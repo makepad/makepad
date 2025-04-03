@@ -4,12 +4,12 @@ use {
         draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
         makepad_platform::*,
+        turtle::*,
         text::{
             color::Color,
             font::FontId,
             font_family::FontFamilyId,
             fonts::Fonts,
-            geom::{Point, Rect, Size, Transform},
             layouter::{LaidoutGlyph, LaidoutRow, LaidoutText},
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
@@ -80,6 +80,8 @@ pub struct DrawText2 {
     pub geometry: GeometryQuad2D,
     #[live]
     pub text_style: TextStyle,
+    #[live(1.0)]
+    pub font_scale: f32,
     #[live]
     pub color: Vec4,
     #[live]
@@ -118,21 +120,105 @@ impl LiveHook for DrawText2 {
 }
 
 impl DrawText2 {
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, text: impl Into<Substr>) {
+        use crate::text::geom::{Point};
+        
+        // letes do a layout
+        let laidout_text = self.layout(cx, None, Align::default(), text);
+        let origin_in_lpxs = Point::new(
+            pos.x as f32,
+            pos.y as f32,
+        );
+        self.draw_text(cx, origin_in_lpxs, &laidout_text);
+    }
+    
     pub fn draw_walk(
         &mut self,
-        cx: &mut Cx2d<'_>,
+        cx: &mut Cx2d,
         walk: Walk,
         align: Align,
         text: impl Into<Substr>,
     ) -> makepad_platform::Rect {
-        let text = self.layout(cx, walk, align, text);
+        let max_width =  cx
+        .turtle()
+        .max_width(walk)
+        .map(|max_width| max_width as f32);
+        
+        let text = self.layout(cx, max_width, align, text);
         self.draw_walk_laidout(cx, walk, align, &text)
     }
-
+    
+    pub fn draw_walk_resumable_with(
+        &mut self,
+        cx: &mut Cx2d,
+        text: impl Into<Substr>,
+        mut f: impl FnMut(&mut Cx2d, Rect)
+    ) {
+        use crate::text::geom::Point;
+        use crate::text::layouter::{LayoutOptions, LayoutParams, Span, Style};
+        use crate::text::selection::{Selection, Cursor};
+                
+        let rect = cx.turtle().padded_rect();
+        let fixed_width = if rect.size.x.is_nan() {
+            None
+        } else {
+            Some(rect.size.x)
+        };
+        
+        let wrap_width = if cx.turtle().layout().flow == Flow::RightWrap {
+            fixed_width
+        } else {
+            None
+        };
+        
+        // ok we need to now fetch the turtle cursor pos because thats the indent
+        // and when done we need to 'set' the turtle cursor pos where we ended up
+        let start_xpos = cx.turtle().pos().x - rect.pos.x;
+        let start_ypos = cx.turtle().pos().y;
+        
+        let text = text.into();
+        let text_len = text.len();
+        
+        let laid_out_text = cx.fonts.borrow_mut().get_or_layout(LayoutParams {
+            text,
+            spans: [Span {
+                style: Style {
+                    font_family_id: self.text_style.font_family.to_font_family_id(),
+                    font_size_in_lpxs: self.text_style.font_size,
+                    color: None,
+                },
+                len: text_len,
+            }]
+            .into(),
+            options: LayoutOptions {
+                first_row_start_x_in_lpxs: start_xpos as f32,
+                max_width_in_lpxs:wrap_width.map(|v| v as f32),
+                align: 0.0,
+                line_spacing_scale: self.text_style.line_spacing as f32,
+            },
+        });
+        // lets give the callback the rects
+        let rects = laid_out_text.selection_rects_in_lpxs(Selection{
+            anchor: Cursor{index: 0, prefer_next_row: false},
+            cursor: Cursor{index: laid_out_text.text.len(), prefer_next_row: false},
+        });
+        for rect in &rects{
+            f(cx, Rect{
+                pos: dvec2(rect.origin.x as f64,rect.origin.y as f64),
+                size: dvec2(rect.size.width as f64, rect.size.height as f64)
+            });
+        }
+        // alright lets draw it
+        self.draw_text(cx, Point::new(rect.pos.x as f32, start_ypos as f32), &laid_out_text);
+        // now update the turtle pos and bounding box with our layout info
+        // ok how do we do this
+        // 
+    }
+        
     pub fn layout(
         &self,
-        cx: &mut Cx2d<'_>,
-        walk: Walk,
+        cx: &mut Cx2d,
+        max_width: Option<f32>, 
         align: Align,
         text: impl Into<Substr>,
     ) -> Rc<LaidoutText> {
@@ -152,11 +238,8 @@ impl DrawText2 {
             }]
             .into(),
             options: LayoutOptions {
+                max_width_in_lpxs:max_width,
                 first_row_start_x_in_lpxs: 0.0,
-                max_width_in_lpxs: cx
-                    .turtle()
-                    .max_width(walk)
-                    .map(|max_width| max_width as f32),
                 align: align.x as f32,
                 line_spacing_scale: self.text_style.line_spacing as f32,
             },
@@ -165,30 +248,28 @@ impl DrawText2 {
 
     pub fn draw_walk_laidout(
         &mut self,
-        cx: &mut Cx2d<'_>,
+        cx: &mut Cx2d,
         walk: Walk,
         align: Align,
         laidout_text: &LaidoutText,
     ) -> makepad_platform::Rect {
+        use crate::text::geom::{Point, Size};
         use crate::turtle;
 
-        let max_width_in_lpxs = cx
-            .turtle()
-            .max_width(walk)
-            .map_or(laidout_text.size_in_lpxs.width, |max_width| {
-                max_width as f32
-            });
-        let max_height_in_lpxs = cx
-            .turtle()
-            .max_height(walk)
-            .map_or(laidout_text.size_in_lpxs.height, |max_height| {
-                max_height as f32
-            });
+        let size_in_lpxs = laidout_text.size_in_lpxs * self.font_scale;
+        let max_size_in_lpxs = Size::new(
+            cx.turtle()
+                .max_width(walk)
+                .map_or(size_in_lpxs.width, |max_width| max_width as f32),
+            cx.turtle()
+                .max_height(walk)
+                .map_or(size_in_lpxs.height, |max_height| max_height as f32),
+        );
         let turtle_rect = cx.walk_turtle(Walk {
             abs_pos: walk.abs_pos,
             margin: walk.margin,
-            width: turtle::Size::Fixed(max_width_in_lpxs as f64),
-            height: turtle::Size::Fixed(max_height_in_lpxs as f64),
+            width: turtle::Size::Fixed(max_size_in_lpxs.width as f64),
+            height: turtle::Size::Fixed(max_size_in_lpxs.height as f64),
         });
 
         if self.debug {
@@ -197,23 +278,24 @@ impl DrawText2 {
             cx.cx.debug.area(area, vec4(1.0, 1.0, 1.0, 1.0));
         }
 
-        let remaining_width_in_lpxs = max_width_in_lpxs - laidout_text.size_in_lpxs.width;
-        let remaining_height_in_lpxs = max_height_in_lpxs - laidout_text.size_in_lpxs.height;
+        let remaining_size_in_lpxs = max_size_in_lpxs - size_in_lpxs;
         let origin_in_lpxs = Point::new(
-            turtle_rect.pos.x as f32 + align.x as f32 * remaining_width_in_lpxs,
-            turtle_rect.pos.y as f32 + align.y as f32 * remaining_height_in_lpxs,
+            turtle_rect.pos.x as f32 + align.x as f32 * remaining_size_in_lpxs.width,
+            turtle_rect.pos.y as f32 + align.y as f32 * remaining_size_in_lpxs.height,
         );
         self.draw_text(cx, origin_in_lpxs, &laidout_text);
 
         rect(
             origin_in_lpxs.x as f64,
             origin_in_lpxs.y as f64,
-            laidout_text.size_in_lpxs.width as f64,
-            laidout_text.size_in_lpxs.height as f64,
+            size_in_lpxs.width as f64,
+            size_in_lpxs.height as f64,
         )
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d<'_>, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
+    fn draw_text(&mut self, cx: &mut Cx2d, origin_in_lpxs: crate::text::geom::Point<f32>, text: &LaidoutText) {
+        use crate::text::geom::{Size};
+        
         self.update_draw_vars(cx);
         let mut instances: ManyInstances =
             cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
@@ -221,7 +303,7 @@ impl DrawText2 {
         for row in &text.rows {
             self.draw_row(
                 cx,
-                origin_in_lpxs + Size::from(row.origin_in_lpxs),
+                origin_in_lpxs + Size::from(row.origin_in_lpxs) * self.font_scale,
                 row,
                 &mut instances.instances,
             );
@@ -248,28 +330,31 @@ impl DrawText2 {
 
     fn draw_row(
         &mut self,
-        cx: &mut Cx2d<'_>,
-        origin_in_lpxs: Point<f32>,
+        cx: &mut Cx2d,
+        origin_in_lpxs: crate::text::geom::Point<f32>,
         row: &LaidoutRow,
         out_instances: &mut Vec<f32>,
     ) {
+        use crate::text::geom::{Size};
+        
         for glyph in &row.glyphs {
             self.draw_glyph(
                 cx,
-                origin_in_lpxs + Size::from(glyph.origin_in_lpxs),
+                origin_in_lpxs + Size::from(glyph.origin_in_lpxs) * self.font_scale,
                 glyph,
                 out_instances,
             );
         }
 
+        let width_in_lpxs = row.width_in_lpxs * self.font_scale;
         if self.debug {
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
                 makepad_platform::rect(
                     origin_in_lpxs.x as f64,
-                    (origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
-                    row.width_in_lpxs as f64,
+                    (origin_in_lpxs.y - row.ascender_in_lpxs * self.font_scale) as f64,
+                    width_in_lpxs as f64,
                     1.0,
                 ),
             );
@@ -283,7 +368,7 @@ impl DrawText2 {
                 makepad_platform::rect(
                     origin_in_lpxs.x as f64,
                     origin_in_lpxs.y as f64,
-                    row.width_in_lpxs as f64,
+                    width_in_lpxs as f64,
                     1.0,
                 ),
             );
@@ -296,8 +381,8 @@ impl DrawText2 {
                 &mut area,
                 makepad_platform::rect(
                     origin_in_lpxs.x as f64,
-                    (origin_in_lpxs.y - row.descender_in_lpxs) as f64,
-                    row.width_in_lpxs as f64,
+                    (origin_in_lpxs.y - row.descender_in_lpxs * self.font_scale) as f64,
+                    width_in_lpxs as f64,
                     1.0,
                 ),
             );
@@ -309,15 +394,19 @@ impl DrawText2 {
 
     fn draw_glyph(
         &mut self,
-        cx: &mut Cx2d<'_>,
-        origin_in_lpxs: Point<f32>,
+        cx: &mut Cx2d,
+        origin_in_lpxs: crate::text::geom::Point<f32>,
         glyph: &LaidoutGlyph,
         output: &mut Vec<f32>,
     ) {
+        use crate::text::geom::{Point};
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         if let Some(rasterized_glyph) = glyph.rasterize(font_size_in_dpxs) {
             self.draw_rasterized_glyph(
-                Point::new(origin_in_lpxs.x + glyph.offset_in_lpxs(), origin_in_lpxs.y),
+                Point::new(
+                    origin_in_lpxs.x + glyph.offset_in_lpxs() * self.font_scale,
+                    origin_in_lpxs.y,
+                ),
                 glyph.font_size_in_lpxs,
                 glyph.color,
                 rasterized_glyph,
@@ -328,12 +417,13 @@ impl DrawText2 {
 
     fn draw_rasterized_glyph(
         &mut self,
-        point_in_lpxs: Point<f32>,
+        point_in_lpxs: crate::text::geom::Point<f32>,
         font_size_in_lpxs: f32,
         color: Option<Color>,
         glyph: RasterizedGlyph,
         output: &mut Vec<f32>,
     ) {
+         use crate::text::geom::{Point, Rect, Size, Transform};
         fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
             Point::new(
                 (2 * point.x + 1) as f32 / (2 * size.width) as f32,
@@ -341,8 +431,9 @@ impl DrawText2 {
             )
         }
 
-        let transform = Transform::from_scale_uniform(font_size_in_lpxs / glyph.dpxs_per_em)
-            .translate(point_in_lpxs.x, point_in_lpxs.y);
+        let transform =
+            Transform::from_scale_uniform(font_size_in_lpxs / glyph.dpxs_per_em * self.font_scale)
+                .translate(point_in_lpxs.x, point_in_lpxs.y);
         let bounds_in_lpxs = Rect::new(
             Point::new(glyph.bounds_in_dpxs.min().x, -glyph.bounds_in_dpxs.max().y),
             glyph.bounds_in_dpxs.size,
@@ -418,7 +509,7 @@ impl LiveHook for FontFamily {
             next_child_index = nodes.next_child(child_index);
         }
         self.id = id;
-
+        
         let font_family_id = self.to_font_family_id();
         if !fonts.is_font_family_known(font_family_id) {
             let mut font_ids = Vec::new();
@@ -435,6 +526,7 @@ impl LiveHook for FontFamily {
                             },
                         );
                     }
+                   
                     font_ids.push(font_id);
                 }
                 next_child_index = nodes.next_child(child_index);

@@ -44,7 +44,7 @@ live_design!{
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
-                    THEME_COLOR_CTRL_SELECTED,
+                    THEME_COLOR_OUTSET_ACTIVE,
                     self.selected
                 );
             }
@@ -98,7 +98,7 @@ live_design!{
             
             fold_button = <FoldButton>{
                 animator:{
-                    open={default:off}
+                    active={default:off}
                 }
             }
             

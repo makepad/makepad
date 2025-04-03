@@ -16,6 +16,7 @@ use {
             /*LiveTokenId,*/
             LiveFileId,
         },
+        makepad_live_compiler::*,
         studio::{StudioToAppVec,StudioToApp},
         web_socket::WebSocketMessage,
         makepad_live_compiler::LiveTypeInfo,

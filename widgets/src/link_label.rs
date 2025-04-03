@@ -10,13 +10,10 @@ live_design!{
     
     use link::theme::*;
     use makepad_draw::shader::std::*;
+    use crate::button::ButtonBase
     
-    pub LinkLabelBase = {{LinkLabel}} {}
+    pub LinkLabelBase = {{LinkLabel}}<ButtonBase> {}
     pub LinkLabel = <LinkLabelBase> {
-        // TODO: add a focus states
-        instance hover: 0.0
-        instance pressed: 0.0
-        
         width: Fit, height: Fit,
         margin: <THEME_MSPACE_2> {}
         padding: 0.,
@@ -24,28 +21,39 @@ live_design!{
         label_walk: { width: Fit, height: Fit, },
         
         draw_bg: {
-            instance pressed: 0.0
+            instance down: 0.0
             instance hover: 0.0
+
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_down: (THEME_COLOR_TEXT_DOWN)
+            
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let offset_y = 1.0
                 sdf.move_to(0., self.rect_size.y - offset_y);
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                 return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_DEFAULT,
-                    THEME_COLOR_TEXT_PRESSED,
-                    self.pressed
+                    mix(
+                        self.color,
+                        self.color_hover,
+                        self.hover
+                    ),
+                    self.color_down,
+                    self.down
                 ), mix(.7, 1., self.hover));
             }
         }
         
         draw_text: {
-            wrap: Word
-            color: (THEME_COLOR_TEXT_DEFAULT),
-            instance color_hover: (THEME_COLOR_TEXT_HOVER),
-            instance color_pressed: (THEME_COLOR_TEXT_PRESSED),
-            instance pressed: 0.0
+            instance down: 0.0
             instance hover: 0.0
+
+            uniform color: (THEME_COLOR_TEXT),
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER),
+            uniform color_down: (THEME_COLOR_TEXT_DOWN),
+
+            wrap: Word
             text_style: <THEME_FONT_REGULAR>{
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -56,8 +64,8 @@ live_design!{
                         self.color_hover,
                         self.hover
                     ),
-                    self.color_pressed,
-                    self.pressed
+                    self.color_down,
+                    self.down
                 )
             }
         }
@@ -68,30 +76,131 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_bg: {pressed: 0.0, hover: 0.0}
-                        draw_icon: {pressed: 0.0, hover: 0.0}
-                        draw_text: {pressed: 0.0, hover: 0.0}
+                        draw_bg: {down: 0.0, hover: 0.0}
+                        draw_icon: {down: 0.0, hover: 0.0}
+                        draw_text: {down: 0.0, hover: 0.0}
                     }
                 }
                 
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
+                        down: Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
                 
-                pressed = {
+                down = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    }
+                }
+            }
+        }
+        
+    }
+
+    pub LinkLabelGradientY = <LinkLabelBase> {
+        width: Fit, height: Fit,
+        margin: <THEME_MSPACE_2> {}
+        padding: 0.,
+        
+        label_walk: { width: Fit, height: Fit, },
+        
+        draw_bg: {
+            instance down: 0.0
+            instance hover: 0.0
+
+            uniform color_1: #0ff,
+            uniform color_1_hover: #0ff,
+            uniform color_1_down: #0ff,
+
+            uniform color_2: #A00
+            uniform color_2_hover: #F00
+            uniform color_2_down: #000
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let offset_y = 1.0
+                sdf.move_to(0., self.rect_size.y - offset_y);
+                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+                return sdf.stroke(mix(
+                    mix(
+                        mix(self.color_1, self.color_2, self.pos.y),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.y),
+                        self.hover
+                    ),
+                    mix(self.color_1_down, self.color_2_down, self.pos.y),
+                    self.down
+                ), mix(.7, 1., self.hover));
+            }
+        }
+        
+        draw_text: {
+            instance down: 0.0
+            instance hover: 0.0
+
+            uniform color_1: #0ff,
+            uniform color_1_hover: #0ff,
+            uniform color_1_down: #0ff,
+
+            uniform color_2: #A40
+            uniform color_2_hover: #FA0
+            uniform color_2_down: #0A0
+
+            wrap: Word
+            text_style: <THEME_FONT_REGULAR>{
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        mix(self.color_1, self.color_2, self.pos.y),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.y),
+                        self.hover
+                    ),
+                    mix(self.color_1_down, self.color_2_down, self.pos.y),
+                    self.down);
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {down: 0.0, hover: 0.0}
+                        draw_icon: {down: 0.0, hover: 0.0}
+                        draw_text: {down: 0.0, hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                        down: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    }
+                }
+                
+                down = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
             }
@@ -99,6 +208,108 @@ live_design!{
         
     }
     
+    pub LinkLabelGradientX = <LinkLabelBase> {
+        width: Fit, height: Fit,
+        margin: <THEME_MSPACE_2> {}
+        padding: 0.,
+        
+        label_walk: { width: Fit, height: Fit, },
+        
+        draw_bg: {
+            instance down: 0.0
+            instance hover: 0.0
+
+            uniform color_1: #0FF
+            uniform color_1_hover: #F00
+            uniform color_1_down: #f00
+
+            uniform color_2: #F00
+            uniform color_2_hover: #0FF
+            uniform color_2_down: #f00
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let offset_y = 1.0
+                sdf.move_to(0., self.rect_size.y - offset_y);
+                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+                return sdf.stroke(mix(
+                    mix(
+                        mix(self.color_1, self.color_2, self.pos.x),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.x),
+                        self.hover
+                    ),
+                    mix(self.color_1_down, self.color_2_down, self.pos.x),
+                    self.down
+                ), mix(.7, 1., self.hover));
+            }
+        }
+        
+        draw_text: {
+            instance down: 0.0
+            instance hover: 0.0
+
+            uniform color_1: #CCC
+            uniform color_1_hover: #FFF
+            uniform color_1_down: #888
+
+            uniform color_2: #CCC
+            uniform color_2_hover: #FFF
+            uniform color_2_down: #888
+
+            wrap: Word
+            text_style: <THEME_FONT_REGULAR>{
+                font_size: (THEME_FONT_SIZE_P)
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        mix(self.color_1, self.color_2, self.pos.x),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.x),
+                        self.hover
+                    ),
+                    mix(self.color_1_down, self.color_2_down, self.pos.x),
+                    self.down);
+            }
+        }
+        
+        animator: {
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {down: 0.0, hover: 0.0}
+                        draw_icon: {down: 0.0, hover: 0.0}
+                        draw_text: {down: 0.0, hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                        down: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    }
+                }
+                
+                down = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    }
+                }
+            }
+        }
+        
+    }
+
+
     pub LinkLabelIcon = <LinkLabel> {
         padding: { bottom: 2. }
         label_walk: {
@@ -107,17 +318,21 @@ live_design!{
         draw_icon: {
             instance focus: 0.0
             instance hover: 0.0
-            instance pressed: 0.0
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            instance down: 0.0
+
+            uniform color: (THEME_COLOR_TEXT),
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER),
+            uniform color_down: (THEME_COLOR_TEXT_DOWN),
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
                         self.color,
-                        mix(self.color, #f, 0.5),
+                        self.color_hover,
                         self.hover
                     ),
-                    self.color * 0.75,
-                    self.pressed
+                    self.color_down,
+                    self.down
                 )
             }
         }

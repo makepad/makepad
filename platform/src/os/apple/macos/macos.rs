@@ -458,6 +458,16 @@ impl Cx {
                     metal_windows.push(metal_window);
                     window.is_created = true;
                 },
+                CxOsOp::ResizeWindow(window_id, size) => {
+                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        metal_window.cocoa_window.set_outer_size(size);
+                    }
+                }
+                CxOsOp::RepositionWindow(window_id, pos ) => {
+                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        metal_window.cocoa_window.set_position(pos);
+                    }
+                }
                 CxOsOp::CloseWindow(window_id) => {
                     if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
                         self.windows[window_id].is_created = false;

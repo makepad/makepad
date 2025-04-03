@@ -169,12 +169,12 @@ impl App {
                 continue
             }
             
-            if !self.ui.check_box(id!((machine.id).render_check_box)).selected(cx){
+            if !self.ui.check_box(id!((machine.id).render_check_box)).active(cx){
                 continue
             }
             
             let prompt = self.ui.text_input(id!(prompt_input)).text();
-            let seed = if self.ui.check_box(id!(random_check_box)).selected(cx) {
+            let seed = if self.ui.check_box(id!(random_check_box)).active(cx) {
                 let seed = LiveId::from_str(&format!("{:?}", Instant::now())).0;
                 self.ui.text_input(id!(seed_input)).set_text(cx, &format!("{}",seed));
                 seed
@@ -426,7 +426,7 @@ impl App {
     
     fn set_current_image(&mut self, cx: &mut Cx, image_id: ImageId) {
         // lets send the remote screens the 3 images below the current selection
-        let single =  self.ui.check_box(id!(single_check_box)).selected(cx);
+        let single =  self.ui.check_box(id!(single_check_box)).active(cx);
             
         pub fn get_data_for_index(db:&Database, current:usize, id:usize, single:bool)->Option<Vec<u8>>{
             let id = if single || db.image_files[current].prompt_hash != db.image_files[id].prompt_hash{
@@ -518,7 +518,7 @@ impl App {
     }
     
     fn next_render(&mut self, cx:&mut Cx){
-        if self.ui.check_box(id!(render_check_box)).selected(cx) {
+        if self.ui.check_box(id!(render_check_box)).active(cx) {
             self.render(cx);
             return
         }
@@ -1494,7 +1494,7 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx:&mut Cx, actions:&Actions){
         for action in actions{
             if let Some(WhisperTextInput{clear, text}) = action.downcast_ref(){
-                if text != "Thank you." && !self.ui.check_box(id!(mute_check_box)).selected(cx){
+                if text != "Thank you." && !self.ui.check_box(id!(mute_check_box)).active(cx){
                     if *clear{
                         self.ui.text_input(id!(prompt_input)).set_text(cx, "");
                     }

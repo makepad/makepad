@@ -147,9 +147,9 @@ live_design!{
             color_inactive: (COLOR_UP_OFF),
         }
         draw_text: {
-            color_selected: (COLOR_UP_FULL),
-            color_unselected: (COLOR_UP_6),
-            color_unselected_hover: (COLOR_UP_6),
+            color: (COLOR_UP_6),
+            color_active: (COLOR_UP_FULL),
+            color_hover: (COLOR_UP_6),
             text_style: <H3_TEXT_REGULAR> {}
         }
     }
@@ -344,7 +344,7 @@ live_design!{
                 radius: 2.0
             },
         }
-        draw_slider: {
+        draw_bg: {
             instance line_color: (COLOR_UP_4)
             instance bipolar: 0.0
             fn pixel(self) -> vec4 {
@@ -372,7 +372,7 @@ live_design!{
     
     TextSlider = <ElementBox> {
         slider = <FishSlider> {
-            draw_slider: {
+            draw_bg: {
                 instance line_color: (COLOR_UP_4)
                 instance bipolar: 0.0
                 fn pixel(self) -> vec4 {
@@ -394,13 +394,13 @@ live_design!{
     
     InstrumentSlider = <ElementBox> {
         slider = <FishSlider> {
-            draw_slider: {bipolar: 0.0}
+            draw_bg: {bipolar: 0.0}
         }
     }
     
     InstrumentBipolarSlider = <ElementBox> {
         slider = <FishSlider> {
-            draw_slider: {bipolar: 1.0}
+            draw_bg: {bipolar: 1.0}
         }
     }
     
@@ -408,7 +408,7 @@ live_design!{
         checkbox = <CheckBox> {
             padding: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}
             text: "CutOff1"
-            draw_check: {
+            draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     let left = 3;
@@ -423,7 +423,7 @@ live_design!{
                     sdf.move_to(left + 4.0, c.y);
                     sdf.line_to(c.x, c.y + szs);
                     sdf.line_to(c.x + szs, c.y - szs);
-                    sdf.stroke(mix((COLOR_UP_OFF), (COLOR_UP_6), self.selected), 1.25); // CHECKMARK
+                    sdf.stroke(mix((COLOR_UP_OFF), (COLOR_UP_6), self.active), 1.25); // CHECKMARK
                     return sdf.result
                 }
             }
@@ -455,7 +455,7 @@ live_design!{
         checkbox = {
             width: 20, height: 20
             text: ""
-            draw_check: {
+            draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     let left = 3;
@@ -467,12 +467,12 @@ live_design!{
                     sdf.line_to(c.x * 0.75, c.y * 0.5);
                     sdf.line_to(0.0, c.y);
                     sdf.close_path();
-                    sdf.fill_keep(mix((COLOR_UP_5), (COLOR_UP_FULL), self.selected))
+                    sdf.fill_keep(mix((COLOR_UP_5), (COLOR_UP_FULL), self.active))
                     sdf.stroke_keep(
                         mix(
                             mix((COLOR_UP_6), (COLOR_UP_2), pow(self.pos.y, 0.5)),
                             (COLOR_UP_7),
-                            self.selected
+                            self.active
                         ),
                         1.
                     )
@@ -489,20 +489,20 @@ live_design!{
             text: "CutOff1"
             label_walk: {margin: {left: 45.0, top: 8, bottom: 8, right: 10}}
             animator: {
-                selected = {
+                active = {
                     default: off
                     off = {
                         from: {all: Forward {duration: 0.1}}
-                        apply: {draw_check: {selected: 0.0}}
+                        apply: {draw_bg: {active: 0.0}}
                     }
                     on = {
                         cursor: Arrow,
                         from: {all: Forward {duration: 0.1}}
-                        apply: {draw_check: {selected: 1.0}}
+                        apply: {draw_bg: {active: 1.0}}
                     }
                 }
             }
-            draw_check: {
+            draw_bg: {
                 instance border_width: 1.0
                 instance border_color: #x06
                 instance border_color2: #xFFFFFF0A
@@ -518,11 +518,11 @@ live_design!{
                     
                     sdf.fill((COLOR_UP_OFF))
                     let isz = sz * 0.65;
-                    sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                    sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
+                    sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                    sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
                     sdf.subtract();
-                    sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                    sdf.blend(self.selected)
+                    sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                    sdf.blend(self.active)
                     sdf.fill(#xFFF8);
                     return sdf.result
                 }
@@ -535,7 +535,7 @@ live_design!{
     }
     
     PresetFavorite = <CheckBox> {
-        draw_check: {
+        draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 
@@ -557,7 +557,7 @@ live_design!{
                 sdf.line_to(c.x * 0.5, c.y);
                 sdf.close_path();
                 
-                sdf.fill_keep(mix(#141414, #888, self.selected))
+                sdf.fill_keep(mix(#141414, #888, self.active))
                 
                 return sdf.result
             }
@@ -961,7 +961,7 @@ live_design!{
     }
     
     FishCheckbox = <CheckBox> {
-        draw_check: {
+        draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 
@@ -971,7 +971,7 @@ live_design!{
                 let c = vec2(left + sz, self.rect_size.y * 0.5 - 2.0);
                 
                 sdf.box(left, c.y - sz, sz * 2.5, sz * 2.5, 2.0); // 3rd parameter == corner radius
-                sdf.fill_keep(mix((COLOR_UP_2), (COLOR_UP_7), self.selected))
+                sdf.fill_keep(mix((COLOR_UP_2), (COLOR_UP_7), self.active))
                 sdf.stroke(#x888, 0.0) // outline
                 
                 let szs = sz * 0.5;
@@ -983,7 +983,7 @@ live_design!{
                 sdf.line_to(c.x + offset, c.y + szs + offset);
                 sdf.line_to(c.x + szs + offset, c.y - szs + offset);
                 
-                sdf.stroke_keep(mix(#fff0, (COLOR_DOWN_FULL), self.selected), 1.75);
+                sdf.stroke_keep(mix(#fff0, (COLOR_DOWN_FULL), self.active), 1.75);
                 
                 
                 return sdf.result
@@ -1152,13 +1152,13 @@ live_design!{
                     tab1 = <FishTab> {
                         text: "All",
                         height: Fit, margin: 10
-                        animator: {selected = {default: on}},
-                        draw_text: {color_selected: (COLOR_UP_8)}
+                        animator: {active = {default: on}},
+                        draw_text: {color_active: (COLOR_UP_8)}
                     }
                     tab2 = <FishTab> {
                         text: "Favorites",
                         height: Fit, margin: 10
-                        draw_text: {color_selected: (COLOR_UP_8)}
+                        draw_text: {color_active: (COLOR_UP_8)}
                     }
                 }
             }
@@ -1207,7 +1207,7 @@ live_design!{
                 
                 mobile_modes = <View> {
                     tab1 = <FishTab> {
-                        animator: {selected = {default: on}},
+                        animator: {active = {default: on}},
                         text: "Sequencer"
                         draw_icon: {
                             svg_file: (ICO_SEQ),
@@ -1215,7 +1215,7 @@ live_design!{
                                 return mix(
                                     (COLOR_UP_6),
                                     (COLOR_UP_FULL),
-                                    self.selected
+                                    self.active
                                 )
                             }
                         }
@@ -1231,7 +1231,7 @@ live_design!{
                                 return mix(
                                     (COLOR_UP_6),
                                     (COLOR_UP_FULL),
-                                    self.selected
+                                    self.active
                                 )
                             }
                         }
@@ -1247,7 +1247,7 @@ live_design!{
                                 return mix(
                                     (COLOR_UP_6),
                                     (COLOR_UP_FULL),
-                                    self.selected
+                                    self.active
                                 )
                             }
                         }

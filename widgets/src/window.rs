@@ -69,9 +69,9 @@ live_design!{
         cursor: Default
         mouse_cursor_size: vec2(20, 20),
         draw_cursor: {
-            instance border_width: 1.5
-            instance color: (THEME_COLOR_CURSOR_BG)
-            instance border_color: (THEME_COLOR_CURSOR_BORDER)
+            uniform border_size: 1.5
+            uniform color: (THEME_COLOR_CURSOR)
+            uniform border_color: (THEME_COLOR_CURSOR_BORDER)
             
             fn get_color(self) -> vec4 {
                 return self.color
@@ -88,8 +88,8 @@ live_design!{
                 sdf.line_to(self.rect_size.x * 0.5, self.rect_size.y - 1.0)
                 sdf.close_path();
                 sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_width)
+                if self.border_size > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_size)
                 }
                 return sdf.result
             }
@@ -268,6 +268,12 @@ impl Window {
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass);
     }
+    pub fn resize(&self, cx: &mut Cx, size: DVec2) {
+        self.window.resize(cx, size);
+    }
+    pub fn reposition(&self, cx: &mut Cx, size: DVec2) {
+        self.window.reposition(cx, size);
+    }
 }
 
 impl WindowRef{
@@ -277,6 +283,17 @@ impl WindowRef{
         }
         else{
             dvec2(0.0,0.0)
+        }
+    }
+    pub fn resize(&self, cx: &mut Cx, size: DVec2) {
+        if let Some(inner) = self.borrow() {
+            inner.resize(cx, size);
+        }
+    }
+
+    pub fn reposition(&self, cx: &mut Cx, size: DVec2) {
+        if let Some(inner) = self.borrow() {
+            inner.reposition(cx, size);
         }
     }
 }

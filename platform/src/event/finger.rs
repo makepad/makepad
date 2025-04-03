@@ -1157,7 +1157,7 @@ impl Event {
                     };
                     
                     if hover_last == area {
-                        if handled_area.is_empty() && hit_test(e.abs, &rect, &options.margin) {
+                        if (handled_area.is_empty() || handled_area == area) && hit_test(e.abs, &rect, &options.margin) {
                             e.handled.set(area);
                             cx.fingers.new_hover_area(digit_id, area);
                             return Hit::FingerHoverOver(fhe)
@@ -1167,7 +1167,7 @@ impl Event {
                         }
                     }
                     else {
-                        if handled_area.is_empty() && hit_test(e.abs, &rect, &options.margin) {
+                        if (handled_area.is_empty() || handled_area == area) && hit_test(e.abs, &rect, &options.margin) {
                             //let any_captured = cx.fingers.get_digit_for_captured_area(area);
                             cx.fingers.new_hover_area(digit_id, area);
                             e.handled.set(area);

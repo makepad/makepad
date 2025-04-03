@@ -141,6 +141,7 @@ live_design! {
         draw_bg: {color: (COLOR_UP_2)}
         width: Fill,
         height: Fit,
+        align: { x: 0.0, y: 0.5 }
         margin: {bottom: (SSPACING_2), top: (SSPACING_2)}
         padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_1)}
     }
@@ -171,15 +172,15 @@ live_design! {
             instance inset: vec4(1.0, 1.0, 1.0, 1.0)
             instance radius: 2.5
             instance dither: 1.0
-            color: (COLOR_UP_3),
-            color2: (COLOR_UP_1)
+            color_1: (COLOR_UP_3),
+            color_2: (COLOR_UP_1)
             instance border_color: #x6
             instance border_color2: #x4
             instance border_color3: #x3A
 
             fn get_color(self) -> vec4 {
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
-                return mix(self.color, self.color2, self.pos.y + dither)
+                return mix(self.color_1, self.color_2, self.pos.y + dither)
             }
 
             fn pixel(self) -> vec4 {
@@ -212,71 +213,10 @@ live_design! {
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
     }
 
-    FishDropDown = <DropDown> {
+    FishDropDown = <DropDownFlat> {
         width: Fit
-        padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}
+        // padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}
 
-        draw_text: {
-            text_style: <H2_TEXT_REGULAR> {},
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        mix(
-                            (#xFFF8),
-                            (#xFFF8),
-                            self.focus
-                        ),
-                        (#xFFFF),
-                        self.hover
-                    ),
-                    (#x000A),
-                    self.pressed
-                )
-            }
-        }
-
-        popup_menu: {
-            menu_item: {
-                indent_width: 10.0
-                width: Fill,
-                height: Fit
-                padding: {left: (SSPACING_4), top: (SSPACING_2), bottom: (SSPACING_2), right: (SSPACING_4)}
-
-                draw_bg: {
-                    color: #x48,
-                    color_selected: #x6
-                }
-            }
-        }
-
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                self.get_bg(sdf);
-                // triangle
-                let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
-                let sz = 2.5;
-
-                sdf.move_to(c.x - sz, c.y - sz);
-                sdf.line_to(c.x + sz, c.y - sz);
-                sdf.line_to(c.x, c.y + sz * 0.75);
-                sdf.close_path();
-
-                sdf.fill(mix(#FFFA, #FFFF, self.hover));
-
-                return sdf.result
-            }
-
-            fn get_bg(self, inout sdf: Sdf2d) {
-                sdf.rect(
-                    0,
-                    0,
-                    self.rect_size.x,
-                    self.rect_size.y
-                )
-                sdf.fill((COLOR_UP_0))
-            }
-        }
     }
 
     IconButton = <Button> {
@@ -290,7 +230,7 @@ live_design! {
                         self.hover
                     ),
                     (COLOR_UP_4),
-                    self.pressed
+                    self.down
                 )
             }
         }
@@ -320,14 +260,14 @@ live_design! {
                         self.hover
                     ),
                     (COLOR_DOWN_FULL),
-                    self.pressed
+                    self.down
                 )
             }
         }
 
         draw_bg: {
             instance hover: 0.0
-            instance pressed: 0.0
+            instance down: 0.0
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -352,14 +292,14 @@ live_design! {
                         self.hover
                     ),
                     (COLOR_UP_5),
-                    self.pressed
+                    self.down
                 )
             }
         }
 
         draw_bg: {
             instance hover: 0.0
-            instance pressed: 0.0
+            instance down: 0.0
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -379,7 +319,7 @@ live_design! {
                             self.hover
                         ),
                         mix((COLOR_DOWN_5), (COLOR_UP_3), pow(self.pos.y, 3)),
-                        self.pressed
+                        self.down
                     ),
                     1.
                 );
@@ -391,7 +331,7 @@ live_design! {
                             self.hover
                         ),
                         mix((COLOR_DOWN_4), (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 0.3)),
-                        self.pressed
+                        self.down
                     )
                 );
 
@@ -417,7 +357,7 @@ live_design! {
                 color: (COLOR_DOWN_0)
             },
         }
-        draw_slider: {
+        draw_bg: {
             instance line_color: #f00
             instance bipolar: 0.0
             fn pixel(self) -> vec4 {
@@ -474,13 +414,13 @@ live_design! {
 
     InstrumentSlider = <ElementBox> {
         slider = <FishSlider> {
-            draw_slider: {bipolar: 0.0}
+            draw_bg: {bipolar: 0.0}
         }
     }
 
     InstrumentBipolarSlider = <ElementBox> {
         slider = <FishSlider> {
-            draw_slider: {bipolar: 1.0}
+            draw_bg: {bipolar: 1.0}
         }
     }
 
@@ -492,19 +432,19 @@ live_design! {
             padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23}
             text: "CutOff1"
             animator: {
-                selected = {
+                active = {
                     default: off
                     off = {
                         from: {all: Forward {duration: 0.1}}
-                        apply: {draw_check: {selected: 0.0}}
+                        apply: {draw_bg: {active: 0.0}}
                     }
                     on = {
                         from: {all: Forward {duration: 0.1}}
-                        apply: {draw_check: {selected: 1.0}}
+                        apply: {draw_bg: {active: 1.0}}
                     }
                 }
             }
-            draw_check: {
+            draw_bg: {
                 instance border_width: 1.0
                 instance border_color: #x06
                 instance border_color2: #xFFFFFF0A
@@ -530,11 +470,11 @@ live_design! {
                         )
                     )
                     let isz = sz * 0.65;
-                    sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                    sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
+                    sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                    sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
                     sdf.subtract();
-                    sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                    sdf.blend(self.selected)
+                    sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                    sdf.blend(self.active)
                     sdf.fill(mix(#xFFF8, #xFFFC, self.hover));
                     return sdf.result
                 }
@@ -551,13 +491,6 @@ live_design! {
         align: {y: 0.5}
         padding: <SPACING_0> {},
         flow: Right
-        label = <Label> {
-            width: Fit
-            draw_text: {
-                color: (COLOR_UP_5)
-                text_style: <H2_TEXT_BOLD> {},
-            }
-        }
         dropdown = <FishDropDown> {
             margin: {left: (SSPACING_1), right: (SSPACING_1)}
         }
@@ -626,6 +559,7 @@ live_design! {
         flow: Right
         height: Fit,
         width: Fill,
+        align: { x: 0.0, y: 0.5 }
         margin: {bottom: (SSPACING_2)}
         title = <FishTitle> {
             height: Fit,
@@ -641,7 +575,7 @@ live_design! {
     }
 
     CheckboxTextual = <CheckBox> {
-        draw_check: {
+        draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
@@ -655,7 +589,7 @@ live_design! {
                 return mix(
                     (COLOR_UP_4),
                     (COLOR_UP_6),
-                    self.selected
+                    self.active
                 )
             }
         }
@@ -680,13 +614,13 @@ live_design! {
                     off = {
                         from: {all: Forward {duration: 0.1}}
                         apply: {
-                            draw_check: {hover: 0.0}
+                            draw_bg: {hover: 0.0}
                         }
                     }
                     on = {
                         from: {all: Snap}
                         apply: {
-                            draw_check: {hover: 1.0}
+                            draw_bg: {hover: 1.0}
                         }
                     }
                 }
@@ -695,30 +629,30 @@ live_design! {
                     off = {
                         from: {all: Forward {duration: 0.0}}
                         apply: {
-                            draw_check: {focus: 0.0}
+                            draw_bg: {focus: 0.0}
                         }
                     }
                     on = {
                         from: {all: Snap}
                         apply: {
-                            draw_check: {focus: 1.0}
+                            draw_bg: {focus: 1.0}
                         }
                     }
                 }
-                selected = {
+                active = {
                     default: off
                     off = {
                         from: {all: Forward {duration: 0.0}}
-                        apply: {draw_check: {selected: 0.0}}
+                        apply: {draw_bg: {active: 0.0}}
                     }
                     on = {
                         cursor: Arrow,
                         from: {all: Forward {duration: 0.0}}
-                        apply: {draw_check: {selected: 1.0}}
+                        apply: {draw_bg: {active: 1.0}}
                     }
                 }
             }
-            draw_check: {
+            draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     let sz = self.rect_size.x;
@@ -744,7 +678,7 @@ live_design! {
                                 mix(#x9C9C64FF, #x00000088, pow(length((self.pos - vec2(0.5, 0.5)) * 1.75), 1.25)),
                                 self.hover
                             ),
-                            self.selected
+                            self.active
                         )
                     )
 
@@ -752,7 +686,7 @@ live_design! {
                         mix(
                             mix((COLOR_UP_5), (COLOR_DOWN_4), pow(self.pos.y, .2)),
                             mix((COLOR_DOWN_5), (COLOR_UP_3), pow(self.pos.y, 3)),
-                            self.selected
+                            self.active
                         ),
                         1.5
                     );
@@ -775,7 +709,7 @@ live_design! {
                                 self.hover
                             ),
                             #fff,
-                            self.selected
+                            self.active
                         )
                     )
 
@@ -786,7 +720,7 @@ live_design! {
     }
 
     FishCheckbox = <CheckBox> {
-        draw_check: {
+        draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
@@ -799,7 +733,7 @@ live_design! {
                 sdf.fill_keep(mix(
                     mix((COLOR_DOWN_4), (COLOR_DOWN_2), self.pos.y),
                     mix((COLOR_DOWN_5), (COLOR_DOWN_3), self.pos.y),
-                    self.selected
+                    self.active
                 ))
 
                 sdf.stroke(
@@ -831,7 +765,7 @@ live_design! {
                         (COLOR_UP_6),
                         self.hover
                     ),
-                    self.selected
+                    self.active
                 ), 1.75);
 
                 return sdf.result
@@ -891,7 +825,7 @@ live_design! {
         margin: 0.0
         padding: 0.0
 
-        draw_check: {
+        draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 
@@ -917,7 +851,7 @@ live_design! {
                     mix(
                         mix(#141414, #444, self.hover),
                         mix(#888, #CCC, self.hover),
-                        self.selected
+                        self.active
                     )
                 )
 
@@ -948,7 +882,7 @@ live_design! {
             spacing: (SSPACING_1)
             attack = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_ENV)}
+                    draw_bg: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
                     text: "A"
@@ -957,7 +891,7 @@ live_design! {
 
             hold = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_ENV)}
+                    draw_bg: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
                     text: "H"
@@ -966,7 +900,7 @@ live_design! {
 
             decay = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_ENV)}
+                    draw_bg: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
                     text: "D"
@@ -975,7 +909,7 @@ live_design! {
 
             sustain = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_ENV)}
+                    draw_bg: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
                     text: "S"
@@ -984,7 +918,7 @@ live_design! {
 
             release = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_ENV)}
+                    draw_bg: {line_color: (COLOR_ENV)}
                     min: 0.0
                     max: 1.0
                     text: "R"
@@ -1041,7 +975,7 @@ live_design! {
         modamount = <InstrumentBipolarSlider> {
             width: Fill
             slider = {
-                draw_slider: {line_color: (COLOR_ENV)}
+                draw_bg: {line_color: (COLOR_ENV)}
                 min: -1.0
                 max: 1.0
                 text: "Influence on Cutoff"
@@ -1100,7 +1034,7 @@ live_design! {
         height: Fit,
         width: 120,
         margin: <SPACING_0> {}
-        draw_bg: {color: (COLOR_UP_0), color2: (COLOR_UP_0)}
+        draw_bg: {color_1: (COLOR_UP_0), color_2: (COLOR_UP_0)}
 
         <View> {
             flow: Right,
@@ -1142,7 +1076,7 @@ live_design! {
             margin: <SPACING_0> {}
             padding: <SPACING_0> {}
             slider = {
-                draw_slider: {line_color: (COLOR_DEFAULT)}
+                draw_bg: {line_color: (COLOR_DEFAULT)}
                 min: -4.0
                 max: 4.0
                 step: 1.0
@@ -1175,7 +1109,7 @@ live_design! {
             padding: <SPACING_0> {}
             slider = {
                 width: Fill
-                draw_slider: {line_color: (COLOR_DEFAULT)}
+                draw_bg: {line_color: (COLOR_DEFAULT)}
                 min: 0.0
                 max: 1.0
                 text: "Portamento"
@@ -1193,7 +1127,7 @@ live_design! {
             flow: Down,
             spacing: (SSPACING_0),
             padding: {top: (SSPACING_2)}
-            draw_bg: {color: (COLOR_UP_3), color2: (COLOR_UP_1)}
+            draw_bg: {color_1: (COLOR_UP_3), color_2: (COLOR_UP_1)}
 
             <FishHeader> {
                 title = {
@@ -1217,15 +1151,15 @@ live_design! {
                     instance inset: vec4(1.0, 1.0, 1.0, 1.0)
                     instance radius: 2.5
                     instance dither: 1.0
-                    color: (#x00000008),
-                    color2: (#x0004)
+                    color_1: (#x00000008),
+                    color_2: (#x0004)
                     instance border_color: #x1A
                     instance border_color2: #x28
                     instance border_color3: #x50
 
                     fn get_color(self) -> vec4 {
                         let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
-                        return mix(self.color, self.color2, pow(self.pos.y, 0.5) + dither)
+                        return mix(self.color_1, self.color_2, pow(self.pos.y, 0.5) + dither)
                     }
 
                     fn pixel(self) -> vec4 {
@@ -1263,7 +1197,7 @@ live_design! {
                     // playpause = <PlayPause> {}
 
                     playpause = <CheckBox> {
-                        draw_check: {check_type: None}
+                        draw_bg: {check_type: None}
                         draw_icon: {svg_file: (ICO_PLAY)}
                         icon_walk: {
                             width: 25.0,
@@ -1289,7 +1223,7 @@ live_design! {
                     speed = <InstrumentSlider> {
                         width: Fill
                         slider = {
-                            draw_slider: {line_color: (COLOR_DEFAULT)}
+                            draw_bg: {line_color: (COLOR_DEFAULT)}
                             min: 0.0
                             max: 240.0
                             text: "BPM"
@@ -1344,7 +1278,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 1.0
                     text: "Size"
@@ -1355,7 +1289,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 1.0
                     text: "Stddev"
@@ -1400,7 +1334,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 1.0
                     text: "Opacity"
@@ -1411,7 +1345,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 100.0
                     text: "X"
@@ -1422,7 +1356,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 100.0
                     text: "Y"
@@ -1476,7 +1410,7 @@ live_design! {
                 width: Fill,
                 height: Fit
                 slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
+                    draw_bg: {line_color: (COLOR_FX)}
                     min: 0.0
                     max: 1.0
                     text: "Amount"
@@ -1508,7 +1442,7 @@ live_design! {
 
                 delaysend = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Send"
@@ -1517,7 +1451,7 @@ live_design! {
 
                 delayfeedback = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Feedback"
@@ -1535,7 +1469,7 @@ live_design! {
 
                 delaydifference = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Stereo difference"
@@ -1544,7 +1478,7 @@ live_design! {
 
                 delaycross = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Crossover"
@@ -1561,7 +1495,7 @@ live_design! {
                     
 
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Length"
@@ -1594,7 +1528,7 @@ live_design! {
 
                 chorusmix = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Mix"
@@ -1602,7 +1536,7 @@ live_design! {
                 }
                 chorusdelay = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Pre"
@@ -1616,7 +1550,7 @@ live_design! {
                 height: Fit
                 chorusmod = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Depth"
@@ -1624,7 +1558,7 @@ live_design! {
                 }
                 chorusrate = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Rate"
@@ -1638,7 +1572,7 @@ live_design! {
                 height: Fit
                 chorusphase = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Phasing"
@@ -1647,7 +1581,7 @@ live_design! {
 
                 chorusfeedback = <InstrumentBipolarSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: -1
                         max: 1
                         text: "Feedback"
@@ -1679,7 +1613,7 @@ live_design! {
 
                 reverbmix = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Mix"
@@ -1687,7 +1621,7 @@ live_design! {
                 }
                 reverbfeedback = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
+                        draw_bg: {line_color: (COLOR_FX)}
                         min: 0.0
                         max: 1.0
                         text: "Feedback"
@@ -1704,21 +1638,24 @@ live_design! {
 
                 <FishHeader> {
                 draw_bg: {color: (COLOR_FILTER)}
+                align: { x: 0.0, y: 0.5 }
                 title = {
                     width: Fit
                     label = {
-                        text: "Hello",
+                        text: "Filter",
                     },
                 }
 
                 menu = <View> {
+                    height: Fit,
                     filter_type = <FishDropDown> {
-                        width: Fill
+                        width: Fill,
 
                         labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
                         values: [LowPass, HighPass, BandPass, BandReject]
 
                         draw_text: {
+                            instance down: 0.0,
                             text_style: <H2_TEXT_REGULAR> {},
                             fn get_color(self) -> vec4 {
                                 return mix(
@@ -1732,7 +1669,7 @@ live_design! {
                                         self.hover
                                     ),
                                     (#x000A),
-                                    self.pressed
+                                    self.down
                                 )
                             }
                         }
@@ -1787,7 +1724,7 @@ live_design! {
                 height: Fit
                 cutoff = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FILTER)}
+                        draw_bg: {line_color: (COLOR_FILTER)}
                         min: 0.0
                         max: 1.0
                         text: "Cutoff"
@@ -1796,7 +1733,7 @@ live_design! {
 
                 resonance = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FILTER)}
+                        draw_bg: {line_color: (COLOR_FILTER)}
                         min: 0.0
                         max: 1.0
                         text: "Resonance"
@@ -1811,7 +1748,7 @@ live_design! {
 
                 lfoamount = <InstrumentBipolarSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FILTER)}
+                        draw_bg: {line_color: (COLOR_FILTER)}
                         min: -1.0
                         max: 1.0
                         text: "Cutoff LFO Amount"
@@ -1819,7 +1756,7 @@ live_design! {
                 }
                 rate = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_FILTER)}
+                        draw_bg: {line_color: (COLOR_FILTER)}
                         max: 1.0
                         text: "Cutoff LFO Rate"
                     }
@@ -1834,12 +1771,12 @@ live_design! {
         width: Fill,
         height: Fit
         flow: Down
-            <View> {
+        <View> {
             flow: Right
             width: Fill,
             height: Fit
 
-                <SubheaderContainer> {
+            <SubheaderContainer> {
                 <FishSubTitle> {label = {text: "Osc", draw_text: {color: (COLOR_OSC)}, width: Fit}}
                 type = <InstrumentDropdown> {
                     flow: Down
@@ -1859,7 +1796,7 @@ live_design! {
             height: Fit
             transpose = <InstrumentBipolarSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
+                    draw_bg: {line_color: (COLOR_OSC)}
                     min: -24.0
                     max: 24.0
                     step: 1.0
@@ -1870,7 +1807,7 @@ live_design! {
 
             detune = <InstrumentBipolarSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
+                    draw_bg: {line_color: (COLOR_OSC)}
                     min: -1.0
                     max: 1.0
                     text: "Detune"
@@ -1888,7 +1825,7 @@ live_design! {
                 height: Fit
                 spread = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         text: "Spread"
@@ -1896,7 +1833,7 @@ live_design! {
                 }
                 diffuse = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         text: "Diffuse"
@@ -1911,7 +1848,7 @@ live_design! {
                 height: Fit
                 spread = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         text: "Spread"
@@ -1919,7 +1856,7 @@ live_design! {
                 }
                 diffuse = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         text: "Diffuse"
@@ -1933,7 +1870,7 @@ live_design! {
                 height: Fit
                 harmonicshift = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: 0
                         max: 1.0
                         text: "Shift"
@@ -1941,7 +1878,7 @@ live_design! {
                 }
                 harmonicenv = <InstrumentBipolarSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: -1.0
                         max: 1.0
                         text: "Env mod"
@@ -1949,7 +1886,7 @@ live_design! {
                 }
                 harmoniclfo = <InstrumentBipolarSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
+                        draw_bg: {line_color: (COLOR_OSC)}
                         min: -1.0
                         max: 1.0
                         text: "LFO mod"
@@ -1970,7 +1907,7 @@ live_design! {
             height: Fit
             noise = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
+                    draw_bg: {line_color: (COLOR_OSC)}
                     min: 0.0
                     max: 1.0
                     text: "Noise"
@@ -1978,7 +1915,7 @@ live_design! {
             }
             sub = <InstrumentSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
+                    draw_bg: {line_color: (COLOR_OSC)}
                     min: 0.0
                     max: 1.0
                     text: "Sub"
@@ -1991,7 +1928,7 @@ live_design! {
             height: Fit
             balance = <InstrumentBipolarSlider> {
                 slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
+                    draw_bg: {line_color: (COLOR_OSC)}
                     min: 0.0
                     max: 1.0
                     text: "Oscillator Balance"
@@ -2154,7 +2091,7 @@ live_design! {
         height: Fit,
         width: Fill,
         margin: {top: (SSPACING_0), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
-        draw_bg: {color: (COLOR_UP_3), color2: (COLOR_UP_1)}
+        draw_bg: {color_1: (COLOR_UP_3), color_2: (COLOR_UP_1)}
 
         <Arp> {}
         <ScrollXView> {
@@ -2292,7 +2229,7 @@ live_design! {
                             return mix(
                                 mix((COLOR_UP_5), (COLOR_UP_6), self.hover),
                                 (COLOR_UP_4),
-                                self.pressed
+                                self.down
                             )
                         }
                         text_style: <H2_TEXT_REGULAR> {},
@@ -2329,7 +2266,7 @@ live_design! {
                                 return mix(
                                     mix((COLOR_UP_3), (COLOR_UP_6), self.hover),
                                     (COLOR_UP_3),
-                                    self.pressed
+                                    self.down
                                 )
                             }
                         }
@@ -2474,7 +2411,7 @@ live_design! {
             <GradientYView> {
                 width: Fill,
                 height: (HEIGHT_AUDIOVIZ)
-                draw_bg: {color: (COLOR_VIZ_1), color2: (COLOR_VIZ_2)}
+                draw_bg: {color_1: (COLOR_VIZ_1), color_2: (COLOR_VIZ_2)}
                 display_audio = <DisplayAudio> {
                     height: Fill,
                     width: Fill
