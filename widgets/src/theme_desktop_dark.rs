@@ -230,22 +230,28 @@ live_design! {
     pub THEME_FONT_SIZE_3 = (THEME_FONT_SIZE_BASE + 4 * THEME_FONT_SIZE_CONTRAST)
     pub THEME_FONT_SIZE_4 = (THEME_FONT_SIZE_BASE + 2 * THEME_FONT_SIZE_CONTRAST)
     pub THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
-    /*
+
     pub THEME_FONT_LABEL = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
+        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
         font_family:{
             latin = dep("crate://self/resources/IBMPlexSans-Text.ttf"),
             chinese = dep("crate://self/resources/LXGWWenKaiRegular.ttf")
             emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
         }
-    } 
+    } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
     pub THEME_FONT_REGULAR = {
-        font_family:{
+        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
+        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+        font_family: {
             latin = dep("crate://self/resources/IBMPlexSans-Text.ttf"),
             chinese = dep("crate://self/resources/LXGWWenKaiRegular.ttf")
             emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
         }
     }
     pub THEME_FONT_BOLD = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-SemiBold.ttf") }
+        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
         font_family:{
             latin = dep("crate://self/resources/IBMPlexSans-SemiBold.ttf")
             chinese = dep("crate://self/resources/LXGWWenKaiBold.ttf"),
@@ -253,52 +259,29 @@ live_design! {
         }
     }
     pub THEME_FONT_ITALIC = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-Italic.ttf") }
+        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
         font_family:{
             latin = dep("crate://self/resources/IBMPlexSans-Italic.ttf")
             chinese =  dep("crate://self/resources/LXGWWenKaiRegular.ttf"),
         }
     }
     pub THEME_FONT_BOLD_ITALIC = {
+        font: { path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf") },
+        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
         font_family:{
             latin = dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf")
             chinese = dep("crate://self/resources/LXGWWenKaiBold.ttf"),
         }
     }
     pub THEME_FONT_CODE = {
-        font_family:{
-            latin = dep("crate://self/resources/LiberationMono-Regular.ttf") 
-        }
-        font_size: (THEME_FONT_SIZE_CODE)
-        //brightness: 1.1
-        //line_scale: 1.2,
-        line_spacing: 1.16
-    }*/
-    
-    pub THEME_FONT_LABEL = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
-    } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
-    pub THEME_FONT_REGULAR = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
-    }
-    pub THEME_FONT_BOLD = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-SemiBold.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
-    }
-    pub THEME_FONT_ITALIC = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-Italic.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
-    }
-    pub THEME_FONT_BOLD_ITALIC = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf") },
-        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
-    }
-    pub THEME_FONT_CODE = {
         font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
         font_size: (THEME_FONT_SIZE_CODE)
         //brightness: 1.1
         line_scale: 1.2,
-        line_spacing: 1.16
+        line_spacing: 1.16,
+        font_family:{
+            latin = dep("crate://self/resources/LiberationMono-Regular.ttf")
+        }
     }
 }

@@ -34,6 +34,7 @@ live_design! {
         texture grayscale_texture: texture2d
         texture color_texture: texture2d
 
+        varying pos: vec2
         varying t: vec2
 
         fn vertex(self) -> vec4 {
@@ -41,6 +42,7 @@ live_design! {
             let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw);
             let p_normalized: vec2 = (p_clipped - self.rect_pos) / self.rect_size;
 
+            self.pos = p_normalized;
             self.t = mix(self.t_min, self.t_max, p_normalized.xy);
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
                 p_clipped.x,
@@ -56,6 +58,10 @@ live_design! {
             return s;
         }
 
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+
         fn pixel(self) -> vec4 {
             let dxt = length(dFdx(self.t));
             let dyt = length(dFdy(self.t));
@@ -63,8 +69,8 @@ live_design! {
                 // TODO: Support non square atlases?
                 let scale = (dxt + dyt) * self.grayscale_atlas_size.x * 0.5;
                 let s = self.sdf(scale, self.t.xy);
-                let c = self.draw_color;
-                return s * c;
+                let c = self.get_color();
+                return s * vec4(c.rgb * c.a, c.a);
             } else {
                 let c = sample2d(self.color_texture, self.t);
                 return vec4(c.rgb * c.a, c.a);
@@ -83,8 +89,6 @@ pub struct DrawText2 {
     #[live(1.0)]
     pub font_scale: f32,
     #[live]
-    pub color: Vec4,
-    #[live]
     pub debug: bool,
 
     #[deref]
@@ -97,8 +101,8 @@ pub struct DrawText2 {
     pub draw_clip: Vec4,
     #[calc]
     pub draw_depth: f32,
-    #[calc]
-    pub draw_color: Vec4,
+    #[live]
+    pub color: Vec4,
     #[calc]
     pub texture_index: f32,
     #[calc]
@@ -447,14 +451,14 @@ impl DrawText2 {
 
         self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y);
         self.rect_size = vec2(bounds_in_lpxs.size.width, bounds_in_lpxs.size.height);
-        self.draw_color = color.map_or(self.color, |color| {
-            vec4(
+        if let Some(color) = color {
+            self.color = vec4(
                 color.r as f32,
                 color.g as f32,
                 color.b as f32,
                 color.a as f32,
-            ) / 255.0
-        });
+            ) / 255.0;
+        }
         self.texture_index = texture_index;
         self.t_min = vec2(t_min.x, t_min.y);
         self.t_max = vec2(t_max.x, t_max.y);

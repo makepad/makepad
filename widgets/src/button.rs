@@ -18,7 +18,7 @@ live_design! {
             instance down: 0.0,
             instance focus: 0.0,
 
-            uniform color: (THEME_COLOR_TEXT)
+            color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_DOWN)
             uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
@@ -464,7 +464,7 @@ pub struct Button {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_text: DrawText,
+    draw_text: DrawText2,
     #[live]
     draw_icon: DrawIcon,
     #[live]
