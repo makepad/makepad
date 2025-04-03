@@ -47,7 +47,7 @@ live_design!{
                 }
 
                 <CheckBox> { text: "TestButton"}
-                <CheckBoxToggle> { text: "TestButton"}
+                <Toggle> { text: "TestButton"}
                 <ButtonFlat> { text: "TestButton"}
                 <Button> { text: "TestButton, disabled", enabled: true}
                 <TextInput> { text: "TestButton"}
@@ -108,7 +108,7 @@ live_design!{
                 spacing: (THEME_SPACE_2)
                 height: Fit,
                 <CheckBox> { text: "<CheckBox>"}
-                <CheckBoxToggle> { text: "<CheckBoxToggle>"}
+                <Toggle> { text: "<Toggle>"}
                 <CheckBoxCustom> {
                     text:"<CheckBoxCustom>"
                     draw_bg: { check_type: None }

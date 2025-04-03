@@ -14,7 +14,7 @@ live_design!{
     pub Label = <LabelBase> {
         width: Fit, height: Fit,
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT),
+            color: (THEME_COLOR_TEXT),
             text_style: <THEME_FONT_REGULAR> {},
             wrap: Word
         }
@@ -159,7 +159,7 @@ live_design!{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         text: "Paragraph"
     }
@@ -172,7 +172,7 @@ live_design!{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         text: "Paragraph"
     }
@@ -185,7 +185,7 @@ live_design!{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         text: "Paragraph"
     }
@@ -198,7 +198,7 @@ live_design!{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         text: "Paragraph"
     }

@@ -13,7 +13,6 @@ live_design!{
             <H3> { text: "Slider"}
         }
         demos = {
-            <Hr> {}
             <H4> { text: "Slider"}
             <Slider> { text: "Default" }
             <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
@@ -21,12 +20,35 @@ live_design!{
             <Slider> { text: "precision", precision: 20 }
             <Slider> { text: "stepped", step: 0.1 }
 
+            <Hr> {}
+            <H4> { text: "SliderFlat"}
+            <SliderFlat> { text: "Default" }
+            <SliderFlat> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+            <SliderFlat> { text: "min/max", min: 0., max: 100. }
+            <SliderFlat> { text: "precision", precision: 20 }
+            <SliderFlat> { text: "stepped", step: 0.1 }
+
+            <Hr> {}
+            <H4> { text: "SliderFlatter"}
+            <SliderFlatter> { text: "Default" }
+            <SliderFlatter> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+            <SliderFlatter> { text: "min/max", min: 0., max: 100. }
+            <SliderFlatter> { text: "precision", precision: 20 }
+            <SliderFlatter> { text: "stepped", step: 0.1 }
+
             <H4> { text: "SliderMinimal"}
             <SliderMinimal> { text: "Default" }
             <SliderMinimal> { text: "label_align", label_align: { x: 0.5, y: 0. } }
             <SliderMinimal> { text: "min/max", min: 0., max: 100. }
             <SliderMinimal> { text: "precision", precision: 20 }
             <SliderMinimal> { text: "stepped", step: 0.1 }
+
+            <H4> { text: "SliderMinimalFlat"}
+            <SliderMinimalFlat> { text: "Default" }
+            <SliderMinimalFlat> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+            <SliderMinimalFlat> { text: "min/max", min: 0., max: 100. }
+            <SliderMinimalFlat> { text: "precision", precision: 20 }
+            <SliderMinimalFlat> { text: "stepped", step: 0.1 }
 
             <Hr> {}
             <H4> { text: "SliderRound"}
@@ -87,6 +109,17 @@ live_design!{
                 draw_bg: {label_size: 150. },
             }
 
+            <Hr> {}
+            <H4> { text: "SliderRoundFlat"}
+            <SliderRoundFlat> { text: "min/max", min: 0., max: 100. }
+            <SliderRoundFlat> { text: "precision", precision: 20 }
+            <SliderRoundFlat> { text: "stepped", step: 0.1 }
+
+            <Hr> {}
+            <H4> { text: "SliderRoundFlatter"}
+            <SliderRoundFlatter> { text: "min/max", min: 0., max: 100. }
+            <SliderRoundFlatter> { text: "precision", precision: 20 }
+            <SliderRoundFlatter> { text: "stepped", step: 0.1 }
         }
     }
 }

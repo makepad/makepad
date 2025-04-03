@@ -15,7 +15,7 @@ live_design!{
         // ok so we can use one drawtext
         // change to italic, change bold (SDF), strikethrough
         font_size: 8,
-        // font_color: (THEME_COLOR_TEXT_DEFAULT),
+        // font_color: (THEME_COLOR_TEXT),
         flow: RightWrap,
     }
     
@@ -79,41 +79,41 @@ live_design!{
         padding: 0
                 
         font_size: (THEME_FONT_SIZE_P),
-        font_color: (THEME_COLOR_TEXT_DEFAULT),
+        font_color: (THEME_COLOR_TEXT),
                 
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
                 
         draw_italic: {
             text_style: <THEME_FONT_ITALIC> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
                 
         draw_bold: {
             text_style: <THEME_FONT_BOLD> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
                 
         draw_bold_italic: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
                 
         draw_fixed: {
             text_style: <THEME_FONT_CODE> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
                 
         code_layout: {
@@ -147,10 +147,10 @@ live_design!{
         link = <TextFlowLink> {}
                 
         draw_block:{
-            line_color: (THEME_COLOR_TEXT_DEFAULT)
+            line_color: (THEME_COLOR_TEXT)
             sep_color: (THEME_COLOR_DIVIDER)
             quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
-            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
+            quote_fg_color: (THEME_COLOR_TEXT)
             code_color: (THEME_COLOR_BG_HIGHLIGHT)
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
