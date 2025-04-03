@@ -761,7 +761,7 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
-            uniform mark_color: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_hover: (THEME_COLOR_U_HIDDEN)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
