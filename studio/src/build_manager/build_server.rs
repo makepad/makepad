@@ -188,6 +188,17 @@ impl BuildConnection {
             BuildTarget::Android => vec![
                 "makepad".into(),
                 "android".into(),
+                "--variant=default",
+                "run".into(),
+                "-p".into(),
+                what.binary.clone(),
+                "--release".into(),
+                "--message-format=json".into(),
+            ],
+            BuildTarget::Quest => vec![
+                "makepad".into(),
+                "android".into(),
+                "--variant=quest",
                 "run".into(),
                 "-p".into(),
                 what.binary.clone(),
