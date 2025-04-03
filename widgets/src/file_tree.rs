@@ -33,6 +33,10 @@ live_design!{
         min_drag_distance: 10.0
         
         draw_bg: {
+            uniform color_1: (THEME_COLOR_BG_EVEN)
+            uniform color_2: (THEME_COLOR_BG_ODD)
+            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -45,12 +49,12 @@ live_design!{
                 sdf.fill_keep(
                     mix(
                         mix(
-                            THEME_COLOR_BG_EVEN,
-                            THEME_COLOR_BG_ODD,
+                            self.color_1,
+                            self.color_2,
                             self.is_even
                         ),
-                        THEME_COLOR_CTRL_SELECTED,
-                        self.selected
+                        self.color_active,
+                        self.active
                     )
                 )
                 return sdf.result
@@ -58,6 +62,9 @@ live_design!{
         }
         
         draw_icon: {
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let w = self.rect_size.x;
@@ -65,20 +72,25 @@ live_design!{
                 sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
                 sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
                 sdf.union();
-                return sdf.fill(mix(
-                    THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_TEXT_SELECTED,
-                    self.selected
-                ));
+                return sdf.fill(
+                    mix(
+                        self.color * self.scale,
+                        self.color_active,
+                        self.active
+                    )
+                );
             }
         }
         
-        draw_name: {
+        draw_text: {
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_active: (THEME_COLOR_TEXT)
+            
             fn get_color(self) -> vec4 {
                 return mix(
-                    THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_TEXT_SELECTED,
-                    self.selected
+                    self.color * self.scale,
+                    self.color_active,
+                    self.active
                 )
             }
             
@@ -100,7 +112,7 @@ live_design!{
                     apply: {
                         hover: 0.0
                         draw_bg: {hover: 0.0}
-                        draw_name: {hover: 0.0}
+                        draw_text: {hover: 0.0}
                         draw_icon: {hover: 0.0}
                     }
                 }
@@ -111,7 +123,7 @@ live_design!{
                     apply: {
                         hover: 1.0
                         draw_bg: {hover: 1.0}
-                        draw_name: {hover: 1.0}
+                        draw_text: {hover: 1.0}
                         draw_icon: {hover: 1.0}
                     },
                 }
@@ -135,19 +147,19 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        selected: 0.0
-                        draw_bg: {selected: 0.0}
-                        draw_name: {selected: 0.0}
-                        draw_icon: {selected: 0.0}
+                        active: 0.0
+                        draw_bg: {active: 0.0}
+                        draw_text: {active: 0.0}
+                        draw_icon: {active: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        selected: 1.0
-                        draw_bg: {selected: 1.0}
-                        draw_name: {selected: 1.0}
-                        draw_icon: {selected: 1.0}
+                        active: 1.0
+                        draw_bg: {active: 1.0}
+                        draw_text: {active: 1.0}
+                        draw_icon: {active: 1.0}
                     }
                 }
                 
@@ -167,7 +179,7 @@ live_design!{
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
                         draw_bg: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-                        draw_name: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+                        draw_text: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                         draw_icon: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
@@ -183,7 +195,7 @@ live_design!{
                     apply: {
                         opened: 1.0
                         draw_bg: {opened: 1.0}
-                        draw_name: {opened: 1.0}
+                        draw_text: {opened: 1.0}
                         draw_icon: {opened: 1.0}
                     }
                 }
@@ -203,13 +215,13 @@ live_design!{
         file_node: <FileTreeNode> {
             is_folder: false,
             draw_bg: {is_folder: 0.0}
-            draw_name: {is_folder: 0.0}
+            draw_text: {is_folder: 0.0}
         }
         
         folder_node: <FileTreeNode> {
             is_folder: true,
             draw_bg: {is_folder: 1.0}
-            draw_name: {is_folder: 1.0}
+            draw_text: {is_folder: 1.0}
         }
         
         filler: { // TODO: Clarify what this is for. Appears not to do anything.
@@ -221,11 +233,11 @@ live_design!{
                         self.is_even
                     ),
                     mix(
-                        THEME_COLOR_CTRL_INACTIVE,
-                        THEME_COLOR_CTRL_SELECTED,
+                        THEME_COLOR_OUTSET_INACTIVE,
+                        THEME_COLOR_OUTSET_ACTIVE,
                         self.focussed
                     ),
-                    self.selected
+                    self.active
                 );
             }
         }
@@ -240,7 +252,7 @@ struct DrawBgQuad {
     #[live] scale: f32,
     #[live] is_folder: f32,
     #[live] focussed: f32,
-    #[live] selected: f32,
+    #[live] active: f32,
     #[live] hover: f32,
     #[live] opened: f32,
 }
@@ -252,7 +264,7 @@ struct DrawNameText {
     #[live] scale: f32,
     #[live] is_folder: f32,
     #[live] focussed: f32,
-    #[live] selected: f32,
+    #[live] active: f32,
     #[live] hover: f32,
     #[live] opened: f32,
 }
@@ -264,7 +276,7 @@ struct DrawIconQuad {
     #[live] scale: f32,
     #[live] is_folder: f32,
     #[live] focussed: f32,
-    #[live] selected: f32,
+    #[live] active: f32,
     #[live] hover: f32,
     #[live] opened: f32,
 }
@@ -273,7 +285,7 @@ struct DrawIconQuad {
 pub struct FileTreeNode {
     #[live] draw_bg: DrawBgQuad,
     #[live] draw_icon: DrawIconQuad,
-    #[live] draw_name: DrawNameText,
+    #[live] draw_text: DrawNameText,
     #[live] check_box: CheckBox,
     #[layout] layout: Layout,
     
@@ -290,7 +302,7 @@ pub struct FileTreeNode {
     #[live] opened: f32,
     #[live] focussed: f32,
     #[live] hover: f32,
-    #[live] selected: f32,
+    #[live] active: f32,
 }
 
 #[derive(Live, Widget)]
@@ -348,11 +360,11 @@ impl FileTreeNode {
     pub fn set_draw_state(&mut self, is_even: f32, scale: f64) {
         self.draw_bg.scale = scale as f32;
         self.draw_bg.is_even = is_even;
-        self.draw_name.scale = scale as f32;
-        self.draw_name.is_even = is_even;
+        self.draw_text.scale = scale as f32;
+        self.draw_text.is_even = is_even;
         self.draw_icon.scale = scale as f32;
         self.draw_icon.is_even = is_even;
-        self.draw_name.font_scale = scale;
+        self.draw_text.font_scale = scale;
     }
     
     pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
@@ -364,7 +376,7 @@ impl FileTreeNode {
         
         self.draw_icon.draw_walk(cx, self.icon_walk);
         
-        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
     }
     
@@ -375,7 +387,7 @@ impl FileTreeNode {
         
         cx.walk_turtle(self.indent_walk(depth));
         
-        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
     }
     

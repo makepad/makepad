@@ -21,7 +21,7 @@ live_design!{
         
         draw_bg: {
             instance is_even: 0.0
-            instance selected: 0.0
+            instance active: 0.0
             instance hover: 0.0
             fn pixel(self) -> vec4 {
                 return mix(
@@ -30,8 +30,8 @@ live_design!{
                         THEME_COLOR_BG_ODD,
                         self.is_even
                     ),
-                    THEME_COLOR_CTRL_SELECTED,
-                    self.selected
+                    THEME_COLOR_OUTSET_ACTIVE,
+                    self.active
                 );
             }
         }
@@ -41,49 +41,44 @@ live_design!{
         width: Fill,
         
         margin: <THEME_MSPACE_H_1> {}
-        draw_check: {
+        draw_bg: {
             uniform size: 3.5;
-            instance open: 0.0
             uniform length: 3.0
             uniform width: 1.0
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                match self.check_type {
-                    CheckType::Check => {
-                        let left = 3;
-                        let sz = self.size;
-                        let c = vec2(left + sz, self.rect_size.y * 0.5 - 1);
-                        
-                        // PAUSE
-                        sdf.box(
-                            sz * 0.5,
-                            sz * 2.25,
-                            sz * 0.9,
-                            sz * 3.0,
-                            1.0
-                        );
+                let left = 3;
+                let sz = self.size;
+                let c = vec2(left + sz, self.rect_size.y * 0.5 - 1);
+                
+                // PAUSE
+                sdf.box(
+                    sz * 0.5,
+                    sz * 2.25,
+                    sz * 0.9,
+                    sz * 3.0,
+                    1.0
+                );
 
-                        sdf.box(
-                            sz * 1.75,
-                            sz * 2.25,
-                            sz * 0.9,
-                            sz * 3.0,
-                            1.0
-                        );
+                sdf.box(
+                    sz * 1.75,
+                    sz * 2.25,
+                    sz * 0.9,
+                    sz * 3.0,
+                    1.0
+                );
 
-                        sdf.fill(mix(THEME_COLOR_U_HIDDEN, mix(THEME_COLOR_W, THEME_COLOR_TEXT_HOVER, self.hover), self.selected));
+                sdf.fill(mix(THEME_COLOR_U_HIDDEN, mix(THEME_COLOR_W, THEME_COLOR_TEXT_HOVER, self.hover), self.active));
 
-                        // PLAY
-                        sdf.rotate(self.open * 0.5 * PI + 0.5 * PI, c.x, c.y);
-                        sdf.move_to(c.x - sz, c.y + sz);
-                        sdf.line_to(c.x, c.y - sz);
-                        sdf.line_to(c.x + sz, c.y + sz);
-                        sdf.close_path();
-                        sdf.fill(mix(mix(THEME_COLOR_U_4, THEME_COLOR_TEXT_HOVER, self.hover), THEME_COLOR_U_HIDDEN, self.selected));
+                // PLAY
+                sdf.rotate(self.active * 0.5 * PI + 0.5 * PI, c.x, c.y);
+                sdf.move_to(c.x - sz, c.y + sz);
+                sdf.line_to(c.x, c.y - sz);
+                sdf.line_to(c.x + sz, c.y + sz);
+                sdf.close_path();
+                sdf.fill(mix(mix(THEME_COLOR_U_4, THEME_COLOR_TEXT_HOVER, self.hover), THEME_COLOR_U_HIDDEN, self.active));
 
-                    }
-                }
                 return sdf.result
             }
         }
@@ -154,10 +149,10 @@ live_design!{
                 fold = <FoldButton> {
                     height: 25, width: 15,
                     margin: { left: (THEME_SPACE_2) }
-                    animator: { open = { default: off } },
+                    animator: { active = { default: off } },
                     draw_bg: {
                         uniform size: 3.75;
-                        instance open: 0.0
+                        instance active: 0.0
                         
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -171,7 +166,7 @@ live_design!{
                             sdf.fill_keep(mix((#6), #8, self.hover));
                             sdf.box(sz * 1.0, sz * 2.125, sz * 0.7, sz * 2.5, 1.0); // rounding = 3rd value
     
-                            sdf.fill_keep(mix(mix((#6), #8, self.hover), #fff0, self.open))
+                            sdf.fill_keep(mix(mix((#6), #8, self.hover), #fff0, self.active))
     
                             return sdf.result
                         }
@@ -225,7 +220,7 @@ impl RunList{
             item.fold_button(id!(fold)).set_action_data(ActionData::FoldBinary{binary_id});
             
             let cb =  item.check_box(id!(check));
-            cb.set_selected(cx, build_manager.active.any_binary_active(&binary.name));
+            cb.set_active(cx, build_manager.active.any_binary_active(&binary.name));
             cb.set_action_data(ActionData::RunMain{binary_id});
             
             item.draw_all(cx, &mut Scope::empty());
@@ -243,7 +238,7 @@ impl RunList{
                         check = {text: (BuildTarget::from_id(i).name())}
                     });
                     let cb = item.check_box(id!(check));
-                    cb.set_selected(cx, build_manager.active.item_id_active(item_id));
+                    cb.set_active(cx, build_manager.active.item_id_active(item_id));
                     
                     cb.set_action_data(ActionData::RunTarget{target:BuildTarget::from_id(i), binary_id});
                     item.draw_all(cx, &mut Scope::empty());

@@ -4,14 +4,11 @@ use {
         font::{Font, FontId, GlyphId},
         font_family::{FontFamily, FontFamilyId},
         geom::{Point, Rect, Size},
-        loader,
-        loader::{FontDefinition, FontFamilyDefinition, Loader},
-        rasterizer,
-        rasterizer::{RasterizedGlyph, Rasterizer},
+        loader::{self, FontDefinition, FontFamilyDefinition, Loader},
+        rasterizer::{self, RasterizedGlyph, Rasterizer},
         sdfer,
         selection::{Cursor, CursorPosition, Selection},
-        shaper,
-        shaper::ShapedText,
+        shaper::{self, ShapedText},
         substr::Substr,
     },
     std::{
@@ -123,10 +120,7 @@ impl<'a> LayoutContext<'a> {
             loader,
             text,
             options,
-            current_point_in_lpxs: Point::new(
-                options.first_row_start_x_in_lpxs,
-                0.0,
-            ),
+            current_point_in_lpxs: Point::new(options.first_row_start_x_in_lpxs, 0.0),
             current_row_start: 0,
             current_row_end: 0,
             rows: Vec::new(),
@@ -154,14 +148,13 @@ impl<'a> LayoutContext<'a> {
     }
 
     fn layout(mut self, spans: &[Span]) -> LaidoutText {
-        for span in spans {
-            self.layout_span_multiline(span);
+        for (span_index, span) in spans.iter().enumerate() {
+            self.layout_span_multiline(span, span_index == spans.len() - 1);
         }
-        self.finish_current_row(None);
         self.finish()
     }
 
-    fn layout_span_multiline(&mut self, span: &Span) {
+    fn layout_span_multiline(&mut self, span: &Span, is_last: bool) {
         let font_family = self
             .loader
             .get_or_load_font_family(span.style.font_family_id)
@@ -173,21 +166,24 @@ impl<'a> LayoutContext<'a> {
             .enumerate()
         {
             if line_index != 0 {
-                self.finish_current_row(Some((&span.style, &font_family)));
+                self.finish_current_row(&font_family, span.style, true);
             }
-            self.layout_span(&span.style, &font_family, len);
+            self.layout_span(&font_family, span.style, len);
+        }
+        if is_last {
+            self.finish_current_row(&font_family, span.style, false);
         }
     }
 
-    fn layout_span(&mut self, style: &Style, font_family: &Rc<FontFamily>, len: usize) {
+    fn layout_span(&mut self, font_family: &Rc<FontFamily>, style: Style, len: usize) {
         if self.remaining_width_in_lpxs().is_none() {
-            self.layout_span_directly(style, &font_family, len);
+            self.layout_span_directly(font_family, style, len);
         } else {
-            self.layout_span_by_word(style, &font_family, len);
+            self.layout_span_by_word(font_family, style, len);
         }
     }
 
-    fn layout_span_by_word(&mut self, style: &Style, font_family: &Rc<FontFamily>, len: usize) {
+    fn layout_span_by_word(&mut self, font_family: &Rc<FontFamily>, style: Style, len: usize) {
         let mut fitter = Fitter::new(
             self.span_text(len),
             font_family.clone(),
@@ -199,16 +195,16 @@ impl<'a> LayoutContext<'a> {
                 Some(text) => self.append_text(style, &text),
                 None => {
                     if self.current_row_is_empty() {
-                        self.layout_span_by_grapheme(style, font_family, fitter.pop());
+                        self.layout_span_by_grapheme(font_family, style, fitter.pop());
                     } else {
-                        self.finish_current_row(None);
+                        self.finish_current_row(font_family, style, false);
                     }
                 }
             }
         }
     }
 
-    fn layout_span_by_grapheme(&mut self, style: &Style, font_family: &Rc<FontFamily>, len: usize) {
+    fn layout_span_by_grapheme(&mut self, font_family: &Rc<FontFamily>, style: Style, len: usize) {
         let mut fitter = Fitter::new(
             self.span_text(len),
             font_family.clone(),
@@ -220,16 +216,16 @@ impl<'a> LayoutContext<'a> {
                 Some(text) => self.append_text(style, &text),
                 None => {
                     if self.current_row_is_empty() {
-                        self.layout_span_directly(style, font_family, fitter.pop());
+                        self.layout_span_directly(font_family, style, fitter.pop());
                     } else {
-                        self.finish_current_row(None);
+                        self.finish_current_row(font_family, style, false);
                     }
                 }
             }
         }
     }
 
-    fn layout_span_directly(&mut self, style: &Style, font_family: &FontFamily, len: usize) {
+    fn layout_span_directly(&mut self, font_family: &FontFamily, style: Style, len: usize) {
         self.append_text(
             style,
             &font_family.get_or_shape(
@@ -239,7 +235,7 @@ impl<'a> LayoutContext<'a> {
         );
     }
 
-    fn append_text(&mut self, style: &Style, text: &ShapedText) {
+    fn append_text(&mut self, style: Style, text: &ShapedText) {
         use super::num::Zero;
 
         for glyph in &text.glyphs {
@@ -260,44 +256,45 @@ impl<'a> LayoutContext<'a> {
         self.current_row_end += text.text.len();
     }
 
-    fn finish_current_row(&mut self, newline: Option<(&Style, &FontFamily)>) {
+    fn finish_current_row(
+        &mut self,
+        fallback_font_family: &FontFamily,
+        fallback_style: Style,
+        newline: bool,
+    ) {
         use {super::num::Zero, std::mem};
 
         let glyphs = mem::take(&mut self.glyphs);
-        let newline_ascender_in_lpxs = newline.map(|(style, font_family)| {
-            font_family.fonts()[0].ascender_in_ems() * style.font_size_in_lpxs
-        });
-        let newline_descender_in_lpxs = newline.map(|(style, font_family)| {
-            font_family.fonts()[0].descender_in_ems() * style.font_size_in_lpxs
-        });
-        let newline_line_gap_in_lpxs = newline.map(|(style, font_family)| {
-            font_family.fonts()[0].line_gap_in_ems() * style.font_size_in_lpxs
-        });
+        let fallback_font = &fallback_font_family.fonts()[0];
+        let fallback_font_size_in_lpxs = fallback_style.font_size_in_lpxs;
+        let fallback_ascender_in_lpxs =
+            fallback_font.ascender_in_ems() * fallback_font_size_in_lpxs;
+        let fallback_descender_in_lpxs =
+            fallback_font.descender_in_ems() * fallback_font_size_in_lpxs;
+        let fallback_line_gap_in_lpxs =
+            fallback_font.line_gap_in_ems() * fallback_font_size_in_lpxs;
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
             text: self
                 .text
                 .substr(self.current_row_start..self.current_row_end),
-            newline: newline.is_some(),
+            newline,
             width_in_lpxs: self.current_point_in_lpxs.x,
             ascender_in_lpxs: glyphs
                 .iter()
                 .map(|glyph| glyph.ascender_in_lpxs())
                 .reduce(f32::max)
-                .or(newline_ascender_in_lpxs)
-                .unwrap(),
+                .unwrap_or(fallback_ascender_in_lpxs),
             descender_in_lpxs: glyphs
                 .iter()
                 .map(|glyph| glyph.descender_in_lpxs())
                 .reduce(f32::min)
-                .or(newline_descender_in_lpxs)
-                .unwrap(),
+                .unwrap_or(fallback_descender_in_lpxs),
             line_gap_in_lpxs: glyphs
                 .iter()
                 .map(|glyph| glyph.line_gap_in_lpxs())
                 .reduce(f32::max)
-                .or(newline_line_gap_in_lpxs)
-                .unwrap(),
+                .unwrap_or(fallback_line_gap_in_lpxs),
             line_spacing_scale: self.options.line_spacing_scale,
             glyphs,
         };
@@ -311,7 +308,7 @@ impl<'a> LayoutContext<'a> {
         row.origin_in_lpxs.x = self.options.align * remaining_width_in_lpxs;
         row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
         self.current_row_start = self.current_row_end;
-        if newline.is_some() {
+        if newline {
             self.current_row_start += 1;
             self.current_row_end += 1;
         }
@@ -448,7 +445,7 @@ pub struct Span {
     pub len: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Style {
     pub font_family_id: FontFamilyId,
     pub font_size_in_lpxs: f32,

@@ -13,14 +13,15 @@ live_design!{
     link widgets;
     use link::theme::*;
     use makepad_draw::shader::std::*;
-
-    pub MarkdownLinkBase = {{MarkdownLink}} {
-        link = {
+    use crate::link_label::LinkLabelBase;
+    
+    pub MarkdownLinkBase = {{MarkdownLink}}<LinkLabelBase> {
+        /*link = {
             draw_text:{
                 // other blue hyperlink colors: #1a0dab, // #0969da  // #0c50d1
                 color: #1a0dab
             }
-        }
+        }*/
     }
 
     pub MarkdownBase = {{Markdown}} {
@@ -37,14 +38,15 @@ live_design!{
         draw_icon: {
             instance hover: 0.0
             instance pressed: 0.0
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
+                        THEME_COLOR_TEXT,
                         THEME_COLOR_TEXT_HOVER,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_PRESSED,
+                    THEME_COLOR_TEXT_DOWN,
                     self.pressed
                 )
             }
@@ -88,26 +90,29 @@ live_design!{
         draw_bg: {
             instance pressed: 0.0
             instance hover: 0.0
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let offset_y = 1.0
                 sdf.move_to(0., self.rect_size.y - offset_y);
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                 return sdf.stroke(mix(
-                    THEME_COLOR_TEXT_DEFAULT,
-                    THEME_COLOR_TEXT_PRESSED,
+                    THEME_COLOR_TEXT,
+                    THEME_COLOR_TEXT_DOWN,
                     self.pressed
                 ), mix(0.0, 0.8, self.hover));
             }
         }
         
         draw_text: {
-            wrap: Word
-            color: (THEME_COLOR_TEXT_DEFAULT),
-            instance color_hover: (THEME_COLOR_TEXT_HOVER),
-            instance color_pressed: (THEME_COLOR_TEXT_PRESSED),
             instance pressed: 0.0
             instance hover: 0.0
+
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER),
+            uniform color_pressed: (THEME_COLOR_TEXT_DOWN),
+
+            wrap: Word
+            color: (THEME_COLOR_TEXT),
             text_style: <THEME_FONT_REGULAR>{
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -131,7 +136,7 @@ live_design!{
         padding: <THEME_MSPACE_1> {}
                 
         font_size: (THEME_FONT_SIZE_P),
-        font_color: (THEME_COLOR_TEXT_DEFAULT),
+        font_color: (THEME_COLOR_TEXT),
         
         paragraph_spacing: 16,
         pre_code_spacing: 8,
@@ -142,35 +147,35 @@ live_design!{
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         
         draw_italic: {
             text_style: <THEME_FONT_ITALIC> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         
         draw_bold: {
             text_style: <THEME_FONT_BOLD> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         
         draw_bold_italic: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         
         draw_fixed: {
             text_style: <THEME_FONT_CODE> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         
         code_layout: {
@@ -199,10 +204,10 @@ live_design!{
         }
         
         draw_block: {
-            line_color: (THEME_COLOR_TEXT_DEFAULT)
+            line_color: (THEME_COLOR_TEXT)
             sep_color: (THEME_COLOR_DIVIDER)
             quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
-            quote_fg_color: (THEME_COLOR_TEXT_DEFAULT)
+            quote_fg_color: (THEME_COLOR_TEXT)
             code_color: (THEME_COLOR_BG_HIGHLIGHT)
             
             fn pixel(self) -> vec4 {

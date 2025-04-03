@@ -57,7 +57,7 @@ live_design!{
                     }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/back.svg"),
-                        color: (THEME_COLOR_TEXT_DEFAULT);
+                        color: (THEME_COLOR_TEXT);
                         brightness: 0.8;
                     }
                 }
