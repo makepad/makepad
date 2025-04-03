@@ -65,7 +65,7 @@ impl BuildTarget {
             Self::TvosSim => "tvOS Simulator",
             Self::TvosDevice => "tvOS Device",
             Self::Android => "Android",
-            Self::Android => "Quest",
+            Self::Quest => "Quest",
             Self::Harmony => "Harmony",
             Self::WebAssembly => "WebAssembly",
             Self::CheckMacos => "Check macOS",
