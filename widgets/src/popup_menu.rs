@@ -492,7 +492,7 @@ live_design!{
 pub struct PopupMenuItem {
     
     #[live] draw_bg: DrawQuad,
-    #[live] draw_text: DrawText,
+    #[live] draw_text: DrawText2,
     
     #[layout] layout: Layout,
     #[animator] animator: Animator,
