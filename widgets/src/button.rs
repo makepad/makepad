@@ -19,9 +19,9 @@ live_design! {
             instance hover: 0.0,
             instance down: 0.0,
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_down: (THEME_COLOR_TEXT_PRESSED)
+            uniform color_down: (THEME_COLOR_TEXT_DOWN)
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -47,9 +47,9 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_down: (THEME_COLOR_TEXT_PRESSED)
+            uniform color_down: (THEME_COLOR_TEXT_DOWN)
 
             fn get_color(self) -> vec4 {
                 return mix(
@@ -73,9 +73,9 @@ live_design! {
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_down: (THEME_COLOR_CTRL_PRESSED)
+            uniform color: (THEME_COLOR)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_down: (THEME_COLOR_OUTSET_DOWN)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT_HOVER)
@@ -186,13 +186,13 @@ live_design! {
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_1_hover: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color_1: (THEME_COLOR)
+            uniform color_1_hover: (THEME_COLOR)
             uniform color_1_down: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
 
             uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
             uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
-            uniform color_2_down: (THEME_COLOR_CTRL_PRESSED)
+            uniform color_2_down: (THEME_COLOR_OUTSET_DOWN)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -253,8 +253,8 @@ live_design! {
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_1_hover: (THEME_COLOR_CTRL_DEFAULT)
+            uniform color_1: (THEME_COLOR)
+            uniform color_1_hover: (THEME_COLOR)
             uniform color_1_down: (#3)
 
             uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
@@ -328,8 +328,8 @@ live_design! {
             border_radius: (THEME_CORNER_RADIUS)
 
             color: (THEME_COLOR_U_HIDDEN)
-            color_hover: (THEME_COLOR_CTRL_HOVER)
-            color_down: (THEME_COLOR_CTRL_PRESSED)
+            color_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_down: (THEME_COLOR_OUTSET_DOWN)
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)

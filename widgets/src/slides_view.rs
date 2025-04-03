@@ -29,7 +29,7 @@ live_design!{
         title = <H1> {
             text: "SlideTitle",
             draw_text: {
-                color: (THEME_COLOR_TEXT_DEFAULT)
+                color: (THEME_COLOR_TEXT)
             }
         }
     }
@@ -47,7 +47,7 @@ live_design!{
         title = <H1> {
             text: "SlideTitle",
             draw_text: {
-                color: (THEME_COLOR_TEXT_DEFAULT)
+                color: (THEME_COLOR_TEXT)
             }
         }
     }
@@ -55,7 +55,7 @@ live_design!{
     pub SlideBody = <H2> {
         text: "Body of the slide"
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
     }
 }
