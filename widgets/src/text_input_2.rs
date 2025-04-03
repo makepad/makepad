@@ -34,13 +34,12 @@ live_design! {
         height: Fit,
 
         is_password: true,
-
+        
         draw_text: {
             instance hover: 0.0
             instance focus: 0.0
             wrap: Word,
-            text_style: {
-                font_family: <THEME_FONT_FAMILY_REGULAR> {},
+            text_style: <THEME_FONT_REGULAR>{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: 16.0
             }
@@ -130,18 +129,25 @@ impl TextInput2 {
 
     fn cursor_to_position(&self, cursor: Cursor) -> CursorPosition {
         let laidout_text = self.laidout_text.as_ref().unwrap();
-        laidout_text.cursor_to_position(self.cursor_to_password_cursor(cursor))
+        let position = laidout_text.cursor_to_position(self.cursor_to_password_cursor(cursor));
+        CursorPosition {
+            row_index: position.row_index,
+            x_in_lpxs: position.x_in_lpxs * self.draw_text.font_scale,
+        }
     }
 
     fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Cursor {
         let laidout_text = self.laidout_text.as_ref().unwrap();
-        let cursor = laidout_text.point_in_lpxs_to_cursor(point_in_lpxs);
+        let cursor = laidout_text.point_in_lpxs_to_cursor(point_in_lpxs / self.draw_text.font_scale);
         self.password_cursor_to_cursor(cursor)
     }
 
     fn position_to_cursor(&self, position: CursorPosition) -> Cursor {
         let laidout_text = self.laidout_text.as_ref().unwrap();
-        let cursor = laidout_text.position_to_cursor(position);
+        let cursor = laidout_text.position_to_cursor(CursorPosition {
+            row_index: position.row_index,
+            x_in_lpxs: position.x_in_lpxs / self.draw_text.font_scale,
+        });
         self.password_cursor_to_cursor(cursor)
     }
 
@@ -199,7 +205,9 @@ impl TextInput2 {
         } else {
             self.text.as_str().into()
         };
-        self.laidout_text = Some(self.draw_text.layout(cx, self.text_walk, self.text_align, text));
+        let max_width =  cx.turtle().max_width(self.text_walk).map(|max_width| max_width as f32);
+                
+        self.laidout_text = Some(self.draw_text.layout(cx, max_width, self.text_align, text));
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
@@ -224,26 +232,28 @@ impl TextInput2 {
         self.draw_cursor.draw_abs(
             cx,
             rect(
-                text_rect.pos.x + x_in_lpxs as f64 - 2.0 / 2.0,
-                text_rect.pos.y + (row.origin_in_lpxs.y - row.ascender_in_lpxs) as f64,
-                2.0,
-                (row.ascender_in_lpxs - row.descender_in_lpxs) as f64,
+                text_rect.pos.x + (x_in_lpxs - 1.0 * self.draw_text.font_scale) as f64,
+                text_rect.pos.y + ((row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.draw_text.font_scale) as f64,
+                (2.0 * self.draw_text.font_scale) as f64,
+                ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_text.font_scale) as f64,
             )
         );
     }
 
     fn draw_selection(&mut self, cx: &mut Cx2d, text_rect: Rect) {
         let laidout_text = self.laidout_text.as_ref().unwrap();
+        
+        
         for rect_in_lpxs in laidout_text.selection_rects_in_lpxs(
             self.selection_to_password_selection(self.selection)
         ) {
             self.draw_selection.draw_abs(
                 cx,
                 rect(
-                    text_rect.pos.x + rect_in_lpxs.origin.x as f64,
-                    text_rect.pos.y + rect_in_lpxs.origin.y as f64,
-                    rect_in_lpxs.size.width as f64,
-                    rect_in_lpxs.size.height as f64,
+                    text_rect.pos.x + (rect_in_lpxs.origin.x * self.draw_text.font_scale) as f64,
+                    text_rect.pos.y + (rect_in_lpxs.origin.y * self.draw_text.font_scale) as f64,
+                    (rect_in_lpxs.size.width * self.draw_text.font_scale) as f64,
+                    (rect_in_lpxs.size.height * self.draw_text.font_scale) as f64,
                 )
             );
         }

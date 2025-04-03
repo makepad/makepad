@@ -48,7 +48,7 @@ live_design!{
         view = <RoundedView>{
             draw_bg:{
                 color:#4,
-                border_width:2
+                border_size:2
                 border_color:#5
             }
             padding: 10
@@ -65,12 +65,12 @@ live_design!{
             clip_x: false, clip_y: false,
             
             draw_bg: {
-                border_width: 1.0
+                border_size: 1.0
                 border_color: (THEME_COLOR_BEVEL_LIGHT)
                 shadow_color: (THEME_COLOR_D_3)
                 shadow_radius: 5.0,
                 shadow_offset: vec2(0.0, 0.0)
-                radius: 2.5
+                border_radius: 2.5
                 color: (THEME_COLOR_FG_APP),
             }
             
@@ -80,24 +80,24 @@ live_design!{
                 
                 draw_bg: {
                     instance hover: 0.0
-                    instance pressed: 0.0
+                    instance down: 0.0
                     uniform border_radius: (THEME_CORNER_RADIUS)
-                    instance bodytop: (THEME_COLOR_FG_APP)
-                    instance bodybottom: #f00
+                    instance color: (THEME_COLOR_FG_APP)
+                    instance color_down: #f00
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                         let grad_top = 5.0;
                         let grad_bot = 2.0;
-                        let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
+                        let body = mix(mix(self.color, self.color_down, self.hover), THEME_COLOR_OUTSET_DOWN, self.down);
                         
                         let body_transp = vec4(body.xyz, 0.0);
                         let top_gradient = mix(
                             body_transp,
-                            mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed),
+                            mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.down),
                             max(0.0, grad_top - sdf.pos.y) / grad_top
                         );
                         let bot_gradient = mix(
-                            mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pressed),
+                            mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.down),
                             top_gradient,
                             clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                         );
@@ -366,11 +366,11 @@ impl DesignerView{
         /*for (id, comp) in self.containers.iter_mut(){
             if what_id == Some(*id){
                 comp.container.as_designer_container().borrow_mut().unwrap()
-                    .animator_cut(cx, id!(select.on));
+                    .animator_cut(cx, id!(active.on));
             }
             else{
                 comp.container.as_designer_container().borrow_mut().unwrap()
-                    .animator_cut(cx, id!(select.off));
+                    .animator_cut(cx, id!(active.off));
             }
         }
         */

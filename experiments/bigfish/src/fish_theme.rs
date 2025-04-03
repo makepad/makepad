@@ -119,7 +119,7 @@ live_design! {
                 color: (#ffff00ff)
             }
         }
-        draw_slider: {
+        draw_bg: {
             instance line_color: #f00
             instance bipolar: 0.0
             fn pixel(self) -> vec4 {

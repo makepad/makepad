@@ -17,13 +17,25 @@ live_design! {
         
         draw_text: {
             instance hover: 0.0,
-            instance pressed: 0.0,
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            instance down: 0.0,
+
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_down: (THEME_COLOR_TEXT_DOWN)
+
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
             fn get_color(self) -> vec4 {
-                return self.color
+                return mix(
+                    mix(
+                        self.color,
+                        self.color_hover,
+                        self.hover
+                    ),
+                    self.color_down,
+                    self.down
+                )
             }
         }
         
@@ -33,45 +45,50 @@ live_design! {
         
         draw_icon: {
             instance hover: 0.0
-            instance pressed: 0.0
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            instance down: 0.0
+
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+            uniform color_down: (THEME_COLOR_TEXT_DOWN)
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
                         self.color,
-                        mix(self.color, #f, 0.5),
+                        self.color_hover,
                         self.hover
                     ),
-                    self.color * 0.75,
-                    self.pressed
+                    self.color_down,
+                    self.down
                 )
             }
         }
         
         draw_bg: {
             instance hover: 0.0
-            instance pressed: 0.0
+            instance down: 0.0
+            instance enabled: 1.0
+            uniform color_dither: 1.0
+
+            uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
-            instance bodytop: (THEME_COLOR_CTRL_DEFAULT)
-            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
+
+            uniform color: (THEME_COLOR)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_down: (THEME_COLOR_OUTSET_DOWN)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT_HOVER)
+            uniform border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let grad_top = 5.0;
-                let grad_bot = 2.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
-                
-                let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(
-                    body_transp,
-                    mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.pressed),
-                    max(0.0, grad_top - sdf.pos.y) / grad_top
-                );
-                let bot_gradient = mix(
-                    mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pressed),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-                
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
                 sdf.box(
                     1.,
                     1.,
@@ -79,13 +96,29 @@ live_design! {
                     self.rect_size.y - 2.0,
                     self.border_radius
                 )
-                sdf.fill_keep(body)
-                
-                sdf.stroke(
-                    bot_gradient,
-                    THEME_BEVELING
+
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                        self.down
+                    ), self.border_size)
+
+                sdf.fill(
+                    mix(
+                        mix(
+                            self.color,
+                            self.color_hover,
+                            self.hover
+                        ),
+                        self.color_down,
+                        self.down
+                    )
                 )
-                
                 return sdf.result
             }
         }
@@ -106,44 +139,176 @@ live_design! {
                     }
                 }
             }
-        }
-                
-        animator: {
             hover = {
                 default: off,
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_bg: {pressed: 0.0, hover: 0.0}
-                        draw_icon: {pressed: 0.0, hover: 0.0}
-                        draw_text: {pressed: 0.0, hover: 0.0}
+                        draw_bg: {down: 0.0, hover: 0.0}
+                        draw_icon: {down: 0.0, hover: 0.0}
+                        draw_text: {down: 0.0, hover: 0.0}
                     }
                 }
                 
                 on = {
                     from: {
                         all: Forward {duration: 0.1}
-                        pressed: Forward {duration: 0.01}
+                        down: Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        draw_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
                 
-                pressed = {
+                down = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        draw_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
+
             }
         }
     }
     
+    pub ButtonGradientX = <Button> {
+        draw_bg: {
+            instance hover: 0.0
+            instance down: 0.0
+            instance enabled: 1.0
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR)
+            uniform color_1_hover: (THEME_COLOR)
+            uniform color_1_down: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+
+            uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
+            uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
+            uniform color_2_down: (THEME_COLOR_OUTSET_DOWN)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                        self.down
+                    ), self.border_size)
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.x + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                            self.hover
+                        ),
+                        mix(self.color_1_down, self.color_2_down, self.pos.x + dither),
+                        self.down
+                    )
+                )
+                return sdf.result
+            }
+        }
+
+    }
+
+    pub ButtonGradientY = <Button> {
+        draw_bg: {
+            instance hover: 0.0
+            instance down: 0.0
+            instance enabled: 1.0
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR)
+            uniform color_1_hover: (THEME_COLOR)
+            uniform color_1_down: (#3)
+
+            uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
+            uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
+            uniform color_2_down: (#4)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT * 1.5)
+            uniform border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                        self.down
+                    ), self.border_size)
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.y + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.color_1_down, self.color_2_down, self.pos.y + dither),
+                        self.down
+                    )
+                )
+                return sdf.result
+            }
+        }
+
+    }
+
     pub ButtonIcon = <Button> {
         icon_walk: {
             width: 12.
@@ -151,156 +316,50 @@ live_design! {
         }
     }
     
-    pub ButtonFlat = <ButtonIcon> {
+    pub ButtonFlat = <Button> {
         height: Fit, width: Fit,
         padding: <THEME_MSPACE_2> {}
         margin: 0.
         align: { x: 0.5, y: 0.5 }
         icon_walk: { width: 12. }
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.fill(#f00)
-                return sdf.result
-            }
-        }
-        
-        draw_text: {
-            instance hover: 0.0,
-            instance pressed: 0.0,
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
-                        self.hover
-                    ),
-                    THEME_COLOR_TEXT_PRESSED,
-                    self.pressed
-                )
-            }
-        }
         
         draw_bg: {
-            instance hover: 0.0
-            instance pressed: 0.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            instance bodytop: (THEME_COLOR_U_HIDDEN)
-            instance bodybottom: (THEME_COLOR_CTRL_HOVER)
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let grad_top = 5.0;
-                let grad_bot = 2.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_CTRL_PRESSED, self.pressed);
-                
-                let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(
-                    body_transp,
-                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BEVEL_SHADOW, self.pressed),
-                    max(0.0, grad_top - sdf.pos.y) / grad_top
-                );
-                let bot_gradient = mix(
-                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BEVEL_LIGHT, self.pressed),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-                
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    self.border_radius
-                )
-                sdf.fill_keep(body)
-                
-                sdf.stroke(
-                    bot_gradient,
-                    THEME_BEVELING
-                )
-                
-                return sdf.result
-            }
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_down: (THEME_COLOR_OUTSET_DOWN)
+
+            border_color_1: (THEME_COLOR_U_HIDDEN)
+            border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+
+            border_color_2: (THEME_COLOR_D_HIDDEN)
+            border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+
         }
         
     }
     
-    pub ButtonFlatter = <ButtonIcon> {
-        height: Fit, width: Fit,
-        padding: <THEME_MSPACE_2> {},
-        margin: <THEME_MSPACE_2> {},
-        align: { x: 0.5, y: 0.5 },
-        icon_walk: { width: 12. },
+    pub ButtonFlatter = <Button> {
         draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.fill(#f00)
-                return sdf.result
-            }
-        }
-        
-        draw_text: {
-            instance hover: 0.0,
-            instance pressed: 0.0,
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_HOVER,
-                        self.hover
-                    ),
-                    THEME_COLOR_TEXT_PRESSED,
-                    self.pressed
-                )
-            }
-        }
-        
-        draw_bg: {
-            instance hover: 0.0
-            instance pressed: 0.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            instance bodytop: (THEME_COLOR_U_HIDDEN)
-            instance bodybottom: (THEME_COLOR_U_HIDDEN)
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let grad_top = 5.0;
-                let grad_bot = 2.0;
-                let body = mix(mix(self.bodytop, self.bodybottom, self.hover), THEME_COLOR_D_HIDDEN, self.pressed);
-                
-                let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(
-                    body_transp,
-                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_D_HIDDEN, self.pressed),
-                    max(0.0, grad_top - sdf.pos.y) / grad_top
-                );
-                let bot_gradient = mix(
-                    mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_D_HIDDEN, self.pressed),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-                
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    self.border_radius
-                )
-                sdf.fill_keep(body)
-                
-                sdf.stroke(
-                    bot_gradient,
-                    THEME_BEVELING
-                )
-                
-                return sdf.result
-            }
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_U_HIDDEN)
+            color_down: (THEME_COLOR_U_HIDDEN)
+
+            border_color_1: (THEME_COLOR_U_HIDDEN)
+            border_color_1_hover: (THEME_COLOR_U_HIDDEN)
+            border_color_1_down: (THEME_COLOR_U_HIDDEN)
+
+            border_color_2: (THEME_COLOR_D_HIDDEN)
+            border_color_2_hover: (THEME_COLOR_D_HIDDEN)
+            border_color_2_down: (THEME_COLOR_D_HIDDEN)
+
         }
         
     }
@@ -400,7 +459,7 @@ impl Widget for Button {
                         cx.set_key_focus(self.draw_bg.area());
                     }
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
-                    self.animator_play(cx, id!(hover.pressed));
+                    self.animator_play(cx, id!(hover.down));
                 }
                 Hit::FingerHoverIn(_) => {
                     if self.enabled {

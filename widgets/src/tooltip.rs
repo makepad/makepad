@@ -39,7 +39,7 @@ live_design!{
                 
                 draw_bg: {
                     color: #fff,
-                    border_width: 1.0,
+                    border_size: 1.0,
                     border_color: #D0D5DD,
                     radius: 2.
                 }
@@ -81,6 +81,10 @@ pub struct Tooltip {
 
 impl Widget for Tooltip {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if !self.opened {
+            return;
+        }
+
         self.content.handle_event(cx, event, scope);
 
         match event.hits_with_capture_overload(cx, self.content.area(), true) {

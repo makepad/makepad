@@ -201,7 +201,7 @@ live_design!{
                 auto_run = <CheckBoxCustom> {
                     text: "Auto run",
                     align: { y: 0.5 }
-                    draw_check: { check_type: None }
+                    draw_bg: { check_type: None }
                     spacing: (THEME_SPACE_1),
                     padding: <THEME_MSPACE_V_2> {}
                     icon_walk: { width: 10. }
@@ -423,7 +423,7 @@ impl Widget for AiChatView {
                     .map(|(index, _)| index).unwrap_or(0);
                 }
                 
-                self.view.check_box(id!(auto_run)).set_selected(cx, doc.auto_run);
+                self.view.check_box(id!(auto_run)).set_active(cx, doc.auto_run);
                 
                 let history_len = doc.file.history.len(); 
                 self.view.label(id!(slot)).set_text_with(|v| fmt_over!(v, "{}/{}", self.history_slot+1, history_len));

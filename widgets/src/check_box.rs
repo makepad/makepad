@@ -24,83 +24,188 @@ live_design!{
             margin: <THEME_MSPACE_H_1> { left: 12.5 }
         }
         
-        draw_check: {
+        draw_bg: {
             uniform size: 7.5;
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_INSET_1)
+            uniform color_1_hover: (THEME_COLOR_INSET_1)
+            uniform color_1_active: (THEME_COLOR_INSET_1)
+
+            uniform color_2: (THEME_COLOR_INSET_2)
+            uniform color_2_hover: (THEME_COLOR_INSET_2)
+            uniform color_2_active: (THEME_COLOR_INSET_2)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform mark_color: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color_hover: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            uniform mark_color_focus: (#f00)
+
             fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
                 match self.check_type {
                     CheckType::Check => {
-                        let left = 1;
+                        let left = 1.;
                         let sz = self.size - 1.0;
-                        let offset_x = 0.0;
-                        let offset_y = -1.0;
+
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
+
+                        // Draw background                        
+                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, self.border_radius * 0.5);
+
+                        sdf.fill_keep(
+                            mix(
+                                mix(
+                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                                self.hover
+                            )
+                        )
+
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                self.hover
+                            ), self.border_size
+                        )
                         
-                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.5 + offset_y);
-                        sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
-                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
-                        
+
+                        // Draw mark
                         let szs = sz * 0.5;
-                        let dx = 1.0;
                         sdf.move_to(left + 4.0, c.y);
                         sdf.line_to(c.x, c.y + szs);
                         sdf.line_to(c.x + szs, c.y - szs);
-                        sdf.stroke(mix(
-                            THEME_COLOR_U_HIDDEN,
-                            THEME_COLOR_TEXT_ACTIVE,
-                            self.selected), 1.25
+                        sdf.stroke(
+                            mix(
+                                mix(self.mark_color, self.mark_color_hover, self.hover),
+                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                                self.active
+                            ), 1.25
                         );
+
                     }
+
                     CheckType::Radio => {
                         let sz = self.size;
                         let left = 0.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
                         sdf.circle(left, c.y, sz);
-                        sdf.fill_keep(mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM, pow(self.pos.y, 1.)))
-                        sdf.stroke(mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.pos.y), THEME_BEVELING)
+                        sdf.fill_keep(
+                            mix(
+                                mix(
+                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                                self.hover
+                            )
+                        )
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                self.hover
+                            ), self.border_size
+                        )
                         let isz = sz * 0.5;
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
                             mix(
                                 mix(
-                                    THEME_COLOR_U_HIDDEN,
-                                    THEME_COLOR_CTRL_HOVER,
+                                    mix(
+                                        self.mark_color,
+                                        self.mark_color_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_hover,
                                     self.hover
                                 ),
-                                THEME_COLOR_TEXT_ACTIVE,
-                                self.selected
+                                mix(
+                                    mix(
+                                        self.mark_color_active,
+                                        self.mark_color_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_hover,
+                                    self.hover
+                                ),
+                                self.active
                             )
                         );
                     }
                     CheckType::Toggle => {
                         let sz = self.size;
-                        let left = 0.;
+                        let left = 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
-                        sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
-                        
-                        sdf.stroke_keep(
+
+                        // Draw background                        
+                        sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, self.border_radius * 1.4);
+                        sdf.fill_keep(
                             mix(
-                                THEME_COLOR_BEVEL_SHADOW,
-                                THEME_COLOR_BEVEL_LIGHT,
-                                clamp(self.pos.y - 0.2, 0, 1)
-                            ),
-                            THEME_BEVELING
-                        )
-                            
-                        sdf.fill(
-                            mix(
-                                mix(THEME_COLOR_INSET_PIT_TOP, THEME_COLOR_INSET_PIT_BOTTOM * 0.1, pow(self.pos.y, 1.0)),
-                                mix(THEME_COLOR_INSET_PIT_TOP_HOVER * 1.75, THEME_COLOR_INSET_PIT_BOTTOM * 0.1, pow(self.pos.y, 1.0)),
+                                mix(
+                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
                                 self.hover
                             )
                         )
+                        
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                self.hover
+                            ), self.border_size
+                        )
+                            
+                        // Draw mark
                         let isz = sz * 0.65;
-                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
+                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
                         sdf.subtract();
-                        sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
-                        sdf.blend(self.selected)
-                        sdf.fill(mix(THEME_COLOR_TEXT_DEFAULT, THEME_COLOR_TEXT_HOVER, self.hover));
+                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                        sdf.blend(self.active)
+                        sdf.fill(
+                            mix(
+                                mix(self.mark_color, self.mark_color_hover, self.hover),
+                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                                self.active
+                            )
+                        )
                     }
                     CheckType::None => {
                         sdf.fill(THEME_COLOR_D_HIDDEN);
@@ -112,43 +217,49 @@ live_design!{
             
         draw_text: {
             instance focus: 0.0
-            instance selected: 0.0
             instance hover: 0.0
-            text_style: <THEME_FONT_REGULAR> {
-                font_size: (THEME_FONT_SIZE_P)
-            }
+            instance active: 0.0
+
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_hover: (THEME_COLOR_TEXT)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
+            uniform color_active: (THEME_COLOR_TEXT)
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT_DEFAULT,
-                        THEME_COLOR_TEXT_DEFAULT,
+                        mix(self.color, self.color_focus, self.focus),
+                        self.color_hover,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_DEFAULT,
-                    self.selected
+                    self.color_active,
+                    self.active
                 )
+            }
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
             }
         }
             
         draw_icon: {
             instance focus: 0.0
             instance hover: 0.0
-            instance selected: 0.0
-            uniform color: (THEME_COLOR_INSET_PIT_TOP)
+            instance active: 0.0
+
+            uniform color: (THEME_COLOR_D_3)
+            uniform color_hover: (THEME_COLOR_D_4)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
             uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
                         self.color,
-                        self.color * 1.4,
+                        self.color_hover,
                         self.hover
                     ),
-                    mix(
-                        self.color_active,
-                        self.color_active * 1.4,
-                        self.hover
-                    ),
-                    self.selected
+                    self.color_active,
+                    self.active
                 )
             }
         }
@@ -161,7 +272,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.15}}
                     apply: {
-                        draw_check: {hover: 0.0}
+                        draw_bg: {hover: 0.0}
                         draw_text: {hover: 0.0}
                         draw_icon: {hover: 0.0}
                     }
@@ -169,7 +280,7 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {hover: 1.0}
+                        draw_bg: {hover: 1.0}
                         draw_text: {hover: 1.0}
                         draw_icon: {hover: 1.0}
                     }
@@ -180,7 +291,7 @@ live_design!{
                 off = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {focus: 0.0}
+                        draw_bg: {focus: 0.0}
                         draw_text: {focus: 0.0}
                         draw_icon: {focus: 0.0}
                     }
@@ -188,37 +299,324 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {focus: 1.0}
+                        draw_bg: {focus: 1.0}
                         draw_text: {focus: 1.0}
                         draw_icon: {focus: 1.0}
                     }
                 }
             }
-            selected = {
+            active = {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {selected: 0.0},
-                        draw_text: {selected: 0.0},
-                        draw_icon: {selected: 0.0},
+                        draw_bg: {active: 0.0},
+                        draw_text: {active: 0.0},
+                        draw_icon: {active: 0.0},
                     }
                 }
                 on = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_check: {selected: 1.0}
-                        draw_text: {selected: 1.0}
-                        draw_icon: {selected: 1.0},
+                        draw_bg: {active: 1.0}
+                        draw_text: {active: 1.0}
+                        draw_icon: {active: 1.0},
                     }
                 }
             }
         }
     }
+
+    pub CheckBoxFlat = <CheckBox> {
+        draw_bg: {
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_active: (THEME_COLOR_INSET_ACTIVE)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_active: (THEME_COLOR_INSET_ACTIVE)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_active: (THEME_COLOR_BEVEL_FOCUS)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_active: (THEME_COLOR_BEVEL_FOCUS)
+
+            mark_color: (THEME_COLOR_U_HIDDEN)
+            mark_color_hover: (THEME_COLOR_U_HIDDEN)
+            mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_focus: (#f00)
+
+        }
+
+    }
+
+    pub CheckBoxFlatter = <CheckBox> {
+        draw_bg: {
+            border_size: 0.0
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_active: (THEME_COLOR_INSET_ACTIVE)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_active: (THEME_COLOR_INSET_ACTIVE)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_active: (THEME_COLOR_BEVEL_FOCUS)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_active: (THEME_COLOR_BEVEL_FOCUS)
+
+            mark_color: (THEME_COLOR_U_HIDDEN)
+            mark_color_hover: (THEME_COLOR_U_HIDDEN)
+            mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_focus: (#f00)
+
+        }
+
+    }
         
-    pub CheckBoxToggle = <CheckBox> {
+    pub CheckBoxGradientX = <CheckBox> {
+        draw_bg: {
+            uniform size: 7.5;
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_INSET_1)
+            uniform color_1_hover: (THEME_COLOR_INSET_1)
+            uniform color_1_active: (THEME_COLOR_INSET_1)
+
+            uniform color_2: (THEME_COLOR_INSET_2)
+            uniform color_2_hover: (THEME_COLOR_INSET_2)
+            uniform color_2_active: (THEME_COLOR_INSET_2)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform mark_color: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_hover: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            uniform mark_color_focus: (#f00)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                match self.check_type {
+                    CheckType::Check => {
+                        let left = 1.;
+                        let sz = self.size - 1.0;
+
+                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+
+                        // Draw background                        
+                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, self.border_radius * 0.5);
+
+                        sdf.fill_keep(
+                            mix(
+                                mix(
+                                    mix(self.color_1, self.color_2, self.pos.x + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                                    self.active
+                                ),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                                self.hover
+                            )
+                        )
+
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                self.hover
+                            ), self.border_size
+                        )
+
+                        // Draw mark
+                        let szs = sz * 0.5;
+                        sdf.move_to(left + 4.0, c.y);
+                        sdf.line_to(c.x, c.y + szs);
+                        sdf.line_to(c.x + szs, c.y - szs);
+                        sdf.stroke(
+                            mix(
+                                mix(self.mark_color, self.mark_color_hover, self.hover),
+                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                                self.active
+                            ), 1.25
+                        );
+
+                    }
+
+                    CheckType::Radio => {
+                        let sz = self.size;
+                        let left = 0.;
+                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+                        sdf.circle(left, c.y, sz);
+                        sdf.fill_keep(
+                            mix(
+                                mix(
+                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                                self.hover
+                            )
+                        )
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                self.hover
+                            ), self.border_size
+                        )
+                        let isz = sz * 0.5;
+                        sdf.circle(left, c.y, isz);
+                        sdf.fill(
+                            mix(
+                                mix(
+                                    mix(
+                                        self.mark_color,
+                                        self.mark_color_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_hover,
+                                    self.hover
+                                ),
+                                mix(
+                                    mix(
+                                        self.mark_color_active,
+                                        self.mark_color_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_hover,
+                                    self.hover
+                                ),
+                                self.active
+                            )
+                        );
+                    }
+                    CheckType::Toggle => {
+                        let sz = self.size;
+                        let left = 1.;
+                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+
+                        // Draw background                        
+                        sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, self.border_radius * 1.4);
+                        sdf.fill_keep(
+                            mix(
+                                mix(
+                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                                self.hover
+                            )
+                        )
+                        
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                    self.active
+                                ),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                self.hover
+                            ), self.border_size
+                        )
+                            
+                        // Draw mark
+                        let isz = sz * 0.65;
+                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
+                        sdf.subtract();
+                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                        sdf.blend(self.active)
+                        sdf.fill(
+                            mix(
+                                mix(self.mark_color, self.mark_color_hover, self.hover),
+                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                                self.active
+                            )
+                        )
+                    }
+                    CheckType::None => {
+                        sdf.fill(THEME_COLOR_D_HIDDEN);
+                    }
+                }
+                return sdf.result
+            }
+        }
+
+    }
+
+    pub CheckBoxGradientY = <CheckBox> { }
+
+    pub Toggle = <CheckBox> {
         align: { x: 0., y: 0. }
-        draw_check: { check_type: Toggle }
+        draw_bg: {
+            uniform size: 7.5;
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_INSET_1)
+            uniform color_1_hover: (THEME_COLOR_INSET_1)
+            uniform color_1_active: (THEME_COLOR_INSET_1)
+
+            uniform color_2: (THEME_COLOR_INSET_2)
+            uniform color_2_hover: (THEME_COLOR_INSET_2)
+            uniform color_2_active: (THEME_COLOR_INSET_2)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform mark_color: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            uniform mark_color_focus: (#f00)
+            check_type: Toggle
+        }
         label_walk: {
             margin: <THEME_MSPACE_H_1> { left: 22.5 }
         }
@@ -229,7 +627,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.25}}
                     apply: {
-                        draw_check: {hover: 0.0}
+                        draw_bg: {hover: 0.0}
                         draw_text: {hover: 0.0}
                         draw_icon: {hover: 0.0}
                     }
@@ -237,7 +635,7 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {hover: 1.0}
+                        draw_bg: {hover: 1.0}
                         draw_text: {hover: 1.0}
                         draw_icon: {hover: 1.0}
                     }
@@ -248,7 +646,7 @@ live_design!{
                 off = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {focus: 0.0}
+                        draw_bg: {focus: 0.0}
                         draw_text: {focus: 0.0}
                         draw_icon: {focus: 0.0}
                     }
@@ -256,38 +654,178 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_check: {focus: 1.0}
+                        draw_bg: {focus: 1.0}
                         draw_text: {focus: 1.0}
                         draw_icon: {focus: 1.0}
                     }
                 }
             }
-            selected = {
+            active = {
                 default: off
                 off = {
                     ease: OutQuad
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {selected: 0.0},
-                        draw_text: {selected: 0.0},
-                        draw_icon: {selected: 0.0},
+                        draw_bg: {active: 0.0},
+                        draw_text: {active: 0.0},
+                        draw_icon: {active: 0.0},
                     }
                 }
                 on = {
                     ease: OutQuad
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_check: {selected: 1.0}
-                        draw_text: {selected: 1.0}
-                        draw_icon: {selected: 1.0},
+                        draw_bg: {active: 1.0}
+                        draw_text: {active: 1.0}
+                        draw_icon: {active: 1.0},
                     }
                 }
             }
         }
     }
+
+    pub ToggleFlat = <Toggle> {
+        draw_bg: {
+            size: 7.5;
+
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_active: (THEME_COLOR_INSET_ACTIVE)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_active: (THEME_COLOR_INSET_ACTIVE)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL)
+            border_color_1_active: (THEME_COLOR_BEVEL)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_active: (THEME_COLOR_BEVEL_ACTIVE)
+
+            mark_color: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_focus: (#f00)
+        }
+    }
         
+    pub ToggleFlatter = <Toggle> {
+        draw_bg: {
+            border_size: 0.
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_active: (THEME_COLOR_INSET_ACTIVE)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_active: (THEME_COLOR_INSET_ACTIVE)
+
+            mark_color: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_focus: (#f00)
+        }
+    }
+
+    pub ToggleGradientX = <Toggle> {
+        draw_bg: {
+            uniform size: 7.5;
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_INSET_1)
+            uniform color_1_hover: (THEME_COLOR_INSET_1)
+            uniform color_1_active: (THEME_COLOR_INSET_1)
+
+            uniform color_2: (THEME_COLOR_INSET_2)
+            uniform color_2_hover: (THEME_COLOR_INSET_2)
+            uniform color_2_active: (THEME_COLOR_INSET_2)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform mark_color: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color_hover: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            uniform mark_color_focus: (#f00)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                let sz = self.size;
+                let left = 1.;
+                let c = vec2(left + sz, self.rect_size.y * 0.5);
+
+                // Draw background                        
+                sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, self.border_radius * 1.4);
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.x + dither),
+                            mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                            self.active
+                        ),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                        self.hover
+                    )
+                )
+                
+                sdf.stroke(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                            self.active
+                        ),
+                        mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                        self.hover
+                    ), self.border_size
+                )
+                    
+                // Draw mark
+                let isz = sz * 0.65;
+                sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
+                sdf.subtract();
+                sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
+                sdf.blend(self.active)
+                sdf.fill(
+                    mix(
+                        mix(self.mark_color, self.mark_color_hover, self.hover),
+                        mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                        self.active
+                    )
+                )
+
+                return sdf.result
+            }
+        }
+
+    }
+    pub ToggleGradientY = <Toggle> { }
+
+
     pub CheckBoxCustom = <CheckBox> {
-        draw_check: { check_type: None }
+        draw_bg: { check_type: None }
         align: { x: 0.0, y: 0.5}
         label_walk: { margin: <THEME_MSPACE_H_2> {} }
     }
@@ -300,7 +838,7 @@ pub struct DrawCheckBox {
     #[live] check_type: CheckType,
     #[live] hover: f32,
     #[live] focus: f32,
-    #[live] selected: f32
+    #[live] active: f32
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -324,7 +862,7 @@ pub struct CheckBox {
     #[live] label_walk: Walk,
     #[live] label_align: Align,
     
-    #[redraw] #[live] draw_check: DrawCheckBox,
+    #[redraw] #[live] draw_bg: DrawCheckBox,
     #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
     
@@ -339,21 +877,14 @@ pub enum CheckBoxAction {
     Change(bool),
     None
 }
-/*
-#[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
-struct DrawLabelText {
-    #[deref] draw_super: DrawText,
-    #[live] hover: f32,
-    #[live] pressed: f32,
-}*/
 
 impl CheckBox {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_check.begin(cx, walk, self.layout);
+        self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
-        self.draw_check.end(cx);
+        self.draw_bg.end(cx);
     }
 }
 
@@ -372,7 +903,7 @@ impl Widget for CheckBox {
     fn data_to_widget(&mut self, cx: &mut Cx, nodes: &[LiveNode], path: &[LiveId]) {
         if let Some(value) = nodes.read_field_value(path) {
             if let Some(value) = value.as_bool() {
-                self.animator_toggle(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
+                self.animator_toggle(cx, value, Animate::Yes, id!(active.on), id!(active.off));
             }
         }
     }
@@ -381,7 +912,7 @@ impl Widget for CheckBox {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
                 
-        match event.hits(cx, self.draw_check.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
@@ -390,12 +921,12 @@ impl Widget for CheckBox {
                 self.animator_play(cx, id!(hover.off));
             },
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                if self.animator_in_state(cx, id!(selected.on)) {
-                    self.animator_play(cx, id!(selected.off));
+                if self.animator_in_state(cx, id!(active.on)) {
+                    self.animator_play(cx, id!(active.off));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
                 }
                 else {
-                    self.animator_play(cx, id!(selected.on));
+                    self.animator_play(cx, id!(active.on));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(true));
                 }
             },
@@ -439,18 +970,18 @@ impl CheckBoxRef {
         }
     }
     
-    pub fn selected(&self, cx: &Cx) -> bool {
+    pub fn active(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator_in_state(cx, id!(selected.on))
+            inner.animator_in_state(cx, id!(active.on))
         }
         else {
             false
         }
     }
     
-    pub fn set_selected(&self, cx: &mut Cx, value: bool) {
+    pub fn set_active(&self, cx: &mut Cx, value: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_toggle(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
+            inner.animator_toggle(cx, value, Animate::Yes, id!(active.on), id!(active.off));
         }
     }
 }

@@ -57,8 +57,6 @@ live_design!{
         
         width: 100
         height: 100
-        draw_bg: {
-        }
     }
     
 }
@@ -138,11 +136,13 @@ impl Widget for Image {
                 if let Some(AsyncImageLoad{image_path, result}) = &action.downcast_ref(){
                     if let Some(result) = result.borrow_mut().take(){
                         // we have a result for the image_cache to load up
-                        if self.process_async_image_load(cx, self.async_image_path.clone(), 0, image_path, result){
-                            self.async_image_size = None;
-                            self.animator_play(cx, id!(async_load.off));
-                            self.redraw(cx);
-                        }
+                        self.process_async_image_load(cx, image_path, result);
+                    }
+                    if self.async_image_size.is_some() && self.async_image_path.clone() == Some(image_path.to_path_buf()){ // see if we can load from cache
+                        self.load_image_from_cache(cx, image_path, 0);
+                        self.async_image_size = None;
+                        self.animator_play(cx, id!(async_load.off));
+                        self.redraw(cx);
                     }
                 }
             }
@@ -331,6 +331,25 @@ impl Image {
         
         DrawStep::done()
     }
+    
+    /// Loads the image at the given `image_path` on disk into this `ImageRef`.
+    pub fn load_image_file_by_path_async(&mut self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
+        if let Ok(result) = self.load_image_file_by_path_async_impl(cx, image_path, 0){
+            match result{
+                AsyncLoadResult::Loading(w,h)=>{
+                    self.async_image_size = Some((w,h));
+                    self.async_image_path = Some(image_path.into());
+                    self.animator_play(cx, id!(async_load.on));
+                    self.redraw(cx);
+                }
+                AsyncLoadResult::Loaded=>{
+                    self.redraw(cx);
+                }
+            }
+            // lets set the w-h
+        }
+        Ok(())
+    }    
 }
 
 pub enum AsyncLoad{
@@ -360,13 +379,7 @@ impl ImageRef {
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
     pub fn load_image_file_by_path_async(&self, cx: &mut Cx,  image_path: &Path) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
-            if let Ok((w,h)) = inner.load_image_file_by_path_async(cx, image_path, 0){
-                // lets set the w-h
-                inner.async_image_size = Some((w,h));
-                inner.async_image_path = Some(image_path.into());
-                inner.animator_play(cx, id!(async_load.on));
-                inner.redraw(cx);
-            }
+            return inner.load_image_file_by_path_async(cx, image_path)
         }
         Ok(())
     }    
