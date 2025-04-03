@@ -90,8 +90,8 @@
                         <SliderRound> { text: "Scale" }
                         <SliderRound> { text: "Contrast"}
                         <Vr> {}
-                        <CheckBoxToggle> { text: "Label Hover"}
-                        <CheckBoxToggle> { text: "Light Theme"}
+                        <Toggle> { text: "Label Hover"}
+                        <Toggle> { text: "Light Theme"}
                     }
 
                     <Dock> {
@@ -115,7 +115,7 @@
                                 tLayoutDemos,
                                 tAdaptiveView,
                                 tButton,
-                                tCheckbox,
+                                tCheckBox,
                                 tCommandTextInput,
                                 tDesktopButton,
                                 tDropDown,
@@ -148,7 +148,7 @@
                         tLayoutDemos = Tab { name: "Layout Demos", template: PermanentTab, kind: TabLayoutDemos }
                         tAdaptiveView = Tab { name: "Adaptive View", template: PermanentTab, kind: TabAdaptiveView }
                         tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
-                        tCheckbox = Tab { name: "Checkbox", template: PermanentTab, kind: TabCheckbox }
+                        tCheckBox = Tab { name: "CheckBox", template: PermanentTab, kind: TabCheckBox }
                         tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
                         tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
@@ -177,7 +177,7 @@
                         TabLayoutDemos = <UIZooTab> { <DemoLayout> {} }
                         TabAdaptiveView = <UIZooTab> { <DemoAdaptiveView> {} }
                         TabButton = <UIZooTab> { <DemoButton> {} }
-                        TabCheckbox = <UIZooTab> { <DemoCheckbox> {} }
+                        TabCheckBox = <UIZooTab> { <DemoCheckBox> {} }
                         TabCommandTextInput = <UIZooTab> { <DemoCommandTextInput> {} }
                         TabDesktopButton = <UIZooTab> { <DemoDesktopButton> {} }
                         TabDropDown = <UIZooTab> { <DemoDropdown> {} }
@@ -230,6 +230,7 @@
         #[live] inumber: i32,
         #[live] dropdown: DropDownEnum,
         #[live] dropdown_flat: DropDownEnum,
+        #[live] dropdown_flatter: DropDownEnum,
         #[live] dropdown_gradient_x: DropDownEnum,
         #[live] dropdown_gradient_y: DropDownEnum,
         #[live] dropdown_custom: DropDownEnum,
@@ -296,6 +297,9 @@
             ui.radio_button_set(ids!(radios_demo_11.radio1, radios_demo_11.radio2, radios_demo_11.radio3, radios_demo_11.radio4)).selected(cx, actions);
             ui.radio_button_set(ids!(radios_demo_12.radio1, radios_demo_12.radio2, radios_demo_12.radio3, radios_demo_12.radio4)).selected(cx, actions);
             ui.radio_button_set(ids!(radios_demo_13.radio1, radios_demo_13.radio2, radios_demo_13.radio3, radios_demo_13.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_14.radio1, radios_demo_14.radio2, radios_demo_14.radio3, radios_demo_14.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_15.radio1, radios_demo_15.radio2, radios_demo_15.radio3, radios_demo_15.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_16.radio1, radios_demo_16.radio2, radios_demo_16.radio3, radios_demo_16.radio4)).selected(cx, actions);
 
             if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
                 log!("TEXTBOX CHANGED {}", self.counter);
@@ -390,6 +394,7 @@ impl App{
     pub fn data_bind(mut db: DataBindingMap) {
         db.bind(id!(dropdown), ids!(dropdown));
         db.bind(id!(dropdown_flat), ids!(dropdown_flat));
+        db.bind(id!(dropdown_flatter), ids!(dropdown_flatter));
         db.bind(id!(dropdown_gradient_x), ids!(dropdown_gradient_x));
         db.bind(id!(dropdown_gradient_y), ids!(dropdown_gradient_y));
         db.bind(id!(dropdown_custom), ids!(dropdown_custom));

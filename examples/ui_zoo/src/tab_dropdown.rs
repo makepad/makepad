@@ -27,6 +27,13 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "DropDownFlatter" }
+            dropdown_flatter = <DropDownFlatter> {
+                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+            }
+
+            <Hr> {}
             <H4> { text: "DropDownGradientX" }
             dropdown_gradient_x = <DropDownGradientX> {
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
@@ -60,11 +67,11 @@ live_design!{
 
                     color_dither: 1.0
 
-                    color_1: (THEME_COLOR_CTRL_DEFAULT * 1.75)
+                    color_1: (THEME_COLOR * 1.75)
                     color_1_hover: #0
                     color_1_focus: #2
 
-                    color_2: (THEME_COLOR_CTRL_DEFAULT)
+                    color_2: (THEME_COLOR)
                     color_2_hover: #3
                     color_2_focus: #4
 

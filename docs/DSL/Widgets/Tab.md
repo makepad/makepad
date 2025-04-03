@@ -77,7 +77,7 @@ MyTab = <Tab> {
 			sdf.fill_keep(
 				mix(
 					THEME_COLOR_D_2 * 0.75,
-					THEME_COLOR_DOCK_TAB_SELECTED,
+					THEME_COLOR_DOCK_TAB_ACTIVE,
 					self.selected
 				)
 			)
@@ -117,7 +117,7 @@ MyTab = <Tab> {
 			return mix(
 				mix(
 					THEME_COLOR_TEXT_INACTIVE,
-					THEME_COLOR_TEXT_SELECTED,
+					THEME_COLOR_TEXT_ACTIVE,
 					self.selected
 				),
 				THEME_COLOR_TEXT_HOVER,
