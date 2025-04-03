@@ -22,7 +22,9 @@ live_design!{
         close_button: <TabCloseButton> {}
 
         draw_text: {
-            text_style: <THEME_FONT_REGULAR> {}
+            text_style: <THEME_FONT_REGULAR> {
+                font_size: (THEME_FONT_SIZE_P)
+            }
             instance hover: 0.0
             instance active: 0.0
 
@@ -306,7 +308,7 @@ pub struct Tab {
     
     #[live] draw_bg: DrawQuad,
     #[live] draw_icon: DrawIcon,
-    #[live] draw_text: DrawText,
+    #[live] draw_text: DrawText2,
     #[live] icon_walk: Walk,
     //#[live] draw_drag: DrawColor,
     
