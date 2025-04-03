@@ -55,7 +55,7 @@ live_design!{
                             THEME_COLOR_BG_ODD,
                             self.is_even
                         ),
-                        THEME_COLOR_CTRL_SELECTED,
+                        THEME_COLOR_OUTSET_ACTIVE,
                         self.selected
                     )
                 )
@@ -82,8 +82,8 @@ live_design!{
             instance focussed: 0.0
             fn get_color(self) -> vec4 {
                 return mix(
-                    THEME_COLOR_TEXT_DEFAULT * self.scale,
-                    THEME_COLOR_TEXT_SELECTED,
+                    THEME_COLOR_TEXT * self.scale,
+                    THEME_COLOR_TEXT_ACTIVE,
                     self.selected
                 )
             }
@@ -192,8 +192,8 @@ live_design!{
     STUDIO_PALETTE_6 = #FFB368
     STUDIO_PALETTE_7 = #FFD864
     
-    STUDIO_COLOR_FILE = (THEME_COLOR_TEXT_DEFAULT)
-    STUDIO_COLOR_FOLDER = (THEME_COLOR_TEXT_DEFAULT)
+    STUDIO_COLOR_FILE = (THEME_COLOR_TEXT)
+    STUDIO_COLOR_FOLDER = (THEME_COLOR_TEXT)
     STUDIO_COLOR_LAYOUT = (STUDIO_PALETTE_6)
     STUDIO_COLOR_WIDGET = (STUDIO_PALETTE_2)
     STUDIO_COLOR_ASSET = (STUDIO_PALETTE_5)
@@ -427,11 +427,11 @@ impl DesignerOutlineTreeNode {
         else{
             self.opened = 0.0
         }
-        self.button_open.animator_toggle(cx, is, animate, id!(open.on), id!(open.off));
+        self.button_open.animator_toggle(cx, is, animate, id!(active.on), id!(active.off));
     }
     
     pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(open.on), id!(open.off));
+        self.animator_toggle(cx, is, animate, id!(active.on), id!(active.off));
     }
     
     pub fn handle_event(
@@ -478,16 +478,16 @@ impl DesignerOutlineTreeNode {
                 }
             }
             Hit::FingerDown(e) => {
-                self.animator_play(cx, id!(select.on));
+                self.animator_play(cx, id!(active.on));
                 actions_out.push((node_id, OutlineTreeNodeAction::Selected(e.modifiers)));
                 /*
                 if self.is_folder {
-                    if self.animator_in_state(cx, id!(open.on)) {
-                        self.animator_play(cx, id!(open.off));
+                    if self.animator_in_state(cx, id!(active.on)) {
+                        self.animator_play(cx, id!(active.off));
                         actions.push((node_id, OutlineTreeNodeAction::Closing));
                     }
                     else {
-                        self.animator_play(cx, id!(open.on));
+                        self.animator_play(cx, id!(active.on));
                         actions.push((node_id, OutlineTreeNodeAction::Opening));
                     }
                 }

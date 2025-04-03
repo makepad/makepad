@@ -86,20 +86,20 @@ live_design! {
     pub THEME_COLOR_BG_UNFOCUSSED = (THEME_COLOR_BG_HIGHLIGHT * 0.85)
     pub THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
     pub THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
+    pub THEME_COLOR_DRAG_TARGET_PREVIEW = (THEME_COLOR_U_2)
 
-    pub THEME_COLOR_CURSOR_BG = (THEME_COLOR_BLACK)
+    pub THEME_COLOR_CURSOR = (THEME_COLOR_BLACK)
     pub THEME_COLOR_CURSOR_BORDER = (THEME_COLOR_WHITE)
 
-    pub THEME_COLOR_TEXT_DEFAULT = (THEME_COLOR_U_5)
-    pub THEME_COLOR_TEXT_DEFAULT_DARK = (THEME_COLOR_D_4)
-    pub THEME_COLOR_TEXT_HL = (THEME_COLOR_TEXT_DEFAULT)
+    pub THEME_COLOR_TEXT = (THEME_COLOR_U_5)
+    pub THEME_COLOR_TEXT_D = (THEME_COLOR_D_4)
+    pub THEME_COLOR_TEXT_HL = (THEME_COLOR_TEXT)
 
-    pub THEME_COLOR_TEXT_PRESSED = (THEME_COLOR_U_4)
+    pub THEME_COLOR_TEXT_DOWN = (THEME_COLOR_U_4)
     pub THEME_COLOR_TEXT_HOVER = (THEME_COLOR_WHITE)
     pub THEME_COLOR_TEXT_ACTIVE = (THEME_COLOR_U_5)
     pub THEME_COLOR_TEXT_INACTIVE = (THEME_COLOR_U_5)
-    pub THEME_COLOR_TEXT_SELECTED = (THEME_COLOR_WHITE)
-    pub THEME_COLOR_TEXT_FOCUSED = (THEME_COLOR_U_5)
+    pub THEME_COLOR_TEXT_FOCUS = (THEME_COLOR_U_5)
     pub THEME_COLOR_TEXT_PLACEHOLDER = (THEME_COLOR_U_3)
     pub THEME_COLOR_TEXT_PLACEHOLDER_HOVER = (THEME_COLOR_U_5)
     pub THEME_COLOR_TEXT_META = (THEME_COLOR_U_4)
@@ -110,57 +110,77 @@ live_design! {
     pub THEME_COLOR_BG_EVEN = (THEME_COLOR_BG_CONTAINER * 0.875)
     pub THEME_COLOR_BG_ODD = (THEME_COLOR_BG_CONTAINER * 1.125)
     pub THEME_COLOR_BG_HIGHLIGHT = (THEME_COLOR_U_1) // Code-blocks and quotes.
-    pub THEME_COLOR_BG_HIGHLIGHT_INLINE = (THEME_COLOR_U_3) // i.e. inline code
+    pub THEME_COLOR_BG_HIGHLIGHT_INLINE = (THEME_COLOR_D_3) // i.e. inline code
 
-    pub THEME_COLOR_BEVEL_LIGHT = (THEME_COLOR_U_2)
+    pub THEME_COLOR_BEVEL = (THEME_COLOR_U_2)
+    pub THEME_COLOR_BEVEL_FOCUS = (THEME_COLOR_U_3)
+    pub THEME_COLOR_BEVEL_ACTIVE = (THEME_COLOR_U_3)
+    pub THEME_COLOR_BEVEL_HOVER = (THEME_COLOR_U_4)
+    pub THEME_COLOR_BEVEL_DRAG = (THEME_COLOR_U_4)
+    pub THEME_COLOR_BEVEL_LIGHT = (THEME_COLOR_U_3)
+    pub THEME_COLOR_BEVEL_LIGHT_HOVER = (THEME_COLOR_U_3 * 1.2)
+    pub THEME_COLOR_BEVEL_LIGHT_FOCUS = (THEME_COLOR_U_3 * 1.2)
+    pub THEME_COLOR_BEVEL_LIGHT_DRAG = (THEME_COLOR_U_3 * 1.2)
     pub THEME_COLOR_BEVEL_SHADOW = (THEME_COLOR_D_3)
+    pub THEME_COLOR_BEVEL_SHADOW_HOVER = (THEME_COLOR_D_3)
+    pub THEME_COLOR_BEVEL_SHADOW_FOCUS = (THEME_COLOR_D_3)
+    pub THEME_COLOR_BEVEL_SHADOW_DRAG = (THEME_COLOR_D_4)
 
     // WIDGET COLORS
-    pub THEME_COLOR_CTRL_DEFAULT = (THEME_COLOR_U_1)
-    pub THEME_COLOR_CTRL_PRESSED = (THEME_COLOR_D_1)
-    pub THEME_COLOR_CTRL_HOVER = (THEME_COLOR_U_2)
-    pub THEME_COLOR_CTRL_ACTIVE = (THEME_COLOR_D_2)
-    pub THEME_COLOR_CTRL_SELECTED = (THEME_COLOR_U_2)
-    pub THEME_COLOR_CTRL_INACTIVE = (THEME_COLOR_D_HIDDEN)
+    pub THEME_COLOR = (THEME_COLOR_U_1)
+    pub THEME_COLOR_OUTSET_DOWN = (THEME_COLOR_D_1)
+    pub THEME_COLOR_OUTSET_HOVER = (THEME_COLOR_U_2)
+    pub THEME_COLOR_OUTSET_ACTIVE = (THEME_COLOR_D_1)
+    pub THEME_COLOR_OUTSET_FOCUS = (THEME_COLOR_U_2)
+    pub THEME_COLOR_OUTSET_DRAG = (THEME_COLOR_D_2)
+    pub THEME_COLOR_OUTSET_INACTIVE = (THEME_COLOR_D_HIDDEN)
 
     pub THEME_COLOR_FLOATING_BG = #505050FF // Elements that live on top of the UI like dialogs, popovers, and context menus.
 
     // Background of textinputs, radios, checkboxes etc.
-    pub THEME_COLOR_INSET_DEFAULT = (THEME_COLOR_D_1)
-    pub THEME_COLOR_INSET_PIT_TOP = (THEME_COLOR_D_4)
-    pub THEME_COLOR_INSET_PIT_TOP_HOVER = (THEME_COLOR_D_4)
-    pub THEME_COLOR_INSET_PIT_BOTTOM = (THEME_COLOR_D_HIDDEN)
+    pub THEME_COLOR_INSET = (THEME_COLOR_D_2)
+    pub THEME_COLOR_INSET_FOCUS = (THEME_COLOR_D_2)
+    pub THEME_COLOR_INSET_HOVER = (THEME_COLOR_D_3)
+    pub THEME_COLOR_INSET_ACTIVE = (THEME_COLOR_D_2)
+    pub THEME_COLOR_INSET_DRAG = (THEME_COLOR_D_2)
+    pub THEME_COLOR_INSET_1 = (THEME_COLOR_D_4)
+    pub THEME_COLOR_INSET_1_HOVER = (THEME_COLOR_D_4)
+    pub THEME_COLOR_INSET_2 = (THEME_COLOR_D_HIDDEN)
 
     // Progress bars, slider amounts etc.
-    pub THEME_COLOR_AMOUNT_DEFAULT_BIG = #A
-    pub THEME_COLOR_AMOUNT_DEFAULT = (THEME_COLOR_U_2)
-    pub THEME_COLOR_AMOUNT_HOVER = (THEME_COLOR_U_2)
-    pub THEME_COLOR_AMOUNT_ACTIVE = (THEME_COLOR_U_2)
+    pub THEME_COLOR_VAL = (THEME_COLOR_U_3)
+    pub THEME_COLOR_VAL_HOVER = (THEME_COLOR_U_4)
+    pub THEME_COLOR_VAL_FOCUS = (THEME_COLOR_U_4)
+    pub THEME_COLOR_VAL_ACTIVE = (THEME_COLOR_U_5)
 
-    pub THEME_COLOR_AMOUNT_TRACK_DEFAULT = (THEME_COLOR_D_3)
-    pub THEME_COLOR_AMOUNT_TRACK_HOVER = (THEME_COLOR_D_3)
-    pub THEME_COLOR_AMOUNT_TRACK_ACTIVE = (THEME_COLOR_D_4)
+    pub THEME_COLOR_VAL_TRACK_DEFAULT = (THEME_COLOR_D_3)
+    pub THEME_COLOR_VAL_TRACK_HOVER = (THEME_COLOR_D_3)
+    pub THEME_COLOR_VAL_TRACK_ACTIVE = (THEME_COLOR_D_4)
 
     // WIDGET SPECIFIC COLORS
     pub THEME_COLOR_DIVIDER = (THEME_COLOR_D_4)
 
-    pub THEME_COLOR_SLIDER_NUB_DEFAULT = (THEME_COLOR_U_3)
-    pub THEME_COLOR_SLIDER_NUB_HOVER = (THEME_COLOR_U_3)
-    pub THEME_COLOR_SLIDER_NUB_ACTIVE = (THEME_COLOR_WHITE)
+    pub THEME_COLOR_SLIDER_MINIMAL_HANDLE = (THEME_COLOR_U_3)
+    pub THEME_COLOR_SLIDER_MINIMAL_HANDLE_HOVER = (THEME_COLOR_U_4)
+    pub THEME_COLOR_SLIDER_MINIMAL_HANDLE_ACTIVE = (THEME_COLOR_WHITE)
 
     pub THEME_COLOR_SLIDES_CHAPTER = (THEME_COLOR_MAKEPAD)
     pub THEME_COLOR_SLIDES_BG = (THEME_COLOR_D_4)
 
-    pub THEME_COLOR_SLIDER_BIG_NUB_TOP = #8
-    pub THEME_COLOR_SLIDER_BIG_NUB_TOP_HOVER = #A
-    pub THEME_COLOR_SLIDER_BIG_NUB_BOTTOM = #282828
-    pub THEME_COLOR_SLIDER_BIG_NUB_BOTTOM_HOVER = #3
+    pub THEME_COLOR_SLIDER_HANDLE = #6
+    pub THEME_COLOR_SLIDER_HANDLE_HOVER = #8
+    pub THEME_COLOR_SLIDER_HANDLE_FOCUS = #7
+    pub THEME_COLOR_SLIDER_HANDLE_DRAG = #A
+    pub THEME_COLOR_SLIDER_HANDLE_1 = #8
+    pub THEME_COLOR_SLIDER_HANDLE_1_HOVER = #A
+    pub THEME_COLOR_SLIDER_HANDLE_2 = #282828
+    pub THEME_COLOR_SLIDER_HANDLE_2_HOVER = #3
 
-    pub THEME_COLOR_CTRL_SCROLLBAR_HOVER = (THEME_COLOR_U_3)
+    pub THEME_COLOR_SCROLLBAR_HOVER = (THEME_COLOR_U_3)
 
     pub THEME_COLOR_DOCK_CONTAINER = (THEME_COLOR_BG_CONTAINER)
-    pub THEME_COLOR_DOCK_TAB_SELECTED = (THEME_COLOR_FG_APP)
-    pub THEME_COLOR_DOCK_TAB_SELECTED_MINIMAL = (THEME_COLOR_U_4)
+    pub THEME_COLOR_DOCK_TAB_ACTIVE = (THEME_COLOR_FG_APP)
+    pub THEME_COLOR_DOCK_TAB_ACTIVE_MINIMAL = (THEME_COLOR_U_4)
 
 
     // TODO: THESE ARE APPLICATION SPECIFIC COLORS THAT SHOULD BE MOVED FROM THE GENERAL THEME TO THE GIVEN PROJECT
@@ -183,16 +203,54 @@ live_design! {
     pub THEME_FONT_SIZE_3 = (THEME_FONT_SIZE_BASE + 4 * THEME_FONT_SIZE_CONTRAST)
     pub THEME_FONT_SIZE_4 = (THEME_FONT_SIZE_BASE + 2 * THEME_FONT_SIZE_CONTRAST)
     pub THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
+    /*
+    pub THEME_FONT_LABEL = {
+        font_family:{
+            latin = dep("crate://self/resources/IBMPlexSans-Text.ttf"),
+            chinese = dep("crate://self/resources/LXGWWenKaiRegular.ttf")
+            emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
+        }
+    } 
+    pub THEME_FONT_REGULAR = {
+        font_family:{
+            latin = dep("crate://self/resources/IBMPlexSans-Text.ttf"),
+            chinese = dep("crate://self/resources/LXGWWenKaiRegular.ttf")
+            emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
+        }
+    }
+    pub THEME_FONT_BOLD = {
+        font_family:{
+            latin = dep("crate://self/resources/IBMPlexSans-SemiBold.ttf")
+            chinese = dep("crate://self/resources/LXGWWenKaiBold.ttf"),
+            emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
+        }
+    }
+    pub THEME_FONT_ITALIC = {
+        font_family:{
+            latin = dep("crate://self/resources/IBMPlexSans-Italic.ttf")
+            chinese =  dep("crate://self/resources/LXGWWenKaiRegular.ttf"),
+        }
+    }
+    pub THEME_FONT_BOLD_ITALIC = {
+        font_family:{
+            latin = dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf")
+            chinese = dep("crate://self/resources/LXGWWenKaiBold.ttf"),
+        }
+    }
+    pub THEME_FONT_CODE = {
+        font_family:{
+            latin = dep("crate://self/resources/LiberationMono-Regular.ttf") 
+        }
+        font_size: (THEME_FONT_SIZE_CODE)
+        //brightness: 1.1
+        //line_scale: 1.2,
+        line_spacing: 1.16
+    }*/
     
     pub THEME_FONT_LABEL = {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
         font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
     } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
-    pub THEME_FONT_FAMILY_REGULAR = {
-        latin: dep("crate://self/resources/IBMPlexSans-Text.ttf"),
-        chinese: dep("crate://self/resources/LXGWWenKaiRegular.ttf")
-        emoji: dep("crate://self/resources/NotoColorEmoji.ttf")
-    };
     pub THEME_FONT_REGULAR = {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
         font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },

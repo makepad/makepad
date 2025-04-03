@@ -157,7 +157,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (STUDIO_PALETTE_5),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
                 <P> { width: Fit, text: "Fill" }
@@ -165,7 +165,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (STUDIO_PALETTE_2),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
                 <Filler> {}
@@ -176,7 +176,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (THEME_COLOR_D_3),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
             }
@@ -192,12 +192,12 @@ live_design!{
             clip_x: false, clip_y: false,
             
             draw_bg: {
-                border_width: 1.0
+                border_size: 1.0
                 border_color: (THEME_COLOR_BEVEL_LIGHT)
                 shadow_color: (THEME_COLOR_D_4)
                 shadow_radius: 10.0,
                 shadow_offset: vec2(0.0, 5.0)
-                radius: 2.5
+                border_radius: 2.5
                 color: (THEME_COLOR_FG_APP),
             }
             
@@ -297,12 +297,12 @@ live_design!{
             clip_x: false, clip_y: false,
             
             draw_bg: {
-                border_width: 1.0
+                border_size: 1.0
                 border_color: (THEME_COLOR_BEVEL_LIGHT)
                 shadow_color: (THEME_COLOR_D_4)
                 shadow_radius: 10.0,
                 shadow_offset: vec2(0.0, 5.0)
-                radius: 2.5
+                border_radius: 2.5
                 color: (THEME_COLOR_FG_APP),
             }
                         
@@ -315,7 +315,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (#f00),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
                 <Pbold> { width: Fit, margin: {left: 3.}, text: "Canvas" }
@@ -342,7 +342,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (STUDIO_PALETTE_1),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
                 <RoundedView> {
@@ -350,7 +350,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (STUDIO_PALETTE_2),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
                 <RoundedView> {
@@ -358,7 +358,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (STUDIO_PALETTE_3),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
                 <RoundedView> {
@@ -366,7 +366,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (STUDIO_PALETTE_4),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
                 <RoundedView> {
@@ -374,7 +374,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (STUDIO_PALETTE_5),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
                 <RoundedView> {
@@ -382,7 +382,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (STUDIO_PALETTE_6),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
                 <RoundedView> {
@@ -390,7 +390,7 @@ live_design!{
                     width: 15., height: 15.,
                     draw_bg: {
                         color: (STUDIO_PALETTE_7),
-                        radius: 5.0
+                        border_radius: 5.0
                     }
                 }
             }

@@ -14,9 +14,33 @@ live_design!{
     pub Label = <LabelBase> {
         width: Fit, height: Fit,
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT),
+            color: (THEME_COLOR_TEXT),
             text_style: <THEME_FONT_REGULAR> {},
             wrap: Word
+        }
+    }
+
+    pub LabelGradientX = <Label> {
+        width: Fit, height: Fit,
+        draw_text: {
+            uniform color_1: #f00,
+            uniform color_2: #ff0
+
+            fn get_color(self) ->vec4{
+                return mix(self.color_1, self.color_2, self.pos.y)
+            }
+        }
+    }
+    
+    pub LabelGradientY = <Label> {
+        width: Fit, height: Fit,
+        draw_text: {
+            uniform color_1: #f00,
+            uniform color_2: #ff0
+
+            fn get_color(self) ->vec4{
+                return mix(self.color_1, self.color_2, self.pos.x)
+            }
         }
     }
     
@@ -135,7 +159,7 @@ live_design!{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         text: "Paragraph"
     }
@@ -148,7 +172,7 @@ live_design!{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         text: "Paragraph"
     }
@@ -161,7 +185,7 @@ live_design!{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         text: "Paragraph"
     }
@@ -174,7 +198,7 @@ live_design!{
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
         }
         text: "Paragraph"
     }

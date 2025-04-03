@@ -17,7 +17,7 @@ use {
 pub struct WindowHandle(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
-pub struct WindowId(usize, u64);
+pub struct WindowId(pub usize, pub u64);
 
 impl WindowId{
     pub fn id(&self)->usize{self.0}
@@ -102,6 +102,7 @@ impl std::ops::IndexMut<WindowId> for CxWindowPool {
 
 impl LiveHook for WindowHandle {}
 impl LiveNew for WindowHandle {
+
     fn new(cx: &mut Cx) -> Self {
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
@@ -123,6 +124,7 @@ impl LiveNew for WindowHandle {
         }
     }
 }
+
 impl LiveApply for WindowHandle {
     //fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
@@ -173,7 +175,6 @@ impl LiveApply for WindowHandle {
         return index;
     }
 }
-
 
 impl WindowHandle {
     pub fn set_pass(&self, cx: &mut Cx, pass: &Pass) {
@@ -229,6 +230,14 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::SetTopmost(self.window_id(), set_topmost));
     }
     
+    pub fn resize(&self, cx: &mut Cx, size: DVec2) {
+        cx.push_unique_platform_op(CxOsOp::ResizeWindow(self.window_id(), size));
+    }
+
+    pub fn reposition(&self, cx: &mut Cx, position: DVec2) {
+        cx.push_unique_platform_op(CxOsOp::RepositionWindow(self.window_id(), position));
+    }
+
     pub fn restore(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::RestoreWindow(self.window_id()));
     }

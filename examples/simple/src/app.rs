@@ -25,29 +25,20 @@ live_design!{
                             let angle = atan(uv.y, uv.x);
                             let color1 = mix(#f00, #00f, 0.5 + 10.5 * cos(angle + self.time));
                             let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
-                            return vec4(0.0, 0.0, 0.0, 1.0); // mix(color1, color2, radius);
+                            return mix(color1, color2, radius);
                         }
                     }
-                    button = <Button2> {
-                        text: "Click me"
+                    b0= <Button> {
+                        text: "Click me 123"
                         draw_text:{color:#fff}
                     }
-                    /*
-                    b0= <Button2> {
-                        text: "😊不对😭不对😊"
-                        draw_text:{color:#fff, text_style: { font_size: 24.0 } }
-                    }
-                    button1 = <Button2> {
+                    button1 = <Button> {
                         text: "Click me 234"
                         draw_text:{color:#fff}
                     }
-                    button2 = <Button2> {
+                    button2 = <Button> {
                         text: "Click me 345"
                         draw_text:{color:#fff}
-                    }
-                    */
-                    text_input = <TextInput2> {
-                        text: "Averylongwordtodemonstratedesperatebreaks The 😊错误 quick\n\nLet's force a new line\n brown fox😊 jumped over the lazy dog"
                     }
                 }
             }
@@ -70,9 +61,9 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App{
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button2(id!(button)).clicked(&actions) {
-            self.ui.text_input2(id!(text_input)).toggle_is_password(cx);
+    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
+        if self.ui.button(id!(button1)).clicked(&actions) {
+            self.counter += 1;
         }
     }
 }
