@@ -19,6 +19,7 @@
         use crate::tab_foldbutton::*;
         use crate::tab_html::*;
         use crate::tab_icon::*;
+        use crate::tab_iconset::*;
         use crate::tab_image::*;
         use crate::tab_imageblend::*;
         use crate::tab_label::*;
@@ -124,6 +125,7 @@
                                 tFoldHeader,
                                 tHTML,
                                 tIcon,
+                                tIconSet,
                                 tImage,
                                 tImageBlend,
                                 tLabel,
@@ -157,6 +159,7 @@
                         tFoldHeader = Tab { name: "FoldHeader", template: PermanentTab, kind: TabFoldHeader }
                         tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
                         tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
+                        tIconSet = Tab { name: "IconSet", template: PermanentTab, kind: TabIconSet }
                         tImage = Tab { name: "Image", template: PermanentTab, kind: TabImage }
                         tImageBlend = Tab { name: "ImageBlend", template: PermanentTab, kind: TabImageBlend }
                         tLabel = Tab { name: "Label", template: PermanentTab, kind: TabLabel }
@@ -186,6 +189,7 @@
                         TabFoldHeader = <UIZooTab> { <DemoFoldHeader> {} }
                         TabHTML = <UIZooTab> { <DemoHtml> {} }
                         TabIcon = <UIZooTab> { <DemoIcon> {} }
+                        TabIconSet = <UIZooTab> { <DemoIconSet> {} }
                         TabImage = <UIZooTab> { <DemoImage> {} }
                         TabImageBlend = <UIZooTab> { <DemoImageBlend> {} }
                         TabLabel = <UIZooTab> { <DemoLabel> {} }
@@ -259,6 +263,7 @@
             crate::tab_foldheader::live_design(cx);
             crate::tab_html::live_design(cx);
             crate::tab_icon::live_design(cx);
+            crate::tab_iconset::live_design(cx);
             crate::tab_image::live_design(cx);
             crate::tab_imageblend::live_design(cx);
             crate::tab_label::live_design(cx);
