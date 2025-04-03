@@ -37,17 +37,17 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color: (THEME_COLOR)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
-            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_1_hover: (THEME_COLOR_INSET_PIT_TOP)
-            uniform color_1_active: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1: (THEME_COLOR_INSET_1)
+            uniform color_1_hover: (THEME_COLOR_INSET_1)
+            uniform color_1_active: (THEME_COLOR_INSET_1)
 
-            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
-            uniform color_2_hover: (THEME_COLOR_INSET_PIT_BOTTOM)
-            uniform color_2_active: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2: (THEME_COLOR_INSET_2)
+            uniform color_2_hover: (THEME_COLOR_INSET_2)
+            uniform color_2_active: (THEME_COLOR_INSET_2)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -58,7 +58,7 @@ live_design!{
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_hover: (THEME_COLOR_CTRL_HOVER)
+            uniform mark_color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             
@@ -150,9 +150,9 @@ live_design!{
             instance hover: 0.0
             instance active: 0.0
                 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_active: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_hover: (THEME_COLOR_TEXT)
+            uniform color_active: (THEME_COLOR_TEXT)
                 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -174,11 +174,11 @@ live_design!{
             instance hover: 0.0
             instance active: 0.0
 
-            uniform color_1: (THEME_COLOR_INSET_PIT_TOP)
+            uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_WHITE)
             uniform color_1_active: (THEME_COLOR_TEXT_ACTIVE)
 
-            uniform color_2: (THEME_COLOR_INSET_PIT_BOTTOM)
+            uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_WHITE)
             uniform color_2_active: (THEME_COLOR_TEXT_ACTIVE)
 
@@ -243,7 +243,133 @@ live_design!{
             }
         }
     }
-        
+
+    pub RadioButtonFlat = <RadioButton> {
+        draw_bg: {
+            border_size: (THEME_BEVELING)
+
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_active: (THEME_COLOR_INSET_ACTIVE)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_active: (THEME_COLOR_INSET_ACTIVE)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL)
+            border_color_1_active: (THEME_COLOR_BEVEL)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL)
+            border_color_2_active: (THEME_COLOR_BEVEL)
+        }
+
+    }
+
+    pub RadioButtonFlatter = <RadioButton> {
+        draw_bg: {
+            border_size: 0.
+
+            color_1: (THEME_COLOR_INSET)
+            color_1_hover: (THEME_COLOR_INSET_HOVER)
+            color_1_active: (THEME_COLOR_INSET_ACTIVE)
+
+            color_2: (THEME_COLOR_INSET)
+            color_2_hover: (THEME_COLOR_INSET_HOVER)
+            color_2_active: (THEME_COLOR_INSET_ACTIVE)
+        }
+
+    }
+         
+    pub RadioButtonGradientX = <RadioButton> {
+        draw_bg: {
+            uniform size: 7.0;
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS)
+
+            uniform color_dither: 1.0
+
+            uniform color: (THEME_COLOR)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
+
+            uniform color_1: (THEME_COLOR_INSET_1)
+            uniform color_1_hover: (THEME_COLOR_INSET_1)
+            uniform color_1_active: (THEME_COLOR_INSET_1)
+
+            uniform color_2: (THEME_COLOR_INSET_2)
+            uniform color_2_hover: (THEME_COLOR_INSET_2)
+            uniform color_2_active: (THEME_COLOR_INSET_2)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+
+            uniform mark_color: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                match self.radio_type {
+                    RadioType::Round => {
+                        let sz = self.size;
+                        let left = sz + 1.;
+                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+
+                        // Draw background
+                        sdf.circle(left, c.y, sz);
+                        sdf.fill_keep(
+                            mix(
+                                mix(
+                                    mix(self.color_1, self.color_2, self.pos.x + dither),
+                                    mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                                    self.active
+                                ),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                                self.hover
+                            )
+                        )
+                        sdf.stroke(
+                            mix(
+                                mix(
+                                    mix(self.border_color_1, self.border_color_2, self.pos.x + dither),
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.x + dither),
+                                    self.active
+                                ),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.x + dither),
+                                self.hover
+                            ), self.border_size
+                        )
+
+                        // Draw mark
+                        let isz = sz * 0.5;
+                        sdf.circle(left, c.y, isz);
+                        sdf.fill(
+                            mix(
+                                mix(self.mark_color, self.mark_color_hover, self.hover),
+                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                                self.active
+                            )
+                        );
+                    }
+                }
+                return sdf.result
+            }
+        }
+    }
+
+    pub RadioButtonGradientY = <RadioButton> { }
+    
     pub RadioButtonCustom = <RadioButton> {
         height: Fit,
         draw_bg: {
@@ -276,7 +402,7 @@ live_design!{
         draw_text: {
             color: (THEME_COLOR_U_3)
             color_hover: (THEME_COLOR_TEXT_HOVER)
-            color_active: (THEME_COLOR_TEXT_SELECTED)
+            color_active: (THEME_COLOR_TEXT_ACTIVE)
                 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -295,13 +421,13 @@ live_design!{
             radio_type: Tab
             border_size: (THEME_BEVELING)
 
-            color_1: (THEME_COLOR_CTRL_DEFAULT)
-            color_1_hover: (THEME_COLOR_CTRL_HOVER)
-            color_1_active: (THEME_COLOR_CTRL_ACTIVE)
+            color_1: (THEME_COLOR)
+            color_1_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
 
-            color_2: (THEME_COLOR_CTRL_DEFAULT)
-            color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            color_2_active: (THEME_COLOR_CTRL_ACTIVE)
+            color_2: (THEME_COLOR)
+            color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -314,9 +440,38 @@ live_design!{
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
             
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
             color_hover: (THEME_COLOR_TEXT_HOVER)
             color_active: (THEME_COLOR_TEXT_ACTIVE)
+        }
+    }
+
+    pub RadioButtonTabFlat = <RadioButtonTab> {
+        draw_bg: {
+            radio_type: Tab
+            border_size: (THEME_BEVELING)
+
+            color_1: (THEME_COLOR)
+            color_1_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
+
+            color_2: (THEME_COLOR)
+            color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_active: (THEME_COLOR_BEVEL_ACTIVE)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_active: (THEME_COLOR_BEVEL_ACTIVE)
+        }
+    }
+
+    pub RadioButtonTabFlatter = <RadioButtonTabFlat> {
+        draw_bg: {
+            border_size: 0.
         }
     }
 
@@ -328,7 +483,7 @@ live_design!{
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
             
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
             color_hover: (THEME_COLOR_TEXT_HOVER)
             color_active: (THEME_COLOR_TEXT_ACTIVE)
         }
@@ -339,13 +494,13 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL_DEFAULT * 1.5)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 1.2)
-            uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE * 2.0)
+            uniform color_1: (THEME_COLOR * 1.5)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
+            uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
 
-            uniform color_2: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER * 0.5)
-            uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE * 0.5)
+            uniform color_2: (THEME_COLOR)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
+            uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -402,7 +557,7 @@ live_design!{
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
             
         draw_text: {
-            color: (THEME_COLOR_TEXT_DEFAULT)
+            color: (THEME_COLOR_TEXT)
             color_hover: (THEME_COLOR_TEXT_HOVER)
             color_active: (THEME_COLOR_TEXT_ACTIVE)
         }
@@ -412,13 +567,13 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL_DEFAULT * 1.5)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 1.2)
-            uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE * 2.0)
+            uniform color_1: (THEME_COLOR * 1.5)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
+            uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
 
-            uniform color_2: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER * 0.5)
-            uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE * 0.5)
+            uniform color_2: (THEME_COLOR)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
+            uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)

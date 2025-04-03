@@ -14,6 +14,8 @@ live_design!{
     use link::theme::*;
     use link::shaders::*;
     use crate::popup_menu::PopupMenu;
+    use crate::popup_menu::PopupMenuFlat;
+    use crate::popup_menu::PopupMenuFlatter;
     use crate::popup_menu::PopupMenuGradientX;
     use crate::popup_menu::PopupMenuGradientY;
     
@@ -27,9 +29,9 @@ live_design!{
         align: {x: 0., y: 0.}
         
         draw_text: {
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_focus: (THEME_COLOR_TEXT_FOCUSED)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -54,9 +56,9 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_focus: (THEME_COLOR_CTRL_DEFAULT * 1.2)
+            uniform color: (THEME_COLOR)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_focus: (THEME_COLOR * 1.2)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -66,7 +68,7 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
 
-            uniform arrow_color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform arrow_color: (THEME_COLOR_TEXT)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
             
             fn pixel(self) -> vec4 {
@@ -171,9 +173,31 @@ live_design!{
     
     pub DropDownFlat = <DropDown> {
         draw_bg: {
+            border_size: 1.,
+
             color: (THEME_COLOR_U_HIDDEN)
-            color_hover: (THEME_COLOR_CTRL_HOVER)
-            color_focus: (THEME_COLOR_CTRL_DEFAULT * 1.2)
+            color_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_focus: (THEME_COLOR * 1.2)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
+        }
+
+        popup_menu: <PopupMenuFlat> {}
+    }
+
+    pub DropDownFlatter = <DropDown> {
+        draw_bg: {
+            border_size: 0.,
+
+            color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_focus: (THEME_COLOR * 1.2)
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -183,6 +207,8 @@ live_design!{
             border_color_2_hover: (THEME_COLOR_U_HIDDEN)
             border_color_2_focus: (THEME_COLOR_U_HIDDEN)
         }
+
+        popup_menu: <PopupMenuFlatter> {}
     }
 
 
@@ -197,13 +223,13 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL_DEFAULT * 1.75)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 1.5)
-            uniform color_1_focus: (THEME_COLOR_CTRL_DEFAULT * 2.5)
+            uniform color_1: (THEME_COLOR * 1.75)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.5)
+            uniform color_1_focus: (THEME_COLOR * 2.5)
 
-            uniform color_2: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_2_focus: (THEME_COLOR_CTRL_DEFAULT * 1.25)
+            uniform color_2: (THEME_COLOR)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_2_focus: (THEME_COLOR * 1.25)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -213,7 +239,7 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
 
-            uniform arrow_color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform arrow_color: (THEME_COLOR_TEXT)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
             
             fn pixel(self) -> vec4 {
@@ -283,13 +309,13 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_CTRL_DEFAULT * 1.75)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 1.5)
-            uniform color_1_focus: (THEME_COLOR_CTRL_DEFAULT * 2.5)
+            uniform color_1: (THEME_COLOR * 1.75)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.5)
+            uniform color_1_focus: (THEME_COLOR * 2.5)
 
-            uniform color_2: (THEME_COLOR_CTRL_DEFAULT)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_2_focus: (THEME_COLOR_CTRL_DEFAULT * 1.25)
+            uniform color_2: (THEME_COLOR)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_2_focus: (THEME_COLOR * 1.25)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -299,7 +325,7 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
             
-            uniform arrow_color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform arrow_color: (THEME_COLOR_TEXT)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
 
             fn pixel(self) -> vec4 {

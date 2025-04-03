@@ -28,7 +28,7 @@ live_design!{
 
             uniform color: (THEME_COLOR_TEXT_INACTIVE)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_active: (THEME_COLOR_TEXT_SELECTED)
+            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
 
             fn get_color(self) -> vec4 {
                 return mix(

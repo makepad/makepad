@@ -506,7 +506,7 @@ live_design!{
                 text: "X"
                 margin:{right:4}
             }
-            render_check_box = <CheckBoxToggle> {
+            render_check_box = <Toggle> {
                 text: ">"
             }
             model = <DropDownFlat> {

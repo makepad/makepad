@@ -39,9 +39,9 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            color: (THEME_COLOR_INSET_DEFAULT)
-            uniform color_hover: (THEME_COLOR_INSET_DEFAULT)
-            uniform color_focus: (THEME_COLOR_CTRL_ACTIVE)
+            color: (THEME_COLOR_INSET)
+            uniform color_hover: (THEME_COLOR_INSET)
+            uniform color_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -96,9 +96,9 @@ live_design!{
             instance hover: 0.0
             instance focus: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_hover: (THEME_COLOR_TEXT_DEFAULT)
-            uniform color_focus: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_hover: (THEME_COLOR_TEXT)
+            uniform color_focus: (THEME_COLOR_TEXT)
             uniform color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
             uniform color_empty_focus: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
 
@@ -219,6 +219,38 @@ live_design!{
 
         }
 
+    pub TextInputFlat = <TextInput> {
+        draw_bg: {
+            border_radius: (THEME_CORNER_RADIUS)
+            border_size: (THEME_BEVELING)
+
+            color_dither: 1.0
+
+            color: (THEME_COLOR_INSET)
+            color_hover: (THEME_COLOR_INSET_HOVER)
+            color_focus: (THEME_COLOR_INSET_FOCUS)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
+        }
+    }
+
+    pub TextInputFlatter = <TextInput> {
+        draw_bg: {
+            border_radius: (THEME_CORNER_RADIUS)
+            border_size: 0.
+
+            color: (THEME_COLOR_INSET)
+            color_hover: (THEME_COLOR_INSET_HOVER)
+            color_focus: (THEME_COLOR_INSET_FOCUS)
+        }
+    }
+
     pub TextInputGradientX = <TextInput> {
         draw_bg: {
             instance hover: 0.0
@@ -229,13 +261,13 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_INSET_DEFAULT)
-            uniform color_1_hover: (THEME_COLOR_INSET_DEFAULT)
-            uniform color_1_focus: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_1: (THEME_COLOR_INSET)
+            uniform color_1_hover: (THEME_COLOR_INSET)
+            uniform color_1_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
-            uniform color_2: (THEME_COLOR_INSET_DEFAULT * 2.5)
-            uniform color_2_hover: (THEME_COLOR_INSET_DEFAULT * 3.)
-            uniform color_2_focus: (THEME_COLOR_INSET_DEFAULT * 4. )
+            uniform color_2: (THEME_COLOR_INSET * 2.5)
+            uniform color_2_hover: (THEME_COLOR_INSET * 3.)
+            uniform color_2_focus: (THEME_COLOR_INSET * 4. )
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -345,9 +377,9 @@ live_design!{
             uniform color_1_hover: #3
             uniform color_1_focus: #2
 
-            uniform color_2: (THEME_COLOR_INSET_DEFAULT)
+            uniform color_2: (THEME_COLOR_INSET)
             uniform color_2_hover: #4
-            uniform color_2_focus: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_2_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)

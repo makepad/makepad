@@ -21,9 +21,9 @@ live_design!{
             instance active: 0.0
             instance hover: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_DEFAULT)
+            uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_active: (THEME_COLOR_TEXT_PRESSED)
+            uniform color_active: (THEME_COLOR_TEXT_DOWN)
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P),
@@ -52,8 +52,8 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color: (THEME_COLOR_U_HIDDEN)
-            uniform color_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_U_HIDDEN)
             uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -64,7 +64,7 @@ live_design!{
             uniform border_color_2_active: (THEME_COLOR_U_HIDDEN)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_active: (THEME_COLOR_TEXT_DEFAULT)
+            uniform mark_color_active: (THEME_COLOR_TEXT)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -157,24 +157,44 @@ live_design!{
         }
         indent_width: 10.0
     }
-    
+
+    PopupMenuItemFlat = <PopupMenuItem> {
+        draw_bg: {
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
+
+            color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_active: (THEME_COLOR_OUTSET_ACTIVE)
+
+            border_color_1: (THEME_COLOR_U_HIDDEN)
+            border_color_1_hover: (THEME_COLOR_U_HIDDEN)
+            border_color_1_active: (THEME_COLOR_U_HIDDEN)
+
+            border_color_2: (THEME_COLOR_U_HIDDEN)
+            border_color_2_hover: (THEME_COLOR_U_HIDDEN)
+            border_color_2_active: (THEME_COLOR_U_HIDDEN)
+
+            mark_color: (THEME_COLOR_U_HIDDEN)
+            mark_color_active: (THEME_COLOR_TEXT)
+            
+        }
+    }
+
     PopupMenuItemGradientX = <PopupMenuItem> {
         draw_bg: {
-            instance active: 0.0
-            instance hover: 0.0
-
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
             uniform color_dither: 1.0
 
             uniform color_1: (THEME_COLOR_U_HIDDEN)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 2.)
-            uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 2.)
+            uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform color_2: (THEME_COLOR_U_HIDDEN)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_U_HIDDEN)
             uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -185,7 +205,7 @@ live_design!{
             uniform border_color_2_active: (THEME_COLOR_U_HIDDEN)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_active: (THEME_COLOR_TEXT_DEFAULT)
+            uniform mark_color_active: (THEME_COLOR_TEXT)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -251,12 +271,12 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color_1: (THEME_COLOR_U_HIDDEN)
-            uniform color_1_hover: (THEME_COLOR_CTRL_HOVER * 2.)
-            uniform color_1_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 2.)
+            uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform color_2: (THEME_COLOR_U_HIDDEN)
-            uniform color_2_hover: (THEME_COLOR_CTRL_HOVER)
-            uniform color_2_active: (THEME_COLOR_CTRL_ACTIVE)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_U_HIDDEN)
             uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -267,7 +287,7 @@ live_design!{
             uniform border_color_2_active: (THEME_COLOR_U_HIDDEN)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_active: (THEME_COLOR_TEXT_DEFAULT)
+            uniform mark_color_active: (THEME_COLOR_TEXT)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -366,6 +386,48 @@ live_design!{
             }
         }
     }
+    pub PopupMenuFlat = <PopupMenu> {
+        menu_item: <PopupMenuItemFlat> {}
+        
+        draw_bg: {
+            border_radius: (THEME_CORNER_RADIUS)
+            color: (THEME_COLOR_FG_APP)
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_2: (THEME_COLOR_BEVEL)
+
+            // fn pixel(self) -> vec4 {
+            //     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            //     let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+            //     sdf.box(
+            //         self.inset.x + self.border_size,
+            //         self.inset.y + self.border_size,
+            //         self.rect_size.x - (self.inset.x + self.inset.z + self.border_size * 2.0),
+            //         self.rect_size.y - (self.inset.y + self.inset.w + self.border_size * 2.0),
+            //         max(1.0, self.border_radius)
+            //     )
+
+            //     sdf.fill_keep(mix(self.color_1, self.color_2, self.pos.x));
+
+            //     if self.border_size > 0.0 {
+            //         sdf.stroke(mix(self.border_color_1, self.border_color_2, self.pos.y + dither), self.border_size);
+            //     }
+            //     return sdf.result;
+            // }
+        }
+    }
+
+    pub PopupMenuFlatter = <PopupMenuFlat> {
+        menu_item: <PopupMenuItemFlat> {}
+        
+        draw_bg: {
+            border_size: 0.
+            color: (THEME_COLOR_FG_APP)
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_2: (THEME_COLOR_BEVEL)
+
+        }
+    }
     
     pub PopupMenuGradientX = <PopupMenu> {
         menu_item: <PopupMenuItemGradientX> {}
@@ -382,25 +444,6 @@ live_design!{
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
 
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                sdf.box(
-                    self.inset.x + self.border_size,
-                    self.inset.y + self.border_size,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_size * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_size * 2.0),
-                    max(1.0, self.border_radius)
-                )
-
-                sdf.fill_keep(mix(self.color_1, self.color_2, self.pos.x));
-
-                if self.border_size > 0.0 {
-                    sdf.stroke(mix(self.border_color_1, self.border_color_2, self.pos.y + dither), self.border_size);
-                }
-                return sdf.result;
-            }
         }
     }
 
