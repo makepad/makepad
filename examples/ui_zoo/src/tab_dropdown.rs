@@ -48,7 +48,7 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "DropDowGradientY Custom" }
+            <H4> { text: "DropDownGradientY Custom" }
             dropdown_custom = <DropDownGradientY> {
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
