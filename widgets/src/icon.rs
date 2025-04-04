@@ -43,10 +43,10 @@ live_design! {
         }
     }
 
-    pub IconGradientY = <Icon> {
+    pub IconGradientY = <IconGradientX> {
         draw_icon: {
-            uniform color_1: (#f00)
-            uniform color_2: (#00f)
+            color_1: (#f00)
+            color_2: (#00f)
             fn get_color(self) -> vec4 {
                 return mix(self.color_1, self.color_2, self.pos.y);
             }
