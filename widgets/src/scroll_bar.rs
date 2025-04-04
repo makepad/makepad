@@ -9,78 +9,6 @@ live_design!{
     
     pub ScrollBarBase= {{ScrollBar}} {}
     
-    pub ScrollBarTabs = <ScrollBarBase> {
-        bar_size: 10.0,
-        bar_side_margin: 3.0
-        min_handle_size: 30.0
-        draw_bg: {
-            instance drag: 0.0
-            instance hover: 0.0
-
-            uniform border_radius: 1.5
-            uniform bar_width: 6.0
-                                    
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                if self.is_vertical > 0.5 {
-                    sdf.box(
-                        1.,
-                        self.rect_size.y * self.norm_scroll,
-                        self.bar_width,
-                        self.rect_size.y * self.norm_handle,
-                        self.border_radius
-                    );
-                }
-                else {
-                    sdf.box(
-                        self.rect_size.x * self.norm_scroll,
-                        1.,
-                        self.rect_size.x * self.norm_handle,
-                        self.bar_width,
-                        self.border_radius
-                    );
-                }
-                return sdf.fill(THEME_COLOR_U_HIDDEN)
-            }
-        }
-        animator: {
-            hover = {
-                default: off
-                off = {
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {
-                        draw_bg: {drag: 0.0, hover: 0.0}
-                    }
-                }
-                                                
-                on = {
-                    cursor: Default,
-                    from: {
-                        all: Forward {duration: 0.1}
-                        drag: Forward {duration: 0.01}
-                    }
-                    apply: {
-                        draw_bg: {
-                            drag: 0.0,
-                            hover: [{time: 0.0, value: 1.0}],
-                        }
-                    }
-                }
-                                                
-                drag = {
-                    cursor: Default,
-                    from: {all: Snap}
-                    apply: {
-                        draw_bg: {
-                            drag: 1.0,
-                            hover: 1.0,
-                        }
-                    }
-                }
-            }
-        }
-    }
-            
     pub ScrollBar = <ScrollBarBase> {
         bar_size: 10.0,
         bar_side_margin: 3.0
@@ -183,6 +111,17 @@ live_design!{
             }
         }
     }
+
+    pub ScrollBarTabs = <ScrollBar> {
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                return sdf.fill(THEME_COLOR_U_HIDDEN)
+            }
+        }
+    }
+
+
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
