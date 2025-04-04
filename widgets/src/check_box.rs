@@ -414,8 +414,8 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
-            uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_hover: (THEME_COLOR_U_HIDDEN)
+            uniform mark_color: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_hover: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             uniform mark_color_focus: (#f00)
@@ -865,11 +865,11 @@ pub struct CheckBox {
     #[redraw] #[live] draw_bg: DrawCheckBox,
     #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
+    
+    #[live] text: ArcStringMut,
 
     #[live(true)]
     pub visible: bool,
-    
-    #[live] text: ArcStringMut,
     
     #[live] bind: String,
     #[action_data] #[rust] action_data: WidgetActionData,
@@ -882,13 +882,20 @@ pub enum CheckBoxAction {
 }
 
 impl CheckBox {
+	pub fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+		if !self.visible {
+			self.visible = visible;
+			self.redraw(cx);
+		}
+	}
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
-    }
+        DrawStep::done() 
+   }
 }
 
 impl Widget for CheckBox {
@@ -949,10 +956,10 @@ impl Widget for CheckBox {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.draw_walk(cx, walk);
-        // if !self.visible {
-        DrawStep::done()
-        // }
+        if !self.visible {
+            return DrawStep::done()
+        }
+        self.draw_walk(cx, walk)
     }
     
     fn text(&self) -> String {
@@ -968,13 +975,10 @@ impl Widget for CheckBox {
 impl CheckBoxRef {
     pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            if inner.visible != visible{
-                inner.visible = visible;
-                inner.redraw(cx);
-            }
+            inner.set_visible(cx, visible)
         }
     }
-    
+
     pub fn visible(&self) -> bool {
         if let Some(inner) = self.borrow() {
             inner.visible
