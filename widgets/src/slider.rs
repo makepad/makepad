@@ -543,7 +543,7 @@ live_design!{
             border_color_2_focus: (THEME_COLOR_OUTSET_FOCUS)
             border_color_2_drag: (THEME_COLOR_OUTSET_DRAG)
 
-            handle_size: 10.
+            handle_size: 14.
 
             val_size: 2.
 
