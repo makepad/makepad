@@ -42,6 +42,8 @@ live_design!{
             color: (THEME_COLOR_INSET)
             uniform color_hover: (THEME_COLOR_INSET)
             uniform color_focus: (THEME_COLOR_OUTSET_ACTIVE)
+            // uniform color_empty: (#f00)
+            // uniform color_empty_focus: (#0ff)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -86,6 +88,15 @@ live_design!{
                         self.color_focus,
                         self.focus
                     )
+                    // mix(
+                    //     mix(
+                    //         mix(self.color, self.color_hover, self.hover),
+                    //         self.color_focus,
+                    //         self.focus
+                    //     ),
+                    //     mix(self.color_empty, self.color_empty_focus, self.hover),
+                    //     self.is_empty
+                    // )
                 )
                 
                 return sdf.result
