@@ -740,32 +740,32 @@ live_design!{
         draw_bg: {
             uniform size: 7.5;
 
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: (THEME_CORNER_RADIUS)
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color_dither: 1.0
+            color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_INSET_1)
-            uniform color_1_hover: (THEME_COLOR_INSET_1)
-            uniform color_1_active: (THEME_COLOR_INSET_1)
+            color_1: (THEME_COLOR_INSET_1)
+            color_1_hover: (THEME_COLOR_INSET_1)
+            color_1_active: (THEME_COLOR_INSET_1)
 
-            uniform color_2: (THEME_COLOR_INSET_2)
-            uniform color_2_hover: (THEME_COLOR_INSET_2)
-            uniform color_2_active: (THEME_COLOR_INSET_2)
+            color_2: (THEME_COLOR_INSET_2)
+            color_2_hover: (THEME_COLOR_INSET_2)
+            color_2_active: (THEME_COLOR_INSET_2)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
-            uniform mark_color: (THEME_COLOR_TEXT_ACTIVE)
-            uniform mark_color_hover: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
-            uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
-            uniform mark_color_focus: (#f00)
+            mark_color: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
+            mark_color_focus: (#f00)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
