@@ -865,6 +865,9 @@ pub struct CheckBox {
     #[redraw] #[live] draw_bg: DrawCheckBox,
     #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
+
+    #[live(true)]
+    pub visible: bool,
     
     #[live] text: ArcStringMut,
     
@@ -889,6 +892,9 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
     
     fn widget_to_data(&self, _cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
         match actions.find_widget_action_cast(self.widget_uid()) {
@@ -912,37 +918,41 @@ impl Widget for CheckBox {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
                 
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
-            }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
-            },
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                if self.animator_in_state(cx, id!(active.on)) {
-                    self.animator_play(cx, id!(active.off));
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
+        if self.visible {
+            match event.hits(cx, self.draw_bg.area()) {
+                Hit::FingerHoverIn(_) => {
+                    cx.set_cursor(MouseCursor::Hand);
+                    self.animator_play(cx, id!(hover.on));
                 }
-                else {
-                    self.animator_play(cx, id!(active.on));
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(true));
+                Hit::FingerHoverOut(_) => {
+                    self.animator_play(cx, id!(hover.off));
+                },
+                Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                    if self.animator_in_state(cx, id!(active.on)) {
+                        self.animator_play(cx, id!(active.off));
+                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
+                    }
+                    else {
+                        self.animator_play(cx, id!(active.on));
+                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(true));
+                    }
+                },
+                Hit::FingerUp(_fe) => {
+                                    
                 }
-            },
-            Hit::FingerUp(_fe) => {
-                                
+                Hit::FingerMove(_fe) => {
+                                    
+                }
+                _ => ()
             }
-            Hit::FingerMove(_fe) => {
-                                
-            }
-            _ => ()
         }
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
+        // if !self.visible {
         DrawStep::done()
+        // }
     }
     
     fn text(&self) -> String {
@@ -956,6 +966,23 @@ impl Widget for CheckBox {
 }
 
 impl CheckBoxRef {
+    pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.visible != visible{
+                inner.visible = visible;
+                inner.redraw(cx);
+            }
+        }
+    }
+    
+    pub fn visible(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.visible
+        } else {
+            false
+        }
+    }
+
     pub fn changed(&self, actions: &Actions) -> Option<bool> {
         if let CheckBoxAction::Change(b) = actions.find_widget_action_cast(self.widget_uid()) {
             return Some(b)
