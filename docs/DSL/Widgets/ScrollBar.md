@@ -99,7 +99,7 @@ MyScrollBar = <ScrollBar> {
 			instance color_hover: #999
 			instance color_pressed: #666
 			
-			uniform bar_width: 6.0
+			uniform size: 6.0
 			uniform border_radius: 1.5
 
 			fn pixel(self) -> vec4 {
@@ -108,7 +108,7 @@ MyScrollBar = <ScrollBar> {
 					sdf.box(
 						1.,
 						self.rect_size.y * self.norm_scroll,
-						self.bar_width,
+						self.size,
 						self.rect_size.y * self.norm_handle,
 						self.border_radius
 					);
@@ -118,7 +118,7 @@ MyScrollBar = <ScrollBar> {
 						self.rect_size.x * self.norm_scroll,
 						1.,
 						self.rect_size.x * self.norm_handle,
-						self.bar_width,
+						self.size,
 						self.border_radius
 					);
 				}

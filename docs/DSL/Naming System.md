@@ -47,7 +47,6 @@ All widget shaders list their supported uniforms at their top.
 | Attribute          | Type  | Desc                                                                                 |
 | ------------------ | ----- | ------------------------------------------------------------------------------------ |
 | `arrow_color`      | color | Color of the graphical indicator that suggests dropdowns have popup menus available. |
-| `bar_width`        | float | Width of Scrollbars                                                                  |
 | `border_color[_i]` | color | Outline color.                                                                       |
 | `border_inset`     | float | Moves the outline inside the widget.                                                 |
 | `border_radius`    | float | Rounded corners.                                                                     |
