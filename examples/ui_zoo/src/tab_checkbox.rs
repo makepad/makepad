@@ -27,7 +27,10 @@ live_design!{
         }
         demos = {
             <H4> { text: "Checkbox"}
-            <CheckBox> {text:"Check me out!"}
+            <CheckBox> {
+                text:"Check me out!"
+                visible: false
+            }
 
             <Hr> {}
             <H4> { text: "CheckBoxFlat"}
