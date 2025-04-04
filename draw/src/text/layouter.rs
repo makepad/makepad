@@ -120,7 +120,7 @@ impl<'a> LayoutContext<'a> {
             loader,
             text,
             options,
-            current_point_in_lpxs: Point::new(options.first_row_start_x_in_lpxs, 0.0),
+            current_point_in_lpxs: Point::new(options.first_row_indent_in_lpxs, 0.0),
             current_row_start: 0,
             current_row_end: 0,
             rows: Vec::new(),
@@ -143,8 +143,8 @@ impl<'a> LayoutContext<'a> {
 
     fn remaining_width_in_lpxs(&self) -> Option<f32> {
         self.options
-            .max_width_in_lpxs
-            .map(|max_width_in_lpxs| max_width_in_lpxs - self.current_point_in_lpxs.x)
+            .wrap_width_in_lpxs
+            .map(|wrap_width_in_lpxs| wrap_width_in_lpxs - self.current_point_in_lpxs.x)
     }
 
     fn layout(mut self, spans: &[Span]) -> LaidoutText {
@@ -303,8 +303,8 @@ impl<'a> LayoutContext<'a> {
         self.current_point_in_lpxs.y += self.rows.last().map_or(row.ascender_in_lpxs, |prev_row| {
             prev_row.line_spacing_in_lpxs(&row)
         });
-        let max_width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(row.width_in_lpxs);
-        let remaining_width_in_lpxs = max_width_in_lpxs - row.width_in_lpxs;
+        let wrap_width_in_lpxs = self.options.wrap_width_in_lpxs.unwrap_or(row.width_in_lpxs);
+        let remaining_width_in_lpxs = wrap_width_in_lpxs - row.width_in_lpxs;
         row.origin_in_lpxs.x = self.options.align * remaining_width_in_lpxs;
         row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
         self.current_row_start = self.current_row_end;
@@ -379,13 +379,13 @@ impl Fitter {
         self.text.is_empty()
     }
 
-    fn fit(&mut self, max_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
+    fn fit(&mut self, wrap_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
         let mut min_count = 1;
         let mut max_count = self.lens.len() + 1;
         let mut best_count = None;
         while min_count < max_count {
             let mid_count = (min_count + max_count) / 2;
-            if self.can_fit(mid_count, max_width_in_lpxs) {
+            if self.can_fit(mid_count, wrap_width_in_lpxs) {
                 best_count = Some(mid_count);
                 min_count = mid_count + 1;
             } else {
@@ -404,15 +404,15 @@ impl Fitter {
         }
     }
 
-    fn can_fit(&self, count: usize, max_width_in_lpxs: f32) -> bool {
+    fn can_fit(&self, count: usize, wrap_width_in_lpxs: f32) -> bool {
         let len = self.lens[..count].iter().sum();
         let estimated_width_in_lpxs: f32 = self.widths_in_lpxs[..count].iter().sum();
-        if 0.5 * estimated_width_in_lpxs > max_width_in_lpxs {
+        if 0.5 * estimated_width_in_lpxs > wrap_width_in_lpxs {
             return false;
         }
         let text = self.font_family.get_or_shape(self.text.substr(0..len));
         let actual_width_in_lpxs = text.width_in_ems * self.font_size_in_lpxs;
-        if actual_width_in_lpxs > max_width_in_lpxs {
+        if actual_width_in_lpxs > wrap_width_in_lpxs {
             return false;
         }
         true
@@ -482,8 +482,8 @@ impl PartialEq for Style {
 
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutOptions {
-    pub first_row_start_x_in_lpxs: f32,
-    pub max_width_in_lpxs: Option<f32>,
+    pub first_row_indent_in_lpxs: f32,
+    pub wrap_width_in_lpxs: Option<f32>,
     pub align: f32,
     pub line_spacing_scale: f32,
 }
@@ -491,8 +491,8 @@ pub struct LayoutOptions {
 impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
-            first_row_start_x_in_lpxs: 50.0,
-            max_width_in_lpxs: None,
+            first_row_indent_in_lpxs: 50.0,
+            wrap_width_in_lpxs: None,
             align: 0.0,
             line_spacing_scale: 1.0,
         }
@@ -506,7 +506,7 @@ impl Hash for LayoutOptions {
     where
         H: Hasher,
     {
-        self.max_width_in_lpxs.map(f32::to_bits).hash(hasher);
+        self.wrap_width_in_lpxs.map(f32::to_bits).hash(hasher);
         self.align.to_bits().hash(hasher);
         self.line_spacing_scale.to_bits().hash(hasher);
     }
@@ -514,7 +514,7 @@ impl Hash for LayoutOptions {
 
 impl PartialEq for LayoutOptions {
     fn eq(&self, other: &Self) -> bool {
-        if self.max_width_in_lpxs.map(f32::to_bits) != other.max_width_in_lpxs.map(f32::to_bits) {
+        if self.wrap_width_in_lpxs.map(f32::to_bits) != other.wrap_width_in_lpxs.map(f32::to_bits) {
             return false;
         }
         if self.align != other.align {
