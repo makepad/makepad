@@ -238,7 +238,7 @@ impl LiveRegister for App {
     }
 }
 
-impl MatchEvent for App{
+impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(id!(slideshow_button)).clicked(&actions) {
             self.ui.page_flip(id!(body)).set_active_page(cx, live_id!(slideshow));
