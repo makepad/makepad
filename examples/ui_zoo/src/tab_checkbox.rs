@@ -29,7 +29,6 @@ live_design!{
             <H4> { text: "Checkbox"}
             <CheckBox> {
                 text:"Check me out!"
-                visible: false
             }
 
             <Hr> {}
