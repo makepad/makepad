@@ -71,6 +71,8 @@ live_design!{
                             </ol>
                         </li>
                     </ol>
+                    "
+                    /*
                     inline <code>let x = 1.0;</code> code
                     <b>BOLD text</b>&nbsp;<i>italic</i><br/>
                     <sep/>
@@ -122,6 +124,7 @@ live_design!{
                     *italic* **Bold** normal _italic_ __bold__ ***Bolditalic*** normal
                     123
                     "
+                    */
                 }
             }
         }
