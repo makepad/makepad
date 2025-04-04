@@ -207,7 +207,7 @@ impl TextInput2 {
         };
         let max_width =  cx.turtle().max_width(self.text_walk).map(|max_width| max_width as f32);
                 
-        self.laidout_text = Some(self.draw_text.layout(cx, max_width, self.text_align, text));
+        self.laidout_text = Some(self.draw_text.layout(cx, 0.0, max_width, self.text_align, text));
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
