@@ -272,6 +272,7 @@ impl Cx {
                     window.is_created = true;
                 },
                 CxOsOp::CloseWindow(window_id) => {
+                    self.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
                     if let Some(index) = opengl_windows.iter().position( | w | w.window_id == window_id) {
                         self.windows[window_id].is_created = false;
                         opengl_windows[index].xlib_window.close_window();

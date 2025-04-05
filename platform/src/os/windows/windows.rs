@@ -318,6 +318,7 @@ impl Cx {
                     });
                 },
                 CxOsOp::CloseWindow(window_id) => {
+                    self.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
                     if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
                         self.windows[window_id].is_created = false;
                         d3d11_windows[index].win32_window.close_window();
