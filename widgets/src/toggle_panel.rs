@@ -26,6 +26,10 @@ pub struct TogglePanel {
 
     #[animator]
     animator: Animator,
+
+    /// Toggle the panel horizontally or vertically; default is horizontal.
+    #[live(true)]
+    is_horizontal: bool,
 }
 
 impl LiveHook for TogglePanel {
@@ -69,7 +73,12 @@ impl Widget for TogglePanel {
 
         let size_range = self.open_size - self.close_size;
         let size = self.close_size + size_range * self.animator_panel_progress;
-        walk.width = Size::Fixed(size.into());
+
+        if self.is_horizontal {
+            walk.width = Size::Fixed(size.into());
+        } else {
+            walk.height = Size::Fixed(size.into());
+        }
 
         self.view.draw_walk(cx, scope, walk)
     }
