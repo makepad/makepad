@@ -301,6 +301,16 @@ impl Cx {
                         window.xlib_window.restore();
                     }
                 },
+                CxOsOp::ResizeWindow(window_id, size) => {
+                    if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.xlib_window.set_inner_size(size);
+                    }
+                },
+                CxOsOp::RepositionWindow(window_id, size) => {
+                    if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.xlib_window.set_position(size);
+                    }
+                },
                 CxOsOp::ShowClipboardActions(_) =>{
                 },
                 CxOsOp::CopyToClipboard(content) => {
