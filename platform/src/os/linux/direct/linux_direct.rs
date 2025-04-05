@@ -304,6 +304,14 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     direct_app.timers.stop_timer(timer_id);
                 },
+                CxOsOp::ResizeWindow(window_id, size) => {
+                    let window = &mut self.windows[window_id];
+                    window.window_geom.inner_size = size;
+                },
+                CxOsOp::RepositionWindow(window_id, size) => {
+                    let window = &mut self.windows[window_id];
+                    window.window_geom.position = size;
+                },
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
