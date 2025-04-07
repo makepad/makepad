@@ -729,7 +729,7 @@ impl Widget for View {
         }
     }
 
-    fn is_visible(&self) -> bool {
+    fn visible(&self) -> bool {
         self.visible
     }
 
@@ -844,7 +844,7 @@ impl Widget for View {
             if step < self.children.len() {
                 //let id = self.draw_order[step];
                 if let Some((id,child)) = self.children.get_mut(step) {
-                    if child.is_visible() {
+                    if child.visible() {
                         let walk = child.walk(cx);
                         if resume {
                             scope.with_id(*id, |scope| child.draw_walk(cx, scope, walk))?;
