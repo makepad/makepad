@@ -346,7 +346,7 @@ impl Widget for Window {
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
 
-                    if self.view(id!(caption_bar)).is_visible() {
+                    if self.view(id!(caption_bar)).visible() {
                         let size = self.window.get_inner_size(cx);
                     
                         if dq.abs.y < 25. {
