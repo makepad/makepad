@@ -10,7 +10,9 @@ use {
             font_family::FontFamilyId,
             fonts::Fonts,
             geom::{Point, Rect, Size, Transform},
-            layouter::{LaidoutGlyph, LaidoutRow, LayoutOptions, LaidoutText, LayoutParams, Span, Style},
+            layouter::{
+                LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams, Span, Style,
+            },
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
             selection::{Cursor, Selection},
@@ -222,16 +224,15 @@ impl DrawText2 {
             wrap_width_in_lpxs,
             Align::default(),
             text,
-            
         );
-        
-        
-                
+        self.draw_text(cx, origin_in_lpxs, &text);
+
         let last_row = text.rows.last().unwrap();
-        let new_turtle_pos = origin_in_lpxs + Size::new(
-            last_row.width_in_lpxs,
-            last_row.origin_in_lpxs.y - last_row.ascender_in_lpxs
-        ) * self.font_scale;
+        let new_turtle_pos = origin_in_lpxs
+            + Size::new(
+                last_row.width_in_lpxs,
+                last_row.origin_in_lpxs.y - last_row.ascender_in_lpxs,
+            ) * self.font_scale;
         let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
         println!("Drawing the following text: {:?}", text.text);
         println!("Turtle pos {:?}", turtle_pos);
@@ -242,29 +243,19 @@ impl DrawText2 {
         println!("New turtle pos {:?}", new_turtle_pos);
         println!("Used size in lpxs: {:?}", used_size_in_lpxs);
         println!();
-        let new_turtle_pos = dvec2(
-            new_turtle_pos.x as f64,
-            new_turtle_pos.y as f64,
-        );
+        let new_turtle_pos = dvec2(new_turtle_pos.x as f64, new_turtle_pos.y as f64);
         cx.turtle_mut().set_pos(new_turtle_pos);
-        cx.turtle_mut().update_width_max(
-            origin_in_lpxs.x as f64,
-            used_size_in_lpxs.width as f64
-        );
-        cx.turtle_mut().update_height_max(
-            origin_in_lpxs.y as f64,
-            used_size_in_lpxs.height as f64
-        );
-        cx.emit_turtle_walk(makepad_platform::Rect{
+        cx.turtle_mut()
+            .update_width_max(origin_in_lpxs.x as f64, used_size_in_lpxs.width as f64);
+        cx.turtle_mut()
+            .update_height_max(origin_in_lpxs.y as f64, used_size_in_lpxs.height as f64);
+        cx.emit_turtle_walk(makepad_platform::Rect {
             pos: new_turtle_pos,
-            size: dvec2(used_size_in_lpxs.width as f64,used_size_in_lpxs.height as f64)
+            size: dvec2(
+                used_size_in_lpxs.width as f64,
+                used_size_in_lpxs.height as f64,
+            ),
         });
-        
-        self.draw_text(
-            cx,
-            origin_in_lpxs,
-            &text,
-        );
 
         for rect_in_lpxs in text.selection_rects_in_lpxs(Selection {
             anchor: Cursor {
@@ -280,16 +271,16 @@ impl DrawText2 {
                 origin_in_lpxs + Size::from(rect_in_lpxs.origin) * self.font_scale,
                 rect_in_lpxs.size * self.font_scale,
             );
-            f(cx, makepad_platform::rect(
-                rect_in_lpxs.origin.x as f64,
-                rect_in_lpxs.origin.y as f64,
-                rect_in_lpxs.size.width as f64,
-                rect_in_lpxs.size.height as f64,
-            ))
+            f(
+                cx,
+                makepad_platform::rect(
+                    rect_in_lpxs.origin.x as f64,
+                    rect_in_lpxs.origin.y as f64,
+                    rect_in_lpxs.size.width as f64,
+                    rect_in_lpxs.size.height as f64,
+                ),
+            )
         }
-
-        // lets emit a turtle walk
-        
     }
 
     pub fn layout(
@@ -322,12 +313,7 @@ impl DrawText2 {
         })
     }
 
-    fn draw_text(
-        &mut self,
-        cx: &mut Cx2d,
-        origin_in_lpxs: Point<f32>,
-        text: &LaidoutText,
-    ) {
+    fn draw_text(&mut self, cx: &mut Cx2d, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
         use crate::text::geom::Size;
 
         self.update_draw_vars(cx);
@@ -392,10 +378,9 @@ impl DrawText2 {
                     1.0,
                 ),
             );
-            /*cx.cx
+            cx.cx
                 .debug
                 .area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
-*/
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
@@ -406,11 +391,9 @@ impl DrawText2 {
                     1.0,
                 ),
             );
-            /*
             cx.cx
                 .debug
                 .area(area, makepad_platform::vec4(0.0, 1.0, 0.0, 1.0));
-*/
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
@@ -421,12 +404,10 @@ impl DrawText2 {
                     1.0,
                 ),
             );
-            /*
             cx.cx
                 .debug
                 .area(area, makepad_platform::vec4(0.0, 0.0, 1.0, 1.0));
-*/                
-            }
+        }
     }
 
     fn draw_glyph(
