@@ -222,7 +222,44 @@ impl DrawText2 {
             wrap_width_in_lpxs,
             Align::default(),
             text,
+            
         );
+        
+        
+                
+        let last_row = text.rows.last().unwrap();
+        let new_turtle_pos = origin_in_lpxs + Size::new(
+            last_row.width_in_lpxs,
+            last_row.origin_in_lpxs.y - last_row.ascender_in_lpxs
+        ) * self.font_scale;
+        let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
+        println!("Drawing the following text: {:?}", text.text);
+        println!("Turtle pos {:?}", turtle_pos);
+        println!("Origin in lpxs {:?}", origin_in_lpxs);
+        println!("Last row origin in lpxs {:?}", last_row.origin_in_lpxs);
+        println!("Last row width in lpxs {:?}", last_row.width_in_lpxs);
+        println!("Last row ascender in lpxs {:?}", last_row.ascender_in_lpxs);
+        println!("New turtle pos {:?}", new_turtle_pos);
+        println!("Used size in lpxs: {:?}", used_size_in_lpxs);
+        println!();
+        let new_turtle_pos = dvec2(
+            new_turtle_pos.x as f64,
+            new_turtle_pos.y as f64,
+        );
+        cx.turtle_mut().set_pos(new_turtle_pos);
+        cx.turtle_mut().update_width_max(
+            origin_in_lpxs.x as f64,
+            used_size_in_lpxs.width as f64
+        );
+        cx.turtle_mut().update_height_max(
+            origin_in_lpxs.y as f64,
+            used_size_in_lpxs.height as f64
+        );
+        cx.emit_turtle_walk(makepad_platform::Rect{
+            pos: new_turtle_pos,
+            size: dvec2(used_size_in_lpxs.width as f64,used_size_in_lpxs.height as f64)
+        });
+        
         self.draw_text(
             cx,
             origin_in_lpxs,
@@ -251,33 +288,8 @@ impl DrawText2 {
             ))
         }
 
-        let last_row = text.rows.last().unwrap();
-        let new_turtle_pos = origin_in_lpxs + Size::new(
-            last_row.width_in_lpxs,
-            last_row.origin_in_lpxs.y - last_row.ascender_in_lpxs
-        ) * self.font_scale;
-        let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
-        println!("Drawing the following text: {:?}", text.text);
-        println!("Turtle pos {:?}", turtle_pos);
-        println!("Origin in lpxs {:?}", origin_in_lpxs);
-        println!("Last row origin in lpxs {:?}", last_row.origin_in_lpxs);
-        println!("Last row width in lpxs {:?}", last_row.width_in_lpxs);
-        println!("Last row ascender in lpxs {:?}", last_row.ascender_in_lpxs);
-        println!("New turtle pos {:?}", new_turtle_pos);
-        println!("Used size in lpxs: {:?}", used_size_in_lpxs);
-        println!();
-        cx.turtle_mut().set_pos(dvec2(
-            new_turtle_pos.x as f64,
-            new_turtle_pos.y as f64,
-        ));
-        cx.turtle_mut().update_width_max(
-            origin_in_lpxs.x as f64,
-            used_size_in_lpxs.width as f64
-        );
-        cx.turtle_mut().update_width_max(
-            origin_in_lpxs.y as f64,
-            used_size_in_lpxs.height as f64
-        );
+        // lets emit a turtle walk
+        
     }
 
     pub fn layout(
@@ -380,10 +392,10 @@ impl DrawText2 {
                     1.0,
                 ),
             );
-            cx.cx
+            /*cx.cx
                 .debug
                 .area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
-
+*/
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
@@ -394,10 +406,11 @@ impl DrawText2 {
                     1.0,
                 ),
             );
+            /*
             cx.cx
                 .debug
                 .area(area, makepad_platform::vec4(0.0, 1.0, 0.0, 1.0));
-
+*/
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
@@ -408,10 +421,12 @@ impl DrawText2 {
                     1.0,
                 ),
             );
+            /*
             cx.cx
                 .debug
                 .area(area, makepad_platform::vec4(0.0, 0.0, 1.0, 1.0));
-        }
+*/                
+            }
     }
 
     fn draw_glyph(
