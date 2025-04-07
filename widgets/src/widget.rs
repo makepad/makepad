@@ -84,6 +84,10 @@ pub trait Widget: WidgetNode {
     }
     fn data_to_widget(&mut self, _cx: &mut Cx, _nodes: &[LiveNode], _path: &[LiveId]) {}
     
+    fn draw_3d(&mut self, _cx:&mut Cx3d, _scope: &mut Scope)->DrawStep{
+        DrawStep::done()
+    }
+    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep;
 
     fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
@@ -95,7 +99,6 @@ pub trait Widget: WidgetNode {
         while self.draw_walk(cx, scope, walk).is_step() {}
     }
     
-
     fn draw_all(&mut self, cx: &mut Cx2d, scope: &mut Scope) {
         while self.draw(cx, scope).is_step() {}
     }
@@ -132,7 +135,7 @@ pub trait Widget: WidgetNode {
     fn set_disabled(&mut self, _cx:&mut Cx, _disabled:bool){
     }
                 
-    fn disabled(&self) -> bool {
+    fn disabled(&self, _cx:&Cx) -> bool {
         false
     }
         
@@ -653,9 +656,9 @@ impl WidgetRef {
         }
     }
         
-    pub fn disabled(&self) -> bool {
+    pub fn disabled(&self, cx:&Cx) -> bool {
         if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget.disabled();
+            return inner.widget.disabled(cx);
         }
         true
     }
