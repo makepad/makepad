@@ -12,6 +12,7 @@ use {
         substr::Substr,
     },
     std::{
+        borrow::Borrow,
         cell::RefCell,
         collections::{HashMap, VecDeque},
         hash::{Hash, Hasher},
@@ -27,8 +28,8 @@ const PTS_PER_INCH: f32 = 72.0;
 pub struct Layouter {
     loader: Loader,
     cache_size: usize,
-    cached_params: VecDeque<LayoutParams>,
-    cached_results: HashMap<LayoutParams, Rc<LaidoutText>>,
+    cached_params: VecDeque<OwnedLayoutParams>,
+    cached_results: HashMap<OwnedLayoutParams, Rc<LaidoutText>>,
 }
 
 impl Layouter {
@@ -61,20 +62,22 @@ impl Layouter {
         self.loader.define_font(id, definition);
     }
 
-    pub fn get_or_layout(&mut self, params: LayoutParams) -> Rc<LaidoutText> {
-        if !self.cached_results.contains_key(&params) {
-            if self.cached_params.len() == self.cache_size {
-                let params = self.cached_params.pop_front().unwrap();
-                self.cached_results.remove(&params);
-            }
-            let result = self.layout(params.clone());
-            self.cached_params.push_back(params.clone());
-            self.cached_results.insert(params.clone(), Rc::new(result));
+    pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
+        if let Some(result) = self.cached_results.get(&params as &dyn LayoutParams) {
+            return result.clone();
         }
-        self.cached_results.get(&params).unwrap().clone()
+        if self.cached_params.len() == self.cache_size {
+            let params = self.cached_params.pop_front().unwrap();
+            self.cached_results.remove(&params);
+        }
+        let params = params.to_owned();
+        let result = Rc::new(self.layout(params.clone()));
+        self.cached_params.push_back(params.clone());
+        self.cached_results.insert(params, result.clone());
+        result
     }
 
-    fn layout(&mut self, params: LayoutParams) -> LaidoutText {
+    fn layout(&mut self, params: OwnedLayoutParams) -> LaidoutText {
         LayoutContext::new(&mut self.loader, params.text, params.options).layout(&params.spans)
     }
 }
@@ -435,11 +438,105 @@ enum SegmentKind {
     Grapheme,
 }
 
+pub trait LayoutParams {
+    fn to_owned(self) -> OwnedLayoutParams;
+    fn text(&self) -> &str;
+    fn spans(&self) -> &[Span];
+    fn options(&self) -> LayoutOptions;
+}
+
+impl Eq for dyn LayoutParams + '_ {}
+
+impl Hash for dyn LayoutParams + '_ {
+    fn hash<H>(&self, hasher: &mut H)
+    where
+        H: Hasher,
+    {
+        self.text().hash(hasher);
+        self.spans().hash(hasher);
+        self.options().hash(hasher);
+    }
+}
+
+impl PartialEq for dyn LayoutParams + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        if self.text() != other.text() {
+            return false;
+        }
+        if self.spans() != other.spans() {
+            return false;
+        }
+        if self.options() != other.options() {
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct LayoutParams {
+pub struct OwnedLayoutParams {
     pub text: Substr,
     pub spans: Rc<[Span]>,
     pub options: LayoutOptions,
+}
+
+impl<'a> Borrow<dyn LayoutParams + 'a> for OwnedLayoutParams {
+    fn borrow(&self) -> &(dyn LayoutParams + 'a) {
+        self
+    }
+}
+
+impl LayoutParams for OwnedLayoutParams {
+    fn to_owned(self) -> Self {
+        self
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn spans(&self) -> &[Span] {
+        &self.spans
+    }
+
+    fn options(&self) -> LayoutOptions {
+        self.options
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BorrowedLayoutParams<'a> {
+    pub text: &'a str,
+    pub spans: &'a [Span],
+    pub options: LayoutOptions,
+}
+
+impl<'a> Borrow<dyn LayoutParams + 'a> for BorrowedLayoutParams<'a> {
+    fn borrow(&self) -> &(dyn LayoutParams + 'a) {
+        self
+    }
+}
+
+impl<'a> LayoutParams for BorrowedLayoutParams<'a> {
+    fn to_owned(self) -> OwnedLayoutParams {
+        OwnedLayoutParams {
+            text: self.text.into(),
+            spans: self.spans.into(),
+            options: self.options,
+        }
+    }
+
+    fn text(&self) -> &str {
+        self.text
+    }
+
+    fn spans(&self) -> &[Span] {
+        self.spans
+    }
+
+    fn options(&self) -> LayoutOptions {
+        self.options
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

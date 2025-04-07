@@ -10,7 +10,6 @@ use {
                     Selection
                 },
                 layouter::LaidoutText,
-                substr::Substr
             },
             *
         },
@@ -192,7 +191,7 @@ impl TextInput2 {
         if self.laidout_text.is_some() {
             return;
         }
-        let text: Substr = if self.is_password {
+        let text = if self.is_password {
             self.password_text.clear();
             for grapheme in self.text.graphemes(true) {
                 self.password_text.push(if grapheme == "\n" {
@@ -201,9 +200,9 @@ impl TextInput2 {
                     '•'
                 });
             }
-            self.password_text.as_str().into()
+            &self.password_text
         } else {
-            self.text.as_str().into()
+            &self.text
         };
         let max_width =  cx.turtle().max_width(self.text_walk).map(|max_width| max_width as f32);
                 
