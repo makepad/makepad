@@ -36,16 +36,15 @@ mod tests {
         let text = "\n\ntest";
         let laidout_text = layouter.get_or_layout(LayoutParams {
             text: text.into(),
-            spans: [
-                Span {
-                    style: Style {
-                        font_family_id: "Sans".into(),
-                        font_size_in_lpxs: 16.0,
-                        color: Some(Color::RED),
-                    },
-                    len: text.len(),
-                }
-            ].into(),
+            spans: [Span {
+                style: Style {
+                    font_family_id: "Sans".into(),
+                    font_size_in_lpxs: 16.0,
+                    color: Some(Color::RED),
+                },
+                len: text.len(),
+            }]
+            .into(),
             options: LayoutOptions {
                 wrap_width_in_lpxs: Some(1018.0),
                 ..LayoutOptions::default()
