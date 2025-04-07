@@ -259,7 +259,7 @@ struct DrawBgQuad {
 
 #[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawNameText {
-    #[deref] draw_super: DrawText,
+    #[deref] draw_super: DrawText2,
     #[live] is_even: f32,
     #[live] scale: f32,
     #[live] is_folder: f32,
@@ -364,7 +364,7 @@ impl FileTreeNode {
         self.draw_text.is_even = is_even;
         self.draw_icon.scale = scale as f32;
         self.draw_icon.is_even = is_even;
-        self.draw_text.font_scale = scale;
+        self.draw_text.font_scale = scale as f32;
     }
     
     pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
