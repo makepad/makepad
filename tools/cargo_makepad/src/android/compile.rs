@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use crate::android::{HostOs, AndroidTarget};
+use crate::android::{HostOs, AndroidTarget, AndroidVariant};
 use crate::utils::*;
 use crate::makepad_shell::*;
 use super::sdk::{ANDROID_BUILD_TOOLS_VERSION, ANDROID_PLATFORM, ANDROID_SDK_VERSION, BUILD_TOOLS_DIR, NDK_VERSION_FULL, PLATFORMS_DIR};
@@ -40,55 +40,7 @@ pub struct BuildResult {
     java_url: String,
 }
 
-fn manifest_xml(label:&str, class_name:&str, url:&str, sdk_version: usize)->String{
-    format!(r#"<?xml version="1.0" encoding="utf-8"?>
-    <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-        xmlns:tools="http://schemas.android.com/tools"
-        package="{url}">
-        <application
-            android:label="{label}"
-            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
-            android:allowBackup="true"
-            android:supportsRtl="true"
-            android:debuggable="true"
-            android:largeHeap="true"
-            tools:targetApi="{sdk_version}">
-            <meta-data android:name="android.max_aspect" android:value="2.1" />
-            <activity
-                android:name=".{class_name}"
-                android:configChanges="orientation|screenSize|keyboardHidden"
-                android:exported="true">
-                <intent-filter>
-                    <action android:name="android.intent.action.MAIN" />
-                    <category android:name="android.intent.category.LAUNCHER" />
-                </intent-filter>
-            </activity>
-        </application>
-        <uses-sdk android:targetSdkVersion="{sdk_version}" />
-        <uses-feature android:glEsVersion="0x00020000" android:required="true"/>
-        <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
-        <uses-feature android:name="android.software.midi" android:required="true"/>
-        <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-        <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"  />
-        <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"  />
-        <uses-permission android:name="android.permission.INTERNET" />
-        <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-        <uses-permission android:name="android.permission.BLUETOOTH"/>
-        <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
-        <uses-permission android:name="android.permission.CAMERA"/>
-        <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-        <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-        <uses-permission android:name="android.permission.USE_BIOMETRIC" />
-        <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
 
-        <queries>
-            <intent>
-                <action android:name="android.intent.action.MAIN" />
-            </intent>
-        </queries>
-    </manifest>
-    "#)
-}
 
 fn main_java(url:&str)->String{
     format!(r#"
@@ -107,6 +59,8 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
         
         let bin_path = |bin_filename: &str, windows_extension: &str| match host_os {
             HostOs::MacosX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
+            // NOTE! The NDK version we install (33) does not have darwin-aarch64 binaries (host) so we have to use darwin-x86
+            // This automatically runs via rosetta on M1 and newer targets.
             HostOs::MacosAarch64 => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
             HostOs::WindowsX64   => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/{bin_filename}.{windows_extension}"),
             HostOs::LinuxX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64/bin/{bin_filename}"),
@@ -174,7 +128,7 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
     Ok(())
 }
 
-fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str) -> Result<BuildPaths, String> {
+fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str, variant:&AndroidVariant) -> Result<BuildPaths, String> {
     let cwd = std::env::current_dir().unwrap();
 
     let tmp_dir = cwd.join("target").join("makepad-android-apk").join(&underscore_build_crate).join("tmp");
@@ -186,7 +140,7 @@ fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str) 
     mkdir(&tmp_dir) ?; 
     mkdir(&out_dir) ?;
 
-    let manifest_xml = manifest_xml(app_label, "MakepadApp", java_url, ANDROID_SDK_VERSION);
+    let manifest_xml = variant.manifest_xml(app_label, "MakepadApp", java_url, ANDROID_SDK_VERSION);
     let manifest_file = tmp_dir.join("AndroidManifest.xml");
     write_text(&manifest_file, &manifest_xml)?;
     
@@ -348,7 +302,7 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     Ok(())
 }
 
-fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args: &[String]) -> Result<PathBuf, String> {
+fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args: &[String], variant:&AndroidVariant) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().unwrap();
     let profile = get_profile_from_args(args);
     let mut build_dir = None;
@@ -366,6 +320,18 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
         let dst_lib = build_paths.out_dir.join(binary_path.clone());
         cp(&src_lib, &dst_lib, false) ?;
 
+        shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir).to_str().unwrap(), &[
+            "add",
+            (build_paths.dst_unaligned_apk.to_str().unwrap()),
+            &binary_path,
+        ]) ?;
+    }
+    // for the quest variant add the precompiled openXR loader
+    if let AndroidVariant::Quest = variant{
+        let binary_path = format!("lib/arm64-v8a/libopenxr_loader.so");
+        let src_lib = cwd.join(format!("tools/cargo_makepad/quest/libopenxr_loader.so"));
+        let dst_lib = build_paths.out_dir.join(binary_path.clone());
+        cp(&src_lib, &dst_lib, false) ?;
         shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir).to_str().unwrap(), &[
             "add",
             (build_paths.dst_unaligned_apk.to_str().unwrap()),
@@ -465,7 +431,7 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
     Ok(())
 }
 
-pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], android_targets:&[AndroidTarget]) -> Result<BuildResult, String> {
+pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], android_targets:&[AndroidTarget], variant:&AndroidVariant) -> Result<BuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
 
@@ -473,7 +439,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     let app_label = app_label.unwrap_or_else(|| format!("{underscore_build_crate}"));
 
     rust_build(sdk_dir, host_os, args, android_targets)?;
-    let build_paths = prepare_build(build_crate, &java_url, &app_label)?;
+    let build_paths = prepare_build(build_crate, &java_url, &app_label, variant)?;
 
     println!("Compiling APK & R.java files");
     build_r_class(sdk_dir, &build_paths)?;
@@ -482,7 +448,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     println!("Building APK");
     build_dex(sdk_dir, &build_paths)?;
     build_unaligned_apk(sdk_dir, &build_paths)?;
-    let build_dir = add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets, args)?;
+    let build_dir = add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets, args, variant)?;
     add_resources(sdk_dir, build_crate, &build_paths, &build_dir, android_targets)?;
     build_zipaligned_apk(sdk_dir, &build_paths)?;
     sign_apk(sdk_dir, &build_paths)?;
@@ -494,8 +460,8 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     })
 }
 
-pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], targets:&[AndroidTarget]) -> Result<(), String> {
-    let result = build(sdk_dir, host_os, package_name, app_label, args, targets)?;
+pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], targets:&[AndroidTarget], android_variant:&AndroidVariant) -> Result<(), String> {
+    let result = build(sdk_dir, host_os, package_name, app_label, args, targets, android_variant)?;
     
     let cwd = std::env::current_dir().unwrap();
     //println!("Installing android application");
