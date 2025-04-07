@@ -208,11 +208,10 @@ impl DrawText2 {
                 size: dvec2(rect.size.width as f64, rect.size.height as f64)
             });
         }
+        
         // alright lets draw it
         self.draw_text(cx, Point::new(rect.pos.x as f32, start_ypos as f32), &laid_out_text);
-        // now update the turtle pos and bounding box with our layout info
-        // ok how do we do this
-        // 
+        
     }
         
     pub fn layout(
@@ -470,9 +469,9 @@ impl DrawText2 {
 pub struct TextStyle {
     #[live]
     pub font_family: FontFamily,
-    #[live]
+    #[live(10.0)]
     pub font_size: f32,
-    #[live]
+    #[live(1.0)]
     pub line_spacing: f32,
 }
 
