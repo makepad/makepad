@@ -4,6 +4,9 @@ pub mod x11;
 #[cfg(linux_direct)]
 pub mod direct;
 
+#[cfg(quest)]
+pub mod openxr_sys;
+
 #[cfg(target_env="ohos")]
 pub mod open_harmony;
 

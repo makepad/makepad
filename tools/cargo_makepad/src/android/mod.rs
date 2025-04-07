@@ -10,6 +10,123 @@ pub enum HostOs {
     Unsupported
 }
 
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum AndroidVariant {
+    Default,
+    Quest
+}
+impl AndroidVariant {
+    fn from_str(opt: &str) -> Result<Self,String> {
+        for opt in opt.split(","){
+            match opt {
+                "default"=> return Ok(AndroidVariant::Default),
+                "quest" => return Ok(AndroidVariant::Quest),
+                _=>()
+            }
+        }
+        return Err(format!("please provide a valid android variant: default, quest"))
+        
+    }
+    
+    fn manifest_xml(&self, label:&str, class_name:&str, url:&str, sdk_version: usize)->String{
+        match self{
+            Self::Default=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+                xmlns:tools="http://schemas.android.com/tools"
+                package="{url}">
+                <application
+                    android:label="{label}"
+                    android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+                    android:allowBackup="true"
+                    android:supportsRtl="true"
+                    android:debuggable="true"
+                    android:largeHeap="true"
+                    tools:targetApi="{sdk_version}">
+                    <meta-data android:name="android.max_aspect" android:value="2.1" />
+                    <activity
+                    android:name=".{class_name}"
+                    android:configChanges="orientation|screenSize|keyboardHidden"
+                    android:exported="true">
+                    <intent-filter>
+                    <action android:name="android.intent.action.MAIN" />
+                    <category android:name="android.intent.category.LAUNCHER" />
+                    </intent-filter>
+                    </activity>
+                </application>
+                <uses-sdk android:targetSdkVersion="{sdk_version}" />
+                <uses-feature android:glEsVersion="0x00020000" android:required="true"/>
+                <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
+                <uses-feature android:name="android.software.midi" android:required="true"/>
+                <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+                <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"  />
+                <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"  />
+                <uses-permission android:name="android.permission.INTERNET" />
+                <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+                <uses-permission android:name="android.permission.BLUETOOTH"/>
+                <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+                <uses-permission android:name="android.permission.CAMERA"/>
+                <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+                <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+                <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+                <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+                            
+                <queries>
+                <intent>
+                <action android:name="android.intent.action.MAIN" />
+                </intent>
+                </queries>
+                </manifest>
+                "#),
+            Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+                xmlns:tools="http://schemas.android.com/tools"
+                package="{url}">
+                    <application
+                        android:label="{label}"
+                        android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+                        android:allowBackup="true"
+                        android:supportsRtl="true"
+                        android:debuggable="true"
+                        android:largeHeap="true"
+                        tools:targetApi="{sdk_version}">
+                        <meta-data android:name="com.oculus.supportedDevices" android:value="all"/>
+                        <activity
+                            android:name=".{class_name}"
+                            android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
+                            android:exported="true"
+                            android:launchMode="singleTask"
+                            >
+                        </activity>
+                        
+                        <intent-filter>
+                            <action android:name="android.intent.action.MAIN" />
+                            <category android:name="com.oculus.intent.category.VR" />
+                            <category android:name="android.intent.category.LAUNCHER" />
+                        </intent-filter>
+                    </application>
+
+                    <uses-sdk android:targetSdkVersion="{sdk_version}" />
+                    <uses-feature android:glEsVersion="0x00030001" android:required="true"/>
+                    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+                    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"  />
+                    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"  />
+                    <uses-permission android:name="android.permission.INTERNET" />
+                    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+                    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+                    <uses-feature android:name="android.hardware.vr.headtracking" android:required="false"/>
+                    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true"/>
+                    <uses-permission android:name="com.oculus.permission.USE_SCENE" />
+                    <!-- Request hand and keyboard tracking for keyboard hand presence testing -->
+                    <uses-feature android:name="oculus.software.handtracking" android:required="false"/>
+                    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+                    
+                </manifest>
+                "#)
+            }
+        }
+    }
+
 #[allow(non_camel_case_types)]
 pub enum AndroidTarget {
     aarch64,
@@ -130,6 +247,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let mut sdk_path = None;
     let mut package_name = None;
     let mut app_label = None;
+    let mut variant = AndroidVariant::Default;
     let mut targets = vec![AndroidTarget::aarch64];
     let mut keep_sdk_sources = false;
     // pull out options
@@ -149,6 +267,9 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         }
         else if let Some(opt) = v.strip_prefix("--abi=") {
             targets = AndroidTarget::from_str(opt)?;
+        }
+        else if let Some(opt) = v.strip_prefix("--variant=") {
+            variant = AndroidVariant::from_str(opt)?;
         }
         else if v.trim() == "--keep-sdk-sources" {
             keep_sdk_sources = true;
@@ -202,11 +323,11 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             compile::base_apk(&sdk_dir, host_os, &args[1..])
         }*/
         "build" => {
-            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets) ?;
+            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant) ?;
             Ok(())
         }
         "run" => {
-            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets)
+            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant)
         }
         _ => Err(format!("{} is not a valid command or option", args[0]))
     }

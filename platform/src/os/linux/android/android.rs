@@ -70,6 +70,8 @@ use {
     makepad_http::websocket::ServerWebSocket as WebSocketImpl,
     makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl
 };
+#[cfg(quest)]
+use crate::os::linux::android::android_openxr::CxAndroidOpenXr;
 
 /*
 fn android_debug_log(msg:&str){
@@ -541,7 +543,9 @@ impl Cx {
             let mut cx = startup();
             cx.android_load_dependencies();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
-
+            
+            #[cfg(quest)] cx.os.openxr.init();
+            
             let window = loop {
                 // Here use blocking method `recv` to reduce CPU usage during cold start.
                 match from_java_rx.recv() {
@@ -924,6 +928,7 @@ impl Default for CxOs {
             timers: Default::default(),
             video_surfaces: HashMap::new(),
             websocket_parsers: HashMap::new(),
+            #[cfg(quest)] openxr: CxAndroidOpenXr::default()
         }
     }
 }
@@ -953,6 +958,8 @@ pub struct CxOs {
     pub (crate) media: CxAndroidMedia,
     pub (crate) video_surfaces: HashMap<LiveId, jobject>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
+    #[cfg(quest)]
+    pub (crate) openxr: CxAndroidOpenXr
 }
 
 impl CxAndroidDisplay {
