@@ -74,7 +74,7 @@ impl Font {
     pub fn line_gap_in_ems(&self) -> f32 {
         self.ttf_parser_face().line_gap() as f32 / self.units_per_em()
     }
-
+    
     pub fn glyph_outline(&self, glyph_id: GlyphId) -> Option<GlyphOutline> {
         use super::{geom::Point, glyph_outline};
 
