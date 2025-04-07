@@ -813,8 +813,16 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
-    fn is_visible(&self) -> bool {
+    fn visible(&self) -> bool {
         self.visible
+    }
+
+    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
+        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+    }
+                
+    fn disabled(&self, cx:&Cx) -> bool {
+        self.animator_in_state(cx, id!(disabled.on))
     }
     
     fn widget_to_data(&self, _cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
@@ -841,6 +849,13 @@ impl Widget for CheckBox {
                 
         if self.visible {
             match event.hits(cx, self.draw_bg.area()) {
+                Hit::KeyFocus(_) => {
+                    self.animator_play(cx, id!(focus.on));
+                }
+                Hit::KeyFocusLost(_) => {
+                    self.animator_play(cx, id!(focus.off));
+                    self.draw_bg.redraw(cx);
+                }
                 Hit::FingerHoverIn(_) => {
                     cx.set_cursor(MouseCursor::Hand);
                     self.animator_play(cx, id!(hover.on));
@@ -849,6 +864,7 @@ impl Widget for CheckBox {
                     self.animator_play(cx, id!(hover.off));
                 },
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                    self.set_key_focus(cx);
                     if self.animator_in_state(cx, id!(active.on)) {
                         self.animator_play(cx, id!(active.off));
                         cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
