@@ -15,6 +15,7 @@ pub enum BuildTarget {
     TvosSim,
     TvosDevice,
     Android,
+    Quest,
     Harmony,
     WebAssembly,
     CheckMacos,
@@ -42,12 +43,13 @@ impl BuildTarget {
     pub const TVOS_SIM: u64 = 7;
     pub const TVOS_DEVICE: u64 = 8;
     pub const ANDROID: u64 = 9;
-    pub const HARMONY: u64 = 10;
-    pub const WEBASSEMBLY: u64 = 11;
-    pub const CHECK_MACOS: u64 = 12;
-    pub const CHECK_WINDOWS: u64 = 13;
-    pub const CHECK_LINUX: u64 = 14;
-    pub const CHECK_ALL: u64 = 15;
+    pub const QUEST: u64 = 10;
+    pub const HARMONY: u64 = 11;
+    pub const WEBASSEMBLY: u64 = 12;
+    pub const CHECK_MACOS: u64 = 13;
+    pub const CHECK_WINDOWS: u64 = 14;
+    pub const CHECK_LINUX: u64 = 15;
+    pub const CHECK_ALL: u64 = 16;
     pub fn len() -> usize {
         Self::CHECK_ALL as usize + 1
     }
@@ -63,6 +65,7 @@ impl BuildTarget {
             Self::TvosSim => "tvOS Simulator",
             Self::TvosDevice => "tvOS Device",
             Self::Android => "Android",
+            Self::Quest => "Quest",
             Self::Harmony => "Harmony",
             Self::WebAssembly => "WebAssembly",
             Self::CheckMacos => "Check macOS",
@@ -83,6 +86,7 @@ impl BuildTarget {
             Self::TvosSim { .. } => Self::TVOS_SIM,
             Self::TvosDevice { .. } => Self::TVOS_DEVICE,
             Self::Android => Self::ANDROID,
+            Self::Quest => Self::QUEST,
             Self::Harmony => Self::HARMONY,
             Self::WebAssembly => Self::WEBASSEMBLY,
             Self::CheckMacos => Self::CHECK_MACOS,
@@ -104,6 +108,7 @@ impl BuildTarget {
             Self::TVOS_DEVICE => Self::TvosDevice,
             Self::ANDROID => Self::Android,
             Self::HARMONY => Self::Harmony,
+            Self::QUEST => Self::Quest,
             Self::WEBASSEMBLY => Self::WebAssembly,
             Self::CHECK_MACOS => Self::CheckMacos,
             Self::CHECK_WINDOWS => Self::CheckWindows,
