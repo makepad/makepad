@@ -39,7 +39,7 @@ mod tests {
             spans: [Span {
                 style: Style {
                     font_family_id: "Sans".into(),
-                    font_size_in_lpxs: 16.0,
+                    font_size_in_pts: 16.0,
                     color: Some(Color::RED),
                 },
                 len: text.len(),
@@ -60,7 +60,7 @@ mod tests {
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: 16.0,
+                        font_size_in_pts: 16.0,
                         color: Some(Color::RED),
                     },
                     len: 10,
@@ -68,7 +68,7 @@ mod tests {
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: 16.0,
+                        font_size_in_pts: 16.0,
                         color: Some(Color::GREEN),
                     },
                     len: 10,
@@ -76,7 +76,7 @@ mod tests {
                 Span {
                     style: Style {
                         font_family_id: "Sans".into(),
-                        font_size_in_lpxs: 16.0,
+                        font_size_in_pts: 16.0,
                         color: Some(Color::BLUE),
                     },
                     len: text.len() - 20,
