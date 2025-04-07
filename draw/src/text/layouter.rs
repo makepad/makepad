@@ -20,6 +20,9 @@ use {
     unicode_segmentation::UnicodeSegmentation,
 };
 
+const LPXS_PER_INCH: f32 = 96.0;
+const PTS_PER_INCH: f32 = 72.0;
+
 #[derive(Debug)]
 pub struct Layouter {
     loader: Loader,
@@ -187,7 +190,7 @@ impl<'a> LayoutContext<'a> {
         let mut fitter = Fitter::new(
             self.span_text(len),
             font_family.clone(),
-            style.font_size_in_lpxs,
+            style.font_size_in_lpxs(),
             SegmentKind::Word,
         );
         while !fitter.is_empty() {
@@ -208,7 +211,7 @@ impl<'a> LayoutContext<'a> {
         let mut fitter = Fitter::new(
             self.span_text(len),
             font_family.clone(),
-            style.font_size_in_lpxs,
+            style.font_size_in_lpxs(),
             SegmentKind::Grapheme,
         );
         while !fitter.is_empty() {
@@ -242,7 +245,7 @@ impl<'a> LayoutContext<'a> {
             let mut glyph = LaidoutGlyph {
                 origin_in_lpxs: Point::ZERO,
                 font: glyph.font.clone(),
-                font_size_in_lpxs: style.font_size_in_lpxs,
+                font_size_in_lpxs: style.font_size_in_lpxs(),
                 color: style.color,
                 id: glyph.id,
                 cluster: self.current_row_len() + glyph.cluster,
@@ -266,7 +269,7 @@ impl<'a> LayoutContext<'a> {
 
         let glyphs = mem::take(&mut self.glyphs);
         let fallback_font = &fallback_font_family.fonts()[0];
-        let fallback_font_size_in_lpxs = fallback_style.font_size_in_lpxs;
+        let fallback_font_size_in_lpxs = fallback_style.font_size_in_lpxs();
         let fallback_ascender_in_lpxs =
             fallback_font.ascender_in_ems() * fallback_font_size_in_lpxs;
         let fallback_descender_in_lpxs =
@@ -448,8 +451,14 @@ pub struct Span {
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
     pub font_family_id: FontFamilyId,
-    pub font_size_in_lpxs: f32,
+    pub font_size_in_pts: f32,
     pub color: Option<Color>,
+}
+
+impl Style {
+    fn font_size_in_lpxs(&self) -> f32 {
+        self.font_size_in_pts * LPXS_PER_INCH / PTS_PER_INCH
+    }
 }
 
 impl Eq for Style {}
@@ -460,7 +469,7 @@ impl Hash for Style {
         H: Hasher,
     {
         self.font_family_id.hash(hasher);
-        self.font_size_in_lpxs.to_bits().hash(hasher);
+        self.font_size_in_pts.to_bits().hash(hasher);
         self.color.hash(hasher);
     }
 }
@@ -470,7 +479,7 @@ impl PartialEq for Style {
         if self.font_family_id != other.font_family_id {
             return false;
         }
-        if self.font_size_in_lpxs.to_bits() != other.font_size_in_lpxs.to_bits() {
+        if self.font_size_in_lpxs().to_bits() != other.font_size_in_lpxs().to_bits() {
             return false;
         }
         if self.color != other.color {
