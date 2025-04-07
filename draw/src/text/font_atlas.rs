@@ -51,21 +51,16 @@ impl<T> FontAtlas<T> {
         self.image.subimage(dirty_rect)
     }
 
-    pub fn get_or_allocate_glyph_image(
-        &mut self,
-        key: GlyphImageKey,
-    ) -> Option<SubimageMut<'_, T>> {
-        if !self.cached_glyph_image_rects.contains_key(&key) {
-            let rect = self.allocate_glyph_image(key.size)?;
-            self.cached_glyph_image_rects.insert(key.clone(), rect);
+    pub fn get_or_allocate_glyph_image(&mut self, key: GlyphImageKey) -> Option<GlyphImage<'_, T>> {
+        if let Some(rect) = self.cached_glyph_image_rects.get(&key) {
+            return Some(GlyphImage::Cached(*rect));
         }
-        self.cached_glyph_image_rects
-            .get(&key)
-            .copied()
-            .map(|rect| self.image.subimage_mut(rect))
+        let rect = self.allocate_glyph_image(key.size)?;
+        self.cached_glyph_image_rects.insert(key.clone(), rect);
+        Some(GlyphImage::Allocated(self.image.subimage_mut(rect)))
     }
 
-    pub fn allocate_glyph_image(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
+    fn allocate_glyph_image(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
         const PADDING: Size<usize> = Size::new(2, 2);
 
         let padded_size = size + PADDING;
@@ -103,4 +98,10 @@ pub struct GlyphImageKey {
     pub font_id: FontId,
     pub glyph_id: GlyphId,
     pub size: Size<usize>,
+}
+
+#[derive(Debug)]
+pub enum GlyphImage<'a, T> {
+    Cached(Rect<usize>),
+    Allocated(SubimageMut<'a, T>),
 }
