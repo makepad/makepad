@@ -94,10 +94,7 @@ pub trait Widget: WidgetNode {
     fn draw_walk_all(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) {
         while self.draw_walk(cx, scope, walk).is_step() {}
     }
-
-    fn is_visible(&self) -> bool {
-        true
-    }
+    
 
     fn draw_all(&mut self, cx: &mut Cx2d, scope: &mut Scope) {
         while self.draw(cx, scope).is_step() {}
@@ -110,13 +107,35 @@ pub trait Widget: WidgetNode {
     fn draw_all_unscoped(&mut self, cx: &mut Cx2d) {
         self.draw_all(cx, &mut Scope::empty());
     }
+        
+    fn set_visible(&mut self, _cx:&mut Cx, _visible:bool){
+    }
+        
+    fn visible(&self) -> bool {
+        true
+    }
     
     fn text(&self) -> String {
         String::new()
     }
 
     fn set_text(&mut self, _cx:&mut Cx, _v: &str) {}
-
+    
+    fn set_key_focus(&self, cx:&mut Cx){
+        cx.set_key_focus(self.area())
+    }
+    
+    fn key_focus(&self, cx:&Cx)->bool{
+        cx.has_key_focus(self.area())
+    }
+    
+    fn set_disabled(&mut self, _cx:&mut Cx, _disabled:bool){
+    }
+                
+    fn disabled(&self) -> bool {
+        false
+    }
+        
     /*fn set_text_and_redraw(&mut self, cx: &mut Cx, v: &str) {
         self.set_text(v);
         self.redraw(cx);
@@ -586,14 +605,61 @@ impl WidgetRef {
             return inner.widget.redraw(cx);
         }
     }
-
-    pub fn is_visible(&self) -> bool {
+    
+    pub fn set_visible(&self, cx:&mut Cx, visible:bool) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.widget.set_visible(cx, visible);
+        }
+    }
+    
+    pub fn visible(&self) -> bool {
         if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget.is_visible();
+            return inner.widget.visible();
         }
         true
     }
-
+    
+    pub fn text(&self) -> String {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.text()
+        } else {
+            String::new()
+        }
+    }
+    
+    pub fn set_text(&self, cx: &mut Cx, v: &str) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.set_text(cx, v)
+        }
+    }
+    
+    pub fn key_focus(&self, cx:&Cx) -> bool {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.key_focus(cx)
+        } else {
+            false
+        }
+    }
+        
+    pub fn set_key_focus(&self, cx: &mut Cx) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.set_key_focus(cx)
+        }
+    }
+    
+    pub fn set_disabled(&self, cx:&mut Cx, disabled:bool) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.widget.set_disabled(cx, disabled);
+        }
+    }
+        
+    pub fn disabled(&self) -> bool {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.disabled();
+        }
+        true
+    }
+    
     pub fn draw_all(&self, cx: &mut Cx2d, scope: &mut Scope) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.draw_all(cx, scope);
@@ -614,20 +680,6 @@ impl WidgetRef {
     pub fn draw_all_unscoped(&self, cx: &mut Cx2d) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.draw_all_unscoped(cx);
-        }
-    }
-
-    pub fn text(&self) -> String {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.widget.text()
-        } else {
-            String::new()
-        }
-    }
-
-    pub fn set_text(&self, cx: &mut Cx, v: &str) {
-        if let Some(inner) = self.0.borrow_mut().as_mut() {
-            inner.widget.set_text(cx, v)
         }
     }
 
