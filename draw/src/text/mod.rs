@@ -27,7 +27,7 @@ mod tests {
         use {
             super::{
                 color::Color,
-                layouter::{LayoutOptions, OwnedLayoutParams, Layouter, Settings, Span, Style},
+                layouter::{LayoutOptions, Layouter, OwnedLayoutParams, Settings, Span, Style},
             },
             std::{fs::File, io::BufWriter},
         };
