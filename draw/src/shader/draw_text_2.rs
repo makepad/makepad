@@ -11,12 +11,11 @@ use {
             fonts::Fonts,
             geom::{Point, Rect, Size, Transform},
             layouter::{
-                LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, LayoutParams, Span, Style,
+                LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, BorrowedLayoutParams, Span, Style,
             },
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
             selection::{Cursor, Selection},
-            substr::Substr,
         },
         turtle::*,
         turtle::{Align, Walk},
@@ -128,7 +127,7 @@ impl LiveHook for DrawText2 {
 }
 
 impl DrawText2 {
-    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, text: impl Into<Substr>) {
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, text: &str) {
         let text = self.layout(cx, 0.0, None, Align::default(), text);
         self.draw_text(cx, Point::new(pos.x as f32, pos.y as f32), &text);
     }
@@ -138,7 +137,7 @@ impl DrawText2 {
         cx: &mut Cx2d,
         walk: Walk,
         align: Align,
-        text: impl Into<Substr>,
+        text: &str,
     ) -> makepad_platform::Rect {
         let max_width = cx
             .turtle()
@@ -199,7 +198,7 @@ impl DrawText2 {
     pub fn draw_walk_resumable_with(
         &mut self,
         cx: &mut Cx2d,
-        text: impl Into<Substr>,
+        text: &str,
         mut f: impl FnMut(&mut Cx2d, makepad_platform::Rect),
     ) {
         self.debug = true;
@@ -290,21 +289,19 @@ impl DrawText2 {
         first_row_indent_in_lpxs: f32,
         wrap_width_in_lpxs: Option<f32>,
         align: Align,
-        text: impl Into<Substr>,
+        text: &str,
     ) -> Rc<LaidoutText> {
-        let text = text.into();
         let text_len = text.len();
-        cx.fonts.borrow_mut().get_or_layout(LayoutParams {
+        cx.fonts.borrow_mut().get_or_layout(BorrowedLayoutParams {
             text,
-            spans: [Span {
+            spans: &[Span {
                 style: Style {
                     font_family_id: self.text_style.font_family.to_font_family_id(),
                     font_size_in_pts: self.text_style.font_size,
                     color: None,
                 },
                 len: text_len,
-            }]
-            .into(),
+            }],
             options: LayoutOptions {
                 wrap_width_in_lpxs,
                 first_row_indent_in_lpxs: first_row_indent_in_lpxs,

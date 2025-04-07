@@ -27,14 +27,14 @@ mod tests {
         use {
             super::{
                 color::Color,
-                layouter::{LayoutOptions, LayoutParams, Layouter, Settings, Span, Style},
+                layouter::{LayoutOptions, OwnedLayoutParams, Layouter, Settings, Span, Style},
             },
             std::{fs::File, io::BufWriter},
         };
 
         let mut layouter = Layouter::new(Settings::default());
         let text = "\n\ntest";
-        let laidout_text = layouter.get_or_layout(LayoutParams {
+        let laidout_text = layouter.get_or_layout(OwnedLayoutParams {
             text: text.into(),
             spans: [Span {
                 style: Style {
@@ -54,7 +54,7 @@ mod tests {
 
         let mut layouter = Layouter::new(Settings::default());
         let text = "The quick brown fox jumps over the lazy dog繁😊😔";
-        let text = layouter.get_or_layout(LayoutParams {
+        let text = layouter.get_or_layout(OwnedLayoutParams {
             text: text.into(),
             spans: [
                 Span {
