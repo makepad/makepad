@@ -11,7 +11,8 @@ use {
             fonts::Fonts,
             geom::{Point, Rect, Size, Transform},
             layouter::{
-                LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, BorrowedLayoutParams, Span, Style,
+                BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, Span,
+                Style,
             },
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
