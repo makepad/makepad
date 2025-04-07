@@ -48,6 +48,7 @@ live_design!{
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
 
+            uniform mark_size: 0.65
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
             uniform mark_color_hover: (THEME_COLOR_U_HIDDEN)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
@@ -161,7 +162,7 @@ live_design!{
                             )
                         );
                     }
-                    CheckType::Toggle => {
+                    CheckType::Toggle => { // 1
                         let sz = self.size;
                         let left = 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
@@ -193,9 +194,17 @@ live_design!{
                         )
                             
                         // Draw mark
-                        let isz = sz * 0.65;
-                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
-                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
+                        let isz = sz * self.mark_size;
+                        sdf.circle(
+                            left + sz + self.active * sz,
+                            c.y,
+                            isz
+                        );
+                        sdf.circle(
+                            left + sz + self.active * sz,
+                            c.y,
+                            0.425 * isz
+                        );
                         sdf.subtract();
                         sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
                         sdf.blend(self.active)
@@ -424,158 +433,51 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                match self.check_type {
-                    CheckType::Check => {
-                        let left = 1.;
-                        let sz = self.size - 1.0;
+                let left = 1.;
+                let sz = self.size - 1.0;
 
-                        let c = vec2(left + sz, self.rect_size.y * 0.5);
+                let c = vec2(left + sz, self.rect_size.y * 0.5);
 
-                        // Draw background                        
-                        sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, self.border_radius * 0.5);
+                // Draw background                        
+                sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, self.border_radius * 0.5);
 
-                        sdf.fill_keep(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, self.pos.x + dither),
-                                    mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
-                                    self.active
-                                ),
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
-                                self.hover
-                            )
-                        )
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.x + dither),
+                            mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                            self.active
+                        ),
+                        mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                        self.hover
+                    )
+                )
 
-                        sdf.stroke(
-                            mix(
-                                mix(
-                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
-                                    self.active
-                                ),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
-                                self.hover
-                            ), self.border_size
-                        )
+                sdf.stroke(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                            self.active
+                        ),
+                        mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                        self.hover
+                    ), self.border_size
+                )
 
-                        // Draw mark
-                        let szs = sz * 0.5;
-                        sdf.move_to(left + 4.0, c.y);
-                        sdf.line_to(c.x, c.y + szs);
-                        sdf.line_to(c.x + szs, c.y - szs);
-                        sdf.stroke(
-                            mix(
-                                mix(self.mark_color, self.mark_color_hover, self.hover),
-                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
-                                self.active
-                            ), 1.25
-                        );
+                // Draw mark
+                let szs = sz * 0.5;
+                sdf.move_to(left + 4.0, c.y);
+                sdf.line_to(c.x, c.y + szs);
+                sdf.line_to(c.x + szs, c.y - szs);
+                sdf.stroke(
+                    mix(
+                        mix(self.mark_color, self.mark_color_hover, self.hover),
+                        mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                        self.active
+                    ), 1.25
+                );
 
-                    }
-
-                    CheckType::Radio => {
-                        let sz = self.size;
-                        let left = 0.;
-                        let c = vec2(left + sz, self.rect_size.y * 0.5);
-                        sdf.circle(left, c.y, sz);
-                        sdf.fill_keep(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, self.pos.y + dither),
-                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
-                                    self.active
-                                ),
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
-                                self.hover
-                            )
-                        )
-                        sdf.stroke(
-                            mix(
-                                mix(
-                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
-                                    self.active
-                                ),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
-                                self.hover
-                            ), self.border_size
-                        )
-                        let isz = sz * 0.5;
-                        sdf.circle(left, c.y, isz);
-                        sdf.fill(
-                            mix(
-                                mix(
-                                    mix(
-                                        self.mark_color,
-                                        self.mark_color_focus,
-                                        self.focus
-                                    ),
-                                    self.mark_color_hover,
-                                    self.hover
-                                ),
-                                mix(
-                                    mix(
-                                        self.mark_color_active,
-                                        self.mark_color_focus,
-                                        self.focus
-                                    ),
-                                    self.mark_color_hover,
-                                    self.hover
-                                ),
-                                self.active
-                            )
-                        );
-                    }
-                    CheckType::Toggle => {
-                        let sz = self.size;
-                        let left = 1.;
-                        let c = vec2(left + sz, self.rect_size.y * 0.5);
-
-                        // Draw background                        
-                        sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, self.border_radius * 1.4);
-                        sdf.fill_keep(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, self.pos.y + dither),
-                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
-                                    self.active
-                                ),
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
-                                self.hover
-                            )
-                        )
-                        
-                        sdf.stroke(
-                            mix(
-                                mix(
-                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
-                                    self.active
-                                ),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
-                                self.hover
-                            ), self.border_size
-                        )
-                            
-                        // Draw mark
-                        let isz = sz * 0.65;
-                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
-                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
-                        sdf.subtract();
-                        sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
-                        sdf.blend(self.active)
-                        sdf.fill(
-                            mix(
-                                mix(self.mark_color, self.mark_color_hover, self.hover),
-                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
-                                self.active
-                            )
-                        )
-                    }
-                    CheckType::None => {
-                        sdf.fill(THEME_COLOR_D_HIDDEN);
-                    }
-                }
                 return sdf.result
             }
         }
@@ -586,8 +488,10 @@ live_design!{
 
     pub Toggle = <CheckBox> {
         align: { x: 0., y: 0. }
+
         draw_bg: {
             size: 7.5;
+            check_type: Toggle
 
             border_size: (THEME_BEVELING)
             border_radius: (THEME_CORNER_RADIUS)
@@ -615,7 +519,6 @@ live_design!{
             mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
             mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             mark_color_focus: (#f00)
-            check_type: Toggle
         }
         label_walk: {
             margin: <THEME_MSPACE_H_1> { left: 22.5 }
@@ -707,6 +610,8 @@ live_design!{
             border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
             border_color_2_active: (THEME_COLOR_BEVEL_ACTIVE)
 
+            uniform mark_size: 0.75
+
             mark_color: (THEME_COLOR_TEXT_ACTIVE)
             mark_color_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
@@ -728,6 +633,7 @@ live_design!{
             color_2_hover: (THEME_COLOR_INSET_HOVER)
             color_2_active: (THEME_COLOR_INSET_ACTIVE)
 
+            uniform mark_size: 0.75
             mark_color: (THEME_COLOR_TEXT_ACTIVE)
             mark_color_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
@@ -802,9 +708,17 @@ live_design!{
                 )
                     
                 // Draw mark
-                let isz = sz * 0.65;
-                sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
-                sdf.circle(left + sz + self.active * sz, c.y - 0.5, 0.425 * isz);
+                let isz = sz * self.mark_size;
+                sdf.circle(
+                    left + sz + self.active * sz,
+                    c.y,
+                    isz
+                );
+                sdf.circle(
+                    left + sz + self.active * sz,
+                    c.y,
+                    0.425 * isz
+                );
                 sdf.subtract();
                 sdf.circle(left + sz + self.active * sz, c.y - 0.5, isz);
                 sdf.blend(self.active)
