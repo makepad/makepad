@@ -353,18 +353,11 @@ live_design!{
             uniform val_color_focus: (THEME_COLOR_VAL_HOVER)
             uniform val_color_drag: (THEME_COLOR_VAL_ACTIVE)
 
-            uniform handle_size: vec2(11.0, 11.0)
-
-
-            uniform handle_size: vec2(11.0, 11.0)
-
-
             uniform handle_size: 20.
             uniform bipolar: 0.0,
 
             fn pixel(self) -> vec4 {
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                let handle_sz = 3
                 let handle_sz = self.handle_size;
                     
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -447,11 +440,9 @@ live_design!{
                 );
                     
                 // Handle
-                let handle_x = self.slide_pos * (self.rect_size.x - handle_sz - offset_sides * 2 - 9);
                 let track_length = self.rect_size.x - offset_sides * 4.;
                 let val_x = self.slide_pos * track_length + offset_sides * 2.;
                 sdf.move_to(mix(offset_sides + 3.5, self.rect_size.x * 0.5, self.bipolar), top + offset_top);
-                sdf.line_to(handle_x + offset_sides + handle_sz * 0.5, top + offset_top);
                 sdf.line_to(val_x, top + offset_top);
 
                 sdf.stroke(
@@ -469,8 +460,6 @@ live_design!{
                         self.focus
                     ), self.val_size)
                     
-                let handle_x = self.slide_pos * (self.rect_size.x - handle_sz - offset_sides * 2 - 3) - 3;
-                sdf.box(handle_x + offset_sides, top + 1.0, self.handle_size.x, self.handle_size.y, self.border_radius);
 
                 let ctrl_height = self.rect_size.y - top - 4;
                 let handle_x = self.slide_pos * (self.rect_size.x - handle_sz - offset_sides) - 3;
