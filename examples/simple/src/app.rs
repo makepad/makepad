@@ -55,7 +55,7 @@ pub struct App {
  }
  
 impl LiveRegister for App {
-    fn live_register(cx: &mut Cx) {
+    fn live_register(cx: &mut Cx) { 
         crate::makepad_widgets::live_design(cx);
     }
 }

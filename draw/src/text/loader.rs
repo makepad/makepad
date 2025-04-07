@@ -1,6 +1,6 @@
 use {
     super::{
-        builtins,
+        //builtins,
         font::{Font, FontId},
         font_face::FontFace,
         font_family::{FontFamily, FontFamilyId},
@@ -24,7 +24,7 @@ pub struct Loader {
 
 impl Loader {
     pub fn new(settings: Settings) -> Self {
-        let mut loader = Self {
+        let loader = Self {
             shaper: Rc::new(RefCell::new(Shaper::new(settings.shaper))),
             rasterizer: Rc::new(RefCell::new(Rasterizer::new(settings.rasterizer))),
             font_family_definitions: HashMap::new(),
@@ -32,7 +32,7 @@ impl Loader {
             font_family_cache: HashMap::new(),
             font_cache: HashMap::new(),
         };
-        builtins::define(&mut loader);
+        //builtins::define(&mut loader);
         loader
     }
 
