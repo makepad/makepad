@@ -87,6 +87,10 @@ impl Widget for Root {
     }
     
      fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        // check if we are in a 3D mode. Ifso we wrap Cx2d in Cx3d
+        // and call into the next layer as draw_3d
+        // the window then continues back into the 2d draw context
+        
         self.draw_state.begin(cx, DrawState::Window(0));
         
         while let Some(DrawState::Window(step)) = self.draw_state.get() {
