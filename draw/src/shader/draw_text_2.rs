@@ -235,12 +235,13 @@ impl DrawText2 {
             ) * self.font_scale;
         let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
         println!("Drawing the following text: {:?}", text.text);
-        println!("Turtle pos {:?}", turtle_pos);
-        println!("Origin in lpxs {:?}", origin_in_lpxs);
+        println!("Current turtle position {:?}", turtle_pos);
+        println!("Draw origin in lpxs {:?}", origin_in_lpxs);
+        println!("Number of rows in text {:?}", text.rows.len());
         println!("Last row origin in lpxs {:?}", last_row.origin_in_lpxs);
         println!("Last row width in lpxs {:?}", last_row.width_in_lpxs);
         println!("Last row ascender in lpxs {:?}", last_row.ascender_in_lpxs);
-        println!("New turtle pos {:?}", new_turtle_pos);
+        println!("New turtle position {:?}", new_turtle_pos);
         println!("Used size in lpxs: {:?}", used_size_in_lpxs);
         println!();
         let new_turtle_pos = dvec2(new_turtle_pos.x as f64, new_turtle_pos.y as f64);
@@ -298,7 +299,7 @@ impl DrawText2 {
             spans: [Span {
                 style: Style {
                     font_family_id: self.text_style.font_family.to_font_family_id(),
-                    font_size_in_lpxs: self.text_style.font_size,
+                    font_size_in_pts: self.text_style.font_size,
                     color: None,
                 },
                 len: text_len,
