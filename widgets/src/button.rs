@@ -16,10 +16,12 @@ live_design! {
         draw_text: {
             instance hover: 0.0,
             instance down: 0.0,
+            instance focus: 0.0,
 
             uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_DOWN)
+            uniform color_focus: (#0f0)
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -27,12 +29,16 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        self.color,
-                        self.color_hover,
-                        self.hover
+                        mix(
+                            self.color,
+                            self.color_hover,
+                            self.hover
+                        ),
+                        self.color_down,
+                        self.down
                     ),
-                    self.color_down,
-                    self.down
+                  self.color_focus,
+                  self.focus
                 )
             }
         }
@@ -44,20 +50,26 @@ live_design! {
         draw_icon: {
             instance hover: 0.0
             instance down: 0.0
+            instance focus: 0.0
 
             uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_DOWN)
+            uniform color_focus: (#f0f)
 
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        self.color,
-                        self.color_hover,
-                        self.hover
+                        mix(
+                            self.color,
+                            self.color_hover,
+                            self.hover
+                        ),
+                        self.color_down,
+                        self.down
                     ),
-                    self.color_down,
-                    self.down
+                    self.color_focus,
+                    self.focus
                 )
             }
         }
@@ -76,6 +88,7 @@ live_design! {
             uniform color: (THEME_COLOR)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_down: (THEME_COLOR_OUTSET_DOWN)
+            uniform color_focus: (#ff0)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT_HOVER)
@@ -121,12 +134,16 @@ live_design! {
                 sdf.fill(
                     mix(
                         mix(
-                            self.color,
-                            self.color_hover,
-                            self.hover
+                            mix(
+                                self.color,
+                                self.color_hover,
+                                self.hover
+                            ),
+                            self.color_down,
+                            self.down
                         ),
-                        self.color_down,
-                        self.down
+                        self.color_focus,
+                        self.focus
                     )
                 )
                 return sdf.result
@@ -187,9 +204,8 @@ live_design! {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {focus: 0.0}
-                        // draw_icon: {active: 0.0}
-                        // draw_text: {active: 0.0}
-                        // draw_icon: {active: 0.0}
+                        draw_icon: {focus: 0.0}
+                        draw_text: {focus: 0.0}
                     }
                 }
                 on = {
@@ -197,9 +213,8 @@ live_design! {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
                         draw_bg: {focus: 1.0}
-                        // draw_icon: {active: 1.0}
-                        // draw_text: {active: 1.0}
-                        // draw_icon: {active: 1.0}
+                        draw_icon: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                     }
                 }
             }
@@ -220,10 +235,12 @@ live_design! {
             uniform color_1: (THEME_COLOR)
             uniform color_1_hover: (THEME_COLOR)
             uniform color_1_down: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_1_focus: (#f00)
 
             uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
             uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
             uniform color_2_down: (THEME_COLOR_OUTSET_DOWN)
+            uniform color_2_focus: (#0ff)
 
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -267,18 +284,21 @@ live_design! {
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(self.color_1, self.color_2, self.pos.x + dither),
-                            mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
-                            self.hover
+                            mix(
+                                mix(self.color_1, self.color_2, self.pos.x + dither),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                                self.hover
+                            ),
+                            mix(self.color_1_down, self.color_2_down, self.pos.x + dither),
+                            self.down
                         ),
-                        mix(self.color_1_down, self.color_2_down, self.pos.x + dither),
-                        self.down
+                        mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
+                        self.focus
                     )
                 )
                 return sdf.result
             }
         }
-
     }
 
     pub ButtonGradientY = <ButtonGradientX> {
@@ -295,10 +315,12 @@ live_design! {
             color_1: (THEME_COLOR)
             color_1_hover: (THEME_COLOR)
             color_1_down: (#3)
+            color_1_focus: (#f00)
 
             color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
             color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
             color_2_down: (#4)
+            color_2_focus: (#0f0)
 
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT * 1.5)
@@ -342,12 +364,16 @@ live_design! {
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(self.color_1, self.color_2, self.pos.y + dither),
-                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
-                            self.hover
+                            mix(
+                                mix(self.color_1, self.color_2, self.pos.y + dither),
+                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                                self.hover
+                            ),
+                            mix(self.color_1_down, self.color_2_down, self.pos.y + dither),
+                            self.down
                         ),
-                        mix(self.color_1_down, self.color_2_down, self.pos.y + dither),
-                        self.down
+                        mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                        self.focus
                     )
                 )
                 return sdf.result
