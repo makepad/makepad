@@ -7,8 +7,6 @@ live_design! {
     
     pub ButtonBase = {{Button}} {}
     pub Button = <ButtonBase> {
-        // TODO: NEEDS FOCUS STATE
-        
         width: Fit, height: Fit,
         spacing: 7.5,
         align: {x: 0.5, y: 0.5},
@@ -68,6 +66,7 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
             instance enabled: 1.0
+            instance focus: 0.0
             uniform color_dither: 1.0
 
             uniform border_size: (THEME_BEVELING)
@@ -86,6 +85,7 @@ live_design! {
             uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
 
             fn pixel(self) -> vec4 {
+                // return mix(#f00, #0ff, self.focus);
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
@@ -170,7 +170,28 @@ live_design! {
                         draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
-
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {focus: 0.0}
+                        // draw_icon: {active: 0.0}
+                        // draw_text: {active: 0.0}
+                        // draw_icon: {active: 0.0}
+                    }
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_bg: {focus: 1.0}
+                        // draw_icon: {active: 1.0}
+                        // draw_text: {active: 1.0}
+                        // draw_icon: {active: 1.0}
+                    }
+                }
             }
         }
     }
@@ -436,6 +457,14 @@ pub struct Button {
 }
 
 impl Widget for Button {
+    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
+        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+    }
+                
+    fn disabled(&self, cx:&Cx) -> bool {
+        self.animator_in_state(cx, id!(disabled.on))
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
@@ -454,12 +483,20 @@ impl Widget for Button {
             // If it's not enabled, we still show the button, but we set
             // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
             match event.hits(cx, self.draw_bg.area()) {
+                Hit::KeyFocus(_) => {
+                    self.animator_play(cx, id!(focus.on));
+                }
+                Hit::KeyFocusLost(_) => {
+                    self.animator_play(cx, id!(focus.off));
+                    self.draw_bg.redraw(cx);
+                }
                 Hit::FingerDown(fe) if self.enabled && fe.is_primary_hit() => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.draw_bg.area());
                     }
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
-                    self.animator_play(cx, id!(hover.down));
+                        self.animator_play(cx, id!(hover.down));
+                        self.set_key_focus(cx);
                 }
                 Hit::FingerHoverIn(_) => {
                     if self.enabled {
@@ -505,6 +542,7 @@ impl Widget for Button {
         self.draw_text
             .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
         self.draw_bg.end(cx);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
         DrawStep::done()
     }
 
