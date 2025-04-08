@@ -66,6 +66,7 @@ live_design! {
             instance hover: 0.0
             instance down: 0.0
             instance enabled: 1.0
+            instance disabled: 0.0
             instance focus: 0.0
             uniform color_dither: 1.0
 
@@ -79,12 +80,15 @@ live_design! {
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT_HOVER)
             uniform border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_focus: (#f00)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_focus: (#0ff)
 
             fn pixel(self) -> vec4 {
+                // return mix(#f00, #0ff, self.disabled);
                 // return mix(#f00, #0ff, self.focus);
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -100,13 +104,19 @@ live_design! {
                 sdf.stroke_keep(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
-                            self.hover
+                            mix(
+                                mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                self.hover
+                            ),
+                            mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                            self.down
+                            ),
+                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                        self.focus
                         ),
-                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
-                        self.down
-                    ), self.border_size)
+                    self.border_size
+                )
 
                 sdf.fill(
                     mix(
@@ -218,10 +228,12 @@ live_design! {
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1_focus: (#f00)
 
             border_color_2: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2_focus: (#f0f)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -238,13 +250,19 @@ live_design! {
                 sdf.stroke_keep(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
-                            self.hover
+                            mix(
+                                mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                self.hover
+                            ),
+                            mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                            self.down
+                            ),
+                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                        self.focus
                         ),
-                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
-                        self.down
-                    ), self.border_size)
+                    self.border_size
+                )
 
                 sdf.fill_keep(
                     mix(
@@ -285,10 +303,12 @@ live_design! {
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT * 1.5)
             border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1_focus: (#0ff)
 
             border_color_2: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2_focus: (#f00)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -305,13 +325,19 @@ live_design! {
                 sdf.stroke_keep(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
-                            self.hover
+                            mix(
+                                mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                                self.hover
+                            ),
+                            mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                            self.down
+                            ),
+                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                        self.focus
                         ),
-                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
-                        self.down
-                    ), self.border_size)
+                    self.border_size
+                )
 
                 sdf.fill_keep(
                     mix(
@@ -355,10 +381,12 @@ live_design! {
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1_focus: (#0ff)
 
             border_color_2: (THEME_COLOR_D_HIDDEN)
             border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2_focus: (#f00)
 
         }
         
@@ -376,10 +404,12 @@ live_design! {
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_U_HIDDEN)
             border_color_1_down: (THEME_COLOR_U_HIDDEN)
+            border_color_1_focus: (#f00)
 
             border_color_2: (THEME_COLOR_D_HIDDEN)
             border_color_2_hover: (THEME_COLOR_D_HIDDEN)
             border_color_2_down: (THEME_COLOR_D_HIDDEN)
+            border_color_2_focus: (#0ff)
 
         }
         
