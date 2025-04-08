@@ -35,3 +35,4 @@ CLAUDE_KEY
 *.fish
 experiments/websocket-windows/nodejs-websocketserver
 experiments/svgloader
+CLAUDE.md
