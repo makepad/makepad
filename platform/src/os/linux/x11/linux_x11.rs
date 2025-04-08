@@ -272,6 +272,7 @@ impl Cx {
                     window.is_created = true;
                 },
                 CxOsOp::CloseWindow(window_id) => {
+                    self.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
                     if let Some(index) = opengl_windows.iter().position( | w | w.window_id == window_id) {
                         self.windows[window_id].is_created = false;
                         opengl_windows[index].xlib_window.close_window();
@@ -299,6 +300,16 @@ impl Cx {
                 CxOsOp::RestoreWindow(window_id) => {
                     if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
                         window.xlib_window.restore();
+                    }
+                },
+                CxOsOp::ResizeWindow(window_id, size) => {
+                    if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.xlib_window.set_inner_size(size);
+                    }
+                },
+                CxOsOp::RepositionWindow(window_id, size) => {
+                    if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.xlib_window.set_position(size);
                     }
                 },
                 CxOsOp::ShowClipboardActions(_) =>{
