@@ -82,7 +82,11 @@ live_design!{
                                             mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
                                             self.focus
                                         ),
-                                        mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                        mix(
+                                            mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                            mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                                            self.focus
+                                        ),
                                         self.active
                                     ),
                                     mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
@@ -98,7 +102,11 @@ live_design!{
                                         mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
                                         self.focus
                                     ),
-                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                    mix(
+                                        mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                        self.focus
+                                    ),
                                     self.active
                                 ),
                                 mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
@@ -135,7 +143,11 @@ live_design!{
                                         mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
                                         self.focus
                                     ),
-                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                    mix(
+                                        mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                        mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                                        self.focus
+                                    ),
                                     self.active
                                 ),
                                 mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
@@ -194,7 +206,11 @@ live_design!{
                                             mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
                                             self.focus
                                         ),
-                                        mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                        mix(
+                                            mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                            mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                                            self.focus
+                                        ),
                                         self.active
                                     ),
                                     mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
@@ -252,7 +268,7 @@ live_design!{
 
             uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT)
-            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
+            uniform color_focus: (#f00)
             uniform color_active: (THEME_COLOR_TEXT_FOCUS)
 
             fn get_color(self) -> vec4 {
@@ -262,7 +278,7 @@ live_design!{
                         self.color_hover,
                         self.hover
                     ),
-                    self.color_active,
+                    mix(self.color_active, self.color_focus, self.focus),
                     self.active
                 )
             }
@@ -288,7 +304,7 @@ live_design!{
                         self.color_hover,
                         self.hover
                     ),
-                    self.color_active,
+                    mix(self.color_active, self.color_focus, self.focus),
                     self.active
                 )
             }
@@ -482,7 +498,11 @@ live_design!{
                                     mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
                                     self.focus
                                 ),
-                                mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                                mix(
+                                    mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                                    mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
+                                    self.focus
+                                ),
                                 self.active
                             ),
                             mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
@@ -498,7 +518,11 @@ live_design!{
                                 mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
                                 self.focus
                             ),
-                            mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                            mix(
+                                mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                self.focus
+                            ),
                             self.active
                         ),
                         mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
@@ -746,7 +770,11 @@ live_design!{
                                 mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
                                 self.focus
                             ),
-                            mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                            mix(
+                                mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                                mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
+                                self.focus
+                            ),
                             self.active
                         ),
                         mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
@@ -762,7 +790,11 @@ live_design!{
                                 mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
                                 self.focus
                             ),
-                            mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                            mix(
+                                mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                self.focus
+                            ),
                             self.active
                         ),
                         mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
