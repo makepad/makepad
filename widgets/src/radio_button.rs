@@ -68,6 +68,7 @@ live_design!{
 
                 match self.radio_type {
                     RadioType::Round => {
+                        // return mix(#f00, #0ff, self.focus);
                         let sz = self.size;
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
@@ -147,8 +148,9 @@ live_design!{
         }
             
         draw_text: {
-            instance hover: 0.0
             instance active: 0.0
+            instance focus: 0.0
+            instance hover: 0.0
                 
             uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT)
@@ -171,8 +173,9 @@ live_design!{
         }
             
         draw_icon: {
-            instance hover: 0.0
             instance active: 0.0
+            instance focus: 0.0
+            instance hover: 0.0
 
             uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_WHITE)
@@ -227,7 +230,6 @@ live_design!{
                         draw_bg: {active: 0.0}
                         draw_icon: {active: 0.0}
                         draw_text: {active: 0.0}
-                        draw_icon: {active: 0.0}
                     }
                 }
                 on = {
@@ -237,7 +239,26 @@ live_design!{
                         draw_bg: {active: 1.0}
                         draw_icon: {active: 1.0}
                         draw_text: {active: 1.0}
-                        draw_icon: {active: 1.0}
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                    }
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_bg: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                     }
                 }
             }
@@ -721,6 +742,7 @@ impl RadioButton {
         }
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
     }
         
 }
@@ -747,6 +769,13 @@ impl Widget for RadioButton {
         self.animator_handle_event(cx, event);
                 
         match event.hits(cx, self.draw_bg.area()) {
+            Hit::KeyFocus(_) => {
+                self.animator_play(cx, id!(focus.on));
+            }
+            Hit::KeyFocusLost(_) => {
+                self.animator_play(cx, id!(focus.off));
+                self.draw_bg.redraw(cx);
+            }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
@@ -760,6 +789,7 @@ impl Widget for RadioButton {
                     self.animator_play(cx, id!(active.on));
                     cx.widget_action(uid, &scope.path, RadioButtonAction::Clicked);
                 }
+                self.set_key_focus(cx);
             },
             Hit::FingerUp(_fe) => {
                                 
@@ -769,8 +799,17 @@ impl Widget for RadioButton {
             }
             _ => ()
         }
+
     }
     
+    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
+        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+    }
+                
+    fn disabled(&self, cx:&Cx) -> bool {
+        self.animator_in_state(cx, id!(disabled.on))
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
         DrawStep::done()
