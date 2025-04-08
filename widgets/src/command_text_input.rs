@@ -17,8 +17,8 @@ live_design! {
         flow: Down,
         height: Fit,
 
-        color_focus: (THEME_COLOR_OUTSET_HOVER),
-        color_hover: (THEME_COLOR_OUTSET_HOVER * 0.85),
+        color_focus: (THEME_COLOR_CTRL_HOVER),
+        color_hover: (THEME_COLOR_CTRL_HOVER * 0.85),
 
         popup = <RoundedView> {
             flow: Down,
@@ -246,8 +246,16 @@ impl Widget for CommandTextInput {
                     let mut eat_the_event = true;
 
                     match key_event.key_code {
-                        KeyCode::ArrowDown => self.on_keyboard_move(cx, 1),
-                        KeyCode::ArrowUp => self.on_keyboard_move(cx, -1),
+                        KeyCode::ArrowDown => {
+                            // Clear mouse hover when using up/down keys
+                            self.pointer_hover_index = None;
+                            self.on_keyboard_move(cx, 1);
+                        },
+                        KeyCode::ArrowUp => {
+                            // Clear mouse hover when using up/down keys
+                            self.pointer_hover_index = None;
+                            self.on_keyboard_move(cx, -1);
+                        },
                         KeyCode::ReturnKey => {
                             self.on_keyboard_controller_input_submit(cx, scope);
                         }
@@ -309,6 +317,9 @@ impl Widget for CommandTextInput {
                     .unwrap_or(false)
                 {
                     selected_by_click = Some((&*item).clone());
+
+                    // Clear keyboard focus when mouse is clicked
+                    self.keyboard_focus_index = None;
                 }
 
                 if item.finger_hover_out(actions).is_some() && Some(idx) == self.pointer_hover_index
@@ -318,7 +329,9 @@ impl Widget for CommandTextInput {
                 }
 
                 if item.finger_hover_in(actions).is_some() {
+                    // When mouse enters item, clear keyboard focus and set mouse hover index
                     self.pointer_hover_index = Some(idx);
+                    self.keyboard_focus_index = None;
                     should_redraw = true;
                 }
             }
@@ -685,6 +698,14 @@ impl CommandTextInput {
 
     fn on_keyboard_move(&mut self, cx: &mut Cx, delta: i32) {
         let Some(idx) = self.keyboard_focus_index else {
+            // If no keyboard focus exists but user pressed arrow keys, focus on first item
+            if !self.selectable_widgets.is_empty() {
+                if delta > 0 {
+                    self.keyboard_focus_index = Some(0);
+                } else {
+                    self.keyboard_focus_index = Some(self.selectable_widgets.len() - 1);
+                }
+            }
             return;
         };
 
@@ -696,14 +717,24 @@ impl CommandTextInput {
             self.keyboard_focus_index = Some(new_index);
         }
 
+        // Clear mouse hover state when using keyboard navigation
+        // This ensures keyboard navigation and mouse hover don't appear simultaneously
+        self.pointer_hover_index = None;
+
         self.redraw(cx);
     }
 
     fn update_highlights(&mut self, cx: &mut Cx) {
+        // Check if currently there is a keyboard-focused item
+        let has_keyboard_focus = self.keyboard_focus_index.is_some();
+
         for (idx, item) in self.selectable_widgets.iter().enumerate() {
             item.apply_over(cx, live! { show_bg: true, cursor: Hand });
 
+            // If there is a keyboard focus, prioritize it over mouse hover
+            // If there is no keyboard focus, show mouse hover
             if Some(idx) == self.keyboard_focus_index {
+                // Keyboard-selected item is highlighted in blue
                 item.apply_over(
                     cx,
                     live! {
@@ -712,7 +743,8 @@ impl CommandTextInput {
                         }
                     },
                 );
-            } else if Some(idx) == self.pointer_hover_index {
+            } else if Some(idx) == self.pointer_hover_index && !has_keyboard_focus {
+                // Mouse-hovered item is highlighted in gray, but only when there is no keyboard focus
                 item.apply_over(
                     cx,
                     live! {
@@ -722,6 +754,7 @@ impl CommandTextInput {
                     },
                 );
             } else {
+                // Default state
                 item.apply_over(
                     cx,
                     live! {
