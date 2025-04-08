@@ -55,22 +55,22 @@ pub static mut MACOS_CLASSES: *const MacosClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
 
 thread_local! {
-	pub static MACOS_APP: RefCell<Option<MacosApp>> = RefCell::new(None);
+    pub static MACOS_APP: RefCell<Option<MacosApp>> = RefCell::new(None);
 }
 
 pub fn with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> R {
-	MACOS_APP.with_borrow_mut(|app| {
-		f(app.as_mut().unwrap())
-	})
+    MACOS_APP.with_borrow_mut(|app| {
+        f(app.as_mut().unwrap())
+    })
 }
 
 pub fn init_macos_app_global(event_callback: Box<dyn FnMut(MacosEvent) -> EventFlow>) {
     unsafe {
         MACOS_CLASSES = Box::into_raw(Box::new(MacosClasses::new()));
     }
-	MACOS_APP.with(|app| {
-		*app.borrow_mut() = Some(MacosApp::new(event_callback));
-	})
+    MACOS_APP.with(|app| {
+        *app.borrow_mut() = Some(MacosApp::new(event_callback));
+    })
 }
 
 pub fn get_macos_class_global() -> &'static MacosClasses {
