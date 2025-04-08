@@ -279,6 +279,30 @@ impl<'a> LayoutContext<'a> {
             fallback_font.descender_in_ems() * fallback_font_size_in_lpxs;
         let fallback_line_gap_in_lpxs =
             fallback_font.line_gap_in_ems() * fallback_font_size_in_lpxs;
+        let ascender_in_lpxs = glyphs
+            .iter()
+            .map(|glyph| glyph.ascender_in_lpxs())
+            .reduce(f32::max)
+            .unwrap_or(fallback_ascender_in_lpxs);
+        let descender_in_lpxs = glyphs
+            .iter()
+            .map(|glyph| glyph.descender_in_lpxs())
+            .reduce(f32::min)
+            .unwrap_or(fallback_descender_in_lpxs);
+        let line_gap_in_lpxs = glyphs
+            .iter()
+            .map(|glyph| glyph.line_gap_in_lpxs())
+            .reduce(f32::max)
+            .unwrap_or(fallback_line_gap_in_lpxs);
+        let line_spacing_scale = self.options.line_spacing_scale;
+        let line_spacing_above_in_lpxs = ascender_in_lpxs * line_spacing_scale;
+        let line_spacing_below_in_lpxs =
+            (-descender_in_lpxs + line_gap_in_lpxs) * line_spacing_scale;
+        let line_spacing_below_in_lpxs = line_spacing_below_in_lpxs.max(if self.rows.is_empty() {
+            self.options.first_row_min_line_spacing_below_in_lpxs
+        } else {
+            0.0
+        });
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
             text: self
@@ -286,22 +310,11 @@ impl<'a> LayoutContext<'a> {
                 .substr(self.current_row_start..self.current_row_end),
             newline,
             width_in_lpxs: self.current_point_in_lpxs.x,
-            ascender_in_lpxs: glyphs
-                .iter()
-                .map(|glyph| glyph.ascender_in_lpxs())
-                .reduce(f32::max)
-                .unwrap_or(fallback_ascender_in_lpxs),
-            descender_in_lpxs: glyphs
-                .iter()
-                .map(|glyph| glyph.descender_in_lpxs())
-                .reduce(f32::min)
-                .unwrap_or(fallback_descender_in_lpxs),
-            line_gap_in_lpxs: glyphs
-                .iter()
-                .map(|glyph| glyph.line_gap_in_lpxs())
-                .reduce(f32::max)
-                .unwrap_or(fallback_line_gap_in_lpxs),
-            line_spacing_scale: self.options.line_spacing_scale,
+            ascender_in_lpxs,
+            descender_in_lpxs,
+            line_gap_in_lpxs,
+            line_spacing_above_in_lpxs,
+            line_spacing_below_in_lpxs,
             glyphs,
         };
 
@@ -589,6 +602,7 @@ impl PartialEq for Style {
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutOptions {
     pub first_row_indent_in_lpxs: f32,
+    pub first_row_min_line_spacing_below_in_lpxs: f32,
     pub wrap_width_in_lpxs: Option<f32>,
     pub align: f32,
     pub line_spacing_scale: f32,
@@ -597,7 +611,8 @@ pub struct LayoutOptions {
 impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
-            first_row_indent_in_lpxs: 50.0,
+            first_row_indent_in_lpxs: 0.0,
+            first_row_min_line_spacing_below_in_lpxs: 0.0,
             wrap_width_in_lpxs: None,
             align: 0.0,
             line_spacing_scale: 1.0,
@@ -761,21 +776,14 @@ pub struct LaidoutRow {
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
     pub line_gap_in_lpxs: f32,
-    pub line_spacing_scale: f32,
+    pub line_spacing_above_in_lpxs: f32,
+    pub line_spacing_below_in_lpxs: f32,
     pub glyphs: Vec<LaidoutGlyph>,
 }
 
 impl LaidoutRow {
     pub fn line_spacing_in_lpxs(&self, next_row: &LaidoutRow) -> f32 {
-        self.line_spacing_below_in_lpxs() + next_row.line_spacing_above_in_lpxs()
-    }
-
-    pub fn line_spacing_above_in_lpxs(&self) -> f32 {
-        self.ascender_in_lpxs * self.line_spacing_scale
-    }
-
-    pub fn line_spacing_below_in_lpxs(&self) -> f32 {
-        (-self.descender_in_lpxs + self.line_gap_in_lpxs) * self.line_spacing_scale
+        self.line_spacing_below_in_lpxs + next_row.line_spacing_above_in_lpxs
     }
 
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
