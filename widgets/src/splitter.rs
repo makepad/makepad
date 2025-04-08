@@ -63,7 +63,7 @@ live_design!{
             }
         }
 
-        split_bar_size: (THEME_SPLITTER_SIZE)
+        size: (THEME_SPLITTER_SIZE)
         min_horizontal: (THEME_SPLITTER_MIN_HORIZONTAL)
         max_horizontal: (THEME_SPLITTER_MAX_HORIZONTAL)
         min_vertical: (THEME_SPLITTER_MIN_VERTICAL)
@@ -171,7 +171,7 @@ pub struct Splitter {
     #[live] max_horizontal: f64,
     
     #[redraw] #[live] draw_bg: DrawSplitter,
-    #[live] split_bar_size: f64,
+    #[live] size: f64,
     
     // framecomponent mode
     #[rust] draw_state: DrawStateWrap<DrawState>,
@@ -311,11 +311,11 @@ impl Splitter {
         match self.axis {
             SplitterAxis::Horizontal => {
                 self.draw_bg.is_vertical = 1.0;
-                self.draw_bg.draw_walk(cx, Walk::size(Size::Fixed(self.split_bar_size), Size::Fill));
+                self.draw_bg.draw_walk(cx, Walk::size(Size::Fixed(self.size), Size::Fill));
             }
             SplitterAxis::Vertical => {
                 self.draw_bg.is_vertical = 0.0;
-                self.draw_bg.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.split_bar_size)));
+                self.draw_bg.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.size)));
             }
         }
         cx.begin_turtle(Walk::default(), Layout::flow_down());
