@@ -367,6 +367,7 @@ pub struct RectAreasTracker{
 impl RectAreasTracker{
     fn clear_stack(&mut self){
         self.pos = 0;
+        self.areas.clear();
         self.stack.clear();
     }
     

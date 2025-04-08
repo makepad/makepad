@@ -816,6 +816,13 @@ pub struct TurtleAlignRange{
 }
 
 impl Turtle {
+    pub fn row_height(&self)->f64{
+        // relative y pos
+        // bounding box from origin
+        // pos from origin
+        self.height_used - (self.pos.y - self.origin.y)
+    }
+    
     pub fn update_width_max(&mut self, pos:f64, dx: f64) {
         self.width_used = self.width_used.max((pos + dx) - self.origin.x);
     }
