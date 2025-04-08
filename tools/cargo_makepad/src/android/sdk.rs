@@ -117,7 +117,7 @@ pub fn remove_sdk_sources(sdk_dir: &Path, _host_os: HostOs, _args: &[String]) ->
 }
 
 pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[AndroidTarget]) -> Result<(), String> {
-    let full_ndk = args.contains(&String::from("--full-ndk"));
+    let full_ndk = !args.contains(&String::from("--strip-ndk"));
     let src_dir = &sdk_dir.join("sources");
     
     fn unzip(step: usize, src_dir: &Path, sdk_dir: &Path, url: &str, files: &[(&str, bool)]) -> Result<(), String> {
