@@ -80,7 +80,7 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
     let mut device_identifier = None;
     let mut app = None;
     let mut org = None;
-    let mut stable = false;
+    let mut stable = true;
     if args.len() < 1{
         return Err(format!("not enough args"))
     }

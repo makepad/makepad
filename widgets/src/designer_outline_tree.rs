@@ -97,7 +97,7 @@ live_design!{
         button_open: <FoldButton> {
             height: 25, width: 15,
             margin: { left: (THEME_SPACE_2) }
-            animator: { open = { default: off } },
+            animator: { active = { default: off } },
             draw_bg: {
                 uniform size: 3.75;
                 instance open: 0.0
@@ -114,7 +114,7 @@ live_design!{
                     sdf.fill_keep(mix(#8F, #FF, self.hover));
                     sdf.box(sz * 1.0, sz * 2.125, sz * 0.7, sz * 2.5, 1.0); // rounding = 3rd value
                     
-                    sdf.fill_keep(mix(mix(#8F, #FF, self.hover), #FFF0, self.open))
+                    sdf.fill_keep(mix(mix(#8F, #FF, self.hover), #FFF0, self.active))
                     
                     return sdf.result
                 }
