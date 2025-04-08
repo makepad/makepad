@@ -118,9 +118,6 @@ live_design!{
                         self.focus
                     )
                 )
-
-
-                
                 return sdf.result
             }
         }
