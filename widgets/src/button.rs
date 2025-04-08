@@ -29,16 +29,12 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        mix(
-                            self.color,
-                            self.color_hover,
-                            self.hover
-                        ),
-                        self.color_down,
-                        self.down
+                        mix(self.color, self.color_focus, self.focus),
+                        self.color_hover,
+                        self.hover
                     ),
-                  self.color_focus,
-                  self.focus
+                    self.color_down,
+                    self.down
                 )
             }
         }
@@ -60,16 +56,12 @@ live_design! {
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        mix(
-                            self.color,
-                            self.color_hover,
-                            self.hover
-                        ),
-                        self.color_down,
-                        self.down
+                        mix(self.color, self.color_focus, self.focus),
+                        self.color_hover,
+                        self.hover
                     ),
-                    self.color_focus,
-                    self.focus
+                    self.color_down,
+                    self.down
                 )
             }
         }
@@ -101,8 +93,6 @@ live_design! {
             uniform border_color_2_focus: (#0ff)
 
             fn pixel(self) -> vec4 {
-                // return mix(#f00, #0ff, self.disabled);
-                // return mix(#f00, #0ff, self.focus);
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
@@ -116,34 +106,30 @@ live_design! {
 
                 sdf.stroke_keep(
                     mix(
-                        mix(
                             mix(
-                                mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                mix(
+                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                    self.focus
+                                ),
                                 mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
                                 self.hover
                             ),
                             mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
                             self.down
                             ),
-                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
-                        self.focus
-                        ),
                     self.border_size
                 )
 
                 sdf.fill(
                     mix(
                         mix(
-                            mix(
-                                self.color,
-                                self.color_hover,
-                                self.hover
-                            ),
-                            self.color_down,
-                            self.down
+                            mix(self.color, self.color_focus, self.focus),
+                            self.color_hover,
+                            self.hover
                         ),
-                        self.color_focus,
-                        self.focus
+                        self.color_down,
+                        self.down
                     )
                 )
                 return sdf.result
@@ -269,14 +255,14 @@ live_design! {
                         mix(
                             mix(
                                 mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
-                                self.hover
+                                mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                self.focus
                             ),
-                            mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
-                            self.down
-                            ),
-                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
-                        self.focus
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                        self.down
                         ),
                     self.border_size
                 )
@@ -286,14 +272,14 @@ live_design! {
                         mix(
                             mix(
                                 mix(self.color_1, self.color_2, self.pos.x + dither),
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
-                                self.hover
+                                mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
+                                self.focus
                             ),
-                            mix(self.color_1_down, self.color_2_down, self.pos.x + dither),
-                            self.down
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                            self.hover
                         ),
-                        mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
-                        self.focus
+                        mix(self.color_1_down, self.color_2_down, self.pos.x + dither),
+                        self.down
                     )
                 )
                 return sdf.result
@@ -349,15 +335,15 @@ live_design! {
                         mix(
                             mix(
                                 mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
-                                self.hover
+                                mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                self.focus
                             ),
-                            mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
-                            self.down
-                            ),
-                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
-                        self.focus
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
                         ),
+                        mix(self.border_color_1_down, self.border_color_2_down, self.pos.y + dither),
+                        self.down
+                    ),
                     self.border_size
                 )
 
@@ -366,14 +352,14 @@ live_design! {
                         mix(
                             mix(
                                 mix(self.color_1, self.color_2, self.pos.y + dither),
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
-                                self.hover
+                                mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                                self.focus
                             ),
-                            mix(self.color_1_down, self.color_2_down, self.pos.y + dither),
-                            self.down
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                            self.hover
                         ),
-                        mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
-                        self.focus
+                        mix(self.color_1_down, self.color_2_down, self.pos.y + dither),
+                        self.down
                     )
                 )
                 return sdf.result
