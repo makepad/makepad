@@ -134,6 +134,14 @@ impl<'a> LayoutContext<'a> {
         }
     }
 
+    fn current_row_is_first(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    fn current_row_is_continuation(&self) -> bool {
+        self.current_row_is_first() && self.options.first_row_indent_in_lpxs > 0.0
+    }
+
     fn current_row_is_empty(&self) -> bool {
         self.current_row_start == self.current_row_end
     }
@@ -200,7 +208,7 @@ impl<'a> LayoutContext<'a> {
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
                 Some(text) => self.append_text(style, &text),
                 None => {
-                    if self.current_row_is_empty() {
+                    if self.current_row_is_empty() && !self.current_row_is_continuation() {
                         self.layout_span_by_grapheme(font_family, style, fitter.pop());
                     } else {
                         self.finish_current_row(font_family, style, false);
@@ -279,6 +287,11 @@ impl<'a> LayoutContext<'a> {
             fallback_font.descender_in_ems() * fallback_font_size_in_lpxs;
         let fallback_line_gap_in_lpxs =
             fallback_font.line_gap_in_ems() * fallback_font_size_in_lpxs;
+
+        let text = self
+            .text
+            .substr(self.current_row_start..self.current_row_end);
+        let width_in_lpxs = self.current_point_in_lpxs.x;
         let ascender_in_lpxs = glyphs
             .iter()
             .map(|glyph| glyph.ascender_in_lpxs())
@@ -298,18 +311,17 @@ impl<'a> LayoutContext<'a> {
         let line_spacing_above_in_lpxs = ascender_in_lpxs * line_spacing_scale;
         let line_spacing_below_in_lpxs =
             (-descender_in_lpxs + line_gap_in_lpxs) * line_spacing_scale;
-        let line_spacing_below_in_lpxs = line_spacing_below_in_lpxs.max(if self.rows.is_empty() {
-            self.options.first_row_min_line_spacing_below_in_lpxs
-        } else {
-            0.0
-        });
+        let line_spacing_below_in_lpxs =
+            line_spacing_below_in_lpxs.max(if self.current_row_is_first() {
+                self.options.first_row_min_line_spacing_below_in_lpxs
+            } else {
+                0.0
+            });
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
-            text: self
-                .text
-                .substr(self.current_row_start..self.current_row_end),
+            text,
             newline,
-            width_in_lpxs: self.current_point_in_lpxs.x,
+            width_in_lpxs,
             ascender_in_lpxs,
             descender_in_lpxs,
             line_gap_in_lpxs,
