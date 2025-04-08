@@ -23,10 +23,12 @@ live_design!{
         draw_bg: {
             instance down: 0.0
             instance hover: 0.0
+            instance focus: 0.0
 
             uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_DOWN)
+            uniform color_focus: (#f00)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -35,7 +37,7 @@ live_design!{
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                 return sdf.stroke(mix(
                     mix(
-                        self.color,
+                        mix(self.color, self.color_focus, self.focus),
                         self.color_hover,
                         self.hover
                     ),
@@ -48,10 +50,12 @@ live_design!{
         draw_text: {
             instance down: 0.0
             instance hover: 0.0
+            instance focus: 0.0,
 
             uniform color: (THEME_COLOR_TEXT),
             uniform color_hover: (THEME_COLOR_TEXT_HOVER),
             uniform color_down: (THEME_COLOR_TEXT_DOWN),
+            uniform color_focus: (#f00),
 
             wrap: Word
             text_style: <THEME_FONT_REGULAR>{
@@ -60,7 +64,7 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        self.color,
+                        mix(self.color, self.color_focus, self.focus),
                         self.color_hover,
                         self.hover
                     ),
@@ -103,6 +107,26 @@ live_design!{
                     }
                 }
             }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                    }
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_bg: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                    }
+                }
+            }
         }
         
     }
@@ -117,14 +141,17 @@ live_design!{
         draw_bg: {
             instance down: 0.0
             instance hover: 0.0
+            instance focus: 0.0
 
             uniform color_1: #0ff,
             uniform color_1_hover: #0ff,
             uniform color_1_down: #0ff,
+            uniform color_1_focus: #0ff,
 
             uniform color_2: #A00
             uniform color_2_hover: #F00
             uniform color_2_down: #000
+            uniform color_2_focus: #f00
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -133,7 +160,11 @@ live_design!{
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                 return sdf.stroke(mix(
                     mix(
-                        mix(self.color_1, self.color_2, self.pos.y),
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.y),
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.y),
+                            self.focus
+                        ),
                         mix(self.color_1_hover, self.color_2_hover, self.pos.y),
                         self.hover
                     ),
@@ -146,14 +177,17 @@ live_design!{
         draw_text: {
             instance down: 0.0
             instance hover: 0.0
+            instance focus: 0.0
 
             uniform color_1: #0ff,
             uniform color_1_hover: #0ff,
             uniform color_1_down: #0ff,
+            uniform color_1_focus: #f00,
 
             uniform color_2: #A40
             uniform color_2_hover: #FA0
             uniform color_2_down: #0A0
+            uniform color_2_focus: #0F0
 
             wrap: Word
             text_style: <THEME_FONT_REGULAR>{
@@ -162,7 +196,11 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        mix(self.color_1, self.color_2, self.pos.y),
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.y),
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.y),
+                            self.focus
+                        ),
                         mix(self.color_1_hover, self.color_2_hover, self.pos.y),
                         self.hover
                     ),
@@ -204,6 +242,27 @@ live_design!{
                     }
                 }
             }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                    }
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_bg: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                    }
+                }
+            }
+
         }
         
     }
@@ -218,14 +277,17 @@ live_design!{
         draw_bg: {
             instance down: 0.0
             instance hover: 0.0
+            instance focus: 0.0
 
             uniform color_1: #0FF
             uniform color_1_hover: #F00
             uniform color_1_down: #f00
+            uniform color_1_focus: #f0f
 
             uniform color_2: #F00
             uniform color_2_hover: #0FF
             uniform color_2_down: #f00
+            uniform color_2_focus: #fff
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -234,7 +296,11 @@ live_design!{
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                 return sdf.stroke(mix(
                     mix(
-                        mix(self.color_1, self.color_2, self.pos.x),
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.x),
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.x),
+                            self.focus
+                        ),
                         mix(self.color_1_hover, self.color_2_hover, self.pos.x),
                         self.hover
                     ),
@@ -247,14 +313,17 @@ live_design!{
         draw_text: {
             instance down: 0.0
             instance hover: 0.0
+            instance focus: 0.0
 
             uniform color_1: #CCC
             uniform color_1_hover: #FFF
             uniform color_1_down: #888
+            uniform color_1_focus: #F00
 
             uniform color_2: #CCC
             uniform color_2_hover: #FFF
             uniform color_2_down: #888
+            uniform color_2_focus: #f0f
 
             wrap: Word
             text_style: <THEME_FONT_REGULAR>{
@@ -263,7 +332,11 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        mix(self.color_1, self.color_2, self.pos.x),
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.x),
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.x),
+                            self.focus
+                        ),
                         mix(self.color_1_hover, self.color_2_hover, self.pos.x),
                         self.hover
                     ),
@@ -302,6 +375,26 @@ live_design!{
                         draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
                         draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
                         draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                    }
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_bg: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                     }
                 }
             }
@@ -323,11 +416,12 @@ live_design!{
             uniform color: (THEME_COLOR_TEXT),
             uniform color_hover: (THEME_COLOR_TEXT_HOVER),
             uniform color_down: (THEME_COLOR_TEXT_DOWN),
+            uniform color_focus: (#f00),
 
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        self.color,
+                        mix(self.color, self.color_focus, self.focus),
                         self.color_hover,
                         self.hover
                     ),
