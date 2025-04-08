@@ -266,6 +266,9 @@ impl Cx {
                 CxOsOp::CopyToClipboard(content) => {
                     with_ios_app(|app| app.copy_to_clipboard(&content));
                 }
+                CxOsOp::SetCursor(_)=>{
+                    // no need
+                }
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
