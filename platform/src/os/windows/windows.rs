@@ -318,6 +318,7 @@ impl Cx {
                     });
                 },
                 CxOsOp::CloseWindow(window_id) => {
+                    self.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
                     if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
                         self.windows[window_id].is_created = false;
                         d3d11_windows[index].win32_window.close_window();
@@ -339,6 +340,16 @@ impl Cx {
                         window.win32_window.maximize();
                     }
                 },
+                CxOsOp::ResizeWindow(window_id, size) => {
+                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.win32_window.set_inner_size(size);
+                    }
+                }
+                CxOsOp::RepositionWindow(window_id, pos) => {
+                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.win32_window.set_position(pos);
+                    }
+                }
                 CxOsOp::RestoreWindow(window_id) => {
                     if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
                         window.win32_window.restore();
