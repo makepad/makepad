@@ -181,10 +181,10 @@ live_design! {
             instance down: 0.0
             instance enabled: 1.0
 
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: (THEME_CORNER_RADIUS)
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color_dither: 1.0
+            color_dither: 1.0
 
             uniform color_1: (THEME_COLOR)
             uniform color_1_hover: (THEME_COLOR)
@@ -194,13 +194,13 @@ live_design! {
             uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
             uniform color_2_down: (THEME_COLOR_OUTSET_DOWN)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -242,32 +242,32 @@ live_design! {
 
     }
 
-    pub ButtonGradientY = <Button> {
+    pub ButtonGradientY = <ButtonGradientX> {
         draw_bg: {
             instance hover: 0.0
             instance down: 0.0
             instance enabled: 1.0
 
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: (THEME_CORNER_RADIUS)
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color_dither: 1.0
+            color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR)
-            uniform color_1_hover: (THEME_COLOR)
-            uniform color_1_down: (#3)
+            color_1: (THEME_COLOR)
+            color_1_hover: (THEME_COLOR)
+            color_1_down: (#3)
 
-            uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
-            uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
-            uniform color_2_down: (#4)
+            color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
+            color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
+            color_2_down: (#4)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT * 1.5)
-            uniform border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT * 1.5)
+            border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)

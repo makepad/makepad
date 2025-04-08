@@ -15,13 +15,6 @@ live_design!{
     use makepad_draw::shader::std::*;
     use crate::view_ui::RectShadowView;
 
-    /*
-    should not be here
-    RectView = <View> {
-        show_bg: true,
-        draw_bg: { color: (THEME_COLOR_DOCK_CONTAINER) }
-    }*/
-
     pub DrawRoundCorner = {{DrawRoundCorner}} {}
     pub DockBase = {{Dock}} {}
     pub Dock = <DockBase> {
@@ -35,7 +28,6 @@ live_design!{
         round_corner: {
             border_radius: 20.
             uniform color: (THEME_COLOR_BG_APP)
-// 
             fn pixel(self) -> vec4 {
                 let pos = vec2(
                     mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
