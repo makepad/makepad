@@ -18,10 +18,10 @@ use {
         makepad_math::dvec2,
         makepad_live_id::*,
         thread::SignalToUI,
-        event::Event,
+        event::*,
         pass::CxPassParent,
         cx::{Cx, OsType,LinuxWindowParams}, 
-        os::cx_stdin::{PollTimers},
+        os::cx_stdin::PollTimers,
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
     }
