@@ -234,9 +234,9 @@ impl CxOsApi for Cx {
         
         self.live_scan_dependencies();
 
-        #[cfg(apple_bundle)]
+        #[cfg(not(apple_sim))]
         self.apple_bundle_load_dependencies();
-        #[cfg(not(apple_bundle))]
+        #[cfg(apple_sim)]
         self.native_load_dependencies();
     }
     

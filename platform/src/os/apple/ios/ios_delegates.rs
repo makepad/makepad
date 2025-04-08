@@ -7,7 +7,7 @@ use {
             apple::ios_app::IosApp,
             apple::apple_util::nsstring_to_string,
             apple::apple_sys::*,
-            apple::ios_app::get_ios_app_global,
+            apple::ios_app::with_ios_app,
         },
     }
 };
@@ -23,7 +23,7 @@ pub fn define_ios_app_delegate() -> *const Class {
         _: ObjcId,
         _: ObjcId,
     ) -> BOOL {
-        get_ios_app_global().did_finish_launching_with_options();
+        with_ios_app(|app| app.did_finish_launching_with_options());
         YES
     }
     
@@ -40,7 +40,7 @@ pub fn define_ios_app_delegate() -> *const Class {
 
 pub fn define_mtk_view() -> *const Class {
     let mut decl = ClassDecl::new("MakepadView", class!(MTKView)).unwrap();
-    extern fn yes(_: &Object, _: Sel) -> BOOL {
+    extern "C" fn yes(_: &Object, _: Sel) -> BOOL {
         YES
     }
     
@@ -60,7 +60,7 @@ pub fn define_mtk_view() -> *const Class {
                     touch_id as u64
                 };
                 let p: NSPoint = msg_send![ios_touch, locationInView: this];
-                get_ios_app_global().update_touch(uid, dvec2(p.x, p.y), state);
+                with_ios_app(|app| app.update_touch(uid, dvec2(p.x, p.y), state));
             }
         }
     }
@@ -136,11 +136,11 @@ pub fn define_mtk_view_delegate() -> *const Class {
 
 pub fn define_ios_timer_delegate() -> *const Class {
     
-    extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
+    extern "C" fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
         IosApp::send_timer_received(nstimer);
     }
     
-    extern fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
+    extern "C" fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
         IosApp::send_paint_event();
     }
     
@@ -149,8 +149,8 @@ pub fn define_ios_timer_delegate() -> *const Class {
     
     // Add callback methods
     unsafe {
-        decl.add_method(sel!(receivedTimer:), received_timer as extern fn(&Object, Sel, ObjcId));
-        decl.add_method(sel!(receivedLiveResize:), received_live_resize as extern fn(&Object, Sel, ObjcId));
+        decl.add_method(sel!(receivedTimer:), received_timer as extern "C" fn(&Object, Sel, ObjcId));
+        decl.add_method(sel!(receivedLiveResize:), received_live_resize as extern "C" fn(&Object, Sel, ObjcId));
     }
     
     return decl.register();
@@ -203,17 +203,17 @@ pub fn define_textfield_delegate() -> *const Class {
     extern "C" fn keyboard_will_hide(_: &Object, _: Sel, notif: ObjcId) {
         let height = get_height_delta(notif);
         let (duration, ease) = get_curve_duration(notif);
-        let time = get_ios_app_global().time_now();
-        get_ios_app_global().queue_virtual_keyboard_event(VirtualKeyboardEvent::WillHide {
+        let time = with_ios_app(|app| app.time_now());
+        with_ios_app(|app| app.queue_virtual_keyboard_event(VirtualKeyboardEvent::WillHide {
             time,
             ease,
             height: -height,
             duration
-        });
+        }));
     }
     
     extern "C" fn keyboard_did_hide(_: &Object, _: Sel, _notif: ObjcId) {
-        let time = get_ios_app_global().time_now();
+        let time = with_ios_app(|app| app.time_now());
         IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::DidHide {
             time,
         });
@@ -221,7 +221,7 @@ pub fn define_textfield_delegate() -> *const Class {
     extern "C" fn keyboard_will_show(_: &Object, _: Sel, notif: ObjcId) {
         let height = get_height_delta(notif);
         let (duration, ease) = get_curve_duration(notif);
-        let time = get_ios_app_global().time_now();
+        let time = with_ios_app(|app| app.time_now());
         IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::WillShow {
             time,
             height,
@@ -231,7 +231,7 @@ pub fn define_textfield_delegate() -> *const Class {
     }
     extern "C" fn keyboard_did_show(_: &Object, _: Sel, notif: ObjcId) {
         let height = get_height_delta(notif);
-        let time = get_ios_app_global().time_now();
+        let time = with_ios_app(|app| app.time_now());
         IosApp::send_virtual_keyboard_event(VirtualKeyboardEvent::DidShow {
             time,
             height: height

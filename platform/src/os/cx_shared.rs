@@ -116,7 +116,7 @@ impl Cx {
     
     pub (crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
-        if Cx::has_studio_web_socket(){
+        if false{//Cx::has_studio_web_socket(){
             let start = self.seconds_since_app_start();
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);
@@ -211,6 +211,7 @@ impl Cx {
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
         self.in_draw_event = true;
+
         self.call_event_handler(&Event::Draw(draw_event));
         self.in_draw_event = false;
     }
