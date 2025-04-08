@@ -176,9 +176,11 @@ impl Cx {
                 self.os.first_after_resize = true;
                 self.call_event_handler(&Event::ClearAtlasses);
             }
-            FromJavaMessage::LongClick { x, y, pointer_id, time } => {
+            FromJavaMessage::LongClick { abs, pointer_id, time } => {
+                let window = &mut self.windows[CxWindowPool::id_zero()];
+                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
                 let e = Event::LongPress(LongPressEvent {
-                    abs: DVec2 { x, y },
+                    abs: abs / dpi_factor,
                     uid: pointer_id,
                     window_id: CxWindowPool::id_zero(),
                     time,
