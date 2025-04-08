@@ -33,7 +33,7 @@ live_design!{
                         draw_text:{color:#fff}
                     }
                     button1 = <Button> {
-                        text: "Click me 234"
+                        text: "Click me\n234\n456"
                         draw_text:{color:#fff}
                     }
                     button2 = <Button> {
