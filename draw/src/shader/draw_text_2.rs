@@ -202,11 +202,12 @@ impl DrawText2 {
         text: &str,
         mut f: impl FnMut(&mut Cx2d, makepad_platform::Rect),
     ) {
-        self.debug = true;
+        //self.debug = true;
         let turtle_pos = cx.turtle().pos();
         let turtle_rect = cx.turtle().padded_rect();
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
+        let row_height = cx.turtle().row_height();
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
@@ -221,7 +222,7 @@ impl DrawText2 {
         let text = self.layout(
             cx,
             first_row_indent_in_lpxs,
-            0.0,
+            row_height as f32,
             wrap_width_in_lpxs,
             Align::default(),
             text,
@@ -235,6 +236,7 @@ impl DrawText2 {
                 last_row.origin_in_lpxs.y - last_row.ascender_in_lpxs,
             ) * self.font_scale;
         let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
+        /*
         println!("Drawing the following text: {:?}", text.text);
         println!("Current turtle position {:?}", turtle_pos);
         println!("Draw origin in lpxs {:?}", origin_in_lpxs);
@@ -244,13 +246,14 @@ impl DrawText2 {
         println!("Last row ascender in lpxs {:?}", last_row.ascender_in_lpxs);
         println!("New turtle position {:?}", new_turtle_pos);
         println!("Used size in lpxs: {:?}", used_size_in_lpxs);
-        println!();
+        println!();*/
         let new_turtle_pos = dvec2(new_turtle_pos.x as f64, new_turtle_pos.y as f64);
         cx.turtle_mut().set_pos(new_turtle_pos);
         cx.turtle_mut()
             .update_width_max(origin_in_lpxs.x as f64, used_size_in_lpxs.width as f64);
         cx.turtle_mut()
             .update_height_max(origin_in_lpxs.y as f64, used_size_in_lpxs.height as f64);
+         
         cx.emit_turtle_walk(makepad_platform::Rect {
             pos: new_turtle_pos,
             size: dvec2(
