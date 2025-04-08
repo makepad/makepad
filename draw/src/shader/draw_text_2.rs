@@ -129,7 +129,7 @@ impl LiveHook for DrawText2 {
 
 impl DrawText2 {
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, text: &str) {
-        let text = self.layout(cx, 0.0, None, Align::default(), text);
+        let text = self.layout(cx, 0.0, 0.0, None, Align::default(), text);
         self.draw_text(cx, Point::new(pos.x as f32, pos.y as f32), &text);
     }
 
@@ -145,7 +145,7 @@ impl DrawText2 {
             .max_width(walk)
             .map(|max_width| max_width as f32);
 
-        let text = self.layout(cx, 0.0, max_width, align, text);
+        let text = self.layout(cx, 0.0, 0.0, max_width, align, text);
         self.draw_walk_laidout(cx, walk, align, &text)
     }
 
@@ -221,6 +221,7 @@ impl DrawText2 {
         let text = self.layout(
             cx,
             first_row_indent_in_lpxs,
+            0.0,
             wrap_width_in_lpxs,
             Align::default(),
             text,
@@ -288,6 +289,7 @@ impl DrawText2 {
         &self,
         cx: &mut Cx2d,
         first_row_indent_in_lpxs: f32,
+        first_row_min_line_spacing_below_in_lpxs: f32,
         wrap_width_in_lpxs: Option<f32>,
         align: Align,
         text: &str,
@@ -305,7 +307,8 @@ impl DrawText2 {
             }],
             options: LayoutOptions {
                 wrap_width_in_lpxs,
-                first_row_indent_in_lpxs: first_row_indent_in_lpxs,
+                first_row_indent_in_lpxs,
+                first_row_min_line_spacing_below_in_lpxs,
                 align: align.x as f32,
                 line_spacing_scale: self.text_style.line_spacing as f32,
             },
