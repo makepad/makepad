@@ -15,7 +15,7 @@ pub mod tvos;
 #[cfg(target_os = "macos")]
 pub mod metal_xpc;
 
-#[cfg(apple_bundle)]
+#[cfg(any(apple_bundle,target_os="ios",target_os="tvos"))]
 mod apple_resources;
 
 pub mod url_session;

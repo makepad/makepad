@@ -35,20 +35,26 @@ use {
 // this value will be fetched from multiple threads (post signal uses it)
 pub static mut IOS_CLASSES: *const IosClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
-pub static mut IOS_APP: Option<RefCell<IosApp>> = None;
+
+thread_local! {
+    pub static IOS_APP: RefCell<Option<IosApp>> = RefCell::new(None);
+}
+
+pub fn with_ios_app<R>(f: impl FnOnce(&mut IosApp) -> R) -> R {
+    IOS_APP.with_borrow_mut(|app| {
+        f(app.as_mut().unwrap())
+    })
+}
 
 pub fn init_ios_app_global(metal_device: ObjcId, event_callback: Box<dyn FnMut(IosEvent) -> EventFlow>) {
     unsafe {
         IOS_CLASSES = Box::into_raw(Box::new(IosClasses::new()));
-        IOS_APP = Some(RefCell::new(IosApp::new(metal_device, event_callback)));
+        IOS_APP.with(|app| {
+            *app.borrow_mut() = Some(IosApp::new(metal_device, event_callback));
+        })
     }
 }
 
-pub fn get_ios_app_global() -> std::cell::RefMut<'static, IosApp> {
-    unsafe {
-        IOS_APP.as_mut().unwrap().borrow_mut()
-    }
-}
 
 pub fn get_ios_class_global() -> &'static IosClasses {
     unsafe {
@@ -103,13 +109,14 @@ impl IosApp {
         unsafe {
             
             // Construct the bits that are shared between windows
-            let ns_app: ObjcId = msg_send![class!(UIApplication), sharedApplication];
-            let app_delegate_instance: ObjcId = msg_send![get_ios_class_global().app_delegate, new];
-            
-            let () = msg_send![ns_app, setDelegate: app_delegate_instance];
+            //let ns_app: ObjcId = msg_send![class!(UIApplication), sharedApplication];
+            //let app_delegate_instance: ObjcId = msg_send![get_ios_class_global().app_delegate, new];
+            //if ns_app == nil{
+            //   panic!();
+            //}
+            //let () = msg_send![ns_app, setDelegate: app_delegate_instance];
             
             let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
-            
             IosApp {
                 virtual_keyboard_event: None,
                 touches: Vec::new(),
@@ -210,14 +217,16 @@ impl IosApp {
             dpi_factor,
             position: dvec2(0.0, 0.0)
         };
-
-        if get_ios_app_global().first_draw {
-            get_ios_app_global().update_geom(new_geom.clone());
+        
+        let first_draw = with_ios_app(|app| app.first_draw);
+        if first_draw {
+            with_ios_app(|app| app.update_geom(new_geom.clone()));
             IosApp::do_callback(
                 IosEvent::Init,
             );
         }
-        let old_geom = get_ios_app_global().update_geom(new_geom.clone());
+        
+        let old_geom = with_ios_app(|app| app.update_geom(new_geom.clone()));
         if let Some(old_geom) = old_geom {
             IosApp::do_callback(
                 IosEvent::WindowGeomChange(WindowGeomChangeEvent {
@@ -240,7 +249,7 @@ impl IosApp {
     
     pub fn draw_in_rect() {
         Self::check_window_geom();
-        get_ios_app_global().first_draw = false;
+        with_ios_app(|app| app.first_draw = false);
         IosApp::do_callback(IosEvent::Paint);
     }
     
@@ -265,8 +274,8 @@ impl IosApp {
     }
     
     pub fn send_touch_update() {
-        let time_now = get_ios_app_global().time_now();
-        let touches = get_ios_app_global().touches.clone();
+        let time_now = with_ios_app(|app| app.time_now());
+        let touches = with_ios_app(|app| app.touches.clone());
         IosApp::do_callback(IosEvent::TouchUpdate(TouchUpdateEvent {
             time: time_now,
             window_id: CxWindowPool::id_zero(),
@@ -274,7 +283,7 @@ impl IosApp {
             touches
         }));
         // remove the stopped touches
-        get_ios_app_global().touches.retain( | v | if let TouchState::Stop = v.state {false}else {true});
+        with_ios_app(|app| app.touches.retain( | v | if let TouchState::Stop = v.state {false}else {true}));
     }
     
     pub fn time_now(&self) -> f64 {
@@ -295,32 +304,33 @@ impl IosApp {
     }
     
     pub fn show_keyboard() {
-        let textfield = get_ios_app_global().textfield.unwrap();
+        let textfield = with_ios_app(|app| app.textfield.unwrap());
         let () = unsafe {msg_send![textfield, becomeFirstResponder]};
     }
 
     pub fn hide_keyboard(){
-        let textfield = get_ios_app_global().textfield.unwrap();
+        let textfield = with_ios_app(|app| app.textfield.unwrap());
         let () = unsafe {msg_send![textfield, resignFirstResponder]};
     }
     
     pub fn do_callback(event: IosEvent) {
-        let cb = get_ios_app_global().event_callback.take();
+        let cb = with_ios_app(|app| app.event_callback.take());
         if let Some(mut callback) = cb {
-            
-            
             let event_flow = callback(event);
-            let mtk_view = get_ios_app_global().mtk_view.unwrap();
-            get_ios_app_global().event_flow = event_flow;
+            let mtk_view = with_ios_app(|app| app.mtk_view.unwrap());
+            with_ios_app(|app| app.event_flow = event_flow);
+            
             if let EventFlow::Wait = event_flow {
                 let () = unsafe {msg_send![mtk_view, setPaused: YES]};
             }
             else {
                 let () = unsafe {msg_send![mtk_view, setPaused: NO]};
             }
-            get_ios_app_global().event_callback = Some(callback);
+            
+            with_ios_app(|app| app.event_callback = Some(callback));
         }
     }
+    
     
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
         unsafe {
@@ -375,7 +385,7 @@ impl IosApp {
     }
     
     pub fn send_backspace() {
-        let time = get_ios_app_global().time_now();
+        let time = with_ios_app(|app| app.time_now());
         IosApp::do_callback(IosEvent::KeyDown(KeyEvent {
             key_code: KeyCode::Backspace,
             is_repeat: false,
@@ -391,13 +401,13 @@ impl IosApp {
     }
     
     pub fn send_timer_received(nstimer: ObjcId) {
-        let len = get_ios_app_global().timers.len();
-        let time = get_ios_app_global().time_now();
+        let len = with_ios_app(|app| app.timers.len());
+        let time = with_ios_app(|app| app.time_now());
         for i in 0..len {
-            if get_ios_app_global().timers[i].nstimer == nstimer {
-                let timer_id = get_ios_app_global().timers[i].timer_id;
-                if !get_ios_app_global().timers[i].repeats {
-                    get_ios_app_global().timers.remove(i);
+            if with_ios_app(|app| app.timers[i].nstimer == nstimer) {
+                let timer_id = with_ios_app(|app| app.timers[i].timer_id);
+                if !with_ios_app(|app| app.timers[i].repeats) {
+                    with_ios_app(|app| app.timers.remove(i));
                 }
                 IosApp::do_callback(IosEvent::Timer(TimerEvent {timer_id: timer_id, time:Some(time)}));
                 return
