@@ -55,6 +55,7 @@ live_design!{
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             uniform mark_color_focus: (#f00)
 
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -70,6 +71,7 @@ live_design!{
                         sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, self.border_radius * 0.5);
 
                         sdf.fill_keep(
+                            // mix(#f00, #0ff, self.focus))
                             mix(
                                 mix(
                                     mix(self.color_1, self.color_2, self.pos.y + dither),
@@ -808,6 +810,7 @@ impl CheckBox {
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
         DrawStep::done() 
    }
 }
