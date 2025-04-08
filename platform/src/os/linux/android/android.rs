@@ -883,6 +883,9 @@ impl Cx {
                         android_jni::to_java_cleanup_video_playback_resources(env, video_id);
                     }
                 },
+                CxOsOp::SetCursor(_)=>{
+                    // no need
+                },
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
