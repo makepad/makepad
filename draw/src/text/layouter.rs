@@ -639,6 +639,10 @@ impl Hash for LayoutOptions {
     where
         H: Hasher,
     {
+        self.first_row_indent_in_lpxs.to_bits().hash(hasher);
+        self.first_row_min_line_spacing_below_in_lpxs
+            .to_bits()
+            .hash(hasher);
         self.wrap_width_in_lpxs.map(f32::to_bits).hash(hasher);
         self.align.to_bits().hash(hasher);
         self.line_spacing_scale.to_bits().hash(hasher);
@@ -647,6 +651,14 @@ impl Hash for LayoutOptions {
 
 impl PartialEq for LayoutOptions {
     fn eq(&self, other: &Self) -> bool {
+        if self.first_row_indent_in_lpxs.to_bits() != other.first_row_indent_in_lpxs.to_bits() {
+            return false;
+        }
+        if self.first_row_min_line_spacing_below_in_lpxs.to_bits()
+            != other.first_row_min_line_spacing_below_in_lpxs.to_bits()
+        {
+            return false;
+        }
         if self.wrap_width_in_lpxs.map(f32::to_bits) != other.wrap_width_in_lpxs.map(f32::to_bits) {
             return false;
         }
