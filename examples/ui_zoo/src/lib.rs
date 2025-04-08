@@ -14,6 +14,7 @@ pub mod tab_foldbutton;
 pub mod tab_foldheader;
 pub mod tab_html;
 pub mod tab_icon;
+pub mod tab_iconset;
 pub mod tab_image;
 pub mod tab_imageblend;
 pub mod tab_label;

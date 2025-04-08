@@ -298,35 +298,35 @@ live_design!{
     }
 
 
-    pub DropDownGradientY = <DropDown> {
+    pub DropDownGradientY = <DropDownGradientX> {
         
         draw_bg: {
             instance hover: 0.0
             instance focus: 0.0
                         
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: (THEME_CORNER_RADIUS)
+            border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color_dither: 1.0
+            color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR * 1.75)
-            uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.5)
-            uniform color_1_focus: (THEME_COLOR * 2.5)
+            color_1: (THEME_COLOR * 1.75)
+            color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.5)
+            color_1_focus: (THEME_COLOR * 2.5)
 
-            uniform color_2: (THEME_COLOR)
-            uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_2_focus: (THEME_COLOR * 1.25)
+            color_2: (THEME_COLOR)
+            color_2_hover: (THEME_COLOR_OUTSET_HOVER)
+            color_2_focus: (THEME_COLOR * 1.25)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_LIGHT * 1.3)
+            border_color_1: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1_focus: (THEME_COLOR_BEVEL_LIGHT * 1.3)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
+            border_color_2: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
             
-            uniform arrow_color: (THEME_COLOR_TEXT)
-            uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
+            arrow_color: (THEME_COLOR_TEXT)
+            arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
