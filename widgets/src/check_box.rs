@@ -35,12 +35,12 @@ live_design!{
             uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_INSET_1)
             uniform color_1_active: (THEME_COLOR_INSET_1)
-            uniform color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
+            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_INSET_2)
             uniform color_2_active: (THEME_COLOR_INSET_2)
-            uniform color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
+            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -381,12 +381,12 @@ live_design!{
             color_1: (THEME_COLOR_INSET)
             color_1_hover: (THEME_COLOR_INSET_HOVER)
             color_1_active: (THEME_COLOR_INSET_ACTIVE)
-            color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET)
             color_2_hover: (THEME_COLOR_INSET_HOVER)
             color_2_active: (THEME_COLOR_INSET_ACTIVE)
-            color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
@@ -416,12 +416,12 @@ live_design!{
             color_1: (THEME_COLOR_INSET)
             color_1_hover: (THEME_COLOR_INSET_HOVER)
             color_1_active: (THEME_COLOR_INSET_ACTIVE)
-            color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET)
             color_2_hover: (THEME_COLOR_INSET_HOVER)
             color_2_active: (THEME_COLOR_INSET_ACTIVE)
-            color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
@@ -455,12 +455,12 @@ live_design!{
             color_1: (THEME_COLOR_INSET_1)
             color_1_hover: (THEME_COLOR_INSET_1)
             color_1_active: (THEME_COLOR_INSET_1)
-            color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET_2)
             color_2_hover: (THEME_COLOR_INSET_2)
             color_2_active: (THEME_COLOR_INSET_2)
-            color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -566,12 +566,12 @@ live_design!{
             color_1: (THEME_COLOR_INSET_1)
             color_1_hover: (THEME_COLOR_INSET_1)
             color_1_active: (THEME_COLOR_INSET_1)
-            color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET_2)
             color_2_hover: (THEME_COLOR_INSET_2)
             color_2_active: (THEME_COLOR_INSET_2)
-            color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
@@ -666,12 +666,12 @@ live_design!{
             color_1: (THEME_COLOR_INSET)
             color_1_hover: (THEME_COLOR_INSET_HOVER)
             color_1_active: (THEME_COLOR_INSET_ACTIVE)
-            color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET)
             color_2_hover: (THEME_COLOR_INSET_HOVER)
             color_2_active: (THEME_COLOR_INSET_ACTIVE)
-            color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL)
@@ -701,12 +701,12 @@ live_design!{
             color_1: (THEME_COLOR_INSET)
             color_1_hover: (THEME_COLOR_INSET_HOVER)
             color_1_active: (THEME_COLOR_INSET_ACTIVE)
-            color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET)
             color_2_hover: (THEME_COLOR_INSET_HOVER)
             color_2_active: (THEME_COLOR_INSET_ACTIVE)
-            color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL)
@@ -741,7 +741,7 @@ live_design!{
             color_2: (THEME_COLOR_INSET)
             color_2_hover: (THEME_COLOR_INSET_HOVER)
             color_2_active: (THEME_COLOR_INSET_ACTIVE)
-            color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             uniform mark_size: 0.75
             mark_color: (THEME_COLOR_TEXT_ACTIVE)
@@ -764,12 +764,12 @@ live_design!{
             color_1: (THEME_COLOR_INSET_1)
             color_1_hover: (THEME_COLOR_INSET_1)
             color_1_active: (THEME_COLOR_INSET_1)
-            color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET_2)
             color_2_hover: (THEME_COLOR_INSET_2)
             color_2_active: (THEME_COLOR_INSET_2)
-            color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
