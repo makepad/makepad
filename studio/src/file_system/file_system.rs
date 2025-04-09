@@ -116,7 +116,7 @@ impl FileSystem {
         self.reload_file_tree();
     }
     
-    pub fn search_string(&mut self, cx:&mut Cx, what:String){
+    pub fn search_string(&mut self, _cx:&mut Cx, what:String){
         self.search_results_id += 1;
         self.search_results.clear();
         self.file_client.send_request(FileRequest::Search{
