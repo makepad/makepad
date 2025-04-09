@@ -9,6 +9,7 @@ use {
         file_system::FileClient,
         ai_chat::ai_chat_manager::AiChatDocument,
         makepad_file_protocol::{
+            SearchResult,
             FileRequest,
             FileError,
             FileResponse,
@@ -30,7 +31,10 @@ pub struct FileSystem {
     pub path_to_file_node_id: HashMap<String, LiveId>,
     pub tab_id_to_file_node_id: HashMap<LiveId, LiveId>,
     pub tab_id_to_session: HashMap<LiveId, EditSession>,
-    pub open_documents: HashMap<LiveId, OpenDocument>
+    pub open_documents: HashMap<LiveId, OpenDocument>,
+    
+    pub search_results_id: u64,
+    pub search_results: Vec<SearchResult>
 }
 
 pub enum EditSession {
@@ -44,7 +48,6 @@ pub enum OpenDocument {
     AiChatLoading,
     AiChat(AiChatDocument)
 }
-
 
 #[derive(Debug)]
 pub struct FileNode {
@@ -71,6 +74,7 @@ pub enum FileSystemAction {
     RecompileNeeded,
     LiveReloadNeeded(LiveFileChange),
     FileChangedOnDisk(SaveFileResponse),
+    SearchResults,
     None
 }
 
@@ -110,6 +114,16 @@ impl FileSystem {
     pub fn init(&mut self, cx: &mut Cx, path:&Path) {
         self.file_client.init(cx, path);
         self.reload_file_tree();
+    }
+    
+    pub fn search_string(&mut self, cx:&mut Cx, what:String){
+        self.search_results_id += 1;
+        self.search_results.clear();
+        self.file_client.send_request(FileRequest::Search{
+            id: self.search_results_id,
+            what
+        });
+        //cx.action( FileSystemAction::SearchResults );
     }
     
     pub fn reload_file_tree(&mut self) {
@@ -175,6 +189,8 @@ impl FileSystem {
             while let Ok(message) = self.file_client.inner.as_mut().unwrap().message_receiver.try_recv() {
                 match message {
                     FileClientMessage::Response(response) => match response {
+                        FileResponse::SearchInProgress(_)=>{
+                        }
                         FileResponse::LoadFileTree(response) => {
                             self.load_file_tree(response.unwrap());
                             cx.action(FileSystemAction::TreeLoaded)
@@ -227,6 +243,12 @@ impl FileSystem {
                     },
                     FileClientMessage::Notification(notification) => {
                         match notification{
+                            FileNotification::SearchResults{id, results} =>{
+                                if self.search_results_id == id{
+                                    self.search_results.extend(results);
+                                }
+                                cx.action( FileSystemAction::SearchResults );
+                            }
                             FileNotification::FileChangedOnDisk(response)=>{
                                //println!("FILE CHANGED ON DISK {}", response.path);
                                 if let Some(file_id) = self.path_to_file_node_id.get(&response.path){

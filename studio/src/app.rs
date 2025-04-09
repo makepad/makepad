@@ -51,6 +51,7 @@ impl LiveRegister for App{
         crate::studio_file_tree::live_design(cx);
         crate::app_ui::live_design(cx);
         crate::ai_chat::ai_chat_view::live_design(cx);
+        crate::search::live_design(cx);
         // for macos
         cx.start_stdin_service();
     }
@@ -194,6 +195,7 @@ impl MatchEvent for App{
         let log_list = self.ui.log_list(id!(log_list));
         let run_list = self.ui.view(id!(run_list_tab));
         let profiler = self.ui.view(id!(profiler));
+        let search = self.ui.view(id!(search));
         
         match action.cast(){
             AppAction::SwapSelection(ss)=>{
@@ -504,6 +506,9 @@ impl MatchEvent for App{
             }
             FileSystemAction::FileChangedOnDisk(_res)=>{
                 
+            }
+            FileSystemAction::SearchResults=>{
+                search.redraw(cx);
             }
             FileSystemAction::None=>()
         }

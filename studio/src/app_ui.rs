@@ -12,7 +12,8 @@ live_design!{
     use makepad_studio::log_list::LogList;
     use makepad_studio::run_list::RunList;
     use makepad_studio::profiler::Profiler;
-
+    use makepad_studio::search::Search;
+    
     ICO_SEARCH = dep("crate://self/resources/icons/Icon_Search.svg")
 
     Logo = <Button> {
@@ -534,59 +535,7 @@ live_design!{
                 }
                 <RunList> {}
             }
-            Search = <RectView> {
-                draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
-                flow: Down,
-                <DockToolbar> {
-                    content = {
-                        spacing: (THEME_SPACE_2)
-                        align: { y: 0.5 }
-                        <TextInput> {
-                            width: Fill,
-                            empty_message: "Search",
-                        }
-
-                        <CheckBoxCustom> {
-                            padding: 0.
-                            text: ""
-                            draw_bg: { check_type: None }
-                            icon_walk: {width: 14.}
-                            draw_icon: {
-                                color: (THEME_COLOR_D_3),
-                                color_active: (THEME_COLOR_U_5),
-                                svg_file: dep("crate://self/resources/icons/icon_search_case_sensitive.svg"),
-                            }
-                        }
-                        <CheckBoxCustom> {
-                            padding: 0.
-                            text:""
-                            draw_bg: { check_type: None }
-                            icon_walk: {width: 16.}
-                            draw_icon: {
-                                color: (THEME_COLOR_D_3),
-                                color_active: (THEME_COLOR_U_5),
-                                svg_file: dep("crate://self/resources/icons/icon_search_full_word.svg"),
-                            }
-                        }
-                        <CheckBoxCustom> {
-                            padding: 0.
-                            text:""
-                            draw_bg: { check_type: None }
-                            icon_walk: {width: 12.}
-                            draw_icon: {
-                                color: (THEME_COLOR_D_3),
-                                color_active: (THEME_COLOR_U_5),
-                                svg_file: dep("crate://self/resources/icons/icon_search_regex.svg"),
-                            }
-                        }
-                    }
-                }
-                <View> {
-                    flow: Down
-                    margin: <THEME_MSPACE_2> {}
-                    <P> { text: "this does not work yet." }
-                }
-            }
+            Search = <Search> {}
             RunView = <RunView> {}
             StudioFileTree = <View> {
                 flow: Down,
