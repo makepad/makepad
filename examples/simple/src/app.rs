@@ -28,15 +28,15 @@ live_design!{
                             return mix(color1, color2, radius);
                         }
                     }
-                    b0= <Button> {
+                    button_1 = <Button> {
                         text: "Click me 123"
                         draw_text:{color:#fff}
                     }
-                    button1 = <Button> {
+                    text_input = <TextInput> {
                         text: "Click me\n234\n456"
                         draw_text:{color:#fff}
                     }
-                    button2 = <Button> {
+                    button_2 = <Button> {
                         text: "Click me 345"
                         draw_text:{color:#fff}
                     }

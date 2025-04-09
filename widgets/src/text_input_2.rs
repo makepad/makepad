@@ -95,6 +95,7 @@ pub struct TextInput2 {
     #[live] text_align: Align,
 
     #[live] is_password: bool,
+    #[live] is_read_only: bool,
     #[live] text: String,
     #[rust] password_text: String,
     #[rust] laidout_text: Option<Rc<LaidoutText>>,
@@ -448,7 +449,7 @@ impl Widget for TextInput2 {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
-            }) => {
+            }) if !self.is_read_only => {
                 let mut start = self.selection.start().index;
                 let end = self.selection.end().index;
                 if start == end {
@@ -466,7 +467,7 @@ impl Widget for TextInput2 {
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
                 ..
-            }) => {
+            }) if !self.is_read_only => {
                 let start = self.selection.start().index;
                 let mut end = self.selection.end().index;
                 if start == end {
@@ -488,7 +489,7 @@ impl Widget for TextInput2 {
                     ..
                 },
                 ..
-            }) => {
+            }) if !self.is_read_only => {
                 self.create_or_extend_edit_group(EditKind::Other);
                 self.apply_edit(Edit {
                     start: self.selection.start().index,
@@ -505,7 +506,7 @@ impl Widget for TextInput2 {
                     ..
                 },
                 ..
-            }) if modifiers.is_primary() => {
+            }) if modifiers.is_primary() && !self.is_read_only => {
                 if self.undo() {
                     self.draw_bg.redraw(cx);
                     cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
@@ -518,7 +519,7 @@ impl Widget for TextInput2 {
                     ..
                 },
                 ..
-            }) if modifiers.is_primary() => {
+            }) if modifiers.is_primary() && !self.is_read_only => {
                 if self.redo() {
                     self.draw_bg.redraw(cx);
                     cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
@@ -529,7 +530,7 @@ impl Widget for TextInput2 {
                 replace_last,
                 was_paste,
                 ..
-            }) if !input.is_empty() => {
+            }) if !input.is_empty() && !self.is_read_only => {
                 self.create_or_extend_edit_group(
                     if replace_last || was_paste {
                         EditKind::Other
