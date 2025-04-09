@@ -180,7 +180,7 @@ impl Search{
                         
                         //tf.draw_text(cx, &res.result_line);
                         let code = tf.item_counted(cx, live_id!(code_view));
-                        code.set_text(cx, &res.result_line.lines().next().unwrap());
+                        code.set_text(cx, &res.result_line.lines().next().unwrap().trim());
                         code.draw_all_unscoped(cx);
                                                 
                         let open = fold_button.open_float();
