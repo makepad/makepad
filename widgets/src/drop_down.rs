@@ -56,9 +56,9 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR)
+            uniform color: (THEME_COLOR_OUTSET)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_focus: (THEME_COLOR * 1.2)
+            uniform color_focus: (THEME_COLOR_OUTSET * 1.2)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -185,7 +185,7 @@ live_design!{
 
             color: (THEME_COLOR_U_HIDDEN)
             color_hover: (THEME_COLOR_OUTSET_HOVER)
-            color_focus: (THEME_COLOR * 1.2)
+            color_focus: (THEME_COLOR_OUTSET * 1.2)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
@@ -205,7 +205,7 @@ live_design!{
 
             color: (THEME_COLOR_U_HIDDEN)
             color_hover: (THEME_COLOR_OUTSET_HOVER)
-            color_focus: (THEME_COLOR * 1.2)
+            color_focus: (THEME_COLOR_OUTSET * 1.2)
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -231,13 +231,13 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR * 1.75)
+            uniform color_1: (THEME_COLOR_OUTSET * 1.75)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.5)
-            uniform color_1_focus: (THEME_COLOR * 2.5)
+            uniform color_1_focus: (THEME_COLOR_OUTSET * 2.5)
 
-            uniform color_2: (THEME_COLOR)
+            uniform color_2: (THEME_COLOR_OUTSET)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_2_focus: (THEME_COLOR * 1.25)
+            uniform color_2_focus: (THEME_COLOR_OUTSET * 1.25)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -328,13 +328,13 @@ live_design!{
 
             color_dither: 1.0
 
-            color_1: (THEME_COLOR * 1.75)
+            color_1: (THEME_COLOR_OUTSET * 1.75)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.5)
-            color_1_focus: (THEME_COLOR * 2.5)
+            color_1_focus: (THEME_COLOR_OUTSET * 2.5)
 
-            color_2: (THEME_COLOR)
+            color_2: (THEME_COLOR_OUTSET)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
-            color_2_focus: (THEME_COLOR * 1.25)
+            color_2_focus: (THEME_COLOR_OUTSET * 1.25)
 
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
