@@ -928,6 +928,9 @@ impl CodeEditor {
                     keyboard_moved_cursor = true;
                 }
             }
+            Hit::KeyDown(ke)=>{
+                actions.push(CodeEditorAction::UnhandledKeyDown(ke))
+            }
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 tap_count,
@@ -1500,9 +1503,10 @@ impl CodeEditor {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, DefaultNone)]
+#[derive(Clone, Copy, Debug, PartialEq, DefaultNone)]
 pub enum CodeEditorAction {
     TextDidChange,
+    UnhandledKeyDown(KeyEvent),
     None
 }
 

@@ -8,6 +8,7 @@ use {
             FileNotification,
             FileRequest,
             FileResponse,
+            SearchItem,
             SearchResult,
             SaveKind,
             SaveFileResponse,
@@ -82,8 +83,8 @@ impl FileServerConnection {
     /// sending back the response.
     pub fn handle_request(&self, request: FileRequest) -> FileResponse {
         match request {
-            FileRequest::Search{what, id}=>{
-                self.search_start(what, id);
+            FileRequest::Search{set, id}=>{
+                self.search_start(set, id);
                 FileResponse::SearchInProgress(id)
             }
             FileRequest::LoadFileTree {with_data} => FileResponse::LoadFileTree(self.load_file_tree(with_data)),
@@ -92,21 +93,20 @@ impl FileServerConnection {
         }
     }
     
-    fn search_start(&self, what:String, id:u64) {
+    fn search_start(&self, what:Vec<SearchItem>, id:u64) {
         let mut sender = self._notification_sender.clone();
         let root_path = self.shared.read().unwrap().root_path.clone();
         thread::spawn(move || {
             
             // A recursive helper function for traversing the entries of a directory and creating the
             // data structures that describe them.
-            fn search_files(id: u64, what:&[u8], path: &Path, string_path:&str, sender: &mut Box<dyn NotificationSender>, last_send: &mut Instant, results: &mut Vec<SearchResult>) {
+            fn search_files(id: u64, set:&Vec<SearchItem>, path: &Path, string_path:&str, sender: &mut Box<dyn NotificationSender>, last_send: &mut Instant, results: &mut Vec<SearchResult>) {
                 if let Ok(entries) = fs::read_dir(path){
                     for entry in entries{
                         if let Ok(entry) = entry{
                             let entry_path = entry.path();
                             let name = entry.file_name();
                             if let Ok(name) = name.into_string() {
-                                //let name = name.to_string_lossy().to_string();
                                 if entry_path.is_file() && !name.ends_with(".rs") || entry_path.is_dir() && name == "target"
                                 || name.starts_with('.') {
                                     continue;
@@ -121,38 +121,63 @@ impl FileServerConnection {
                             let entry_string_path = if string_path != ""{format!("{}/{}", string_path, entry_string_name)}else {entry_string_name};
                             
                             if entry_path.is_dir() {
-                                search_files(id, what, &entry_path, &entry_string_path, sender, last_send, results);
+                                search_files(id, set, &entry_path, &entry_string_path, sender, last_send, results);
                             }
                             else if entry_path.is_file() {
                                 let mut rk_results = Vec::new();
                                 if let Ok(bytes) = fs::read(&entry_path){
                                     // lets look for what in bytes
                                     // if we find thigns we emit it on the notification send
-                                    makepad_rabin_karp::search(&bytes, what, &mut rk_results);
-                                    for result in rk_results{
-                                        let mut line_count = 0;
-                                        for i in result.new_line_byte..bytes.len()+1{
-                                            if i < bytes.len() && bytes[i] == b'\n'{
-                                                line_count += 1;
+                                    fn is_word_char(b: u8)->bool{
+                                        b == b':' || b >= b'0' && b<= b'9' || b >= b'A' && b <= b'Z' || b >= b'a' && b <= b'z' || b>126
+                                    }
+                                    for item in set{
+                                        let needle_bytes = item.needle.as_bytes();
+                                        makepad_rabin_karp::search(&bytes, &needle_bytes, &mut rk_results);
+                                        for result in &rk_results{
+                                            
+                                            if item.pre_word_boundary && result.byte > 0 && is_word_char(bytes[result.byte-1]){
+                                                continue
                                             }
-                                            if i == bytes.len() || bytes[i] == b'\n' && line_count == 4{
-                                                if let Ok(result_line) = str::from_utf8(&bytes[result.new_line_byte..i]){
-                                                    // lets output it to our results
-                                                    results.push(SearchResult{
-                                                        file_name: entry_string_path.clone(),
-                                                        line: result.line,
-                                                        column_byte: result.column_byte,
-                                                        result_line: result_line.to_string()
-                                                    });
+                                            if item.post_word_boundary && result.byte + needle_bytes.len() < bytes.len() && is_word_char(bytes[result.byte + needle_bytes.len()]){
+                                                continue
+                                            }
+                                            if let Some(prefixes) = &item.prefixes{
+                                                // alright so prefixes as_bytes should be right before the match
+                                                if !prefixes.iter().any(|prefix|{
+                                                    let pb = prefix.as_bytes();
+                                                    if result.byte > pb.len(){
+                                                        if &bytes[result.byte - pb.len()..result.byte] == pb{
+                                                            return true
+                                                        }
+                                                    }
+                                                    false
+                                                }){
+                                                    continue
                                                 }
-                                                break;
+                                            }
+                                             
+                                            let mut line_count = 0;
+                                            for i in result.new_line_byte..bytes.len()+1{
+                                                if i < bytes.len() && bytes[i] == b'\n'{
+                                                    line_count += 1;
+                                                }
+                                                if i == bytes.len() || bytes[i] == b'\n' && line_count == 4{
+                                                    if let Ok(result_line) = str::from_utf8(&bytes[result.new_line_byte..i]){
+                                                        // lets output it to our results
+                                                       results.push(SearchResult{
+                                                            file_name: entry_string_path.clone(),
+                                                            line: result.line,
+                                                            column_byte: result.column_byte,
+                                                            result_line: result_line.to_string()
+                                                        });
+                                                    }
+                                                    break;
+                                                }
                                             }
                                         }
+                                        rk_results.clear();
                                     }
-                                    // alright lets spit some search results back
-                                    // println!("SEARCHING {:?} results {}", entry_string_path, indices.len());
-                                    // we need to figure out which 'line/col' indices are on
-                                    
                                 }
                             }
                         }
@@ -172,8 +197,13 @@ impl FileServerConnection {
             }
             let mut last_send = Instant::now();
             let mut results = Vec::new();
-            search_files(id, &what.as_bytes(), &root_path, "", &mut sender, &mut last_send, &mut results);
-            
+            search_files(id, &what, &root_path, "", &mut sender, &mut last_send, &mut results);
+            if results.len()>0{
+                sender.send_notification(FileNotification::SearchResults{
+                    id,
+                    results
+                });
+            }
         });
     }
     

@@ -822,6 +822,33 @@ impl CodeSession {
             .redo(self.id, &self.selection_state.borrow().selections)
     }
 
+    /// Returns the word at the main cursor position as a String.
+    pub fn word_at_cursor(&self) -> Option<String> {
+        let selection_state = self.selection_state.borrow();
+        if let Some(index) = selection_state.last_added_selection_index {
+            let cursor = selection_state.selections[index].cursor;
+            let position = cursor.position;
+            let text = self.document().as_text();
+            let lines = text.as_lines();
+            
+            // Handle empty document or invalid cursor position
+            if lines.is_empty() || position.line_index >= lines.len() {
+                return None;
+            }
+            
+            let line = &lines[position.line_index];
+            let word_separators = &self.settings.word_separators;
+            
+            // Find word boundaries
+            let start_byte_index = line.find_prev_word_boundary(position.byte_index, word_separators);
+            let end_byte_index = line.find_next_word_boundary(position.byte_index, word_separators);
+            if start_byte_index!=end_byte_index{
+                return Some(line[start_byte_index..end_byte_index].to_string())
+            }
+        }
+        None
+    }
+
     pub fn handle_changes(&mut self) {
         while let Ok((selections, edits)) = self.edit_receiver.try_recv() {
             self.update_after_edit(selections, &edits);

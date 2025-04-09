@@ -7,6 +7,7 @@ use crate::{
     makepad_micro_serde::*,
     makepad_widgets::file_tree::*,
     makepad_platform::os::cx_stdin::*,
+    makepad_file_protocol::SearchItem,
     file_system::file_system::*,
     studio_editor::*,
     run_view::*,
@@ -515,10 +516,32 @@ impl MatchEvent for App{
         
         if let Some(action) = action.as_widget_action(){
             match action.cast(){
+                CodeEditorAction::UnhandledKeyDown(ke) if ke.key_code == KeyCode::F12=>{
+                    if let Some(word) = self.data.file_system.get_word_under_cursor_for_session(action.path.from_end(1)){
+                        dock.select_tab(cx, live_id!(search));
+                        let set = vec![SearchItem{
+                            needle:word.clone(), 
+                            prefixes: Some(vec![
+                                format!("struct "),
+                                format!("enum "),
+                                format!("fn "),
+                                format!("type "),
+                                format!("trait "),
+                                format!("pub ")
+                            ]),
+                            pre_word_boundary:true,
+                            post_word_boundary:true
+                        }];
+                        search.text_input(id!(search_input)).set_text(cx, &word);
+                        //search.text_input(id!(search_input)).set_text(cx, &set.iter().map(|v| v.needle.clone()).collect::<Vec<String>>().join("\\b|"));
+                        self.data.file_system.search_string(cx, set);
+                    } 
+                },
                 CodeEditorAction::TextDidChange => {
                     // lets write the file
                     self.data.file_system.request_save_file_for_tab_id(action.path.from_end(1), false)
                 }
+                CodeEditorAction::UnhandledKeyDown(_)=>{}
                 CodeEditorAction::None=>{}
             }
             
