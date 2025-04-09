@@ -21,7 +21,7 @@ live_design! {
             uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_DOWN)
-            uniform color_focus: (#0f0)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -51,7 +51,7 @@ live_design! {
             uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_DOWN)
-            uniform color_focus: (#f0f)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
 
             fn get_color(self) -> vec4 {
                 return mix(
@@ -80,17 +80,17 @@ live_design! {
             uniform color: (THEME_COLOR)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_down: (THEME_COLOR_OUTSET_DOWN)
-            uniform color_focus: (#ff0)
+            uniform color_focus: (THEME_COLOR_OUTSET_FOCUS)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT_HOVER)
             uniform border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_focus: (#f00)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_2_focus: (#0ff)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -221,22 +221,22 @@ live_design! {
             uniform color_1: (THEME_COLOR)
             uniform color_1_hover: (THEME_COLOR)
             uniform color_1_down: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
-            uniform color_1_focus: (#f00)
+            uniform color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
 
             uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
             uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
             uniform color_2_down: (THEME_COLOR_OUTSET_DOWN)
-            uniform color_2_focus: (#0ff)
+            uniform color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
-            border_color_1_focus: (#f00)
+            border_color_1_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             border_color_2: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
-            border_color_2_focus: (#f0f)
+            border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -300,23 +300,23 @@ live_design! {
 
             color_1: (THEME_COLOR)
             color_1_hover: (THEME_COLOR)
-            color_1_down: (#3)
-            color_1_focus: (#f00)
+            color_1_down: (THEME_COLOR_OUTSET_1_DOWN)
+            color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
 
             color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.5)
             color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 0.25)
-            color_2_down: (#4)
-            color_2_focus: (#0f0)
+            color_2_down: (THEME_COLOR_OUTSET_2_DOWN)
+            color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT * 1.5)
             border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
-            border_color_1_focus: (#0ff)
+            border_color_1_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             border_color_2: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
-            border_color_2_focus: (#f00)
+            border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -393,12 +393,12 @@ live_design! {
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
-            border_color_1_focus: (#0ff)
+            border_color_1_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             border_color_2: (THEME_COLOR_D_HIDDEN)
             border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
-            border_color_2_focus: (#f00)
+            border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
         }
         
@@ -416,12 +416,12 @@ live_design! {
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_U_HIDDEN)
             border_color_1_down: (THEME_COLOR_U_HIDDEN)
-            border_color_1_focus: (#f00)
+            border_color_1_focus: (THEME_COLOR_U_HIDDEN)
 
             border_color_2: (THEME_COLOR_D_HIDDEN)
             border_color_2_hover: (THEME_COLOR_D_HIDDEN)
             border_color_2_down: (THEME_COLOR_D_HIDDEN)
-            border_color_2_focus: (#0ff)
+            border_color_2_focus: (THEME_COLOR_U_HIDDEN)
 
         }
         
