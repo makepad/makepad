@@ -32,7 +32,7 @@ use {
 // Mouse events
 
 
-#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, Eq, PartialEq)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,
