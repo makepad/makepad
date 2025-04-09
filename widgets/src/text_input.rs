@@ -88,15 +88,6 @@ live_design!{
                         self.color_focus,
                         self.focus
                     )
-                    // mix(
-                    //     mix(
-                    //         mix(self.color, self.color_hover, self.hover),
-                    //         self.color_focus,
-                    //         self.focus
-                    //     ),
-                    //     mix(self.color_empty, self.color_empty_focus, self.hover),
-                    //     self.is_empty
-                    // )
                 )
                 
                 return sdf.result
