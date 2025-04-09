@@ -8,12 +8,14 @@ use {
             FileNotification,
             FileRequest,
             FileResponse,
+            SearchResult,
             SaveKind,
             SaveFileResponse,
             OpenFileResponse
         },
     },
     std::{
+        time::Instant,
         thread,
         cmp::Ordering,
         fmt,
@@ -68,6 +70,7 @@ pub struct FileServerConnection {
     // Used to send notifications for this connection.
     _notification_sender: Box<dyn NotificationSender>,
     open_files: Arc<Mutex<Vec<(String, u64, Vec<u8>)>>>,
+    
     stop_observation: Arc<Mutex<bool>>,
 }
 
@@ -77,13 +80,96 @@ impl FileServerConnection {
     /// The embedder is responsible for receiving requests, calling this method to handle them, and
     /// sending back the response.
     pub fn handle_request(&self, request: FileRequest) -> FileResponse {
-        
-        
         match request {
+            FileRequest::Search{what, id}=>{
+                self.search_start(what, id);
+                FileResponse::SearchInProgress(id)
+            }
             FileRequest::LoadFileTree {with_data} => FileResponse::LoadFileTree(self.load_file_tree(with_data)),
             FileRequest::OpenFile{path,id} => FileResponse::OpenFile(self.open_file(path, id)),
             FileRequest::SaveFile{path, data, id, patch} => FileResponse::SaveFile(self.save_file(path, data, id, patch)),
         }
+    }
+    
+    fn search_start(&self, what:String, id:u64) {
+        let mut sender = self._notification_sender.clone();
+        let root_path = self.shared.read().unwrap().root_path.clone();
+        thread::spawn(move || {
+            
+            // A recursive helper function for traversing the entries of a directory and creating the
+            // data structures that describe them.
+            fn search_files(id: u64, what:&[u8], path: &Path, string_path:&str, sender: &mut Box<dyn NotificationSender>, last_send: &mut Instant, results: &mut Vec<SearchResult>) {
+                if let Ok(entries) = fs::read_dir(path){
+                    for entry in entries{
+                        if let Ok(entry) = entry{
+                            let entry_path = entry.path();
+                            let name = entry.file_name();
+                            if let Ok(name) = name.into_string() {
+                                //let name = name.to_string_lossy().to_string();
+                                if entry_path.is_file() && !name.ends_with(".rs") || entry_path.is_dir() && name == "target"
+                                || name.starts_with('.') {
+                                    continue;
+                                }
+                            }
+                            else {
+                                // Skip over entries with a non UTF-8 file name.
+                                continue;
+                            }
+                            
+                            let entry_string_name = entry.file_name().to_string_lossy().to_string();
+                            let entry_string_path = if string_path != ""{format!("{}/{}", string_path, entry_string_name)}else {entry_string_name};
+                            
+                            if entry_path.is_dir() {
+                                search_files(id, what, &entry_path, &entry_string_path, sender, last_send, results);
+                            }
+                            else if entry_path.is_file() {
+                                let mut rk_results = Vec::new();
+                                if let Ok(bytes) = fs::read(&entry_path){
+                                    // lets look for what in bytes
+                                    // if we find thigns we emit it on the notification send
+                                    makepad_rabin_karp::search(&bytes, what, &mut rk_results);
+                                    for result in rk_results{
+                                        for i in result.new_line_byte..bytes.len()+1{
+                                            if i == bytes.len() || bytes[i] == b'\n'{
+                                                if let Ok(result_line) = str::from_utf8(&bytes[result.new_line_byte..i]){
+                                                    // lets output it to our results
+                                                    results.push(SearchResult{
+                                                        file_name: entry_string_path.clone(),
+                                                        line: result.line,
+                                                        column_byte: result.column_byte,
+                                                        result_line: result_line.to_string()
+                                                    });
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    // alright lets spit some search results back
+                                    // println!("SEARCHING {:?} results {}", entry_string_path, indices.len());
+                                    // we need to figure out which 'line/col' indices are on
+                                    
+                                }
+                            }
+                        }
+                        // lets compare time
+                        if last_send.elapsed().as_secs_f64()>0.1{
+                            *last_send = Instant::now();
+                            let  mut new_results = Vec::new();
+                            std::mem::swap(results, &mut new_results);
+                            sender.send_notification(FileNotification::SearchResults{
+                                id,
+                                results: new_results
+                            });
+                            
+                        }
+                    }
+                }
+            }
+            let mut last_send = Instant::now();
+            let mut results = Vec::new();
+            search_files(id, &what.as_bytes(), &root_path, "", &mut sender, &mut last_send, &mut results);
+            
+        });
     }
     
     // Handles a `LoadFileTree` request.
