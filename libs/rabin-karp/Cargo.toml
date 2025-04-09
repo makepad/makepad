@@ -1,6 +1,13 @@
 [package]
 name = "makepad-rabin-karp"
 version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
+description = "Makepad shell functions"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "FjnKHgx3ocKp3y5TQqN41-_8lrc="
 
-[workspace]
+[features] 
+[dependencies]

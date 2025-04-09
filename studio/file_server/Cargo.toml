@@ -13,4 +13,4 @@ metadata.makepad-auto-version = "K1ZQL60Gs8fF9js94ms2TAZwPKQ="
 makepad-live-id = { path = "../../libs/live_id", version = "0.4.0"}
 makepad-micro-serde = {path = "../../libs/micro_serde", version = "0.4.0"}
 makepad-file-protocol = {path="../file_protocol", version="0.5.0"}
-
+makepad-rabin-karp = {path="../../libs/rabin-karp",version="0.1.0"}

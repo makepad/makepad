@@ -149,7 +149,7 @@ live_design!{
                 fold = <FoldButton> {
                     height: 25, width: 15,
                     margin: { left: (THEME_SPACE_2) }
-                    animator: { active = { default: off } },
+                    animator: { active = { default: off } }
                     draw_bg: {
                         uniform size: 3.75;
                         instance active: 0.0
@@ -258,7 +258,6 @@ impl RunList{
             item.draw_all(cx, &mut Scope::empty());
             counter += 1;
         }
-            
     }
 }
 
