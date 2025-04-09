@@ -69,6 +69,7 @@ live_design!{
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
 
             uniform arrow_color: (THEME_COLOR_TEXT)
+            uniform arrow_color_focus: (#f00)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
             
             fn pixel(self) -> vec4 {
@@ -86,7 +87,17 @@ live_design!{
                 sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
                 
-                sdf.fill_keep(mix(self.arrow_color, self.arrow_color_hover, self.hover));
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            self.arrow_color,
+                            self.arrow_color_focus,
+                            self.focus
+                        ),
+                        self.arrow_color_hover,
+                        self.hover
+                    )
+                );
 
                 sdf.box(
                     1.,
@@ -237,6 +248,7 @@ live_design!{
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
 
             uniform arrow_color: (THEME_COLOR_TEXT)
+            uniform arrow_color_focus: (#f00)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
             
             fn pixel(self) -> vec4 {
@@ -254,7 +266,17 @@ live_design!{
                 sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
                 
-                sdf.fill_keep(mix(self.arrow_color, self.arrow_color_hover, self.hover));
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            self.arrow_color,
+                            self.arrow_color_focus,
+                            self.focus
+                        ),
+                        self.arrow_color_hover,
+                        self.hover
+                    )
+                )
 
                 sdf.box(
                     1.,
@@ -323,6 +345,7 @@ live_design!{
             border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
             
             arrow_color: (THEME_COLOR_TEXT)
+            arrow_color_focus: (#f00)
             arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
 
             fn pixel(self) -> vec4 {
@@ -340,7 +363,17 @@ live_design!{
                 sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
                 
-                sdf.fill_keep(mix(self.arrow_color, self.arrow_color_hover, self.hover));
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            self.arrow_color,
+                            self.arrow_color_focus,
+                            self.focus
+                        ),
+                        self.arrow_color_hover,
+                        self.hover
+                    )
+                )
 
                 sdf.box(
                     1.,
