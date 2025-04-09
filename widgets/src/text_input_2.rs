@@ -549,6 +549,19 @@ impl Widget for TextInput2 {
             Hit::TextCopy(event) => {
                 *event.response.borrow_mut() = Some(self.selected_text().to_string());
             }
+            Hit::TextCut(event) => {
+                *event.response.borrow_mut() = Some(self.selected_text().to_string());
+                if !self.selected_text().is_empty() {
+                    self.history.create_or_extend_edit_group(EditKind::Other, self.selection);
+                    self.apply_edit(Edit {
+                        start: self.selection.start().index,
+                        end: self.selection.end().index,
+                        replace_with: String::new(),
+                    });
+                    self.draw_bg.redraw(cx);
+                    cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
+                }
+            }
             _ => {}
         }
     }
