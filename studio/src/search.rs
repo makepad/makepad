@@ -3,8 +3,9 @@ use {
     crate::{
         file_system::file_system::FileSystem,
         makepad_platform::studio::JumpToFile,
-        app::{AppData},
+        app::{AppAction, AppData},
         makepad_widgets::*,
+        makepad_code_editor::code_view::*,
     },
     std::{
         env,
@@ -83,6 +84,7 @@ live_design!{
             
             code_view = <CodeView>{
                 editor:{
+                    draw_bg: { color: (#0000) }
                     margin:{left:25}
                 }
             }
@@ -162,7 +164,7 @@ impl Search{
                         // alright what do we do
                        //tf.draw_item_counted(cx, map_level_to_icon(msg.level));
                         //let fold_button = if msg.explanation.is_some(){
-                        let _fold_button = tf.draw_item_counted_ref(cx, live_id!(fold_button));//.as_fold_button()
+                        let fold_button = tf.draw_item_counted_ref(cx, live_id!(fold_button)).as_fold_button();
                         //}
                         //else{
                         //    Default::default()
@@ -175,18 +177,22 @@ impl Search{
                         
                         tf.draw_link(cx, live_id!(link), JumpToFileLink{item_id}, &location);
                         
-                        tf.draw_text(cx, &res.result_line);
-                        
+                        //tf.draw_text(cx, &res.result_line);
+                        let code = tf.item_counted(cx, live_id!(code_view));
+                        code.set_text(cx, &res.result_line.lines().next().unwrap());
+                        code.draw_all_unscoped(cx);
+                                                
+                        let open = fold_button.open_float();
+                        if open > 0.0{
+                            cx.turtle_new_line();
+                            let code = tf.item_counted(cx, live_id!(code_view));
+                            code.set_text(cx, &res.result_line);
+                            code.as_code_view().borrow_mut().unwrap().editor.height_scale = open;
+                            code.draw_all_unscoped(cx);
+                        }
                         // lets check 
                         /*if let Some(explanation) = &msg.explanation{
-                            let open = fold_button.open_float();
-                            if open > 0.0{
-                                cx.turtle_new_line();
-                                let code = tf.item_counted(cx, live_id!(code_view));
-                                code.set_text(cx, explanation);
-                                code.as_code_view().borrow_mut().unwrap().editor.height_scale = open;
-                                code.draw_all_unscoped(cx);
-                            }
+                            
                         };*/
                     }
                 }
@@ -220,21 +226,15 @@ impl Widget for Search {
             if search_results.any_items_with_actions(&actions) {
                 // alright lets figure out if someone clicked a link
                 // alright so how do we now filter which link was clicked
-               /* for jtf in actions.filter_actions_data::<JumpToFileLink>(){
-                    // ok we have a JumpToFile link
-                    if let Some((_build_id, log_item)) = data.build_manager.log.get(jtf.item_id) {
-                        match log_item {
-                            LogItem::Location(msg) => {
-                                cx.action(AppAction::JumpTo(JumpToFile{
-                                    file_name: msg.file_name.clone(), 
-                                    line: msg.start.line_index as u32,
-                                    column: msg.start.byte_index as u32
-                                }));
-                            }
-                            _ => ()
-                        }
+                for jtf in actions.filter_actions_data::<JumpToFileLink>(){
+                    if let Some(res) = data.file_system.search_results.get(jtf.item_id) {
+                        cx.action(AppAction::JumpTo(JumpToFile{
+                            file_name: res.file_name.clone(), 
+                            line: res.line as u32,
+                            column: res.column_byte as u32
+                        }));
                     }
-                }*/
+                }
             }
         }
     }
