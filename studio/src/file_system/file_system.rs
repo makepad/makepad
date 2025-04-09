@@ -10,6 +10,7 @@ use {
         ai_chat::ai_chat_manager::AiChatDocument,
         makepad_file_protocol::{
             SearchResult,
+            SearchItem,
             FileRequest,
             FileError,
             FileResponse,
@@ -116,12 +117,12 @@ impl FileSystem {
         self.reload_file_tree();
     }
     
-    pub fn search_string(&mut self, _cx:&mut Cx, what:String){
+    pub fn search_string(&mut self, _cx:&mut Cx, set:Vec<SearchItem>){
         self.search_results_id += 1;
         self.search_results.clear();
         self.file_client.send_request(FileRequest::Search{
             id: self.search_results_id,
-            what
+            set
         });
         //cx.action( FileSystemAction::SearchResults );
     }
@@ -153,6 +154,13 @@ impl FileSystem {
             if *id == file_node {
                 return Some(*tab)
             }
+        }
+        None
+    }
+    
+    pub fn get_word_under_cursor_for_session(&mut self, tab_id: LiveId)->Option<String> {
+        if let Some(EditSession::Code(session)) = self.tab_id_to_session.get(&tab_id){
+            return session.word_at_cursor();
         }
         None
     }
