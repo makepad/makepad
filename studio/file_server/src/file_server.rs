@@ -129,8 +129,12 @@ impl FileServerConnection {
                                     // if we find thigns we emit it on the notification send
                                     makepad_rabin_karp::search(&bytes, what, &mut rk_results);
                                     for result in rk_results{
+                                        let mut line_count = 0;
                                         for i in result.new_line_byte..bytes.len()+1{
-                                            if i == bytes.len() || bytes[i] == b'\n'{
+                                            if i < bytes.len() && bytes[i] == b'\n'{
+                                                line_count += 1;
+                                            }
+                                            if i == bytes.len() || bytes[i] == b'\n' && line_count == 4{
                                                 if let Ok(result_line) = str::from_utf8(&bytes[result.new_line_byte..i]){
                                                     // lets output it to our results
                                                     results.push(SearchResult{
