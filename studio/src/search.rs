@@ -86,7 +86,10 @@ live_design!{
                 editor:{
                     word_wrap: false
                     draw_bg: { color: (#0000) }
-                    margin:{left:25}
+                    margin:{left:15}
+                    draw_text: {
+                       // text_style: {font_size:7}
+                    }
                 }
             }
             
@@ -179,18 +182,17 @@ impl Search{
                         tf.draw_link(cx, live_id!(link), JumpToFileLink{item_id}, &location);
                         
                         //tf.draw_text(cx, &res.result_line);
-                        let code = tf.item_counted(cx, live_id!(code_view));
-                        code.set_text(cx, &res.result_line.lines().next().unwrap().trim());
-                        code.draw_all_unscoped(cx);
-                                                
+                        
                         let open = fold_button.open_float();
-                        if open > 0.0{
-                            cx.turtle_new_line();
-                            let code = tf.item_counted(cx, live_id!(code_view));
-                            code.set_text(cx, &res.result_line);
-                            code.as_code_view().borrow_mut().unwrap().editor.height_scale = open;
-                            code.draw_all_unscoped(cx);
+                        cx.turtle_new_line();
+                        let code = tf.item_counted(cx, live_id!(code_view));
+                        code.set_text(cx, &res.result_line);
+                        if let Some(mut code_view) = code.as_code_view().borrow_mut(){
+                            code_view.lazy_init_session();
+                            let lines = code_view.session.as_ref().unwrap().document().as_text().as_lines().len();
+                            code_view.editor.height_scale = open.max(1.0 / (lines + 1) as f64);
                         }
+                        code.draw_all_unscoped(cx);
                         // lets check 
                         /*if let Some(explanation) = &msg.explanation{
                             
