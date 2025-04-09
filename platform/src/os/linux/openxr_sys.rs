@@ -2,20 +2,46 @@
 use crate::module_loader::ModuleLoader;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
+use std::fmt;
+use std::mem;
+use std::ffi::CStr;
 
+pub const MAX_APPLICATION_NAME_SIZE: usize = 128usize;
+pub const MAX_ENGINE_NAME_SIZE: usize = 128usize;
+
+#[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrInstance(u64);
 
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct XrVersion(u64);
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct XrInstanceCreateFlags(u64);
+
 pub type XrVoidFunction = unsafe extern "system" fn();
+pub type TxrGetInstanceProcAddr = unsafe extern "system" fn(
+    instance: XrInstance,
+    name: *const c_char,
+    function: *mut Option<XrVoidFunction>,
+) -> XrResult;
 
-pub type PFNXRGETINSTANCEPROCADDR = Option<
-    unsafe extern "system" fn(
-        instance: XrInstance,
-        name: *const c_char,
-        function: *mut Option<XrVoidFunction>,
-    ) -> XrResult,
->;
+pub type TxrCreateInstance = unsafe extern "system" fn(
+    create_info: *const XrInstanceCreateInfo,
+    instance: *mut XrInstance,
+) -> XrResult;
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrApplicationInfo {
+    pub application_name: [c_char; MAX_APPLICATION_NAME_SIZE],
+    pub application_version: u32,
+    pub engine_name: [c_char; MAX_ENGINE_NAME_SIZE],
+    pub engine_version: u32,
+    pub api_version: XrVersion,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -31,6 +57,8 @@ pub struct XrInstanceCreateInfo {
 }
 
 pub struct LibOpenXr {
+    xrCreateInstance:Option<TxrCreateInstance>,
+    xrGetInstanceProcAddr: Option<TxrGetInstanceProcAddr>,
     /*
     xrAcquireSwapchainImage
     xrApplyHapticFeedback
@@ -39,9 +67,7 @@ pub struct LibOpenXr {
     xrBeginSession
     xrCreateAction
     xrCreateActionSet
-    xrCreateActionSpace*/
-    xrCreateInstance:PFNXRCREATEINSTANCE
-    /*
+    xrCreateActionSpace
     xrCreateReferenceSpace
     xrCreateSession
     xrCreateSwapchain
@@ -89,36 +115,34 @@ pub struct LibOpenXr {
     xrWaitFrame
     xrWaitSwapchainImage
     */
-    xrGetInstanceProcAddr: PFNXRGETINSTANCEPROCADDR,
     _keep_module_alive: ModuleLoader,
 }
-
-use std::ffi::CStr;
 
 impl LibOpenXr {
     pub fn try_load() -> Option<LibOpenXr> {
         let module = ModuleLoader::load("libopenxr_loader.so").ok()?;
 
-        let xrGetInstanceProcAddr: PFNXRGETINSTANCEPROCADDR =
+        let gipa: Option<TxrGetInstanceProcAddr> = 
             module.get_symbol("xrGetInstanceProcAddr").ok();
             
-        // alright! lets get some function pointers
-        crate::log!("GOT: {:?}", xrGetInstanceProcAddr);
-            
-        macro_rules! get_ext_fn {
-            ($name:literal) => {
-                xrGetInstanceProcAddr.and_then(|gpa| unsafe {
-                    std::mem::transmute(gpa(CStr::from_bytes_with_nul(
-                        concat!($name, "\0").as_bytes(),
-                    )
-                    .unwrap()
-                    .as_ptr()))
-                })
+        macro_rules! get_proc_addr {
+            ($get_addr:expr, $inst:expr, $name:literal) => {
+                unsafe{mem::transmute($get_addr.and_then(|addr| {
+                    let mut f = None;
+                    addr(
+                        $inst, 
+                        CStr::from_bytes_with_nul(concat!($name, "\0").as_bytes()).unwrap().as_ptr(),
+                        &mut f
+                    );
+                    f
+                }))}
             };
         }
-
+        let xrCreateInstance:Option<TxrCreateInstance> = get_proc_addr!(gipa, XrInstance(0), "xrCreateInstance");
+        
         Some(LibOpenXr {
-            xrGetInstanceProcAddr,
+            xrGetInstanceProcAddr: gipa,
+            xrCreateInstance,
             _keep_module_alive: module
         })
     }
