@@ -38,35 +38,35 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color: (THEME_COLOR)
-            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
-            uniform color_focus: (#f00)
+            uniform color_hover: (THEME_COLOR_INSET_HOVER)
+            uniform color_active: (THEME_COLOR_INSET_ACTIVE)
+            uniform color_focus: (THEME_COLOR_INSET_FOCUS)
 
             uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_INSET_1)
             uniform color_1_active: (THEME_COLOR_INSET_1)
-            uniform color_1_focus: (#f00)
+            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_INSET_2)
             uniform color_2_active: (THEME_COLOR_INSET_2)
-            uniform color_2_focus: (#0ff)
+            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_focus: (#0f0)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_2_focus: (#0ff)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
             uniform mark_color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
-            uniform mark_color_focus: (#0ff)
-            uniform mark_color_active_focus: (#00f)
+            uniform mark_color_focus: (THEME_COLOR_MARK_HOVER)
+            uniform mark_color_active_focus: (THEME_COLOR_MARK_ACTIVE_FOCUS)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             
             fn pixel(self) -> vec4 {
@@ -214,7 +214,7 @@ live_design!{
             uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT)
             uniform color_active: (THEME_COLOR_TEXT)
-            uniform color_focus: (#f00)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
                 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -240,13 +240,12 @@ live_design!{
             uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_WHITE)
             uniform color_1_active: (THEME_COLOR_TEXT_ACTIVE)
-            uniform color_1_focus: (#0f0)
-
+            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_WHITE)
             uniform color_2_active: (THEME_COLOR_TEXT_ACTIVE)
-            uniform color_2_focus: (#00f)
+            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             fn get_color(self) -> vec4 {
                 return mix(
@@ -343,22 +342,22 @@ live_design!{
             color_1: (THEME_COLOR_INSET)
             color_1_hover: (THEME_COLOR_INSET_HOVER)
             color_1_active: (THEME_COLOR_INSET_ACTIVE)
-            color_1_focus: (#f00)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET)
             color_2_hover: (THEME_COLOR_INSET_HOVER)
             color_2_active: (THEME_COLOR_INSET_ACTIVE)
-            color_2_focus: (#f)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL)
             border_color_1_active: (THEME_COLOR_BEVEL)
-            border_color_1_focus: (#00f)
+            border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             border_color_2: (THEME_COLOR_BEVEL)
             border_color_2_hover: (THEME_COLOR_BEVEL)
             border_color_2_active: (THEME_COLOR_BEVEL)
-            border_color_2_focus: (#0f0)
+            border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
         }
 
     }
@@ -370,12 +369,12 @@ live_design!{
             color_1: (THEME_COLOR_INSET)
             color_1_hover: (THEME_COLOR_INSET_HOVER)
             color_1_active: (THEME_COLOR_INSET_ACTIVE)
-            color_1_focus: (#f00)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET)
             color_2_hover: (THEME_COLOR_INSET_HOVER)
             color_2_active: (THEME_COLOR_INSET_ACTIVE)
-            color_2_focus: (#0ff)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
         }
 
     }
@@ -392,32 +391,32 @@ live_design!{
             uniform color: (THEME_COLOR)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
-            uniform color_focus: (#f)
+            uniform color_focus: (THEME_COLOR_INSET_FOCUS)
 
             uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_INSET_1)
             uniform color_1_active: (THEME_COLOR_INSET_1)
-            uniform color_1_focus: (#0ff)
+            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_INSET_2)
             uniform color_2_active: (THEME_COLOR_INSET_2)
-            uniform color_2_focus: (#00f)
+            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_focus: (#f0f)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_2_focus: (#0ff)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
             uniform mark_color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform mark_color_focus: (#f00)
-            uniform mark_color_active_focus: (#ff0)
+            uniform mark_color_focus: (THEME_COLOR_MARK_HOVER)
+            uniform mark_color_active_focus: (THEME_COLOR_MARK_ACTIVE_FOCUS)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             
@@ -561,22 +560,22 @@ live_design!{
             color_1: (THEME_COLOR)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
-            color_1_focus: (#f00)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
-            color_2_focus: (#00f)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
-            border_color_1_focus: (#f0f)
+            border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             border_color_2: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
-            border_color_2_focus: (#ff0)
+            border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
         }
 
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
@@ -596,10 +595,12 @@ live_design!{
             color_1: (THEME_COLOR)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
+            color_1_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
             color_2: (THEME_COLOR)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
+            color_2_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
@@ -639,22 +640,22 @@ live_design!{
             uniform color_1: (THEME_COLOR * 1.5)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
             uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
-            uniform color_1_active_focus: (#f00)
+            uniform color_1_active_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             uniform color_2: (THEME_COLOR)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
-            uniform color_2_active_focus: (#0ff)
+            uniform color_2_active_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_active_focus: (#0ff)
+            uniform border_color_1_active_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_2_active_focus: (#f00)
+            uniform border_color_2_active_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -733,22 +734,22 @@ live_design!{
             uniform color_1: (THEME_COLOR * 1.5)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
             uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
-            uniform color_1_active_focus: (#ff0)
+            uniform color_1_active_focus: (THEME_COLOR_INSET_1_ACTIVE_FOCUS)
 
             uniform color_2: (THEME_COLOR)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
-            uniform color_2_active_focus: (#f0f)
+            uniform color_2_active_focus: (THEME_COLOR_INSET_2_ACTIVE_FOCUS)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
-            uniform border_color_1_active_focus: (#0ff)
+            uniform border_color_1_active_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
-            uniform border_color_2_active_focus: (#f00)
+            uniform border_color_2_active_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
