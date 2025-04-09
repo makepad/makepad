@@ -3,11 +3,13 @@ use crate::module_loader::ModuleLoader;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
 use std::fmt;
-use std::mem;
 use std::ffi::CStr;
 
 pub const MAX_APPLICATION_NAME_SIZE: usize = 128usize;
 pub const MAX_ENGINE_NAME_SIZE: usize = 128usize;
+pub const MAX_EXTENSION_NAME_SIZE: usize = 128usize;
+pub const MAX_API_LAYER_NAME_SIZE: usize = 256usize;
+pub const MAX_API_LAYER_DESCRIPTION_SIZE: usize = 256usize;
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -21,17 +23,50 @@ pub struct XrVersion(u64);
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct XrInstanceCreateFlags(u64);
 
-pub type XrVoidFunction = unsafe extern "system" fn();
-pub type TxrGetInstanceProcAddr = unsafe extern "system" fn(
+pub type XrVoidFunction = unsafe extern "C" fn();
+pub type TxrGetInstanceProcAddr = unsafe extern "C" fn(
     instance: XrInstance,
     name: *const c_char,
-    function: *mut Option<XrVoidFunction>,
+    function: *mut XrVoidFunction,
 ) -> XrResult;
 
-pub type TxrCreateInstance = unsafe extern "system" fn(
+pub type TxrCreateInstance = unsafe extern "C" fn(
     create_info: *const XrInstanceCreateInfo,
     instance: *mut XrInstance,
 ) -> XrResult;
+
+pub type TxrEnumerateInstanceExtensionProperties = unsafe extern "C" fn(
+    layer_name: *const c_char,
+    property_capacity_input: u32,
+    property_count_output: *mut u32,
+    properties: *mut XrExtensionProperties,
+) -> XrResult;
+
+pub type TxrEnumerateApiLayerProperties = unsafe extern "C" fn(
+    property_capacity_input: u32,
+    property_count_output: *mut u32,
+    properties: *mut XrApiLayerProperties,
+) -> XrResult;
+
+pub type TxrInitializeLoaderKHR = unsafe extern "C" fn(
+    loader_init_info: *const LoaderInitInfoBaseHeaderKHR
+) -> XrResult;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct LoaderInitInfoBaseHeaderKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrExtensionProperties {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub extension_name: [c_char; MAX_EXTENSION_NAME_SIZE],
+    pub extension_version: u32,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -41,6 +76,17 @@ pub struct XrApplicationInfo {
     pub engine_name: [c_char; MAX_ENGINE_NAME_SIZE],
     pub engine_version: u32,
     pub api_version: XrVersion,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrApiLayerProperties {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub layer_name: [c_char; MAX_API_LAYER_NAME_SIZE],
+    pub spec_version: XrVersion,
+    pub layer_version: u32,
+    pub description: [c_char; MAX_API_LAYER_DESCRIPTION_SIZE],
 }
 
 #[repr(C)]
@@ -56,9 +102,46 @@ pub struct XrInstanceCreateInfo {
     pub enabled_extension_names: *const *const c_char,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrLoaderInitInfoAndroidKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub application_vm: *mut c_void,
+    pub application_context: *mut c_void,
+}
+
+impl XrLoaderInitInfoAndroidKHR {
+    pub const TYPE: XrStructureType = XrStructureType::LOADER_INIT_INFO_ANDROID_KHR;
+}
+
+pub fn xr_array_fetch<T, F, R>(s:usize, default:T, f:F)->(R,Vec<T>) where
+T: Clone,
+F:Fn(u32, *mut u32, *mut T)->R
+{
+    let s = if s == 0{
+        let mut len = 0;
+        f(0, &mut len, 0 as *mut _);
+        len as usize
+    }
+    else{
+        s
+    };
+    let mut v = Vec::new();
+    v.resize(s, default);
+    let ptr = v.as_mut_ptr();
+    let mut len = 0;
+    let r = f(v.len() as u32, &mut len, ptr as *mut _);
+    v.truncate(len as usize);
+    (r, v)
+}
+
 pub struct LibOpenXr {
-    xrCreateInstance:Option<TxrCreateInstance>,
-    xrGetInstanceProcAddr: Option<TxrGetInstanceProcAddr>,
+    pub xrCreateInstance:TxrCreateInstance,
+    pub xrGetInstanceProcAddr: TxrGetInstanceProcAddr,
+    pub xrEnumerateInstanceExtensionProperties: TxrEnumerateInstanceExtensionProperties,
+    pub xrEnumerateApiLayerProperties:TxrEnumerateApiLayerProperties,
+    pub xrInitializeLoaderKHR: TxrInitializeLoaderKHR,
     /*
     xrAcquireSwapchainImage
     xrApplyHapticFeedback
@@ -120,36 +203,42 @@ pub struct LibOpenXr {
 
 impl LibOpenXr {
     pub fn try_load() -> Option<LibOpenXr> {
-        crate::log!("GOT HERE!");
         let module = ModuleLoader::load("libopenxr_loader.so").ok()?;
-
-        let gipa: Option<TxrGetInstanceProcAddr> = 
-            module.get_symbol("xrGetInstanceProcAddr").ok();
-            
+        
+        let gipa:TxrGetInstanceProcAddr = 
+            module.get_symbol("xrGetInstanceProcAddr").ok().unwrap();
         macro_rules! get_proc_addr {
-            ($get_addr:expr, $inst:expr, $name:literal) => {
-                unsafe{mem::transmute($get_addr.and_then(|addr| {
-                    let mut f = None;
-                    addr(
+            ($get_addr:expr, $inst:expr,  $ty:ident) => {
+                unsafe{
+                    let mut f: *mut c_void = 0 as *mut _;
+                    $get_addr(
                         $inst, 
-                        CStr::from_bytes_with_nul(concat!($name, "\0").as_bytes()).unwrap().as_ptr(),
-                        &mut f
+                        CStr::from_bytes_with_nul(&concat!(stringify!($ty), "\0").as_bytes()[1..]).unwrap().as_ptr(),
+                        &mut f as *mut _ as _
                     );
-                    f
-                }))}
+                    if f.is_null() {
+                        crate::log!("GOT NULL {:?}", stringify!($ty));
+                        None
+                    }
+                    else{
+                        Some({ std::mem::transmute_copy::<_, $ty>(&f) })
+                    }
+                    //let f:Option<$ty> = mem::transmute(&mut f);
+                    //f
+                }
             };
         }
-        
-        let xrCreateInstance:Option<TxrCreateInstance> = get_proc_addr!(gipa, XrInstance(0), "xrCreateInstance"); 
-        
-        crate::log!("{:?}", xrCreateInstance);
-        
         Some(LibOpenXr {
             xrGetInstanceProcAddr: gipa,
-            xrCreateInstance,
+            xrCreateInstance: get_proc_addr!(gipa, XrInstance(0), TxrCreateInstance)?,
+            xrEnumerateInstanceExtensionProperties:  get_proc_addr!(gipa, XrInstance(0), TxrEnumerateInstanceExtensionProperties)?,
+            xrEnumerateApiLayerProperties: get_proc_addr!(gipa, XrInstance(0), TxrEnumerateApiLayerProperties)?,
+            xrInitializeLoaderKHR: get_proc_addr!(gipa, XrInstance(0), TxrInitializeLoaderKHR)?,
             _keep_module_alive: module
         })
     }
+    
+    
 }
 
 #[repr(transparent)]
