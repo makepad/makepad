@@ -84,6 +84,7 @@ live_design!{
             
             code_view = <CodeView>{
                 editor:{
+                    word_wrap: false
                     draw_bg: { color: (#0000) }
                     margin:{left:25}
                 }
