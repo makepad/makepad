@@ -64,8 +64,16 @@ live_design!{
                 sdf.rect(0, self.rect_size.y - slider_height * 1.25, self.rect_size.x, slider_height)
                 sdf.fill(
                     mix(
-                        mix(self.border_color_2, self.border_color_2_focus, self.focus),
-                        mix(self.border_color_2_hover, self.border_color_2_drag, self.drag),
+                        mix(
+                            self.border_color_2,
+                            self.border_color_2_focus,
+                            self.focus
+                        ),
+                        mix(
+                            self.border_color_2_hover,
+                            self.border_color_2_drag,
+                            self.drag
+                        ),
                         self.hover
                     )
                 );
