@@ -136,7 +136,7 @@ pub const ANDROID_META_ALT_MASK: u32 = 50;
 
 static mut SET_ACTIVITY_FN: unsafe fn(jni_sys::jobject) = |_| {};
 
-pub unsafe fn jni_init_globals(activity:*const std::ffi::c_void, from_java_tx: mpsc::Sender<FromJavaMessage>){
+pub unsafe fn jni_init_globals(activity:*const std::ffi::c_void, from_java_tx: mpsc::Sender<FromJavaMessage>)->*const std::ffi::c_void{
     if let Some(func) = makepad_android_state::get_activity_setter_fn() {
         // This will only occur once during the entire process lifetime.
         SET_ACTIVITY_FN = func;
@@ -146,6 +146,7 @@ pub unsafe fn jni_init_globals(activity:*const std::ffi::c_void, from_java_tx: m
     let activity = (**env).NewGlobalRef.unwrap()(env, activity as jni_sys::jobject);
     SET_ACTIVITY_FN(activity);
     *MESSAGES_TX.lock().unwrap() = Some(from_java_tx);
+    activity as * const _
 }
 
 pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
