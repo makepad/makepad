@@ -28,7 +28,7 @@ live_design!{
             uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT_HOVER)
             uniform color_down: (THEME_COLOR_TEXT_DOWN)
-            uniform color_focus: (#f00)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -55,7 +55,7 @@ live_design!{
             uniform color: (THEME_COLOR_TEXT),
             uniform color_hover: (THEME_COLOR_TEXT_HOVER),
             uniform color_down: (THEME_COLOR_TEXT_DOWN),
-            uniform color_focus: (#f00),
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
 
             wrap: Word
             text_style: <THEME_FONT_REGULAR>{
@@ -416,7 +416,7 @@ live_design!{
             uniform color: (THEME_COLOR_TEXT),
             uniform color_hover: (THEME_COLOR_TEXT_HOVER),
             uniform color_down: (THEME_COLOR_TEXT_DOWN),
-            uniform color_focus: (#f00),
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
 
             fn get_color(self) -> vec4 {
                 return mix(
