@@ -37,7 +37,7 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR)
+            uniform color: (THEME_COLOR_OUTSET)
             uniform color_hover: (THEME_COLOR_INSET_HOVER)
             uniform color_active: (THEME_COLOR_INSET_ACTIVE)
             uniform color_focus: (THEME_COLOR_INSET_FOCUS)
@@ -388,7 +388,7 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR)
+            uniform color: (THEME_COLOR_OUTSET)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
             uniform color_focus: (THEME_COLOR_INSET_FOCUS)
@@ -557,12 +557,12 @@ live_design!{
 
             border_size: (THEME_BEVELING)
 
-            color_1: (THEME_COLOR)
+            color_1: (THEME_COLOR_OUTSET)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
             color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
-            color_2: (THEME_COLOR)
+            color_2: (THEME_COLOR_OUTSET)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
             color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
@@ -592,12 +592,12 @@ live_design!{
             radio_type: Tab
             border_size: (THEME_BEVELING)
 
-            color_1: (THEME_COLOR)
+            color_1: (THEME_COLOR_OUTSET)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
             color_1_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
-            color_2: (THEME_COLOR)
+            color_2: (THEME_COLOR_OUTSET)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
             color_2_focus: (THEME_COLOR_OUTSET_ACTIVE)
@@ -637,12 +637,12 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR * 1.5)
+            uniform color_1: (THEME_COLOR_OUTSET * 1.5)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
             uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
             uniform color_1_active_focus: (THEME_COLOR_INSET_1_FOCUS)
 
-            uniform color_2: (THEME_COLOR)
+            uniform color_2: (THEME_COLOR_OUTSET)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
             uniform color_2_active_focus: (THEME_COLOR_INSET_2_FOCUS)
@@ -731,12 +731,12 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR * 1.5)
+            uniform color_1: (THEME_COLOR_OUTSET * 1.5)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
             uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
             uniform color_1_active_focus: (THEME_COLOR_INSET_1_ACTIVE_FOCUS)
 
-            uniform color_2: (THEME_COLOR)
+            uniform color_2: (THEME_COLOR_OUTSET)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
             uniform color_2_active_focus: (THEME_COLOR_INSET_2_ACTIVE_FOCUS)
