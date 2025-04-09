@@ -681,7 +681,7 @@ live_design!{
                         ),
                         mix(
                             mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
-                            mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                            mix(self.border_color_1_active_focus, self.border_color_2_active_focus, self.pos.y + dither),
                             self.focus
                         ),
                         self.active
@@ -775,7 +775,7 @@ live_design!{
                         ),
                         mix(
                             mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
-                            mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                            mix(self.border_color_1_active_focus, self.border_color_2_active_focus, self.pos.y + dither),
                             self.focus
                         ),
                         self.active
@@ -786,16 +786,16 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.color_1, self.color_2, self.pos.y + dither),
-                                mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                                mix(self.color_1, self.color_2, self.pos.x + dither),
+                                mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
                                 self.focus
                             ),
-                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
                             self.hover
                         ),
                         mix(
-                            mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
-                            mix(self.color_1_active_focus, self.color_2_active_focus, self.pos.y + dither),
+                            mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                            mix(self.color_1_active_focus, self.color_2_active_focus, self.pos.x + dither),
                             self.focus
                         ),
                         self.active
