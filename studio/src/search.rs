@@ -2,6 +2,7 @@
 use {
     crate::{
         file_system::file_system::FileSystem,
+        makepad_file_protocol::SearchItem,
         makepad_platform::studio::JumpToFile,
         app::{AppAction, AppData},
         makepad_widgets::*,
@@ -224,7 +225,45 @@ impl Widget for Search {
         let data = scope.data.get_mut::<AppData>().unwrap();
         if let Event::Actions(actions) = event{
             if let Some(search) = self.view.text_input(id!(search_input)).changed(&actions){
-                data.file_system.search_string(cx, search);
+                let mut set = Vec::new();
+                
+                for item in search.split("|"){
+                    if let Some(item) = item.strip_suffix("\\b"){
+                        if let Some(item) = item.strip_prefix("\\b"){
+                            set.push(SearchItem{
+                                needle: item.to_string(),
+                                prefixes: None,
+                                pre_word_boundary: true,
+                                post_word_boundary: true
+                            })
+                        }
+                        else{
+                            set.push(SearchItem{
+                                needle: item.to_string(),
+                                prefixes: None,
+                                pre_word_boundary: false,
+                                post_word_boundary: true
+                            })
+                        }
+                    }
+                    else if let Some(item) = item.strip_prefix("\\b"){
+                        set.push(SearchItem{
+                            needle: item.to_string(),
+                            prefixes: None,
+                            pre_word_boundary: true,
+                            post_word_boundary: false
+                        })
+                    }
+                    else{
+                        set.push(SearchItem{
+                            needle: item.to_string(),
+                            prefixes: None,
+                            pre_word_boundary: false,
+                            post_word_boundary: false
+                        })
+                    }
+                }
+                data.file_system.search_string(cx, set);
             }
             if search_results.any_items_with_actions(&actions) {
                 // alright lets figure out if someone clicked a link

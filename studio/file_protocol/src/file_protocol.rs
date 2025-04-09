@@ -49,8 +49,16 @@ pub enum FileRequest {
     },
     Search{
         id: u64,
-        what: String
+        set: Vec<SearchItem>
     }
+}
+
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct SearchItem{
+    pub needle: String,
+    pub prefixes: Option<Vec<String>>,
+    pub pre_word_boundary: bool,
+    pub post_word_boundary: bool
 }
 
 /// A type for representing either a response or a notification from the collab server.

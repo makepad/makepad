@@ -139,7 +139,7 @@ impl Default for KeyCode {
 
 
 // lowest common denominator keymap between desktop and web
-#[derive(Live, LiveHook, Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+#[derive(Live, LiveHook, Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, Eq, PartialEq)]
 pub enum KeyCode {
     #[pick] Escape,
 
