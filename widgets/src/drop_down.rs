@@ -69,7 +69,7 @@ live_design!{
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
 
             uniform arrow_color: (THEME_COLOR_TEXT)
-            uniform arrow_color_focus: (#f00)
+            uniform arrow_color_focus: (THEME_COLOR_TEXT_FOCUS)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
             
             fn pixel(self) -> vec4 {
@@ -248,7 +248,7 @@ live_design!{
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
 
             uniform arrow_color: (THEME_COLOR_TEXT)
-            uniform arrow_color_focus: (#f00)
+            uniform arrow_color_focus: (THEME_COLOR_TEXT_FOCUS)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
             
             fn pixel(self) -> vec4 {
@@ -345,7 +345,7 @@ live_design!{
             border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
             
             arrow_color: (THEME_COLOR_TEXT)
-            arrow_color_focus: (#f00)
+            arrow_color_focus: (THEME_COLOR_TEXT_FOCUS)
             arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
 
             fn pixel(self) -> vec4 {
