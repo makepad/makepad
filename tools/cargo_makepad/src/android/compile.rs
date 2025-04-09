@@ -51,7 +51,7 @@ fn main_java(url:&str)->String{
     "#)
 }
 
-fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:&[AndroidTarget]) -> Result<(), String> {
+fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:&[AndroidTarget], variant:&AndroidVariant) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
 
     for android_target in android_targets {
@@ -92,6 +92,13 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
         let cfg_flag = format!("--cfg android_target=\"{}\"", target_arch_str);
          
         let makepad_env = std::env::var("MAKEPAD").unwrap_or("lines".to_string());
+        let makepad_env = if let AndroidVariant::Quest = variant{
+            format!("{}+quest", makepad_env)
+        }
+        else{
+            makepad_env
+        };
+        
         shell_env(
             &[
                 // Set the linker env var to the path of the target-specific `clang` binary.
@@ -438,7 +445,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_build_crate}"));
     let app_label = app_label.unwrap_or_else(|| format!("{underscore_build_crate}"));
 
-    rust_build(sdk_dir, host_os, args, android_targets)?;
+    rust_build(sdk_dir, host_os, args, android_targets, variant)?;
     let build_paths = prepare_build(build_crate, &java_url, &app_label, variant)?;
 
     println!("Compiling APK & R.java files");

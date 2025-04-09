@@ -120,6 +120,7 @@ pub struct LibOpenXr {
 
 impl LibOpenXr {
     pub fn try_load() -> Option<LibOpenXr> {
+        crate::log!("GOT HERE!");
         let module = ModuleLoader::load("libopenxr_loader.so").ok()?;
 
         let gipa: Option<TxrGetInstanceProcAddr> = 
@@ -138,7 +139,10 @@ impl LibOpenXr {
                 }))}
             };
         }
-        let xrCreateInstance:Option<TxrCreateInstance> = get_proc_addr!(gipa, XrInstance(0), "xrCreateInstance");
+        
+        let xrCreateInstance:Option<TxrCreateInstance> = get_proc_addr!(gipa, XrInstance(0), "xrCreateInstance"); 
+        
+        crate::log!("{:?}", xrCreateInstance);
         
         Some(LibOpenXr {
             xrGetInstanceProcAddr: gipa,
