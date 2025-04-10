@@ -353,7 +353,7 @@ impl CodeEditor {
         // This needs to be called first to ensure the session is up to date.
         session.handle_changes();
 
-        let text = self.draw_text.layout(cx, 0.0, None, Align::default(), "!");
+        let text = self.draw_text.layout(cx, 0.0, 0.0, None, Align::default(), "!");
         let first_row = text.rows.first().unwrap();
         let first_glyph = first_row.glyphs.first().unwrap();
         self.cell_size = dvec2(
