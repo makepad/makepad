@@ -330,6 +330,17 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     xlib_app.stop_timer(timer_id);
                 },
+                CxOsOp::ShowTextIME(area, pos) => {
+                    let pos = area.clipped_rect(self).pos + pos;
+                    opengl_windows.iter_mut().for_each(|w| {
+                        w.xlib_window.set_ime_spot(pos);
+                    });
+                },
+                CxOsOp::HideTextIME => {
+                    opengl_windows.iter_mut().for_each(|w| {
+                        w.xlib_window.set_ime_spot(dvec2(0.0,0.0));
+                    });
+                },
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
