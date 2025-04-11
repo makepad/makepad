@@ -22,6 +22,7 @@ pub type suseconds_t = c_ulong;
 
 type c_int =  std::os::raw::c_int;
 //type c_uint =  std::os::raw::c_uint;
+type c_long = std::os::raw::c_long;
 type c_ulong = std::os::raw::c_ulong;
 type c_void = std::os::raw::c_void;
 type c_char = std::os::raw::c_char;
@@ -38,6 +39,7 @@ pub struct fd_set {
 
 pub const RTLD_LAZY: c_int = 1;
 pub const RTLD_LOCAL: c_int = 0;
+pub const SYS_GETTID: c_long = 178;
     
 extern "C"{
     pub fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
@@ -55,6 +57,7 @@ extern "C"{
         timeout: *mut timeval,
     ) -> c_int;
     pub fn read(fd: c_int, buf: *mut c_void, count: size_t) -> c_int;
+    pub fn syscall(num: c_long, ...) -> c_long;
 }
 
 pub unsafe fn FD_SET(fd: c_int, set: *mut fd_set) -> () {
