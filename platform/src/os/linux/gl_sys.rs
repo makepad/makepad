@@ -61,6 +61,7 @@ pub const R8: types::GLenum =  0x8229;
 pub const UNSIGNED_BYTE: types::GLenum = 0x1401;
 pub const HALF_FLOAT: types::GLenum =  0x140B;
 pub const FLOAT: types::GLenum = 0x1406;
+pub const SRGB8_ALPHA8L: types::GLenum =  0x8C43;
 
 pub const DEPTH_COMPONENT32F: types::GLenum = 0x8CAC;
 pub const STATIC_DRAW: types::GLenum = 0x88E4;
