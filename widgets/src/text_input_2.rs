@@ -32,7 +32,7 @@ live_design! {
         width: 200,
         height: Fit,
 
-        is_password: true,
+        is_password: false,
         
         draw_text: {
             instance hover: 0.0
@@ -205,9 +205,13 @@ impl TextInput2 {
         } else {
             &self.text
         };
-        let max_width =  cx.turtle().max_width(self.text_walk).map(|max_width| max_width as f32);
-                
-        self.laidout_text = Some(self.draw_text.layout(cx, 0.0, 0.0, max_width, self.text_align, text));
+        let max_width_in_lpxs =  cx.turtle().max_width(self.text_walk).map(|max_width| max_width as f32);
+        let wrap_width_in_lpxs = if cx.turtle().layout().flow == Flow::RightWrap {
+            max_width_in_lpxs
+        } else {
+            None
+        };
+        self.laidout_text = Some(self.draw_text.layout(cx, 0.0, 0.0, wrap_width_in_lpxs, self.text_align, text));
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
