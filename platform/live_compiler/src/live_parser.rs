@@ -18,7 +18,7 @@ use {
         span::{TextSpan, TextPos},
         live_error::{LiveError},
         live_document::LiveOriginal,
-        live_node::{LiveImport, LivePropType, LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
+        live_node::{LiveFont, LiveImport, LivePropType, LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
     }
 };
 
@@ -674,6 +674,39 @@ impl<'a> LiveParser<'a> {
                         origin,
                         id: prop_id,
                         value: LiveValue::Id(live_id!(dep))
+                    });
+                }
+            }
+            LiveToken::Ident(live_id!(font)) => {
+                self.skip_token();
+                if self.accept_token(LiveToken::Open(Delim::Paren)) {
+                    let path = self.expect_string() ?;
+                    
+                    let mut ascender_fudge = 0.0;
+                    let mut descender_fudge = 0.0;
+                    // optionally we accept 2 floats as fudges
+                    if self.accept_token(LiveToken::Punct(live_id!(,))){
+                        ascender_fudge = self.expect_float() ?  as f32;
+                        self.expect_token(LiveToken::Punct(live_id!(,))) ?;
+                        descender_fudge = self.expect_float() ? as f32;
+                    }
+                    self.expect_token(LiveToken::Close(Delim::Paren)) ?;
+                    
+                    self.ld.nodes.push(LiveNode {
+                        origin,
+                        id: prop_id,
+                        value: LiveValue::Font(LiveFont{
+                            path,
+                            ascender_fudge,
+                            descender_fudge
+                        })
+                    });
+                }
+                else {
+                    self.ld.nodes.push(LiveNode {
+                        origin,
+                        id: prop_id,
+                        value: LiveValue::Id(live_id!(font))
                     });
                 }
             }
