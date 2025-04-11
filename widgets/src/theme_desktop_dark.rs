@@ -238,7 +238,8 @@ live_design! {
             latin = dep("crate://self/resources/IBMPlexSans-Text.ttf"),
             chinese = dep("crate://self/resources/LXGWWenKaiRegular.ttf")
             emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
-        }
+        },
+        line_spacing: 1.2
     } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
     pub THEME_FONT_REGULAR = {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
@@ -247,7 +248,8 @@ live_design! {
             latin = dep("crate://self/resources/IBMPlexSans-Text.ttf"),
             chinese = dep("crate://self/resources/LXGWWenKaiRegular.ttf")
             emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
-        }
+        },
+        line_spacing: 1.2
     }
     pub THEME_FONT_BOLD = {
         font: { path: dep("crate://self/resources/IBMPlexSans-SemiBold.ttf") }
@@ -256,7 +258,8 @@ live_design! {
             latin = dep("crate://self/resources/IBMPlexSans-SemiBold.ttf")
             chinese = dep("crate://self/resources/LXGWWenKaiBold.ttf"),
             emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
-        }
+        },
+        line_spacing: 1.2
     }
     pub THEME_FONT_ITALIC = {
         font: { path: dep("crate://self/resources/IBMPlexSans-Italic.ttf") }
@@ -264,7 +267,8 @@ live_design! {
         font_family:{
             latin = dep("crate://self/resources/IBMPlexSans-Italic.ttf")
             chinese =  dep("crate://self/resources/LXGWWenKaiRegular.ttf"),
-        }
+        },
+        line_spacing: 1.2
     }
     pub THEME_FONT_BOLD_ITALIC = {
         font: { path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf") },
@@ -272,16 +276,17 @@ live_design! {
         font_family:{
             latin = dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf")
             chinese = dep("crate://self/resources/LXGWWenKaiBold.ttf"),
-        }
+        },
+        line_spacing: 1.2
     }
     pub THEME_FONT_CODE = {
         font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
         font_size: (THEME_FONT_SIZE_CODE)
         //brightness: 1.1
         line_scale: 1.2,
-        line_spacing: 1.16,
         font_family:{
             latin = dep("crate://self/resources/LiberationMono-Regular.ttf")
-        }
+        },
+        line_spacing: 1.2
     }
 }
