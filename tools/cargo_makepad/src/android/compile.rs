@@ -2,26 +2,26 @@ use std::path::{Path, PathBuf};
 use crate::android::{HostOs, AndroidTarget, AndroidVariant};
 use crate::utils::*;
 use crate::makepad_shell::*;
-use super::sdk::{ANDROID_BUILD_TOOLS_VERSION, ANDROID_PLATFORM, ANDROID_SDK_VERSION, BUILD_TOOLS_DIR, NDK_VERSION_FULL, PLATFORMS_DIR};
+use super::sdk::{AndroidSDKUrls,  BUILD_TOOLS_DIR, PLATFORMS_DIR};
 
-fn aapt_path(sdk_dir: &Path) -> PathBuf {
-    sdk_dir.join(BUILD_TOOLS_DIR).join(ANDROID_BUILD_TOOLS_VERSION).join("aapt")
+fn aapt_path(sdk_dir: &Path, urls:&AndroidSDKUrls) -> PathBuf {
+    sdk_dir.join(BUILD_TOOLS_DIR).join(urls.build_tools_version).join("aapt")
 }
 
-fn d8_jar_path(sdk_dir: &Path) -> PathBuf {
-    sdk_dir.join(BUILD_TOOLS_DIR).join(ANDROID_BUILD_TOOLS_VERSION).join("lib/d8.jar")
+fn d8_jar_path(sdk_dir: &Path, urls:&AndroidSDKUrls) -> PathBuf {
+    sdk_dir.join(BUILD_TOOLS_DIR).join(urls.build_tools_version).join("lib/d8.jar")
 }
 
-fn apksigner_jar_path(sdk_dir: &Path) -> PathBuf {
-    sdk_dir.join(BUILD_TOOLS_DIR).join(ANDROID_BUILD_TOOLS_VERSION).join("lib/apksigner.jar")
+fn apksigner_jar_path(sdk_dir: &Path, urls:&AndroidSDKUrls) -> PathBuf {
+    sdk_dir.join(BUILD_TOOLS_DIR).join(urls.build_tools_version).join("lib/apksigner.jar")
 }
 
-fn zipalign_path(sdk_dir: &Path) -> PathBuf {
-    sdk_dir.join(BUILD_TOOLS_DIR).join(ANDROID_BUILD_TOOLS_VERSION).join("zipalign")
+fn zipalign_path(sdk_dir: &Path, urls:&AndroidSDKUrls) -> PathBuf {
+    sdk_dir.join(BUILD_TOOLS_DIR).join(urls.build_tools_version).join("zipalign")
 }
 
-fn android_jar_path(sdk_dir: &Path) -> PathBuf {
-    sdk_dir.join(PLATFORMS_DIR).join(ANDROID_PLATFORM).join("android.jar")
+fn android_jar_path(sdk_dir: &Path, urls:&AndroidSDKUrls) -> PathBuf {
+    sdk_dir.join(PLATFORMS_DIR).join(urls.platform).join("android.jar")
 }
 
 #[derive(Debug)]
@@ -51,9 +51,10 @@ fn main_java(url:&str)->String{
     "#)
 }
 
-fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:&[AndroidTarget], variant:&AndroidVariant) -> Result<(), String> {
+fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:&[AndroidTarget], variant:&AndroidVariant, urls:&AndroidSDKUrls) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
-
+    #[allow(non_snake_case)]
+    let NDK_VERSION_FULL = urls.ndk_version_full;
     for android_target in android_targets {
         let clang_filename = format!("{}33-clang", android_target.clang());
         
@@ -110,11 +111,11 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
                 // or are defined by the `android-build` crate: <https://crates.io/crates/android-build>.
                 ("ANDROID_HOME",                 sdk_dir.to_str().unwrap()),
                 ("ANDROID_SDK_ROOT",             sdk_dir.to_str().unwrap()),
-                ("ANDROID_BUILD_TOOLS_VERSION",  super::sdk::ANDROID_BUILD_TOOLS_VERSION),
-                ("ANDROID_PLATFORM",             super::sdk::ANDROID_PLATFORM),
-                ("ANDROID_SDK_VERSION",          super::sdk::ANDROID_SDK_VERSION.to_string().as_str()),
-                ("ANDROID_API_LEVEL",            super::sdk::ANDROID_SDK_VERSION.to_string().as_str()),  // for legacy/clarity purposes
-                ("ANDROID_SDK_EXTENSION",        super::sdk::ANDROID_SDK_EXTENSION),
+                ("ANDROID_BUILD_TOOLS_VERSION",  urls.build_tools_version),
+                ("ANDROID_PLATFORM",             urls.platform),
+                ("ANDROID_SDK_VERSION",          urls.sdk_version.to_string().as_str()),
+                ("ANDROID_API_LEVEL",            urls.sdk_version.to_string().as_str()),  // for legacy/clarity purposes
+                ("ANDROID_SDK_EXTENSION",        urls.sdk_extension),
                 ("JAVA_HOME",                    sdk_dir.join("openjdk").to_str().unwrap()),
 
                 // We set these three env vars to allow native library C/C++ builds to succeed with no additional app-side config.
@@ -135,7 +136,7 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:
     Ok(())
 }
 
-fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str, variant:&AndroidVariant) -> Result<BuildPaths, String> {
+fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str, variant:&AndroidVariant, urls:&AndroidSDKUrls) -> Result<BuildPaths, String> {
     let cwd = std::env::current_dir().unwrap();
 
     let tmp_dir = cwd.join("target").join("makepad-android-apk").join(&underscore_build_crate).join("tmp");
@@ -147,7 +148,7 @@ fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str, 
     mkdir(&tmp_dir) ?; 
     mkdir(&out_dir) ?;
 
-    let manifest_xml = variant.manifest_xml(app_label, "MakepadApp", java_url, ANDROID_SDK_VERSION);
+    let manifest_xml = variant.manifest_xml(app_label, "MakepadApp", java_url, urls.sdk_version);
     let manifest_file = tmp_dir.join("AndroidManifest.xml");
     write_text(&manifest_file, &manifest_xml)?;
     
@@ -175,7 +176,7 @@ fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str, 
     })
 }
 
-fn build_r_class(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
+fn build_r_class(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) -> Result<(), String> {
     let java_home = sdk_dir.join("openjdk");
     let cwd = std::env::current_dir().unwrap();
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -183,13 +184,13 @@ fn build_r_class(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String>
     shell_env(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
        &cwd,
-       &aapt_path(sdk_dir).to_str().unwrap(),
+       &aapt_path(sdk_dir, urls).to_str().unwrap(),
        &[
            "package",
            "-f",
            "-m",
            "-I",
-           (android_jar_path(sdk_dir).to_str().unwrap()),
+           (android_jar_path(sdk_dir, urls).to_str().unwrap()),
            "-S",
            (cargo_manifest_dir.join("src/android/res").to_str().unwrap()),
            "-M",
@@ -205,7 +206,7 @@ fn build_r_class(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String>
     Ok(())
 }
 
-fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
+fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) -> Result<(), String> {
     let makepad_package_path = "dev/makepad/android";
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let java_home = sdk_dir.join("openjdk");
@@ -220,7 +221,7 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
         java_home.join("bin/javac").to_str().unwrap(),
         &[
             "-classpath", 
-            (android_jar_path(sdk_dir).to_str().unwrap()),
+            (android_jar_path(sdk_dir, urls).to_str().unwrap()),
             "-Xlint:deprecation",
             "-d", 
             (build_paths.out_dir.to_str().unwrap()),
@@ -240,7 +241,7 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
     Ok(())
 }
 
-fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
+fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) -> Result<(), String> {
     let makepad_package_path = "dev/makepad/android";
     let java_home = sdk_dir.join("openjdk");
     let cwd = std::env::current_dir().unwrap();
@@ -253,10 +254,10 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
         java_home.join("bin/java").to_str().unwrap(),
         &[ 
             "-cp",
-            (d8_jar_path(sdk_dir).to_str().unwrap()),
+            (d8_jar_path(sdk_dir, urls).to_str().unwrap()),
             "com.android.tools.r8.D8",
             "--classpath",
-            (android_jar_path(sdk_dir).to_str().unwrap()),
+            (android_jar_path(sdk_dir, urls).to_str().unwrap()),
             "--output",  
             (build_paths.out_dir.to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadNative.class").to_str().unwrap()),
@@ -282,7 +283,7 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
     Ok(())
 } 
 
-fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
+fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     let java_home = sdk_dir.join("openjdk");
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -290,14 +291,14 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     shell_env(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
        &cwd,
-       aapt_path(sdk_dir).to_str().unwrap(),
+       aapt_path(sdk_dir, urls).to_str().unwrap(),
        &[ 
            "package",
            "-f",
            "-F",
            (build_paths.dst_unaligned_apk.to_str().unwrap()),
            "-I",
-           (android_jar_path(sdk_dir).to_str().unwrap()),
+           (android_jar_path(sdk_dir, urls).to_str().unwrap()),
            "-M",
            (build_paths.manifest_file.to_str().unwrap()),
            "-S",
@@ -309,7 +310,7 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     Ok(())
 }
 
-fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args: &[String], variant:&AndroidVariant) -> Result<PathBuf, String> {
+fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget], args: &[String], variant:&AndroidVariant, urls:&AndroidSDKUrls) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().unwrap();
     let profile = get_profile_from_args(args);
     let mut build_dir = None;
@@ -327,7 +328,7 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
         let dst_lib = build_paths.out_dir.join(binary_path.clone());
         cp(&src_lib, &dst_lib, false) ?;
 
-        shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir).to_str().unwrap(), &[
+        shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir, urls).to_str().unwrap(), &[
             "add",
             (build_paths.dst_unaligned_apk.to_str().unwrap()),
             &binary_path,
@@ -335,21 +336,30 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
     }
     // for the quest variant add the precompiled openXR loader
     if let AndroidVariant::Quest = variant{
-        let binary_path = format!("lib/arm64-v8a/libopenxr_loader.so");
-        let src_lib = cwd.join(format!("tools/cargo_makepad/quest/libopenxr_loader.so"));
-        let dst_lib = build_paths.out_dir.join(binary_path.clone());
-        cp(&src_lib, &dst_lib, false) ?;
-        shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir).to_str().unwrap(), &[
-            "add",
-            (build_paths.dst_unaligned_apk.to_str().unwrap()),
-            &binary_path,
-        ]) ?;
+        
+        for (binary_path, src_lib) in [
+            ("lib/arm64-v8a/libopenxr_loader.so", "tools/cargo_makepad/quest/libopenxr_loader.so"),
+            //("lib/arm64-v8a/libktx.so", "tools/cargo_makepad/quest/libktx.so"),
+            //("lib/arm64-v8a/libktx_read.so", "tools/cargo_makepad/quest/libktx_read.so"),
+            //("lib/arm64-v8a/libobjUtil.a", "tools/cargo_makepad/quest/libobjUtil.a"),
+        ]{
+            //let binary_path = format!("lib/arm64-v8a/libopenxr_loader.so");
+            let src_lib = cwd.join(src_lib);
+            let dst_lib = build_paths.out_dir.join(binary_path);
+            cp(&src_lib, &dst_lib, false) ?;
+            shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir, urls).to_str().unwrap(), &[
+                "add",
+                (build_paths.dst_unaligned_apk.to_str().unwrap()),
+                &binary_path,
+            ]) ?;
+                        
+        }
     }
 
     Ok(build_dir.unwrap())
 }
 
-fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, build_dir:&Path, android_targets:&[AndroidTarget]) -> Result<(), String> {
+fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, build_dir:&Path, android_targets:&[AndroidTarget], urls:&AndroidSDKUrls) -> Result<(), String> {
     let mut assets_to_add: Vec<String> = Vec::new();
     
     let build_crate_dir = get_crate_dir(build_crate) ?;
@@ -394,13 +404,13 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, bu
         aapt_args.push(asset);
     }
 
-    shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir).to_str().unwrap(), &aapt_args) ?;
+    shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir, urls).to_str().unwrap(), &aapt_args) ?;
 
     Ok(())
 }
 
-fn build_zipaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
-    shell_env_cap(&[], &build_paths.out_dir, zipalign_path(sdk_dir).to_str().unwrap(), &[
+fn build_zipaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) -> Result<(), String> {
+    shell_env_cap(&[], &build_paths.out_dir, zipalign_path(sdk_dir, urls).to_str().unwrap(), &[
        "-v",
        "-f",
        "4",
@@ -411,7 +421,7 @@ fn build_zipaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), 
     Ok(())
 }
 
-fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
+fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let java_home = sdk_dir.join("openjdk");
@@ -422,7 +432,7 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
         java_home.join("bin/java").to_str().unwrap(),
         &[
             "-jar",
-            (apksigner_jar_path(sdk_dir).to_str().unwrap()),
+            (apksigner_jar_path(sdk_dir, urls).to_str().unwrap()),
             "sign",
             "-v",
             "-ks",
@@ -438,27 +448,27 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
     Ok(())
 }
 
-pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], android_targets:&[AndroidTarget], variant:&AndroidVariant) -> Result<BuildResult, String> {
+pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], android_targets:&[AndroidTarget], variant:&AndroidVariant, urls: &AndroidSDKUrls) -> Result<BuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
     let underscore_build_crate = build_crate.replace('-', "_");
 
     let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_build_crate}"));
     let app_label = app_label.unwrap_or_else(|| format!("{underscore_build_crate}"));
 
-    rust_build(sdk_dir, host_os, args, android_targets, variant)?;
-    let build_paths = prepare_build(build_crate, &java_url, &app_label, variant)?;
+    rust_build(sdk_dir, host_os, args, android_targets, variant, urls)?;
+    let build_paths = prepare_build(build_crate, &java_url, &app_label, variant, urls)?;
 
     println!("Compiling APK & R.java files");
-    build_r_class(sdk_dir, &build_paths)?;
-    compile_java(sdk_dir, &build_paths)?;
+    build_r_class(sdk_dir, &build_paths, urls)?;
+    compile_java(sdk_dir, &build_paths, urls)?;
 
     println!("Building APK");
-    build_dex(sdk_dir, &build_paths)?;
-    build_unaligned_apk(sdk_dir, &build_paths)?;
-    let build_dir = add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets, args, variant)?;
-    add_resources(sdk_dir, build_crate, &build_paths, &build_dir, android_targets)?;
-    build_zipaligned_apk(sdk_dir, &build_paths)?;
-    sign_apk(sdk_dir, &build_paths)?;
+    build_dex(sdk_dir, &build_paths, urls)?;
+    build_unaligned_apk(sdk_dir, &build_paths, urls)?;
+    let build_dir = add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets, args, variant, urls)?;
+    add_resources(sdk_dir, build_crate, &build_paths, &build_dir, android_targets, urls)?;
+    build_zipaligned_apk(sdk_dir, &build_paths, urls)?;
+    sign_apk(sdk_dir, &build_paths, urls)?;
 
     println!("Compile APK completed");
     Ok(BuildResult{
@@ -467,8 +477,8 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     })
 }
 
-pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], targets:&[AndroidTarget], android_variant:&AndroidVariant) -> Result<(), String> {
-    let result = build(sdk_dir, host_os, package_name, app_label, args, targets, android_variant)?;
+pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], targets:&[AndroidTarget], android_variant:&AndroidVariant, urls:&AndroidSDKUrls) -> Result<(), String> {
+    let result = build(sdk_dir, host_os, package_name, app_label, args, targets, android_variant, urls)?;
     
     let cwd = std::env::current_dir().unwrap();
     //println!("Installing android application");
