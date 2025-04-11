@@ -18,7 +18,9 @@ use {
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
         super::egl_sys::{self, LibEgl},
+        super::libc_sys,
         ndk_sys,
+        
     },
     self::super::super::{
         gl_sys,
@@ -96,12 +98,18 @@ impl Cx {
         self.redraw_all();
 
         self.start_network_live_file_watcher();
+        
         while !self.os.quit {
+           #[cfg(quest)]
+           if self.quest_openxr_mode(&from_java_rx){continue};
+            
             // Wait for the next message, blocking until one is received.
             // This ensures we're in sync with the Android Choreographer when we receive a RenderLoop message.
             match from_java_rx.recv() {
                 Ok(FromJavaMessage::RenderLoop) => {
-                    self.handle_all_pending_messages(&from_java_rx);
+                    while let Ok(msg) = from_java_rx.try_recv() {
+                        self.handle_message(msg);
+                    }
                     self.handle_other_events();
                     self.handle_drawing();
                 },
@@ -115,15 +123,8 @@ impl Cx {
             }
         }
     }
-
-    fn handle_all_pending_messages(&mut self, from_java_rx: &mpsc::Receiver<FromJavaMessage>) {
-        // Handle the messages that arrived during the last frame
-        while let Ok(msg) = from_java_rx.try_recv() {
-            self.handle_message(msg);
-        }
-    }
-
-    fn handle_message(&mut self, msg: FromJavaMessage) {
+    
+    pub(crate) fn handle_message(&mut self, msg: FromJavaMessage) {
         match msg {
             FromJavaMessage::RenderLoop => {
                 // This should not happen here, as it's handled in the main loop
@@ -448,7 +449,7 @@ impl Cx {
         }
     }
 
-    fn handle_drawing(&mut self) {
+    pub(crate) fn handle_drawing(&mut self) {
         if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() {
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(self.os.timers.time_now());
@@ -465,20 +466,11 @@ impl Cx {
 
             self.handle_repaint();
         }
-        else{
-            /*unsafe{
-               let _ret = ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.00001, 0); 
-                if let Some(display) = &mut self.os.display {
-                    (display.libegl.eglSurfaceAttrib.unwrap())(display.egl_display, display.surface, egl_sys::EGL_SWAP_BEHAVIOR, egl_sys::EGL_BUFFER_PRESERVED);
-                    (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
-                }
-            }*/
-        }
     }
 
     /// Processes events that need to be checked regularly, regardless of incoming messages.
     /// This includes timers, signals, video updates, live edits, and platform operations.
-    fn handle_other_events(&mut self) {
+    pub(crate) fn handle_other_events(&mut self) {
         // Timers
         for event in self.os.timers.get_dispatch() {
             self.call_event_handler(&event);
@@ -534,19 +526,31 @@ impl Cx {
         std::panic::set_hook(Box::new(|info| {
             crate::log!("Custom panic hook: {}", info);
         }));
-
+        
+        
+        
+        let activity_thread_id =  unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 };
+        
         // SAFETY: This function initializes JNI globals and is expected to be called only once.
-        unsafe {android_jni::jni_init_globals(activity, from_java_tx)};
-
+        
+        let _activity_handle = unsafe {android_jni::jni_init_globals(activity, from_java_tx)} as u64;
+        
         // lets start a thread
         std::thread::spawn(move || {
+            
             // SAFETY: This attaches the current thread to the JVM. It's safe as long as we're in the correct thread.
             unsafe {attach_jni_env()};
             let mut cx = startup();
             cx.android_load_dependencies();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
             
-            #[cfg(quest)] cx.os.openxr.init();
+            cx.os.activity_thread_id = Some(activity_thread_id);
+            cx.os.render_thread_id = Some(unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 });
+            
+            #[cfg(quest)] 
+            if let Err(e) = cx.os.openxr.init(_activity_handle){
+                crate::error!("OpenXR init failed: {}", e);
+            }
             
             let window = loop {
                 // Here use blocking method `recv` to reduce CPU usage during cold start.
@@ -570,12 +574,22 @@ impl Cx {
             // SAFETY:
             // The LibEgl instance (libegl) has been properly loaded and initialized earlier.
             // We're not requesting a robust context (false), which is usually fine for most applications.
+            #[cfg(quest)]
+            let major = 3;
+            #[cfg(quest)]
+            let alpha = true;
+            #[cfg(not(quest))]
+            let major = 2;
+            #[cfg(not(quest))]
+            let alpha = false;
+                        
             let (egl_context, egl_config, egl_display) = unsafe {egl_sys::create_egl_context(
                 &mut libegl,
                 std::ptr::null_mut(),/* EGL_DEFAULT_DISPLAY */
-                false,
+                major,
+                alpha,
             ).expect("Cant create EGL context")};
-
+            
             // SAFETY: This is loading OpenGL function pointers. It's safe as long as we have a valid EGL context.
             unsafe {gl_sys::load_with( | s | {
                 let s = CString::new(s).unwrap();
@@ -604,8 +618,14 @@ impl Cx {
                 surface,
                 window
             });
+            
+            #[cfg(quest)] 
+            if let Err(e) = cx.os.openxr.create_xr_session(cx.os.display.as_ref().unwrap()){
+                crate::error!("OpenXR after_egl_init failed: {}", e);
+            }
+            
             cx.main_loop(from_java_rx);
-
+            
             let display = cx.os.display.take().unwrap();
 
             // SAFETY: These calls clean up EGL resources. They're safe as long as we have valid EGL objects.
@@ -933,16 +953,18 @@ impl Default for CxOs {
             timers: Default::default(),
             video_surfaces: HashMap::new(),
             websocket_parsers: HashMap::new(),
-            #[cfg(quest)] openxr: CxAndroidOpenXr::default()
+            #[cfg(quest)] openxr: CxAndroidOpenXr::default(),
+            activity_thread_id: None,
+            render_thread_id: None
         }
     }
 }
 
 pub struct CxAndroidDisplay {
     libegl: LibEgl,
-    egl_display: egl_sys::EGLDisplay,
-    egl_config: egl_sys::EGLConfig,
-    egl_context: egl_sys::EGLContext,
+    pub egl_display: egl_sys::EGLDisplay,
+    pub egl_config: egl_sys::EGLConfig,
+    pub egl_context: egl_sys::EGLContext,
     surface: egl_sys::EGLSurface,
     window: *mut ndk_sys::ANativeWindow,
     //event_handler: Box<dyn EventHandler>,
@@ -964,7 +986,9 @@ pub struct CxOs {
     pub (crate) video_surfaces: HashMap<LiveId, jobject>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
     #[cfg(quest)]
-    pub (crate) openxr: CxAndroidOpenXr
+    pub (crate) openxr: CxAndroidOpenXr,
+    pub (crate) activity_thread_id: Option<u64>,
+    pub (crate) render_thread_id: Option<u64>,
 }
 
 impl CxAndroidDisplay {
