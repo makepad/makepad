@@ -118,6 +118,8 @@ impl Loader {
             self.rasterizer.clone(),
             FontFace::from_data_and_index(definition.data, definition.index)
                 .expect("failed to load font from definition"),
+            definition.ascender_fudge_in_ems,
+            definition.descender_fudge_in_ems,
         )
     }
 }
@@ -137,4 +139,6 @@ pub struct FontFamilyDefinition {
 pub struct FontDefinition {
     pub data: Rc<Vec<u8>>,
     pub index: u32,
+    pub ascender_fudge_in_ems: f32,
+    pub descender_fudge_in_ems: f32,
 }
