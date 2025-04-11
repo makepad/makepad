@@ -43,6 +43,12 @@ live_design!{
             <H4> { text: "Rotary styled" }
             <Rotary> {
                 text: "Solid",
+
+                label_walk: {
+                    width: Fit, height: Fit,
+                    margin: {bottom: (THEME_SPACE_1)},
+                }
+
                 draw_text: {
                     color: #0f0;
                     color_hover: #0ff;
