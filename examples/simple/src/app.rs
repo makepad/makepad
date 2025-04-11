@@ -32,9 +32,11 @@ live_design!{
                         text: "Click me 123"
                         draw_text:{color:#fff}
                     }
-                    text_input = <TextInput> {
-                        text: "Click me\n234\n456"
-                        draw_text:{color:#fff}
+                    text_input = <TextInput2> {
+                        width: 100,
+                        flow: RightWrap,
+                        text: "With sufficient thrust, pigs fly just fine. However, this is not necessarily a good idea."
+                        draw_text:{color:#fff, }
                     }
                     button_2 = <Button> {
                         text: "Click me 345"
