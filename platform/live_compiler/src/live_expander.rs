@@ -9,7 +9,7 @@ use {
         live_error::{LiveError},
         live_eval::live_eval_value,
         live_document::{LiveOriginal, LiveExpanded},
-        live_node::{LiveValue, LiveNode, LiveFieldKind, LivePropType, LiveNodeRoot},
+        live_node::{LiveFont, LiveValue, LiveNode, LiveFieldKind, LivePropType, LiveNodeRoot},
         live_node_vec::{LiveNodeSliceApi, LiveNodeVecApi},
         live_registry::{LiveRegistry, LiveScopeTarget},
     }
@@ -43,6 +43,27 @@ impl<'a> LiveExpander<'a> {
                 }
             }
         }
+    }
+    
+    fn resolve_path(&self, file_id:LiveFileId, path:&str)->Option<Arc<String>>{
+        if let Some(path) = path.strip_prefix("crate://self/") {
+            let mut final_path = self.live_registry.file_id_to_cargo_manifest_path(file_id);
+            final_path.push('/');
+            final_path.push_str(path);
+            return Some(Arc::new(final_path))
+        } else if let Some(path) = path.strip_prefix("crate://") {
+            let mut split = path.split('/');
+            if let Some(crate_name) = split.next() {
+                if let Some(mut final_path) = self.live_registry.crate_name_to_cargo_manifest_path(crate_name) {
+                    for next in split {
+                        final_path.push('/');
+                        final_path.push_str(next);
+                    }
+                    return Some(Arc::new(final_path))
+                }
+            }
+        }
+        None
     }
     
     pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded, generation: LiveFileGeneration) {
@@ -268,23 +289,18 @@ impl<'a> LiveExpander<'a> {
             // process stacks
             match in_value {
                 LiveValue::Dependency(path) => {
-                    if let Some(path) = path.strip_prefix("crate://self/") {
-                        let file_id = in_node.origin.token_id().unwrap().file_id().unwrap();
-                        let mut final_path = self.live_registry.file_id_to_cargo_manifest_path(file_id);
-                        final_path.push('/');
-                        final_path.push_str(path);
-                        out_doc.nodes[out_index].value = LiveValue::Dependency(Arc::new(final_path));
-                    } else if let Some(path) = path.strip_prefix("crate://") {
-                        let mut split = path.split('/');
-                        if let Some(crate_name) = split.next() {
-                            if let Some(mut final_path) = self.live_registry.crate_name_to_cargo_manifest_path(crate_name) {
-                                for next in split {
-                                    final_path.push('/');
-                                    final_path.push_str(next);
-                                }
-                                out_doc.nodes[out_index].value = LiveValue::Dependency(Arc::new(final_path));
-                            }
-                        }
+                     let file_id = in_node.origin.token_id().unwrap().file_id().unwrap();
+                    if let Some(final_path) = self.resolve_path(file_id, &path){
+                        out_doc.nodes[out_index].value = LiveValue::Dependency(final_path);
+                    }
+                },
+                LiveValue::Font(font) => {
+                    let file_id = in_node.origin.token_id().unwrap().file_id().unwrap();
+                    if let Some(final_path) = self.resolve_path(file_id, &font.path){
+                        out_doc.nodes[out_index].value = LiveValue::Font(LiveFont{
+                            path:final_path,
+                            ..*font
+                        });
                     }
                 },
                 LiveValue::Clone{clone,..} | LiveValue::Deref{clone,..}=> {

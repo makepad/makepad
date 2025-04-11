@@ -389,7 +389,10 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 }
                 LiveValue::IdPath(..) => {
                     return Err("Cannot serialise LiveValue::IdPath".into())
-                }                
+                }
+                LiveValue::Font {..} => {
+                    return Err("Cannot serialise LiveValue::Font".into())
+                },
             }
             index += 1;
         }
