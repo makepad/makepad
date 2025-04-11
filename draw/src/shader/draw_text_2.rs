@@ -7,6 +7,7 @@ use {
         text::{
             color::Color,
             font_family::FontFamilyId,
+            font::FontId,
             fonts::Fonts,
             geom::{Point, Rect, Size, Transform},
             layouter::{
@@ -540,24 +541,16 @@ impl LiveHook for FontFamily {
             let mut font_ids = Vec::new();
             let mut next_child_index = Some(index + 1);
             while let Some(child_index) = next_child_index {
-<<<<<<< HEAD
                 if let LiveValue::Font(font) = &nodes[child_index].value {
-                    let font_id:FontId = (font.to_live_id().0 as usize).into();
-=======
-                if let LiveValue::Dependency(dependency) = &nodes[child_index].value {
-                    let font_id = (LiveId::from_str(&dependency.as_str()).0 as usize).into();
->>>>>>> c4f96ec20 (Fix bug in how we compute live ids for font families)
+                    let font_id: FontId = (font.to_live_id().0 as usize).into();
                     if !fonts.is_font_known(font_id) {
-                        // stuff in 
-                        // font.ascender_fudge
-                        // font.descender_fudge
                         fonts.define_font(
                             font_id,
                             FontDefinition {
                                 data: cx.get_dependency(font.path.as_str()).unwrap().into(),
                                 index: 0,
-                                ascender_fudge_in_ems: 0.0,
-                                descender_fudge_in_ems: 0.0,
+                                ascender_fudge_in_ems: font.ascender_fudge,
+                                descender_fudge_in_ems: font.descender_fudge,
                             },
                         );
                     }
