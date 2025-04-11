@@ -386,6 +386,7 @@ pub struct Egl {}
 pub unsafe fn create_egl_context(
     egl: &mut LibEgl,
     display: *mut std::ffi::c_void,
+    major: u32,
     alpha: bool,
 ) -> Result<(EGLContext, EGLConfig, EGLDisplay), EglError> {
 
@@ -458,7 +459,7 @@ pub unsafe fn create_egl_context(
     if !exact_cfg_found {
         config = available_cfgs[0];
     }
-    let ctx_attributes = vec![EGL_CONTEXT_MAJOR_VERSION, 2, EGL_NONE];
+    let ctx_attributes = vec![EGL_CONTEXT_MAJOR_VERSION, major, EGL_NONE];
     let context = (egl.eglCreateContext.unwrap())(
         display,
         config,
