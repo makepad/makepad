@@ -17,9 +17,9 @@ live_design!{
     
     pub DesktopButton = <DesktopButtonBase> {
         draw_bg: {
-            uniform color: (THEME_COLOR_TEXT)
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_down: (THEME_COLOR_TEXT_DOWN)
+            uniform color: (THEME_COLOR_LABEL_INNER)
+            uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+            uniform color_down: (THEME_COLOR_LABEL_INNER_DOWN)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);

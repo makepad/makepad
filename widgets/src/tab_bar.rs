@@ -124,7 +124,8 @@ live_design!{
         PermanentTab = <TabGradientY> {closeable: false}
         draw_bg: {
             uniform color_dither: 1.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
+            uniform border_radius: 0.
+            uniform border_size: (THEME_BEVELING)
             uniform color_1: (THEME_COLOR_BG_APP * 0.9);
             uniform color_2: #282828;
 
@@ -132,16 +133,18 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                sdf.box(
+                sdf.rect(
                     1.,
                     1.,
                     self.rect_size.x - 1.5,
-                    self.rect_size.y - 1.5,
-                    self.border_radius
+                    self.rect_size.y - 1.5
                 )
 
-                sdf.fill(mix(self.color_1, self.color_2, pow(self.pos.y, 7.5) + dither));
+                sdf.fill_keep(mix(self.color_1, self.color_2, pow(self.pos.y, 7.5) + dither));
 
+                sdf.stroke(
+                    mix(#fff0, (THEME_COLOR_BEVEL_OUTSET_1), pow(self.pos.y, 80.)), self.border_size
+                )
                 return sdf.result
             }
         }

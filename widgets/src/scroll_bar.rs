@@ -13,17 +13,18 @@ live_design!{
         bar_size: 10.0,
         bar_side_margin: 3.0
         min_handle_size: 30.0
+
         draw_bg: {
             instance drag: 0.0
             instance hover: 0.0
 
             uniform size: 6.0
-            uniform border_size: 1.0
+            uniform border_size: (THEME_BEVELING)
             uniform border_radius: 1.5
 
             uniform color: (THEME_COLOR_OUTSET)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_drag: (THEME_COLOR_SCROLLBAR_HOVER * 1.2)
+            uniform color_drag: (THEME_COLOR_OUTSET_DRAG)
 
             uniform border_color: (THEME_COLOR_U_HIDDEN)
             uniform border_color_hover: (THEME_COLOR_U_HIDDEN)
@@ -114,9 +115,63 @@ live_design!{
 
     pub ScrollBarTabs = <ScrollBar> {
         draw_bg: {
+            instance drag: 0.0
+            instance hover: 0.0
+
+            uniform size: 6.0
+            uniform border_size: 1.0
+            uniform border_radius: 1.5
+
+            uniform color: (THEME_COLOR_U_HIDDEN)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_drag: (THEME_COLOR_OUTSET_DRAG)
+
+            uniform border_color: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_hover: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_drag: (THEME_COLOR_U_HIDDEN)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                return sdf.fill(THEME_COLOR_U_HIDDEN)
+                if self.is_vertical > 0.5 {
+                    sdf.box(
+                        1.,
+                        self.rect_size.y * self.norm_scroll,
+                        self.size,
+                        self.rect_size.y * self.norm_handle,
+                        self.border_radius
+                    );
+                }
+                else {
+                    sdf.box(
+                        self.rect_size.x * self.norm_scroll,
+                        1.,
+                        self.rect_size.x * self.norm_handle,
+                        self.size,
+                        self.border_radius
+                    );
+                }
+
+                sdf.fill_keep(mix(
+                    self.color,
+                    mix(
+                        self.color_hover,
+                        self.color_drag,
+                        self.drag
+                    ),
+                    self.hover
+                ));
+
+                sdf.stroke(mix(
+                    self.border_color,
+                    mix(
+                        self.border_color_hover,
+                        self.border_color_drag,
+                        self.drag
+                    ),
+                    self.hover
+                ), self.border_size);
+
+                return sdf.result
             }
         }
     }

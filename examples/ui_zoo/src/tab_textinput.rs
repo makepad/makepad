@@ -26,6 +26,10 @@ live_design!{
             <TextInput> { empty_text: "Inline Label" }
 
             <Hr> {}
+            <H4> { text: "TextInput with content" }
+            <TextInput> { text: "Some text" }
+
+            <Hr> {}
             <H4> { text: "TextInputFlat" }
             <TextInputFlat> { empty_text: "Inline Label" }
 
@@ -54,13 +58,13 @@ live_design!{
                     color_2_hover: #FF0
                     color_2_focus: #CC0
 
-                    border_color_1: (THEME_COLOR_BEVEL_SHADOW)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
-                    border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW)
+                    border_color_1: (THEME_COLOR_BEVEL_INSET_2)
+                    border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2)
+                    border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2)
 
-                    border_color_2: (THEME_COLOR_BEVEL_LIGHT)
-                    border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
-                    border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT)
+                    border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+                    border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1)
+                    border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1)
                 }
 
                 draw_text: {
@@ -71,11 +75,6 @@ live_design!{
                     color_empty_focus: #6
 
                     wrap: Word,
-
-                    text_style: <THEME_FONT_REGULAR> {
-                        line_spacing: (THEME_FONT_LINE_SPACING),
-                        font_size: (THEME_FONT_SIZE_P)
-                    }
 
                     fn get_color(self) -> vec4 {
                         return
@@ -127,13 +126,13 @@ live_design!{
                     color_2_hover: #FF0
                     color_2_focus: #CC0
 
-                    border_color_1: (THEME_COLOR_BEVEL_SHADOW)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
-                    border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW)
+                    border_color_1: (THEME_COLOR_BEVEL_INSET_2)
+                    border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2)
+                    border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2)
 
-                    border_color_2: (THEME_COLOR_BEVEL_LIGHT)
-                    border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
-                    border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT)
+                    border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+                    border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1)
+                    border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1)
                 }
 
                 draw_text: {
@@ -144,11 +143,6 @@ live_design!{
                     color_empty_focus: #6
 
                     wrap: Word,
-
-                    text_style: <THEME_FONT_REGULAR> {
-                        line_spacing: (THEME_FONT_LINE_SPACING),
-                        font_size: (THEME_FONT_SIZE_P)
-                    }
 
                     fn get_color(self) -> vec4 {
                         return

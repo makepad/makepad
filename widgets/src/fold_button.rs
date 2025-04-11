@@ -19,9 +19,9 @@ live_design!{
             instance active: 0.0
             instance hover: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_INACTIVE)
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color: (THEME_COLOR_LABEL_INNER)
+            uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+            uniform color_active: (THEME_COLOR_LABEL_INNER_ACTIVE)
 
             uniform fade: 1.0
             
@@ -39,8 +39,8 @@ live_design!{
                 sdf.close_path();
                 sdf.fill(
                     mix(
-                        mix( self.color, self.color_hover, self.hover),
-                        mix( self.color_active, self.color_hover, self.hover),
+                        mix(self.color, self.color_hover, self.hover),
+                        mix(self.color_active, self.color_hover, self.hover),
                         self.active
                     )
                 );
