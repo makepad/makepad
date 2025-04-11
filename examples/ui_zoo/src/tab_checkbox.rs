@@ -53,14 +53,6 @@ live_design!{
                     draw_bg: {
                         border_size: 1.0
 
-                        color_1: #F40
-                        color_1_hover: #F44
-                        color_1_active: #F00
-
-                        color_2: #F80
-                        color_2_hover: #FA4
-                        color_2_active: #F80
-
                         border_color_1: #0
                         border_color_1_hover: #F
                         border_color_1_active: #8
@@ -86,7 +78,6 @@ live_design!{
 
                     draw_icon: {
                         color: #F00
-                        color_hover: #F44
                         color_active: #F00
                     }
 
@@ -142,14 +133,6 @@ live_design!{
                 draw_bg: {
                     border_size: 1.0
 
-                    color_1: #F00
-                    color_1_hover: #F44
-                    color_1_active: #F00
-
-                    color_2: #F80
-                    color_2_hover: #FA4
-                    color_2_active: #F80
-
                     border_color_1: #0
                     border_color_1_hover: #F
                     border_color_1_active: #8
@@ -175,7 +158,6 @@ live_design!{
 
                 draw_icon: {
                     color: #F00
-                    color_hover: #F44
                     color_active: #F00
                 }
 
@@ -200,26 +182,6 @@ live_design!{
 
                     draw_bg: {
                         border_size: 1.0
-
-                        color_1: #F00
-                        color_1_hover: #F44
-                        color_1_active: #F00
-
-                        color_2: #F80
-                        color_2_hover: #FA4
-                        color_2_active: #F80
-
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
-
-                        border_color_2: #0
-                        border_color_2_hover: #F
-                        border_color_2_active: #8
-
-                        mark_color: #FFF0
-                        mark_color_hover: #FFFF
-                        mark_color_active: #FFFC
                     }  
                 
                     draw_text: {
@@ -233,13 +195,12 @@ live_design!{
                     }
 
                     draw_icon: {
-                        color: #300
-                        color_hover: #800
-                        color_active: #F00
+
                     }
 
                     icon_walk: { width: 13.0, height: Fit }
                 }
+
                 <CheckBoxCustom> {
                     text:"Check me out!"
                     draw_bg: { check_type: None }

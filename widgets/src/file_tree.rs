@@ -29,13 +29,13 @@ live_design!{
         align: { y: 0.5 }
         padding: { left: (THEME_SPACE_1) },
         is_folder: false,
-        indent_width: 10.0
+        indent_width: (THEME_SPACE_2)
         min_drag_distance: 10.0
         
         draw_bg: {
             uniform color_1: (THEME_COLOR_BG_EVEN)
             uniform color_2: (THEME_COLOR_BG_ODD)
-            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
+            uniform color_active: (THEME_COLOR_HIGHLIGHT)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -62,8 +62,8 @@ live_design!{
         }
         
         draw_icon: {
-            uniform color: (THEME_COLOR_TEXT)
-            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color: (THEME_COLOR_LABEL_INNER)
+            uniform color_active: (THEME_COLOR_LABEL_INNER_ACTIVE)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -83,8 +83,8 @@ live_design!{
         }
         
         draw_text: {
-            uniform color: (THEME_COLOR_TEXT)
-            uniform color_active: (THEME_COLOR_TEXT)
+            uniform color: (THEME_COLOR_LABEL_INNER)
+            uniform color_active: (THEME_COLOR_LABEL_INNER_ACTIVE)
             
             fn get_color(self) -> vec4 {
                 return mix(
@@ -101,7 +101,7 @@ live_design!{
         
         icon_walk: {
             width: (THEME_DATA_ICON_WIDTH - 2), height: (THEME_DATA_ICON_HEIGHT),
-            margin: { right: 3.0 }
+            margin: { right: (THEME_SPACE_1) }
         }
         
         animator: {
@@ -224,7 +224,7 @@ live_design!{
             draw_text: {is_folder: 1.0}
         }
         
-        filler: { // TODO: Clarify what this is for. Appears not to do anything.
+        filler: {
             fn pixel(self) -> vec4 {
                 return mix(
                     mix(

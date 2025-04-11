@@ -108,8 +108,8 @@ live_design! {
     pub THEME_COLOR_BG_HIGHLIGHT = (THEME_COLOR_U_1) // Code-blocks and quotes.
     pub THEME_COLOR_BG_HIGHLIGHT_INLINE = (THEME_COLOR_U_3) // i.e. inline code
 
-    pub THEME_COLOR_BEVEL_LIGHT = (THEME_COLOR_U_3)
-    pub THEME_COLOR_BEVEL_SHADOW = (THEME_COLOR_D_3)
+    pub THEME_COLOR_BEVEL_1 = (THEME_COLOR_U_3)
+    pub THEME_COLOR_BEVEL_2 = (THEME_COLOR_D_3)
 
     // WIDGET COLORS
     pub THEME_COLOR_OUTSET = (THEME_COLOR_U_1)
@@ -118,7 +118,6 @@ live_design! {
     pub THEME_COLOR_OUTSET_ACTIVE = (THEME_COLOR_U_2)
     pub THEME_COLOR_OUTSET_INACTIVE = (THEME_COLOR_D_HIDDEN)
 
-    pub THEME_COLOR_FLOATING_BG = #505050FF // Elements that live on top of the UI like dialogs, popovers, and context menus.
 
     // Background of textinputs, radios, checkboxes etc.
     pub THEME_COLOR_INSET = (THEME_COLOR_D_1)

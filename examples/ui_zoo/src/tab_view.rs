@@ -16,7 +16,7 @@ live_design!{
             <H4> { text: "View" }
             <View> {
                 width: Fit, height: Fit, 
-                padding: 10.,
+                padding: <THEME_MSPACE_2> {},
                 align: { x: 0.5, y: 0.5 }
                 <Label> { text: "<View>" }
             }
@@ -27,7 +27,7 @@ live_design!{
                 flow: RightWrap
                 <SolidView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
                     draw_bg: { color: #0 }
                     <Label> { text: "<SolidView>" }
@@ -51,7 +51,7 @@ live_design!{
 
                 <RectView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
                     draw_bg: {
                         color: #000,
@@ -64,7 +64,7 @@ live_design!{
 
                 <RectShadowView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
@@ -81,7 +81,7 @@ live_design!{
 
                 <RoundedShadowView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
@@ -99,7 +99,7 @@ live_design!{
 
                 <RoundedView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
@@ -115,7 +115,7 @@ live_design!{
 
                 <RoundedXView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
@@ -131,7 +131,7 @@ live_design!{
 
                 <RoundedYView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
@@ -147,7 +147,7 @@ live_design!{
 
                 <RoundedAllView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
@@ -163,7 +163,7 @@ live_design!{
 
                 <GradientXView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
@@ -177,7 +177,7 @@ live_design!{
 
                 <GradientYView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
@@ -212,7 +212,7 @@ live_design!{
 
                 <HexagonView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
@@ -234,7 +234,7 @@ live_design!{
                 flow: RightWrap
                 <CachedView> {
                     width: Fit, height: Fit, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
 
                     <View> {
@@ -260,7 +260,7 @@ live_design!{
 
                     <View> {
                         width: Fit, height: Fit,
-                        padding: 10.,
+                        padding: <THEME_MSPACE_2> {},
                         show_bg: true, 
                         draw_bg: { color: #0 }
 
@@ -271,7 +271,7 @@ live_design!{
 
                 <CachedScrollXY> {
                     width: 100, height: 100, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
 
                     <View> {
@@ -298,7 +298,7 @@ live_design!{
 
                 <CachedScrollX> {
                     width: 100, height: 100, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
 
                     <View> {
@@ -325,7 +325,7 @@ live_design!{
 
                 <CachedScrollY> {
                     width: 100, height: 100, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
 
                     <View> {
@@ -352,7 +352,7 @@ live_design!{
 
                 <ScrollXYView> {
                     width: 100, height: 100, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
                     show_bg: true,
                     draw_bg: {
@@ -383,7 +383,7 @@ live_design!{
 
                 <ScrollXView> {
                     width: 100, height: 100, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
                     show_bg: true,
                     draw_bg: {
@@ -414,7 +414,7 @@ live_design!{
 
                 <ScrollYView> {
                     width: 100, height: 100, 
-                    padding: 10.,
+                    padding: <THEME_MSPACE_2> {},
                     align: { x: 0., y: 0. }
                     show_bg: true,
                     draw_bg: {

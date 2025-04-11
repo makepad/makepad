@@ -18,19 +18,16 @@ live_design! {
         flow: Down,
         height: Fit,
 
-        color_focus: (THEME_COLOR_OUTSET_HOVER),
-        color_hover: (THEME_COLOR_OUTSET_HOVER * 0.85),
-
         popup = <RoundedView> {
             flow: Down,
             height: Fit,
             visible: false,
 
             draw_bg: {
-                color: #fff,
-                border_size: 2.0,
-                border_color: #eaecf0,
-                border_radius: 8.0,
+                color: (THEME_COLOR_FG_APP),
+                border_size: (THEME_BEVELING),
+                border_color: (THEME_COLOR_BEVEL),
+                border_radius: (THEME_CORNER_RADIUS)
 
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -72,10 +69,10 @@ live_design! {
                 show_bg: true
                 visible: true,
                 draw_bg: {
-                    color: #f5f5f5,
-                    instance top_radius: 8.0,
-                    instance border_color: #f5f5f5,
-                    instance border_width: 2.0,
+                    color: (THEME_COLOR_FG_APP),
+                    instance top_radius: (THEME_CORNER_RADIUS),
+                    instance border_color: (THEME_COLOR_BEVEL),
+                    instance border_width: (THEME_BEVELING)
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                         sdf.box_all(
@@ -95,9 +92,9 @@ live_design! {
 
                 header_label = <Label> {
                     draw_text: {
-                        color: #495057,
+                        color: (THEME_COLOR_LABEL_INNER)
                         text_style: {
-                            font_size: 13.0,
+                            font_size: (THEME_FONT_SIZE_4)
                         }
                     }
                 }
