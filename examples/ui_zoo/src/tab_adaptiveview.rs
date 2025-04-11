@@ -17,7 +17,7 @@ live_design!{
             <AdaptiveView> {
                 Desktop = {
                     flow: Down,
-                    spacing: 10.
+                    spacing: (THEME_SPACE_2)
 
                     <View> {
                         show_bg: true,
@@ -31,7 +31,7 @@ live_design!{
                     }
                     <View> {
                         flow: Right,
-                        spacing: 10.
+                        spacing: (THEME_SPACE_2)
                         <View> {
                             show_bg: true,
                             draw_bg: {color: #008}
@@ -59,7 +59,7 @@ live_design!{
                     flow: Down,
                     show_bg: true,
                     draw_bg: {color: #008}
-                    spacing: 5.
+                    spacing: (THEME_SPACE_1)
 
                     <View> {
                         show_bg: true,

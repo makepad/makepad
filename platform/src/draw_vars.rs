@@ -79,7 +79,7 @@ pub const fn shader_enum(i: u32) -> u32 {
     i
 }
 
-pub const DRAW_CALL_USER_UNIFORMS: usize = 192;
+pub const DRAW_CALL_USER_UNIFORMS: usize = 256;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
 pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
 
