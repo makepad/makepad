@@ -64,8 +64,16 @@ live_design!{
                 sdf.rect(0, self.rect_size.y - slider_height * 1.25, self.rect_size.x, slider_height)
                 sdf.fill(
                     mix(
-                        mix(self.border_color_2, self.border_color_2_focus, self.focus),
-                        mix(self.border_color_2_hover, self.border_color_2_drag, self.drag),
+                        mix(
+                            self.border_color_2,
+                            self.border_color_2_focus,
+                            self.focus
+                        ),
+                        mix(
+                            self.border_color_2_hover,
+                            self.border_color_2_drag,
+                            self.drag
+                        ),
                         self.hover
                     )
                 );
@@ -284,12 +292,12 @@ live_design!{
             uniform handle_color_2_focus: (THEME_COLOR_SLIDER_HANDLE_2)
             uniform handle_color_2_drag: (THEME_COLOR_SLIDER_HANDLE_2)
 
-            uniform border_color_1: (THEME_COLOR)
+            uniform border_color_1: (THEME_COLOR_OUTSET)
             uniform border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform border_color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
             uniform border_color_1_drag: (THEME_COLOR_OUTSET_DRAG)
 
-            uniform border_color_2: (THEME_COLOR)
+            uniform border_color_2: (THEME_COLOR_OUTSET)
             uniform border_color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform border_color_2_focus: (THEME_COLOR_OUTSET_FOCUS)
             uniform border_color_2_drag: (THEME_COLOR_OUTSET_DRAG)
@@ -533,12 +541,12 @@ live_design!{
             handle_color_2_focus: (THEME_COLOR_SLIDER_HANDLE_FOCUS)
             handle_color_2_drag: (THEME_COLOR_SLIDER_HANDLE_DRAG)
 
-            border_color_1: (THEME_COLOR)
+            border_color_1: (THEME_COLOR_OUTSET)
             border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             border_color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
             border_color_1_drag: (THEME_COLOR_OUTSET_DRAG)
 
-            border_color_2: (THEME_COLOR)
+            border_color_2: (THEME_COLOR_OUTSET)
             border_color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             border_color_2_focus: (THEME_COLOR_OUTSET_FOCUS)
             border_color_2_drag: (THEME_COLOR_OUTSET_DRAG)
@@ -850,7 +858,7 @@ live_design!{
             uniform color_2_focus: (THEME_COLOR_INSET_2)
             uniform color_2_drag: (THEME_COLOR_INSET_2)
 
-            uniform border_color_1: (THEME_COLOR)
+            uniform border_color_1: (THEME_COLOR_OUTSET)
             uniform border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform border_color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
             uniform border_color_1_drag: (THEME_COLOR_OUTSET_DRAG)
@@ -1608,12 +1616,12 @@ live_design!{
 
             color_dither: 1.0
 
-            color_1: (THEME_COLOR)
+            color_1: (THEME_COLOR_OUTSET)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
             color_1_drag: (THEME_COLOR_OUTSET_DRAG)
 
-            color_2: (THEME_COLOR)
+            color_2: (THEME_COLOR_OUTSET)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             color_2_focus: (THEME_COLOR_OUTSET_FOCUS)
             color_2_drag: (THEME_COLOR_OUTSET_DRAG)
@@ -1793,6 +1801,13 @@ impl WidgetDesign for Slider{
 }
 
 impl Widget for Slider {
+    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
+        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+    }
+                
+    fn disabled(&self, cx:&Cx) -> bool {
+        self.animator_in_state(cx, id!(disabled.on))
+    }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         let uid = self.widget_uid();
