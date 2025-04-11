@@ -143,8 +143,13 @@ impl DrawText2 {
             .turtle()
             .max_width(walk)
             .map(|max_width| max_width as f32);
+        let wrap_width_in_lpxs = if cx.turtle().layout().flow == Flow::RightWrap {
+            max_width_in_lpxs
+        } else {
+            None
+        };
 
-        let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, align, text);
+        let text = self.layout(cx, 0.0, 0.0, wrap_width_in_lpxs, align, text);
         self.draw_walk_laidout(cx, walk, align, &text)
     }
 
