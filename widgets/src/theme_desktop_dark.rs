@@ -287,6 +287,6 @@ live_design! {
         font_family:{
             latin = dep("crate://self/resources/LiberationMono-Regular.ttf")
         },
-        line_spacing: 1.2
+        line_spacing: 1.35
     }
 }
