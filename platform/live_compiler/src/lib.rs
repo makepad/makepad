@@ -69,6 +69,7 @@ pub use {
             LiveNodeReader,
         },
         live_node::{
+            LiveFont,
             LiveImport,
             LiveProp,
             LiveIdAsProp,

@@ -346,6 +346,11 @@ impl Cx {
                                 data: None
                             });
                         }, 
+                        LiveValue::Font(font)=>{
+                            self.dependencies.insert(font.path.as_str().to_string(), CxDependency {
+                                data: None
+                            });
+                        }
                         _ => {
                         }
                     }

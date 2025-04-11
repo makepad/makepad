@@ -309,6 +309,9 @@ impl LiveRegistry {
             LiveValue::Dependency (v) => {
                 Some(v.as_str().to_string())
             }
+            LiveValue::Font (v) => {
+                Some(v.path.as_str().to_string())
+            }
             _ => None
         }
     }
