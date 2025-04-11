@@ -235,9 +235,9 @@ live_design! {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
         font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
         font_family:{
-            latin = dep("crate://self/resources/IBMPlexSans-Text.ttf"),
-            chinese = dep("crate://self/resources/LXGWWenKaiRegular.ttf")
-            emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
+            latin = font("crate://self/resources/IBMPlexSans-Text.ttf", 0.0, 0.0),
+            chinese = font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
+            emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
         line_spacing: 1.2
     } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
@@ -245,9 +245,9 @@ live_design! {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
         font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
         font_family: {
-            latin = dep("crate://self/resources/IBMPlexSans-Text.ttf"),
-            chinese = dep("crate://self/resources/LXGWWenKaiRegular.ttf")
-            emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
+            latin = font("crate://self/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
+            chinese = font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
+            emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
         line_spacing: 1.2
     }
@@ -255,9 +255,9 @@ live_design! {
         font: { path: dep("crate://self/resources/IBMPlexSans-SemiBold.ttf") }
         font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
         font_family:{
-            latin = dep("crate://self/resources/IBMPlexSans-SemiBold.ttf")
-            chinese = dep("crate://self/resources/LXGWWenKaiBold.ttf"),
-            emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
+            latin = font("crate://self/resources/IBMPlexSans-SemiBold.ttf", 0.0, 0.0)
+            chinese = font("crate://self/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
+            emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
         line_spacing: 1.2
     }
@@ -265,8 +265,8 @@ live_design! {
         font: { path: dep("crate://self/resources/IBMPlexSans-Italic.ttf") }
         font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
         font_family:{
-            latin = dep("crate://self/resources/IBMPlexSans-Italic.ttf")
-            chinese =  dep("crate://self/resources/LXGWWenKaiRegular.ttf"),
+            latin = font("crate://self/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0)
+            chinese =  font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0),
         },
         line_spacing: 1.2
     }
@@ -274,8 +274,8 @@ live_design! {
         font: { path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf") },
         font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
         font_family:{
-            latin = dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf")
-            chinese = dep("crate://self/resources/LXGWWenKaiBold.ttf"),
+            latin = font("crate://self/resources/IBMPlexSans-BoldItalic.ttf", 0.0, 0.0)
+            chinese = font("crate://self/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
         },
         line_spacing: 1.2
     }
@@ -285,7 +285,7 @@ live_design! {
         //brightness: 1.1
         line_scale: 1.2,
         font_family:{
-            latin = dep("crate://self/resources/LiberationMono-Regular.ttf")
+            latin = font("crate://self/resources/LiberationMono-Regular.ttf", 0.0, 0.0)
         },
         line_spacing: 1.35
     }
