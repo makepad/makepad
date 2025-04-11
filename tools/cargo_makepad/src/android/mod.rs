@@ -176,7 +176,7 @@ impl AndroidTarget {
         }
         return Ok(out);
     }
-    fn sys_dir(&self) -> &'static str {
+    fn _sys_dir(&self) -> &'static str {
         match self {
             Self::aarch64 => "aarch64-linux-android",
             Self::x86_64 => "x86_64-linux-android",
@@ -184,7 +184,7 @@ impl AndroidTarget {
             Self::i686 => "i686-linux-android",
         }
     }
-    fn unwind_dir(&self) -> &'static str {
+    fn _unwind_dir(&self) -> &'static str {
         match self {
             Self::aarch64 => "aarch64",
             Self::x86_64 => "x86_64",
@@ -273,6 +273,9 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let mut variant = AndroidVariant::Default;
     let mut targets = vec![AndroidTarget::aarch64];
     let mut keep_sdk_sources = false;
+    
+    let urls = sdk::ANDROID_SDK_URLS_33;
+    
     // pull out options
     for i in 0..args.len() {
         let v = &args[i];
@@ -323,10 +326,10 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             sdk::rustup_toolchain_install(&targets)
         }
         "download-sdk" => {
-            sdk::download_sdk(&sdk_dir, host_os, &args[1..])
+            sdk::download_sdk(&sdk_dir, host_os, &args[1..], &urls)
         }
         "expand-sdk" => {
-            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets)
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets, &urls)
         }
         "remove-sdk-sources" => {
             sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
@@ -334,8 +337,8 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         "toolchain-install" | "install-toolchain"=> {
             println!("Installing Android toolchain\n");
             sdk::rustup_toolchain_install(&targets) ?;
-            sdk::download_sdk(&sdk_dir, host_os, &args[1..]) ?;
-            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets) ?;
+            sdk::download_sdk(&sdk_dir, host_os, &args[1..], &urls) ?;
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets, &urls) ?;
             if !keep_sdk_sources {
                 sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..]) ?;
             }
@@ -346,11 +349,11 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             compile::base_apk(&sdk_dir, host_os, &args[1..])
         }*/
         "build" => {
-            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant) ?;
+            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant, &urls) ?;
             Ok(())
         }
         "run" => {
-            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant)
+            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant, &urls)
         }
         _ => Err(format!("{} is not a valid command or option", args[0]))
     }
