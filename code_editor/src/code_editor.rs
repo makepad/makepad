@@ -358,7 +358,7 @@ impl CodeEditor {
         let first_glyph = first_row.glyphs.first().unwrap();
         self.cell_size = dvec2(
             first_glyph.advance_in_lpxs() as f64,
-            (first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs()) as f64,
+            ((first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs()) as f64) * self.draw_text.text_style.line_spacing as f64,
         );
 
         let last_added_selection =
