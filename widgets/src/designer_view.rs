@@ -66,7 +66,7 @@ live_design!{
             
             draw_bg: {
                 border_size: 1.0
-                border_color: (THEME_COLOR_BEVEL_LIGHT)
+                border_color: (THEME_COLOR_BEVEL_OUTSET_1)
                 shadow_color: (THEME_COLOR_D_3)
                 shadow_radius: 5.0,
                 shadow_offset: vec2(0.0, 0.0)
@@ -93,11 +93,11 @@ live_design!{
                         let body_transp = vec4(body.xyz, 0.0);
                         let top_gradient = mix(
                             body_transp,
-                            mix(THEME_COLOR_BEVEL_LIGHT, THEME_COLOR_BEVEL_SHADOW, self.down),
+                            mix(THEME_COLOR_BEVEL_OUTSET_1, THEME_COLOR_BEVEL_2, self.down),
                             max(0.0, grad_top - sdf.pos.y) / grad_top
                         );
                         let bot_gradient = mix(
-                            mix(THEME_COLOR_BEVEL_SHADOW, THEME_COLOR_BEVEL_LIGHT, self.down),
+                            mix(THEME_COLOR_BEVEL_2, THEME_COLOR_BEVEL_OUTSET_1, self.down),
                             top_gradient,
                             clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                         );

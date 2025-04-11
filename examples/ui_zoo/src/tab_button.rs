@@ -15,53 +15,14 @@ live_design!{
         demos = {
             <H4> { text: "Standard"}
             <UIZooRowH> {
-                basicbutton = <Button> {
+                basicbutton = <Button> { text: "<Button>" }
 
-                    draw_text: {
-                        color: (THEME_COLOR_TEXT)
-                        color_hover: (THEME_COLOR_TEXT_HOVER)
-                        color_down: (THEME_COLOR_TEXT_DOWN)
-                        text_style: <THEME_FONT_REGULAR> {
-                            font_size: (THEME_FONT_SIZE_P)
-                        }
-                    }
-
-                    icon_walk: {
-                        width: (THEME_DATA_ICON_WIDTH), height: Fit,
-                    }
-
-                    draw_icon: {
-                        color: (THEME_COLOR_TEXT)
-                        color_hover: (THEME_COLOR_TEXT_HOVER)
-                        color_down: (THEME_COLOR_TEXT_DOWN)
-                    }
-
-                    draw_bg: {
-                        border_radius: (THEME_BEVELING)
-                        border_radius: (THEME_CORNER_RADIUS)
-
-                        color: (THEME_COLOR_OUTSET)
-                        color_hover: (THEME_COLOR_OUTSET_HOVER)
-                        color_down: (THEME_COLOR_OUTSET_DOWN)
-
-                        border_color_1: (THEME_COLOR_BEVEL_LIGHT)
-                        border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
-                        border_color_1_down: (THEME_COLOR_BEVEL_SHADOW)
-
-                        border_color_2: (THEME_COLOR_BEVEL_SHADOW)
-                        border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
-                        border_color_2_down: (THEME_COLOR_BEVEL_LIGHT)
-                    }
-
-                    text: "<Button>"
-                }
-
-                iconbutton = <ButtonIcon> {
+                iconbutton = <Button> {
                     draw_icon: {
                         color: #f00,
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
-                    text: "<ButtonIcon>"
+                    text: "<Button>"
                 }
             }
 

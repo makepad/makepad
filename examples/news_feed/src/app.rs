@@ -674,7 +674,7 @@ live_design!{
                             );
 
                             let bot_gradient = mix(
-                                (THEME_COLOR_BEVEL_LIGHT),
+                                (THEME_COLOR_BEVEL_OUTSET_1),
                                 top_gradient,
                                 clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                             );

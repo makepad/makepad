@@ -76,14 +76,14 @@ live_design!{
             }
         }
         
-        draw_name: {
+        draw_text: {
             instance selected: 0.0
             instance hover: 0.0
             instance focussed: 0.0
             fn get_color(self) -> vec4 {
                 return mix(
-                    THEME_COLOR_TEXT * self.scale,
-                    THEME_COLOR_TEXT_ACTIVE,
+                    THEME_COLOR_LABEL_OUTER * self.scale,
+                    THEME_COLOR_LABEL_OUTER_ACTIVE,
                     self.selected
                 )
             }
@@ -129,7 +129,7 @@ live_design!{
                     apply: {
                         hover: 0.0
                         draw_bg: {hover: 0.0}
-                        draw_name: {hover: 0.0}
+                        draw_text: {hover: 0.0}
                         draw_icon: {hover: 0.0}
                     }
                 }
@@ -140,7 +140,7 @@ live_design!{
                     apply: {
                         hover: 1.0
                         draw_bg: {hover: 1.0}
-                        draw_name: {hover: 1.0}
+                        draw_text: {hover: 1.0}
                         draw_icon: {hover: 1.0}
                     },
                 }
@@ -166,7 +166,7 @@ live_design!{
                     apply: {
                         selected: 0.0
                         draw_bg: {selected: 0.0}
-                        draw_name: {selected: 0.0}
+                        draw_text: {selected: 0.0}
                         draw_icon: {selected: 0.0}
                     }
                 }
@@ -175,7 +175,7 @@ live_design!{
                     apply: {
                         selected: 1.0
                         draw_bg: {selected: 1.0}
-                        draw_name: {selected: 1.0}
+                        draw_text: {selected: 1.0}
                         draw_icon: {selected: 1.0}
                     }
                 }
@@ -192,8 +192,8 @@ live_design!{
     STUDIO_PALETTE_6 = #FFB368
     STUDIO_PALETTE_7 = #FFD864
     
-    STUDIO_COLOR_FILE = (THEME_COLOR_TEXT)
-    STUDIO_COLOR_FOLDER = (THEME_COLOR_TEXT)
+    STUDIO_COLOR_FILE = (THEME_COLOR_LABEL_OUTER)
+    STUDIO_COLOR_FOLDER = (THEME_COLOR_LABEL_OUTER)
     STUDIO_COLOR_LAYOUT = (STUDIO_PALETTE_6)
     STUDIO_COLOR_WIDGET = (STUDIO_PALETTE_2)
     STUDIO_COLOR_ASSET = (STUDIO_PALETTE_5)
@@ -290,7 +290,7 @@ pub struct DesignerOutlineTreeNode {
     #[live] draw_bg: DrawNodeQuad,
     #[live] button_open: FoldButton,
     #[live] draw_icon: DrawNodeIcon,
-    #[live] draw_name: DrawNodeText,
+    #[live] draw_text: DrawNodeText,
     #[live] icon_walk: Walk,
     #[live] button_open_width: f64,
     #[live] draw_eye: bool,
@@ -386,7 +386,7 @@ impl DesignerOutlineTreeNode {
         self.draw_bg.is_even = is_even;
         self.draw_bg.scale = scale as f32;
         self.draw_icon.scale = scale as f32;
-        self.draw_name.scale = scale as f32;
+        self.draw_text.scale = scale as f32;
                         
         
         self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
@@ -399,7 +399,7 @@ impl DesignerOutlineTreeNode {
             cx.walk_turtle(Walk::fixed(self.button_open_width,0.0));
         }
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.draw_bg.end(cx);
     }
     
