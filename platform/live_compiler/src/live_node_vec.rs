@@ -773,6 +773,9 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 LiveValue::Import(live_import) => {
                     writeln!(f, "<Import> {}::{} as {}", live_import.module_id, live_import.import_id, node.id).unwrap();
                 }
+                LiveValue::Font (s) => {
+                    writeln!(f, "{}{} <Font> {:?}", node.id, pt, s).unwrap();
+                },
                 /*LiveValue::Registry(component_id) => {
                     writeln!(f, "<Registry> {}::{}", component_id, node.id).unwrap();
                 }*/

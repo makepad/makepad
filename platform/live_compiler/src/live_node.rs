@@ -26,6 +26,21 @@ pub struct LiveNode { // 48 bytes. Don't really see ways to compress
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct LiveFont {
+    pub path: Arc<String>,
+    pub ascender_fudge: f32,
+    pub descender_fudge: f32
+}
+
+impl LiveFont{
+    pub fn to_live_id(&self)->LiveId{
+        LiveId::seeded().str_append(self.path.as_str())
+        .bytes_append(&self.ascender_fudge.to_be_bytes())
+        .bytes_append(&self.descender_fudge.to_be_bytes())
+    }
+}
+ 
+#[derive(Clone, Debug, PartialEq)]
 pub enum LiveValue {
     None,
     // string types
@@ -33,6 +48,7 @@ pub enum LiveValue {
     String(Arc<String>),
     InlineString(InlineString),
     Dependency(Arc<String>),
+    Font(LiveFont),
     Bool(bool),
     Int64(i64),
     Uint64(u64),
@@ -711,6 +727,7 @@ impl LiveValue {
             
             Self::DSL {..} => 31,
             Self::Import {..} => 32,
+            Self::Font {..} => 33,
             //Self::Registry {..} => 30,
         }
     }

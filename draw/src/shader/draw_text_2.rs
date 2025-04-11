@@ -502,8 +502,8 @@ impl LiveHook for FontFamily {
         let mut id = LiveId::seeded();
         let mut next_child_index = Some(index + 1);
         while let Some(child_index) = next_child_index {
-            if let LiveValue::Dependency(dependency) = &nodes[child_index].value {
-                id = id.xor(dependency.as_ptr() as u64);
+            if let LiveValue::Font(font) = &nodes[child_index].value {
+                id = id.id_append(font.to_live_id());
             }
             next_child_index = nodes.next_child(child_index);
         }
@@ -514,18 +514,20 @@ impl LiveHook for FontFamily {
             let mut font_ids = Vec::new();
             let mut next_child_index = Some(index + 1);
             while let Some(child_index) = next_child_index {
-                if let LiveValue::Dependency(dependency) = &nodes[child_index].value {
-                    let font_id: FontId = dependency.as_str().into();
+                if let LiveValue::Font(font) = &nodes[child_index].value {
+                    let font_id:FontId = (font.to_live_id().0 as usize).into();
                     if !fonts.is_font_known(font_id) {
+                        // stuff in 
+                        // font.ascender_fudge
+                        // font.descender_fudge
                         fonts.define_font(
                             font_id,
                             FontDefinition {
-                                data: cx.get_dependency(dependency).unwrap().into(),
+                                data: cx.get_dependency(font.path.as_str()).unwrap().into(),
                                 index: 0,
                             },
                         );
                     }
-                   
                     font_ids.push(font_id);
                 }
                 next_child_index = nodes.next_child(child_index);
