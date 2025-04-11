@@ -88,15 +88,6 @@ live_design!{
                         self.color_focus,
                         self.focus
                     )
-                    // mix(
-                    //     mix(
-                    //         mix(self.color, self.color_hover, self.hover),
-                    //         self.color_focus,
-                    //         self.focus
-                    //     ),
-                    //     mix(self.color_empty, self.color_empty_focus, self.hover),
-                    //     self.is_empty
-                    // )
                 )
                 
                 return sdf.result
@@ -722,6 +713,14 @@ impl TextInput {
 }
 
 impl Widget for TextInput {
+    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
+        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+    }
+                
+    fn disabled(&self, cx:&Cx) -> bool {
+        self.animator_in_state(cx, id!(disabled.on))
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let rect = self.draw_bg.area().rect(cx);
         let padded_rect = Rect {
