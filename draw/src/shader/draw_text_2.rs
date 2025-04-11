@@ -6,7 +6,6 @@ use {
         makepad_platform::*,
         text::{
             color::Color,
-            font::FontId,
             font_family::FontFamilyId,
             fonts::Fonts,
             geom::{Point, Rect, Size, Transform},
@@ -140,12 +139,12 @@ impl DrawText2 {
         align: Align,
         text: &str,
     ) -> makepad_platform::Rect {
-        let max_width = cx
+        let max_width_in_lpxs = cx
             .turtle()
             .max_width(walk)
             .map(|max_width| max_width as f32);
 
-        let text = self.layout(cx, 0.0, 0.0, max_width, align, text);
+        let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, align, text);
         self.draw_walk_laidout(cx, walk, align, &text)
     }
 
@@ -202,7 +201,6 @@ impl DrawText2 {
         text: &str,
         mut f: impl FnMut(&mut Cx2d, makepad_platform::Rect),
     ) {
-        //self.debug = true;
         let turtle_pos = cx.turtle().pos();
         let turtle_rect = cx.turtle().padded_rect();
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
@@ -253,7 +251,7 @@ impl DrawText2 {
             .update_width_max(origin_in_lpxs.x as f64, used_size_in_lpxs.width as f64);
         cx.turtle_mut()
             .update_height_max(origin_in_lpxs.y as f64, used_size_in_lpxs.height as f64);
-         
+
         cx.emit_turtle_walk(makepad_platform::Rect {
             pos: new_turtle_pos,
             size: dvec2(
@@ -553,6 +551,8 @@ impl LiveHook for FontFamily {
                             FontDefinition {
                                 data: cx.get_dependency(font.path.as_str()).unwrap().into(),
                                 index: 0,
+                                ascender_fudge_in_ems: 0.0,
+                                descender_fudge_in_ems: 0.0,
                             },
                         );
                     }
