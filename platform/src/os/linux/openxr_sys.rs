@@ -15,9 +15,9 @@ macro_rules! get_proc_addr {
     ($get_addr:expr, $inst:expr,  $ty:ident) => {
         unsafe{
             let mut f: *mut c_void = 0 as *mut _;
-            $get_addr($inst, CStr::from_bytes_with_nul(&concat!(stringify!($ty), "\0").as_bytes()[1..]).unwrap().as_ptr(),&mut f as *mut _ as _);
+            let res = $get_addr($inst, CStr::from_bytes_with_nul(&concat!(stringify!($ty), "\0").as_bytes()[1..]).unwrap().as_ptr(),&mut f as *mut _ as _);
             if f.is_null() {
-                Err(format!("Cannot find symbol {}", stringify!($ty)))
+                Err(format!("Cannot find symbol {} {:?}", stringify!($ty), res))
             }
             else{
                 Ok({ std::mem::transmute_copy::<_, $ty>(&f) })
@@ -88,8 +88,8 @@ pub struct LibOpenXr{
     pub xrPerfSettingsSetPerformanceLevelEXT: TxrPerfSettingsSetPerformanceLevelEXT,
     pub xrWaitFrame: TxrWaitFrame,
     pub xrBeginFrame: TxrBeginFrame,
-    pub xrEndFrame: TxrEndFrame
-    //pub xrSetAndroidApplicationThreadKHR: TxrSetAndroidApplicationThreadKHR,
+    pub xrEndFrame: TxrEndFrame,
+    pub xrSetAndroidApplicationThreadKHR: TxrSetAndroidApplicationThreadKHR,
 }
 
 
@@ -123,7 +123,7 @@ impl LibOpenXr {
             xrWaitFrame: get_proc_addr!(gipa, instance, TxrWaitFrame)?,
             xrBeginFrame: get_proc_addr!(gipa, instance, TxrBeginFrame)?,
             xrEndFrame: get_proc_addr!(gipa, instance, TxrEndFrame)?,
-            //xrSetAndroidApplicationThreadKHR:get_proc_addr!(gipa, XrInstance(1), TxrSetAndroidApplicationThreadKHR)?,
+            xrSetAndroidApplicationThreadKHR:get_proc_addr!(gipa, instance, TxrSetAndroidApplicationThreadKHR)?,
         })
     }
 }
