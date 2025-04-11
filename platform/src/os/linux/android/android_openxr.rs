@@ -125,9 +125,11 @@ impl CxAndroidOpenXr{
         let exts_needed = [
             "XR_KHR_opengl_es_enable\0",
             "XR_EXT_performance_settings\0",
+            "XR_KHR_android_thread_settings\0",
             "XR_FB_passthrough\0",
-            "XR_META_environment_depth\0"
+            "XR_META_environment_depth\0",
         ];
+        
         for ext_needed in exts_needed{
             if !exts.iter().any(|e|{
                 xr_string_zero_terminated(&e.extension_name) == ext_needed
@@ -149,22 +151,13 @@ impl CxAndroidOpenXr{
             },
             enabled_api_layer_count: 0,
             enabled_api_layer_names: 0 as *const *const _,
-            enabled_extension_count: 4 as u32,
+            enabled_extension_count: 5 as u32,
             enabled_extension_names: &xr_static_str_array(&exts_needed) as *const *const _
         };
         let mut instance = XrInstance(0);
         unsafe{(loader.xrCreateInstance)(&create_info, &mut instance)}.to_result("xrCreateInstance")?;
         self.instance = Some(instance);
         
-        let mut f = 0u64;
-        let result = unsafe{(loader.xrGetInstanceProcAddr)(
-            instance,
-            "xrSetAndroidApplicationThreadKHR\0".as_ptr(),
-            &mut f as *mut _ as _
-        )};
-        
-        crate::log!("INSTANCE {} {}", result, f);// unsafe{*(instance.0 as *const u32)});
-                
         self.openxr = Some(LibOpenXr::try_load(loader, instance)?);
         let openxr = &self.openxr.as_ref().unwrap();
         
@@ -430,7 +423,7 @@ impl CxAndroidOpenXr{
     static const int NUM_MULTI_SAMPLES = 4;
     static const int MAX_NUM_EYES = 2;
     */
-    fn begin_session(&mut self, _activity_thread: u64, _render_thread: u64){
+    fn begin_session(&mut self, activity_thread: u64, render_thread: u64){
         let openxr = &self.openxr.as_ref().unwrap();
         let session = self.session.unwrap();
         
@@ -460,16 +453,7 @@ impl CxAndroidOpenXr{
             XrPerfSettingsLevelEXT::BOOST
         )}.log_error("xrPerfSettingsSetPerformanceLevelEXT GPU");
         
-        /*
-        if self.thread_prio.is_none(){
-            if let Ok(tp) = LibOpenXrAndroidThread::try_load(self.loader.as_ref().unwrap(), self.instance.unwrap()){
-                self.thread_prio = Some(tp);
-            }
-            else{
-                crate::log!("OpenXR could not find thread prio fn");
-            }
-        }*/
-        /*
+        
         unsafe{(openxr.xrSetAndroidApplicationThreadKHR)(
             session, 
             XrAndroidThreadTypeKHR::APPLICATION_MAIN,
@@ -480,7 +464,7 @@ impl CxAndroidOpenXr{
             session, 
             XrAndroidThreadTypeKHR::RENDERER_MAIN,
             render_thread as u32
-        )}.log_error("xrSetAndroidApplicationThreadKHR");       */
+        )}.log_error("xrSetAndroidApplicationThreadKHR");     
     }
     
     fn begin_frame(&mut self){
@@ -496,7 +480,7 @@ impl CxAndroidOpenXr{
         let mut bf = XrFrameBeginInfo::default();
         unsafe{(openxr.xrBeginFrame)(session, &mut bf)}.log_error("xrBeginFrame");
                 
-        crate::log!("{:?}", fs);
+        //crate::log!("{:?}", fs);
     }
     
     fn end_frame(&mut self){
