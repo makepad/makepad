@@ -26,6 +26,18 @@ macro_rules! get_proc_addr {
     };
 }
 
+macro_rules! bitmask {
+    ($name:ident) => {
+        impl std::ops::BitOr for $name {
+            type Output = $name;
+            
+            #[inline]
+            fn bitor(self, rhs: $name) -> $name {
+                $name(self.0 | rhs.0)
+            }
+        }
+    }
+}
 
 
 
@@ -90,6 +102,12 @@ pub struct LibOpenXr{
     pub xrBeginFrame: TxrBeginFrame,
     pub xrEndFrame: TxrEndFrame,
     pub xrSetAndroidApplicationThreadKHR: TxrSetAndroidApplicationThreadKHR,
+    pub xrLocateSpace: TxrLocateSpace,
+    pub xrLocateViews: TxrLocateViews,
+    pub xrAcquireSwapchainImage:TxrAcquireSwapchainImage,
+    pub xrWaitSwapchainImage:TxrWaitSwapchainImage,
+    pub xrAcquireEnvironmentDepthImageMETA: TxrAcquireEnvironmentDepthImageMETA,
+    pub xrReleaseSwapchainImage:TxrReleaseSwapchainImage,
 }
 
 
@@ -124,6 +142,12 @@ impl LibOpenXr {
             xrBeginFrame: get_proc_addr!(gipa, instance, TxrBeginFrame)?,
             xrEndFrame: get_proc_addr!(gipa, instance, TxrEndFrame)?,
             xrSetAndroidApplicationThreadKHR:get_proc_addr!(gipa, instance, TxrSetAndroidApplicationThreadKHR)?,
+            xrLocateSpace:get_proc_addr!(gipa, instance, TxrLocateSpace)?,
+            xrLocateViews: get_proc_addr!(gipa, instance, TxrLocateViews)?,
+            xrAcquireSwapchainImage: get_proc_addr!(gipa, instance, TxrAcquireSwapchainImage)?,
+            xrWaitSwapchainImage: get_proc_addr!(gipa, instance, TxrWaitSwapchainImage)?,
+            xrAcquireEnvironmentDepthImageMETA: get_proc_addr!(gipa, instance, TxrAcquireEnvironmentDepthImageMETA)?,
+            xrReleaseSwapchainImage:get_proc_addr!(gipa, instance, TxrReleaseSwapchainImage)?,
         })
     }
 }
@@ -326,6 +350,43 @@ unsafe extern "C" fn(
     frame_end_info: *const XrFrameEndInfo
 ) -> XrResult;
 
+pub type TxrLocateSpace = unsafe extern "C" fn(
+    space: XrSpace,
+    base_space: XrSpace,
+    time: XrTime,
+    location: *mut XrSpaceLocation,
+) -> XrResult;
+
+pub type TxrLocateViews = unsafe extern "C" fn(
+    session: XrSession,
+    view_locate_info: *const XrViewLocateInfo,
+    view_state: *mut XrViewState,
+    view_capacity_input: u32,
+    view_count_output: *mut u32,
+    views: *mut XrView,
+) -> XrResult;
+
+pub type TxrAcquireSwapchainImage = unsafe extern "C" fn(
+    swapchain: XrSwapchain,
+    acquire_info: *const XrSwapchainImageAcquireInfo,
+    index: *mut u32,
+) -> XrResult;
+
+pub type TxrWaitSwapchainImage = unsafe extern "C" fn(
+    swapchain: XrSwapchain,
+    wait_info: *const XrSwapchainImageWaitInfo,
+) -> XrResult;
+
+pub type TxrAcquireEnvironmentDepthImageMETA = unsafe extern "C" fn(
+    environment_depth_provider: XrEnvironmentDepthProviderMETA,
+    acquire_info: *const XrEnvironmentDepthImageAcquireInfoMETA,
+    environment_depth_image: *mut XrEnvironmentDepthImageMETA,
+) -> XrResult;
+
+pub type TxrReleaseSwapchainImage = unsafe extern "C" fn(
+    swapchain: XrSwapchain,
+    release_info: *const XrSwapchainImageReleaseInfo,
+) -> XrResult;
 
 // Consts
 
@@ -439,6 +500,25 @@ pub struct XrVector3f {
     pub z: f32,
 }
 
+impl XrVector3f{
+    fn add(a:&XrVector3f, b:&XrVector3f)->Self{
+        Self{
+            x: a.x+b.x,
+            y: a.y+b.y,
+            z: a.z+b.z
+        }
+    }
+    
+    fn scale(&self, s: f32)->Self{
+        Self{
+            x: self.x*s,
+            y: self.y*s,
+            z: self.z*s,
+        }
+    }
+}
+
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct XrQuaternionf {
@@ -448,12 +528,62 @@ pub struct XrQuaternionf {
     pub w: f32,
 }
 
+impl XrQuaternionf{
+    fn multiply(a:&XrQuaternionf, b:&XrQuaternionf)->Self{
+        Self{
+            x:(b.w * a.x) + (b.x * a.w) + (b.y * a.z) - (b.z * a.y),
+            y:(b.w * a.y) - (b.x * a.z) + (b.y * a.w) + (b.z * a.x),
+            z:(b.w * a.z) + (b.x * a.y) - (b.y * a.x) + (b.z * a.w),
+            w:(b.w * a.w) - (b.x * a.x) - (b.y * a.y) - (b.z * a.z)
+        }
+    }
+    
+    fn invert(&self)->Self{
+        Self{
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: self.w,
+        }
+    }
+    
+    fn rotate_vector3f(&self, v:&XrVector3f)->XrVector3f{
+        let q = XrQuaternionf{x:v.x, y:v.y, z:v.z, w:0.0};
+        let aq = XrQuaternionf::multiply(&q, self);
+        let ainv = self.invert();
+        let aqainv = XrQuaternionf::multiply(&ainv, &aq);
+        XrVector3f{x: aqainv.x, y: aqainv.y, z: aqainv.z}
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct XrPosef {
     pub orientation: XrQuaternionf,
     pub position: XrVector3f,
 }
+
+impl XrPosef{
+    pub fn transform_vector3f(&self, v:&XrVector3f)->XrVector3f{
+        let r0 = self.orientation.rotate_vector3f(v);
+        XrVector3f::add(&r0, &self.position)
+    }
+    pub fn multiply(a:&XrPosef, b:&XrPosef)->Self{
+        Self{
+            orientation: XrQuaternionf::multiply(&b.orientation, &a.orientation),
+            position: a.transform_vector3f(&b.position)
+        }
+    }
+    pub fn invert(&self)->Self{
+        let orientation = self.orientation.invert();
+        let neg_pos = self.position.scale(-1.0);
+        Self{
+            orientation,
+            position: orientation.rotate_vector3f(&neg_pos),
+        }
+    }
+}
+
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(transparent)]
@@ -470,7 +600,7 @@ impl XrTime {
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 #[repr(transparent)]
-pub struct XrDuration(i64);
+pub struct XrDuration(pub i64);
 impl XrDuration {
     pub fn from_nanos(x: i64) -> Self {
         Self(x)
@@ -481,12 +611,286 @@ impl XrDuration {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct XrOffset2Di {
+    pub x: i32,
+    pub y: i32,
+}
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct XrExtent2Di {
+    pub width: i32,
+    pub height: i32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct XrRect2Di {
+    pub offset: XrOffset2Di,
+    pub extent: XrExtent2Di,
+}
+
 
 
 
 
 // Struct datatypes
 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrCompositionLayerProjection {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub layer_flags: XrCompositionLayerFlags,
+    pub space: XrSpace,
+    pub view_count: u32,
+    pub views: *const XrCompositionLayerProjectionView,
+}
+
+impl Default for XrCompositionLayerProjection{
+    fn default()->Self{
+        XrCompositionLayerProjection{
+            ty: XrType::COMPOSITION_LAYER_PROJECTION,
+            next: 0 as *mut _,
+            layer_flags: XrCompositionLayerFlags(0),
+            space: XrSpace(0),
+            view_count: 0,
+            views: 0 as *const _,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSwapchainSubImage {
+    pub swapchain: XrSwapchain,
+    pub image_rect: XrRect2Di,
+    pub image_array_index: u32,
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrCompositionLayerProjectionView {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub pose: XrPosef,
+    pub fov: XrFovf,
+    pub sub_image: XrSwapchainSubImage,
+}
+
+impl Default for XrCompositionLayerProjectionView{
+    fn default()->Self{
+        XrCompositionLayerProjectionView{
+            ty: XrType::COMPOSITION_LAYER_PROJECTION_VIEW,
+            next: 0 as *mut _,
+            pose: Default::default(),
+            fov: Default::default(),
+            sub_image: XrSwapchainSubImage{
+                swapchain: XrSwapchain(0),
+                image_rect: Default::default(),
+                image_array_index:0
+            }
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrCompositionLayerPassthroughFB {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub flags: XrCompositionLayerFlags,
+    pub space: XrSpace,
+    pub layer_handle: XrPassthroughLayerFB,
+}
+
+impl Default for XrCompositionLayerPassthroughFB{
+    fn default()->Self{
+        XrCompositionLayerPassthroughFB{
+            ty: XrType::COMPOSITION_LAYER_PASSTHROUGH_FB,
+            next: 0 as *mut _,
+            flags: XrCompositionLayerFlags(0),
+            space: XrSpace(0),
+            layer_handle: XrPassthroughLayerFB(0)
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSwapchainImageReleaseInfo {
+    pub ty: XrType,
+    pub next: *const c_void,
+}
+
+impl Default for XrSwapchainImageReleaseInfo{
+    fn default()->Self{
+        XrSwapchainImageReleaseInfo{
+            ty: XrType::SWAPCHAIN_IMAGE_RELEASE_INFO,
+            next: 0 as *mut _,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEnvironmentDepthImageViewMETA {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub fov: XrFovf,
+    pub pose: XrPosef,
+}
+
+impl Default for XrEnvironmentDepthImageViewMETA{
+    fn default()->Self{
+        XrEnvironmentDepthImageViewMETA{
+            ty: XrType::ENVIRONMENT_DEPTH_IMAGE_VIEW_META,
+            next: 0 as *mut _,
+            fov: Default::default(),
+            pose: Default::default(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEnvironmentDepthImageMETA {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub swapchain_index: u32,
+    pub near_z: f32,
+    pub far_z: f32,
+    pub views: [XrEnvironmentDepthImageViewMETA; 2usize],
+}
+
+impl Default for XrEnvironmentDepthImageMETA{
+    fn default()->Self{
+        XrEnvironmentDepthImageMETA{
+            ty: XrType::ENVIRONMENT_DEPTH_IMAGE_META,
+            next: 0 as *mut _,
+            swapchain_index: 0,
+            near_z: 0.0,
+            far_z: 0.0,
+            views: [Default::default(); 2]
+        }
+    }
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEnvironmentDepthImageAcquireInfoMETA {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub space: XrSpace,
+    pub display_time: XrTime,
+}
+
+impl Default for XrEnvironmentDepthImageAcquireInfoMETA{
+    fn default()->Self{
+        XrEnvironmentDepthImageAcquireInfoMETA{
+            ty: XrType::ENVIRONMENT_DEPTH_IMAGE_ACQUIRE_INFO_META,
+            next: 0 as *mut _,
+            space: XrSpace(0),
+            display_time: XrTime(0)
+        }
+    }
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSwapchainImageWaitInfo {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub timeout: XrDuration,
+}
+impl Default for XrSwapchainImageWaitInfo{
+    fn default()->Self{
+        XrSwapchainImageWaitInfo{
+            ty: XrType::SWAPCHAIN_IMAGE_WAIT_INFO,
+            next: 0 as *mut _,
+            timeout: XrDuration(0)
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSwapchainImageAcquireInfo {
+    pub ty: XrType,
+    pub next: *const c_void,
+}
+impl Default for XrSwapchainImageAcquireInfo{
+    fn default()->Self{
+        XrSwapchainImageAcquireInfo{
+            ty: XrType::SWAPCHAIN_IMAGE_ACQUIRE_INFO,
+            next: 0 as *mut _,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrViewLocateInfo {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub view_configuration_type: XrViewConfigurationType,
+    pub display_time: XrTime,
+    pub space: XrSpace,
+}
+impl Default for XrViewLocateInfo{
+    fn default()->Self{
+        XrViewLocateInfo{
+            ty: XrType::VIEW_LOCATE_INFO,
+            next: 0 as *mut _,
+            view_configuration_type: Default::default(),
+            display_time: XrTime(0),
+            space:XrSpace(0),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrViewState {
+    pub ty: XrType,
+    pub next: *mut c_void,
+    pub view_state_flags: XrViewStateFlags,
+}
+
+impl Default for XrViewState{
+    fn default()->Self{
+        XrViewState{
+            ty: XrType::VIEW_STATE,
+            next: 0 as *mut _,
+            view_state_flags: XrViewStateFlags(0),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceLocation {
+    pub ty: XrType,
+    pub next: *mut c_void,
+    pub location_flags: XrSpaceLocationFlags,
+    pub pose: XrPosef,
+}
+
+impl Default for XrSpaceLocation{
+    fn default()->Self{
+        XrSpaceLocation{
+            ty: XrType::SPACE_LOCATION,
+            next: 0 as *mut _,
+            location_flags: XrSpaceLocationFlags(0),
+            pose: XrPosef::default()
+        }
+    }
+}
 
 
 #[repr(C)]
@@ -509,6 +913,18 @@ pub struct XrFrameEndInfo {
     pub layers: *const *const XrCompositionLayerBaseHeader,
 }
 
+impl Default for XrFrameEndInfo{
+    fn default()->Self{
+        XrFrameEndInfo{
+            ty: XrType::FRAME_END_INFO,
+            next: 0 as *const _,
+            display_time: XrTime(0),
+            environment_blend_mode: XrEnvironmentBlendMode::OPAQUE,
+            layer_count: 0,
+            layers: 0 as *const *const _
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -593,6 +1009,19 @@ pub struct XrPassthroughLayerCreateInfoFB {
     pub purpose: XrPassthroughLayerPurposeFB,
 }
 
+impl Default for XrPassthroughLayerCreateInfoFB{
+    fn default()->Self{
+        Self{
+            ty: XrType::PASSTHROUGH_LAYER_CREATE_INFO_FB,
+            next: 0 as *const _,
+            passthrough: XrPassthroughFB(0),
+            flags: XrPassthroughFlagsFB(0),
+            purpose: XrPassthroughLayerPurposeFB::RECONSTRUCTION
+        }
+    }
+}
+
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct XrPassthroughCreateInfoFB {
@@ -635,6 +1064,24 @@ pub struct XrSwapchainCreateInfo {
     pub mip_count: u32,
 }
 
+impl Default for XrSwapchainCreateInfo{
+    fn default()->Self{
+        Self{
+            ty: XrType::SWAPCHAIN_CREATE_INFO,
+            next: 0 as *const _,
+            create_flags: XrSwapchainCreateFlags(0),
+            usage_flags: XrSwapchainUsageFlags(0),
+            format: 0,
+            width:0,
+            height:0,
+            sample_count: 0,
+            face_count:0,
+            array_size:0,
+            mip_count:0
+        }
+    }
+}
+
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -662,6 +1109,20 @@ pub struct XrReferenceSpaceCreateInfo {
     pub next: *const c_void,
     pub reference_space_type: XrReferenceSpaceType,
     pub pose_in_reference_space: XrPosef,
+}
+
+impl Default for XrReferenceSpaceCreateInfo{
+    fn default()->Self{
+        Self{
+            ty: XrType::REFERENCE_SPACE_CREATE_INFO,
+            next: 0 as *const _,
+            reference_space_type: XrReferenceSpaceType::VIEW,
+            pose_in_reference_space: XrPosef{
+                orientation: XrQuaternionf{x:0.,y:0.,z:0.,w:1.0},
+                position: XrVector3f{x:0.0,y:0.0,z:0.0}
+            }
+        }
+    }
 }
 
 #[repr(C)]
@@ -1004,6 +1465,27 @@ pub fn xr_static_str_array<const N:usize>(v: &[&'static str;N])->[*const c_char;
 
 // Bitflags
 
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct XrViewStateFlags(u64);
+impl XrViewStateFlags {
+    pub const ORIENTATION_VALID: XrViewStateFlags = Self(1 << 0u64);
+    pub const POSITION_VALID: XrViewStateFlags = Self(1 << 1u64);
+    pub const ORIENTATION_TRACKED: XrViewStateFlags = Self(1 << 2u64);
+    pub const POSITION_TRACKED: XrViewStateFlags = Self(1 << 3u64);
+}
+bitmask!(XrViewStateFlags);
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct XrSpaceLocationFlags(u64);
+impl XrSpaceLocationFlags {
+    pub const ORIENTATION_VALID: XrSpaceLocationFlags = Self(1 << 0u64);
+    pub const POSITION_VALID: XrSpaceLocationFlags = Self(1 << 1u64);
+    pub const ORIENTATION_TRACKED: XrSpaceLocationFlags = Self(1 << 2u64);
+    pub const POSITION_TRACKED: XrSpaceLocationFlags = Self(1 << 3u64);
+}
+bitmask!(XrSpaceLocationFlags);
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -1014,13 +1496,7 @@ impl XrCompositionLayerFlags {
     pub const UNPREMULTIPLIED_ALPHA: XrCompositionLayerFlags = Self(1 << 2u64);
     pub const INVERTED_ALPHA: XrCompositionLayerFlags = Self(1 << 3u64);
 }
-impl std::ops::BitOr for XrCompositionLayerFlags {
-    type Output = XrCompositionLayerFlags;
-    #[inline]
-    fn bitor(self, rhs: XrCompositionLayerFlags) -> XrCompositionLayerFlags {
-        XrCompositionLayerFlags(self.0 | rhs.0)
-    }
-}
+bitmask!(XrCompositionLayerFlags);
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -1042,14 +1518,7 @@ impl XrPassthroughFlagsFB {
     pub const IS_RUNNING_AT_CREATION: XrPassthroughFlagsFB = Self(1 << 0u64);
     pub const LAYER_DEPTH: XrPassthroughFlagsFB = Self(1 << 1u64);
 }
-
-impl std::ops::BitOr for XrPassthroughFlagsFB {
-    type Output = XrPassthroughFlagsFB;
-    #[inline]
-    fn bitor(self, rhs: XrPassthroughFlagsFB) -> XrPassthroughFlagsFB {
-        XrPassthroughFlagsFB(self.0 | rhs.0)
-    }
-}
+bitmask!(XrPassthroughFlagsFB);
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -1072,19 +1541,16 @@ impl XrSwapchainUsageFlags {
     pub const MUTABLE_FORMAT: XrSwapchainUsageFlags = Self(1 << 6u64);
     pub const INPUT_ATTACHMENT: XrSwapchainUsageFlags = Self(1 << 7u64);
 }
-impl std::ops::BitOr for XrSwapchainUsageFlags {
-    type Output = XrSwapchainUsageFlags;
-    #[inline]
-    fn bitor(self, rhs: XrSwapchainUsageFlags) -> XrSwapchainUsageFlags {
-        XrSwapchainUsageFlags(self.0 | rhs.0)
-    }
-}
+bitmask!(XrSwapchainUsageFlags);
 
 
 
 
 
 // Enums
+
+
+
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
