@@ -124,8 +124,6 @@ impl AndroidVariant {
                         </activity>
                        
                     </application>
-                    
-                                        
                                                             
                     <queries>
                         <!-- to talk to the broker -->
