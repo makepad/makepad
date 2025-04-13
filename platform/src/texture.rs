@@ -569,6 +569,29 @@ impl Texture {
         *data = Some(new_data);
         *updated = updated.update(dirty_rect);
     }
+        /// Swaps the internal u32 image data with the provided vector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the texture format is not `VecBGRAu8_32`
+    /// or if the internal image data is not available (i.e. has not been taken).
+    pub fn swap_vec_u32(&self, cx: &mut Cx, other: &mut Vec<u32>) {
+        // Retrieve a mutable reference to the texture from Cx.
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let (data, updated) = match &mut cx_texture.format {
+            TextureFormat::VecBGRAu8_32 { data, updated, .. } => (data, updated),
+            _ => panic!("incorrect texture format for u32 image data in swap_vec_u32"),
+        };
+
+        // Get the internal vector. This expects that the image data is currently available (i.e. Some(_))
+        let mut current = data.take().expect("image data not available for swapping");
+        // Swap the contents with `other`
+        std::mem::swap(&mut current, other);
+        // Put the new (swapped) vector back into the texture.
+        *data = Some(current);
+        // Update the texture’s dirty state.
+        *updated = updated.update(None);
+    }
 }
 
 #[derive(Default)]
