@@ -16,6 +16,7 @@ use {
     self::super::{
         android_media::CxAndroidMedia,
         android_jni::{self, *},
+        android_openxr::CxAndroidOpenXr,
         android_keycodes::android_to_makepad_key_code,
         super::egl_sys::{self, LibEgl},
         super::libc_sys,
@@ -72,8 +73,6 @@ use {
     makepad_http::websocket::ServerWebSocket as WebSocketImpl,
     makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl
 };
-#[cfg(quest)]
-use crate::os::linux::android::android_openxr::CxAndroidOpenXr;
 
 /*
 fn android_debug_log(msg:&str){
@@ -100,8 +99,9 @@ impl Cx {
         self.start_network_live_file_watcher();
         
         while !self.os.quit {
-           #[cfg(quest)]
-           if self.quest_openxr_mode(&from_java_rx){continue};
+            if self.os.in_xr_mode{
+                if self.quest_openxr_mode(&from_java_rx){continue};
+            }
             
             // Wait for the next message, blocking until one is received.
             // This ensures we're in sync with the Android Choreographer when we receive a RenderLoop message.
@@ -122,10 +122,19 @@ impl Cx {
                 }
             }
         }
+        from_java_messages_clear()
     }
     
     pub(crate) fn handle_message(&mut self, msg: FromJavaMessage) {
         match msg {
+            FromJavaMessage::SwitchedActivity(activity_handle, activity_thread_id)=>{
+                self.os.activity_thread_id = Some(activity_thread_id);
+                if self.os.in_xr_mode{
+                    if let Err(e) = self.os.openxr.init(activity_handle){
+                        crate::error!("OpenXR init failed: {}", e);
+                    }
+                }
+            },
             FromJavaMessage::RenderLoop => {
                 // This should not happen here, as it's handled in the main loop
             },
@@ -143,7 +152,13 @@ impl Cx {
                 width,
                 height,
             } => {
-
+                
+                if self.os.in_xr_mode{
+                    if let Err(e) = self.os.openxr.create_xr_session(self.os.display.as_ref().unwrap()){
+                        crate::error!("OpenXR after_egl_init failed: {}", e);
+                    }
+                }
+                
                 unsafe {
                     self.os.display.as_mut().unwrap().update_surface(window);
                 }
@@ -433,8 +448,11 @@ impl Cx {
                 self.call_event_handler(&Event::Background);
             }
             FromJavaMessage::Destroy => {
-                self.call_event_handler(&Event::Shutdown);
-                self.os.quit = true;
+                if !self.os.ignore_destroy{
+                    self.call_event_handler(&Event::Shutdown);
+                    self.os.quit = true;
+                }
+                self.os.ignore_destroy = false;
             }
             FromJavaMessage::WindowFocusChanged { has_focus } => {
                 if has_focus {
@@ -444,7 +462,6 @@ impl Cx {
                 }
             }
             FromJavaMessage::Init(_) => {
-                panic!()
             }
         }
     }
@@ -521,20 +538,29 @@ impl Cx {
     }
 
     pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F) where F: FnOnce() -> Box<Cx> + Send + 'static {
+        let activity_thread_id =  unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 };
+        let activity_handle = unsafe {android_jni::fetch_activity_handle(activity)};
+        
+        let already_running = android_jni::from_java_messages_already_set();
+        if already_running{
+            android_jni::jni_update_activity(activity_handle);
+            // maybe send activity update?
+            android_jni::send_from_java_message(FromJavaMessage::SwitchedActivity(
+                activity_handle, activity_thread_id
+            ));
+            
+            return
+        }
+        
         let (from_java_tx, from_java_rx) = mpsc::channel();
-
+        
         std::panic::set_hook(Box::new(|info| {
             crate::log!("Custom panic hook: {}", info);
         }));
         
-        
-        
-        let activity_thread_id =  unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 };
-        
-        // SAFETY: This function initializes JNI globals and is expected to be called only once.
-        
-        let _activity_handle = unsafe {android_jni::jni_init_globals(activity, from_java_tx)} as u64;
-        
+        android_jni::jni_set_activity(activity_handle);
+        android_jni::jni_set_from_java_tx(from_java_tx);
+                
         // lets start a thread
         std::thread::spawn(move || {
             
@@ -547,10 +573,6 @@ impl Cx {
             cx.os.activity_thread_id = Some(activity_thread_id);
             cx.os.render_thread_id = Some(unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 });
             
-            #[cfg(quest)] 
-            if let Err(e) = cx.os.openxr.init(_activity_handle){
-                crate::error!("OpenXR init failed: {}", e);
-            }
             
             let window = loop {
                 // Here use blocking method `recv` to reduce CPU usage during cold start.
@@ -619,11 +641,7 @@ impl Cx {
                 window
             });
             
-            #[cfg(quest)] 
-            if let Err(e) = cx.os.openxr.create_xr_session(cx.os.display.as_ref().unwrap()){
-                crate::error!("OpenXR after_egl_init failed: {}", e);
-            }
-            
+           
             cx.main_loop(from_java_rx);
             
             let display = cx.os.display.take().unwrap();
@@ -905,6 +923,15 @@ impl Cx {
                         android_jni::to_java_cleanup_video_playback_resources(env, video_id);
                     }
                 },
+                CxOsOp::SwitchToXr=>{
+                    crate::log!("SWITCHTOOXR");
+                    self.os.ignore_destroy = true;
+                    self.os.in_xr_mode = !self.os.in_xr_mode;
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_switch_activity(env);
+                    }
+                }
                 CxOsOp::SetCursor(_)=>{
                     // no need
                 },
@@ -953,9 +980,11 @@ impl Default for CxOs {
             timers: Default::default(),
             video_surfaces: HashMap::new(),
             websocket_parsers: HashMap::new(),
-            #[cfg(quest)] openxr: CxAndroidOpenXr::default(),
+            openxr: CxAndroidOpenXr::default(),
             activity_thread_id: None,
-            render_thread_id: None
+            render_thread_id: None,
+            ignore_destroy: false,
+            in_xr_mode: false
         }
     }
 }
@@ -985,10 +1014,11 @@ pub struct CxOs {
     pub (crate) media: CxAndroidMedia,
     pub (crate) video_surfaces: HashMap<LiveId, jobject>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
-    #[cfg(quest)]
     pub (crate) openxr: CxAndroidOpenXr,
     pub (crate) activity_thread_id: Option<u64>,
     pub (crate) render_thread_id: Option<u64>,
+    pub (crate) ignore_destroy: bool,
+    pub (crate) in_xr_mode: bool
 }
 
 impl CxAndroidDisplay {
