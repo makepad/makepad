@@ -31,6 +31,8 @@ struct BuildPaths {
     manifest_file: PathBuf,
     java_file: PathBuf,
     java_class: PathBuf,
+    xr_class: PathBuf,
+    xr_file: PathBuf,
     dst_unaligned_apk: PathBuf,
     dst_apk: PathBuf,
 }
@@ -47,9 +49,25 @@ fn main_java(url:&str)->String{
         package {url};
         import dev.makepad.android.MakepadActivity;
         public class MakepadApp extends MakepadActivity{{
+            public void switchActivity(){{
+                switchActivityClass(MakepadAppXr.class);
+            }}
         }}
     "#)
 }
+
+fn xr_java(url:&str)->String{
+    format!(r#"
+        package {url};
+        import dev.makepad.android.MakepadActivity;
+        public class MakepadAppXr extends MakepadActivity{{
+            public void switchActivity(){{
+                switchActivityClass(MakepadApp.class);
+            }}
+        }}
+    "#)
+}
+
 
 fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:&[AndroidTarget], variant:&AndroidVariant, urls:&AndroidSDKUrls) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
@@ -157,7 +175,13 @@ fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str, 
     let java_file = tmp_dir.join(&java_path).join("MakepadApp.java");
     let java_class = out_dir.join(&java_path).join("MakepadApp.class");
     write_text(&java_file, &main_java)?;
-
+        
+    let xr_java = xr_java(java_url);
+    let xr_file = tmp_dir.join(&java_path).join("MakepadAppXr.java");
+    let xr_class = out_dir.join(&java_path).join("MakepadAppXr.class");
+    write_text(&xr_file, &xr_java)?;
+    
+        
     let apk_filename = to_snakecase(app_label);
     let dst_unaligned_apk = out_dir.join(format!("{apk_filename}.unaligned.apk"));
     let dst_apk = out_dir.join(format!("{apk_filename}.apk"));
@@ -171,6 +195,8 @@ fn prepare_build(underscore_build_crate: &str, java_url: &str, app_label: &str, 
         manifest_file,
         java_file,
         java_class,
+        xr_class,
+        xr_file,
         dst_unaligned_apk,
         dst_apk,
     })
@@ -234,7 +260,8 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) 
             (makepad_java_classes_dir.join("ByteArrayMediaDataSource.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("VideoPlayer.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("VideoPlayerRunnable.java").to_str().unwrap()),
-            (build_paths.java_file.to_str().unwrap())
+            (build_paths.java_file.to_str().unwrap()),
+            (build_paths.xr_file.to_str().unwrap()),
         ]   
     ) ?; 
 
@@ -277,6 +304,7 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) -> 
             (compiled_java_classes_dir.join("MakepadActivity$1.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$2.class").to_str().unwrap()),
             (build_paths.java_class.to_str().unwrap()),
+            (build_paths.xr_class.to_str().unwrap()),
         ]
     ) ?;
 

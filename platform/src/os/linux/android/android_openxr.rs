@@ -7,6 +7,7 @@ use self::super::android_jni::{ *};
 use std::sync::{mpsc};
 use std::ptr;
 use crate::makepad_math::Mat4;
+use makepad_jni_sys as jni_sys;
 
 #[derive(Default, Clone, Copy)]
 pub struct CxAndroidOpenXrEye{
@@ -124,7 +125,7 @@ impl Cx{
 }
 
 impl CxAndroidOpenXr{
-    pub fn init(&mut self, activity_handle:u64)->Result<(),String>{
+    pub fn init(&mut self, activity_handle: jni_sys::jobject)->Result<(),String>{
         self.loader = Some(LibOpenXrLoader::try_load()?);
         
         // lets load em up!
@@ -642,7 +643,7 @@ impl CxAndroidOpenXr{
             };
         }
         
-        let _comp_proj = XrCompositionLayerProjection{
+        let comp_proj = XrCompositionLayerProjection{
             space: session.local_space,
             view_count: 2,
             views: &proj_views as *const _,
@@ -655,7 +656,7 @@ impl CxAndroidOpenXr{
         
         let layers = [
             &comp_passthrough as *const _ as *const XrCompositionLayerBaseHeader,
-            //&comp_proj as *const _ as *const XrCompositionLayerBaseHeader
+            &comp_proj as *const _ as *const XrCompositionLayerBaseHeader
         ];
         
         let fei = XrFrameEndInfo{
