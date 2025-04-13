@@ -4,7 +4,7 @@ pub mod x11;
 #[cfg(linux_direct)]
 pub mod direct;
 
-#[cfg(quest)]
+#[cfg(target_os="android")]
 pub mod openxr_sys;
 
 #[cfg(target_env="ohos")]
