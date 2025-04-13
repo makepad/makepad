@@ -64,6 +64,7 @@ pub enum CxOsOp {
     RestoreWindow(WindowId),
     HideWindow(WindowId),
     SetTopmost(WindowId, bool),
+    SwitchToXr,
     ShowInDock(bool),
     XrStartPresenting,
     XrStopPresenting,
@@ -169,6 +170,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::SelectFolderDialog(..)=>write!(f, "SelectFolderDialog"),
             Self::ResizeWindow(..)=>write!(f, "ResizeWindow"),
             Self::RepositionWindow(..)=>write!(f, "RepositionWindow"),
+            Self::SwitchToXr=>write!(f, "SwitchToXr")
         }
     }
 }
@@ -232,7 +234,11 @@ impl Cx {
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
         self.platform_ops.push(CxOsOp::UpdateMacosMenu(menu));
     }
-
+    
+    pub fn switch_to_xr(&mut self) {
+        self.platform_ops.push(CxOsOp::SwitchToXr);
+    }
+    
     pub fn quit(&mut self) {
         self.platform_ops.push(CxOsOp::Quit);
     }
