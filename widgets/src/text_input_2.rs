@@ -16,7 +16,7 @@ use {
         widget::*,
     },
     std::rc::Rc,
-    unicode_segmentation::UnicodeSegmentation,
+    unicode_segmentation::{GraphemeCursor, UnicodeSegmentation},
 };
 
 
@@ -35,6 +35,8 @@ live_design! {
         height: Fit,
 
         is_password: false,
+        is_read_only: false,
+        empty_text: "Your text here",
         
         draw_bg: {
             instance hover: 0.0
@@ -231,6 +233,7 @@ pub struct TextInput2 {
 
     #[live] is_password: bool,
     #[live] is_read_only: bool,
+    #[live] empty_text: String,
     #[live] text: String,
     #[rust] password_text: String,
     #[rust] laidout_text: Option<Rc<LaidoutText>>,
@@ -350,13 +353,24 @@ impl TextInput2 {
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
-        let laidout_text = self.laidout_text.as_ref().unwrap();
-        let text_rect = self.draw_text.draw_walk_laidout(
-            cx,
-            self.text_walk,
-            self.text_align,
-            laidout_text,
-        );
+        let text_rect = if self.text.is_empty() {
+            self.draw_text.is_empty = 1.0;
+            self.draw_text.draw_walk(
+                cx,
+                self.text_walk,
+                self.text_align,
+                &self.empty_text
+            )
+        } else {
+            self.draw_text.is_empty = 0.0;
+            let laidout_text = self.laidout_text.as_ref().unwrap();
+            self.draw_text.draw_walk_laidout(
+                cx,
+                self.text_walk,
+                self.text_align,
+                laidout_text,
+            )
+        };
         cx.add_aligned_rect_area(&mut self.text_area, text_rect);
         text_rect
     }
@@ -420,8 +434,6 @@ impl TextInput2 {
     }
 
     fn move_cursor_up(&mut self, keep_selection: bool) {
-        use makepad_draw::text::selection::CursorPosition;
-
         let position = self.cursor_to_position(self.selection.cursor);
         self.set_cursor(
             self.position_to_cursor(CursorPosition {
@@ -437,8 +449,6 @@ impl TextInput2 {
     }
 
     fn move_cursor_down(&mut self, keep_selection: bool) {
-        use makepad_draw::text::selection::CursorPosition;
-        
         let laidout_text = self.laidout_text.as_ref().unwrap();
         let position = self.cursor_to_position(self.selection.cursor);
         self.set_cursor(
@@ -901,15 +911,11 @@ impl Edit {
 }
 
 fn prev_grapheme_boundary(text: &str, index: usize) -> usize {
-    use unicode_segmentation::GraphemeCursor;
-
     let mut cursor = GraphemeCursor::new(index, text.len(), true);
     cursor.prev_boundary(text, 0).unwrap().unwrap_or(0)
 }
 
 fn next_grapheme_boundary(text: &str, index: usize) -> usize {
-    use unicode_segmentation::GraphemeCursor;
-
     let mut cursor = GraphemeCursor::new(index, text.len(), true);
     cursor.next_boundary(text, 0).unwrap().unwrap_or(text.len())
 }
