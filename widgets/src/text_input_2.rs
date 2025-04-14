@@ -36,6 +36,7 @@ live_design! {
 
         is_password: false,
         is_read_only: false,
+        is_numeric_only: false
         empty_text: "Your text here",
         
         draw_bg: {
@@ -505,6 +506,7 @@ pub struct TextInput2 {
 
     #[live] is_password: bool,
     #[live] is_read_only: bool,
+    #[live] is_numeric_only: bool,
     #[live] empty_text: String,
     #[live] text: String,
     #[rust] password_text: String,
@@ -789,6 +791,30 @@ impl TextInput2 {
         );
     }
 
+    fn filter_input(&self, input: String, is_set_text: bool) -> String {
+        if self.is_numeric_only {
+            let mut contains_dot = if is_set_text {
+                false   
+            } else {
+                let before_selection = self.text[..self.selection.start().index].to_string();
+                let after_selection = self.text[self.selection.end().index..].to_string();
+                before_selection.contains('.') || after_selection.contains('.')
+            };
+            input.chars().filter(|char| {
+                match char {
+                    '.' | ',' if !contains_dot => {
+                        contains_dot = true;
+                        true
+                    },
+                    char => char.is_ascii_digit(),
+                    _ => false,
+                }
+            }).collect()
+        } else {
+            input
+        }
+    }
+
     fn create_or_extend_edit_group(&mut self, edit_kind: EditKind) {
         self.history.create_or_extend_edit_group(edit_kind, self.selection);
     }
@@ -991,10 +1017,11 @@ impl Widget for TextInput2 {
                 },
                 ..
             }) if modifiers.is_primary() && !self.is_read_only => {
-                if self.undo() {
-                    self.draw_bg.redraw(cx);
-                    cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
+                if !self.undo() {
+                    return;
                 }
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -1004,17 +1031,22 @@ impl Widget for TextInput2 {
                 },
                 ..
             }) if modifiers.is_primary() && !self.is_read_only => {
-                if self.redo() {
-                    self.draw_bg.redraw(cx);
-                    cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
+                if !self.redo() {
+                    return;
                 }
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
             }
             Hit::TextInput(TextInputEvent {
                 input,
                 replace_last,
                 was_paste,
                 ..
-            }) if !input.is_empty() && !self.is_read_only => {
+            }) if !self.is_read_only => {
+                let input = self.filter_input(input, false);
+                if input.is_empty() {
+                    return;
+                }
                 self.create_or_extend_edit_group(
                     if replace_last || was_paste {
                         EditKind::Other
