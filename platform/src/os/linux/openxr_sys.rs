@@ -108,7 +108,18 @@ pub struct LibOpenXr{
     pub xrWaitSwapchainImage:TxrWaitSwapchainImage,
     pub xrAcquireEnvironmentDepthImageMETA: TxrAcquireEnvironmentDepthImageMETA,
     pub xrReleaseSwapchainImage:TxrReleaseSwapchainImage,
+    pub xrEndSession: TxrEndSession,
+    pub xrStopEnvironmentDepthProviderMETA: TxrStopEnvironmentDepthProviderMETA,
+    pub xrDestroyEnvironmentDepthProviderMETA: TxrDestroyEnvironmentDepthProviderMETA,
+    pub xrPassthroughPauseFB: TxrPassthroughPauseFB,
+    pub xrDestroyPassthroughFB: TxrDestroyPassthroughFB,
+    pub xrDestroySwapchain: TxrDestroySwapchain,
+    pub xrDestroyEnvironmentDepthSwapchainMETA: TxrDestroyEnvironmentDepthSwapchainMETA,
+    pub xrDestroySpace: TxrDestroySpace,
+    pub xrDestroySession: TxrDestroySession,
+    pub xrDestroyInstance: TxrDestroyInstance,
 }
+
 
 
 impl LibOpenXr {
@@ -148,6 +159,17 @@ impl LibOpenXr {
             xrWaitSwapchainImage: get_proc_addr!(gipa, instance, TxrWaitSwapchainImage)?,
             xrAcquireEnvironmentDepthImageMETA: get_proc_addr!(gipa, instance, TxrAcquireEnvironmentDepthImageMETA)?,
             xrReleaseSwapchainImage:get_proc_addr!(gipa, instance, TxrReleaseSwapchainImage)?,
+            xrEndSession: get_proc_addr!(gipa, instance, TxrEndSession)?,
+            xrStopEnvironmentDepthProviderMETA: get_proc_addr!(gipa, instance, TxrStopEnvironmentDepthProviderMETA)?,
+            xrDestroyEnvironmentDepthProviderMETA: get_proc_addr!(gipa, instance, TxrDestroyEnvironmentDepthProviderMETA)?,
+            xrPassthroughPauseFB:get_proc_addr!(gipa, instance, TxrPassthroughPauseFB)?,
+            xrDestroyPassthroughFB: get_proc_addr!(gipa, instance, TxrDestroyPassthroughFB)?,
+            xrDestroySwapchain: get_proc_addr!(gipa, instance, TxrDestroySwapchain)?,
+            xrDestroyEnvironmentDepthSwapchainMETA: get_proc_addr!(gipa, instance, TxrDestroyEnvironmentDepthSwapchainMETA)?,
+            xrDestroySpace: get_proc_addr!(gipa, instance, TxrDestroySpace)?,
+            xrDestroySession: get_proc_addr!(gipa, instance, TxrDestroySession)?,
+            xrDestroyInstance: get_proc_addr!(gipa, instance, TxrDestroyInstance)?,
+            
         })
     }
 }
@@ -387,6 +409,48 @@ pub type TxrReleaseSwapchainImage = unsafe extern "C" fn(
     swapchain: XrSwapchain,
     release_info: *const XrSwapchainImageReleaseInfo,
 ) -> XrResult;
+
+pub type TxrEndSession = unsafe extern "C" fn(
+    session: XrSession
+) -> XrResult;
+
+pub type TxrStopEnvironmentDepthProviderMETA = unsafe extern "C" fn(
+    environment_depth_provider: XrEnvironmentDepthProviderMETA,
+) -> XrResult;
+
+pub type TxrDestroyEnvironmentDepthProviderMETA = unsafe extern "C" fn(
+    environment_depth_provider: XrEnvironmentDepthProviderMETA,
+) -> XrResult;
+
+pub type TxrPassthroughPauseFB = unsafe extern "C" fn(
+    passthrough: XrPassthroughFB
+) -> XrResult;
+
+pub type TxrDestroyPassthroughFB = unsafe extern "C" fn(
+    passthrough: XrPassthroughFB
+) -> XrResult;
+
+pub type TxrDestroySwapchain = unsafe extern "C" fn(
+    swapchain: XrSwapchain
+) -> XrResult;
+
+pub type TxrDestroyEnvironmentDepthSwapchainMETA =
+unsafe extern "C" fn(
+    swapchain: XrEnvironmentDepthSwapchainMETA
+) -> XrResult;
+
+pub type TxrDestroySpace = unsafe extern "C" fn(
+    space: XrSpace
+) -> XrResult;
+
+pub type TxrDestroySession = unsafe extern "C" fn(
+    session: XrSession
+) -> XrResult;
+
+pub type TxrDestroyInstance = unsafe extern "C" fn(
+    instance: XrInstance
+) -> XrResult;
+
 
 // Consts
 

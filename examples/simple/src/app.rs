@@ -61,9 +61,17 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App{
-    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button1)).clicked(&actions) {
+    fn handle_startup(&mut self, cx:&mut Cx){
+        cx.switch_to_xr();
+    }
+    
+    fn handle_timer(&mut self, _cx:&mut Cx, _te:&TimerEvent){
+    }
+    
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+        if self.ui.button(id!(b0)).clicked(&actions) {
             self.counter += 1;
+            cx.switch_to_xr();
         }
     }
 }

@@ -387,7 +387,7 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
     Ok(build_dir.unwrap())
 }
 
-fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, build_dir:&Path, android_targets:&[AndroidTarget], urls:&AndroidSDKUrls) -> Result<(), String> {
+fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, build_dir:&Path, android_targets:&[AndroidTarget], variant:&AndroidVariant, urls:&AndroidSDKUrls) -> Result<(), String> {
     let mut assets_to_add: Vec<String> = Vec::new();
     
     let build_crate_dir = get_crate_dir(build_crate) ?;
@@ -421,6 +421,24 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, bu
                 let path = path.display().to_string();
                 assets_to_add.push(format!("assets/makepad/{name}/resources/{path}"));
             }
+        }
+    }
+    // FIX THIS PROPER
+    // On quest remove most of the widget resourcse
+    if let AndroidVariant::Quest = variant{
+        let dst_dir = build_paths.out_dir.join(format!("assets/makepad/makepad_widgets/resources"));
+        let remove = [
+            "fa-solid-900.ttf",
+            "LXGWWenKaiBold.ttf",
+            "LiberationMono-Regular.ttf",
+            "GoNotoKurrent-Bold.ttf",
+            "NotoColorEmoji.ttf",
+            "IBMPlexSans-SemiBold.ttf",
+            "NotoSans-Regular.ttf",
+        ];
+        for remove in remove{
+            assets_to_add.retain(|v| !v.contains(remove));
+            rm(&dst_dir.join(remove))?;
         }
     }
 
@@ -494,7 +512,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     build_dex(sdk_dir, &build_paths, urls)?;
     build_unaligned_apk(sdk_dir, &build_paths, urls)?;
     let build_dir = add_rust_library(sdk_dir, &underscore_build_crate, &build_paths, android_targets, args, variant, urls)?;
-    add_resources(sdk_dir, build_crate, &build_paths, &build_dir, android_targets, urls)?;
+    add_resources(sdk_dir, build_crate, &build_paths, &build_dir, android_targets, variant, urls)?;
     build_zipaligned_apk(sdk_dir, &build_paths, urls)?;
     sign_apk(sdk_dir, &build_paths, urls)?;
 
