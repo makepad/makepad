@@ -661,22 +661,27 @@ impl TextInput2 {
         text_rect
     }
 
-    fn draw_cursor(&mut self, cx: &mut Cx2d, text_rect: Rect) {
+    fn draw_cursor(&mut self, cx: &mut Cx2d, text_rect: Rect) -> DVec2 {
         let CursorPosition {
             row_index,
             x_in_lpxs,
         } = self.cursor_to_position(self.selection.cursor);
         let laidout_text = self.laidout_text.as_ref().unwrap();
         let row = &laidout_text.rows[row_index];
+        let cursor_pos = dvec2(
+            (x_in_lpxs - 1.0 * self.draw_text.font_scale) as f64,
+            ((row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.draw_text.font_scale) as f64,
+        );
         self.draw_cursor.draw_abs(
             cx,
             rect(
-                text_rect.pos.x + (x_in_lpxs - 1.0 * self.draw_text.font_scale) as f64,
-                text_rect.pos.y + ((row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.draw_text.font_scale) as f64,
+                text_rect.pos.x + cursor_pos.x,
+                text_rect.pos.y + cursor_pos.y,
                 (2.0 * self.draw_text.font_scale) as f64,
                 ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_text.font_scale) as f64,
             )
         );
+        cursor_pos
     }
 
     fn draw_selection(&mut self, cx: &mut Cx2d, text_rect: Rect) {
@@ -822,9 +827,15 @@ impl Widget for TextInput2 {
         self.draw_selection.append_to_draw_call(cx);
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
-        self.draw_cursor(cx, text_rect);
+        let cursor_pos = self.draw_cursor(cx, text_rect);
         self.draw_selection(cx, text_rect);
         self.draw_bg.end(cx);
+        if cx.has_key_focus(self.draw_bg.area()) {
+            cx.show_text_ime(
+                self.draw_bg.area(), 
+                cursor_pos,
+            );
+        }
         DrawStep::done()
     }
 
@@ -841,6 +852,7 @@ impl Widget for TextInput2 {
             },
             Hit::KeyFocusLost(_) => {
                 self.animator_play(cx, id!(focus.off));
+                cx.hide_text_ime();
                 cx.widget_action(uid, &scope.path, TextInput2Action::KeyFocusLost);
             }
             Hit::KeyDown(KeyEvent {
