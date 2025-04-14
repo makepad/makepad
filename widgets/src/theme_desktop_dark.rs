@@ -232,8 +232,6 @@ live_design! {
     pub THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
 
     pub THEME_FONT_LABEL = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
         font_family:{
             latin = font("crate://self/resources/IBMPlexSans-Text.ttf", 0.0, 0.0),
             chinese = font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
@@ -242,8 +240,6 @@ live_design! {
         line_spacing: 1.2
     } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
     pub THEME_FONT_REGULAR = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
         font_family: {
             latin = font("crate://self/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
             chinese = font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
@@ -252,8 +248,6 @@ live_design! {
         line_spacing: 1.2
     }
     pub THEME_FONT_BOLD = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-SemiBold.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
         font_family:{
             latin = font("crate://self/resources/IBMPlexSans-SemiBold.ttf", 0.0, 0.0)
             chinese = font("crate://self/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
@@ -262,8 +256,6 @@ live_design! {
         line_spacing: 1.2
     }
     pub THEME_FONT_ITALIC = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-Italic.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
         font_family:{
             latin = font("crate://self/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0)
             chinese =  font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0),
@@ -271,8 +263,6 @@ live_design! {
         line_spacing: 1.2
     }
     pub THEME_FONT_BOLD_ITALIC = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf") },
-        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
         font_family:{
             latin = font("crate://self/resources/IBMPlexSans-BoldItalic.ttf", 0.0, 0.0)
             chinese = font("crate://self/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
@@ -280,10 +270,6 @@ live_design! {
         line_spacing: 1.2
     }
     pub THEME_FONT_CODE = {
-        font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
-        font_size: (THEME_FONT_SIZE_CODE)
-        //brightness: 1.1
-        line_scale: 1.2,
         font_family:{
             latin = font("crate://self/resources/LiberationMono-Regular.ttf", 0.0, 0.0)
         },

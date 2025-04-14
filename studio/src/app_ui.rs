@@ -568,7 +568,7 @@ live_design!{
                         <Vr> {}
                         <TextInput> {
                             width: Fill,
-                            empty_message: "Filter",
+                            empty_text: "Filter",
                         }
                     }
                 }
@@ -649,7 +649,7 @@ live_design!{
                         <Filler> {}
                         <TextInput> {
                             width: 200.
-                            empty_message: "Filter",
+                            empty_text: "Filter",
                         }
                     }
                 }
