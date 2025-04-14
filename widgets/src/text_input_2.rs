@@ -517,25 +517,84 @@ pub struct TextInput2 {
 }
 
 impl TextInput2 {
-    fn set_key_focus(&self, cx: &mut Cx) {
-        cx.set_key_focus(self.draw_bg.area());
-    }
-
-    fn is_password(&self) -> bool {
+    pub fn is_password(&self) -> bool {
         self.is_password
     }
 
-    fn set_is_password(&mut self, cx: &mut Cx, is_password: bool) {
+    pub fn set_is_password(&mut self, cx: &mut Cx, is_password: bool) {
         self.is_password = is_password;
         self.laidout_text = None;
         self.draw_bg.redraw(cx);
     }
 
-    fn toggle_is_password(&mut self, cx: &mut Cx) {
+    pub fn toggle_is_password(&mut self, cx: &mut Cx) {
         self.set_is_password(cx, !self.is_password);
     }
 
-    fn selected_text(&self) -> &str {
+    pub fn is_read_only(&self) -> bool {
+        self.is_read_only
+    }
+
+    pub fn set_is_read_only(&mut self, cx: &mut Cx, is_read_only: bool) {
+        self.is_read_only = is_read_only;
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn toggle_is_read_only(&mut self, cx: &mut Cx) {
+        self.set_is_read_only(cx, !self.is_read_only);
+    }
+
+    pub fn is_numeric_only(&self) -> bool {
+        self.is_numeric_only
+    }
+
+    pub fn set_is_numeric_only(&mut self, cx: &mut Cx, is_numeric_only: bool) {
+        self.is_numeric_only = is_numeric_only;
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn toggle_is_numeric_only(&mut self, cx: &mut Cx) {
+        self.set_is_numeric_only(cx, !self.is_numeric_only);
+    }
+
+    pub fn empty_text(&self) -> &str {
+        &self.empty_text
+    }
+
+    pub fn set_empty_text(&mut self, cx: &mut Cx, empty_text: String) {
+        self.empty_text = empty_text;
+        if self.text.is_empty() {
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn set_text(&mut self, cx: &mut Cx, text: String) {
+        self.text = self.filter_input(text, true);
+        self.set_selection(
+            cx,
+            Selection {
+                anchor: Cursor {
+                    index: self.selection.anchor.index.min(self.text.len()),
+                    prefer_next_row: self.selection.anchor.prefer_next_row,
+                },
+                cursor: Cursor {
+                    index: self.selection.cursor.index.min(self.text.len()),
+                    prefer_next_row: self.selection.cursor.prefer_next_row,
+                }
+            }
+        );
+        self.history.clear();
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn selected_text(&self) -> &str {
         &self.text[self.selection.start().index..self.selection.end().index]
     }
 
@@ -919,6 +978,7 @@ impl Widget for TextInput2 {
                 cursor_pos,
             );
         }
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
         DrawStep::done()
     }
 
@@ -1024,6 +1084,24 @@ impl Widget for TextInput2 {
                     3 => self.select_all(cx),
                     _ => {}
                 }
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
+                modifiers: KeyModifiers {
+                    shift: false,
+                    ..
+                },
+                ..
+            }) => {
+                cx.hide_text_ime();
+                cx.widget_action(uid, &scope.path, TextInput2Action::Returned(self.text.clone()));
+            },
+
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Escape,
+                ..
+            }) => {
+                cx.widget_action(uid, &scope.path, TextInput2Action::Escaped);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
@@ -1147,31 +1225,105 @@ impl Widget for TextInput2 {
                     cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
                 }
             }
+            Hit::KeyDown(event) => {
+                cx.widget_action(uid, &scope.path, TextInput2Action::KeyDownUnhandled(event));
+            }
             _ => {}
         }
     }
 }
 
 impl TextInput2Ref {
+    pub fn is_password(&self) -> bool {
+        self.borrow().unwrap().is_password()
+    }
+ 
+    pub fn set_is_password(&self, cx: &mut Cx, is_password: bool) {
+        self.borrow_mut().unwrap().set_is_password(cx, is_password);
+    }
+ 
+    pub fn toggle_is_password(&self, cx: &mut Cx) {
+        self.borrow_mut().unwrap().toggle_is_password(cx);
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.borrow().unwrap().is_read_only()
+    }
+
+    pub fn set_is_read_only(&self, cx: &mut Cx, is_read_only: bool) {
+        self.borrow_mut().unwrap().set_is_read_only(cx, is_read_only);
+    }
+
+    pub fn toggle_is_read_only(&self, cx: &mut Cx) {
+        self.borrow_mut().unwrap().toggle_is_read_only(cx);
+    }
+
+    pub fn is_numeric_only(&self) -> bool {
+        self.borrow().unwrap().is_numeric_only()
+    }
+
+    pub fn set_is_numeric_only(&self, cx: &mut Cx, is_numeric_only: bool) {
+        self.borrow_mut().unwrap().set_is_numeric_only(cx, is_numeric_only);
+    }
+
+    pub fn toggle_is_numeric_only(&self, cx: &mut Cx) {
+        self.borrow_mut().unwrap().toggle_is_numeric_only(cx);
+    }
+
+    pub fn empty_text(&self) -> String {
+        self.borrow().unwrap().empty_text().to_string()
+    }
+
+    pub fn set_empty_text(&self, cx: &mut Cx, empty_text: String) {
+        self.borrow_mut().unwrap().set_empty_text(cx, empty_text);
+    }
+
+    pub fn text(&self) -> String {
+        self.borrow().unwrap().text().to_string()
+    }
+
+    pub fn set_text(&self, cx: &mut Cx, text: String) {
+        self.borrow_mut().unwrap().set_text(cx, text);
+    }
+
+    pub fn selected_text(&self) -> String {
+        self.borrow().unwrap().selected_text().to_string()
+    }
+
+    pub fn returned(&self, actions: &Actions) -> Option<String> {
+        for action in actions.filter_widget_actions_cast::<TextInput2Action>(self.widget_uid()){
+            if let TextInput2Action::Returned(text) = action{
+                return Some(text);
+            }
+        }
+        None
+    }
+    
+    pub fn escaped(&self, actions: &Actions) -> bool {
+        for action in actions.filter_widget_actions_cast::<TextInput2Action>(self.widget_uid()){
+            if let TextInput2Action::Escaped = action {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn changed(&self, actions: &Actions) -> Option<String> {
         for action in actions.filter_widget_actions_cast::<TextInput2Action>(self.widget_uid()){
-            if let TextInput2Action::Changed(val) = action{
-                return Some(val);
+            if let TextInput2Action::Changed(text) = action{
+                return Some(text);
             }
         }
         None
     }
 
-    pub fn is_password(&self) -> bool {
-       self.borrow().unwrap().is_password()
-    }
-
-    pub fn set_is_password(&self, cx: &mut Cx, is_password: bool) {
-        self.borrow_mut().unwrap().set_is_password(cx, is_password);
-    }
-
-    pub fn toggle_is_password(&self, cx: &mut Cx) {
-        self.borrow_mut().unwrap().toggle_is_password(cx);
+    pub fn key_down_unhandled(&self, actions: &Actions) -> Option<KeyEvent> {
+        for action in actions.filter_widget_actions_cast::<TextInput2Action>(self.widget_uid()){
+            if let TextInput2Action::KeyDownUnhandled(event) = action{
+                return Some(event);
+            }
+        }
+        None
     }
 }
 
@@ -1180,7 +1332,10 @@ pub enum TextInput2Action {
     None,
     KeyFocus,
     KeyFocusLost,
+    Returned(String),
+    Escaped,
     Changed(String),
+    KeyDownUnhandled(KeyEvent),
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -1252,6 +1407,12 @@ impl History {
         } else {
             None
         }
+    }
+
+    fn clear(&mut self) {
+        self.current_edit_kind = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 }
 
