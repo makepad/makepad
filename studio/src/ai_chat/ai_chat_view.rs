@@ -333,7 +333,7 @@ impl AiChatView{
                         cx.action(AppAction::RedrawAiChat{chat_id});
                         cx.action(AppAction::SaveAiChat{chat_id});
                     }
-                    if message_input.escape(actions){
+                    if message_input.escaped(actions){
                         cx.action(AppAction::CancelAiGeneration{chat_id});
                     }
                     
