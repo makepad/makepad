@@ -129,7 +129,7 @@ impl FileServerConnection {
                                     // lets look for what in bytes
                                     // if we find thigns we emit it on the notification send
                                     fn is_word_char(b: u8)->bool{
-                                        b == '_' || b == b':' || b >= b'0' && b<= b'9' || b >= b'A' && b <= b'Z' || b >= b'a' && b <= b'z' || b>126
+                                        b == b'_' || b == b':' || b >= b'0' && b<= b'9' || b >= b'A' && b <= b'Z' || b >= b'a' && b <= b'z' || b>126
                                     }
                                     for item in set{
                                         let needle_bytes = item.needle.as_bytes();
