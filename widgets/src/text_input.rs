@@ -502,7 +502,7 @@ pub struct TextInput {
     #[live] draw_cursor: DrawQuad,
 
     #[layout] layout: Layout,
-    #[walk] text_walk: Walk,
+    #[walk] label_walk: Walk,
     #[live] text_align: Align,
 
     #[live] is_password: bool,
@@ -735,7 +735,7 @@ impl TextInput {
             self.draw_text.is_empty = 1.0;
             self.draw_text.draw_walk(
                 cx,
-                self.text_walk,
+                self.label_walk,
                 self.text_align,
                 &self.empty_text
             )
@@ -744,7 +744,7 @@ impl TextInput {
             let laidout_text = self.laidout_text.as_ref().unwrap();
             self.draw_text.draw_walk_laidout(
                 cx,
-                self.text_walk,
+                self.label_walk,
                 self.text_align,
                 laidout_text,
             )
