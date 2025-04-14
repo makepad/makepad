@@ -1,4 +1,5 @@
 use crate::*;
+use makepad_draw::text::selection::Cursor;
 use unicode_segmentation::UnicodeSegmentation;
 
 live_design! {
@@ -211,7 +212,7 @@ pub struct CommandTextInput {
 
 impl Widget for CommandTextInput {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
-        self.text_input_ref().set_text(cx, v);
+        self.text_input_ref().set_text(cx, v.to_string());
     }
 
     fn text(&self) -> String {
@@ -353,10 +354,10 @@ impl Widget for CommandTextInput {
                 }
 
                 if action.widget_uid == self.search_input_ref().widget_uid() {
-                    if let TextInputAction::Change(search) = action.cast() {
+                    if let TextInputAction::Changed(search) = action.cast() {
                         // disallow multiline input
                         self.search_input_ref()
-                            .set_text(cx, search.lines().next().unwrap_or_default());
+                            .set_text(cx, search.lines().next().unwrap_or_default().to_string());
 
                         cx.widget_action(
                             self.widget_uid(),
@@ -475,7 +476,14 @@ impl CommandTextInput {
         // Calculate the new cursor position (grapheme)
         let new_cursor_pos = text_graphemes[..start_grapheme_idx].join("").graphemes(true).count();
 
-        self.text_input_ref().set_cursor(new_cursor_pos, new_cursor_pos);
+        self.text_input_ref().set_cursor(
+            cx,
+            Cursor {
+                index: new_cursor_pos,
+                prefer_next_row: false,
+            },
+            false
+        );
         self.set_text(cx, &new_text);
     }
 
@@ -497,13 +505,20 @@ impl CommandTextInput {
     /// Clear all text and hide the popup going back to initial state.
     pub fn reset(&mut self, cx: &mut Cx) {
         self.hide_popup(cx);
-        self.text_input_ref().set_text(cx, "");
+        self.text_input_ref().set_text(cx, "".to_string());
     }
 
     fn clear_popup(&mut self, cx: &mut Cx) {
         self.trigger_position = None;
-        self.search_input_ref().set_text(cx, "");
-        self.search_input_ref().set_cursor(0, 0);
+        self.search_input_ref().set_text(cx, "".to_string());
+        self.search_input_ref().set_cursor(
+            cx,
+            Cursor {
+                index: 0,
+                prefer_next_row: false,
+            },
+            false
+        );
         self.clear_items();
     }
 
@@ -850,7 +865,7 @@ fn graphemes(text: &str) -> impl DoubleEndedIterator<Item = &str> {
 }
 
 fn get_head(text_input: &TextInputRef) -> usize {
-    text_input.borrow().map_or(0, |p| p.get_cursor().head.index)
+    text_input.borrow().map_or(0, |p| p.cursor().index)
 }
 
 fn is_whitespace(grapheme: &str) -> bool {
