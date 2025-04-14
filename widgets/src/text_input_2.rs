@@ -791,6 +791,64 @@ impl TextInput2 {
         );
     }
 
+    fn select_word(&mut self, cx: &mut Cx) {
+        if self.selection.cursor.index < self.selection.anchor.index { 
+            self.set_cursor(
+                cx, 
+                Cursor {
+                    index: self.ceil_word_boundary(self.selection.cursor.index),
+                    prefer_next_row: true,
+                },
+                true,
+            );
+        } else if self.selection.cursor.index > self.selection.anchor.index {
+            self.set_cursor(
+                cx,
+                Cursor {
+                    index: self.floor_word_boundary(self.selection.cursor.index),
+                    prefer_next_row: false,
+                },
+                true,
+            );
+        } else {
+            self.set_selection(
+                cx,
+                Selection {
+                    anchor: Cursor {
+                        index: self.ceil_word_boundary(self.selection.cursor.index),
+                        prefer_next_row: true,
+                    },
+                    cursor: Cursor {
+                        index: self.floor_word_boundary(self.selection.cursor.index),
+                        prefer_next_row: false,
+                    }
+                },
+            );
+        }
+    }
+
+    fn ceil_word_boundary(&self, index: usize) -> usize {
+        let mut prev_word_boundary_index = 0;
+        for (word_boundary_index, _) in self.text.split_word_bound_indices() {
+            if word_boundary_index > index {
+                return prev_word_boundary_index;
+            }
+            prev_word_boundary_index = word_boundary_index;
+        }
+        prev_word_boundary_index
+    }
+
+    fn floor_word_boundary(&self, index: usize) -> usize {
+        let mut prev_word_boundary_index = self.text.len();
+        for (word_boundary_index, _) in self.text.split_word_bound_indices().rev() {
+            if word_boundary_index < index {
+                return prev_word_boundary_index;
+            }
+            prev_word_boundary_index = word_boundary_index;
+        }
+        prev_word_boundary_index
+    }
+
     fn filter_input(&self, input: String, is_set_text: bool) -> String {
         if self.is_numeric_only {
             let mut contains_dot = if is_set_text {
@@ -807,7 +865,6 @@ impl TextInput2 {
                         true
                     },
                     char => char.is_ascii_digit(),
-                    _ => false,
                 }
             }).collect()
         } else {
@@ -928,6 +985,7 @@ impl Widget for TextInput2 {
             }) if modifiers.is_primary() => self.select_all(cx),
             Hit::FingerDown(FingerDownEvent {
                 abs,
+                tap_count,
                 device,
                 ..
             }) if device.is_primary_hit() => {
@@ -940,9 +998,15 @@ impl Widget for TextInput2 {
                     ),
                     false
                 );
+                match tap_count {
+                    2 => self.select_word(cx),
+                    3 => self.select_all(cx),
+                    _ => {}
+                }
             }
             Hit::FingerMove(FingerMoveEvent {
                 abs,
+                tap_count,
                 device,
                 ..
             }) if device.is_primary_hit() => {
@@ -955,6 +1019,11 @@ impl Widget for TextInput2 {
                     ),
                     true
                 );
+                match tap_count {
+                    2 => self.select_word(cx),
+                    3 => self.select_all(cx),
+                    _ => {}
+                }
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
