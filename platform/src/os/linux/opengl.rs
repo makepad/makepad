@@ -477,16 +477,11 @@ impl Cx {
         }
         self.draw_shaders.compile_set.clear();
     }
-
+/*
     pub fn maybe_warn_hardware_support(&self) {
         // Temporary warning for Adreno failing at compiling shaders that use samplerExternalOES.
-        let gpu_renderer = get_gl_string(gl_sys::RENDERER);
-        if gpu_renderer.contains("Adreno") {
-            crate::warning!("WARNING: This device is using {gpu_renderer} renderer.
-            OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
-            This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
-        }
-    }
+        
+    }*/
 }
 
 
@@ -1149,6 +1144,14 @@ impl CxTexture {
         }
         if self.take_initial() {
             unsafe{
+                                
+                let gpu_renderer = get_gl_string(gl_sys::RENDERER);
+                if gpu_renderer.contains("Adreno") {
+                    crate::warning!("WARNING: This device is using {gpu_renderer} renderer.
+                    OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
+                    This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
+                }
+                
                 gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, self.os.gl_texture.unwrap());
         
                 gl_sys::TexParameteri(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
