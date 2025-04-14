@@ -112,7 +112,7 @@ live_design!{
                 align: { y: 0.5 }
                 search_input = <TextInput> {
                     width: Fill,
-                    empty_message: "Search",
+                    empty_text: "Search",
                 }
             }
         }

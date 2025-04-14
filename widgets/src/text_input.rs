@@ -333,7 +333,7 @@ live_design! {
             }
         }
 
-        draw_highlight: {
+        draw_selection: {
             instance hover: 0.0
             instance focus: 0.0
 
@@ -446,7 +446,7 @@ live_design! {
             }
         }
 
-        draw_highlight: {
+        draw_selection: {
             instance hover: 0.0
             instance focus: 0.0
 
