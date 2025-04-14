@@ -15,7 +15,7 @@ live_design!{
         demos = {
             <H4> { text: "Slider"}
             <Slider> { text: "Default" }
-            <Slider> { text: "text_align", text_align: { x: 0.5, y: 0. } }
+            <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
             <Slider> { text: "min/max", min: 0., max: 100. }
             <Slider> { text: "precision", precision: 20 }
             <Slider> { text: "stepped", step: 0.1 }
@@ -23,7 +23,7 @@ live_design!{
             <Hr> {}
             <H4> { text: "SliderFlat"}
             <SliderFlat> { text: "Default" }
-            <SliderFlat> { text: "text_align", text_align: { x: 0.5, y: 0. } }
+            <SliderFlat> { text: "label_align", label_align: { x: 0.5, y: 0. } }
             <SliderFlat> { text: "min/max", min: 0., max: 100. }
             <SliderFlat> { text: "precision", precision: 20 }
             <SliderFlat> { text: "stepped", step: 0.1 }
@@ -31,21 +31,21 @@ live_design!{
             <Hr> {}
             <H4> { text: "SliderFlatter"}
             <SliderFlatter> { text: "Default" }
-            <SliderFlatter> { text: "text_align", text_align: { x: 0.5, y: 0. } }
+            <SliderFlatter> { text: "label_align", label_align: { x: 0.5, y: 0. } }
             <SliderFlatter> { text: "min/max", min: 0., max: 100. }
             <SliderFlatter> { text: "precision", precision: 20 }
             <SliderFlatter> { text: "stepped", step: 0.1 }
 
             <H4> { text: "SliderMinimal"}
             <SliderMinimal> { text: "Default" }
-            <SliderMinimal> { text: "text_align", text_align: { x: 0.5, y: 0. } }
+            <SliderMinimal> { text: "label_align", label_align: { x: 0.5, y: 0. } }
             <SliderMinimal> { text: "min/max", min: 0., max: 100. }
             <SliderMinimal> { text: "precision", precision: 20 }
             <SliderMinimal> { text: "stepped", step: 0.1 }
 
             <H4> { text: "SliderMinimalFlat"}
             <SliderMinimalFlat> { text: "Default" }
-            <SliderMinimalFlat> { text: "text_align", text_align: { x: 0.5, y: 0. } }
+            <SliderMinimalFlat> { text: "label_align", label_align: { x: 0.5, y: 0. } }
             <SliderMinimalFlat> { text: "min/max", min: 0., max: 100. }
             <SliderMinimalFlat> { text: "precision", precision: 20 }
             <SliderMinimalFlat> { text: "stepped", step: 0.1 }
