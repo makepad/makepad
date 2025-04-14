@@ -263,6 +263,231 @@ live_design! {
             color_focus: (THEME_COLOR_INSET_FOCUS)
         }
     }
+
+    pub TextInputGradientX = <TextInput> {
+        draw_bg: {
+            instance hover: 0.0
+            instance focus: 0.0
+
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            uniform border_size: (THEME_BEVELING)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: (THEME_COLOR_INSET)
+            uniform color_1_hover: (THEME_COLOR_INSET)
+            uniform color_1_focus: (THEME_COLOR_OUTSET_ACTIVE)
+
+            uniform color_2: (THEME_COLOR_INSET * 2.5)
+            uniform color_2_hover: (THEME_COLOR_INSET * 3.0)
+            uniform color_2_focus: (THEME_COLOR_INSET * 4.0)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+                
+                sdf.box(
+                    1.0,
+                    1.0,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                );
+
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                        self.focus
+                    ),
+                    self.border_size
+                );
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.x + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                            self.hover
+                        ),
+                        mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
+                        self.focus
+                    )
+                );
+                
+                return sdf.result
+            }
+        }
+
+        draw_highlight: {
+            instance hover: 0.0
+            instance focus: 0.0
+
+            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+
+            uniform color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_1_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+
+            uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
+            uniform color_2_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+
+                sdf.box(
+                    0.0,
+                    0.0,
+                    self.rect_size.x,
+                    self.rect_size.y,
+                    self.border_radius
+                )
+
+                sdf.fill(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.x),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.x),
+                            self.hover
+                        ),
+                        mix(
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.x),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.x),
+                            self.hover
+                        ),
+                        self.focus
+                    )
+                );
+
+                return sdf.result
+            }
+        }
+    }
+
+    pub TextInputGradientY = <TextInput> {
+        draw_bg: {
+            instance hover: 0.0
+            instance focus: 0.0
+
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            uniform border_size: (THEME_BEVELING)
+
+            uniform color_dither: 1.0
+
+            uniform color_1: #3
+            uniform color_1_hover: #3
+            uniform color_1_focus: #2
+
+            uniform color_2: (THEME_COLOR_INSET)
+            uniform color_2_hover: #4
+            uniform color_2_focus: (THEME_COLOR_OUTSET_ACTIVE)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+                
+                sdf.box(
+                    1.0,
+                    1.0,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                )
+
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                        self.focus
+                    ), 
+                    self.border_size
+                );
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.y + dither),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                        self.focus
+                    )
+                );
+                
+                return sdf.result
+            }
+        }
+
+        draw_highlight: {
+            instance hover: 0.0
+            instance focus: 0.0
+
+            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+
+            uniform color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
+            uniform color_1_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
+
+            uniform color_2: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_2_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+            uniform color_2_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+
+                sdf.box(
+                    0.0,
+                    0.0,
+                    self.rect_size.x,
+                    self.rect_size.y,
+                    self.border_radius
+                )
+
+                sdf.fill(
+                    mix(
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.y),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.y),
+                            self.hover
+                        ),
+                        mix(
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.y),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.y),
+                            self.hover
+                        ),
+                        self.focus
+                    )
+                );
+                return sdf.result
+            }
+        }
+    }
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -362,7 +587,9 @@ impl TextInput2 {
             return index;
         }
         let grapheme_index = self.text[..index].graphemes(true).count();
-        self.password_text.grapheme_indices(true).nth(grapheme_index).map_or(self.password_text.len(), |(index, _)| index)
+        self.password_text
+            .grapheme_indices(true)
+            .nth(grapheme_index).map_or(self.password_text.len(), |(index, _)| index)
     }
 
     fn password_index_to_index(&self, password_index: usize) -> usize {
@@ -370,7 +597,9 @@ impl TextInput2 {
             return password_index;
         }
         let grapheme_index = self.password_text[..password_index].graphemes(true).count();
-        self.text.grapheme_indices(true).nth(grapheme_index).map_or(self.text.len(), |(index, _)| index)
+        self.text
+            .grapheme_indices(true)
+            .nth(grapheme_index).map_or(self.text.len(), |(index, _)| index)
     }
 
     fn layout_text(&mut self, cx: &mut Cx2d) {
@@ -390,7 +619,10 @@ impl TextInput2 {
         } else {
             &self.text
         };
-        let max_width_in_lpxs =  cx.turtle().max_width(self.text_walk).map(|max_width| max_width as f32);
+        let max_width_in_lpxs = cx
+            .turtle()
+            .max_width(self.text_walk)
+            .map(|max_width| max_width as f32);
         let wrap_width_in_lpxs = if cx.turtle().layout().flow == Flow::RightWrap {
             max_width_in_lpxs
         } else {
