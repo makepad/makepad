@@ -36,6 +36,69 @@ live_design! {
 
         is_password: false,
         
+        draw_bg: {
+            instance hover: 0.0
+            instance focus: 0.0
+
+            uniform border_radius: (THEME_CORNER_RADIUS)
+            uniform border_size: (THEME_BEVELING)
+
+            uniform color_dither: 1.0
+
+            uniform color_hover: (THEME_COLOR_INSET)
+            uniform color_focus: (THEME_COLOR_OUTSET_ACTIVE)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT)
+
+            color: (THEME_COLOR_INSET)
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+                
+                sdf.box(
+                    1.0,
+                    1.0,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    self.border_radius
+                );
+
+                sdf.stroke_keep(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                        self.focus
+                    ),
+                    self.border_size
+                );
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            self.color,
+                            self.color_hover,
+                            self.hover
+                        ),
+                        self.color_focus,
+                        self.focus
+                    )
+                );
+                
+                return sdf.result;
+            }
+        }
+
         draw_text: {
             instance hover: 0.0
             instance focus: 0.0
@@ -112,6 +175,7 @@ live_design! {
                         all: Forward { duration: 0.1 }
                     }
                     apply: {
+                        draw_bg: { hover: 0.0 }
                         draw_text: { hover: 0.0 },
                         draw_selection: { hover: 0.0 }
                     }
@@ -119,6 +183,7 @@ live_design! {
                 on = {
                     from: { all: Snap }
                     apply: {
+                        draw_bg: { hover: 0.0 }
                         draw_text: { hover: 1.0 },
                         draw_selection: { hover: 1.0 }
                     }
@@ -131,6 +196,7 @@ live_design! {
                         all: Forward { duration: 0.25 }
                     }
                     apply: {
+                        draw_bg: { focus: 0.0 }
                         draw_text: { focus: 0.0 },
                         draw_cursor: { focus: 0.0 },
                         draw_selection: { focus: 0.0 }
@@ -139,6 +205,7 @@ live_design! {
                 on = {
                     from: { all: Snap }
                     apply: {
+                        draw_bg: { focus: 1.0 }
                         draw_text: { focus: 1.0 }
                         draw_cursor: { focus: 1.0 },
                         draw_selection: { focus: 1.0 }
