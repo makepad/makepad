@@ -635,7 +635,12 @@ impl CxAndroidOpenXr{
         for eye in 0..2{
             let head_from_eye = projections[eye].pose;
             let local_from_head = local_from_head.pose;
-            eyes[eye].local_from_eye = XrPosef::multiply(&local_from_head, &head_from_eye);
+            let local_from_eye =XrPosef::multiply(&local_from_head, &head_from_eye);
+            eyes[eye].local_from_eye  = local_from_eye;
+            // lets compute eye matrices and depth matrices
+            let eye_from_local = local_from_eye.invert();
+            
+            
         }
         
         session.frame = Some(CxAndroidOpenXrFrame{
