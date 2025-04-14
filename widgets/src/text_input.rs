@@ -502,8 +502,8 @@ pub struct TextInput {
     #[live] draw_cursor: DrawQuad,
 
     #[layout] layout: Layout,
-    #[walk] label_walk: Walk,
-    #[live] text_align: Align,
+    #[walk] walk: Walk,
+    #[live] label_align: Align,
 
     #[live] is_password: bool,
     #[live] is_read_only: bool,
@@ -692,6 +692,14 @@ impl TextInput {
             .nth(grapheme_index).map_or(self.text.len(), |(index, _)| index)
     }
 
+    fn inner_walk(&self) -> Walk {
+        if self.walk.width.is_fit() {
+            Walk::fit()
+        } else {
+            Walk::fill_fit()
+        }
+    }
+
     fn layout_text(&mut self, cx: &mut Cx2d) {
         if self.laidout_text.is_some() {
             return;
@@ -725,18 +733,19 @@ impl TextInput {
             0.0,
             0.0,
             wrap_width_in_lpxs,
-            self.text_align, 
+            self.label_align, 
             text
         ));
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
+        let inner_walk = self.inner_walk();
         let text_rect = if self.text.is_empty() {
             self.draw_text.is_empty = 1.0;
             self.draw_text.draw_walk(
                 cx,
-                self.label_walk,
-                self.text_align,
+                inner_walk,
+                self.label_align,
                 &self.empty_text
             )
         } else {
@@ -744,8 +753,8 @@ impl TextInput {
             let laidout_text = self.laidout_text.as_ref().unwrap();
             self.draw_text.draw_walk_laidout(
                 cx,
-                self.label_walk,
-                self.text_align,
+                inner_walk,
+                self.label_align,
                 laidout_text,
             )
         };

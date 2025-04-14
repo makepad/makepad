@@ -22,7 +22,7 @@ live_design!{
     pub SliderMinimal = <SliderBase> {
         min: 0.0, max: 1.0,
         step: 0.0,
-        text_align: { y: 0.0 }
+        label_align: { y: 0.0 }
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
         precision: 2,
         height: Fit,
@@ -160,7 +160,7 @@ live_design!{
 
             width: Fit,
             padding: 0.,
-            text_align: {y: 0.},
+            label_align: {y: 0.},
             margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
             
             draw_bg: {
@@ -1694,7 +1694,7 @@ pub struct Slider {
     
     #[rust] label_area: Area,
     #[live] label_walk: Walk,
-    #[live] text_align: Align,
+    #[live] label_align: Align,
     #[live] draw_text: DrawText2,
     #[live] text: String,
     
@@ -1775,7 +1775,7 @@ impl Slider {
 
             let label_walk = dw.resolve(cx);
             cx.begin_turtle(label_walk, Layout::default());
-            self.draw_text.draw_walk(cx, label_walk, self.text_align, &self.text);
+            self.draw_text.draw_walk(cx, label_walk, self.label_align, &self.text);
             cx.end_turtle_with_area(&mut self.label_area);
         }
         
