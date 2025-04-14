@@ -140,10 +140,12 @@ impl DrawText2 {
         align: Align,
         text: &str,
     ) -> makepad_platform::Rect {
-        let max_width_in_lpxs = cx
-            .turtle()
-            .max_width(walk)
-            .map(|max_width| max_width as f32);
+        let turtle_rect = cx.turtle().padded_rect();
+        let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
+            Some(turtle_rect.size.x as f32)
+        } else {
+            None
+        };
         let wrap_width_in_lpxs = if cx.turtle().layout().flow == Flow::RightWrap {
             max_width_in_lpxs
         } else {
