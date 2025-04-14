@@ -1749,7 +1749,7 @@ impl Slider {
     
     pub fn update_text_input(&mut self, cx: &mut Cx) {
         let e = self.to_external();
-        self.text_input.text = match self.precision{
+        self.text_input.set_text(cx, match self.precision{
             0=>format!("{:.0}",e),
             1=>format!("{:.1}",e),
             2=>format!("{:.2}",e),
@@ -1759,9 +1759,8 @@ impl Slider {
             6=>format!("{:.6}",e),
             7=>format!("{:.7}",e),
             _=>format!("{}",e)
-        };
-        self.text_input.select_all();
-        self.text_input.redraw(cx);
+        });
+        self.text_input.select_all(cx);
     }
     
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
@@ -1829,14 +1828,14 @@ impl Widget for Slider {
                 TextInputAction::KeyFocusLost => {
                     self.animator_play(cx, id!(focus.off));
                 }
-                TextInputAction::Return(value) => {
+                TextInputAction::Returned(value) => {
                     if let Ok(v) = value.parse::<f64>() {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
                     cx.widget_action(uid, &scope.path, SliderAction::TextSlide(self.to_external()));
                 }
-                TextInputAction::Escape => {
+                TextInputAction::Escaped => {
                     self.update_text_input(cx);
                 }
                 _ => ()
@@ -1875,9 +1874,9 @@ impl Widget for Slider {
                 // self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
                 self.update_text_input(cx);
 
-                self.text_input.is_read_only = true;
+                self.text_input.set_is_read_only(cx, true);
                 self.text_input.set_key_focus(cx);
-                self.text_input.select_all();
+                self.text_input.select_all(cx);
                 self.text_input.redraw(cx);
                                 
                 self.animator_play(cx, id!(drag.on));
@@ -1886,7 +1885,7 @@ impl Widget for Slider {
                 cx.set_cursor(MouseCursor::Grabbing);
             },
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
-                self.text_input.is_read_only = false;
+                self.text_input.set_is_read_only(cx, false);
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.force_new_edit_group();
                 self.animator_play(cx, id!(drag.off));
