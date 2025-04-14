@@ -47,6 +47,7 @@ live_design! {
 
             uniform color_dither: 1.0
 
+            color: (THEME_COLOR_INSET)
             uniform color_hover: (THEME_COLOR_INSET)
             uniform color_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
@@ -105,7 +106,7 @@ live_design! {
             instance hover: 0.0
             instance focus: 0.0
 
-            uniform color: (THEME_COLOR_TEXT)
+            color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT)
             uniform color_focus: (THEME_COLOR_TEXT)
             uniform color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
@@ -135,6 +136,10 @@ live_design! {
 
             uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
 
+            uniform color: (THEME_COLOR_D_HIDDEN)
+            uniform color_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
+            uniform color_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -144,7 +149,13 @@ live_design! {
                     self.rect_size.y,
                     self.border_radius
                 );
-                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BG_HIGHLIGHT_INLINE, self.focus));
+                sdf.fill(
+                    mix(
+                        mix(self.color, self.color_hover, self.hover),
+                        mix(self.color_focus, self.color_hover, self.hover),
+                        self.focus
+                    )
+                );
                 return sdf.result;
             }
         }
@@ -155,6 +166,8 @@ live_design! {
 
             uniform border_radius: 0.5
 
+            uniform color: (THEME_COLOR_TEXT_CURSOR)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -164,7 +177,9 @@ live_design! {
                     self.rect_size.y,
                     self.border_radius
                 );
-                sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, self.focus));
+                sdf.fill(
+                    mix(THEME_COLOR_U_HIDDEN, self.color, self.focus)
+                );
                 return sdf.result;
             }
         }
@@ -214,6 +229,38 @@ live_design! {
                     }
                 }
             }
+        }
+    }
+
+    pub TextInputFlat = <TextInput> {
+        draw_bg: {
+            border_radius: (THEME_CORNER_RADIUS)
+            border_size: (THEME_BEVELING)
+
+            color_dither: 1.0
+
+            color: (THEME_COLOR_INSET)
+            color_hover: (THEME_COLOR_INSET_HOVER)
+            color_focus: (THEME_COLOR_INSET_FOCUS)
+
+            border_color_1: (THEME_COLOR_BEVEL)
+            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
+
+            border_color_2: (THEME_COLOR_BEVEL)
+            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
+        }
+    }
+
+    pub TextInputFlatter = <TextInput> {
+        draw_bg: {
+            border_radius: (THEME_CORNER_RADIUS)
+            border_size: 0.
+
+            color: (THEME_COLOR_INSET)
+            color_hover: (THEME_COLOR_INSET_HOVER)
+            color_focus: (THEME_COLOR_INSET_FOCUS)
         }
     }
 }
@@ -349,7 +396,14 @@ impl TextInput2 {
         } else {
             None
         };
-        self.laidout_text = Some(self.draw_text.layout(cx, 0.0, 0.0, wrap_width_in_lpxs, self.text_align, text));
+        self.laidout_text = Some(self.draw_text.layout(
+            cx,
+            0.0,
+            0.0,
+            wrap_width_in_lpxs,
+            self.text_align, 
+            text
+        ));
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
@@ -413,8 +467,29 @@ impl TextInput2 {
         self.draw_selection.end_many_instances(cx);
     }
 
-    fn move_cursor_left(&mut self, keep_selection: bool) {
+    fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
+        self.selection = selection;
+        self.history.force_new_edit_group();
+        self.draw_bg.redraw(cx);
+    }
+
+    fn set_cursor(&mut self, cx: &mut Cx, cursor: Cursor, keep_selection: bool) {
+        self.set_selection(
+            cx,
+            Selection {
+                anchor: if keep_selection {
+                    self.selection.anchor
+                } else {
+                    cursor
+                },
+                cursor
+            }
+        );
+    }
+
+    fn move_cursor_left(&mut self, cx: &mut Cx, keep_selection: bool) {
         self.set_cursor(
+            cx,
             Cursor {
                 index: prev_grapheme_boundary(&self.text, self.selection.cursor.index),
                 prefer_next_row: true,
@@ -423,8 +498,9 @@ impl TextInput2 {
         );
     }
 
-    fn move_cursor_right(&mut self, keep_selection: bool) {
+    fn move_cursor_right(&mut self, cx: &mut Cx, keep_selection: bool) {
         self.set_cursor(
+            cx,
             Cursor {
                 index: next_grapheme_boundary(&self.text, self.selection.cursor.index),
                 prefer_next_row: false,
@@ -433,9 +509,10 @@ impl TextInput2 {
         );
     }
 
-    fn move_cursor_up(&mut self, keep_selection: bool) {
+    fn move_cursor_up(&mut self, cx: &mut Cx, keep_selection: bool) {
         let position = self.cursor_to_position(self.selection.cursor);
         self.set_cursor(
+            cx,
             self.position_to_cursor(CursorPosition {
                 row_index: if position.row_index == 0 {
                     0
@@ -448,10 +525,11 @@ impl TextInput2 {
         );
     }
 
-    fn move_cursor_down(&mut self, keep_selection: bool) {
+    fn move_cursor_down(&mut self, cx: &mut Cx, keep_selection: bool) {
         let laidout_text = self.laidout_text.as_ref().unwrap();
         let position = self.cursor_to_position(self.selection.cursor);
         self.set_cursor(
+            cx,
             self.position_to_cursor(CursorPosition {
                 row_index: if position.row_index == laidout_text.rows.len() - 1 {
                     laidout_text.rows.len() - 1
@@ -462,14 +540,6 @@ impl TextInput2 {
             }),
             keep_selection
         );
-    }
-
-    fn set_cursor(&mut self, cursor: Cursor, keep_selection: bool) {
-        self.selection.cursor = cursor;
-        if !keep_selection {
-            self.selection.anchor = cursor;
-        }
-        self.history.force_new_edit_group();
     }
 
     fn create_or_extend_edit_group(&mut self, edit_kind: EditKind) {
@@ -540,10 +610,7 @@ impl Widget for TextInput2 {
                     control: false
                 },
                 ..
-            }) => {
-                self.move_cursor_left(keep_selection);
-                self.draw_bg.redraw(cx);
-            },
+            }) => self.move_cursor_left(cx, keep_selection),
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
                 modifiers: KeyModifiers {
@@ -553,10 +620,7 @@ impl Widget for TextInput2 {
                     control: false
                 },
                 ..
-            }) => {
-                self.move_cursor_right(keep_selection);
-                self.draw_bg.redraw(cx);
-            },
+            }) => self.move_cursor_right(cx, keep_selection),
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
                 modifiers: KeyModifiers {
@@ -566,10 +630,7 @@ impl Widget for TextInput2 {
                     control: false
                 },
                 ..
-            }) => {
-                self.move_cursor_up(keep_selection);
-                self.draw_bg.redraw(cx);
-            },
+            }) => self.move_cursor_up(cx, keep_selection),
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
                 modifiers: KeyModifiers {
@@ -579,10 +640,7 @@ impl Widget for TextInput2 {
                     control: false
                 },
                 ..
-            }) => {
-                self.move_cursor_down(keep_selection);
-                self.draw_bg.redraw(cx);
-            },
+            }) => self.move_cursor_down(cx, keep_selection),
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 device,
@@ -590,10 +648,13 @@ impl Widget for TextInput2 {
             }) if device.is_primary_hit() => {
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
-                self.set_cursor(self.point_in_lpxs_to_cursor(
+                self.set_cursor(
+                    cx,
+                    self.point_in_lpxs_to_cursor(
                     Point::new(rel.x as f32, rel.y as f32)
-                ), false);
-                self.draw_bg.redraw(cx);
+                    ),
+                    false
+                );
             }
             Hit::FingerMove(FingerMoveEvent {
                 abs,
@@ -602,10 +663,13 @@ impl Widget for TextInput2 {
             }) if device.is_primary_hit() => {
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
-                self.set_cursor(self.point_in_lpxs_to_cursor(
+                self.set_cursor(
+                    cx,
+                    self.point_in_lpxs_to_cursor(
                     Point::new(rel.x as f32, rel.y as f32)
-                ), true);
-                self.draw_bg.redraw(cx);
+                    ),
+                    true
+                );
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
