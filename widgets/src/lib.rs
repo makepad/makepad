@@ -17,7 +17,6 @@ pub mod popup_menu;
 pub mod check_box;
 pub mod radio_button;
 pub mod text_input;
-pub mod text_input_2;
 pub mod slider;
 pub mod scroll_bar;
 pub mod scroll_bars;
@@ -119,7 +118,6 @@ pub use crate::{
     video::*,
     radio_button::*,
     text_input::*,
-    text_input_2::*,
     link_label::*,
     portal_list::*,
     portal_list2::*,
@@ -202,7 +200,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::view_ui::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
-    crate::text_input_2::live_design(cx);
     crate::link_label::live_design(cx);
     crate::scroll_shadow::live_design(cx);
     crate::button::live_design(cx);
