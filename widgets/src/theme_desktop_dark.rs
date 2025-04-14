@@ -270,6 +270,7 @@ live_design! {
         line_spacing: 1.2
     }
     pub THEME_FONT_CODE = {
+        font_size: (THEME_FONT_SIZE_CODE),
         font_family:{
             latin = font("crate://self/resources/LiberationMono-Regular.ttf", 0.0, 0.0)
         },
