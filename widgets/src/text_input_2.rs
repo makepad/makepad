@@ -542,6 +542,16 @@ impl TextInput2 {
         );
     }
 
+    fn select_all(&mut self, cx: &mut Cx) {
+        self.set_selection(
+            cx,
+            Selection {
+                anchor: Cursor { index: 0, prefer_next_row: false },
+                cursor: Cursor { index: self.text.len(), prefer_next_row: false },
+            }
+        );
+    }
+
     fn create_or_extend_edit_group(&mut self, edit_kind: EditKind) {
         self.history.create_or_extend_edit_group(edit_kind, self.selection);
     }
@@ -641,6 +651,11 @@ impl Widget for TextInput2 {
                 },
                 ..
             }) => self.move_cursor_down(cx, keep_selection),
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyA,
+                modifiers,
+                ..
+            }) if modifiers.is_primary() => self.select_all(cx),
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 device,
@@ -670,6 +685,23 @@ impl Widget for TextInput2 {
                     ),
                     true
                 );
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
+                modifiers: KeyModifiers {
+                    shift: true,
+                    ..
+                },
+                ..
+            }) if !self.is_read_only => {
+                self.create_or_extend_edit_group(EditKind::Other);
+                self.apply_edit(Edit {
+                    start: self.selection.start().index,
+                    end: self.selection.end().index,
+                    replace_with: "\n".to_string(),
+                });
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
@@ -703,23 +735,6 @@ impl Widget for TextInput2 {
                     start,
                     end,
                     replace_with: String::new(),
-                });
-                self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
-            }
-            Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::ReturnKey,
-                modifiers: KeyModifiers {
-                    shift: true,
-                    ..
-                },
-                ..
-            }) if !self.is_read_only => {
-                self.create_or_extend_edit_group(EditKind::Other);
-                self.apply_edit(Edit {
-                    start: self.selection.start().index,
-                    end: self.selection.end().index,
-                    replace_with: "\n".to_string(),
                 });
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInput2Action::Changed(self.text.clone()));
