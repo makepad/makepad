@@ -51,7 +51,7 @@ live_design! {
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
                 p_clipped.x,
                 p_clipped.y,
-                self.draw_depth + self.draw_zbias,
+                self.glyph_depth + self.draw_zbias,
                 1.
             )));
         }
@@ -92,6 +92,8 @@ pub struct DrawText2 {
     pub text_style: TextStyle,
     #[live(1.0)]
     pub font_scale: f32,
+    #[live(1.0)]
+    pub draw_depth: f32,
     #[live]
     pub debug: bool,
 
@@ -104,7 +106,7 @@ pub struct DrawText2 {
     #[calc]
     pub draw_clip: Vec4,
     #[calc]
-    pub draw_depth: f32,
+    pub glyph_depth: f32,
     #[live]
     pub color: Vec4,
     #[calc]
@@ -330,7 +332,7 @@ impl DrawText2 {
         self.update_draw_vars(cx);
         let mut instances: ManyInstances =
             cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
-        self.draw_depth = 1.0;
+        self.glyph_depth = self.draw_depth;
         for row in &text.rows {
             self.draw_row(
                 cx,
@@ -489,7 +491,7 @@ impl DrawText2 {
         self.t_max = vec2(t_max.x, t_max.y);
 
         output.extend_from_slice(self.draw_vars.as_slice());
-        self.draw_depth += 0.000001;
+        self.glyph_depth += 0.000001;
     }
 }
 

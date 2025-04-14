@@ -23,19 +23,19 @@ live_design!{
 
             <Hr> {}
             <H4> { text: "TextInput Inline Label" }
-            <TextInput> { empty_message: "Inline Label" }
+            <TextInput> { empty_text: "Inline Label" }
 
             <Hr> {}
             <H4> { text: "TextInputFlat" }
-            <TextInputFlat> { empty_message: "Inline Label" }
+            <TextInputFlat> { empty_text: "Inline Label" }
 
             <Hr> {}
             <H4> { text: "TextInputFlatter" }
-            <TextInputFlatter> { empty_message: "Inline Label" }
+            <TextInputFlatter> { empty_text: "Inline Label" }
 
             <Hr> {}
             <H4> { text: "TextInputGradientX" }
-            <TextInputGradientX> { empty_message: "Inline Label" }
+            <TextInputGradientX> { empty_text: "Inline Label" }
 
             <Hr> {}
             <H4> { text: "TextInputGradientX styled" }
@@ -91,7 +91,7 @@ live_design!{
                     }
                 }
 
-                draw_highlight: {
+                draw_selection: {
                     color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
                     color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
                     color_1_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
@@ -103,12 +103,12 @@ live_design!{
 
                 draw_cursor: { color: #f00 }
 
-                empty_message: "Inline Label"
+                empty_text: "Inline Label"
             }
 
             <Hr> {}
             <H4> { text: "TextInputGradientY" }
-            <TextInputGradientY> { empty_message: "Inline Label" }
+            <TextInputGradientY> { empty_text: "Inline Label" }
 
             <Hr> {}
             <H4> { text: "TextInputGradientY styled"}
@@ -164,7 +164,7 @@ live_design!{
                     }
                 }
 
-                draw_highlight: {
+                draw_selection: {
                     color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
                     color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
                     color_1_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
@@ -176,7 +176,7 @@ live_design!{
 
                 draw_cursor: { color: #f00 }
 
-                empty_message: "Inline Label"
+                empty_text: "Inline Label"
             }
         }
     }
