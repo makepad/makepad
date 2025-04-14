@@ -26,6 +26,8 @@ live_design! {
     use link::theme::*;
     use makepad_draw::shader::std::*;
 
+    DrawMaybeEmptyText = {{DrawMaybeEmptyText}} {}
+
     pub TextInput2Base = {{TextInput2}} {}
     
     pub TextInput2 = <TextInput2Base> {
@@ -37,23 +39,24 @@ live_design! {
         draw_text: {
             instance hover: 0.0
             instance focus: 0.0
-            wrap: Word,
-            text_style: <THEME_FONT_REGULAR>{
+
+            text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
-                font_size: 16.0
+                font_size: (THEME_FONT_SIZE_P)
             }
         }
 
         draw_selection: {
             instance hover: 0.0
-            instance focus: 1.0 // TODO: Animate this
-            
+            instance focus: 0.0
+
             uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
-                    0.,
-                    0.,
+                    0.0,
+                    0.0,
                     self.rect_size.x,
                     self.rect_size.y,
                     self.border_radius
@@ -64,14 +67,16 @@ live_design! {
         }
 
         draw_cursor: {
-            instance focus: 1.0 // TODO: Animate this
+            instance hover: 0.0
+            instance focus: 0.0
+
             uniform border_radius: 0.5
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
-                    0.,
-                    0.,
+                    0.0,
+                    0.0,
                     self.rect_size.x,
                     self.rect_size.y,
                     self.border_radius
@@ -80,13 +85,58 @@ live_design! {
                 return sdf.result
             }
         }
+
+        animator: {
+            hover = {
+                default: off
+                off = {
+                    from: {
+                        all: Forward { duration: 0.1 }
+                    }
+                    apply: {
+                        draw_text: { hover: 0.0 },
+                        draw_selection: { hover: 0.0 }
+                    }
+                }
+                on = {
+                    from: { all: Snap }
+                    apply: {
+                        draw_text: { hover: 1.0 },
+                        draw_selection: { hover: 1.0 }
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {
+                        all: Forward { duration: 0.25 }
+                    }
+                    apply: {
+                        draw_text: { focus: 0.0 },
+                        draw_cursor: { focus: 0.0 },
+                        draw_selection: { focus: 0.0 }
+                    }
+                }
+                on = {
+                    from: { all: Snap }
+                    apply: {
+                        draw_text: { focus: 1.0 }
+                        draw_cursor: { focus: 1.0 },
+                        draw_selection: { focus: 1.0 }
+                    }
+                }
+            }
+        }
     }
 }
 
 #[derive(Live, LiveHook, Widget)]
 pub struct TextInput2 {
+    #[animator] animator: Animator,
+
     #[redraw] #[live] draw_bg: DrawColor,
-    #[live] draw_text: DrawText2,
+    #[live] draw_text: DrawMaybeEmptyText,
     #[live] draw_selection: DrawQuad,
     #[live] draw_cursor: DrawQuad,
 
@@ -361,6 +411,7 @@ impl TextInput2 {
 impl Widget for TextInput2 {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
+        self.draw_selection.append_to_draw_call(cx);
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
         self.draw_cursor(cx, text_rect);
@@ -370,10 +421,20 @@ impl Widget for TextInput2 {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        use makepad_draw::text::geom::Point;
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.draw_bg.redraw(cx);
+        }
 
         let uid = self.widget_uid();
         match event.hits(cx, self.draw_bg.area()) {
+            Hit::KeyFocus(_) => {
+                self.animator_play(cx, id!(focus.on));
+                cx.widget_action(uid, &scope.path, TextInput2Action::KeyFocus);
+            },
+            Hit::KeyFocusLost(_) => {
+                self.animator_play(cx, id!(focus.off));
+                cx.widget_action(uid, &scope.path, TextInput2Action::KeyFocusLost);
+            }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers: KeyModifiers {
@@ -597,7 +658,16 @@ impl TextInput2Ref {
 #[derive(Clone, Debug, DefaultNone)]
 pub enum TextInput2Action {
     None,
+    KeyFocus,
+    KeyFocusLost,
     Changed(String),
+}
+
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+struct DrawMaybeEmptyText {
+    #[deref] draw_super: DrawText2,
+    #[live] is_empty: f32,
 }
 
 #[derive(Clone, Debug, Default)]
