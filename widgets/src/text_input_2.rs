@@ -40,9 +40,27 @@ live_design! {
             instance hover: 0.0
             instance focus: 0.0
 
+            uniform color: (THEME_COLOR_TEXT)
+            uniform color_hover: (THEME_COLOR_TEXT)
+            uniform color_focus: (THEME_COLOR_TEXT)
+            uniform color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
+            uniform color_empty_focus: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
+
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
+            }
+
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        mix(self.color, self.color_hover, self.hover),
+                        self.color_focus,
+                        self.focus
+                    ),
+                    mix(self.color_empty, self.color_empty_focus, self.hover),
+                    self.is_empty
+                );
             }
         }
 
@@ -62,7 +80,7 @@ live_design! {
                     self.border_radius
                 );
                 sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_BG_HIGHLIGHT_INLINE, self.focus));
-                return sdf.result
+                return sdf.result;
             }
         }
 
@@ -82,7 +100,7 @@ live_design! {
                     self.border_radius
                 );
                 sdf.fill(mix(THEME_COLOR_U_HIDDEN, THEME_COLOR_TEXT_CURSOR, self.focus));
-                return sdf.result
+                return sdf.result;
             }
         }
 
@@ -297,7 +315,7 @@ impl TextInput2 {
     fn draw_selection(&mut self, cx: &mut Cx2d, text_rect: Rect) {
         let laidout_text = self.laidout_text.as_ref().unwrap();
         
-        
+        self.draw_selection.begin_many_instances(cx);
         for rect_in_lpxs in laidout_text.selection_rects_in_lpxs(
             self.selection_to_password_selection(self.selection)
         ) {
@@ -311,6 +329,7 @@ impl TextInput2 {
                 )
             );
         }
+        self.draw_selection.end_many_instances(cx);
     }
 
     fn move_cursor_left(&mut self, keep_selection: bool) {
