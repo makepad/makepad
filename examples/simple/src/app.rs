@@ -35,7 +35,8 @@ live_design!{
                     text_input = <TextInput2> {
                         width: 100,
                         flow: RightWrap,
-                        text: "With sufficient thrust, pigs fly just fine. However, this is not necessarily a good idea."
+                        is_numeric_only: true,
+                        text: ""
                         draw_text:{color:#fff, }
                     }
                     button_2 = <Button> {
