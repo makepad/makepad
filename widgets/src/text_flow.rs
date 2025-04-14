@@ -761,7 +761,7 @@ struct TextFlowLink {
     
     // TODO: remove these if they're unneeded
     //#[walk] walk: Walk,
-    #[live] click_on_down: bool,
+    #[live(true)] click_on_down: bool,
     #[rust] drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)] grab_key_focus: bool,
     #[live] margin: Margin,
