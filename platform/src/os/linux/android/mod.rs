@@ -11,5 +11,4 @@ pub mod android_camera;
 pub mod android_web_socket;
 pub mod ndk_utils;
 pub mod ndk_sys;
-pub mod android_native;
 pub mod android_openxr;

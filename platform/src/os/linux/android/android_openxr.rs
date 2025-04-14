@@ -33,6 +33,7 @@ pub struct CxAndroidOpenXrSession{
     pub color_swap_chain: XrSwapchain,
     pub depth_swap_chain: XrEnvironmentDepthSwapchainMETA,
     pub depth_provider: XrEnvironmentDepthProviderMETA,
+    pub passthrough: XrPassthroughFB,
     pub passthrough_layer: XrPassthroughLayerFB,
     pub width: u32,
     pub height: u32,
@@ -97,7 +98,9 @@ impl Cx{
                     XrSessionState::READY=>{
                         openxr.begin_session(self.os.activity_thread_id.unwrap(), self.os.render_thread_id.unwrap());
                     }
-                    XrSessionState::STOPPING=>{}
+                    XrSessionState::STOPPING=>{
+                        openxr.end_session();
+                    }
                     XrSessionState::EXITING=>{}
                     _=>()
                 }
@@ -119,13 +122,15 @@ impl Cx{
     }
     
      pub(crate) fn handle_openxr_drawing(&mut self){
-         self.os.openxr.begin_frame();
-         self.os.openxr.end_frame();
+         if let Ok(()) = self.os.openxr.begin_frame(){
+             
+             self.os.openxr.end_frame();
+         }
      }
 }
 
 impl CxAndroidOpenXr{
-    pub fn init(&mut self, activity_handle: jni_sys::jobject)->Result<(),String>{
+    pub fn create_instance(&mut self, activity_handle: jni_sys::jobject)->Result<(),String>{
         self.loader = Some(LibOpenXrLoader::try_load()?);
         
         // lets load em up!
@@ -189,14 +194,14 @@ impl CxAndroidOpenXr{
         
         let mut instance_props = XrInstanceProperties::default();
         unsafe{(openxr.xrGetInstanceProperties)(instance, &mut instance_props)}.to_result("xrGetInstanceProperties")?;
-        
+        /*
         crate::log!(
             "OpenXR Runtime loaded: {}, Version: {}.{}.{}", 
             xr_string(&instance_props.runtime_name),
             instance_props.runtime_version.major(),        
             instance_props.runtime_version.minor(),        
             instance_props.runtime_version.patch(),        
-        );
+        );*/
         
         let mut sys_info = XrSystemGetInfo::default();
         sys_info.form_factor = XrFormFactor::HEAD_MOUNTED_DISPLAY;
@@ -208,7 +213,9 @@ impl CxAndroidOpenXr{
         let mut sys_props = XrSystemProperties::default();
         unsafe{(openxr.xrGetSystemProperties)(instance, sys_id, &mut sys_props)}.to_result("xrGetSystemProperties")?;
         
-        crate::log!("OpenXR System props name:{} vendor_id:{}",xr_string(&sys_props.system_name), sys_props.vendor_id);
+        /*crate::log!("OpenXR System props name:{} vendor_id:{}",xr_string(&sys_props.system_name), sys_props.vendor_id);*/
+        
+        /*
         crate::log!(
             "OpenXR System graphics max_width:{}, max_height:{}, max_layer:{}",
             sys_props.graphics_properties.max_swapchain_image_height,
@@ -219,7 +226,7 @@ impl CxAndroidOpenXr{
             "OpenXR System tracking Orientation:{}, Position:{}",
             sys_props.tracking_properties.orientation_tracking.to_bool(),
             sys_props.tracking_properties.position_tracking.to_bool(),
-        );
+        );*/
         
         let mut ogles_req = XrGraphicsRequirementsOpenGLESKHR::default();
         unsafe{(openxr.xrGetOpenGLESGraphicsRequirementsKHR)(instance, sys_id, &mut ogles_req)}.to_result("xrGetOpenGLESGraphicsRequirementsKHR")?;
@@ -244,7 +251,16 @@ impl CxAndroidOpenXr{
         Ok(())
     }
     
-    pub fn create_xr_session(&mut self, display:&CxAndroidDisplay)->Result<(),String>{
+    pub fn destroy_instance(&mut self)->Result<(), String>{
+        let openxr =  self.openxr.as_ref().ok_or("")?;
+        let instance = self.instance.take().ok_or("")?;
+        let _system_id = self.system_id.take().ok_or("")?;
+        unsafe{(openxr.xrDestroyInstance)(instance)}
+            .log_error("xrDestroyInstance");
+        Ok(())
+    }
+    
+    pub fn create_session(&mut self, display:&CxAndroidDisplay)->Result<(),String>{
         if self.openxr.is_none(){
             return Err("OpenXR library not loaded".into());
         }
@@ -287,12 +303,12 @@ impl CxAndroidOpenXr{
         let mut config_props = XrViewConfigurationProperties::default();
         
         unsafe{(openxr.xrGetViewConfigurationProperties)(instance, system_id, XrViewConfigurationType::PRIMARY_STEREO, &mut  config_props)}.to_result("xrGetViewConfigurationProperties")?;
-        
+        /*
         crate::log!(
             "OpenXR System Config type: {:?}, FovMutable:{}",
             config_props.view_configuration_type,
             config_props.fov_mutable.to_bool(),
-        );
+        );*/
         
         let config_views = xr_array_fetch(XrViewConfigurationView::default(), |cap, len, buf|{
             unsafe{(openxr.xrEnumerateViewConfigurationViews)(
@@ -353,24 +369,24 @@ impl CxAndroidOpenXr{
             XrView::default(),
         ];
         
-        let mut pass_through_fb = XrPassthroughFB(0);
+        let mut passthrough = XrPassthroughFB(0);
         let ptci = XrPassthroughCreateInfoFB{
             ty: XrType::PASSTHROUGH_CREATE_INFO_FB,
             next: 0 as *const _,
             flags: XrPassthroughFlagsFB(0)
         };
         
-        unsafe{(openxr.xrCreatePassthroughFB)(session, &ptci, &mut pass_through_fb)}.to_result("xrCreatePassthroughFB")?;
+        unsafe{(openxr.xrCreatePassthroughFB)(session, &ptci, &mut passthrough)}.to_result("xrCreatePassthroughFB")?;
         
         let plci = XrPassthroughLayerCreateInfoFB{
-            passthrough: pass_through_fb,
+            passthrough: passthrough,
             purpose: XrPassthroughLayerPurposeFB::RECONSTRUCTION,
             ..Default::default()
         };
         
         let mut passthrough_layer = XrPassthroughLayerFB(0);
         unsafe{(openxr.xrCreatePassthroughLayerFB)(session, &plci, &mut passthrough_layer)}.to_result("xrCreatePassthroughLayerFB")?;
-        unsafe{(openxr.xrPassthroughStartFB)(pass_through_fb)}.to_result("xrPassthroughStartFB")?;
+        unsafe{(openxr.xrPassthroughStartFB)(passthrough)}.to_result("xrPassthroughStartFB")?;
         unsafe{(openxr.xrPassthroughLayerResumeFB)(passthrough_layer)}.to_result("xrPassthroughLayerResumeFB")?;
         
         let edpci = XrEnvironmentDepthProviderCreateInfoMETA{
@@ -414,6 +430,7 @@ impl CxAndroidOpenXr{
             color_swap_chain,
             depth_swap_chain,
             depth_provider,
+            passthrough,
             passthrough_layer,
             width,
             height,
@@ -443,6 +460,30 @@ impl CxAndroidOpenXr{
         Ok(())
     }
     
+    pub fn destroy_session(&mut self)->Result<(),String>{
+        let openxr =  self.openxr.as_ref().ok_or("")?;
+        let session = self.session.take().ok_or("")?;
+        // alright lets destroy some things on the session
+        unsafe{(openxr.xrStopEnvironmentDepthProviderMETA)(session.depth_provider)}
+            .log_error("xrStopEnvironmentDepthProviderMETA");
+        unsafe{(openxr.xrDestroyEnvironmentDepthProviderMETA)(session.depth_provider)}
+            .log_error("xrDestroyEnvironmentDepthProviderMETA");
+        unsafe{(openxr.xrPassthroughPauseFB)(session.passthrough)}
+            .log_error("xrPassthroughPauseFB");
+        unsafe{(openxr.xrDestroyPassthroughFB)(session.passthrough)}
+            .log_error("xrDestroyPassthroughFB");
+        unsafe{(openxr.xrDestroySwapchain)(session.color_swap_chain)}
+            .log_error("xrDestroySwapchain");
+        unsafe{(openxr.xrDestroyEnvironmentDepthSwapchainMETA)(session.depth_swap_chain)}
+            .log_error("xrDestroyEnvironmentDepthSwapchainMETA");
+        unsafe{(openxr.xrDestroySpace)(session.head_space)}
+            .log_error("xrDestroySpace");
+        unsafe{(openxr.xrDestroySpace)(session.local_space)}
+            .log_error("xrDestroySpace");
+        unsafe{(openxr.xrDestroySession)(session.handle)}
+            .log_error("xrDestroySession");
+        Ok(())
+    }
     /*  
     static const int CPU_LEVEL = 2;
     static const int GPU_LEVEL = 3;
@@ -464,7 +505,7 @@ impl CxAndroidOpenXr{
         if unsafe{(openxr.xrBeginSession)(session.handle, &session_begin_info)} != XrResult::SUCCESS{
             return
         }
-        crate::log!("OpenXR Session started");
+        
         session.active = true;
         
         unsafe{(openxr.xrPerfSettingsSetPerformanceLevelEXT)(
@@ -493,9 +534,21 @@ impl CxAndroidOpenXr{
         )}.log_error("xrSetAndroidApplicationThreadKHR");     
     }
     
-    fn begin_frame(&mut self){
+    fn end_session(&mut self){
+        let openxr = &self.openxr.as_ref().unwrap();
+        if let Some(session) = &mut self.session{
+            unsafe{(openxr.xrEndSession)(session.handle)}.log_error("xrEndSession");
+            session.active = false;
+        }
+    }
+    
+    fn begin_frame(&mut self)->Result<(),()>{
         let openxr = &self.openxr.as_ref().unwrap();
         let session = self.session.as_mut().unwrap();
+        
+        if !session.active{
+            return Err(())
+        }
                         
         let mut fi = XrFrameWaitInfo::default();
         let mut frame_state = XrFrameState::default();
@@ -597,7 +650,7 @@ impl CxAndroidOpenXr{
         });
         
         
-        
+        Ok(())
         //projection_info
         //crate::log!("{:?}", fs);
     }

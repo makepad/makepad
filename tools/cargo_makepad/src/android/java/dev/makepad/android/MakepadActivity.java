@@ -300,10 +300,10 @@ public class MakepadActivity
     Handler mVideoPlaybackHandler;
     HashMap<Long, VideoPlayerRunnable> mVideoPlayerRunnables;
 
-    // networking
-    Handler mWebSocketsHandler;
-    private HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
-    private HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
+    // networking, make these static because of activity switching
+    static Handler mWebSocketsHandler;
+    static HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
+    static HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
 
     static {
         System.loadLibrary("makepad");

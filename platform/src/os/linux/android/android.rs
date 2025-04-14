@@ -122,6 +122,12 @@ impl Cx {
                 }
             }
         }
+        if let Err(e) = self.os.openxr.destroy_session(){
+            crate::log!("OpenXR destroy destroy_session error: {e}")
+        }
+        if let Err(e) = self.os.openxr.destroy_instance(){
+            crate::log!("OpenXR destroy destroy_instance error: {e}")
+        }
         from_java_messages_clear()
     }
     
@@ -130,7 +136,7 @@ impl Cx {
             FromJavaMessage::SwitchedActivity(activity_handle, activity_thread_id)=>{
                 self.os.activity_thread_id = Some(activity_thread_id);
                 if self.os.in_xr_mode{
-                    if let Err(e) = self.os.openxr.init(activity_handle){
+                    if let Err(e) = self.os.openxr.create_instance(activity_handle){
                         crate::error!("OpenXR init failed: {}", e);
                     }
                 }
@@ -154,8 +160,8 @@ impl Cx {
             } => {
                 
                 if self.os.in_xr_mode{
-                    if let Err(e) = self.os.openxr.create_xr_session(self.os.display.as_ref().unwrap()){
-                        crate::error!("OpenXR after_egl_init failed: {}", e);
+                    if let Err(e) = self.os.openxr.create_session(self.os.display.as_ref().unwrap()){
+                        crate::error!("OpenXR create_xr_session failed: {}", e);
                     }
                 }
                 
@@ -630,7 +636,7 @@ impl Cx {
                 panic!();
             }
 
-            cx.maybe_warn_hardware_support();
+            //cx.maybe_warn_hardware_support();
 
             cx.os.display = Some(CxAndroidDisplay {
                 libegl,
@@ -924,7 +930,6 @@ impl Cx {
                     }
                 },
                 CxOsOp::SwitchToXr=>{
-                    crate::log!("SWITCHTOOXR");
                     self.os.ignore_destroy = true;
                     self.os.in_xr_mode = !self.os.in_xr_mode;
                     unsafe {
