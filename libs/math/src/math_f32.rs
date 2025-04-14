@@ -39,6 +39,7 @@ pub enum Vec2Index{
     Y
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Transform {
     pub orientation: Quat,
@@ -50,17 +51,17 @@ impl Transform {
         let q = self.orientation;
         let t = self.position;
         Mat4 {v: [
-            (1.0 - 2.0 * q.b * q.b - 2.0 * q.c * q.c),
-            (2.0 * q.a * q.b - 2.0 * q.c * q.d),
-            (2.0 * q.a * q.c + 2.0 * q.b * q.d),
+            (1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z),
+            (2.0 * q.x * q.y - 2.0 * q.z * q.w),
+            (2.0 * q.x * q.z + 2.0 * q.y * q.w),
             0.0,
-            (2.0 * q.a * q.b + 2.0 * q.c * q.d),
-            (1.0 - 2.0 * q.a * q.a - 2.0 * q.c * q.c),
-            (2.0 * q.b * q.c - 2.0 * q.a * q.d),
+            (2.0 * q.x * q.y + 2.0 * q.z * q.w),
+            (1.0 - 2.0 * q.x * q.x - 2.0 * q.z * q.z),
+            (2.0 * q.y * q.z - 2.0 * q.x * q.w),
             0.0,
-            (2.0 * q.a * q.c - 2.0 * q.b * q.d),
-            (2.0 * q.b * q.c + 2.0 * q.a * q.d),
-            (1.0 - 2.0 * q.a * q.a - 2.0 * q.b * q.b),
+            (2.0 * q.x * q.z - 2.0 * q.y * q.w),
+            (2.0 * q.y * q.z + 2.0 * q.x * q.w),
+            (1.0 - 2.0 * q.x * q.x - 2.0 * q.y * q.y),
             0.0,
             t.x,
             t.y,
@@ -84,6 +85,7 @@ impl Transform {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Vec2 {
     pub x: f32,
@@ -209,6 +211,7 @@ pub fn vec2(x:f32, y:f32)->Vec2{
     Vec2{x:x, y:y}
 }*/
 
+#[repr(C)]
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Vec3 {
     pub x: f32,
@@ -313,8 +316,7 @@ impl Plane {
     }
 }
 
-
-
+#[repr(C)]
 #[derive(Clone, Copy, Default, Debug,PartialEq)]
 pub struct Vec4 {
     pub x: f32,
@@ -442,22 +444,48 @@ impl From<(DVec2,DVec2)> for Vec4{
     }
 }
 
-
+#[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Quat {
-    pub a: f32,
-    pub b: f32,
-    pub c: f32,
-    pub d: f32
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32
 }
 
 impl Quat {
+    pub fn multiply(a:&Quat, b:&Quat)->Self{
+        Self{
+            x:(b.w * a.x) + (b.x * a.w) + (b.y * a.z) - (b.z * a.y),
+            y:(b.w * a.y) - (b.x * a.z) + (b.y * a.w) + (b.z * a.x),
+            z:(b.w * a.z) + (b.x * a.y) - (b.y * a.x) + (b.z * a.w),
+            w:(b.w * a.w) - (b.x * a.x) - (b.y * a.y) - (b.z * a.z)
+        }
+    }
+        
+    pub fn invert(&self)->Self{
+        Self{
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: self.w,
+        }
+    }
+        
+    pub fn rotate_vec3(&self, v:&Vec3)->Vec3{
+        let q = Quat{x:v.x, y:v.y, z:v.z, w:0.0};
+        let aq = Quat::multiply(&q, self);
+        let ainv = self.invert();
+        let aqainv = Quat::multiply(&ainv, &aq);
+        Vec3{x: aqainv.x, y: aqainv.y, z: aqainv.z}
+    }
+    
     pub fn dot(&self, other: Quat) -> f32 {
-        self.a * other.a + self.b * other.b + self.c * other.c + self.d * other.d
+        self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
     }
     
     pub fn neg(&self) -> Quat {
-        Quat {a: -self.a, b: -self.b, c: -self.c, d: -self.d}
+        Quat {x: -self.x, y: -self.y, z: -self.z, w: -self.w}
     }
     
     pub fn get_angle_with(&self, other: Quat) -> f32 {
@@ -484,10 +512,10 @@ impl Quat {
         };
         // calculate final values
         (Quat {
-            a: scale0 * n.a + scale1 * m.a,
-            b: scale0 * n.b + scale1 * m.b,
-            c: scale0 * n.c + scale1 * m.c,
-            d: scale0 * m.d + scale1 * m.d
+            x: scale0 * n.x + scale1 * m.x,
+            y: scale0 * n.y + scale1 * m.y,
+            z: scale0 * n.z + scale1 * m.z,
+            w: scale0 * m.w + scale1 * m.w
         }).normalized()
     }
     
@@ -498,10 +526,10 @@ impl Quat {
     pub fn normalized(&mut self) -> Quat {
         let len = self.length();
         Quat {
-            a: self.a / len,
-            b: self.b / len,
-            c: self.c / len,
-            d: self.d / len,
+            x: self.x / len,
+            y: self.y / len,
+            z: self.z / len,
+            w: self.w / len,
         }
     }
     

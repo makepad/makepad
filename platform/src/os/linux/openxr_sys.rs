@@ -555,7 +555,6 @@ pub struct XrFovf {
     pub angle_down: f32,
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct XrVector3f {
