@@ -33,6 +33,7 @@ live_design! {
     pub TextInput = <TextInputBase> {
         width: 200,
         height: Fit,
+        padding: <THEME_MSPACE_2> {}
 
         is_password: false,
         is_read_only: false,
@@ -708,10 +709,12 @@ impl TextInput {
         } else {
             &self.text
         };
-        let max_width_in_lpxs = cx
-            .turtle()
-            .max_width(self.text_walk)
-            .map(|max_width| max_width as f32);
+        let turtle_rect = cx.turtle().padded_rect();
+        let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
+            Some(turtle_rect.size.x as f32)
+        } else {
+            None
+        };
         let wrap_width_in_lpxs = if cx.turtle().layout().flow == Flow::RightWrap {
             max_width_in_lpxs
         } else {
