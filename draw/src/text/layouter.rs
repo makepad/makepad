@@ -96,7 +96,7 @@ impl Default for Settings {
                 rasterizer: rasterizer::Settings {
                     sdfer: sdfer::Settings {
                         padding: 4,
-                        radius: 6.0,
+                        radius: 8.0,
                         cutoff: 0.25,
                     },
                     grayscale_atlas_size: Size::new(4096, 4096),
