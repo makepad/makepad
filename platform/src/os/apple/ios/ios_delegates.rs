@@ -134,6 +134,38 @@ pub fn define_mtk_view_delegate() -> *const Class {
     return decl.register();
 }
 
+pub fn define_gesture_recognizer_handler() -> *const Class {
+    let mut decl = ClassDecl::new("LongPressGestureRecognizerHandler", class!(NSObject)).unwrap();
+
+    // TODO: figure out which argument is the gesture_recognizer...
+    extern "C" fn handle_long_press_gesture(_this: &Object, _: Sel, gesture_recognizer: ObjcId, _arg4: ObjcId) {
+        static mut STATES: Vec<i64> = Vec::new();
+        unsafe {
+            let state: i64 = msg_send![gesture_recognizer, state];
+            STATES.push(state);
+            // if state != 1 {
+            //     panic!("Got state: {state}");
+            // }
+            crate::log!("Long press gesture state: {state}");
+            if true || state != 3 && state != 0 && state != 1 { // UIGestureRecognizerStateRecognized/Ended
+                crate::log!("Long press gesture in Recognized state");
+                let location_in_window: NSPoint = msg_send![gesture_recognizer, locationInView: nil];
+                // panic!("Long press gesture state: {state}, STATES: {STATES:?}, location: {:?}", location_in_window);
+                IosApp::send_long_press(location_in_window, state);
+            }
+        }
+    }
+
+    unsafe {
+        decl.add_method(
+            sel!(handleLongPressGesture: gestureRecognizer:),
+            handle_long_press_gesture as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+    }
+
+    return decl.register();
+}
+
 pub fn define_ios_timer_delegate() -> *const Class {
     
     extern "C" fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
