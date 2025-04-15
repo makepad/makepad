@@ -1,19 +1,27 @@
-
-use crate::os::linux::openxr_sys::*;
-use crate::os::linux::android::android::CxAndroidDisplay;
-use crate::os::linux::gl_sys;
-use crate::cx::{Cx};
-use self::super::android_jni::{ *};
-use std::sync::{mpsc};
-use std::ptr;
-use crate::makepad_math::Mat4;
+use{
+    crate::{
+        os::{
+            linux::openxr_sys::*,
+            linux::android::android::CxAndroidDisplay,
+            linux::gl_sys,
+            linux::android::android_jni::*
+        },
+        texture::{Texture,TextureFormat},
+        cx::{Cx},
+        makepad_math::Mat4,
+    },
+    std::sync::{mpsc},
+    std::ptr
+};
 use makepad_jni_sys as jni_sys;
 
 #[derive(Default, Clone, Copy)]
 pub struct CxAndroidOpenXrEye{
     pub local_from_eye: XrPosef,
-    pub view: Mat4,
-    pub proj: Mat4
+    pub view_mat: Mat4,
+    pub proj_mat: Mat4,
+    pub depth_proj_mat: Mat4,
+    pub depth_view_mat: Mat4,
 }
 
 pub struct CxAndroidOpenXrFrame{
@@ -50,6 +58,7 @@ pub struct CxAndroidOpenXr{
     openxr: Option<LibOpenXr>,
     instance: Option<XrInstance>,
     system_id: Option<XrSystemId>,
+    depth_textures: Vec<Texture>,
     pub session: Option<CxAndroidOpenXrSession>
 }
 
@@ -121,12 +130,26 @@ impl Cx{
         }
     }
     
-     pub(crate) fn handle_openxr_drawing(&mut self){
-         if let Ok(()) = self.os.openxr.begin_frame(){
-             
-             self.os.openxr.end_frame();
-         }
-     }
+    pub (crate) fn openxr_init_textures(&mut self){
+        if self.os.openxr.depth_textures.len() == 0{
+            let session = self.os.openxr.session.as_ref().unwrap();
+            let swap_chain_len = session.color_images.len();
+            for _ in 0..swap_chain_len{
+                let texture = Texture::new_with_format(self, TextureFormat::XrDepth);
+                self.os.openxr.depth_textures.push(texture);
+            }
+        }
+    }
+    
+    pub(crate) fn handle_openxr_drawing(&mut self){
+        if let Ok(()) = self.os.openxr.begin_frame(){
+            // alright.
+            // we're going to specialise.
+            
+            
+            self.os.openxr.end_frame();
+        }
+    }
 }
 
 impl CxAndroidOpenXr{
@@ -638,8 +661,21 @@ impl CxAndroidOpenXr{
             let local_from_eye =XrPosef::multiply(&local_from_head, &head_from_eye);
             eyes[eye].local_from_eye  = local_from_eye;
             // lets compute eye matrices and depth matrices
-            let eye_from_local = local_from_eye.invert();
+            if let Some(depth_image) = &depth_image{
+                let local_from_depth_eye = depth_image.views[eye].pose;
+                let depth_eye_from_local = local_from_depth_eye.invert();
+                let depth_view_mat = depth_eye_from_local.to_mat4();
+                let depth_proj_mat = Mat4::from_camera_fov(
+                    &depth_image.views[eye].fov, 
+                    depth_image.near_z,
+                    if depth_image.far_z.is_finite(){depth_image.far_z}else{0.0}, 
+                );
+                eyes[eye].depth_view_mat = depth_view_mat;
+                eyes[eye].depth_proj_mat = depth_proj_mat;
+            }
             
+            eyes[eye].view_mat = local_from_eye.to_mat4();
+            eyes[eye].proj_mat = Mat4::from_camera_fov(&projections[eye].fov, 0.1, 10.0);
             
         }
         

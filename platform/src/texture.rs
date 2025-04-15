@@ -107,9 +107,11 @@ pub enum TextureFormat {
     VecRGu8{width:usize, height:usize, data:Option<Vec<u8>>, unpack_row_length:Option<usize>, updated: TextureUpdated},
     VecRf32{width:usize, height:usize, data:Option<Vec<f32>>, updated: TextureUpdated},
     DepthD32{size:TextureSize, initial: bool},
+    XrDepth,
     RenderBGRAu8{size:TextureSize, initial: bool},
     RenderRGBAf16{size:TextureSize, initial: bool},
     RenderRGBAf32{size:TextureSize, initial: bool},
+    
     SharedBGRAu8{width:usize, height:usize, id:crate::cx_stdin::PresentableImageId, initial: bool},
     #[cfg(any(target_os = "android", target_os = "linux"))]
     VideoRGB,
@@ -348,6 +350,13 @@ impl TextureFormat{
             return true;
         }
         false
+    }
+    
+    pub fn is_xr(&self) -> bool {
+        match self{
+            Self::XrDepth=>true,
+            _=>false
+        }
     }
 
     pub fn vec_width_height(&self)->Option<(usize,usize)>{
