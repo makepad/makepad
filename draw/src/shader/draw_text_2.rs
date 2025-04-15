@@ -6,8 +6,8 @@ use {
         makepad_platform::*,
         text::{
             color::Color,
-            font_family::FontFamilyId,
             font::FontId,
+            font_family::FontFamilyId,
             fonts::Fonts,
             geom::{Point, Rect, Size, Transform},
             layouter::{
