@@ -94,12 +94,11 @@ impl Rasterizer {
     ) -> Option<RasterizedGlyph> {
         let padding = self.sdfer.settings().padding;
         let atlas_size = self.grayscale_atlas.size();
-        let dpxs_per_em = if dpxs_per_em < 16.0 {
-            16.0
-        } else if dpxs_per_em < 64.0 {
+        let dpxs_per_em = if dpxs_per_em < 32.0 {
+            32.0
+        } 
+        else {
             64.0
-        } else {
-            256.0
         };
         let dpxs_per_em = dpxs_per_em * 2.0;
         let outline = font.glyph_outline(glyph_id)?;
