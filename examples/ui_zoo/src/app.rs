@@ -95,7 +95,7 @@
                         <Toggle> { text: "Light Theme"}
                     }
 
-                    <Dock> {
+                    dock = <Dock> {
                         height: Fill, width: Fill
 
                         root = Splitter {
@@ -288,23 +288,23 @@
     impl MatchEvent for App{
         fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions) {
             let ui = self.ui.clone();
-
-            ui.radio_button_set(ids!(radios_demo_1.radio1, radios_demo_1.radio2, radios_demo_1.radio3, radios_demo_1.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_2.radio1, radios_demo_2.radio2, radios_demo_2.radio3, radios_demo_2.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_3.radio1, radios_demo_3.radio2, radios_demo_3.radio3, radios_demo_3.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_4.radio1, radios_demo_4.radio2, radios_demo_4.radio3, radios_demo_4.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_5.radio1, radios_demo_5.radio2, radios_demo_5.radio3, radios_demo_5.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_6.radio1, radios_demo_6.radio2, radios_demo_6.radio3, radios_demo_6.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_7.radio1, radios_demo_7.radio2, radios_demo_7.radio3, radios_demo_7.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_8.radio1, radios_demo_8.radio2, radios_demo_8.radio3, radios_demo_8.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_9.radio1, radios_demo_9.radio2, radios_demo_9.radio3, radios_demo_9.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_10.radio1, radios_demo_10.radio2, radios_demo_10.radio3, radios_demo_10.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_11.radio1, radios_demo_11.radio2, radios_demo_11.radio3, radios_demo_11.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_12.radio1, radios_demo_12.radio2, radios_demo_12.radio3, radios_demo_12.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_13.radio1, radios_demo_13.radio2, radios_demo_13.radio3, radios_demo_13.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_14.radio1, radios_demo_14.radio2, radios_demo_14.radio3, radios_demo_14.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_15.radio1, radios_demo_15.radio2, radios_demo_15.radio3, radios_demo_15.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_16.radio1, radios_demo_16.radio2, radios_demo_16.radio3, radios_demo_16.radio4)).selected(cx, actions);
+            let tui = ui.dock(id!(dock)).item(live_id!(tRadioButton));
+            tui.radio_button_set(ids!(radios_demo_1.radio1, radios_demo_1.radio2, radios_demo_1.radio3, radios_demo_1.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_2.radio1, radios_demo_2.radio2, radios_demo_2.radio3, radios_demo_2.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_3.radio1, radios_demo_3.radio2, radios_demo_3.radio3, radios_demo_3.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_4.radio1, radios_demo_4.radio2, radios_demo_4.radio3, radios_demo_4.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_5.radio1, radios_demo_5.radio2, radios_demo_5.radio3, radios_demo_5.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_6.radio1, radios_demo_6.radio2, radios_demo_6.radio3, radios_demo_6.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_7.radio1, radios_demo_7.radio2, radios_demo_7.radio3, radios_demo_7.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_8.radio1, radios_demo_8.radio2, radios_demo_8.radio3, radios_demo_8.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_9.radio1, radios_demo_9.radio2, radios_demo_9.radio3, radios_demo_9.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_10.radio1, radios_demo_10.radio2, radios_demo_10.radio3, radios_demo_10.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_11.radio1, radios_demo_11.radio2, radios_demo_11.radio3, radios_demo_11.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_12.radio1, radios_demo_12.radio2, radios_demo_12.radio3, radios_demo_12.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_13.radio1, radios_demo_13.radio2, radios_demo_13.radio3, radios_demo_13.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_14.radio1, radios_demo_14.radio2, radios_demo_14.radio3, radios_demo_14.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_15.radio1, radios_demo_15.radio2, radios_demo_15.radio3, radios_demo_15.radio4)).selected(cx, actions);
+            tui.radio_button_set(ids!(radios_demo_16.radio1, radios_demo_16.radio2, radios_demo_16.radio3, radios_demo_16.radio4)).selected(cx, actions);
 
             if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
                 log!("TEXTBOX CHANGED {}", self.counter);
