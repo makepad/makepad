@@ -134,25 +134,32 @@ pub fn define_mtk_view_delegate() -> *const Class {
     return decl.register();
 }
 
+/// Defines a class that acts as the target "receiver" for the long press gesture recognizer's
+/// "gesture recognized" action.
 pub fn define_gesture_recognizer_handler() -> *const Class {
     let mut decl = ClassDecl::new("LongPressGestureRecognizerHandler", class!(NSObject)).unwrap();
 
-    // TODO: figure out which argument is the gesture_recognizer...
-    extern "C" fn handle_long_press_gesture(_this: &Object, _: Sel, gesture_recognizer: ObjcId, _arg4: ObjcId) {
-        static mut STATES: Vec<i64> = Vec::new();
+    extern "C" fn handle_long_press_gesture(_this: &Object, _: Sel, gesture_recognizer: ObjcId, _: ObjcId) {
         unsafe {
             let state: i64 = msg_send![gesture_recognizer, state];
-            STATES.push(state);
-            // if state != 1 {
-            //     panic!("Got state: {state}");
-            // }
-            crate::log!("Long press gesture state: {state}");
-            if true || state != 3 && state != 0 && state != 1 { // UIGestureRecognizerStateRecognized/Ended
-                crate::log!("Long press gesture in Recognized state");
-                let location_in_window: NSPoint = msg_send![gesture_recognizer, locationInView: nil];
-                // panic!("Long press gesture state: {state}, STATES: {STATES:?}, location: {:?}", location_in_window);
-                IosApp::send_long_press(location_in_window, state);
+            // One might expect that we want to trigger on the "Recognized" or "Ended" state,
+            // but that state is not triggered until the user lifts their finger.
+            // We want to trigger on the "Began" state, which occurs only once the user has long-pressed
+            // for a long-enough time interval to trigger the gesture (without having to lift their finger).
+            if state == 1 { // UIGestureRecognizerStateBegan
+                let view: ObjcId = msg_send![gesture_recognizer, view];
+                let location_in_view: NSPoint = msg_send![gesture_recognizer, locationInView: view];
+                // There's no way to get the touch event's UID from within a default gesture recognizer
+                // (we'd have to fully implement our own). Since UID isn't used for long presses,
+                // this isn't worth the effort.
+                let uid = 0;
+                IosApp::send_long_press(location_in_view, uid);
             }
+            // Note: in `did_finish_launching_with_options()`, we set gesture recognizer's `cancelTouchesInView` property
+            // to `NO`, which means that the gesture recognizer will still allow Makepad's MTKView
+            // to continue receiving touch events even after the long-press gesture has been recognized.
+            // Thus, we don't need to handle the UIGestureRecognizerStateChanged or UIGestureRecognizerStateEnded
+            // states here, as they'll be handled by the `on_touch` function above, as normal.
         }
     }
 

@@ -144,6 +144,9 @@ impl IosApp {
                 initWithTarget: gesture_recognizer_handler_obj
                 action: sel!(handleLongPressGesture: gestureRecognizer:)
             ];
+            // Set `cancelsTouchesInView` to NO so that the gesture recognizer doesn't prevent
+            // later touch events from being sent to the MTKView *after* it has recognized its gesture.
+            let () = msg_send!(gesture_recognizer_obj, setCancelsTouchesInView: NO);
             let () = msg_send![mtk_view_obj, addGestureRecognizer: gesture_recognizer_obj];
             
             let view_ctrl_obj: ObjcId = msg_send![class!(UIViewController), alloc];
@@ -283,15 +286,13 @@ impl IosApp {
         with_ios_app(|app| app.touches.retain( | v | if let TouchState::Stop = v.state {false}else {true}));
     }
 
-    pub fn send_long_press(abs: NSPoint, state: i64) {
+    pub fn send_long_press(abs: NSPoint, uid: u64) {
         let time_now = with_ios_app(|app| app.time_now());
-        crate::log!("Sending long press event at {abs:?}, {time_now}");
         IosApp::do_callback(IosEvent::LongPress(LongPressEvent {
             abs: dvec2(abs.x, abs.y),
             time: time_now,
             window_id: CxWindowPool::id_zero(),
-            uid: state as u64, // TODO: temp hack to pass along the state
-            // uid: 0, // TODO: Not sure how to obtain this for a long-press gesture
+            uid,
         }));
     }
 
