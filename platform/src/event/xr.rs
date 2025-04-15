@@ -12,8 +12,8 @@ pub struct XRButton {
 pub struct XRInput {
     pub active: bool,
     pub hand: u32,
-    pub grip: Transform,
-    pub ray: Transform,
+    pub grip: Pose,
+    pub ray: Pose,
     pub buttons: Vec<XRButton>,
     pub axes: Vec<f32>,
 }
@@ -22,7 +22,7 @@ pub struct XRInput {
 pub struct XRUpdateEvent {
     // alright what data are we stuffing in
     pub time: f64,
-    pub head_transform: Transform,
+    pub head_pose: Pose,
     pub inputs: Vec<XRInput>,
     pub last_inputs: Option<Vec<XRInput>>
 }
