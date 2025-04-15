@@ -19,6 +19,13 @@ live_design!{
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
             }
 
+            <H4> { text: "Standard, Position: BelowInput" }
+            dropdown_below = <DropDown> {
+            popup_menu_position: BelowInput ,
+            labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+            }
+
             <Hr> {}
             <H4> { text: "DropDownFlat" }
             dropdown_flat = <DropDownFlat> {
