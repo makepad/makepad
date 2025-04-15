@@ -58,7 +58,7 @@ live_design! {
 
         fn sdf(self, scale: float, p: vec2) -> float {
             let s = sample2d(self.grayscale_texture, p).x;
-            s = clamp((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5, 0.0, 1.0);
+            s = clamp((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5, 0.0, 1.0)*1.05;
             return s;
         }
 
