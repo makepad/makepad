@@ -23,6 +23,7 @@ pub const V0F0:Vec4 = Vec4{x:0.0,y:1.0,z:0.0,w:1.0};
 pub const V00F:Vec4 = Vec4{x:0.0,y:0.0,z:1.0,w:1.0};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(C)]
 pub struct Mat4 {
     pub v: [f32; 16],
 }
@@ -41,12 +42,31 @@ pub enum Vec2Index{
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
-pub struct Transform {
+pub struct Pose {
     pub orientation: Quat,
     pub position: Vec3
 }
 
-impl Transform {
+impl Pose {
+    pub fn transform_vec3(&self, v:&Vec3)->Vec3{
+        let r0 = self.orientation.rotate_vec3(v);
+        r0 + self.position
+    }
+    pub fn multiply(a:&Pose, b:&Pose)->Self{
+        Self{
+            orientation: Quat::multiply(&b.orientation, &a.orientation),
+            position: a.transform_vec3(&b.position)
+        }
+    }
+    pub fn invert(&self)->Self{
+        let orientation = self.orientation.invert();
+        let neg_pos = self.position.scale(-1.0);
+        Self{
+            orientation,
+            position: orientation.rotate_vec3(&neg_pos),
+        }
+    }
+    
     pub fn to_mat4(&self) -> Mat4 {
         let q = self.orientation;
         let t = self.position;
@@ -70,15 +90,15 @@ impl Transform {
         ]}
     }
     
-    pub fn from_lerp(a: Transform, b: Transform, f: f32) -> Self {
-        Transform {
+    pub fn from_lerp(a: Pose, b: Pose, f: f32) -> Self {
+        Pose {
             orientation: Quat::from_slerp(a.orientation, b.orientation, f),
             position: Vec3::from_lerp(a.position, b.position, f)
         }
     }
     
-    pub fn from_slerp_orientation(a: Transform, b: Transform, f: f32) -> Self {
-        Transform {
+    pub fn from_slerp_orientation(a: Pose, b: Pose, f: f32) -> Self {
+        Pose {
             orientation: Quat::from_slerp(a.orientation, b.orientation, f),
             position: b.position
         }
@@ -444,6 +464,16 @@ impl From<(DVec2,DVec2)> for Vec4{
     }
 }
 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct CameraFov {
+    pub angle_left: f32,
+    pub angle_right: f32,
+    pub angle_up: f32,
+    pub angle_down: f32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Quat {
@@ -686,6 +716,63 @@ impl Mat4 {
             (2.0 * far * near) * nf,
             0.0
         ]}
+    }
+    
+    pub fn from_camera_fov(fov:&CameraFov, near: f32, far: f32) -> Mat4 {
+        let tan_left = fov.angle_left.tan();
+        let tan_right = fov.angle_right.tan();
+        let tan_down = fov.angle_down.tan();
+        let tan_up = fov.angle_up.tan();
+        
+        let tan_height = tan_up - tan_down;
+        let tan_width = tan_right - tan_left;
+        
+        if far <= near{
+            Mat4 {v: [
+                2.0 / tan_width,
+                0.0,
+                0.0,
+                0.0,
+                
+                0.0,
+                2.0 / tan_height,
+                0.0,
+                0.0,
+                
+                (tan_right + tan_left) / tan_width,
+                (tan_up + tan_down) / tan_height,
+                -1.0,
+                -1.0,
+                
+                0.0,
+                0.0,
+                - 2.0 * near,
+                0.0,
+            ]}
+        }
+        else{
+            Mat4 {v: [
+                2.0 / tan_width,
+                0.0,
+                0.0,
+                0.0,
+                                
+                0.0,
+                2.0 / tan_height,
+                0.0,
+                0.0,
+                                
+                (tan_right + tan_left) / tan_width,
+                (tan_up + tan_down) / tan_height,
+                -2.0 * far / (far - near),
+                -1.0,
+                                
+                0.0,
+                0.0,
+                -(far * 2.0 * near)/ (far - near),
+                0.0,
+            ]}
+        }
     }
     
     pub const fn translation(x: f32, y: f32, z: f32) -> Mat4 {

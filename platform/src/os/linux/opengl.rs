@@ -263,18 +263,10 @@ impl Cx {
         Some(pass_rect.size)
     }
 
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, texture: &Texture) {
-        self.draw_pass_to_texture_inner(pass_id, Some(texture))
-    }
-
-    pub fn draw_pass_to_magic_texture(&mut self, pass_id: PassId) {
-        self.draw_pass_to_texture_inner(pass_id, None)
-    }
-
-    fn draw_pass_to_texture_inner(
+    pub fn draw_pass_to_texture(
         &mut self,
         pass_id: PassId,
-        maybe_texture: Option<&Texture>,
+        override_pass_texture: Option<&Texture>,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -307,7 +299,7 @@ impl Cx {
             gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, self.passes[pass_id].os.gl_framebuffer.unwrap());
         }
 
-        let color_textures_from_fb_texture = maybe_texture.map(|texture| {
+        let color_textures_from_fb_texture = override_pass_texture.map(|texture| {
             [crate::pass::CxPassColorTexture {
                 clear_color: PassClearColor::ClearWith(self.passes[pass_id].clear_color),
                 texture: texture.clone(),
@@ -1128,7 +1120,7 @@ impl CxTexture {
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
         }
     }
-
+    
     pub fn setup_video_texture(&mut self) -> bool {
         while unsafe { gl_sys::GetError() } != 0 {}
 

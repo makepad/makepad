@@ -57,7 +57,7 @@ impl Cx {
                             window.present_index = (window.present_index + 1) % swapchain.presentable_images.len();
                             
                             // render to swapchain
-                            self.draw_pass_to_texture(pass_id, d3d11_cx, current_image.image.texture_id());
+                            self.draw_pass_to_texture(pass_id, d3d11_cx, Some(current_image.image.texture_id()));
 
                             let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
                             let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
@@ -78,10 +78,10 @@ impl Cx {
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_magic_texture(pass_id, d3d11_cx);
+                    self.draw_pass_to_texture(pass_id, d3d11_cx, None);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_magic_texture(pass_id, d3d11_cx);
+                    self.draw_pass_to_texture(pass_id, d3d11_cx, None);
                 }
             }
         }

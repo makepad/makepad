@@ -17,6 +17,7 @@ impl Cx {
     /// Loads resources as dependencies from the NSBundle's resource path.
     ///
     /// This is used for any Apple app bundle on iOS, macOS, or tvOS.
+    #[allow(unused)]
     pub(crate) fn apple_bundle_load_dependencies(&mut self) {
         let bundle_path = unsafe{
             let main:ObjcId = msg_send![class!(NSBundle), mainBundle];

@@ -159,15 +159,17 @@ impl Cx {
                 height,
             } => {
                 
-                if self.os.in_xr_mode{
+                if self.os.in_xr_mode && self.os.openxr.session.is_none(){
                     if let Err(e) = self.os.openxr.create_session(self.os.display.as_ref().unwrap()){
                         crate::error!("OpenXR create_xr_session failed: {}", e);
                     }
+                    self.openxr_init_textures();
                 }
                 
                 unsafe {
                     self.os.display.as_mut().unwrap().update_surface(window);
                 }
+                
                 self.os.display_size = dvec2(width as f64, height as f64);
                 let window_id = CxWindowPool::id_zero();
                 let window = &mut self.windows[window_id];
@@ -816,22 +818,17 @@ impl Cx {
                         start, end 
                     }));
                     unsafe {
-                        //let frame_time = (1000_0000_0000f64 / 120.0) as i64;
-                        ////self.os.frame_time += frame_time;
-                        //let _ret = ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.00001, 0); 
                         if let Some(display) = &mut self.os.display { 
-                            //(display.libegl.eglSurfaceAttrib.unwrap())(display.egl_display, display.surface, egl_sys::EGL_SWAP_BEHAVIOR, egl_sys::EGL_BUFFER_DESTROYED);
                             (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
-
                         }
                     }
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_magic_texture(*pass_id);
+                    self.draw_pass_to_texture(*pass_id, None);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_magic_texture(*pass_id);
+                    self.draw_pass_to_texture(*pass_id, None);
                 }
             }
         }

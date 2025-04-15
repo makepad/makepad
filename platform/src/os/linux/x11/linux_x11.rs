@@ -245,10 +245,10 @@ impl Cx {
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_magic_texture(*pass_id);
+                    self.draw_pass_to_texture(*pass_id, None);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_magic_texture(*pass_id);
+                    self.draw_pass_to_texture(*pass_id, None);
                 }
             }
         }
