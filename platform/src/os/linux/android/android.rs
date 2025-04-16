@@ -25,6 +25,7 @@ use {
     },
     self::super::super::{
         gl_sys,
+        gl_sys::LibGl,
         //libc_sys,
     },
     crate::{
@@ -620,10 +621,16 @@ impl Cx {
             ).expect("Cant create EGL context")};
             
             // SAFETY: This is loading OpenGL function pointers. It's safe as long as we have a valid EGL context.
-            unsafe {gl_sys::load_with( | s | {
-                let s = CString::new(s).unwrap();
-                libegl.eglGetProcAddress.unwrap()(s.as_ptr())
-            })};
+            let libgl = LibGl::try_load(| s | {
+                for s in s{
+                    let s = CString::new(*s).unwrap();
+                    let p = unsafe{libegl.eglGetProcAddress.unwrap()(s.as_ptr())};
+                    if !p.is_null(){
+                        return p
+                    }
+                }
+                0 as _
+            }).expect("Cant load openGL functions");
 
             // SAFETY: This creates an EGL surface. It's safe as long as we have valid EGL display, config, and window.
             let surface = unsafe {(libegl.eglCreateWindowSurface.unwrap())(
@@ -641,6 +648,7 @@ impl Cx {
 
             cx.os.display = Some(CxAndroidDisplay {
                 libegl,
+                libgl,
                 egl_display,
                 egl_config,
                 egl_context,
@@ -756,8 +764,9 @@ impl Cx {
         self.passes[pass_id].paint_dirty = false;
         //let panning_offset = if self.os.keyboard_visible {self.os.keyboard_panning_offset} else {0};
 
+        let gl = self.os.gl();
         unsafe {
-            gl_sys::Viewport(0, 0, self.os.display_size.x as i32, self.os.display_size.y as i32);
+            (gl.glViewport)(0, 0, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
 
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -776,13 +785,13 @@ impl Cx {
 
         if !self.passes[pass_id].dont_clear {
             unsafe {
-                //gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
-                gl_sys::ClearDepthf(clear_depth as f32);
-                gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
-                gl_sys::Clear(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
+                //(gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+                (gl.glClearDepthf)(clear_depth as f32);
+                (gl.glClearColor)(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
+                (gl.glClear)(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             }
         }
-        Self::set_default_depth_and_blend_mode();
+        Self::set_default_depth_and_blend_mode(gl);
 
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
@@ -991,7 +1000,8 @@ impl Default for CxOs {
 }
 
 pub struct CxAndroidDisplay {
-    libegl: LibEgl,
+    pub libegl: LibEgl,
+    pub libgl: LibGl,
     pub egl_display: egl_sys::EGLDisplay,
     pub egl_config: egl_sys::EGLConfig,
     pub egl_context: egl_sys::EGLContext,
@@ -1020,6 +1030,12 @@ pub struct CxOs {
     pub (crate) render_thread_id: Option<u64>,
     pub (crate) ignore_destroy: bool,
     pub (crate) in_xr_mode: bool
+}
+
+impl CxOs{
+    pub (crate) fn gl(&self)->&LibGl{
+        &self.display.as_ref().unwrap().libgl
+    }
 }
 
 impl CxAndroidDisplay {

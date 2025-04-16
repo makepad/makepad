@@ -8,6 +8,7 @@ use {
     },
     self::super::super::{
         egl_sys,
+        gl_sys::LibGl,
         x11::xlib_event::*,
         x11::xlib_app::*,
         x11::x11_sys,
@@ -386,3 +387,8 @@ pub struct CxOs {
     pub(super) opengl_cx: Option<OpenglCx>,
 }
 
+impl CxOs{
+    pub(crate) fn gl(&self)->&LibGl{
+        &self.opengl_cx.as_ref().unwrap().libgl
+    }
+}
