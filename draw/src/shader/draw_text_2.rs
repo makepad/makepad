@@ -448,7 +448,7 @@ impl DrawText2 {
 
     fn draw_rasterized_glyph(
         &mut self,
-        point_in_lpxs: crate::text::geom::Point<f32>,
+        origin_in_lpxs: crate::text::geom::Point<f32>,
         font_size_in_lpxs: f32,
         color: Option<Color>,
         glyph: RasterizedGlyph,
@@ -456,25 +456,35 @@ impl DrawText2 {
     ) {
         fn tex_coord(point: Point<usize>, size: Size<usize>) -> Point<f32> {
             Point::new(
-                (2 * point.x + 1) as f32 / (2 * size.width) as f32,
-                (2 * point.y + 1) as f32 / (2 * size.height) as f32,
+                point.x as f32 / size.width as f32,
+                point.y as f32 / size.height as f32,
             )
         }
 
-        let transform =
-            Transform::from_scale_uniform(font_size_in_lpxs / glyph.dpxs_per_em * self.font_scale)
-                .translate(point_in_lpxs.x, point_in_lpxs.y);
-        let bounds_in_lpxs = Rect::new(
-            Point::new(glyph.bounds_in_dpxs.min().x, -glyph.bounds_in_dpxs.max().y),
-            glyph.bounds_in_dpxs.size,
-        )
-        .apply_transform(transform);
         let texture_index = match glyph.atlas_kind {
             AtlasKind::Grayscale => 0.0,
             AtlasKind::Color => 1.0,
         };
-        let t_min = tex_coord(glyph.atlas_bounds.min(), glyph.atlas_size);
-        let t_max = tex_coord(glyph.atlas_bounds.max(), glyph.atlas_size);
+
+        let atlas_image_bounds = glyph.atlas_image_bounds;
+        let atlas_size = glyph.atlas_size;
+        let t_min = tex_coord(glyph.atlas_image_bounds.min(), atlas_size);
+        let t_max = tex_coord(glyph.atlas_image_bounds.max(), atlas_size);
+
+        let atlas_image_padding = glyph.atlas_image_padding;
+        let atlas_image_size = atlas_image_bounds.size;
+        let origin_in_dpxs = glyph.origin_in_dpxs;
+        let bounds_in_dpxs = Rect::new(
+            Point::new(
+                origin_in_dpxs.x - atlas_image_padding as f32,
+                -origin_in_dpxs.y - atlas_image_size.height as f32 + (atlas_image_padding as f32),
+            ),
+            Size::new(atlas_image_size.width as f32, atlas_image_size.height as f32),
+        );
+        let bounds_in_lpxs = bounds_in_dpxs.apply_transform(
+            Transform::from_scale_uniform(font_size_in_lpxs / glyph.dpxs_per_em * self.font_scale)
+                .translate(origin_in_lpxs.x, origin_in_lpxs.y),
+        );
 
         self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y);
         self.rect_size = vec2(bounds_in_lpxs.size.width, bounds_in_lpxs.size.height);
