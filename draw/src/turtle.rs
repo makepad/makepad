@@ -614,6 +614,15 @@ impl<'a> Cx2d<'a> {
         }
     }
     
+    pub fn emit_turtle_walk(&mut self, rect:Rect){
+        let turtle = self.turtles.last().unwrap();
+        self.turtle_walks.push(TurtleWalk {
+            align_start: self.align_list.len(),
+            defer_index: turtle.defer_count,
+            rect
+        });
+    }
+    
     fn walk_turtle_peek(&self, walk: Walk) -> Rect {
         if self.turtles.len() == 0{
             return Rect::default()
@@ -807,6 +816,13 @@ pub struct TurtleAlignRange{
 }
 
 impl Turtle {
+    pub fn row_height(&self)->f64{
+        // relative y pos
+        // bounding box from origin
+        // pos from origin
+        self.height_used - (self.pos.y - self.origin.y)
+    }
+    
     pub fn update_width_max(&mut self, pos:f64, dx: f64) {
         self.width_used = self.width_used.max((pos + dx) - self.origin.x);
     }

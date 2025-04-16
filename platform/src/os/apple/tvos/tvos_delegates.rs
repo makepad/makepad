@@ -40,7 +40,7 @@ pub fn define_tvos_app_delegate() -> *const Class {
 
 pub fn define_mtk_view() -> *const Class {
     let mut decl = ClassDecl::new("MakepadView", class!(MTKView)).unwrap();
-    extern fn yes(_: &Object, _: Sel) -> BOOL {
+    extern "C" fn yes(_: &Object, _: Sel) -> BOOL {
         YES
     }
     
@@ -80,11 +80,11 @@ pub fn define_mtk_view_delegate() -> *const Class {
 
 pub fn define_tvos_timer_delegate() -> *const Class {
     
-    extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
+    extern "C"  fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
         TvosApp::send_timer_received(nstimer);
     }
     
-    extern fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
+    extern "C"  fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
         TvosApp::send_paint_event();
     }
     
@@ -93,8 +93,8 @@ pub fn define_tvos_timer_delegate() -> *const Class {
     
     // Add callback methods
     unsafe {
-        decl.add_method(sel!(receivedTimer:), received_timer as extern fn(&Object, Sel, ObjcId));
-        decl.add_method(sel!(receivedLiveResize:), received_live_resize as extern fn(&Object, Sel, ObjcId));
+        decl.add_method(sel!(receivedTimer:), received_timer as extern "C" fn(&Object, Sel, ObjcId));
+        decl.add_method(sel!(receivedLiveResize:), received_live_resize as extern "C" fn(&Object, Sel, ObjcId));
     }
     
     return decl.register();

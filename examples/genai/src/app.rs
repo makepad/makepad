@@ -1,4 +1,5 @@
 use crate::makepad_live_id::*;
+use makepad_draw::text::selection::Cursor;
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::fs;
@@ -176,7 +177,7 @@ impl App {
             let prompt = self.ui.text_input(id!(prompt_input)).text();
             let seed = if self.ui.check_box(id!(random_check_box)).active(cx) {
                 let seed = LiveId::from_str(&format!("{:?}", Instant::now())).0;
-                self.ui.text_input(id!(seed_input)).set_text(cx, &format!("{}",seed));
+                self.ui.text_input(id!(seed_input)).set_text(cx, format!("{}",seed));
                 seed
             }
             else{ // read seed from box
@@ -371,7 +372,7 @@ impl App {
             if let Some(image) = self.db.image_files.iter().find( | v | v.image_id == *current_image) {
                 //self.last_seed = image.seed;
                 //self.update_seed_display(cx);
-                self.ui.text_input(id!(seed_input)).set_text(cx, &format!("{}",image.seed));
+                self.ui.text_input(id!(seed_input)).set_text(cx, format!("{}",image.seed));
                 
             }
         }
@@ -401,14 +402,14 @@ impl App {
         
     fn load_inputs_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.text_input(id!(prompt_input)).set_text(cx, &prompt_file.prompt.prompt);
+            self.ui.text_input(id!(prompt_input)).set_text(cx, prompt_file.prompt.prompt.to_string());
             self.ui.redraw(cx);
         }
     }
     
     fn load_last_sent_from_prompt_hash(&mut self, cx: &mut Cx, prompt_hash: LiveId) {
         if let Some(prompt_file) = self.db.prompt_files.iter().find( | v | v.prompt_hash == prompt_hash) {
-            self.ui.text_input(id!(last_sent)).set_text(cx, &prompt_file.prompt.prompt);
+            self.ui.text_input(id!(last_sent)).set_text(cx, prompt_file.prompt.prompt.to_string());
             self.ui.redraw(cx);
         }
     }
@@ -1301,7 +1302,7 @@ impl MatchEvent for App {
                                         let val = val.strip_prefix("assistant").unwrap_or(val);
                                         let val = val.to_string().replace("\"","");
                                         let val = val.trim();
-                                        self.ui.text_input(id!(prompt_input)).set_text(cx, &val);
+                                        self.ui.text_input(id!(prompt_input)).set_text(cx, val);
                                         self.llm_chat.push((LLMMsg::AI,val.into()));
                                         self.ui.widget(id!(llm_chat)).redraw(cx);
                                     }
@@ -1496,10 +1497,10 @@ impl MatchEvent for App {
             if let Some(WhisperTextInput{clear, text}) = action.downcast_ref(){
                 if text != "Thank you." && !self.ui.check_box(id!(mute_check_box)).active(cx){
                     if *clear{
-                        self.ui.text_input(id!(prompt_input)).set_text(cx, "");
+                        self.ui.text_input(id!(prompt_input)).set_text(cx, "".to_string());
                     }
                     let t = self.ui.text_input(id!(prompt_input)).text();
-                    self.ui.text_input(id!(prompt_input)).set_text(cx, &format!("{} {}",t, text));
+                    self.ui.text_input(id!(prompt_input)).set_text(cx, format!("{} {}",t, text));
                 }
             }
         }
@@ -1521,8 +1522,8 @@ impl MatchEvent for App {
 
         let chat = self.ui.text_input(id!(chat));
         if let Some(val) = chat.returned(&actions){
-            chat.set_text(cx, "");
-            chat.set_cursor(0,0);
+            chat.set_text(cx, "".to_string());
+            chat.set_cursor(cx, Cursor { index: 0, prefer_next_row: false }, false);
             self.llm_chat.push((LLMMsg::Human, val));
             self.llm_chat.push((LLMMsg::Progress, "... Thinking ...".into()));
             self.ui.widget(id!(llm_chat)).redraw(cx);

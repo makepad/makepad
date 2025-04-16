@@ -12,6 +12,7 @@ use {
         substr::Substr,
     },
     std::{
+        borrow::Borrow,
         cell::RefCell,
         collections::{HashMap, VecDeque},
         hash::{Hash, Hasher},
@@ -20,12 +21,15 @@ use {
     unicode_segmentation::UnicodeSegmentation,
 };
 
+const LPXS_PER_INCH: f32 = 96.0;
+const PTS_PER_INCH: f32 = 72.0;
+
 #[derive(Debug)]
 pub struct Layouter {
     loader: Loader,
     cache_size: usize,
-    cached_params: VecDeque<LayoutParams>,
-    cached_results: HashMap<LayoutParams, Rc<LaidoutText>>,
+    cached_params: VecDeque<OwnedLayoutParams>,
+    cached_results: HashMap<OwnedLayoutParams, Rc<LaidoutText>>,
 }
 
 impl Layouter {
@@ -58,20 +62,22 @@ impl Layouter {
         self.loader.define_font(id, definition);
     }
 
-    pub fn get_or_layout(&mut self, params: LayoutParams) -> Rc<LaidoutText> {
-        if !self.cached_results.contains_key(&params) {
-            if self.cached_params.len() == self.cache_size {
-                let params = self.cached_params.pop_front().unwrap();
-                self.cached_results.remove(&params);
-            }
-            let result = self.layout(params.clone());
-            self.cached_params.push_back(params.clone());
-            self.cached_results.insert(params.clone(), Rc::new(result));
+    pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
+        if let Some(result) = self.cached_results.get(&params as &dyn LayoutParams) {
+            return result.clone();
         }
-        self.cached_results.get(&params).unwrap().clone()
+        if self.cached_params.len() == self.cache_size {
+            let params = self.cached_params.pop_front().unwrap();
+            self.cached_results.remove(&params);
+        }
+        let params = params.to_owned();
+        let result = Rc::new(self.layout(params.clone()));
+        self.cached_params.push_back(params.clone());
+        self.cached_results.insert(params, result.clone());
+        result
     }
 
-    fn layout(&mut self, params: LayoutParams) -> LaidoutText {
+    fn layout(&mut self, params: OwnedLayoutParams) -> LaidoutText {
         LayoutContext::new(&mut self.loader, params.text, params.options).layout(&params.spans)
     }
 }
@@ -93,8 +99,8 @@ impl Default for Settings {
                         radius: 8.0,
                         cutoff: 0.25,
                     },
-                    grayscale_atlas_size: Size::new(512, 512),
-                    color_atlas_size: Size::new(512, 512),
+                    grayscale_atlas_size: Size::new(4096, 4096),
+                    color_atlas_size: Size::new(4096, 4096),
                 },
             },
             cache_size: 4096,
@@ -120,12 +126,20 @@ impl<'a> LayoutContext<'a> {
             loader,
             text,
             options,
-            current_point_in_lpxs: Point::new(options.first_row_start_x_in_lpxs, 0.0),
+            current_point_in_lpxs: Point::new(options.first_row_indent_in_lpxs, 0.0),
             current_row_start: 0,
             current_row_end: 0,
             rows: Vec::new(),
             glyphs: Vec::new(),
         }
+    }
+
+    fn current_row_is_first(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    fn current_row_is_continuation(&self) -> bool {
+        self.current_row_is_first() && self.options.first_row_indent_in_lpxs > 0.0
     }
 
     fn current_row_is_empty(&self) -> bool {
@@ -143,8 +157,8 @@ impl<'a> LayoutContext<'a> {
 
     fn remaining_width_in_lpxs(&self) -> Option<f32> {
         self.options
-            .max_width_in_lpxs
-            .map(|max_width_in_lpxs| max_width_in_lpxs - self.current_point_in_lpxs.x)
+            .wrap_width_in_lpxs
+            .map(|wrap_width_in_lpxs| wrap_width_in_lpxs - self.current_point_in_lpxs.x)
     }
 
     fn layout(mut self, spans: &[Span]) -> LaidoutText {
@@ -187,14 +201,14 @@ impl<'a> LayoutContext<'a> {
         let mut fitter = Fitter::new(
             self.span_text(len),
             font_family.clone(),
-            style.font_size_in_lpxs,
+            style.font_size_in_lpxs(),
             SegmentKind::Word,
         );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
                 Some(text) => self.append_text(style, &text),
                 None => {
-                    if self.current_row_is_empty() {
+                    if self.current_row_is_empty() && !self.current_row_is_continuation() {
                         self.layout_span_by_grapheme(font_family, style, fitter.pop());
                     } else {
                         self.finish_current_row(font_family, style, false);
@@ -208,7 +222,7 @@ impl<'a> LayoutContext<'a> {
         let mut fitter = Fitter::new(
             self.span_text(len),
             font_family.clone(),
-            style.font_size_in_lpxs,
+            style.font_size_in_lpxs(),
             SegmentKind::Grapheme,
         );
         while !fitter.is_empty() {
@@ -242,7 +256,7 @@ impl<'a> LayoutContext<'a> {
             let mut glyph = LaidoutGlyph {
                 origin_in_lpxs: Point::ZERO,
                 font: glyph.font.clone(),
-                font_size_in_lpxs: style.font_size_in_lpxs,
+                font_size_in_lpxs: style.font_size_in_lpxs(),
                 color: style.color,
                 id: glyph.id,
                 cluster: self.current_row_len() + glyph.cluster,
@@ -266,36 +280,53 @@ impl<'a> LayoutContext<'a> {
 
         let glyphs = mem::take(&mut self.glyphs);
         let fallback_font = &fallback_font_family.fonts()[0];
-        let fallback_font_size_in_lpxs = fallback_style.font_size_in_lpxs;
+        let fallback_font_size_in_lpxs = fallback_style.font_size_in_lpxs();
         let fallback_ascender_in_lpxs =
             fallback_font.ascender_in_ems() * fallback_font_size_in_lpxs;
         let fallback_descender_in_lpxs =
             fallback_font.descender_in_ems() * fallback_font_size_in_lpxs;
         let fallback_line_gap_in_lpxs =
             fallback_font.line_gap_in_ems() * fallback_font_size_in_lpxs;
+
+        let text = self
+            .text
+            .substr(self.current_row_start..self.current_row_end);
+        let width_in_lpxs = self.current_point_in_lpxs.x;
+        let ascender_in_lpxs = glyphs
+            .iter()
+            .map(|glyph| glyph.ascender_in_lpxs())
+            .reduce(f32::max)
+            .unwrap_or(fallback_ascender_in_lpxs);
+        let descender_in_lpxs = glyphs
+            .iter()
+            .map(|glyph| glyph.descender_in_lpxs())
+            .reduce(f32::min)
+            .unwrap_or(fallback_descender_in_lpxs);
+        let line_gap_in_lpxs = glyphs
+            .iter()
+            .map(|glyph| glyph.line_gap_in_lpxs())
+            .reduce(f32::max)
+            .unwrap_or(fallback_line_gap_in_lpxs);
+        let line_spacing_scale = self.options.line_spacing_scale;
+        let line_spacing_above_in_lpxs = ascender_in_lpxs * line_spacing_scale;
+        let line_spacing_below_in_lpxs =
+            (-descender_in_lpxs + line_gap_in_lpxs) * line_spacing_scale;
+        let line_spacing_below_in_lpxs =
+            line_spacing_below_in_lpxs.max(if self.current_row_is_first() {
+                self.options.first_row_min_line_spacing_below_in_lpxs
+            } else {
+                0.0
+            });
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
-            text: self
-                .text
-                .substr(self.current_row_start..self.current_row_end),
+            text,
             newline,
-            width_in_lpxs: self.current_point_in_lpxs.x,
-            ascender_in_lpxs: glyphs
-                .iter()
-                .map(|glyph| glyph.ascender_in_lpxs())
-                .reduce(f32::max)
-                .unwrap_or(fallback_ascender_in_lpxs),
-            descender_in_lpxs: glyphs
-                .iter()
-                .map(|glyph| glyph.descender_in_lpxs())
-                .reduce(f32::min)
-                .unwrap_or(fallback_descender_in_lpxs),
-            line_gap_in_lpxs: glyphs
-                .iter()
-                .map(|glyph| glyph.line_gap_in_lpxs())
-                .reduce(f32::max)
-                .unwrap_or(fallback_line_gap_in_lpxs),
-            line_spacing_scale: self.options.line_spacing_scale,
+            width_in_lpxs,
+            ascender_in_lpxs,
+            descender_in_lpxs,
+            line_gap_in_lpxs,
+            line_spacing_above_in_lpxs,
+            line_spacing_below_in_lpxs,
             glyphs,
         };
 
@@ -303,8 +334,8 @@ impl<'a> LayoutContext<'a> {
         self.current_point_in_lpxs.y += self.rows.last().map_or(row.ascender_in_lpxs, |prev_row| {
             prev_row.line_spacing_in_lpxs(&row)
         });
-        let max_width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(row.width_in_lpxs);
-        let remaining_width_in_lpxs = max_width_in_lpxs - row.width_in_lpxs;
+        let wrap_width_in_lpxs = self.options.wrap_width_in_lpxs.unwrap_or(row.width_in_lpxs);
+        let remaining_width_in_lpxs = wrap_width_in_lpxs - row.width_in_lpxs;
         row.origin_in_lpxs.x = self.options.align * remaining_width_in_lpxs;
         row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
         self.current_row_start = self.current_row_end;
@@ -379,13 +410,13 @@ impl Fitter {
         self.text.is_empty()
     }
 
-    fn fit(&mut self, max_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
+    fn fit(&mut self, wrap_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
         let mut min_count = 1;
         let mut max_count = self.lens.len() + 1;
         let mut best_count = None;
         while min_count < max_count {
             let mid_count = (min_count + max_count) / 2;
-            if self.can_fit(mid_count, max_width_in_lpxs) {
+            if self.can_fit(mid_count, wrap_width_in_lpxs) {
                 best_count = Some(mid_count);
                 min_count = mid_count + 1;
             } else {
@@ -404,15 +435,15 @@ impl Fitter {
         }
     }
 
-    fn can_fit(&self, count: usize, max_width_in_lpxs: f32) -> bool {
+    fn can_fit(&self, count: usize, wrap_width_in_lpxs: f32) -> bool {
         let len = self.lens[..count].iter().sum();
         let estimated_width_in_lpxs: f32 = self.widths_in_lpxs[..count].iter().sum();
-        if 0.5 * estimated_width_in_lpxs > max_width_in_lpxs {
+        if 0.5 * estimated_width_in_lpxs > wrap_width_in_lpxs {
             return false;
         }
         let text = self.font_family.get_or_shape(self.text.substr(0..len));
         let actual_width_in_lpxs = text.width_in_ems * self.font_size_in_lpxs;
-        if actual_width_in_lpxs > max_width_in_lpxs {
+        if actual_width_in_lpxs > wrap_width_in_lpxs {
             return false;
         }
         true
@@ -432,11 +463,105 @@ enum SegmentKind {
     Grapheme,
 }
 
+pub trait LayoutParams {
+    fn to_owned(self) -> OwnedLayoutParams;
+    fn text(&self) -> &str;
+    fn spans(&self) -> &[Span];
+    fn options(&self) -> LayoutOptions;
+}
+
+impl Eq for dyn LayoutParams + '_ {}
+
+impl Hash for dyn LayoutParams + '_ {
+    fn hash<H>(&self, hasher: &mut H)
+    where
+        H: Hasher,
+    {
+        self.text().hash(hasher);
+        self.spans().hash(hasher);
+        self.options().hash(hasher);
+    }
+}
+
+impl PartialEq for dyn LayoutParams + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        if self.text() != other.text() {
+            return false;
+        }
+        if self.spans() != other.spans() {
+            return false;
+        }
+        if self.options() != other.options() {
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct LayoutParams {
+pub struct OwnedLayoutParams {
     pub text: Substr,
     pub spans: Rc<[Span]>,
     pub options: LayoutOptions,
+}
+
+impl<'a> Borrow<dyn LayoutParams + 'a> for OwnedLayoutParams {
+    fn borrow(&self) -> &(dyn LayoutParams + 'a) {
+        self
+    }
+}
+
+impl LayoutParams for OwnedLayoutParams {
+    fn to_owned(self) -> Self {
+        self
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn spans(&self) -> &[Span] {
+        &self.spans
+    }
+
+    fn options(&self) -> LayoutOptions {
+        self.options
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BorrowedLayoutParams<'a> {
+    pub text: &'a str,
+    pub spans: &'a [Span],
+    pub options: LayoutOptions,
+}
+
+impl<'a> Borrow<dyn LayoutParams + 'a> for BorrowedLayoutParams<'a> {
+    fn borrow(&self) -> &(dyn LayoutParams + 'a) {
+        self
+    }
+}
+
+impl<'a> LayoutParams for BorrowedLayoutParams<'a> {
+    fn to_owned(self) -> OwnedLayoutParams {
+        OwnedLayoutParams {
+            text: self.text.into(),
+            spans: self.spans.into(),
+            options: self.options,
+        }
+    }
+
+    fn text(&self) -> &str {
+        self.text
+    }
+
+    fn spans(&self) -> &[Span] {
+        self.spans
+    }
+
+    fn options(&self) -> LayoutOptions {
+        self.options
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -448,8 +573,14 @@ pub struct Span {
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
     pub font_family_id: FontFamilyId,
-    pub font_size_in_lpxs: f32,
+    pub font_size_in_pts: f32,
     pub color: Option<Color>,
+}
+
+impl Style {
+    fn font_size_in_lpxs(&self) -> f32 {
+        self.font_size_in_pts * LPXS_PER_INCH / PTS_PER_INCH
+    }
 }
 
 impl Eq for Style {}
@@ -460,7 +591,7 @@ impl Hash for Style {
         H: Hasher,
     {
         self.font_family_id.hash(hasher);
-        self.font_size_in_lpxs.to_bits().hash(hasher);
+        self.font_size_in_pts.to_bits().hash(hasher);
         self.color.hash(hasher);
     }
 }
@@ -470,7 +601,7 @@ impl PartialEq for Style {
         if self.font_family_id != other.font_family_id {
             return false;
         }
-        if self.font_size_in_lpxs.to_bits() != other.font_size_in_lpxs.to_bits() {
+        if self.font_size_in_lpxs().to_bits() != other.font_size_in_lpxs().to_bits() {
             return false;
         }
         if self.color != other.color {
@@ -482,8 +613,9 @@ impl PartialEq for Style {
 
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutOptions {
-    pub first_row_start_x_in_lpxs: f32,
-    pub max_width_in_lpxs: Option<f32>,
+    pub first_row_indent_in_lpxs: f32,
+    pub first_row_min_line_spacing_below_in_lpxs: f32,
+    pub wrap_width_in_lpxs: Option<f32>,
     pub align: f32,
     pub line_spacing_scale: f32,
 }
@@ -491,8 +623,9 @@ pub struct LayoutOptions {
 impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
-            first_row_start_x_in_lpxs: 50.0,
-            max_width_in_lpxs: None,
+            first_row_indent_in_lpxs: 0.0,
+            first_row_min_line_spacing_below_in_lpxs: 0.0,
+            wrap_width_in_lpxs: None,
             align: 0.0,
             line_spacing_scale: 1.0,
         }
@@ -506,7 +639,11 @@ impl Hash for LayoutOptions {
     where
         H: Hasher,
     {
-        self.max_width_in_lpxs.map(f32::to_bits).hash(hasher);
+        self.first_row_indent_in_lpxs.to_bits().hash(hasher);
+        self.first_row_min_line_spacing_below_in_lpxs
+            .to_bits()
+            .hash(hasher);
+        self.wrap_width_in_lpxs.map(f32::to_bits).hash(hasher);
         self.align.to_bits().hash(hasher);
         self.line_spacing_scale.to_bits().hash(hasher);
     }
@@ -514,7 +651,15 @@ impl Hash for LayoutOptions {
 
 impl PartialEq for LayoutOptions {
     fn eq(&self, other: &Self) -> bool {
-        if self.max_width_in_lpxs.map(f32::to_bits) != other.max_width_in_lpxs.map(f32::to_bits) {
+        if self.first_row_indent_in_lpxs.to_bits() != other.first_row_indent_in_lpxs.to_bits() {
+            return false;
+        }
+        if self.first_row_min_line_spacing_below_in_lpxs.to_bits()
+            != other.first_row_min_line_spacing_below_in_lpxs.to_bits()
+        {
+            return false;
+        }
+        if self.wrap_width_in_lpxs.map(f32::to_bits) != other.wrap_width_in_lpxs.map(f32::to_bits) {
             return false;
         }
         if self.align != other.align {
@@ -655,21 +800,14 @@ pub struct LaidoutRow {
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
     pub line_gap_in_lpxs: f32,
-    pub line_spacing_scale: f32,
+    pub line_spacing_above_in_lpxs: f32,
+    pub line_spacing_below_in_lpxs: f32,
     pub glyphs: Vec<LaidoutGlyph>,
 }
 
 impl LaidoutRow {
     pub fn line_spacing_in_lpxs(&self, next_row: &LaidoutRow) -> f32 {
-        self.line_spacing_below_in_lpxs() + next_row.line_spacing_above_in_lpxs()
-    }
-
-    pub fn line_spacing_above_in_lpxs(&self) -> f32 {
-        self.ascender_in_lpxs * self.line_spacing_scale
-    }
-
-    pub fn line_spacing_below_in_lpxs(&self) -> f32 {
-        (-self.descender_in_lpxs + self.line_gap_in_lpxs) * self.line_spacing_scale
+        self.line_spacing_below_in_lpxs + next_row.line_spacing_above_in_lpxs
     }
 
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {

@@ -50,8 +50,6 @@ import java.util.HashMap;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
-// import dev.makepad.android.MakepadNative;
-
 // note: //% is a special miniquad's pre-processor for plugins
 // when there are no plugins - //% whatever will be replaced to an empty string
 // before compiling
@@ -302,10 +300,10 @@ public class MakepadActivity
     Handler mVideoPlaybackHandler;
     HashMap<Long, VideoPlayerRunnable> mVideoPlayerRunnables;
 
-    // networking
-    Handler mWebSocketsHandler;
-    private HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
-    private HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
+    // networking, make these static because of activity switching
+    static Handler mWebSocketsHandler;
+    static HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
+    static HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
 
     static {
         System.loadLibrary("makepad");
@@ -314,7 +312,7 @@ public class MakepadActivity
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
+        
         this.requestWindowFeature(Window.FEATURE_NO_TITLE);
 
         view = new MakepadSurface(this);
@@ -350,6 +348,7 @@ public class MakepadActivity
         float refreshRate = getDeviceRefreshRate();
         MakepadNative.initChoreographer(refreshRate, sdkVersion);
         //% MAIN_ACTIVITY_ON_CREATE
+        
     }
 
     @Override
@@ -447,7 +446,13 @@ public class MakepadActivity
                 }
             });
     }
-
+    
+    public void switchActivityClass(Class c){
+        Intent intent = new Intent(getApplicationContext(), c);
+        startActivity(intent);
+        finish();
+    }
+    
     public void showKeyboard(final boolean show) {
         runOnUiThread(new Runnable() {
             @Override
@@ -670,7 +675,8 @@ public class MakepadActivity
             runnable = null;
         }
     }
-
+    
+                
     public boolean isEmulator() {
         // hints that the app is running on emulator
         return Build.MODEL.startsWith("sdk")
@@ -698,6 +704,8 @@ public class MakepadActivity
             return "Unknown";
         }
     }
+    
+    
 
     @SuppressWarnings("deprecation")
     public float getDeviceRefreshRate() {

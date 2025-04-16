@@ -36,14 +36,24 @@ pub struct Font {
     id: FontId,
     rasterizer: Rc<RefCell<Rasterizer>>,
     face: FontFace,
+    ascender_fudge_in_ems: f32,
+    descender_fudge_in_ems: f32,
 }
 
 impl Font {
-    pub fn new(id: FontId, rasterizer: Rc<RefCell<Rasterizer>>, face: FontFace) -> Self {
+    pub fn new(
+        id: FontId,
+        rasterizer: Rc<RefCell<Rasterizer>>,
+        face: FontFace,
+        ascender_fudge_in_ems: f32,
+        descender_fudge_in_ems: f32,
+    ) -> Self {
         Self {
             id,
             rasterizer,
             face,
+            ascender_fudge_in_ems,
+            descender_fudge_in_ems,
         }
     }
 
@@ -64,11 +74,12 @@ impl Font {
     }
 
     pub fn ascender_in_ems(&self) -> f32 {
-        self.ttf_parser_face().ascender() as f32 / self.units_per_em()
+        self.ttf_parser_face().ascender() as f32 / self.units_per_em() + self.ascender_fudge_in_ems
     }
 
     pub fn descender_in_ems(&self) -> f32 {
         self.ttf_parser_face().descender() as f32 / self.units_per_em()
+            + self.descender_fudge_in_ems
     }
 
     pub fn line_gap_in_ems(&self) -> f32 {

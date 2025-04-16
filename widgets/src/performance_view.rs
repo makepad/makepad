@@ -4,14 +4,10 @@ use makepad_derive_widget::*;
 use crate::{label::*, makepad_draw::*, view::*, widget::*};
 
 live_design! {
+    use link::theme::*;
     use makepad_draw::shader::std::*;
     use makepad_widgets::label::LabelBase;
     use makepad_widgets::view::ViewBase;
-
-    REGULAR_TEXT = {
-        font_size: 10,
-        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
-    }
 
     PerformanceLiveGraph = {{PerformanceLiveGraph}} {
         data_increments: 16.
@@ -41,7 +37,7 @@ live_design! {
                 width: Fit
                 align: {x: 0., y: 1.}
                 draw_text: {
-                    text_style: <REGULAR_TEXT>{font_size: 8},
+                    text_style: <THEME_FONT_REGULAR>{font_size: 8},
                     color: #111
                 }
                 text: ""
@@ -53,7 +49,7 @@ live_design! {
                 width: Fit
                 align: {x: 1., y: 1}
                 draw_text: {
-                    text_style: <REGULAR_TEXT>{font_size: 8},
+                    text_style: <THEME_FONT_REGULAR>{font_size: 8},
                     color: #111
                 }
                 text: "-"

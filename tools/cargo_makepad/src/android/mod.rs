@@ -49,8 +49,8 @@ impl AndroidVariant {
                     android:configChanges="orientation|screenSize|keyboardHidden"
                     android:exported="true">
                     <intent-filter>
-                    <action android:name="android.intent.action.MAIN" />
-                    <category android:name="android.intent.category.LAUNCHER" />
+                        <action android:name="android.intent.action.MAIN" />
+                        <category android:name="android.intent.category.LAUNCHER" />
                     </intent-filter>
                     </activity>
                 </application>
@@ -79,54 +79,173 @@ impl AndroidVariant {
                 </manifest>
                 "#),
             Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
-                <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-                xmlns:tools="http://schemas.android.com/tools"
-                package="{url}">
-                    <application
-                        android:label="{label}"
-                        android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
-                        android:allowBackup="true"
-                        android:supportsRtl="true"
-                        android:debuggable="true"
-                        android:largeHeap="true"
-                        tools:targetApi="{sdk_version}">
-                        <meta-data android:name="com.oculus.supportedDevices" android:value="all"/>
-                        <activity
-                            android:name=".{class_name}"
-                            android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
-                            android:exported="true"
-                            android:launchMode="singleTask"
-                            >
+                <manifest
+                    xmlns:android="http://schemas.android.com/apk/res/android"
+                    xmlns:tools="http://schemas.android.com/tools"
+                    package="{url}"
+                    android:versionCode="1"
+                    android:versionName="1.0"
+                    android:installLocation="auto"
+                >      
+                                                                
+                <uses-sdk android:targetSdkVersion="{sdk_version}" />
+                <uses-feature android:glEsVersion="0x00030001" android:required="true"/>
+                <uses-feature android:name="android.hardware.vr.headtracking" android:required="false"/>
+                <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true"/>
+                <uses-permission android:name="com.oculus.permission.USE_SCENE" />
+                <!-- Request hand and keyboard tracking for keyboard hand presence testing -->
+                <uses-feature android:name="oculus.software.handtracking" android:required="false"/>
+                <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+                <uses-permission android:name="android.permission.INTERNET" />
+                <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+                <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+                <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+                                                                                    
+                <application
+                    android:label="{label}"
+                    android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+                    android:allowBackup="true"
+                    android:supportsRtl="true"
+                    android:debuggable="true"
+                    android:largeHeap="true"
+                    tools:targetApi="{sdk_version}">
+                    <activity
+                        android:name=".{class_name}"
+                        android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
+                        android:excludeFromRecents="false"
+                        android:exported="true"
+                        android:launchMode="singleTask"
+                        android:screenOrientation="landscape"
+                        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" 
+                        >
+                        <intent-filter>
+                            <action android:name="android.intent.action.MAIN" />
+                            <category android:name="android.intent.category.LAUNCHER" />
+                        </intent-filter>
                         </activity>
-                        
+                                                
+                    <activity
+                        android:name="{class_name}Xr"
+                        android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
+                        android:excludeFromRecents="false"
+                        android:exported="true"
+                        android:launchMode="singleTask"
+                        android:screenOrientation="landscape"
+                        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" 
+                        >
                         <intent-filter>
                             <action android:name="android.intent.action.MAIN" />
                             <category android:name="com.oculus.intent.category.VR" />
-                            <category android:name="android.intent.category.LAUNCHER" />
                         </intent-filter>
-                    </application>
-
-                    <uses-sdk android:targetSdkVersion="{sdk_version}" />
-                    <uses-feature android:glEsVersion="0x00030001" android:required="true"/>
-                    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-                    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"  />
-                    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"  />
-                    <uses-permission android:name="android.permission.INTERNET" />
-                    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-                    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
-                    <uses-feature android:name="android.hardware.vr.headtracking" android:required="false"/>
-                    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true"/>
-                    <uses-permission android:name="com.oculus.permission.USE_SCENE" />
-                    <!-- Request hand and keyboard tracking for keyboard hand presence testing -->
-                    <uses-feature android:name="oculus.software.handtracking" android:required="false"/>
-                    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
-                    
+                    </activity>
+                </application>
+                                                                                    
+                <queries>
+                <!-- to talk to the broker -->
+                    <provider 
+                    android:name="x" android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+                                                                                                
+                <!-- so client-side code of runtime/layers can talk to their service sides -->
+                <intent>
+                <action android:name="org.khronos.openxr.OpenXRRuntimeService" />
+                </intent>
+                <intent>
+                <action android:name="org.khronos.openxr.OpenXRApiLayerService" />
+                </intent>
+                <intent>
+                <action android:name="android.intent.action.MAIN" />
+                </intent>
+                </queries>
+                                            
                 </manifest>
                 "#)
             }
         }
     }
-
+    
+/*
+Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
+    <manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    package="{url}"
+    android:versionCode="1"
+    android:versionName="1.0"
+    android:installLocation="auto"
+    >
+                        
+                                            
+    <uses-sdk android:targetSdkVersion="{sdk_version}" />
+    <uses-feature android:glEsVersion="0x00030001" android:required="true"/>
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="false"/>
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true"/>
+    <uses-permission android:name="com.oculus.permission.USE_SCENE" />
+    <!-- Request hand and keyboard tracking for keyboard hand presence testing -->
+    <uses-feature android:name="oculus.software.handtracking" android:required="false"/>
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+                                                                
+    <application
+    android:label="{label}"
+    android:allowBackup="false"
+    android:debuggable="true"
+    >
+    //
+    <activity
+    android:name="{class_name}"
+    android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+    android:launchMode="singleTask"
+    android:screenOrientation="landscape"
+    android:excludeFromRecents="false"
+    android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
+    android:exported="true"
+    >
+    <intent-filter>
+    <action android:name="android.intent.action.MAIN" />
+    <action android:name="android.intent.action.LAUNCHER" />
+    <action android:name="android.intent.action.VR" />
+    </intent-filter>
+    </activity>
+                            
+    <activity
+    android:name="{class_name}.MakepadAppXr"
+    android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
+    android:excludeFromRecents="false"
+    android:exported="true"
+    android:launchMode="singleTask"
+    android:screenOrientation="landscape"
+    android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" 
+    >
+    <intent-filter>
+    <action android:name="android.intent.action.MAIN" />
+    <category android:name="com.oculus.intent.category.VR" />
+    </intent-filter>
+    </activity>
+    </application>
+                                                                
+    <queries>
+    <!-- to talk to the broker -->
+    <provider 
+    android:name="x" android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+                                                                        
+    <!-- so client-side code of runtime/layers can talk to their service sides -->
+    <intent>
+    <action android:name="org.khronos.openxr.OpenXRRuntimeService" />
+    </intent>
+    <intent>
+    <action android:name="org.khronos.openxr.OpenXRApiLayerService" />
+    </intent>
+    <intent>
+    <action android:name="android.intent.action.MAIN" />
+    </intent>
+    </queries>
+                        
+    </manifest>
+    "#)*/    
+    
+    
 #[allow(non_camel_case_types)]
 pub enum AndroidTarget {
     aarch64,
@@ -153,7 +272,7 @@ impl AndroidTarget {
         }
         return Ok(out);
     }
-    fn sys_dir(&self) -> &'static str {
+    fn _sys_dir(&self) -> &'static str {
         match self {
             Self::aarch64 => "aarch64-linux-android",
             Self::x86_64 => "x86_64-linux-android",
@@ -161,7 +280,7 @@ impl AndroidTarget {
             Self::i686 => "i686-linux-android",
         }
     }
-    fn unwind_dir(&self) -> &'static str {
+    fn _unwind_dir(&self) -> &'static str {
         match self {
             Self::aarch64 => "aarch64",
             Self::x86_64 => "x86_64",
@@ -250,6 +369,9 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let mut variant = AndroidVariant::Default;
     let mut targets = vec![AndroidTarget::aarch64];
     let mut keep_sdk_sources = false;
+    
+    let urls = sdk::ANDROID_SDK_URLS_33;
+    
     // pull out options
     for i in 0..args.len() {
         let v = &args[i];
@@ -300,10 +422,10 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             sdk::rustup_toolchain_install(&targets)
         }
         "download-sdk" => {
-            sdk::download_sdk(&sdk_dir, host_os, &args[1..])
+            sdk::download_sdk(&sdk_dir, host_os, &args[1..], &urls)
         }
         "expand-sdk" => {
-            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets)
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets, &urls)
         }
         "remove-sdk-sources" => {
             sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
@@ -311,8 +433,8 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         "toolchain-install" | "install-toolchain"=> {
             println!("Installing Android toolchain\n");
             sdk::rustup_toolchain_install(&targets) ?;
-            sdk::download_sdk(&sdk_dir, host_os, &args[1..]) ?;
-            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets) ?;
+            sdk::download_sdk(&sdk_dir, host_os, &args[1..], &urls) ?;
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets, &urls) ?;
             if !keep_sdk_sources {
                 sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..]) ?;
             }
@@ -323,11 +445,11 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             compile::base_apk(&sdk_dir, host_os, &args[1..])
         }*/
         "build" => {
-            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant) ?;
+            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant, &urls) ?;
             Ok(())
         }
         "run" => {
-            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant)
+            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant, &urls)
         }
         _ => Err(format!("{} is not a valid command or option", args[0]))
     }
