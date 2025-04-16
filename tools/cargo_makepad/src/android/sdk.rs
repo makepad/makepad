@@ -12,32 +12,47 @@ use crate::{
     makepad_shell::*,
 };
 
-pub const ANDROID_BUILD_TOOLS_VERSION: &str = "33.0.1";
-pub const ANDROID_PLATFORM: &str = "android-33-ext4";
-pub const ANDROID_SDK_VERSION: usize = 33;
-pub const ANDROID_SDK_EXTENSION: &str = "ext4";
+pub struct AndroidSDKUrls{
+    pub sdk_version: usize,
+    pub sdk_extension: &'static str,
+    pub platform: &'static str,
+    pub build_tools_version: &'static str,
+    
+    pub platform_dl: &'static str,
+    pub build_tools_macos: &'static str,
+    pub build_tools_linux: &'static str,
+    pub build_tools_windows: &'static str,
+    pub platform_tools_macos: &'static str,
+    pub platform_tools_linux: &'static str,
+    pub platform_tools_windows: &'static str,
+    pub ndk_macos: &'static str,
+    pub ndk_linux: &'static str,
+    pub ndk_windows: &'static str,
+    pub ndk_version_full: &'static str,
+}
 
 pub const BUILD_TOOLS_DIR: &str = "build-tools";
 pub const PLATFORMS_DIR: &str = "platforms";
 
-pub const _NDK_VERSION_MAJOR: &str = "25";
-pub const _NDK_VERSION_MINOR: &str = "2";
-pub const _NDK_VERSION_BUILD: &str = "9519653";
-pub const NDK_VERSION_FULL:  &str = "25.2.9519653";
-
-const URL_PLATFORM_33: &str = "https://dl.google.com/android/repository/platform-33-ext4_r01.zip";
-
-const URL_BUILD_TOOLS_33_MACOS: &str = "https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip";
-const URL_BUILD_TOOLS_33_LINUX: &str = "https://dl.google.com/android/repository/build-tools_r33.0.1-linux.zip";
-const URL_BUILD_TOOLS_33_WINDOWS: &str = "https://dl.google.com/android/repository/build-tools_r33.0.1-windows.zip";
-
-const URL_PLATFORM_TOOLS_33_MACOS: &str = "https://dl.google.com/android/repository/platform-tools_r33.0.3-darwin.zip";
-const URL_PLATFORM_TOOLS_33_LINUX: &str = "https://dl.google.com/android/repository/platform-tools_r33.0.3-linux.zip";
-const URL_PLATFORM_TOOLS_33_WINDOWS: &str = "https://dl.google.com/android/repository/platform-tools_r33.0.3-windows.zip";
-
-const URL_NDK_33_MACOS: &str = "https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg";
-const URL_NDK_33_LINUX: &str = "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip";
-const URL_NDK_33_WINDOWS: &str = "https://dl.google.com/android/repository/android-ndk-r25c-windows.zip";
+pub const ANDROID_SDK_URLS_33:AndroidSDKUrls = AndroidSDKUrls{
+    sdk_version: 33,
+    build_tools_version:  "33.0.1",
+    sdk_extension: "ext4",
+    platform: "android-33-ext4",
+    ndk_version_full: "25.2.9519653",
+    
+    
+    platform_dl:  "https://dl.google.com/android/repository/platform-33-ext4_r01.zip",
+    build_tools_macos:"https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip",
+    build_tools_linux: "https://dl.google.com/android/repository/build-tools_r33.0.1-linux.zip",
+    build_tools_windows: "https://dl.google.com/android/repository/build-tools_r33.0.1-windows.zip",
+    platform_tools_macos: "https://dl.google.com/android/repository/platform-tools_r33.0.3-darwin.zip",
+    platform_tools_linux: "https://dl.google.com/android/repository/platform-tools_r33.0.3-linux.zip",
+    platform_tools_windows: "https://dl.google.com/android/repository/platform-tools_r33.0.3-windows.zip",
+    ndk_macos: "https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg",
+    ndk_linux: "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip",
+    ndk_windows: "https://dl.google.com/android/repository/android-ndk-r25c-windows.zip",
+};
 
 const URL_OPENJDK_17_0_2_WINDOWS_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_windows-x64_bin.zip";
 const URL_OPENJDK_17_0_2_MACOS_AARCH64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-aarch64_bin.tar.gz";
@@ -69,7 +84,7 @@ pub fn rustup_toolchain_install(targets:&[AndroidTarget]) -> Result<(), String> 
     Ok(())
 }
 
-pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(), String> {
+pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], urls:&AndroidSDKUrls) -> Result<(), String> {
     // get current working directory
     let src_dir = &sdk_dir.join("sources");
     mkdir(src_dir) ?;
@@ -80,18 +95,18 @@ pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result
         shell(src_dir, "curl", &[url, "-#", "--output", src_dir.join(url_file_name(url)).to_str().unwrap()]) ?;
         Ok(())
     }
-    curl(1, src_dir, URL_PLATFORM_33) ?;
+    curl(1, src_dir, urls.platform) ?;
     match host_os {
         HostOs::WindowsX64 => {
-            curl(2, src_dir, URL_BUILD_TOOLS_33_WINDOWS) ?;
-            curl(3, src_dir, URL_PLATFORM_TOOLS_33_WINDOWS) ?;
-            curl(4, src_dir, URL_NDK_33_WINDOWS) ?;
+            curl(2, src_dir, urls.build_tools_windows) ?;
+            curl(3, src_dir, urls.platform_tools_windows) ?;
+            curl(4, src_dir, urls.ndk_windows) ?;
             curl(5, src_dir, URL_OPENJDK_17_0_2_WINDOWS_X64) ?;
         }
         HostOs::MacosX64 | HostOs::MacosAarch64 => {
-            curl(2, src_dir, URL_BUILD_TOOLS_33_MACOS) ?;
-            curl(3, src_dir, URL_PLATFORM_TOOLS_33_MACOS) ?;
-            curl(4, src_dir, URL_NDK_33_MACOS) ?;
+            curl(2, src_dir, urls.build_tools_macos) ?;
+            curl(3, src_dir, urls.platform_tools_macos) ?;
+            curl(4, src_dir, urls.ndk_macos) ?;
             if host_os == HostOs::MacosX64 {
                 curl(5, src_dir, URL_OPENJDK_17_0_2_MACOS_X64) ?;
             }
@@ -100,9 +115,9 @@ pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result
             }
         }
         HostOs::LinuxX64 => {
-            curl(2, src_dir, URL_BUILD_TOOLS_33_LINUX) ?;
-            curl(3, src_dir, URL_PLATFORM_TOOLS_33_LINUX) ?;
-            curl(4, src_dir, URL_NDK_33_LINUX) ?;
+            curl(2, src_dir, urls.build_tools_linux) ?;
+            curl(3, src_dir, urls.platform_tools_linux) ?;
+            curl(4, src_dir, urls.ndk_linux) ?;
             curl(5, src_dir, URL_OPENJDK_17_0_2_LINUX_X64) ?;
         }
         HostOs::Unsupported => panic!()
@@ -116,7 +131,7 @@ pub fn remove_sdk_sources(sdk_dir: &Path, _host_os: HostOs, _args: &[String]) ->
     rmdir(src_dir) 
 }
 
-pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[AndroidTarget]) -> Result<(), String> {
+pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], _targets:&[AndroidTarget], urls:&AndroidSDKUrls) -> Result<(), String> {
     let full_ndk = !args.contains(&String::from("--strip-ndk"));
     let src_dir = &sdk_dir.join("sources");
     
@@ -222,78 +237,82 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
         format!("{base_in}{sep_in}{file}|{base_out}{sep_out}{file}")
     }
     
+    let ANDROID_PLATFORM = urls.platform;
+    let ANDROID_BUILD_TOOLS_VERSION = urls.build_tools_version;
+    let NDK_VERSION_FULL = urls.ndk_version_full;
+    
     match host_os {
         HostOs::WindowsX64 => {
-            unzip(1, src_dir, sdk_dir, URL_PLATFORM_33, &[
+            unzip(1, src_dir, sdk_dir, urls.platform_dl, &[
                 (&copy_map("", PLATFORMS_DIR, &format!("{ANDROID_PLATFORM}/android.jar")), false),
             ]) ?;
-            unzip(2, src_dir, sdk_dir, URL_BUILD_TOOLS_33_WINDOWS, &[
+            unzip(2, src_dir, sdk_dir, urls.build_tools_windows, &[
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "aapt.exe"), false),
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "zipalign.exe"), false),
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/apksigner.jar"), false),
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/d8.jar"), false),
             ]) ?;
-            unzip(3, src_dir, sdk_dir, URL_PLATFORM_TOOLS_33_WINDOWS, &[
+            unzip(3, src_dir, sdk_dir, urls.platform_tools_windows, &[
                 ("platform-tools/adb.exe", false),
                 ("platform-tools/AdbWinApi.dll", false),
                 ("platform-tools/AdbWinUsbApi.dll", false),
             ]) ?;
             const NDK_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64";
             let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64");
-            
-            if full_ndk {
-                // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
-                // and then copy that directory it into the proper `NDK_OUT` directory location.
-                let cwd = std::env::current_dir().unwrap();
-                let url_file_name = url_file_name(URL_NDK_33_WINDOWS);
-                println!("4/5: Unzipping: {} (full NDK)", url_file_name);
-                let ndk_out_path = sdk_dir.join(NDK_OUT);
-                mkdir(&ndk_out_path)?;
 
-                // Some shell environments on Windows are Linux-like (Git Bash, cygwin, mingw, etc),
-                // and therefore support `unzip` and `cp`.
-                let unzip_result = shell(
+            // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
+            // and then copy that directory it into the proper `NDK_OUT` directory location.
+            let cwd = std::env::current_dir().unwrap();
+            let url_file_name = url_file_name(urls.ndk_windows);
+            println!("4/5: Unzipping: {} (full NDK)", url_file_name);
+            let ndk_out_path = sdk_dir.join(NDK_OUT);
+            mkdir(&ndk_out_path)?;
+
+            // Some shell environments on Windows are Linux-like (Git Bash, cygwin, mingw, etc),
+            // and therefore support `unzip` and `cp`.
+            let unzip_result = shell(
+                &cwd,
+                "unzip",
+                &[
+                    "-q", // quiet
+                    "-o", // overwrite existing files
+                    src_dir.join(url_file_name).to_str().unwrap(),
+                    &format!("{NDK_IN}/**/*"),
+                    "-d", src_dir.to_str().unwrap(),
+                ]
+            );
+            if unzip_result.is_ok() {
+                shell(
                     &cwd,
-                    "unzip",
+                    "cp",
                     &[
-                        "-q", // quiet
-                        "-o", // overwrite existing files
-                        src_dir.join(url_file_name).to_str().unwrap(),
-                        &format!("{NDK_IN}/**/*"),
-                        "-d", src_dir.to_str().unwrap(),
+                        "--force",
+                        "--recursive",
+                        "--preserve",
+                        src_dir.join(NDK_IN).to_str().unwrap(),
+                        ndk_out_path.parent().unwrap().to_str().unwrap(),
                     ]
-                );
-                if unzip_result.is_ok() {
-                    shell(
-                        &cwd,
-                        "cp",
-                        &[
-                            "--force",
-                            "--recursive",
-                            "--preserve",
-                            src_dir.join(NDK_IN).to_str().unwrap(),
-                            ndk_out_path.parent().unwrap().to_str().unwrap(),
-                        ]
-                    ).unwrap();
-                } else {
-                    // If `unzip` failed, we're running on a true Windows shell (cmd, powershell),
-                    // so we instead use `tar` (which is the BSD version of tar) to extract the zip file.
-                    // Bonus: the BSD tar utility supports extracting files directly into NDK_OUT.
-                    let num_path_components = Path::new(NDK_IN).iter().count();
-                    shell(
-                        &cwd,
-                        "tar",
-                        &[
-                            "-x",
-                            "-z",
-                            "-f", src_dir.join(url_file_name).to_str().unwrap(),
-                            "--strip-components", &num_path_components.to_string(),
-                            "-C", ndk_out_path.to_str().unwrap(),
-                            NDK_IN,
-                        ]
-                    ).unwrap();
-                }
+                ).unwrap();
             } else {
+                // If `unzip` failed, we're running on a true Windows shell (cmd, powershell),
+                // so we instead use `tar` (which is the BSD version of tar) to extract the zip file.
+                // Bonus: the BSD tar utility supports extracting files directly into NDK_OUT.
+                let num_path_components = Path::new(NDK_IN).iter().count();
+                shell(
+                    &cwd,
+                    "tar",
+                    &[
+                        "-x",
+                        "-z",
+                        "-f", src_dir.join(url_file_name).to_str().unwrap(),
+                        "--strip-components", &num_path_components.to_string(),
+                        "-C", ndk_out_path.to_str().unwrap(),
+                        NDK_IN,
+                    ]
+                ).unwrap();
+            }
+            /*
+            else {
                 let mut ndk_extract = Vec::new();
                 for target in targets{
                     let sys_dir = target.sys_dir();
@@ -330,7 +349,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
                 }
                 let ndk_extract: Vec<(&str,bool)> = ndk_extract.iter().map(|s| (s.0.as_str(),s.1)).collect();
                 unzip(4, src_dir, sdk_dir, URL_NDK_33_WINDOWS, &ndk_extract) ?;
-            }
+            }*/
 
             // patch the .cmd file to stop complaining
             {
@@ -387,78 +406,39 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
             ]) ?;
         }
         HostOs::MacosX64 | HostOs::MacosAarch64 => {
-            unzip(1, src_dir, sdk_dir, URL_PLATFORM_33, &[
+            unzip(1, src_dir, sdk_dir, urls.platform_dl, &[
                 (&copy_map("", PLATFORMS_DIR, &format!("{ANDROID_PLATFORM}/android.jar")), false),
             ]) ?;
-            unzip(2, src_dir, sdk_dir, URL_BUILD_TOOLS_33_MACOS, &[
+            unzip(2, src_dir, sdk_dir, urls.build_tools_macos, &[
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "aapt"), true),
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "zipalign"), true),
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/apksigner.jar"), false),
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/d8.jar"), false),
             ]) ?;
-            unzip(3, src_dir, sdk_dir, URL_PLATFORM_TOOLS_33_MACOS, &[
+            unzip(3, src_dir, sdk_dir, urls.platform_tools_macos, &[
                 ("platform-tools/adb", true),
             ]) ?;
             const NDK_IN: &str = "AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64";
             let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64");
             
-            if full_ndk {
-                let toolchain_dir = copy_map(NDK_IN, NDK_OUT, "");
-                let files = [ (toolchain_dir.as_str(), false) ];
-                dmg_extract(4, src_dir, sdk_dir, URL_NDK_33_MACOS, &files, full_ndk) ?;
-                // We copied over the entire contents of `toolchains/llvm/prebuilt/darwin-x86_64`,
-                // but we still need to make the files in `bin` actually executable.
-                #[cfg(any(target_os = "macos", target_os = "linux"))] {
-                    use std::os::unix::fs::PermissionsExt;
-                    let bin_dir = sdk_dir.join(NDK_OUT).join("bin");
-                    std::fs::read_dir(bin_dir)
-                        .expect("failed to read NDK `bin/` dir: {bin_dir:?}")
-                        .filter_map(|r| r.ok().and_then(|entry| {
-                            let path = entry.path();
-                            path.is_file().then_some(path)
-                        }))
-                        .for_each(|bin_file|
-                            std::fs::set_permissions(&bin_file, PermissionsExt::from_mode(0o744))
-                                .expect("failed to set exec permissions on {bin_file:?}")
-                        );
-                }
-            } else {
-                let mut ndk_extract = Vec::new();
-                #[allow(non_snake_case)]
-                for target in targets{
-                    let sys_dir = target.sys_dir();
-                    let clang = target.clang();
-                    let unwind_dir = target.unwind_dir();
-                    let SYS_IN = &format!("AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
-                    let SYS_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
-                    let UNWIND_IN = &format!("AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64/clang/14.0.7/lib/linux/{unwind_dir}"); 
-                    ndk_extract.extend_from_slice(&[
-                        (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang")), true),
-                        (copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
-                        (copy_map(NDK_IN, NDK_OUT, "bin/ld"), true),
-                        (copy_map(NDK_IN, NDK_OUT, "lib64/libxml2.2.9.13.dylib"), false),
-                        (copy_map(NDK_IN, NDK_OUT, "lib64/libxml2.dylib"), false),
-                        (copy_map(NDK_IN, NDK_OUT, "lib64/libxml2.2.9.13.dylib"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "crtbegin_so.o"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "crtend_so.o"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libc.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libGLESv2.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libm.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "liblog.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libEGL.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libdl.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libaaudio.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libandroid.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libamidi.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libcamera2ndk.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libnativewindow.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libmediandk.so"), false),
-                        (format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
-                        (format!("{UNWIND_IN}/libunwind.a|{SYS_OUT}/libunwind.a"), false),
-                    ]);
-                }
-                let ndk_extract: Vec<(&str,bool)> = ndk_extract.iter().map(|s| (s.0.as_str(),s.1)).collect();
-                dmg_extract(4, src_dir, sdk_dir, URL_NDK_33_MACOS, &ndk_extract, full_ndk) ?;
+            let toolchain_dir = copy_map(NDK_IN, NDK_OUT, "");
+            let files = [ (toolchain_dir.as_str(), false) ];
+            dmg_extract(4, src_dir, sdk_dir, urls.ndk_macos, &files, full_ndk) ?;
+            // We copied over the entire contents of `toolchains/llvm/prebuilt/darwin-x86_64`,
+            // but we still need to make the files in `bin` actually executable.
+            #[cfg(any(target_os = "macos", target_os = "linux"))] {
+                use std::os::unix::fs::PermissionsExt;
+                let bin_dir = sdk_dir.join(NDK_OUT).join("bin");
+                std::fs::read_dir(bin_dir)
+                    .expect("failed to read NDK `bin/` dir: {bin_dir:?}")
+                    .filter_map(|r| r.ok().and_then(|entry| {
+                        let path = entry.path();
+                        path.is_file().then_some(path)
+                    }))
+                    .for_each(|bin_file|
+                        std::fs::set_permissions(&bin_file, PermissionsExt::from_mode(0o744))
+                            .expect("failed to set exec permissions on {bin_file:?}")
+                    );
             }
             
             const JDK_IN: &str = "jdk-17.0.2.jdk/Contents/Home";
@@ -489,95 +469,51 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String], targets:&[An
             ]) ?;
         }
         HostOs::LinuxX64 => {
-            unzip(1, src_dir, sdk_dir, URL_PLATFORM_33, &[
+            unzip(1, src_dir, sdk_dir, urls.platform_dl, &[
                 (&copy_map("", PLATFORMS_DIR, &format!("{ANDROID_PLATFORM}/android.jar")), false),
             ]) ?;
-            unzip(2, src_dir, sdk_dir, URL_BUILD_TOOLS_33_LINUX, &[
+            unzip(2, src_dir, sdk_dir, urls.build_tools_linux, &[
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "aapt"), true),
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib64/libc++.so"), true),
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "zipalign"), true),
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/apksigner.jar"), false),
                 (&copy_map("android-13", &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"), "lib/d8.jar"), false),
             ]) ?;
-            unzip(3, src_dir, sdk_dir, URL_PLATFORM_TOOLS_33_LINUX, &[
+            unzip(3, src_dir, sdk_dir, urls.platform_tools_linux, &[
                 ("platform-tools/adb", true),
             ]) ?;
             const NDK_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64";
             let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64");
             
-            if full_ndk {
-                // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
-                // and then copy that directory it into the proper `NDK_OUT` directory location.
-                let cwd = std::env::current_dir().unwrap();
-                let url_file_name = url_file_name(URL_NDK_33_LINUX);
-                println!("4/5: Unzipping: {} (full NDK)", url_file_name);
-                let ndk_out_path = sdk_dir.join(NDK_OUT);
-                mkdir(&ndk_out_path)?;
-                shell(
-                    &cwd,
-                    "unzip",
-                    &[
-                        "-q", // quiet
-                        "-o", // overwrite existing files
-                        src_dir.join(url_file_name).to_str().unwrap(),
-                        &format!("{NDK_IN}/*"),
-                        "-d", src_dir.to_str().unwrap(),
-                    ]
-                ).unwrap();
-                shell(
-                    &cwd,
-                    "cp",
-                    &[
-                        "--force",
-                        "--recursive",
-                        "--preserve",
-                        src_dir.join(NDK_IN).to_str().unwrap(),
-                        ndk_out_path.parent().unwrap().to_str().unwrap(),
-                    ]
-                ).unwrap();
-            } else {
-                // Extract only the bare minimum NDK to build makepad and an app's Rust-only contents.
-                let mut ndk_extract = Vec::new();
-                #[allow(non_snake_case)]
-                for target in targets{
-                    let sys_dir = target.sys_dir();
-                    let clang = target.clang();
-                    let unwind_dir = target.unwind_dir();
-                    let SYS_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
-                    let SYS_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
-                    let UNWIND_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/14.0.7/lib/linux/{unwind_dir}"); 
-                    ndk_extract.extend_from_slice(&[
-                        (copy_map(NDK_IN, NDK_OUT, &format!("bin/{clang}33-clang")), true),
-                        (copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
-                        (copy_map(NDK_IN, NDK_OUT, "bin/clang-14"), true),
-                        (copy_map(NDK_IN, NDK_OUT, "bin/ld"), true),
-                        (copy_map(NDK_IN, NDK_OUT, "bin/ld.lld"), true),
-                        (copy_map(NDK_IN, NDK_OUT, "bin/lld"), true),
-                        (copy_map(NDK_IN, NDK_OUT, "lib64/libxml2.so.2.9.13"), false),
-                        (copy_map(NDK_IN, NDK_OUT, "lib64/libxml2.so"), false),
-                        (copy_map(NDK_IN, NDK_OUT, "lib64/libc++.so"), false),
-                        (copy_map(NDK_IN, NDK_OUT, "lib64/libc++.so.1"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "crtbegin_so.o"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "crtend_so.o"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libc.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libGLESv2.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libm.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "liblog.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libEGL.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libdl.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libaaudio.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libandroid.so"), false),                    
-                        (copy_map(SYS_IN, SYS_OUT, "libamidi.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libcamera2ndk.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libnativewindow.so"), false),
-                        (copy_map(SYS_IN, SYS_OUT, "libmediandk.so"), false),
-                        (format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
-                        (format!("{UNWIND_IN}/libunwind.a|{SYS_OUT}/libunwind.a"), false),
-                    ]);
-                }
-                let ndk_extract: Vec<(&str,bool)> = ndk_extract.iter().map(|s| (s.0.as_str(),s.1)).collect();
-                unzip(4, src_dir, sdk_dir, URL_NDK_33_LINUX, &ndk_extract) ?;
-            }
+            // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
+            // and then copy that directory it into the proper `NDK_OUT` directory location.
+            let cwd = std::env::current_dir().unwrap();
+            let url_file_name = url_file_name(urls.ndk_linux);
+            println!("4/5: Unzipping: {} (full NDK)", url_file_name);
+            let ndk_out_path = sdk_dir.join(NDK_OUT);
+            mkdir(&ndk_out_path)?;
+            shell(
+                &cwd,
+                "unzip",
+                &[
+                    "-q", // quiet
+                    "-o", // overwrite existing files
+                    src_dir.join(url_file_name).to_str().unwrap(),
+                    &format!("{NDK_IN}/*"),
+                    "-d", src_dir.to_str().unwrap(),
+                ]
+            ).unwrap();
+            shell(
+                &cwd,
+                "cp",
+                &[
+                    "--force",
+                    "--recursive",
+                    "--preserve",
+                    src_dir.join(NDK_IN).to_str().unwrap(),
+                    ndk_out_path.parent().unwrap().to_str().unwrap(),
+                ]
+            ).unwrap();
             
             const JDK_IN: &str = "jdk-17.0.2";
             const JDK_OUT: &str = "openjdk";

@@ -245,10 +245,10 @@ impl Cx {
                 }
                 CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_magic_texture(*pass_id);
+                    self.draw_pass_to_texture(*pass_id, None);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_magic_texture(*pass_id);
+                    self.draw_pass_to_texture(*pass_id, None);
                 }
             }
         }
@@ -329,6 +329,17 @@ impl Cx {
                 },
                 CxOsOp::StopTimer(timer_id) => {
                     xlib_app.stop_timer(timer_id);
+                },
+                CxOsOp::ShowTextIME(area, pos) => {
+                    let pos = area.clipped_rect(self).pos + pos;
+                    opengl_windows.iter_mut().for_each(|w| {
+                        w.xlib_window.set_ime_spot(pos);
+                    });
+                },
+                CxOsOp::HideTextIME => {
+                    opengl_windows.iter_mut().for_each(|w| {
+                        w.xlib_window.set_ime_spot(dvec2(0.0,0.0));
+                    });
                 },
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);

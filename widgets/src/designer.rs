@@ -90,7 +90,7 @@ live_design!{
                             }
                             <TextInput> {
                                 width: Fill,
-                                empty_message: "Filter",
+                                empty_text: "Filter",
                             }
                         }
                     }

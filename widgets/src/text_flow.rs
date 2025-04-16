@@ -282,11 +282,11 @@ impl StackCounter{
 // this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
 pub struct TextFlow {
-    #[live] pub draw_normal: DrawText,
-    #[live] pub draw_italic: DrawText,
-    #[live] pub draw_bold: DrawText,
-    #[live] pub draw_bold_italic: DrawText,
-    #[live] pub draw_fixed: DrawText,
+    #[live] pub draw_normal: DrawText2,
+    #[live] pub draw_italic: DrawText2,
+    #[live] pub draw_bold: DrawText2,
+    #[live] pub draw_bold_italic: DrawText2,
+    #[live] pub draw_fixed: DrawText2,
     #[live] pub draw_block: DrawFlowBlock,
     
     /// The default font size used for all text if not otherwise specified.
@@ -367,6 +367,7 @@ pub struct RectAreasTracker{
 impl RectAreasTracker{
     fn clear_stack(&mut self){
         self.pos = 0;
+        self.areas.clear();
         self.stack.clear();
     }
     
@@ -760,7 +761,7 @@ struct TextFlowLink {
     
     // TODO: remove these if they're unneeded
     //#[walk] walk: Walk,
-    #[live] click_on_down: bool,
+    #[live(true)] click_on_down: bool,
     #[rust] drawn_areas: SmallVec<[Area; 2]>,
     #[live(true)] grab_key_focus: bool,
     #[live] margin: Margin,

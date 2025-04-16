@@ -31,6 +31,7 @@ pub enum TouchPhase{
 #[derive(Debug)]
 pub enum FromJavaMessage {
     Init(AndroidParams),
+    SwitchedActivity(jni_sys::jobject, u64),
     BackPressed,
     SurfaceChanged {
         window: *mut ndk_sys::ANativeWindow,
@@ -121,9 +122,9 @@ unsafe impl Send for FromJavaMessage {}
 
 static MESSAGES_TX: Mutex<Option<mpsc::Sender<FromJavaMessage>>> = Mutex::new(None);
 
-fn send_from_java_message(message: FromJavaMessage) {
+pub fn send_from_java_message(message: FromJavaMessage) {
     if let Ok(mut tx) = MESSAGES_TX.lock(){
-        tx.as_mut().unwrap().send(message).unwrap();
+        tx.as_mut().unwrap().send(message).ok();
     }
 }
 
@@ -134,19 +135,36 @@ pub const ANDROID_META_SHIFT_MASK: u32 = 193;
 // Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_ALT_MASK
 pub const ANDROID_META_ALT_MASK: u32 = 50;
 
-static mut SET_ACTIVITY_FN: unsafe fn(jni_sys::jobject) = |_| {};
+pub static mut SET_ACTIVITY_FN: unsafe fn(jni_sys::jobject) = |_| {};
 
-pub unsafe fn jni_init_globals(activity:*const std::ffi::c_void, from_java_tx: mpsc::Sender<FromJavaMessage>)->*const std::ffi::c_void{
-    if let Some(func) = makepad_android_state::get_activity_setter_fn() {
-        // This will only occur once during the entire process lifetime.
-        SET_ACTIVITY_FN = func;
+pub fn from_java_messages_already_set()->bool{
+    MESSAGES_TX.lock().unwrap().is_some()
+}
+
+pub fn from_java_messages_clear(){
+    *MESSAGES_TX.lock().unwrap() = None;
+}
+
+pub fn jni_update_activity(activity_handle:jni_sys::jobject, ){
+    unsafe{SET_ACTIVITY_FN(activity_handle)};
+}
+
+pub fn jni_set_activity(activity_handle:jni_sys::jobject){
+    unsafe{
+        if let Some(func) = makepad_android_state::get_activity_setter_fn() {
+            SET_ACTIVITY_FN = func;
+        }
+        SET_ACTIVITY_FN(activity_handle);
     }
+}
 
-    let env = attach_jni_env();
-    let activity = (**env).NewGlobalRef.unwrap()(env, activity as jni_sys::jobject);
-    SET_ACTIVITY_FN(activity);
+pub fn jni_set_from_java_tx(from_java_tx: mpsc::Sender<FromJavaMessage>){
     *MESSAGES_TX.lock().unwrap() = Some(from_java_tx);
-    activity as * const _
+}
+    
+pub unsafe fn fetch_activity_handle(activity:*const std::ffi::c_void)->jni_sys::jobject{
+    let env = attach_jni_env();
+   (**env).NewGlobalRef.unwrap()(env, activity as jni_sys::jobject)
 }
 
 pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
@@ -683,6 +701,11 @@ unsafe fn java_byte_array_to_vec(env: *mut jni_sys::JNIEnv, byte_array: jni_sys:
 pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: bool) {
     ndk_utils::call_void_method!(env, get_activity(), "setFullScreen", "(Z)V", fullscreen as i32);
 }
+
+pub unsafe fn to_java_switch_activity(env: *mut jni_sys::JNIEnv) {
+    ndk_utils::call_void_method!(env, get_activity(), "switchActivity", "()V");
+}
+
 
 pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
     let env = attach_jni_env();

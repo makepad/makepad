@@ -30,36 +30,43 @@ live_design!{
         label_align: { y: 0.0 }
         
         draw_bg: {
-            uniform size: 7.0;
+            uniform size: 7.0,
 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR)
-            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
+            uniform color: (THEME_COLOR_OUTSET)
+            uniform color_hover: (THEME_COLOR_INSET_HOVER)
+            uniform color_active: (THEME_COLOR_INSET_ACTIVE)
+            uniform color_focus: (THEME_COLOR_INSET_FOCUS)
 
             uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_INSET_1)
             uniform color_1_active: (THEME_COLOR_INSET_1)
+            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_INSET_2)
             uniform color_2_active: (THEME_COLOR_INSET_2)
+            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
             uniform mark_color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform mark_color_focus: (THEME_COLOR_MARK_HOVER)
+            uniform mark_color_active_focus: (THEME_COLOR_MARK_ACTIVE_FOCUS)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             
             fn pixel(self) -> vec4 {
@@ -68,6 +75,7 @@ live_design!{
 
                 match self.radio_type {
                     RadioType::Round => {
+                        // return mix(#f00, #0ff, self.focus);
                         let sz = self.size;
                         let left = sz + 1.;
                         let c = vec2(left + sz, self.rect_size.y * 0.5);
@@ -77,8 +85,16 @@ live_design!{
                         sdf.fill_keep(
                             mix(
                                 mix(
-                                    mix(self.color_1, self.color_2, self.pos.y + dither),
-                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                    mix(
+                                        mix(self.color_1, self.color_2, self.pos.y + dither),
+                                        mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                                        self.focus
+                                    ),
+                                    mix(
+                                        mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                        mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                                        self.focus
+                                    ),
                                     self.active
                                 ),
                                 mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
@@ -88,8 +104,16 @@ live_design!{
                         sdf.stroke(
                             mix(
                                 mix(
-                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                    mix(
+                                        mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                        self.focus
+                                    ),
+                                    mix(
+                                        mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                        self.focus
+                                    ),
                                     self.active
                                 ),
                                 mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
@@ -102,8 +126,28 @@ live_design!{
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
                             mix(
-                                mix(self.mark_color, self.mark_color_hover, self.hover),
-                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                                mix(
+                                    mix(
+                                        self.mark_color,
+                                        self.mark_color_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_hover,
+                                    self.hover
+                                ),
+                                mix(
+                                    mix(
+                                        mix(
+                                            self.mark_color_active,
+                                            self.mark_color_active_focus,
+                                            self.focus
+                                        ),
+                                        self.mark_color_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_active_hover,
+                                    self.hover
+                                ),
                                 self.active
                             )
                         );
@@ -120,22 +164,38 @@ live_design!{
                         sdf.stroke_keep(
                             mix(
                                 mix(
-                                    mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                    mix(
+                                        mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                        self.focus
+                                    ),
                                     mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
                                     self.hover
                                 ),
-                                mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                mix(
+                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                                    mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                    self.focus
+                                ),
                                 self.active
                             ), self.border_size)
 
                         sdf.fill_keep(
                             mix(
                                 mix(
-                                    mix(self.color_1, self.color_2, self.pos.y + dither),
+                                    mix(
+                                        mix(self.color_1, self.color_2, self.pos.y + dither),
+                                        mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                                        self.focus
+                                    ),
                                     mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
                                     self.hover
                                 ),
-                                mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                mix(
+                                    mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                                    mix(self.color_1_focus, self.color_2_focus, self.pos.y + dither),
+                                    self.focus
+                                ),
                                 self.active
                             )
                         )
@@ -147,12 +207,14 @@ live_design!{
         }
             
         draw_text: {
-            instance hover: 0.0
             instance active: 0.0
+            instance focus: 0.0
+            instance hover: 0.0
                 
             uniform color: (THEME_COLOR_TEXT)
             uniform color_hover: (THEME_COLOR_TEXT)
             uniform color_active: (THEME_COLOR_TEXT)
+            uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
                 
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
@@ -160,37 +222,48 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        self.color,
+                        mix(self.color, self.color_focus, self.focus),
                         self.color_hover,
                         self.hover
                     ),
-                    self.color_active,
+                    mix(self.color_active, self.color_focus, self.focus),
                     self.active
                 )
             }
         }
             
         draw_icon: {
-            instance hover: 0.0
             instance active: 0.0
+            instance focus: 0.0
+            instance hover: 0.0
 
             uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_WHITE)
             uniform color_1_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_WHITE)
             uniform color_2_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        mix(self.color_1, self.color_2, self.pos.y),
+                        mix(
+                            mix(self.color_1, self.color_2, self.pos.y),
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.y),
+                            self.focus
+                        ),
                         mix(self.color_1_hover, self.color_2_hover, self.pos.y),
                         self.hover
                     ),
                     mix(
-                        mix(self.color_1_active, self.color_2_active, self.pos.y),
+                        mix(
+                            mix(self.color_1_active, self.color_2_active, self.pos.y),
+                            mix(self.color_1_focus, self.color_2_focus, self.pos.y),
+                            self.focus
+                        ),
                         mix(self.color_1_hover, self.color_2_hover, self.pos.y),
                         self.hover
                     ),
@@ -227,7 +300,6 @@ live_design!{
                         draw_bg: {active: 0.0}
                         draw_icon: {active: 0.0}
                         draw_text: {active: 0.0}
-                        draw_icon: {active: 0.0}
                     }
                 }
                 on = {
@@ -237,7 +309,26 @@ live_design!{
                         draw_bg: {active: 1.0}
                         draw_icon: {active: 1.0}
                         draw_text: {active: 1.0}
-                        draw_icon: {active: 1.0}
+                    }
+                }
+            }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                    }
+                }
+                on = {
+                    cursor: Arrow,
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_bg: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
+                        draw_text: {focus: 1.0}
                     }
                 }
             }
@@ -251,18 +342,22 @@ live_design!{
             color_1: (THEME_COLOR_INSET)
             color_1_hover: (THEME_COLOR_INSET_HOVER)
             color_1_active: (THEME_COLOR_INSET_ACTIVE)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET)
             color_2_hover: (THEME_COLOR_INSET_HOVER)
             color_2_active: (THEME_COLOR_INSET_ACTIVE)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL)
             border_color_1_active: (THEME_COLOR_BEVEL)
+            border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             border_color_2: (THEME_COLOR_BEVEL)
             border_color_2_hover: (THEME_COLOR_BEVEL)
             border_color_2_active: (THEME_COLOR_BEVEL)
+            border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
         }
 
     }
@@ -274,10 +369,12 @@ live_design!{
             color_1: (THEME_COLOR_INSET)
             color_1_hover: (THEME_COLOR_INSET_HOVER)
             color_1_active: (THEME_COLOR_INSET_ACTIVE)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             color_2: (THEME_COLOR_INSET)
             color_2_hover: (THEME_COLOR_INSET_HOVER)
             color_2_active: (THEME_COLOR_INSET_ACTIVE)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
         }
 
     }
@@ -291,28 +388,35 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR)
+            uniform color: (THEME_COLOR_OUTSET)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
+            uniform color_focus: (THEME_COLOR_INSET_FOCUS)
 
             uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_INSET_1)
             uniform color_1_active: (THEME_COLOR_INSET_1)
+            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_INSET_2)
             uniform color_2_active: (THEME_COLOR_INSET_2)
+            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
             uniform mark_color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform mark_color_focus: (THEME_COLOR_MARK_HOVER)
+            uniform mark_color_active_focus: (THEME_COLOR_MARK_ACTIVE_FOCUS)
             uniform mark_color_active: (THEME_COLOR_TEXT_ACTIVE)
             uniform mark_color_active_hover: (THEME_COLOR_TEXT_ACTIVE * 1.5)
             
@@ -331,8 +435,16 @@ live_design!{
                         sdf.fill_keep(
                             mix(
                                 mix(
-                                    mix(self.color_1, self.color_2, self.pos.x + dither),
-                                    mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                                    mix(
+                                        mix(self.color_1, self.color_2, self.pos.x + dither),
+                                        mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
+                                        self.focus
+                                    ),
+                                    mix(
+                                        mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                                        mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
+                                        self.focus
+                                    ),
                                     self.active
                                 ),
                                 mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
@@ -342,8 +454,16 @@ live_design!{
                         sdf.stroke(
                             mix(
                                 mix(
-                                    mix(self.border_color_1, self.border_color_2, self.pos.x + dither),
-                                    mix(self.border_color_1_active, self.border_color_2_active, self.pos.x + dither),
+                                    mix(
+                                        mix(self.border_color_1, self.border_color_2, self.pos.x + dither),
+                                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.x + dither),
+                                        self.focus
+                                    ),
+                                    mix(
+                                        mix(self.border_color_1_active, self.border_color_2_active, self.pos.x + dither),
+                                        mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.x + dither),
+                                        self.focus
+                                    ),
                                     self.active
                                 ),
                                 mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.x + dither),
@@ -356,8 +476,24 @@ live_design!{
                         sdf.circle(left, c.y, isz);
                         sdf.fill(
                             mix(
-                                mix(self.mark_color, self.mark_color_hover, self.hover),
-                                mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                                mix(
+                                    mix(
+                                        self.mark_color,
+                                        self.mark_color_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_hover,
+                                    self.hover
+                                ),
+                                mix(
+                                    mix(
+                                        self.mark_color_active,
+                                        self.mark_color_active_focus,
+                                        self.focus
+                                    ),
+                                    self.mark_color_active_hover,
+                                    self.hover
+                                ),
                                 self.active
                             )
                         );
@@ -414,29 +550,34 @@ live_design!{
         
     pub RadioButtonTab = <RadioButton> {
         height: Fit,
-
         label_walk: { margin: { left: 20., right: 5. } }
 
         draw_bg: {
             radio_type: Tab
+
             border_size: (THEME_BEVELING)
 
-            color_1: (THEME_COLOR)
+            color_1: (THEME_COLOR_OUTSET)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
+            color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
 
-            color_2: (THEME_COLOR)
+            color_2: (THEME_COLOR_OUTSET)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+            border_color_1_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             border_color_2: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_2_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
         }
+
         padding: <THEME_MSPACE_2> { left: (THEME_SPACE_2 * -1.25)}
             
         draw_text: {
@@ -451,13 +592,15 @@ live_design!{
             radio_type: Tab
             border_size: (THEME_BEVELING)
 
-            color_1: (THEME_COLOR)
+            color_1: (THEME_COLOR_OUTSET)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
+            color_1_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
-            color_2: (THEME_COLOR)
+            color_2: (THEME_COLOR_OUTSET)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
+            color_2_focus: (THEME_COLOR_OUTSET_ACTIVE)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
@@ -494,21 +637,25 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR * 1.5)
+            uniform color_1: (THEME_COLOR_OUTSET * 1.5)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
             uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
+            uniform color_1_active_focus: (THEME_COLOR_INSET_1_FOCUS)
 
-            uniform color_2: (THEME_COLOR)
+            uniform color_2: (THEME_COLOR_OUTSET)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
+            uniform color_2_active_focus: (THEME_COLOR_INSET_2_FOCUS)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -525,22 +672,39 @@ live_design!{
                 sdf.stroke_keep(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, self.pos.x + dither),
-                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.x + dither),
+                            mix(
+                                mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                self.focus
+                            ),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
                             self.hover
                         ),
-                        mix(self.border_color_1_active, self.border_color_2_active, self.pos.x + dither),
+                        mix(
+                            mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                            mix(self.border_color_1_active_focus, self.border_color_2_active_focus, self.pos.y + dither),
+                            self.focus
+                        ),
                         self.active
                     ), self.border_size)
+                    
 
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(self.color_1, self.color_2, self.pos.x + dither),
+                            mix(
+                                mix(self.color_1, self.color_2, self.pos.x + dither),
+                                mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
+                                self.focus
+                            ),
                             mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
                             self.hover
                         ),
-                        mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                        mix(
+                            mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                            mix(self.color_1_active_focus, self.color_2_active_focus, self.pos.x + dither),
+                            self.focus
+                        ),
                         self.active
                     )
                 )
@@ -567,21 +731,25 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR * 1.5)
+            uniform color_1: (THEME_COLOR_OUTSET * 1.5)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.2)
             uniform color_1_active: (THEME_COLOR_OUTSET_ACTIVE * 2.0)
+            uniform color_1_active_focus: (THEME_COLOR_INSET_1_ACTIVE_FOCUS)
 
-            uniform color_2: (THEME_COLOR)
+            uniform color_2: (THEME_COLOR_OUTSET)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER * 0.5)
             uniform color_2_active: (THEME_COLOR_OUTSET_ACTIVE * 0.5)
+            uniform color_2_active_focus: (THEME_COLOR_INSET_2_ACTIVE_FOCUS)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_active: (THEME_COLOR_BEVEL_SHADOW)
+            uniform border_color_1_active_focus: (THEME_COLOR_BEVEL_SHADOW_FOCUS)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_SHADOW)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_2_active_focus: (THEME_COLOR_BEVEL_LIGHT_FOCUS)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -598,22 +766,39 @@ live_design!{
                 sdf.stroke_keep(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                            mix(
+                                mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
+                                mix(self.border_color_1_focus, self.border_color_2_focus, self.pos.y + dither),
+                                self.focus
+                            ),
                             mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
                             self.hover
                         ),
-                        mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                        mix(
+                            mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                            mix(self.border_color_1_active_focus, self.border_color_2_active_focus, self.pos.y + dither),
+                            self.focus
+                        ),
                         self.active
                     ), self.border_size)
+                    
 
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(self.color_1, self.color_2, self.pos.y + dither),
-                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                            mix(
+                                mix(self.color_1, self.color_2, self.pos.x + dither),
+                                mix(self.color_1_focus, self.color_2_focus, self.pos.x + dither),
+                                self.focus
+                            ),
+                            mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
                             self.hover
                         ),
-                        mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                        mix(
+                            mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                            mix(self.color_1_active_focus, self.color_2_active_focus, self.pos.x + dither),
+                            self.focus
+                        ),
                         self.active
                     )
                 )
@@ -674,7 +859,7 @@ pub struct RadioButtonGroup {
 pub struct RadioButton {
     #[redraw] #[live] draw_bg: DrawRadioButton,
     #[live] draw_icon: DrawIcon,
-    #[live] draw_text: DrawText,
+    #[live] draw_text: DrawText2,
 
     #[live] value: LiveValue,
 
@@ -721,6 +906,7 @@ impl RadioButton {
         }
         self.draw_text.draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
     }
         
 }
@@ -747,6 +933,13 @@ impl Widget for RadioButton {
         self.animator_handle_event(cx, event);
                 
         match event.hits(cx, self.draw_bg.area()) {
+            Hit::KeyFocus(_) => {
+                self.animator_play(cx, id!(focus.on));
+            }
+            Hit::KeyFocusLost(_) => {
+                self.animator_play(cx, id!(focus.off));
+                self.draw_bg.redraw(cx);
+            }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, id!(hover.on));
@@ -760,6 +953,7 @@ impl Widget for RadioButton {
                     self.animator_play(cx, id!(active.on));
                     cx.widget_action(uid, &scope.path, RadioButtonAction::Clicked);
                 }
+                self.set_key_focus(cx);
             },
             Hit::FingerUp(_fe) => {
                                 
@@ -769,8 +963,17 @@ impl Widget for RadioButton {
             }
             _ => ()
         }
+
     }
     
+    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
+        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+    }
+                
+    fn disabled(&self, cx:&Cx) -> bool {
+        self.animator_in_state(cx, id!(disabled.on))
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk(cx, walk);
         DrawStep::done()

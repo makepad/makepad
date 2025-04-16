@@ -263,18 +263,10 @@ impl Cx {
         Some(pass_rect.size)
     }
 
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, texture: &Texture) {
-        self.draw_pass_to_texture_inner(pass_id, Some(texture))
-    }
-
-    pub fn draw_pass_to_magic_texture(&mut self, pass_id: PassId) {
-        self.draw_pass_to_texture_inner(pass_id, None)
-    }
-
-    fn draw_pass_to_texture_inner(
+    pub fn draw_pass_to_texture(
         &mut self,
         pass_id: PassId,
-        maybe_texture: Option<&Texture>,
+        override_pass_texture: Option<&Texture>,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -307,7 +299,7 @@ impl Cx {
             gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, self.passes[pass_id].os.gl_framebuffer.unwrap());
         }
 
-        let color_textures_from_fb_texture = maybe_texture.map(|texture| {
+        let color_textures_from_fb_texture = override_pass_texture.map(|texture| {
             [crate::pass::CxPassColorTexture {
                 clear_color: PassClearColor::ClearWith(self.passes[pass_id].clear_color),
                 texture: texture.clone(),
@@ -477,16 +469,11 @@ impl Cx {
         }
         self.draw_shaders.compile_set.clear();
     }
-
+/*
     pub fn maybe_warn_hardware_support(&self) {
         // Temporary warning for Adreno failing at compiling shaders that use samplerExternalOES.
-        let gpu_renderer = get_gl_string(gl_sys::RENDERER);
-        if gpu_renderer.contains("Adreno") {
-            crate::warning!("WARNING: This device is using {gpu_renderer} renderer.
-            OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
-            This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
-        }
-    }
+        
+    }*/
 }
 
 
@@ -1133,7 +1120,7 @@ impl CxTexture {
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
         }
     }
-
+    
     pub fn setup_video_texture(&mut self) -> bool {
         while unsafe { gl_sys::GetError() } != 0 {}
 
@@ -1149,6 +1136,14 @@ impl CxTexture {
         }
         if self.take_initial() {
             unsafe{
+                                
+                let gpu_renderer = get_gl_string(gl_sys::RENDERER);
+                if gpu_renderer.contains("Adreno") {
+                    crate::warning!("WARNING: This device is using {gpu_renderer} renderer.
+                    OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
+                    This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
+                }
+                
                 gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, self.os.gl_texture.unwrap());
         
                 gl_sys::TexParameteri(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);

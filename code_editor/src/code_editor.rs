@@ -4,7 +4,7 @@ use {
         layout::{BlockElement, WrappedElement},
         selection::Affinity,
         session::{SelectionMode, CodeSession},
-        history::{NewGroup},
+        history::NewGroup,
         settings::Settings,
         str::StrExt,
         text::Position,
@@ -216,7 +216,7 @@ live_design! {
 #[repr(C)]
 struct DrawCodeText {
     #[deref]
-    draw_super: DrawText,
+    draw_super: DrawText2,
     #[live]
     outline: f32,
 }
@@ -353,8 +353,14 @@ impl CodeEditor {
         // This needs to be called first to ensure the session is up to date.
         session.handle_changes();
 
-        self.cell_size =
-            self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
+        let text = self.draw_text.layout(cx, 0.0, 0.0, None, Align::default(), "!");
+        let first_row = text.rows.first().unwrap();
+        let first_glyph = first_row.glyphs.first().unwrap();
+        self.cell_size = dvec2(
+            first_glyph.advance_in_lpxs() as f64,
+            ((first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs()) as f64) * self.draw_text.text_style.line_spacing as f64,
+        );
+
         let last_added_selection =
             session.selections()[session.last_added_selection_index().unwrap()];
         let (cursor_x, cursor_y) = session.layout().logical_to_normalized_position(
@@ -579,7 +585,7 @@ impl CodeEditor {
     pub fn decrease_font_size(&mut self) {
         if self.draw_text.text_style.font_size > 3.0 {
             self.draw_text.text_style.font_size -= 1.0;
-            self.draw_gutter.text_style.font_size = self.draw_text.text_style.font_size;
+            self.draw_gutter.text_style.font_size = self.draw_text.text_style.font_size as f64;
             if let Some(pos) = self.last_cursor_screen_pos {
                 self.keep_cursor_in_view = KeepCursorInView::FontResize(pos);
             }
@@ -589,7 +595,7 @@ impl CodeEditor {
     pub fn increase_font_size(&mut self) {
         if self.draw_text.text_style.font_size < 20.0 {
             self.draw_text.text_style.font_size += 1.0;
-            self.draw_gutter.text_style.font_size = self.draw_text.text_style.font_size;
+            self.draw_gutter.text_style.font_size = self.draw_text.text_style.font_size as f64;
             if let Some(pos) = self.last_cursor_screen_pos {
                 self.keep_cursor_in_view = KeepCursorInView::FontResize(pos);
             }
@@ -1091,7 +1097,7 @@ impl CodeEditor {
         {
             match element {
                 BlockElement::Line { line, .. } => {
-                    self.draw_text.font_scale = line.scale();
+                    self.draw_text.font_scale = line.scale() as f32;
                     let mut token_iter = line.tokens().iter().copied();
                     let mut token_slot = token_iter.next();
                     let mut row_index = 0;
