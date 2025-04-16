@@ -926,7 +926,7 @@ impl Dock {
                             *b = LiveId::from_str(&format!("{} {:?}", OLD_UNIQUE_ID_PREFIX, b.0));
                         }
                     }
-                    DockItem::Tabs { tabs, selected, closable } => {
+                    DockItem::Tabs { tabs, selected: _, closable: _ } => {
                         tabs.iter_mut().for_each(|t| {
                             if t.is_unique() {
                                 *t = LiveId::from_str(&format!("{} {:?}", OLD_UNIQUE_ID_PREFIX, t.0));
