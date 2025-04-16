@@ -1,34 +1,16 @@
 use {
-    std::{
-        cell::{Cell,RefCell},
-        time::Instant,
-    },
     crate::{
-        makepad_math::*,
-        os::{
-            apple::apple_util::str_to_nsstring,
-            apple::apple_sys::*,
-            ios::{
+        area::Area, event::{
+            KeyCode, KeyEvent, KeyModifiers, LongPressEvent, TextInputEvent, TimerEvent, TouchPoint, TouchState, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom, WindowGeomChangeEvent
+        }, makepad_math::*, os::{
+            apple::{apple_sys::*, apple_util::str_to_nsstring}, cx_native::EventFlow, ios::{
                 ios_delegates::*,
                 ios_event::*,
-            },
-            cx_native::EventFlow,
-        },
-        area::Area,
-        event::{
-            VirtualKeyboardEvent,
-            KeyCode,
-            KeyEvent,
-            TextInputEvent,
-            KeyModifiers,
-            TouchUpdateEvent,
-            TouchState,
-            TouchPoint,
-            WindowGeomChangeEvent,
-            WindowGeom,
-            TimerEvent,
-        },
-        window::CxWindowPool
+            }
+        }, window::CxWindowPool
+    }, std::{
+        cell::{Cell,RefCell},
+        time::Instant,
     }
 };
 
@@ -73,6 +55,7 @@ pub struct IosClasses {
     pub app_delegate: *const Class,
     pub mtk_view: *const Class,
     pub mtk_view_delegate: *const Class,
+    pub gesture_recognizer_handler: *const Class,
     pub textfield_delegate: *const Class,
     pub timer_delegate: *const Class,
 }
@@ -82,6 +65,7 @@ impl IosClasses {
             app_delegate: define_ios_app_delegate(),
             mtk_view: define_mtk_view(),
             mtk_view_delegate: define_mtk_view_delegate(),
+            gesture_recognizer_handler: define_gesture_recognizer_handler(),
             textfield_delegate: define_textfield_delegate(),
             timer_delegate: define_ios_timer_delegate()
         }
@@ -148,6 +132,22 @@ impl IosApp {
             
             let mtk_view_dlg_obj: ObjcId = msg_send![get_ios_class_global().mtk_view_delegate, alloc];
             let mtk_view_dlg_obj: ObjcId = msg_send![mtk_view_dlg_obj, init];
+
+            // Instantiate a long-press gesture recognizer and our delegate,
+            // set that delegate to be the target of the "gesture recognized" action,
+            // and add the gesture recognizer to our MTKView subclass.
+            let gesture_recognizer_handler_obj: ObjcId = msg_send![get_ios_class_global().gesture_recognizer_handler, alloc];
+            let gesture_recognizer_handler_obj: ObjcId = msg_send![gesture_recognizer_handler_obj, init];
+            let gesture_recognizer_obj: ObjcId = msg_send![class!(UILongPressGestureRecognizer), alloc];
+            let gesture_recognizer_obj: ObjcId = msg_send![
+                gesture_recognizer_obj,
+                initWithTarget: gesture_recognizer_handler_obj
+                action: sel!(handleLongPressGesture: gestureRecognizer:)
+            ];
+            // Set `cancelsTouchesInView` to NO so that the gesture recognizer doesn't prevent
+            // later touch events from being sent to the MTKView *after* it has recognized its gesture.
+            let () = msg_send!(gesture_recognizer_obj, setCancelsTouchesInView: NO);
+            let () = msg_send![mtk_view_obj, addGestureRecognizer: gesture_recognizer_obj];
             
             let view_ctrl_obj: ObjcId = msg_send![class!(UIViewController), alloc];
             let view_ctrl_obj: ObjcId = msg_send![view_ctrl_obj, init];
@@ -162,7 +162,7 @@ impl IosApp {
             let () = msg_send![mtk_view_obj, setMultipleTouchEnabled: YES];
             
             let textfield_dlg: ObjcId = msg_send![get_ios_class_global().textfield_delegate, alloc];
-            let textfield_dlg: ObjcId= msg_send![textfield_dlg, init];
+            let textfield_dlg: ObjcId = msg_send![textfield_dlg, init];
              
             let textfield: ObjcId = msg_send![class!(UITextField), alloc];
             let textfield: ObjcId =  msg_send![textfield, initWithFrame: NSRect {origin: NSPoint {x: 10.0, y: 10.0}, size: NSSize {width: 100.0, height: 50.0}}];
@@ -171,7 +171,7 @@ impl IosApp {
             let () = msg_send![textfield, setSpellCheckingType: 1]; // UITextSpellCheckingTypeNo
             let () = msg_send![textfield, setHidden: YES];
             let () = msg_send![textfield, setDelegate: textfield_dlg];
-            // to make backspce work - with empty text there is no event on text removal
+            // to make backspace work - with empty text there is no event on text removal
             let () = msg_send![textfield, setText: str_to_nsstring("x")];
             let () = msg_send![mtk_view_obj, addSubview: textfield];
             
@@ -285,7 +285,17 @@ impl IosApp {
         // remove the stopped touches
         with_ios_app(|app| app.touches.retain( | v | if let TouchState::Stop = v.state {false}else {true}));
     }
-    
+
+    pub fn send_long_press(abs: NSPoint, uid: u64) {
+        let time_now = with_ios_app(|app| app.time_now());
+        IosApp::do_callback(IosEvent::LongPress(LongPressEvent {
+            abs: dvec2(abs.x, abs.y),
+            time: time_now,
+            window_id: CxWindowPool::id_zero(),
+            uid,
+        }));
+    }
+
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
