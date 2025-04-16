@@ -71,6 +71,7 @@ impl<T> FontAtlas<T> {
         }
         if self.current_point.y + padded_size.height > self.size().height {
             self.needs_reset = true;
+            crate::log!("Font atlas too small, resetting");
             return None;
         }
         let origin = self.current_point;

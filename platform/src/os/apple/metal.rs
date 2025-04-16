@@ -857,40 +857,43 @@ impl CxTexture {
             let texture:ObjcId = unsafe{msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]};
             self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
         }
-        if !self.take_updated().is_empty() {
-            fn update_data(texture:&Option<RcObjcId>, width: usize, height: usize, bpp: u64, data: *const std::ffi::c_void){
-                let region = MTLRegion {
-                    origin: MTLOrigin {x: 0, y: 0, z: 0},
-                    size: MTLSize {width: width as u64, height: height as u64, depth: 1}
-                };
+        let update = self.take_updated();
+        if update.is_empty(){
+            return;
+        }
+        fn update_data(texture:&Option<RcObjcId>, width: usize, height: usize, bpp: u64, data: *const std::ffi::c_void){
+
+            let region = MTLRegion {
+                origin: MTLOrigin {x: 0, y: 0, z: 0},
+                size: MTLSize {width: width as u64, height: height as u64, depth: 1}
+            };
                                             
-                let () = unsafe {msg_send![
-                    texture.as_ref().unwrap().as_id(),
-                    replaceRegion: region
-                    mipmapLevel: 0
-                    withBytes: data
-                    bytesPerRow: (width as u64) * bpp
-                ]};
-            }
+            let () = unsafe {msg_send![
+                texture.as_ref().unwrap().as_id(),
+                replaceRegion: region
+                mipmapLevel: 0
+                withBytes: data
+                bytesPerRow: (width as u64) * bpp
+            ]};
+        }
             
-            match &self.format{
-                TextureFormat::VecBGRAu8_32{width, height, data, ..}=>{
-                    update_data(&self.os.texture, *width, *height, 4,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
-                }
-                TextureFormat::VecRGBAf32{width, height, data, ..}=>{
-                    update_data(&self.os.texture, *width, *height, 16,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
-                }
-                TextureFormat::VecRu8{width, height, data, ..}=>{
-                    update_data(&self.os.texture, *width, *height, 1,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
-                }
-                TextureFormat::VecRGu8{width, height, data, ..}=>{
-                    update_data(&self.os.texture, *width, *height, 2,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
-                }
-                TextureFormat::VecRf32{width, height, data, ..}=>{
-                    update_data(&self.os.texture, *width, *height, 4,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
-                }
-                _=>panic!()
+        match &self.format{
+            TextureFormat::VecBGRAu8_32{width, height, data, ..}=>{
+                update_data(&self.os.texture, *width, *height, 4,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
             }
+            TextureFormat::VecRGBAf32{width, height, data, ..}=>{
+                update_data(&self.os.texture, *width, *height, 16,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
+            }
+            TextureFormat::VecRu8{width, height, data, ..}=>{
+                update_data(&self.os.texture, *width, *height, 1,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
+            }
+            TextureFormat::VecRGu8{width, height, data, ..}=>{
+                update_data(&self.os.texture, *width, *height, 2,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
+            }
+            TextureFormat::VecRf32{width, height, data, ..}=>{
+                update_data(&self.os.texture, *width, *height, 4,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
+            }
+            _=>panic!()
         }
     }
     

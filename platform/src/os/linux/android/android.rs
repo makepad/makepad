@@ -35,7 +35,6 @@ use {
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
         studio::{AppToStudio,GPUSample},
-        
         event::{
             VirtualKeyboardEvent,
             NetworkResponseItem,

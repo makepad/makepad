@@ -29,14 +29,14 @@ live_design!{
                         }
                     }
                     button_1 = <Button> {
-                        text: "Click me 123"
+                        text: "Click me 😊"
                         draw_text:{color:#fff}
                     }
                     text_input = <TextInput> {
                         width: 100,
                         flow: RightWrap,
                         text: "Lorem ipsum"
-                        draw_text:{color:#fff, }
+                        draw_text:{color:#fff}
                     }
                     button_2 = <Button> {
                         text: "Click me 345"
@@ -64,10 +64,11 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_startup(&mut self, cx:&mut Cx){
-        cx.switch_to_xr();
+        cx.start_timeout(10.0);
     }
     
-    fn handle_timer(&mut self, _cx:&mut Cx, _te:&TimerEvent){
+    fn handle_timer(&mut self, cx:&mut Cx, _te:&TimerEvent){
+        cx.switch_to_xr();
     }
     
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
