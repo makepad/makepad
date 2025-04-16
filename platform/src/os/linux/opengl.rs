@@ -1,7 +1,18 @@
 use {
-    self::super::gl_sys, crate::{
-        cx::{Cx, OsType}, draw_list::DrawListId, draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput}, event::{Event, TextureHandleReadyEvent}, makepad_live_id::*, makepad_math::{DVec2, Mat4, Vec4}, makepad_shader_compiler::generate_glsl, pass::{PassClearColor, PassClearDepth, PassId}, texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureUpdated}
-    }, std::{
+    self::super::gl_sys, 
+    gl_sys::LibGl,
+    crate::{
+        cx::{Cx, OsType}, 
+        draw_list::DrawListId, 
+        draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput}, 
+        event::{Event, TextureHandleReadyEvent}, 
+        makepad_live_id::*, 
+        makepad_math::{DVec2, Mat4, Vec4}, 
+        makepad_shader_compiler::generate_glsl, 
+        pass::{PassClearColor, PassClearDepth, PassId}, 
+        texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureUpdated}
+    }, 
+    std::{
         ffi::{c_char, CStr}, fs::{remove_file, File}, io::prelude::*, mem, ptr
     }
 };
@@ -52,6 +63,7 @@ impl Cx {
                 
                 if shp.gl_shader.is_none(){
                     shp.gl_shader = Some(GlShader::new(
+                        self.os.gl(),
                         &shp.vertex,
                         &shp.pixel,
                         &sh.mapping,
@@ -62,7 +74,7 @@ impl Cx {
                 
                 if draw_call.instance_dirty || draw_item.os.inst_vb.gl_buffer.is_none(){
                     draw_call.instance_dirty = false;
-                    draw_item.os.inst_vb.update_with_f32_data(draw_item.instances.as_ref().unwrap());
+                    draw_item.os.inst_vb.update_with_f32_data(self.os.gl(),draw_item.instances.as_ref().unwrap());
                 }
                 
                 // update the zbias uniform if we have it.
@@ -82,8 +94,8 @@ impl Cx {
                 
                 let geometry = &mut self.geometries[geometry_id];
                 if geometry.dirty || geometry.os.vb.gl_buffer.is_none() || geometry.os.ib.gl_buffer.is_none() {
-                    geometry.os.vb.update_with_f32_data(&geometry.vertices);
-                    geometry.os.ib.update_with_u32_data(&geometry.indices);
+                    geometry.os.vb.update_with_f32_data(self.os.gl(),&geometry.vertices);
+                    geometry.os.ib.update_with_u32_data(self.os.gl(),&geometry.indices);
                     geometry.dirty = false;
                 }
                 
@@ -106,7 +118,7 @@ impl Cx {
                         geom_ib: None,
                     });
                 }
-                
+                let gl = self.os.gl();
                 let vao = draw_item.os.vao.as_mut().unwrap();
                 if vao.inst_vb != draw_item.os.inst_vb.gl_buffer
                     || vao.geom_vb != geometry.os.vb.gl_buffer
@@ -114,12 +126,12 @@ impl Cx {
                     || vao.shader_id != Some(draw_call.draw_shader.draw_shader_id) {
                         
                     if let Some(vao) = vao.vao.take(){
-                        unsafe{gl_sys::DeleteVertexArrays(1, &vao)};
+                        unsafe{(gl.glDeleteVertexArrays)(1, &vao)};
                     }
                         
                     vao.vao = Some(unsafe {
                         let mut vao = 0u32;
-                        gl_sys::GenVertexArrays(1, &mut vao);
+                        (gl.glGenVertexArrays)(1, &mut vao);
                         vao
                     });    
                     
@@ -128,47 +140,47 @@ impl Cx {
                     vao.geom_vb = geometry.os.vb.gl_buffer;
                     vao.geom_ib = geometry.os.ib.gl_buffer;
                     unsafe {
-                        gl_sys::BindVertexArray(vao.vao.unwrap());
+                        (gl.glBindVertexArray)(vao.vao.unwrap());
                         
                         // bind the vertex and indexbuffers
-                        gl_sys::BindBuffer(gl_sys::ARRAY_BUFFER, vao.geom_vb.unwrap());
+                        (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, vao.geom_vb.unwrap());
                         for attr in &shgl.geometries {
-                            gl_sys::VertexAttribPointer(attr.loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                            gl_sys::EnableVertexAttribArray(attr.loc);
+                            (gl.glVertexAttribPointer)(attr.loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
+                            (gl.glEnableVertexAttribArray)(attr.loc);
                         }
                         
-                        gl_sys::BindBuffer(gl_sys::ARRAY_BUFFER, vao.inst_vb.unwrap());
+                        (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, vao.inst_vb.unwrap());
                         
                         for attr in &shgl.instances {
-                            gl_sys::VertexAttribPointer(attr.loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                            gl_sys::EnableVertexAttribArray(attr.loc);
-                            gl_sys::VertexAttribDivisor(attr.loc, 1 as gl_sys::GLuint);
+                            (gl.glVertexAttribPointer)(attr.loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
+                            (gl.glEnableVertexAttribArray)(attr.loc);
+                            (gl.glVertexAttribDivisor)(attr.loc, 1 as gl_sys::GLuint);
                         }
                         
                         // bind the indexbuffer
-                        gl_sys::BindBuffer(gl_sys::ELEMENT_ARRAY_BUFFER, vao.geom_ib.unwrap());
-                        gl_sys::BindVertexArray(0);
+                        (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, vao.geom_ib.unwrap());
+                        (gl.glBindVertexArray)(0);
                     }
                 }
                 
                 unsafe {
-                    gl_sys::UseProgram(shgl.program);
+                    (gl.glUseProgram)(shgl.program);
                     
-                    gl_sys::BindVertexArray(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
+                    (gl.glBindVertexArray)(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
                     let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
                     
                     let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                     let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
                     let draw_uniforms = draw_call.draw_uniforms.as_slice();
                     
-                    GlShader::set_uniform_array(&shgl.pass_uniforms, pass_uniforms);
-                    GlShader::set_uniform_array(&shgl.view_uniforms, draw_list_uniforms);
-                    GlShader::set_uniform_array(&shgl.draw_uniforms, draw_uniforms);
-                    GlShader::set_uniform_array(&shgl.user_uniforms, &draw_call.user_uniforms);
-                    GlShader::set_uniform_array(&shgl.live_uniforms, &sh.mapping.live_uniforms_buf);
+                    GlShader::set_uniform_array(gl, &shgl.pass_uniforms, pass_uniforms);
+                    GlShader::set_uniform_array(gl, &shgl.view_uniforms, draw_list_uniforms);
+                    GlShader::set_uniform_array(gl, &shgl.draw_uniforms, draw_uniforms);
+                    GlShader::set_uniform_array(gl, &shgl.user_uniforms, &draw_call.user_uniforms);
+                    GlShader::set_uniform_array(gl, &shgl.live_uniforms, &sh.mapping.live_uniforms_buf);
                     let ct = &sh.mapping.const_table.table;
                     if ct.len()>0 {
-                        GlShader::set_uniform_array(&shgl.const_table_uniform, ct);
+                        GlShader::set_uniform_array(gl, &shgl.const_table_uniform, ct);
                     }
                     
                     // lets set our textures
@@ -181,9 +193,9 @@ impl Cx {
                         let cxtexture = &mut self.textures[texture_id];
 
                         if cxtexture.format.is_vec(){
-                            cxtexture.update_vec_texture(&self.os_type);
+                            cxtexture.update_vec_texture(gl, &self.os_type);
                         } else if cxtexture.format.is_video() {
-                            let is_initial_setup = cxtexture.setup_video_texture();
+                            let is_initial_setup = cxtexture.setup_video_texture(gl);
                             if is_initial_setup {
                                 let e = Event::TextureHandleReady(
                                     TextureHandleReadyEvent {
@@ -202,25 +214,26 @@ impl Cx {
                             continue;
                         };
                         let cxtexture = &mut self.textures[texture_id];
+                        let gl = self.os.gl();
                         // get the loc
-                        gl_sys::ActiveTexture(gl_sys::TEXTURE0 + i as u32);
+                        (gl.glActiveTexture)(gl_sys::TEXTURE0 + i as u32);
                         if let Some(texture) = cxtexture.os.gl_texture {
                             // Video playback with SurfaceTexture requires TEXTURE_EXTERNAL_OES, for any other format we assume regular 2D textures
                             match cxtexture.format {
-                                TextureFormat::VideoRGB => gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, texture),
-                                _ => gl_sys::BindTexture(gl_sys::TEXTURE_2D, texture)     
+                                TextureFormat::VideoRGB => (gl.glBindTexture)(gl_sys::TEXTURE_EXTERNAL_OES, texture),
+                                _ => (gl.glBindTexture)(gl_sys::TEXTURE_2D, texture)     
                             }
                         }
                         else {
                             match cxtexture.format {
-                                TextureFormat::VideoRGB => gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, 0),
-                                _ => gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0)     
+                                TextureFormat::VideoRGB => (gl.glBindTexture)(gl_sys::TEXTURE_EXTERNAL_OES, 0),
+                                _ => (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0)     
                             }
                         }
-                        gl_sys::Uniform1i(shgl.textures[i].loc, i as i32);
+                        (gl.glUniform1i)(shgl.textures[i].loc, i as i32);
                     }
                     
-                    gl_sys::DrawElementsInstanced(
+                    (gl.glDrawElementsInstanced)(
                         gl_sys::TRIANGLES,
                         indices as i32,
                         gl_sys::UNSIGNED_INT,
@@ -228,7 +241,7 @@ impl Cx {
                         instances as i32
                     );
                     
-                    //gl_sys::BindVertexArray(0);
+                    //(gl.glBindVertexArray)(0);
                 }
                 
             }
@@ -238,13 +251,13 @@ impl Cx {
         }
     }
     
-    pub fn set_default_depth_and_blend_mode() {
+    pub fn set_default_depth_and_blend_mode(gl: &LibGl) {
         unsafe {
-            gl_sys::Enable(gl_sys::DEPTH_TEST);
-            gl_sys::DepthFunc(gl_sys::LEQUAL);
-            gl_sys::BlendEquationSeparate(gl_sys::FUNC_ADD, gl_sys::FUNC_ADD);
-            gl_sys::BlendFuncSeparate(gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA, gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA);
-            gl_sys::Enable(gl_sys::BLEND);
+            (gl.glEnable)(gl_sys::DEPTH_TEST);
+            (gl.glDepthFunc)(gl_sys::LEQUAL);
+            (gl.glBlendEquationSeparate)(gl_sys::FUNC_ADD, gl_sys::FUNC_ADD);
+            (gl.glBlendFuncSeparate)(gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA, gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA);
+            (gl.glEnable)(gl_sys::BLEND);
         }
     }
     
@@ -284,19 +297,19 @@ impl Cx {
         let mut clear_color = Vec4::default();
         let mut clear_depth = 1.0;
         let mut clear_flags = 0;
-        
+        let gl = self.os.gl();
         // make a framebuffer
         if self.passes[pass_id].os.gl_framebuffer.is_none() {
             unsafe {
                 let mut gl_framebuffer = std::mem::MaybeUninit::uninit();
-                gl_sys::GenFramebuffers(1, gl_framebuffer.as_mut_ptr());
+                (gl.glGenFramebuffers)(1, gl_framebuffer.as_mut_ptr());
                 self.passes[pass_id].os.gl_framebuffer = Some(gl_framebuffer.assume_init());
             }
         }
         
         // bind the framebuffer
         unsafe {
-            gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, self.passes[pass_id].os.gl_framebuffer.unwrap());
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, self.passes[pass_id].os.gl_framebuffer.unwrap());
         }
 
         let color_textures_from_fb_texture = override_pass_texture.map(|texture| {
@@ -313,7 +326,7 @@ impl Cx {
                 PassClearColor::InitWith(_clear_color) => {
                     let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
                     let size = dpi_factor * pass_size;
-                    cxtexture.update_render_target(size.x as usize, size.y as usize);
+                    cxtexture.update_render_target(gl, size.x as usize, size.y as usize);
                     if cxtexture.take_initial(){
                        clear_color = _clear_color;
                        clear_flags |= gl_sys::COLOR_BUFFER_BIT;
@@ -322,14 +335,14 @@ impl Cx {
                 PassClearColor::ClearWith(_clear_color) => {
                     let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
                     let size = dpi_factor * pass_size;
-                    cxtexture.update_render_target(size.x as usize, size.y as usize);
+                    cxtexture.update_render_target(gl, size.x as usize, size.y as usize);
                     clear_color = _clear_color;
                     clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                 }
             }
             if let Some(gl_texture) = self.textures[color_texture.texture.texture_id()].os.gl_texture {
                 unsafe {
-                    gl_sys::FramebufferTexture2D(gl_sys::FRAMEBUFFER, gl_sys::COLOR_ATTACHMENT0 + index as u32, gl_sys::TEXTURE_2D, gl_texture, 0);
+                    (gl.glFramebufferTexture2D)(gl_sys::FRAMEBUFFER, gl_sys::COLOR_ATTACHMENT0 + index as u32, gl_sys::TEXTURE_2D, gl_texture, 0);
                 }
             }
         }
@@ -340,7 +353,7 @@ impl Cx {
                 PassClearDepth::InitWith(_clear_depth) => {
                     let cxtexture = &mut self.textures[depth_texture.texture_id()];
                     let size = dpi_factor * pass_size;
-                    cxtexture.update_depth_stencil(size.x as usize, size.y as usize);
+                    cxtexture.update_depth_stencil(gl, size.x as usize, size.y as usize);
                     if cxtexture.take_initial(){
                         clear_depth = _clear_depth;
                         clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
@@ -349,7 +362,7 @@ impl Cx {
                 PassClearDepth::ClearWith(_clear_depth) => {
                     let cxtexture = &mut self.textures[depth_texture.texture_id()];
                     let size = dpi_factor * pass_size;
-                    cxtexture.update_depth_stencil(size.x as usize, size.y as usize);
+                    cxtexture.update_depth_stencil(gl, size.x as usize, size.y as usize);
                     clear_depth = _clear_depth;
                     clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
                 }
@@ -359,27 +372,27 @@ impl Cx {
             /* unsafe { // BUGFIX. we have to create a depthbuffer for rtt without depthbuffer use otherwise it fails if there is another pass with depth
                 if self.passes[pass_id].os.gl_bugfix_depthbuffer.is_none() {
                     let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
-                    gl_sys::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
+                    (gl.glGenRenderbuffers)(1, gl_renderbuf.as_mut_ptr());
                     let gl_renderbuffer = gl_renderbuf.assume_init();
-                    gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, gl_renderbuffer);
-                    gl_sys::RenderbufferStorage(
+                    (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, gl_renderbuffer);
+                    (gl.glRenderbufferStorage)(
                         gl_sys::RENDERBUFFER,
                         gl_sys::DEPTH_COMPONENT16,
                         (pass_size.x * dpi_factor) as i32,
                         (pass_size.y * dpi_factor) as i32
                     );
-                    gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, 0);
+                    (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, 0);
                     self.passes[pass_id].os.gl_bugfix_depthbuffer = Some(gl_renderbuffer);
                 }
                 clear_depth = 1.0;
                 clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
-                gl_sys::Disable(gl_sys::DEPTH_TEST);
-                gl_sys::FramebufferRenderbuffer(gl_sys::FRAMEBUFFER, gl_sys::DEPTH_ATTACHMENT, gl_sys::RENDERBUFFER, self.passes[pass_id].os.gl_bugfix_depthbuffer.unwrap());
+                (gl.glDisable)(gl_sys::DEPTH_TEST);
+                (gl.glFramebufferRenderbuffer)(gl_sys::FRAMEBUFFER, gl_sys::DEPTH_ATTACHMENT, gl_sys::RENDERBUFFER, self.passes[pass_id].os.gl_bugfix_depthbuffer.unwrap());
             }*/
         }
 
         // HACK(eddyb) drain error queue, so that we can check erors below.
-        while unsafe { gl_sys::GetError() } != 0 {}
+        while unsafe { (gl.glGetError)() } != 0 {}
 
         unsafe {
             let (x, mut y) = (0, 0);
@@ -398,21 +411,21 @@ impl Cx {
                 }
             }
 
-            gl_sys::Viewport(x as i32, y as i32, width as i32, height as i32);
+            (gl.glViewport)(x as i32, y as i32, width as i32, height as i32);
             
-            assert_eq!(gl_sys::GetError(), 0, "glViewport({x}, {y}, {width}, {height}) failed");
+            assert_eq!((gl.glGetError)(), 0, "glViewport({x}, {y}, {width}, {height}) failed");
         }
 
         if clear_flags != 0 {
             unsafe {
                 if clear_flags & gl_sys::DEPTH_BUFFER_BIT != 0 {
-                    gl_sys::ClearDepthf(clear_depth);
+                    (gl.glClearDepthf)(clear_depth);
                 }
-                gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
-                gl_sys::Clear(clear_flags);
+                (gl.glClearColor)(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
+                (gl.glClear)(clear_flags);
             }
         }
-        Self::set_default_depth_and_blend_mode();
+        Self::set_default_depth_and_blend_mode(self.os.gl());
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
@@ -425,8 +438,8 @@ impl Cx {
         );
         
         unsafe {
-            gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
-            //gl_sys::Finish();
+            (self.os.gl().glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+            //(gl.glFinish)();
         }
     }
     
@@ -461,7 +474,7 @@ impl Cx {
                 }
                 
                 if cx_shader.os_shader_id.is_none() {
-                    let shp = CxOsDrawShader::new(&vertex, &pixel, &self.os_type);
+                    let shp = CxOsDrawShader::new(self.os.gl(), &vertex, &pixel, &self.os_type);
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
@@ -499,15 +512,15 @@ pub struct GlShader {
 }
 
 impl GlShader{
-    pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, os_type: &OsType)->Self{
+    pub fn new(gl: &LibGl, vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, os_type: &OsType)->Self{
         // On OpenHarmony, re-using cached shaders doesn't work properly yet.
         #[cfg(ohos_sim)]
-        unsafe fn read_cache(_vertex: &str, _pixel: &str, _os_type: &OsType) -> Option<gl_sys::GLuint> {
+        unsafe fn read_cache(_gl: &LibOpenGl, _vertex: &str, _pixel: &str, _os_type: &OsType) -> Option<gl_sys::GLuint> {
             None
         }
                 
         #[cfg(not(ohos_sim))]
-        unsafe fn read_cache(vertex: &str, pixel: &str, os_type: &OsType) -> Option<gl_sys::GLuint> {
+        unsafe fn read_cache(gl: &LibGl, vertex: &str, pixel: &str, os_type: &OsType) -> Option<gl_sys::GLuint> {
             if let Some(cache_dir) = os_type.get_cache_dir() {
                 let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
                 let mut base_filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
@@ -540,9 +553,9 @@ impl GlShader{
                                     };
                     
                                     if !version_consistency_conflict {
-                                        let program = gl_sys::CreateProgram();
-                                        gl_sys::ProgramBinary(program, binary_format, binary.as_ptr() as *const _, binary.len() as i32);
-                                        if let Some(error) = GlShader::opengl_has_shader_error(false, program as usize, "") {
+                                        let program = (gl.glCreateProgram)();
+                                        (gl.glProgramBinary)(program, binary_format, binary.as_ptr() as *const _, binary.len() as i32);
+                                        if let Some(error) = GlShader::opengl_has_shader_error(gl, false, program as usize, "") {
                                             crate::error!("ERROR::SHADER::CACHE::PROGRAM_BINARY_FAILED\n{}", error);
                                             return None;
                                         }
@@ -571,45 +584,45 @@ impl GlShader{
         }
         
         unsafe {
-            let program = if let Some(program) = read_cache(&vertex,&pixel,os_type){
+            let program = if let Some(program) = read_cache(gl, &vertex,&pixel,os_type){
                 program
             }
             else{ 
-                let vs = gl_sys::CreateShader(gl_sys::VERTEX_SHADER);
-                gl_sys::ShaderSource(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
-                gl_sys::CompileShader(vs);
+                let vs = (gl.glCreateShader)(gl_sys::VERTEX_SHADER);
+                (gl.glShaderSource)(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
+                (gl.glCompileShader)(vs);
                 //println!("{}", Self::opengl_get_info_log(true, vs as usize, &vertex));
-                if let Some(error) = Self::opengl_has_shader_error(true, vs as usize, &vertex) {
+                if let Some(error) = Self::opengl_has_shader_error(gl, true, vs as usize, &vertex) {
                     panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
                 }
-                let fs = gl_sys::CreateShader(gl_sys::FRAGMENT_SHADER);
-                gl_sys::ShaderSource(fs, 1, [pixel.as_ptr() as *const _].as_ptr(), ptr::null());
-                gl_sys::CompileShader(fs);
+                let fs = (gl.glCreateShader)(gl_sys::FRAGMENT_SHADER);
+                (gl.glShaderSource)(fs, 1, [pixel.as_ptr() as *const _].as_ptr(), ptr::null());
+                (gl.glCompileShader)(fs);
                 //println!("{}", Self::opengl_get_info_log(true, fs as usize, &fragment));
-                if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &pixel) {
+                if let Some(error) = Self::opengl_has_shader_error(gl, true, fs as usize, &pixel) {
                     panic!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
                 }
                 
-                let program = gl_sys::CreateProgram();
-                gl_sys::AttachShader(program, vs);
-                gl_sys::AttachShader(program, fs);
-                gl_sys::LinkProgram(program);
-                if let Some(error) = Self::opengl_has_shader_error(false, program as usize, "") {
+                let program = (gl.glCreateProgram)();
+                (gl.glAttachShader)(program, vs);
+                (gl.glAttachShader)(program, fs);
+                (gl.glLinkProgram)(program);
+                if let Some(error) = Self::opengl_has_shader_error(gl, false, program as usize, "") {
                     panic!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
                 }
-                gl_sys::DeleteShader(vs);
-                gl_sys::DeleteShader(fs);
+                (gl.glDeleteShader)(vs);
+                (gl.glDeleteShader)(fs);
             
                 #[cfg(not(ohos_sim))] // caching doesn't work properly on OpenHarmony
                 if let Some(cache_dir) = os_type.get_cache_dir() {
                     let mut binary = Vec::new();
                     let mut binary_len = 0;
-                    gl_sys::GetProgramiv(program, gl_sys::PROGRAM_BINARY_LENGTH, &mut binary_len);
+                    (gl.glGetProgramiv)(program, gl_sys::PROGRAM_BINARY_LENGTH, &mut binary_len);
                     if binary_len != 0 {
                         binary.resize(binary_len as usize, 0u8);
                         let mut return_size = 0i32;
                         let mut binary_format = 0u32;
-                        gl_sys::GetProgramBinary(program, binary.len() as i32, &mut return_size as *mut _, &mut binary_format as *mut _, binary.as_mut_ptr() as *mut _);
+                        (gl.glGetProgramBinary)(program, binary.len() as i32, &mut return_size as *mut _, &mut binary_format as *mut _, binary.as_mut_ptr() as *mut _);
                         if return_size != 0 {
                             // crate::log!("GOT FORMAT {}", format);
                             let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
@@ -645,15 +658,15 @@ impl GlShader{
 
             let t = Self{
                 program,
-                geometries:Self::opengl_get_attributes(program, "packed_geometry_", mapping.geometries.total_slots),
-                instances: Self::opengl_get_attributes(program, "packed_instance_", mapping.instances.total_slots),
-                textures: Self::opengl_get_texture_slots(program, &mapping.textures),
-                pass_uniforms: Self::opengl_get_uniform(program, "pass_table"),
-                view_uniforms: Self::opengl_get_uniform(program, "view_table"),
-                draw_uniforms: Self::opengl_get_uniform(program, "draw_table"),
-                user_uniforms: Self::opengl_get_uniform(program, "user_table"),
-                live_uniforms: Self::opengl_get_uniform(program, "live_table"),
-                const_table_uniform: Self::opengl_get_uniform(program, "const_table"),
+                geometries:Self::opengl_get_attributes(gl, program, "packed_geometry_", mapping.geometries.total_slots),
+                instances: Self::opengl_get_attributes(gl, program, "packed_instance_", mapping.instances.total_slots),
+                textures: Self::opengl_get_texture_slots(gl, program, &mapping.textures),
+                pass_uniforms: Self::opengl_get_uniform(gl, program, "pass_table"),
+                view_uniforms: Self::opengl_get_uniform(gl, program, "view_table"),
+                draw_uniforms: Self::opengl_get_uniform(gl, program, "draw_table"),
+                user_uniforms: Self::opengl_get_uniform(gl, program, "user_table"),
+                live_uniforms: Self::opengl_get_uniform(gl, program, "live_table"),
+                const_table_uniform: Self::opengl_get_uniform(gl, program, "const_table"),
             };
             // crate::error!("GlShader: {:#?}", t);
             // for tex in &t.textures {
@@ -665,18 +678,18 @@ impl GlShader{
     }
 
     
-    pub fn set_uniform_array(loc: &OpenglUniform, array: &[f32]) {
+    pub fn set_uniform_array(gl: &LibGl, loc: &OpenglUniform, array: &[f32]) {
         unsafe {
-            gl_sys::Uniform1fv(loc.loc as i32, array.len() as i32, array.as_ptr());
+            (gl.glUniform1fv)(loc.loc as i32, array.len() as i32, array.as_ptr());
         }
     }
     
-    pub fn opengl_get_uniform(program: u32, name: &str) -> OpenglUniform {
+    pub fn opengl_get_uniform(gl: &LibGl, program: u32, name: &str) -> OpenglUniform {
         let mut name0 = String::new();
         name0.push_str(name);
         name0.push_str("\0");
         unsafe {
-            let loc = gl_sys::GetUniformLocation(program, name0.as_ptr().cast());
+            let loc = (gl.glGetUniformLocation)(program, name0.as_ptr().cast());
             OpenglUniform {
                 loc,
                 //name: name.to_string(),
@@ -684,19 +697,19 @@ impl GlShader{
         }
     }
     
-    pub fn opengl_get_info_log(compile: bool, shader: usize, source: &str) -> String {
+    pub fn opengl_get_info_log(gl: &LibGl, compile: bool, shader: usize, source: &str) -> String {
         unsafe {
             let mut length = 0;
             if compile {
-                gl_sys::GetShaderiv(shader as u32, gl_sys::INFO_LOG_LENGTH, &mut length);
+                (gl.glGetShaderiv)(shader as u32, gl_sys::INFO_LOG_LENGTH, &mut length);
             } else {
-                gl_sys::GetProgramiv(shader as u32, gl_sys::INFO_LOG_LENGTH, &mut length);
+                (gl.glGetProgramiv)(shader as u32, gl_sys::INFO_LOG_LENGTH, &mut length);
             }
             let mut log = Vec::with_capacity(length as usize);
             if compile {
-                gl_sys::GetShaderInfoLog(shader as u32, length, ptr::null_mut(), log.as_mut_ptr());
+                (gl.glGetShaderInfoLog)(shader as u32, length, ptr::null_mut(), log.as_mut_ptr());
             } else {
-                gl_sys::GetProgramInfoLog(shader as u32, length, ptr::null_mut(), log.as_mut_ptr());
+                (gl.glGetProgramInfoLog)(shader as u32, length, ptr::null_mut(), log.as_mut_ptr());
             }
             log.set_len(length as usize);
             let mut r = "".to_string();
@@ -713,21 +726,21 @@ impl GlShader{
         }
     }
     
-    pub fn opengl_has_shader_error(compile: bool, shader: usize, source: &str) -> Option<String> {
+    pub fn opengl_has_shader_error(gl: &LibGl, compile: bool, shader: usize, source: &str) -> Option<String> {
         //None
         unsafe {
             
             let mut success = gl_sys::TRUE as i32;
             
             if compile {
-                gl_sys::GetShaderiv(shader as u32, gl_sys::COMPILE_STATUS, &mut success);
+                (gl.glGetShaderiv)(shader as u32, gl_sys::COMPILE_STATUS, &mut success);
             }
             else {
-                gl_sys::GetProgramiv(shader as u32, gl_sys::LINK_STATUS, &mut success);
+                (gl.glGetProgramiv)(shader as u32, gl_sys::LINK_STATUS, &mut success);
             };
             
             if success != gl_sys::TRUE as i32 {
-                Some(Self::opengl_get_info_log(compile, shader, source))
+                Some(Self::opengl_get_info_log(gl, compile, shader, source))
             }
             else {
                 None
@@ -735,7 +748,7 @@ impl GlShader{
         }
     }
     
-    pub fn opengl_get_attributes(program: u32, prefix: &str, slots: usize) -> Vec<OpenglAttribute> {
+    pub fn opengl_get_attributes(gl: &LibGl, program: u32, prefix: &str, slots: usize) -> Vec<OpenglAttribute> {
         let mut attribs = Vec::new();
         
         fn ceil_div4(base: usize) -> usize {
@@ -761,7 +774,7 @@ impl GlShader{
                 attribs.push(
                     OpenglAttribute {
                         loc: {
-                            let loc = gl_sys::GetAttribLocation(program, name0.as_ptr() as *const _) as u32;
+                            let loc = (gl.glGetAttribLocation)(program, name0.as_ptr() as *const _) as u32;
                             loc
                         },
                         offset: (i * 4 * mem::size_of::<f32>()) as usize,
@@ -775,7 +788,7 @@ impl GlShader{
     }
     
     
-    pub fn opengl_get_texture_slots(program: u32, texture_slots: &Vec<DrawShaderTextureInput>) -> Vec<OpenglUniform> {
+    pub fn opengl_get_texture_slots(gl: &LibGl, program: u32, texture_slots: &Vec<DrawShaderTextureInput>) -> Vec<OpenglUniform> {
         let mut gl_texture_slots = Vec::new();
         
         for slot in texture_slots {
@@ -783,7 +796,7 @@ impl GlShader{
             name0.push_str(&slot.id.to_string());
             name0.push_str("\0");
             unsafe {
-                let loc = gl_sys::GetUniformLocation(program, name0.as_ptr().cast());
+                let loc = (gl.glGetUniformLocation)(program, name0.as_ptr().cast());
                 // crate::warning!("opengl_get_texture_slots(): texture slot: ({:?}, {:?}), name0: {:X?}, loc: {loc:#X}", slot.id, slot.ty, name0.as_bytes());
                 gl_texture_slots.push(OpenglUniform { loc });
             }
@@ -791,17 +804,17 @@ impl GlShader{
         gl_texture_slots
     }
 
-    pub fn free_resources(self){
+    pub fn free_resources(self, gl: &LibGl){
         unsafe{
-            gl_sys::DeleteShader(self.program);
+            (gl.glDeleteShader)(self.program);
         }
     }
 }
 
 impl CxOsDrawShader {
-    pub fn new(vertex: &str, pixel: &str, os_type: &OsType) -> Self {
+    pub fn new(gl:&LibGl, vertex: &str, pixel: &str, os_type: &OsType) -> Self {
         // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
-        let available_extensions = get_gl_string(gl_sys::EXTENSIONS);
+        let available_extensions = get_gl_string(gl, gl_sys::EXTENSIONS);
         let is_external_texture_supported = available_extensions.split_whitespace().any(|ext| ext == "GL_OES_EGL_image_external");
 
         let mut maybe_ext_tex_extension_import = String::new();
@@ -818,7 +831,7 @@ impl CxOsDrawShader {
         // Some Android devices running Adreno GPUs suddenly stopped compiling shaders when passing the samplerExternalOES sampler to texture2D functions. 
         // This seems like a driver bug (no confirmation from Qualcomm yet).
         // Therefore we're disabling the external texture support for Adreno until this is fixed.
-        let is_vendor_adreno = get_gl_string(gl_sys::RENDERER).contains("Adreno"); 
+        let is_vendor_adreno = get_gl_string(gl, gl_sys::RENDERER).contains("Adreno"); 
         if is_external_texture_supported && !is_vendor_adreno && !is_emulator {
             maybe_ext_tex_extension_import = "#extension GL_OES_EGL_image_external : require\n".to_string();
             maybe_ext_tex_extension_sampler = "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture2D(sampler, vec2(pos.x, pos.y));}}".to_string();
@@ -868,17 +881,17 @@ impl CxOsDrawShader {
         }
     }
 
-    pub fn free_resources(&mut self){
+    pub fn free_resources(&mut self, gl: &LibGl){
         if let Some(gl_shader) = self.gl_shader.take(){
-            gl_shader.free_resources();
+            gl_shader.free_resources(gl);
         }
     }
 }
 
 
-fn get_gl_string(key: gl_sys::types::GLenum) -> String {
+fn get_gl_string(gl: &LibGl, key: gl_sys::GLenum) -> String {
     unsafe {
-        let string_ptr = gl_sys::GetString(key) as *const c_char;
+        let string_ptr = (gl.glGetString)(key) as *const c_char;
         if string_ptr == ptr::null(){
             return String::new()
         }
@@ -908,9 +921,9 @@ pub struct CxOsGeometry {
 }
 
 impl CxOsGeometry{
-    pub fn free_resources(&mut self){
-        self.vb.free_resources();
-        self.ib.free_resources();
+    pub fn free_resources(&mut self, gl:&LibGl){
+        self.vb.free_resources(gl);
+        self.ib.free_resources(gl);
     }
 }
     
@@ -936,9 +949,9 @@ pub struct CxOsDrawCallVao {
 }
 
 impl CxOsDrawCallVao {
-    pub fn free(self){
+    pub fn free(self, gl: &LibGl){
         if let Some(vao) = self.vao{
-            unsafe{gl_sys::DeleteVertexArrays(1, &vao)};
+            unsafe{(gl.glDeleteVertexArrays)(1, &vao)};
         }
     }    
 }
@@ -950,10 +963,10 @@ pub struct CxOsDrawCall {
 }
 
 impl CxOsDrawCall {
-    pub fn free_resources(&mut self){
-        self.inst_vb.free_resources();
+    pub fn free_resources(&mut self, gl:&LibGl){
+        self.inst_vb.free_resources(gl);
         if let Some(vao) = self.vao.take(){
-            vao.free();
+            vao.free(gl);
         }
     }    
 }
@@ -981,7 +994,7 @@ impl CxTexture {
     ///
     /// Note: This method assumes that the texture format doesn't change between updates. 
     /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
-    pub fn update_vec_texture(&mut self, _os_type: &OsType) {
+    pub fn update_vec_texture(&mut self, gl: &LibGl, _os_type: &OsType) {
         let mut needs_realloc = false;
         if self.alloc_vec() {
             if let Some(previous) = self.previous_platform_resource.take() {
@@ -990,7 +1003,7 @@ impl CxTexture {
             if self.os.gl_texture.is_none() {
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
-                    gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                    (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                     self.os.gl_texture = Some(gl_texture.assume_init());
                 }
             }
@@ -1003,9 +1016,9 @@ impl CxTexture {
         }
         
         unsafe {
-            gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
     
             // Set texture parameters based on the format
             let (width, height, internal_format, format, data_type, data, bytes_per_pixel, use_mipmaps) = match &mut self.format {
@@ -1033,16 +1046,16 @@ impl CxTexture {
                 TextureFormat::VecRGBAf32{width, height, data, ..} => 
                     (*width, *height, gl_sys::RGBA, gl_sys::RGBA, gl_sys::FLOAT, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 16, false),
                 TextureFormat::VecRu8{width, height, data, unpack_row_length, ..} => {
-                    //gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                    //(gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
-                        gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
                     }
                     (*width, *height, gl_sys::R8, gl_sys::RED, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 1, false)
                 },
                 TextureFormat::VecRGu8{width, height, data, unpack_row_length, ..} => {
-                    //gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, 1);
+                    //(gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 1);
                     if let Some(row_length) = unpack_row_length {
-                        gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
                     }
                     (*width, *height, gl_sys::RG, gl_sys::RG, gl_sys::UNSIGNED_BYTE, data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void, 2, false)
                 },
@@ -1057,7 +1070,7 @@ impl CxTexture {
             match updated {
                 TextureUpdated::Partial(rect) if DO_PARTIAL_TEXTURE_UPDATES => {
                     if needs_realloc {
-                        gl_sys::TexImage2D(
+                        (gl.glTexImage2D)(
                             gl_sys::TEXTURE_2D,
                             0,
                             internal_format as i32,
@@ -1070,11 +1083,11 @@ impl CxTexture {
                         );
                     }
 
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS,rect.origin.y as i32);
-                    gl_sys::TexSubImage2D(
+                    (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                    (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
+                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS,rect.origin.y as i32);
+                    (gl.glTexSubImage2D)(
                         gl_sys::TEXTURE_2D,
                         0,
                         rect.origin.x as i32,
@@ -1088,11 +1101,11 @@ impl CxTexture {
                 },
                 // Note: this `Partial(_)` case will only match if `DO_PARTIAL_TEXTURE_UPDATES` is false.
                 TextureUpdated::Partial(_) | TextureUpdated::Full => {
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_ROW_LENGTH, width as _);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_PIXELS, 0);
-                    gl_sys::PixelStorei(gl_sys::UNPACK_SKIP_ROWS, 0);
-                    gl_sys::TexImage2D(
+                    (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                    (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
+                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
+                    (gl.glTexImage2D)(
                         gl_sys::TEXTURE_2D,
                         0,
                         internal_format as i32,
@@ -1106,30 +1119,30 @@ impl CxTexture {
                 TextureUpdated::Empty => panic!("already asserted that updated is not empty"),
             };
     
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, if use_mipmaps { gl_sys::LINEAR_MIPMAP_LINEAR } else { gl_sys::LINEAR } as i32);
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, if use_mipmaps { gl_sys::LINEAR_MIPMAP_LINEAR } else { gl_sys::LINEAR } as i32);
+            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
 
             if use_mipmaps {
                 if let TextureFormat::VecMipBGRAu8_32{max_level, ..} = &self.format {
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, max_level.unwrap_or(1000) as i32);
-                    gl_sys::GenerateMipmap(gl_sys::TEXTURE_2D);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_BASE_LEVEL, 0);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, max_level.unwrap_or(1000) as i32);
+                    (gl.glGenerateMipmap)(gl_sys::TEXTURE_2D);
                 }
             }
 
-            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
         }
     }
     
-    pub fn setup_video_texture(&mut self) -> bool {
-        while unsafe { gl_sys::GetError() } != 0 {}
+    pub fn setup_video_texture(&mut self, gl: &LibGl) -> bool {
+        while unsafe { (gl.glGetError)() } != 0 {}
 
         if self.alloc_video() {
-            self.free_previous_resources();
+            self.free_previous_resources(gl);
             if self.os.gl_texture.is_none() { 
                 unsafe {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
-                    gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                    (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                     self.os.gl_texture = Some(gl_texture.assume_init());
                 }
             }
@@ -1137,46 +1150,46 @@ impl CxTexture {
         if self.take_initial() {
             unsafe{
                                 
-                let gpu_renderer = get_gl_string(gl_sys::RENDERER);
+                let gpu_renderer = get_gl_string(gl, gl_sys::RENDERER);
                 if gpu_renderer.contains("Adreno") {
                     crate::warning!("WARNING: This device is using {gpu_renderer} renderer.
                     OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
                     This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
                 }
                 
-                gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, self.os.gl_texture.unwrap());
+                (gl.glBindTexture)(gl_sys::TEXTURE_EXTERNAL_OES, self.os.gl_texture.unwrap());
         
-                gl_sys::TexParameteri(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
-                gl_sys::TexParameteri(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
 
-                gl_sys::TexParameteri(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                gl_sys::TexParameteri(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_EXTERNAL_OES, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
         
-                gl_sys::BindTexture(gl_sys::TEXTURE_EXTERNAL_OES, 0);
+                (gl.glBindTexture)(gl_sys::TEXTURE_EXTERNAL_OES, 0);
 
-                assert_eq!(gl_sys::GetError(), 0, "UPDATE VIDEO TEXTURE ERROR {}", self.os.gl_texture.unwrap());
+                assert_eq!((gl.glGetError)(), 0, "UPDATE VIDEO TEXTURE ERROR {}", self.os.gl_texture.unwrap());
             }
             return true;
         }
         false
     }
     
-    pub fn update_render_target(&mut self, width: usize, height: usize) {
+    pub fn update_render_target(&mut self, gl: &LibGl, width: usize, height: usize) {
         if self.alloc_render(width, height){
             let alloc = self.alloc.as_ref().unwrap();
             if self.os.gl_texture.is_none() {
                 let mut gl_texture = std::mem::MaybeUninit::uninit();
                 unsafe{
-                    gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                    (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                     self.os.gl_texture = Some(gl_texture.assume_init());
                 }
             }
-            unsafe{gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap())};
+            unsafe{(gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap())};
             match &alloc.pixel {
                 TexturePixel::BGRAu8 => unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexImage2D(
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    (gl.glTexImage2D)(
                         gl_sys::TEXTURE_2D,
                         0,
                         gl_sys::RGBA as i32,
@@ -1189,9 +1202,9 @@ impl CxTexture {
                     );
                 },
                 TexturePixel::RGBAf16 => unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexImage2D(
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    (gl.glTexImage2D)(
                         gl_sys::TEXTURE_2D,
                         0,
                         gl_sys::RGBA as i32,
@@ -1204,9 +1217,9 @@ impl CxTexture {
                     );
                 }
                 TexturePixel::RGBAf32 => unsafe{
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
-                    gl_sys::TexImage2D(
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    (gl.glTexImage2D)(
                         gl_sys::TEXTURE_2D,
                         0,
                         gl_sys::RGBA as i32,
@@ -1221,13 +1234,14 @@ impl CxTexture {
                 _ => panic!()
             }
             unsafe{
-                gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
             }
         }
     }
     
     fn update_depth_stencil(
         &mut self,
+        gl: &LibGl,
         width: usize,
         height: usize
     ) {
@@ -1238,19 +1252,19 @@ impl CxTexture {
                 TexturePixel::D32 => unsafe{
                     if self.os.gl_renderbuffer.is_none() {
                         let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
-                        gl_sys::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
+                        (gl.glGenRenderbuffers)(1, gl_renderbuf.as_mut_ptr());
                         let gl_renderbuffer = gl_renderbuf.assume_init();
                         self.os.gl_renderbuffer = Some(gl_renderbuffer);
                     }
                         
-                    gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, self.os.gl_renderbuffer.unwrap());
-                    gl_sys::RenderbufferStorage(
+                    (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, self.os.gl_renderbuffer.unwrap());
+                    (gl.glRenderbufferStorage)(
                         gl_sys::RENDERBUFFER,
                         gl_sys::DEPTH_COMPONENT32F,
                         width as i32,
                         height as i32
                     );
-                    gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, 0);
+                    (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, 0);
                 },
                 _ => {
                     println!("update_platform_render_targete unsupported texture format");
@@ -1259,14 +1273,14 @@ impl CxTexture {
         }
     }
     
-    pub fn free_previous_resources(&mut self){
+    pub fn free_previous_resources(&mut self, gl: &LibGl){
         if let Some(mut old_os) = self.previous_platform_resource.take(){
             if let Some(gl_texture) = old_os.gl_texture.take(){
-                unsafe{gl_sys::DeleteTextures(1, &gl_texture)};
+                unsafe{(gl.glDeleteTextures)(1, &gl_texture)};
                 crate::log!("Deleted texture: {}", gl_texture);
             }
             if let Some(gl_renderbuffer) = old_os.gl_renderbuffer.take(){
-                unsafe{gl_sys::DeleteRenderbuffers(1, &gl_renderbuffer)};
+                unsafe{(gl.glDeleteRenderbuffers)(1, &gl_renderbuffer)};
             }
         }
     }
@@ -1279,9 +1293,9 @@ pub struct CxOsPass {
 
 impl CxOsPass{
     
-    pub fn free_resources(&mut self){
+    pub fn free_resources(&mut self, gl: &LibGl){
         if let Some(gl_framebuffer) = self.gl_framebuffer.take(){
-            unsafe{gl_sys::DeleteFramebuffers(1, &gl_framebuffer)};
+            unsafe{(gl.glDeleteFramebuffers)(1, &gl_framebuffer)};
         }
     }    
 }
@@ -1293,47 +1307,47 @@ pub struct OpenglBuffer {
 
 impl OpenglBuffer {
     
-    pub fn alloc_gl_buffer(&mut self) {
+    pub fn alloc_gl_buffer(&mut self, gl: &LibGl) {
         unsafe {
             let mut gl_buffer = std::mem::MaybeUninit::uninit();
-            gl_sys::GenBuffers(1, gl_buffer.as_mut_ptr());
+            (gl.glGenBuffers)(1, gl_buffer.as_mut_ptr());
             self.gl_buffer = Some(gl_buffer.assume_init());
         }
     }
     
-    pub fn update_with_f32_data(&mut self, data: &Vec<f32>) {
+    pub fn update_with_f32_data(&mut self, gl: &LibGl, data: &Vec<f32>) {
         if self.gl_buffer.is_none() {
-            self.alloc_gl_buffer();
+            self.alloc_gl_buffer(gl);
         }
         unsafe {
-            gl_sys::BindBuffer(gl_sys::ARRAY_BUFFER, self.gl_buffer.unwrap());
-            gl_sys::BufferData(
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, self.gl_buffer.unwrap());
+            (gl.glBufferData)(
                 gl_sys::ARRAY_BUFFER,
-                (data.len() * mem::size_of::<f32>()) as gl_sys::types::GLsizeiptr,
+                (data.len() * mem::size_of::<f32>()) as gl_sys::GLsizeiptr,
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW
             );
         }
     }
     
-    pub fn update_with_u32_data(&mut self, data: &Vec<u32>) {
+    pub fn update_with_u32_data(&mut self, gl: &LibGl, data: &Vec<u32>) {
         if self.gl_buffer.is_none() {
-            self.alloc_gl_buffer();
+            self.alloc_gl_buffer(gl);
         }
         unsafe {
-            gl_sys::BindBuffer(gl_sys::ELEMENT_ARRAY_BUFFER, self.gl_buffer.unwrap());
-            gl_sys::BufferData(
+            (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, self.gl_buffer.unwrap());
+            (gl.glBufferData)(
                 gl_sys::ELEMENT_ARRAY_BUFFER,
-                (data.len() * mem::size_of::<u32>()) as gl_sys::types::GLsizeiptr,
+                (data.len() * mem::size_of::<u32>()) as gl_sys::GLsizeiptr,
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW
             );
         }
     }
     
-    pub fn free_resources(&mut self){
+    pub fn free_resources(&mut self, gl: &LibGl){
         if let Some(gl_buffer) = self.gl_buffer.take(){
-            unsafe{gl_sys::DeleteBuffers(1, &gl_buffer)};
+            unsafe{(gl.glDeleteBuffers)(1, &gl_buffer)};
         }
     }
 
