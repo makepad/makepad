@@ -216,19 +216,24 @@ impl PlistValues{
                 <key>DTPlatformName</key>
                 <string>iphoneos</string>
                 <key>DTPlatformVersion</key>
-                <string>18.0</string>
+                <string>17.5</string>
                 <key>DTSDKBuild</key>
                 <string>22A3362</string>
                 <key>DTSDKName</key>
-                <string>iphoneos18.0</string>
+                <string>iphoneos17.5</string>
                 <key>DTXcode</key>
                 <string>1600</string>
                 <key>DTXcodeBuild</key>
                 <string>16A242d</string>
+                <key>LSEnvironment</key>
+                <dict>
+                    <key>RUST_BACKTRACE</key>
+                    <string>1</string>
+                </dict>
                 <key>LSRequiresIPhoneOS</key>
                 <true/>
                 <key>MinimumOSVersion</key>
-                <string>18.0</string>
+                <string>17.5</string>
                 <key>UIApplicationSupportsIndirectInputEvents</key>
                 <true/>
                 <key>UIDeviceFamily</key>
@@ -396,7 +401,15 @@ pub fn build(stable:bool, org: &str, product: &str, args: &[String], apple_targe
         args_out.push("build-std=std");
     }
     
-    shell_env(if stable{&[("MAKEPAD", "")]}else{&[("MAKEPAD", "lines")]}, &cwd, "rustup", &args_out) ?;
+    shell_env(
+        &[
+            ("RUST_BACKTRACE", "1"),
+            ("MAKEPAD", if stable {""} else {"lines"}),
+        ],
+        &cwd,
+        "rustup",
+        &args_out,
+    ) ?;
     
     // alright lets make the .app file with manifest
     let plist = PlistValues {
