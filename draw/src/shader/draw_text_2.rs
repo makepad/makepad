@@ -58,7 +58,8 @@ live_design! {
 
         fn sdf(self, scale: float, p: vec2) -> float {
             let s = sample2d(self.grayscale_texture, p).x;
-            s = clamp((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5, 0.0, 1.0)*1.05;
+            // 1.1 factor to compensate for text being magically too dark after the fontstack refactor
+            s = clamp(((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5)*1.1, 0.0, 1.0);
             return s;
         }
 
