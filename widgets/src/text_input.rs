@@ -1013,6 +1013,12 @@ impl Widget for TextInput {
 
         let uid = self.widget_uid();
         match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            }
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, id!(focus.on));
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
