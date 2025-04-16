@@ -1,10 +1,12 @@
 use{
     crate::{
         os::{
-            linux::openxr_sys::*,
-            linux::android::android::CxAndroidDisplay,
-            linux::gl_sys,
-            linux::android::android_jni::*
+            linux::{
+                openxr_sys::*,
+                android::android::CxAndroidDisplay,
+                gl_sys,
+                android::android_jni::*
+            }
         },
         texture::{Texture,TextureFormat},
         cx::{Cx},
@@ -38,6 +40,8 @@ pub struct CxAndroidOpenXrFrame{
 pub struct CxAndroidOpenXrSession{
     pub color_images: Vec<XrSwapchainImageOpenGLESKHR>,
     pub depth_images: Vec<XrSwapchainImageOpenGLESKHR>,
+    pub gl_depth_textures: Vec<u32>,
+    pub gl_frame_buffers: Vec<u32>,
     pub color_swap_chain: XrSwapchain,
     pub depth_swap_chain: XrEnvironmentDepthSwapchainMETA,
     pub depth_provider: XrEnvironmentDepthProviderMETA,
@@ -85,7 +89,6 @@ impl Cx{
         }
         false
     }
-    
         
     pub(crate) fn handle_xr_events(&mut self){
         let openxr = &mut self.os.openxr;
@@ -236,7 +239,6 @@ impl CxAndroidOpenXr{
         unsafe{(openxr.xrGetSystemProperties)(instance, sys_id, &mut sys_props)}.to_result("xrGetSystemProperties")?;
         
         /*crate::log!("OpenXR System props name:{} vendor_id:{}",xr_string(&sys_props.system_name), sys_props.vendor_id);*/
-        
         /*
         crate::log!(
             "OpenXR System graphics max_width:{}, max_height:{}, max_layer:{}",
@@ -446,11 +448,58 @@ impl CxAndroidOpenXr{
             )}.to_result("xrEnumerateEnvironmentDepthSwapchainImagesMETA")
         })?;
         
+        let swap_chain_len = color_images.len();
+        let mut gl_depth_textures = vec![0;swap_chain_len];
+        let mut gl_frame_buffers = vec![0;swap_chain_len];
+        let gl = &display.libgl;
+                                
+        for i in 0..swap_chain_len{
+            // alright so 
+            let color_texture = color_images[i].image;
+            unsafe{
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, color_texture);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_BORDER as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_BORDER as i32);
+                let border_color = [0f32;4];
+                (gl.glTexParameterfv)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_BORDER_COLOR, border_color.as_ptr() as * const _);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, 0);
+                                    
+                // generate depth buffer
+                (gl.glGenTextures)(1, &mut gl_depth_textures[i]);
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, gl_depth_textures[i]);
+                (gl.glTexStorage3D)(gl_sys::TEXTURE_2D_ARRAY, 1, gl_sys::DEPTH_COMPONENT24, width as i32, height as i32, 2);
+                
+                (gl.glGenFramebuffers)(1, &mut gl_frame_buffers[i]);
+                (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, gl_frame_buffers[i]);
+                (gl.glFramebufferTextureMultiviewOVR.unwrap())(
+                    gl_sys::DRAW_FRAMEBUFFER,
+                    gl_sys::DEPTH_ATTACHMENT,
+                    gl_depth_textures[i],
+                    0,
+                    0,
+                    2
+                );
+                (gl.glFramebufferTextureMultiviewOVR.unwrap())(
+                    gl_sys::DRAW_FRAMEBUFFER,
+                    gl_sys::COLOR_ATTACHMENT0,
+                    color_texture,
+                    0,
+                    0,
+                    2
+                );
+                (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, 0);
+            }
+        }
+        
         self.session = Some(CxAndroidOpenXrSession{
             color_images,
             depth_images,
             color_swap_chain,
             depth_swap_chain,
+            gl_depth_textures,
+            gl_frame_buffers,
             depth_provider,
             passthrough,
             passthrough_layer,
