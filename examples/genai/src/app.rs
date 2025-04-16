@@ -1302,7 +1302,7 @@ impl MatchEvent for App {
                                         let val = val.strip_prefix("assistant").unwrap_or(val);
                                         let val = val.to_string().replace("\"","");
                                         let val = val.trim();
-                                        self.ui.text_input(id!(prompt_input)).set_text(cx, val);
+                                        self.ui.text_input(id!(prompt_input)).set_text(cx, val.to_string());
                                         self.llm_chat.push((LLMMsg::AI,val.into()));
                                         self.ui.widget(id!(llm_chat)).redraw(cx);
                                     }
