@@ -217,7 +217,7 @@ impl Cx {
         
         unsafe {
             direct_app.egl.make_current();
-            gl_sys::Viewport(0, 0, direct_app.drm.width as i32, direct_app.drm.height as i32);
+            (gl.glViewport)(0, 0, direct_app.drm.width as i32, direct_app.drm.height as i32);
         }
         
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -236,10 +236,10 @@ impl Cx {
         
         if !self.passes[pass_id].dont_clear {
             unsafe {
-                gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
-                gl_sys::ClearDepthf(clear_depth as f32);
-                gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
-                gl_sys::Clear(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
+                (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+                (gl.glClearDepthf)(clear_depth as f32);
+                (gl.glClearColor)(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
+                (gl.glClear)(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             }
         }
         Self::set_default_depth_and_blend_mode();

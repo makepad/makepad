@@ -1,5 +1,6 @@
 use {
     self::super::{
+        super::gl_sys::LibGl,
         super::gl_sys, arkts_obj_ref::ArkTsObjRef, oh_callbacks::*, oh_media::CxOpenHarmonyMedia,
         raw_file::RawFileMgr,
     },
@@ -344,13 +345,17 @@ impl Cx {
             let (egl_context, egl_config, egl_display) = unsafe {
                 egl_sys::create_egl_context(&mut libegl).expect("Can't create EGL context")
             };
-            unsafe {
-                gl_sys::load_with(|s| {
-                    let s = CString::new(s).unwrap();
-                    libegl.eglGetProcAddress.unwrap()(s.as_ptr())
-                })
-            };
-
+            let libgl = LibGl::try_load(| s | {
+                for s in s{
+                    let s = CString::new(*s).unwrap();
+                    let p = unsafe{libegl.eglGetProcAddress.unwrap()(s.as_ptr())};
+                    if !p.is_null(){
+                        return p
+                    }
+                }
+                0 as _
+            }).expect("Cant load openGL functions");
+            
             let win_attr = vec![EGL_NONE];
             let surface = unsafe {
                 (libegl.eglCreateWindowSurface.unwrap())(
@@ -381,6 +386,7 @@ impl Cx {
 
             cx.os.display = Some(CxOhosDisplay {
                 libegl,
+                libgl,
                 egl_display,
                 egl_config,
                 egl_context,
@@ -418,10 +424,10 @@ impl Cx {
 
         // keep repainting in a loop
         //self.passes[pass_id].paint_dirty = false;
-
+        let gl = self.os.gl();
         unsafe {
             //direct_app.egl.make_current();
-            gl_sys::Viewport(
+            (gl.glViewport)(
                 0,
                 0,
                 self.os.display_size.x as i32,
@@ -444,13 +450,13 @@ impl Cx {
 
         if !self.passes[pass_id].dont_clear {
             unsafe {
-                gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
-                gl_sys::ClearDepthf(clear_depth as f32);
-                gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
-                gl_sys::Clear(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
+                (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+                (gl.glClearDepthf)(clear_depth as f32);
+                (gl.glClearColor)(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
+                (gl.glClear)(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             }
         }
-        Self::set_default_depth_and_blend_mode();
+        Self::set_default_depth_and_blend_mode(self.os.gl());
 
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
@@ -475,10 +481,10 @@ impl Cx {
                     self.draw_pass_to_fullscreen(*pass_id);
                 }
                 CxPassParent::Pass(_) => {
-                    self.draw_pass_to_magic_texture(*pass_id);
+                    self.draw_pass_to_texture(*pass_id, None);
                 }
                 CxPassParent::None => {
-                    self.draw_pass_to_magic_texture(*pass_id);
+                    self.draw_pass_to_texture(*pass_id, None);
                 }
             }
         }
@@ -571,6 +577,7 @@ impl CxOsApi for Cx {
 
 pub struct CxOhosDisplay {
     pub libegl: LibEgl,
+    pub libgl: LibGl,
     pub egl_display: egl_sys::EGLDisplay,
     pub egl_config: egl_sys::EGLConfig,
     pub egl_context: egl_sys::EGLContext,
@@ -589,6 +596,12 @@ pub struct CxOs {
     pub arkts_obj: Option<ArkTsObjRef>,
     pub(crate) start_time: Instant,
     pub(crate) display: Option<CxOhosDisplay>,
+}
+
+impl CxOs{
+    pub (crate) fn gl(&self)->&LibGl{
+        &self.display.as_ref().unwrap().libgl
+    }
 }
 
 impl Default for CxOs {
