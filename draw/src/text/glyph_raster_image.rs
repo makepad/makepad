@@ -34,7 +34,7 @@ impl<'a> GlyphRasterImage<'a> {
         Size::new(size.width as f32, size.height as f32)
     }
 
-    pub fn bounds_in_pxs(&self) -> Rect<f32> {
+    pub fn bounds_in_dpxs(&self) -> Rect<f32> {
         Rect::new(self.origin_in_dpxs(), self.size_in_dpxs())
     }
 
