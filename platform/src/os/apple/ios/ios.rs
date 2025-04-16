@@ -182,6 +182,9 @@ impl Cx {
                 let e = if let Event::TouchUpdate(e) = e{e}else{panic!()};
                 self.fingers.process_touch_update_end(&e.touches);
             }
+            IosEvent::LongPress(e) => {
+                self.call_event_handler(&Event::LongPress(e.into()));
+            }
             IosEvent::MouseDown(e) => {
                 self.fingers.process_tap_count(
                     e.abs,
