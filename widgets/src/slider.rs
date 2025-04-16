@@ -64,8 +64,16 @@ live_design!{
                 sdf.rect(0, self.rect_size.y - slider_height * 1.25, self.rect_size.x, slider_height)
                 sdf.fill(
                     mix(
-                        mix(self.border_color_2, self.border_color_2_focus, self.focus),
-                        mix(self.border_color_2_hover, self.border_color_2_drag, self.drag),
+                        mix(
+                            self.border_color_2,
+                            self.border_color_2_focus,
+                            self.focus
+                        ),
+                        mix(
+                            self.border_color_2_hover,
+                            self.border_color_2_drag,
+                            self.drag
+                        ),
                         self.hover
                     )
                 );
@@ -146,7 +154,7 @@ live_design!{
         }
             
         text_input: <TextInput> {
-            empty_message: "0",
+            empty_text: "0",
             is_numeric_only: true,
             is_read_only: false,
 
@@ -188,7 +196,7 @@ live_design!{
 
             draw_cursor: { color: (THEME_COLOR_TEXT_CURSOR) }
 
-            draw_highlight: {
+            draw_selection: {
                 border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
 
                 color: (THEME_COLOR_D_HIDDEN)
@@ -284,12 +292,12 @@ live_design!{
             uniform handle_color_2_focus: (THEME_COLOR_SLIDER_HANDLE_2)
             uniform handle_color_2_drag: (THEME_COLOR_SLIDER_HANDLE_2)
 
-            uniform border_color_1: (THEME_COLOR)
+            uniform border_color_1: (THEME_COLOR_OUTSET)
             uniform border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform border_color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
             uniform border_color_1_drag: (THEME_COLOR_OUTSET_DRAG)
 
-            uniform border_color_2: (THEME_COLOR)
+            uniform border_color_2: (THEME_COLOR_OUTSET)
             uniform border_color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform border_color_2_focus: (THEME_COLOR_OUTSET_FOCUS)
             uniform border_color_2_drag: (THEME_COLOR_OUTSET_DRAG)
@@ -533,12 +541,12 @@ live_design!{
             handle_color_2_focus: (THEME_COLOR_SLIDER_HANDLE_FOCUS)
             handle_color_2_drag: (THEME_COLOR_SLIDER_HANDLE_DRAG)
 
-            border_color_1: (THEME_COLOR)
+            border_color_1: (THEME_COLOR_OUTSET)
             border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             border_color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
             border_color_1_drag: (THEME_COLOR_OUTSET_DRAG)
 
-            border_color_2: (THEME_COLOR)
+            border_color_2: (THEME_COLOR_OUTSET)
             border_color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             border_color_2_focus: (THEME_COLOR_OUTSET_FOCUS)
             border_color_2_drag: (THEME_COLOR_OUTSET_DRAG)
@@ -850,7 +858,7 @@ live_design!{
             uniform color_2_focus: (THEME_COLOR_INSET_2)
             uniform color_2_drag: (THEME_COLOR_INSET_2)
 
-            uniform border_color_1: (THEME_COLOR)
+            uniform border_color_1: (THEME_COLOR_OUTSET)
             uniform border_color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform border_color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
             uniform border_color_1_drag: (THEME_COLOR_OUTSET_DRAG)
@@ -1608,12 +1616,12 @@ live_design!{
 
             color_dither: 1.0
 
-            color_1: (THEME_COLOR)
+            color_1: (THEME_COLOR_OUTSET)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER)
             color_1_focus: (THEME_COLOR_OUTSET_FOCUS)
             color_1_drag: (THEME_COLOR_OUTSET_DRAG)
 
-            color_2: (THEME_COLOR)
+            color_2: (THEME_COLOR_OUTSET)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
             color_2_focus: (THEME_COLOR_OUTSET_FOCUS)
             color_2_drag: (THEME_COLOR_OUTSET_DRAG)
@@ -1687,7 +1695,7 @@ pub struct Slider {
     #[rust] label_area: Area,
     #[live] label_walk: Walk,
     #[live] label_align: Align,
-    #[live] draw_text: DrawText,
+    #[live] draw_text: DrawText2,
     #[live] text: String,
     
     #[live] text_input: TextInput,
@@ -1741,7 +1749,7 @@ impl Slider {
     
     pub fn update_text_input(&mut self, cx: &mut Cx) {
         let e = self.to_external();
-        self.text_input.text = match self.precision{
+        self.text_input.set_text(cx, match self.precision{
             0=>format!("{:.0}",e),
             1=>format!("{:.1}",e),
             2=>format!("{:.2}",e),
@@ -1751,9 +1759,8 @@ impl Slider {
             6=>format!("{:.6}",e),
             7=>format!("{:.7}",e),
             _=>format!("{}",e)
-        };
-        self.text_input.select_all();
-        self.text_input.redraw(cx);
+        });
+        self.text_input.select_all(cx);
     }
     
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
@@ -1793,6 +1800,13 @@ impl WidgetDesign for Slider{
 }
 
 impl Widget for Slider {
+    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
+        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+    }
+                
+    fn disabled(&self, cx:&Cx) -> bool {
+        self.animator_in_state(cx, id!(disabled.on))
+    }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
         let uid = self.widget_uid();
@@ -1814,14 +1828,14 @@ impl Widget for Slider {
                 TextInputAction::KeyFocusLost => {
                     self.animator_play(cx, id!(focus.off));
                 }
-                TextInputAction::Return(value) => {
+                TextInputAction::Returned(value) => {
                     if let Ok(v) = value.parse::<f64>() {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
                     cx.widget_action(uid, &scope.path, SliderAction::TextSlide(self.to_external()));
                 }
-                TextInputAction::Escape => {
+                TextInputAction::Escaped => {
                     self.update_text_input(cx);
                 }
                 _ => ()
@@ -1860,9 +1874,9 @@ impl Widget for Slider {
                 // self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
                 self.update_text_input(cx);
 
-                self.text_input.is_read_only = true;
+                self.text_input.set_is_read_only(cx, true);
                 self.text_input.set_key_focus(cx);
-                self.text_input.select_all();
+                self.text_input.select_all(cx);
                 self.text_input.redraw(cx);
                                 
                 self.animator_play(cx, id!(drag.on));
@@ -1871,7 +1885,7 @@ impl Widget for Slider {
                 cx.set_cursor(MouseCursor::Grabbing);
             },
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
-                self.text_input.is_read_only = false;
+                self.text_input.set_is_read_only(cx, false);
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.force_new_edit_group();
                 self.animator_play(cx, id!(drag.off));

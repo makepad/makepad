@@ -86,7 +86,7 @@ impl Fonts {
         self.layouter.define_font(id, definition);
     }
 
-    pub fn get_or_layout(&mut self, params: LayoutParams) -> Rc<LaidoutText> {
+    pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
         self.layouter.get_or_layout(params)
     }
 

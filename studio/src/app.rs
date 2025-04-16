@@ -532,7 +532,7 @@ impl MatchEvent for App{
                             pre_word_boundary:true,
                             post_word_boundary:true
                         }];
-                        search.text_input(id!(search_input)).set_text(cx, &word);
+                        search.text_input(id!(search_input)).set_text(cx, word);
                         //search.text_input(id!(search_input)).set_text(cx, &set.iter().map(|v| v.needle.clone()).collect::<Vec<String>>().join("\\b|"));
                         self.data.file_system.search_string(cx, set);
                     } 

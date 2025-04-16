@@ -56,9 +56,9 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR)
+            uniform color: (THEME_COLOR_OUTSET)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_focus: (THEME_COLOR * 1.2)
+            uniform color_focus: (THEME_COLOR_OUTSET * 1.2)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -69,6 +69,7 @@ live_design!{
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
 
             uniform arrow_color: (THEME_COLOR_TEXT)
+            uniform arrow_color_focus: (THEME_COLOR_TEXT_FOCUS)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
             
             fn pixel(self) -> vec4 {
@@ -86,7 +87,17 @@ live_design!{
                 sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
                 
-                sdf.fill_keep(mix(self.arrow_color, self.arrow_color_hover, self.hover));
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            self.arrow_color,
+                            self.arrow_color_focus,
+                            self.focus
+                        ),
+                        self.arrow_color_hover,
+                        self.hover
+                    )
+                );
 
                 sdf.box(
                     1.,
@@ -118,9 +129,6 @@ live_design!{
                         self.focus
                     )
                 )
-
-
-                
                 return sdf.result
             }
         }
@@ -177,7 +185,7 @@ live_design!{
 
             color: (THEME_COLOR_U_HIDDEN)
             color_hover: (THEME_COLOR_OUTSET_HOVER)
-            color_focus: (THEME_COLOR * 1.2)
+            color_focus: (THEME_COLOR_OUTSET * 1.2)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
@@ -197,7 +205,7 @@ live_design!{
 
             color: (THEME_COLOR_U_HIDDEN)
             color_hover: (THEME_COLOR_OUTSET_HOVER)
-            color_focus: (THEME_COLOR * 1.2)
+            color_focus: (THEME_COLOR_OUTSET * 1.2)
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -223,13 +231,13 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR * 1.75)
+            uniform color_1: (THEME_COLOR_OUTSET * 1.75)
             uniform color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.5)
-            uniform color_1_focus: (THEME_COLOR * 2.5)
+            uniform color_1_focus: (THEME_COLOR_OUTSET * 2.5)
 
-            uniform color_2: (THEME_COLOR)
+            uniform color_2: (THEME_COLOR_OUTSET)
             uniform color_2_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_2_focus: (THEME_COLOR * 1.25)
+            uniform color_2_focus: (THEME_COLOR_OUTSET * 1.25)
 
             uniform border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -240,6 +248,7 @@ live_design!{
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
 
             uniform arrow_color: (THEME_COLOR_TEXT)
+            uniform arrow_color_focus: (THEME_COLOR_TEXT_FOCUS)
             uniform arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
             
             fn pixel(self) -> vec4 {
@@ -257,7 +266,17 @@ live_design!{
                 sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
                 
-                sdf.fill_keep(mix(self.arrow_color, self.arrow_color_hover, self.hover));
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            self.arrow_color,
+                            self.arrow_color_focus,
+                            self.focus
+                        ),
+                        self.arrow_color_hover,
+                        self.hover
+                    )
+                )
 
                 sdf.box(
                     1.,
@@ -309,13 +328,13 @@ live_design!{
 
             color_dither: 1.0
 
-            color_1: (THEME_COLOR * 1.75)
+            color_1: (THEME_COLOR_OUTSET * 1.75)
             color_1_hover: (THEME_COLOR_OUTSET_HOVER * 1.5)
-            color_1_focus: (THEME_COLOR * 2.5)
+            color_1_focus: (THEME_COLOR_OUTSET * 2.5)
 
-            color_2: (THEME_COLOR)
+            color_2: (THEME_COLOR_OUTSET)
             color_2_hover: (THEME_COLOR_OUTSET_HOVER)
-            color_2_focus: (THEME_COLOR * 1.25)
+            color_2_focus: (THEME_COLOR_OUTSET * 1.25)
 
             border_color_1: (THEME_COLOR_BEVEL_LIGHT)
             border_color_1_hover: (THEME_COLOR_BEVEL_LIGHT)
@@ -326,6 +345,7 @@ live_design!{
             border_color_2_focus: (THEME_COLOR_BEVEL_SHADOW * 1.3)
             
             arrow_color: (THEME_COLOR_TEXT)
+            arrow_color_focus: (THEME_COLOR_TEXT_FOCUS)
             arrow_color_hover: (THEME_COLOR_TEXT_HOVER)
 
             fn pixel(self) -> vec4 {
@@ -343,7 +363,17 @@ live_design!{
                 sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset);
                 sdf.close_path();
                 
-                sdf.fill_keep(mix(self.arrow_color, self.arrow_color_hover, self.hover));
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            self.arrow_color,
+                            self.arrow_color_focus,
+                            self.focus
+                        ),
+                        self.arrow_color_hover,
+                        self.hover
+                    )
+                )
 
                 sdf.box(
                     1.,
@@ -425,7 +455,7 @@ struct PopupMenuGlobal {
 
 #[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawLabelText {
-    #[deref] draw_super: DrawText,
+    #[deref] draw_super: DrawText2,
     #[live] focus: f32,
     #[live] hover: f32,
 }
@@ -545,6 +575,13 @@ impl DropDown {
 }
 
 impl Widget for DropDown {
+    fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
+        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+    }
+                
+    fn disabled(&self, cx:&Cx) -> bool {
+        self.animator_in_state(cx, id!(disabled.on))
+    }
     
     fn widget_to_data(&self, _cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
         match actions.find_widget_action_cast(self.widget_uid()) {

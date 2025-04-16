@@ -166,8 +166,8 @@ live_design!{
                 flow: Right,
                 spacing: (THEME_SPACE_2)
                 height: Fit,
-                <TextInput> { empty_message: "<TextInput>"}
-                <TextInputGradientY> { empty_message: "<TextInputGradientY>"}
+                <TextInput> { empty_text: "<TextInput>"}
+                <TextInputGradientY> { empty_text: "<TextInputGradientY>"}
             }
             <Hr> {}
             <View> {

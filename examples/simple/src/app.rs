@@ -28,15 +28,17 @@ live_design!{
                             return mix(color1, color2, radius);
                         }
                     }
-                    b0= <Button> {
+                    button_1 = <Button> {
                         text: "Click me 123"
                         draw_text:{color:#fff}
                     }
-                    button1 = <Button> {
-                        text: "Click me 234"
-                        draw_text:{color:#fff}
+                    text_input = <TextInput> {
+                        width: 100,
+                        flow: RightWrap,
+                        text: "Lorem ipsum"
+                        draw_text:{color:#fff, }
                     }
-                    button2 = <Button> {
+                    button_2 = <Button> {
                         text: "Click me 345"
                         draw_text:{color:#fff}
                     }
@@ -61,9 +63,17 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App{
-    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button1)).clicked(&actions) {
+    fn handle_startup(&mut self, cx:&mut Cx){
+        cx.switch_to_xr();
+    }
+    
+    fn handle_timer(&mut self, _cx:&mut Cx, _te:&TimerEvent){
+    }
+    
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+        if self.ui.button(id!(b0)).clicked(&actions) {
             self.counter += 1;
+            cx.switch_to_xr();
         }
     }
 }

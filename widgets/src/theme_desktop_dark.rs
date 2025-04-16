@@ -117,25 +117,48 @@ live_design! {
     pub THEME_COLOR_BEVEL_ACTIVE = (THEME_COLOR_U_3)
     pub THEME_COLOR_BEVEL_HOVER = (THEME_COLOR_U_4)
     pub THEME_COLOR_BEVEL_DRAG = (THEME_COLOR_U_4)
+
     pub THEME_COLOR_BEVEL_LIGHT = (THEME_COLOR_U_3)
     pub THEME_COLOR_BEVEL_LIGHT_HOVER = (THEME_COLOR_U_3 * 1.2)
-    pub THEME_COLOR_BEVEL_LIGHT_FOCUS = (THEME_COLOR_U_3 * 1.2)
+    pub THEME_COLOR_BEVEL_LIGHT_FOCUS = (THEME_COLOR_U_3 * 1.3)
     pub THEME_COLOR_BEVEL_LIGHT_DRAG = (THEME_COLOR_U_3 * 1.2)
+
     pub THEME_COLOR_BEVEL_SHADOW = (THEME_COLOR_D_3)
     pub THEME_COLOR_BEVEL_SHADOW_HOVER = (THEME_COLOR_D_3)
-    pub THEME_COLOR_BEVEL_SHADOW_FOCUS = (THEME_COLOR_D_3)
+    pub THEME_COLOR_BEVEL_SHADOW_FOCUS = (THEME_COLOR_D_4)
     pub THEME_COLOR_BEVEL_SHADOW_DRAG = (THEME_COLOR_D_4)
 
     // WIDGET COLORS
-    pub THEME_COLOR = (THEME_COLOR_U_1)
+    pub THEME_COLOR_OUTSET = (THEME_COLOR_U_1)
     pub THEME_COLOR_OUTSET_DOWN = (THEME_COLOR_D_1)
     pub THEME_COLOR_OUTSET_HOVER = (THEME_COLOR_U_2)
     pub THEME_COLOR_OUTSET_ACTIVE = (THEME_COLOR_D_1)
-    pub THEME_COLOR_OUTSET_FOCUS = (THEME_COLOR_U_2)
+    pub THEME_COLOR_OUTSET_FOCUS = (THEME_COLOR_OUTSET)
     pub THEME_COLOR_OUTSET_DRAG = (THEME_COLOR_D_2)
     pub THEME_COLOR_OUTSET_INACTIVE = (THEME_COLOR_D_HIDDEN)
 
+    pub THEME_COLOR_OUTSET_1_DOWN = (THEME_COLOR_D_1)
+    pub THEME_COLOR_OUTSET_1_HOVER = (THEME_COLOR_U_2)
+    pub THEME_COLOR_OUTSET_1_ACTIVE = (THEME_COLOR_D_1)
+    pub THEME_COLOR_OUTSET_1_FOCUS = (THEME_COLOR_OUTSET)
+    pub THEME_COLOR_OUTSET_1_DRAG = (THEME_COLOR_D_2)
+    pub THEME_COLOR_OUTSET_1_INACTIVE = (THEME_COLOR_D_HIDDEN)
+
+    pub THEME_COLOR_OUTSET_2_DOWN = (THEME_COLOR_D_1)
+    pub THEME_COLOR_OUTSET_2_HOVER = (THEME_COLOR_U_3)
+    pub THEME_COLOR_OUTSET_2_ACTIVE = (THEME_COLOR_D_2)
+    pub THEME_COLOR_OUTSET_2_FOCUS = (THEME_COLOR_D_1)
+    pub THEME_COLOR_OUTSET_2_DRAG = (THEME_COLOR_D_3)
+    pub THEME_COLOR_OUTSET_2_INACTIVE = (THEME_COLOR_D_HIDDEN)
+
     pub THEME_COLOR_FLOATING_BG = #505050FF // Elements that live on top of the UI like dialogs, popovers, and context menus.
+
+    // Mark colors
+    pub THEME_COLOR_MARK = (THEME_COLOR_U_HIDDEN)
+    pub THEME_COLOR_MARK_HOVER = (THEME_COLOR_U_HIDDEN)
+    pub THEME_COLOR_MARK_ACTIVE = (THEME_COLOR_U_5)
+    pub THEME_COLOR_MARK_ACTIVE_FOCUS = (THEME_COLOR_U_5)
+    pub THEME_COLOR_MARK_FOCUS = (THEME_COLOR_U_HIDDEN)
 
     // Background of textinputs, radios, checkboxes etc.
     pub THEME_COLOR_INSET = (THEME_COLOR_D_2)
@@ -144,8 +167,12 @@ live_design! {
     pub THEME_COLOR_INSET_ACTIVE = (THEME_COLOR_D_2)
     pub THEME_COLOR_INSET_DRAG = (THEME_COLOR_D_2)
     pub THEME_COLOR_INSET_1 = (THEME_COLOR_D_4)
+    pub THEME_COLOR_INSET_1_FOCUS = (THEME_COLOR_D_4)
+    pub THEME_COLOR_INSET_1_ACTIVE_FOCUS = (THEME_COLOR_D_4)
     pub THEME_COLOR_INSET_1_HOVER = (THEME_COLOR_D_4)
     pub THEME_COLOR_INSET_2 = (THEME_COLOR_D_HIDDEN)
+    pub THEME_COLOR_INSET_2_FOCUS = (THEME_COLOR_D_HIDDEN)
+    pub THEME_COLOR_INSET_2_ACTIVE_FOCUS = (THEME_COLOR_D_HIDDEN)
 
     // Progress bars, slider amounts etc.
     pub THEME_COLOR_VAL = (THEME_COLOR_U_3)
@@ -203,75 +230,50 @@ live_design! {
     pub THEME_FONT_SIZE_3 = (THEME_FONT_SIZE_BASE + 4 * THEME_FONT_SIZE_CONTRAST)
     pub THEME_FONT_SIZE_4 = (THEME_FONT_SIZE_BASE + 2 * THEME_FONT_SIZE_CONTRAST)
     pub THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
-    /*
+
     pub THEME_FONT_LABEL = {
         font_family:{
-            latin = dep("crate://self/resources/IBMPlexSans-Text.ttf"),
-            chinese = dep("crate://self/resources/LXGWWenKaiRegular.ttf")
-            emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
-        }
-    } 
-    pub THEME_FONT_REGULAR = {
-        font_family:{
-            latin = dep("crate://self/resources/IBMPlexSans-Text.ttf"),
-            chinese = dep("crate://self/resources/LXGWWenKaiRegular.ttf")
-            emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
-        }
-    }
-    pub THEME_FONT_BOLD = {
-        font_family:{
-            latin = dep("crate://self/resources/IBMPlexSans-SemiBold.ttf")
-            chinese = dep("crate://self/resources/LXGWWenKaiBold.ttf"),
-            emoji = dep("crate://self/resources/NotoColorEmoji.ttf")
-        }
-    }
-    pub THEME_FONT_ITALIC = {
-        font_family:{
-            latin = dep("crate://self/resources/IBMPlexSans-Italic.ttf")
-            chinese =  dep("crate://self/resources/LXGWWenKaiRegular.ttf"),
-        }
-    }
-    pub THEME_FONT_BOLD_ITALIC = {
-        font_family:{
-            latin = dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf")
-            chinese = dep("crate://self/resources/LXGWWenKaiBold.ttf"),
-        }
-    }
-    pub THEME_FONT_CODE = {
-        font_family:{
-            latin = dep("crate://self/resources/LiberationMono-Regular.ttf") 
-        }
-        font_size: (THEME_FONT_SIZE_CODE)
-        //brightness: 1.1
-        //line_scale: 1.2,
-        line_spacing: 1.16
-    }*/
-    
-    pub THEME_FONT_LABEL = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+            latin = font("crate://self/resources/IBMPlexSans-Text.ttf", 0.0, 0.0),
+            chinese = font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
+            emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
+        },
+        line_spacing: 1.2
     } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
     pub THEME_FONT_REGULAR = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+        font_family: {
+            latin = font("crate://self/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
+            chinese = font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
+            emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
+        },
+        line_spacing: 1.2
     }
     pub THEME_FONT_BOLD = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-SemiBold.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
+        font_family:{
+            latin = font("crate://self/resources/IBMPlexSans-SemiBold.ttf", 0.0, 0.0)
+            chinese = font("crate://self/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
+            emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
+        },
+        line_spacing: 1.2
     }
     pub THEME_FONT_ITALIC = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-Italic.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+        font_family:{
+            latin = font("crate://self/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0)
+            chinese =  font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0),
+        },
+        line_spacing: 1.2
     }
     pub THEME_FONT_BOLD_ITALIC = {
-        font: { path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf") },
-        font2: { path: dep("crate://self/resources/LXGWWenKaiBold.ttf") },
+        font_family:{
+            latin = font("crate://self/resources/IBMPlexSans-BoldItalic.ttf", 0.0, 0.0)
+            chinese = font("crate://self/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
+        },
+        line_spacing: 1.2
     }
     pub THEME_FONT_CODE = {
-        font: { path: dep("crate://self/resources/LiberationMono-Regular.ttf") }
-        font_size: (THEME_FONT_SIZE_CODE)
-        //brightness: 1.1
-        line_scale: 1.2,
-        line_spacing: 1.16
+        font_size: (THEME_FONT_SIZE_CODE),
+        font_family:{
+            latin = font("crate://self/resources/LiberationMono-Regular.ttf", 0.0, 0.0)
+        },
+        line_spacing: 1.35
     }
 }
