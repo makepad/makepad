@@ -144,8 +144,7 @@ impl Cx{
     pub(crate) fn handle_openxr_drawing(&mut self){
         if let Ok(()) = self.os.openxr.begin_frame(){
             // alright.
-            // we're going to specialise.
-            
+            // we're going to specialise our openGL rendering
             
             self.os.openxr.end_frame();
         }

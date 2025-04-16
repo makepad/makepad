@@ -330,7 +330,7 @@ impl<'a> Cx2d<'a> {
                 index += 1;
             }
         }
-
+        crate::log!("PUTTING BACK U8 {:?}",PointUsize::new(atlas_x0, atlas_h - atlas_y0 - size.height));
         font_atlas.texture_sdf.put_back_vec_u8(self.cx, atlas_data, Some(RectUsize::new(
             PointUsize::new(atlas_x0, atlas_h - atlas_y0 - size.height),
             size,
