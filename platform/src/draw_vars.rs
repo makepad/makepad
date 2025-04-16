@@ -385,7 +385,7 @@ impl DrawVars {
                 let stride = sh.mapping.instances.total_slots;
                 let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
                 let inst_slice = self.as_slice();
-                
+                let mut uniform_updated = false;
                 let mut node_iter = nodes.first_child(index);
                 while let Some(node_index) = node_iter {
                     let id = nodes[node_index].id;
@@ -403,6 +403,8 @@ impl DrawVars {
                     }
                     for input in &sh.mapping.user_uniforms.inputs {
                         if input.id == id {
+                            // if we are updating a uniform, make sure we redraw
+                            uniform_updated = true;
                             for i in 0..input.slots {
                                 draw_call.user_uniforms[input.offset + i] = self.user_uniforms[input.offset + i]
                             }
@@ -413,6 +415,11 @@ impl DrawVars {
                 }
                 // DONE!
                 cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+                if uniform_updated{
+                    // not calling redraw when uniforms change might cause
+                    // incorrect drawcall splitting, so we have to. Unfortunately.
+                    self.area.redraw(cx);
+                }
             }
         }
     }

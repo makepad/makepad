@@ -5,7 +5,7 @@ use {
         image::{Image, Rgba, Subimage, SubimageMut, R},
         num::Zero,
     },
-    std::collections::HashMap,
+    std::{collections::HashMap, fs::File, io::BufWriter, path::Path, slice},
 };
 
 #[derive(Clone, Debug)]
@@ -51,21 +51,16 @@ impl<T> FontAtlas<T> {
         self.image.subimage(dirty_rect)
     }
 
-    pub fn get_or_allocate_glyph_image(
-        &mut self,
-        key: GlyphImageKey,
-    ) -> Option<SubimageMut<'_, T>> {
-        if !self.cached_glyph_image_rects.contains_key(&key) {
-            let rect = self.allocate_glyph_image(key.size)?;
-            self.cached_glyph_image_rects.insert(key.clone(), rect);
+    pub fn get_or_allocate_glyph_image(&mut self, key: GlyphImageKey) -> Option<GlyphImage<'_, T>> {
+        if let Some(rect) = self.cached_glyph_image_rects.get(&key) {
+            return Some(GlyphImage::Cached(*rect));
         }
-        self.cached_glyph_image_rects
-            .get(&key)
-            .copied()
-            .map(|rect| self.image.subimage_mut(rect))
+        let rect = self.allocate_glyph_image(key.size)?;
+        self.cached_glyph_image_rects.insert(key.clone(), rect);
+        Some(GlyphImage::Allocated(self.image.subimage_mut(rect)))
     }
 
-    pub fn allocate_glyph_image(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
+    fn allocate_glyph_image(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
         const PADDING: Size<usize> = Size::new(2, 2);
 
         let padded_size = size + PADDING;
@@ -96,11 +91,50 @@ impl<T> FontAtlas<T> {
 }
 
 pub type GrayscaleAtlas = FontAtlas<R>;
+
+impl GrayscaleAtlas {
+    pub fn save_to_png(&self, path: impl AsRef<Path>) {
+        let file = File::create(path).unwrap();
+        let writer = BufWriter::new(file);
+        let size = self.size();
+        let mut encoder = png::Encoder::new(writer, size.width as u32, size.height as u32);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        let pixels = self.image.as_pixels();
+        let data =
+            unsafe { slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len()) };
+        writer.write_image_data(&data).unwrap();
+    }
+}
+
 pub type ColorAtlas = FontAtlas<Rgba>;
+
+impl ColorAtlas {
+    pub fn save_to_png(&self, path: impl AsRef<Path>) {
+        let file = File::create(path).unwrap();
+        let writer = BufWriter::new(file);
+        let size = self.size();
+        let mut encoder = png::Encoder::new(writer, size.width as u32, size.height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        let pixels = self.image.as_pixels();
+        let data =
+            unsafe { slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
+        writer.write_image_data(&data).unwrap();
+    }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct GlyphImageKey {
     pub font_id: FontId,
     pub glyph_id: GlyphId,
     pub size: Size<usize>,
+}
+
+#[derive(Debug)]
+pub enum GlyphImage<'a, T> {
+    Cached(Rect<usize>),
+    Allocated(SubimageMut<'a, T>),
 }

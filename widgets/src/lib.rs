@@ -6,7 +6,6 @@ pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
 
 pub mod button;
-pub mod button_2;
 pub mod cached_widget;
 pub mod label;
 pub mod image;
@@ -18,7 +17,6 @@ pub mod popup_menu;
 pub mod check_box;
 pub mod radio_button;
 pub mod text_input;
-pub mod text_input_2;
 pub mod slider;
 pub mod scroll_bar;
 pub mod scroll_bars;
@@ -100,7 +98,6 @@ pub mod defer_with_redraw;
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
-    button_2::*,
     cached_widget::*,
     view::*,
     adaptive_view::*,
@@ -121,7 +118,6 @@ pub use crate::{
     video::*,
     radio_button::*,
     text_input::*,
-    text_input_2::*,
     link_label::*,
     portal_list::*,
     portal_list2::*,
@@ -204,11 +200,9 @@ pub fn live_design(cx: &mut Cx) {
     crate::view_ui::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
-    crate::text_input_2::live_design(cx);
     crate::link_label::live_design(cx);
     crate::scroll_shadow::live_design(cx);
     crate::button::live_design(cx);
-    crate::button_2::live_design(cx);
     crate::desktop_button::live_design(cx);
     crate::window::live_design(cx);
     crate::window_menu::live_design(cx);
