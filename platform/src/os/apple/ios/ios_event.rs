@@ -10,6 +10,7 @@ use {
             KeyEvent,
             TextClipboardEvent,
             TimerEvent,
+            LongPressEvent,
             TouchUpdateEvent,
             VirtualKeyboardEvent,
         },
@@ -28,6 +29,7 @@ pub enum IosEvent {
     MouseUp(MouseUpEvent),
     MouseMove(MouseMoveEvent),
     TouchUpdate(TouchUpdateEvent),
+    LongPress(LongPressEvent),
     
     Scroll(ScrollEvent),
     
