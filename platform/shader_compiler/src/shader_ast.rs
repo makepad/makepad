@@ -91,10 +91,12 @@ pub struct DrawShaderDef {
     pub vertex_structs: RefCell<Vec<StructPtr >>,
     pub pixel_structs: RefCell<Vec<StructPtr >>,
     pub uses_time: Cell<bool>,
+    pub ignore_idents: Vec<Ident>,
     // ok these 2 things dont belong here
     //pub const_table: DrawShaderConstTable,
     //pub var_inputs: RefCell<DrawShaderVarInputs>
 }
+
 
 #[derive(Clone, Debug)]
 pub struct DrawShaderFieldDef {
