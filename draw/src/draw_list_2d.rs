@@ -72,7 +72,7 @@ impl DrawList2d {
             /*if cx.draw_lists[draw_list_id].locked_view_transform {
                 return
             }*/
-            cx.draw_lists[draw_list_id].uniform_view_transform(mat);
+            cx.draw_lists[draw_list_id].draw_list_uniforms.view_transform = *mat;
             let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
             for draw_item_id in 0..draw_items_len {
                 if let Some(sub_list_id) = cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list() {
@@ -202,7 +202,7 @@ impl DrawList2d {
     
     pub fn get_view_transform(&self, cx: &Cx) -> Mat4 {
         let cxview = &cx.draw_lists[self.draw_list.id()];
-        return cxview.get_view_transform()
+        return cxview.draw_list_uniforms.view_transform
     }
     
     pub fn redraw(&self, cx: &mut Cx) {

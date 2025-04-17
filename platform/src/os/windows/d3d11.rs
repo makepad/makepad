@@ -143,8 +143,6 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
-        //self.views[view_id].set_clipping_uniforms();
-        self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
         
         {
             let draw_list = &mut self.draw_lists[draw_list_id];
@@ -312,7 +310,7 @@ impl Cx {
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
-        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
+        self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].paint_dirty = false;
 
         self.passes[pass_id].set_dpi_factor(dpi_factor);
