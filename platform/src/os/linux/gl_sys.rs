@@ -1,6 +1,41 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+#[macro_export]
+macro_rules!gl_log_error {
+    ($libgl:ident) => {
+        {
+            let mut ret = false;
+            let mut i= 0;
+            loop{
+                #[allow(unused_unsafe)]
+                let err = unsafe{($libgl.glGetError)()};
+                if err!=0{
+                    crate::log!("Caught GL Error({i}) {:x} ", err);
+                    ret = true;
+                }
+                else{break}
+                i += 1;
+            }
+            ret
+        }
+    };
+}
+
+#[macro_export]
+macro_rules!gl_flush_error {
+    ($libgl:ident) => {
+        {
+            loop{
+                #[allow(unused_unsafe)]
+                let err = unsafe{($libgl.glGetError)()};
+                if err!=0{}
+                else{break}
+            }
+        }
+    };
+}
+
 use std::os::raw;
 
 pub type GLenum = raw::c_uint;
@@ -52,6 +87,7 @@ pub const TEXTURE_WIDTH: GLenum = 0x1000;
 pub const TEXTURE_HEIGHT: GLenum = 0x1001;
 pub const TEXTURE_2D_ARRAY: GLenum = 0x8C1A;
 pub const TEXTURE_BORDER_COLOR: GLenum = 0x1004;
+pub const DEBUG_OUTPUT: GLenum = 0x92E0;
 
 pub const RGBA: GLenum = 0x1908;
 pub const BGRA: GLenum = 0x80E1;
@@ -81,6 +117,9 @@ pub const TEXTURE_EXTERNAL_OES: GLenum = 0x8D65;
 pub const EXTENSIONS: GLenum = 0x1F03;
 pub const VENDOR: GLenum = 0x1F00;
 pub const RENDERER: GLenum = 0x1F01;
+pub const SCISSOR_TEST: GLenum = 0x0C11;
+pub const CULL_FACE:GLenum = 0x0B44;
+pub const DONT_CARE:GLenum = 0x1100;
 
 pub type TglGenVertexArrays = unsafe extern "C" fn(n: GLsizei, arrays: *mut GLuint) -> () ;
 pub type TglBindVertexArray = unsafe extern "C" fn(array: GLuint) -> () ;
@@ -145,9 +184,30 @@ pub type TglPixelStorei = unsafe extern "C" fn(pname: GLenum, param: GLint) -> (
 pub type TglGetString = unsafe extern "C" fn(name: GLenum) -> *const GLubyte ;
 pub type TglTexStorage3D = unsafe extern "C" fn (target:GLenum, levels:GLsizei, internal_format: GLenum, width: GLsizei, height:GLsizei, depth:GLsizei);
 pub type TglFramebufferTextureMultiviewOVR = unsafe extern "C" fn(target:GLenum , attachment:GLenum, texture:GLuint, level:GLint, base_view_index:GLint, num_views:GLsizei);
+pub type TglColorMask = unsafe extern "C" fn(r: GLboolean, g:GLboolean, b:GLboolean, a:GLboolean);
+pub type TglDepthMask = unsafe extern "C" fn(d: GLboolean);
+pub type TglScissor = unsafe extern "C" fn(x:GLint, y:GLint, width:GLsizei, height:GLsizei);
+pub type TglInvalidateFramebuffer = unsafe extern "C" fn(target:GLenum, num_attachments:GLsizei, attachments: *const GLenum);
+pub type TglDebugMessageCallback = unsafe extern "C" fn(ptr: TglDebugMessageCallbackFn, param: *const raw::c_void);
+pub type TglDebugMessageCallbackFn = unsafe extern "C" fn(source: GLenum, ty: GLenum, id: GLuint, severity:GLenum, length:GLsizei, msg: *const GLchar, param: *const raw::c_void);
 
-
-
+pub type TglGetDebugMessageLog = unsafe extern "C" fn(count:GLuint,
+    buf_size:GLsizei,
+    sources: *mut GLenum,
+    types: &mut GLenum,
+    ids: *mut GLuint,
+    severities: *mut GLenum,
+    lengths: *mut GLsizei,
+    message_log: *mut GLchar);
+    
+pub type TglDebugMessageControl = unsafe extern "C" fn(
+    source:GLenum,
+    ty: GLenum,
+    severity: GLenum,
+    count: GLsizei,
+    ids: *const GLuint,
+    enabled: GLboolean);
+    
 pub struct LibGl{
     pub glGenVertexArrays: TglGenVertexArrays,
     pub glBindVertexArray: TglBindVertexArray,
@@ -211,8 +271,17 @@ pub struct LibGl{
     pub glPixelStorei: TglPixelStorei,
     pub glGetString: TglGetString,
     pub glTexStorage3D: TglTexStorage3D,
+    pub glColorMask: TglColorMask,
+    pub glDepthMask: TglDepthMask,
+    pub glScissor: TglScissor,
+    pub glInvalidateFramebuffer: TglInvalidateFramebuffer,
+    pub glDebugMessageCallback: TglDebugMessageCallback,
+    pub glGetDebugMessageLog: TglGetDebugMessageLog,
+    pub glDebugMessageControl: TglDebugMessageControl,
     pub glFramebufferTextureMultiviewOVR: Option<TglFramebufferTextureMultiviewOVR>,
 }
+
+
 
 macro_rules! load {
     ($loadfn:expr, $ty:ident, $($sym:expr),*) => {
@@ -231,6 +300,24 @@ macro_rules! load {
 
 
 impl LibGl{
+    pub fn enable_debugging(&self){
+        unsafe{(self.glEnable)(self::DEBUG_OUTPUT)};
+                                
+        unsafe extern "C" fn debug(_source: self::GLenum, _ty: self::GLenum, _id: self::GLuint, _severity:self::GLenum, _length:self::GLsizei, msg: *const self::GLchar, _param: *const std::ffi::c_void){
+            crate::log!("GL Debug info: {:?}", std::ffi::CStr::from_ptr(msg));
+        }
+                                
+        unsafe{(self.glDebugMessageControl)(
+            self::DONT_CARE,
+            self::DONT_CARE,
+            self::DONT_CARE,
+            0,
+            0 as * const _,
+            self::TRUE
+        )};
+        unsafe{(self.glDebugMessageCallback)(debug, 0 as *const _)};
+    }
+    
     pub fn try_load<F>(mut loadfn: F)->Result<LibGl, String>
     where F: FnMut(&[&'static str]) -> *const raw::c_void
     {
@@ -297,6 +384,13 @@ impl LibGl{
             glPixelStorei: load!(loadfn, TglPixelStorei, "glPixelStorei")?,
             glGetString: load!(loadfn, TglGetString, "glGetString")?,
             glTexStorage3D: load!(loadfn, TglTexStorage3D, "glTexStorage3D")?,
+            glColorMask: load!(loadfn, TglColorMask, "glColorMask")?,
+            glDepthMask: load!(loadfn, TglDepthMask, "glDepthMask")?,
+            glScissor: load!(loadfn, TglScissor, "glScissor")?,
+            glInvalidateFramebuffer: load!(loadfn, TglInvalidateFramebuffer, "glInvalidateFramebuffer")?,
+            glDebugMessageCallback: load!(loadfn, TglDebugMessageCallback, "glDebugMessageCallback")?,
+            glGetDebugMessageLog: load!(loadfn, TglGetDebugMessageLog, "glGetDebugMessageLog")?,
+            glDebugMessageControl: load!(loadfn, TglDebugMessageControl, "glDebugMessageControl")?,
             glFramebufferTextureMultiviewOVR: load!(loadfn, TglFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR").ok()
         })
     }

@@ -30,9 +30,7 @@ impl Cx {
 
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
-        //self.views[view_id].set_clipping_uniforms();
-        self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
-        
+       
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].kind.sub_list() {
                 self.render_view(
@@ -61,10 +59,7 @@ impl Cx {
                 }
                 let shp = &mut self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
                 
-                #[cfg(quest)]
-                let shader_variant = if self.os.in_xr_mode{1} else{0};
-                #[cfg(not(quest))]
-                let shader_variant = 0;
+                let shader_variant = self.passes[pass_id].os.shader_variant;
                                  
                 if shp.gl_shader[shader_variant].is_none(){
                     shp.gl_shader[shader_variant] = Some(GlShader::new(
@@ -170,7 +165,6 @@ impl Cx {
                 
                 unsafe {
                     (gl.glUseProgram)(shgl.program);
-                    
                     (gl.glBindVertexArray)(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
                     let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
                     
@@ -187,7 +181,7 @@ impl Cx {
                     if ct.len()>0 {
                         GlShader::set_uniform_array(gl, &shgl.const_table_uniform, ct);
                     }
-                    
+                    crate::gl_log_error!(gl);
                     // lets set our textures
                     for i in 0..sh.mapping.textures.len() {
                         let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
@@ -237,7 +231,6 @@ impl Cx {
                         }
                         (gl.glUniform1i)(shgl.textures[i].loc, i as i32);
                     }
-                    
                     (gl.glDrawElementsInstanced)(
                         gl_sys::TRIANGLES,
                         indices as i32,
@@ -245,7 +238,8 @@ impl Cx {
                         ptr::null(),
                         instances as i32
                     );
-                    
+                    crate::gl_log_error!(gl);
+                                        
                     //(gl.glBindVertexArray)(0);
                 }
                 
@@ -276,7 +270,7 @@ impl Cx {
             return None
         }
         
-        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
+        self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         Some(pass_rect.size)
     }
@@ -862,7 +856,10 @@ impl CxOsDrawShader {
         // check if we are running in XR or not
         let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) = if os_type.has_xr_mode(){(
             "#version 300 es",
-            "#extension GL_OVR_multiview2 : require",
+            "
+            #extension GL_OVR_multiview2 : require
+            layout(num_views=2) in;
+            ",
             "#extension GL_OVR_multiview2 : require",
             "",
             "out vec4 gl_FragColor;",
@@ -895,7 +892,7 @@ impl CxOsDrawShader {
             {vertex_defs}
             {vertex}\0",
         );
-
+        //crate::log!("{}", vertex.replace("int mvo = 0;","int mvo = gl_ViewID_OVR==0?0:16;"));
         let pixel = format!("
             {version}
             {pixel_exts}
@@ -912,7 +909,7 @@ impl CxOsDrawShader {
 
         // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
-            vertex: [vertex.clone(), vertex.replace("int mvo = 0;","int mvo = int(gl_ViewID_OVR) * 16;")],
+            vertex: [vertex.clone(), vertex.replace("int mvo = 0;","int mvo = gl_ViewID_OVR==1?16:0;")],
             pixel: [pixel.clone(), pixel],
             gl_shader: [None,None],
         }
@@ -1327,6 +1324,7 @@ impl CxTexture {
 
 #[derive(Default, Clone)]
 pub struct CxOsPass {
+    pub shader_variant: usize,
     pub gl_framebuffer: Option<u32>,
 }
 

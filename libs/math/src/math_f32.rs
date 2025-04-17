@@ -593,7 +593,26 @@ impl Mat4 {
         ]}
     }
     
-    
+    pub fn transpose(&self) -> Mat4 {
+        Mat4 {v: [
+            self.v[0],
+            self.v[4],
+            self.v[8],
+            self.v[12],
+            self.v[1],
+            self.v[5],
+            self.v[9],
+            self.v[13],
+            self.v[2],
+            self.v[6],
+            self.v[10],
+            self.v[14],
+            self.v[3],
+            self.v[7],
+            self.v[11],
+            self.v[15],
+        ]}
+    }
     
     pub fn txyz_s_ry_rx_txyz(t1: Vec3, s: f32, ry: f32, rx: f32, t2: Vec3) -> Mat4 {
         
@@ -764,7 +783,7 @@ impl Mat4 {
                                 
                 (tan_right + tan_left) / tan_width,
                 (tan_up + tan_down) / tan_height,
-                -2.0 * far / (far - near),
+                -(far + near) / (far - near),
                 -1.0,
                                 
                 0.0,

@@ -9,6 +9,7 @@ use{
                 android::android_jni::*
             }
         },
+        pass::{CxPassParent,PassId},
         texture::{Texture,TextureFormat},
         cx::{Cx},
         makepad_math::Mat4,
@@ -68,7 +69,7 @@ pub struct CxAndroidOpenXr{
 }
 
 impl Cx{
-    pub(crate) fn quest_openxr_mode(&mut self, from_java_rx: &mpsc::Receiver<FromJavaMessage>)->bool{
+    pub(crate) fn openxr_render_loop(&mut self, from_java_rx: &mpsc::Receiver<FromJavaMessage>)->bool{
         if self.os.openxr.session.is_some(){
             loop{
                 match from_java_rx.try_recv() {
@@ -81,17 +82,15 @@ impl Cx{
                     }
                 }
             }
-            self.handle_xr_events();
+            self.openxr_handle_events();
             self.handle_other_events();
-            
-            self.handle_openxr_drawing();
-            // self.handle_drawing();
+            self.openxr_handle_drawing();
             return true
         }
         false
     }
         
-    pub(crate) fn handle_xr_events(&mut self){
+    pub(crate) fn openxr_handle_events(&mut self){
         let openxr = &mut self.os.openxr;
         loop{
             let mut event_buffer = XrEventDataBuffer{
@@ -145,10 +144,109 @@ impl Cx{
         }
     }
     
-    pub(crate) fn handle_openxr_drawing(&mut self){
+    pub(crate) fn openxr_draw_pass_to_multiview(&mut self, pass_id:PassId){
+        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        let session =  &self.os.openxr.session.as_ref().unwrap();
+        let gl = &self.os.display.as_ref().unwrap().libgl;
+        let frame = session.frame.as_ref().unwrap();
+        
+        // alright lets set up the pass matrices
+        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+        
+        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+        let pass = &mut self.passes[pass_id];
+        
+        pass.set_dpi_factor(dpi_factor);
+        pass.paint_dirty = true;
+        pass.os.shader_variant = 1;
+                
+        pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        
+        // lets set up the right matrices and bind the right framebuffers
+        pass.pass_uniforms.camera_projection = frame.eyes[0].proj_mat;
+        pass.pass_uniforms.camera_view = frame.eyes[0].view_mat;
+        pass.pass_uniforms.camera_projection_r = frame.eyes[1].proj_mat;
+        pass.pass_uniforms.camera_view_r = frame.eyes[1].view_mat;
+        
+        // lets bind the framebuffers
+        let gl_frame_buffer = session.gl_frame_buffers[frame.swap_chain_index as usize];
+        
+        unsafe{
+            (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, gl_frame_buffer);
+            (gl.glColorMask)(gl_sys::TRUE, gl_sys::TRUE, gl_sys::TRUE, gl_sys::TRUE);
+            (gl.glDepthMask)(gl_sys::TRUE);
+            (gl.glEnable)(gl_sys::SCISSOR_TEST);
+            (gl.glDisable)(gl_sys::DEPTH_TEST);
+            (gl.glDepthFunc)(gl_sys::LEQUAL);
+            (gl.glDisable)(gl_sys::CULL_FACE);
+            (gl.glBlendEquationSeparate)(gl_sys::FUNC_ADD, gl_sys::FUNC_ADD);
+            (gl.glBlendFuncSeparate)(gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA, gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA);
+            (gl.glEnable)(gl_sys::BLEND);
+            
+            //crate::log!("{:?} {:?}", session.width, session.height);
+            (gl.glViewport)(0, 0, session.width as i32, session.height  as i32);
+            (gl.glScissor)(0, 0, session.width as i32, session.height as i32);
+            
+            (gl.glClearDepthf)(0.0);
+            (gl.glClearColor)(0.0, 0.3, 0.0, 0.0);
+            (gl.glClear)(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
+            crate::gl_log_error!(gl);
+        }
+        
+        //let panning_offset = if self.os.keyboard_visible {self.os.keyboard_panning_offset} else {0};
+        
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
+        self.render_view(
+            pass_id,
+            draw_list_id,
+            &mut zbias,
+            zbias_step,
+        );
+        
+        let gl = &self.os.display.as_ref().unwrap().libgl;
+        unsafe{
+            (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, 0);
+            crate::gl_log_error!(gl);
+            // let da = [gl_sys::DEPTH_ATTACHMENT];
+            //  (gl.glInvalidateFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, 1, da.as_ptr() as _);
+            //crate::gl_log_error!(gl);
+            //glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, 1, depthAttachment);
+                        
+        }
+         
+        
+        
+        // Discard the depth buffer, so the tiler won't need to write it back out to memory.
+    }
+    
+    pub (crate) fn openxr_handle_repaint(&mut self) {
+        //opengl_cx.make_current();
+        let mut passes_todo = Vec::new();
+        self.compute_pass_repaint_order(&mut passes_todo);
+        self.repaint_id += 1;
+        for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
+            match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Window(_) => {
+                    // draw the main pass
+                    self.openxr_draw_pass_to_multiview(*pass_id);
+                }
+                CxPassParent::Pass(_) => {
+                    self.draw_pass_to_texture(*pass_id, None);
+                },
+                CxPassParent::None => {
+                    self.draw_pass_to_texture(*pass_id, None);
+                }
+            }
+        }
+        
+        
+    }
+    
+    pub(crate) fn openxr_handle_drawing(&mut self){
         if let Ok(()) = self.os.openxr.begin_frame(){
-            // alright.
-            // we're going to specialise our openGL rendering
+            
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(self.os.timers.time_now());
             }
@@ -156,7 +254,8 @@ impl Cx{
                 self.call_draw_event();
                 self.opengl_compile_shaders();
             }
-                        
+            
+            self.openxr_handle_repaint();
             self.os.openxr.end_frame();
         }
     }
@@ -724,7 +823,7 @@ impl CxAndroidOpenXr{
         for eye in 0..2{
             let head_from_eye = projections[eye].pose;
             let local_from_head = local_from_head.pose;
-            let local_from_eye =XrPosef::multiply(&local_from_head, &head_from_eye);
+            let local_from_eye =XrPosef::multiply(&head_from_eye,&local_from_head);
             eyes[eye].local_from_eye  = local_from_eye;
             // lets compute eye matrices and depth matrices
             if let Some(depth_image) = &depth_image{
@@ -741,7 +840,7 @@ impl CxAndroidOpenXr{
             }
             
             eyes[eye].view_mat = local_from_eye.to_mat4();
-            eyes[eye].proj_mat = Mat4::from_camera_fov(&projections[eye].fov, 0.1, 10.0);
+            eyes[eye].proj_mat = Mat4::from_camera_fov(&projections[eye].fov, 0.1, 100.0);
             
         }
         
@@ -809,8 +908,8 @@ impl CxAndroidOpenXr{
             views: &proj_views as *const _,
             layer_flags: 
             XrCompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA |
-            XrCompositionLayerFlags::CORRECT_CHROMATIC_ABERRATION |
-            XrCompositionLayerFlags::UNPREMULTIPLIED_ALPHA,
+            XrCompositionLayerFlags::CORRECT_CHROMATIC_ABERRATION, 
+            //XrCompositionLayerFlags::UNPREMULTIPLIED_ALPHA,
             ..Default::default()
         };
         

@@ -100,7 +100,7 @@ impl Cx {
         
         while !self.os.quit {
             if self.os.in_xr_mode{
-                if self.quest_openxr_mode(&from_java_rx){continue};
+                if self.openxr_render_loop(&from_java_rx){continue};
             }
             
             // Wait for the next message, blocking until one is received.
@@ -604,21 +604,18 @@ impl Cx {
             // SAFETY:
             // The LibEgl instance (libegl) has been properly loaded and initialized earlier.
             // We're not requesting a robust context (false), which is usually fine for most applications.
-            #[cfg(quest)]
-            let major = 3;
-            #[cfg(quest)]
-            let alpha = true;
             #[cfg(not(quest))]
-            let major = 2;
-            #[cfg(not(quest))]
-            let alpha = false;
-                        
             let (egl_context, egl_config, egl_display) = unsafe {egl_sys::create_egl_context(
                 &mut libegl,
                 std::ptr::null_mut(),/* EGL_DEFAULT_DISPLAY */
-                major,
-                alpha,
             ).expect("Cant create EGL context")};
+            
+            #[cfg(quest)]
+            let (egl_context, egl_config, egl_display) = unsafe {egl_sys::create_egl_context_openxr(
+                &mut libegl,
+                std::ptr::null_mut(),/* EGL_DEFAULT_DISPLAY */
+            ).expect("Cant create EGL context")};
+            
             // SAFETY: This is loading OpenGL function pointers. It's safe as long as we have a valid EGL context.
             let libgl = LibGl::try_load(| s | {
                 for s in s{
@@ -632,6 +629,7 @@ impl Cx {
             }).expect("Cant load openGL functions");
             
             // SAFETY: This creates an EGL surface. It's safe as long as we have valid EGL display, config, and window.
+            
             let surface = unsafe {(libegl.eglCreateWindowSurface.unwrap())(
                 egl_display,
                 egl_config,
@@ -642,6 +640,9 @@ impl Cx {
             if unsafe {(libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context)} == 0 {
                 panic!();
             }
+            
+            //libgl.enable_debugging();
+                                                
 
             //cx.maybe_warn_hardware_support();
 
