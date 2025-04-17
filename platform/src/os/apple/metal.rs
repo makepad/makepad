@@ -63,7 +63,7 @@ impl Cx {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
         //self.views[view_id].set_clipping_uniforms();
-        self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
+        //self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
         
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].kind.sub_list() {
@@ -165,6 +165,7 @@ impl Cx {
                 unsafe {
                     
                     let () = msg_send![encoder, setVertexBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
+                    
                     let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
                     
                     if let Some(id) = shp.draw_uniform_buffer_id {
@@ -287,7 +288,7 @@ impl Cx {
         
         let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some() {1.0}else {dpi_factor}).unwrap();
         
-        self.passes[pass_id].set_matrix(
+        self.passes[pass_id].set_ortho_matrix(
             pass_rect.pos, 
             pass_rect.size
         );
