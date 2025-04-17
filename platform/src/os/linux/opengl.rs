@@ -61,16 +61,21 @@ impl Cx {
                 }
                 let shp = &mut self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
                 
-                if shp.gl_shader.is_none(){
-                    shp.gl_shader = Some(GlShader::new(
+                #[cfg(quest)]
+                let shader_variant = if self.os.in_xr_mode{1} else{0};
+                #[cfg(not(quest))]
+                let shader_variant = 0;
+                                 
+                if shp.gl_shader[shader_variant].is_none(){
+                    shp.gl_shader[shader_variant] = Some(GlShader::new(
                         self.os.gl(),
-                        &shp.vertex,
-                        &shp.pixel,
+                        &shp.vertex[shader_variant],
+                        &shp.pixel[shader_variant],
                         &sh.mapping,
                         &self.os_type,
                     ));
                 }
-                let shgl = shp.gl_shader.as_ref().unwrap();
+                let shgl = shp.gl_shader[shader_variant].as_ref().unwrap();
                 
                 if draw_call.instance_dirty || draw_item.os.inst_vb.gl_buffer.is_none(){
                     draw_call.instance_dirty = false;
@@ -449,16 +454,23 @@ impl Cx {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
                 let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
+                let glsl_options = generate_glsl::GlslOptions{
+                    use_ovr_multiview: self.os_type.has_xr_mode(),
+                    use_version_300: self.os_type.has_xr_mode(),
+                };
                 
                 let vertex = generate_glsl::generate_vertex_shader(
                     draw_shader_def.as_ref().unwrap(),
                     &cx_shader.mapping.const_table,
-                    &self.shader_registry
+                    &self.shader_registry,
+                    glsl_options
                 );
+                
                 let pixel = generate_glsl::generate_pixel_shader(
                     draw_shader_def.as_ref().unwrap(),
                     &cx_shader.mapping.const_table,
-                    &self.shader_registry
+                    &self.shader_registry,
+                   glsl_options
                 );
                 
                 if cx_shader.mapping.flags.debug {
@@ -467,7 +479,7 @@ impl Cx {
                 
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                    if ds.vertex == vertex && ds.pixel == pixel {
+                    if ds.vertex[0] == vertex && ds.pixel[0] == pixel {
                         cx_shader.os_shader_id = Some(index);
                         break;
                     }
@@ -489,12 +501,13 @@ impl Cx {
     }*/
 }
 
+const NUM_SHADER_VARIANTS:usize = 2;
 
 #[derive(Clone)]
 pub struct CxOsDrawShader {
-    pub gl_shader: Option<GlShader>,
-    pub vertex: String,
-    pub pixel: String,
+    pub gl_shader: [Option<GlShader>;NUM_SHADER_VARIANTS],
+    pub vertex: [String;NUM_SHADER_VARIANTS],
+    pub pixel: [String;NUM_SHADER_VARIANTS],
 }
 
 #[derive(Clone, Debug)]
@@ -817,9 +830,6 @@ impl CxOsDrawShader {
         let available_extensions = get_gl_string(gl, gl_sys::EXTENSIONS);
         let is_external_texture_supported = available_extensions.split_whitespace().any(|ext| ext == "GL_OES_EGL_image_external");
 
-        let mut maybe_ext_tex_extension_import = String::new();
-        let mut maybe_ext_tex_extension_sampler = String::new();
-
         // GL_OES_EGL_image_external is not well supported on Android emulators with macOS hosts.
         // Because there's no bullet-proof way to check the emualtor host at runtime, we're currently disabling external texture support on all emulators.
         let is_emulator = match os_type {
@@ -832,11 +842,15 @@ impl CxOsDrawShader {
         // This seems like a driver bug (no confirmation from Qualcomm yet).
         // Therefore we're disabling the external texture support for Adreno until this is fixed.
         let is_vendor_adreno = get_gl_string(gl, gl_sys::RENDERER).contains("Adreno"); 
-        if is_external_texture_supported && !is_vendor_adreno && !is_emulator {
-            maybe_ext_tex_extension_import = "#extension GL_OES_EGL_image_external : require\n".to_string();
-            maybe_ext_tex_extension_sampler = "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){{ return texture2D(sampler, vec2(pos.x, pos.y));}}".to_string();
-        }
-
+        
+        let (tex_ext_import, tex_ext_sampler) = if is_external_texture_supported && !is_vendor_adreno && !is_emulator {(
+            "#extension GL_OES_EGL_image_external : require\n",
+            "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){ return texture2D(sampler, vec2(pos.x, pos.y));}"
+        )}
+        else{
+            ("","")
+        };
+        
         // Currently, these shaders are only compatible with `#version 100` through `#version 300 es`.
         // Version 310 and later have removed/deprecated some features that we currently use:
         // * error C7616: global function texture2D is removed after version 310
@@ -844,46 +858,71 @@ impl CxOsDrawShader {
         // * error C5514: 'attribute' is deprecated and removed from this profile, use 'in/out' instead
         // * error C7614: GLSL ES doesn't allow use of reserved word attribute
         // * error C7614: GLSL ES doesn't allow use of reserved word varying
-        //
+        
+        // check if we are running in XR or not
+        let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) = if os_type.has_xr_mode(){(
+            "#version 300 es",
+            "#extension GL_OVR_multiview2 : require",
+            "#extension GL_OVR_multiview2 : require",
+            "",
+            "out vec4 gl_FragColor;",
+            "vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}} " 
+        )}
+        else{(
+            "#version 100",
+            "",
+            "",
+            "",
+            "",
+            "vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}"
+        )};
+        
+        let transpose_impl = "
+        mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
+        mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
+        mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
+        ";
+        
         let vertex = format!("
-            #version 100
-            {maybe_ext_tex_extension_import}
+            {version}
+            {vertex_exts}
+            {tex_ext_import}
             precision highp float;
             precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}} 
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
-            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
+            {sampler}
+            {tex_ext_sampler}
+            {transpose_impl}
+            {vertex_defs}
             {vertex}\0",
         );
 
         let pixel = format!("
-            #version 100
+            {version}
+            {pixel_exts}
+            {tex_ext_import}
             #extension GL_OES_standard_derivatives : enable
-            {maybe_ext_tex_extension_import}
             precision highp float;
             precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
-            {maybe_ext_tex_extension_sampler}
-            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
+            {sampler}
+            {tex_ext_sampler}
+            {transpose_impl}
+            {pixel_defs}
             {pixel}\0",
         );
 
         // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
-            vertex,
-            pixel,
-            gl_shader: None,
+            vertex: [vertex.clone(), vertex.replace("int mvo = 0;","int mvo = int(gl_ViewID_OVR) * 16;")],
+            pixel: [pixel.clone(), pixel],
+            gl_shader: [None,None],
         }
     }
 
     pub fn free_resources(&mut self, gl: &LibGl){
-        if let Some(gl_shader) = self.gl_shader.take(){
-            gl_shader.free_resources(gl);
+        for gl_shader in &mut self.gl_shader{
+            if let Some(gl_shader) = gl_shader.take(){
+                gl_shader.free_resources(gl);
+            }
         }
     }
 }

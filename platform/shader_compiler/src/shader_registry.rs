@@ -496,7 +496,9 @@ impl ShaderRegistry {
         
         // lets insert the 2D drawshader uniforms
         draw_shader_def.add_uniform(id_lut!(camera_projection), id_lut!(pass), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(camera_projection_r), id_lut!(pass), Ty::Mat4, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(camera_view), id_lut!(pass), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(camera_view_r), id_lut!(pass), Ty::Mat4, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(camera_inv), id_lut!(pass), Ty::Mat4, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(dpi_factor), id_lut!(pass), Ty::Float, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(dpi_dilate), id_lut!(pass), Ty::Float, TokenSpan::default());
@@ -505,7 +507,7 @@ impl ShaderRegistry {
         draw_shader_def.add_uniform(id_lut!(view_clip), id_lut!(view), Ty::Vec4, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(view_shift), id_lut!(view), Ty::Vec2, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(draw_zbias), id_lut!(draw), Ty::Float, TokenSpan::default());
-                
+        draw_shader_def.ignore_idents = vec![Ident(live_id!(camera_projection_r)), Ident(live_id!(camera_view_r))];
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
 
         match &class_node.value {
@@ -752,7 +754,8 @@ impl ShaderRegistry {
                     for j in (i + 1)..draw_shader_def.fields.len() {
                         let field_a = &draw_shader_def.fields[i];
                         let field_b = &draw_shader_def.fields[j];
-                        if field_a.ident == field_b.ident && !field_a.ident.0.is_empty() {
+                        if field_a.ident == field_b.ident && !field_a.ident.0.is_empty() && 
+                            !draw_shader_def.ignore_idents.contains(&field_a.ident){
                             //let doc = live_registry.ptr_to_doc(draw_shader_ptr.0);
                             //doc.nodes.to_string(draw_shader_ptr.index as usize,100)
                             

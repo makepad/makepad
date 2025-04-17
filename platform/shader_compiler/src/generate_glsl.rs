@@ -16,27 +16,33 @@ use {
     }
 };
 
-pub fn generate_vertex_shader(draw_shader_def: &DrawShaderDef, const_table: &DrawShaderConstTable, shader_registry: &ShaderRegistry) -> String {
+pub fn generate_vertex_shader(draw_shader_def: &DrawShaderDef, const_table: &DrawShaderConstTable, shader_registry: &ShaderRegistry, options:GlslOptions) -> String {
     let mut string = String::new();
     DrawShaderGenerator {
         draw_shader_def,
         const_table,
         shader_registry,
         string: &mut string,
-        backend_writer: &GlslBackendWriter {shader_registry, const_table}
+        options,
+        backend_writer: &GlslBackendWriter {
+            options,
+            shader_registry,
+            const_table
+        }
     }
     .generate_vertex_shader();
     string
 }
 
-pub fn generate_pixel_shader(draw_shader_def: &DrawShaderDef, const_table: &DrawShaderConstTable, shader_registry: &ShaderRegistry) -> String {
+pub fn generate_pixel_shader(draw_shader_def: &DrawShaderDef, const_table: &DrawShaderConstTable, shader_registry: &ShaderRegistry, options:GlslOptions) -> String {
     let mut string = String::new();
     DrawShaderGenerator {
         draw_shader_def,
         const_table,
         shader_registry,
         string: &mut string,
-        backend_writer: &GlslBackendWriter {shader_registry, const_table}
+        options,
+        backend_writer: &GlslBackendWriter {shader_registry, const_table, options}
     }
     .generate_pixel_shader();
     string
@@ -47,7 +53,8 @@ struct DrawShaderGenerator<'a> {
     shader_registry: &'a ShaderRegistry,
     string: &'a mut String,
     const_table: &'a DrawShaderConstTable,
-    backend_writer: &'a dyn BackendWriter
+    backend_writer: &'a dyn BackendWriter,
+    options: GlslOptions,
 }
 
 impl<'a> DrawShaderGenerator<'a> {
@@ -87,6 +94,7 @@ impl<'a> DrawShaderGenerator<'a> {
             Some(packed_geometries_slots),
             Some(packed_instances_slots),
             packed_varyings_slots,
+            true
         );
         for field in &self.draw_shader_def.fields {
             match field.kind {
@@ -247,7 +255,7 @@ impl<'a> DrawShaderGenerator<'a> {
     
     pub fn generate_pixel_shader(&mut self) {
         let packed_varyings_slots = self.compute_packed_varyings_slots();
-        self.generate_decls(None, None, packed_varyings_slots);
+        self.generate_decls(None, None, packed_varyings_slots, false);
         for field in &self.draw_shader_def.fields {
             match &field.kind {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
@@ -321,6 +329,9 @@ impl<'a> DrawShaderGenerator<'a> {
     fn generate_uniform_block_unpack(
         &mut self,
     ) {
+        if self.options.use_ovr_multiview {
+            write!(self.string, "int mvo = 0;").unwrap();
+        }
         for (ident, vec) in self.draw_shader_def.fields_as_uniform_blocks() {
             
             let mut slots = 0;
@@ -329,13 +340,21 @@ impl<'a> DrawShaderGenerator<'a> {
             
             for (index, _item) in vec {
                 let field = &self.draw_shader_def.fields[index];
-                
-                write!(self.string, "    {} = ", &DisplayDsIdent(field.ident)).unwrap();
-                
                 let ty_expr = field.ty_expr.ty.borrow();
-                
-                self.write_uniform_ty_unpack(ty_expr.as_ref().unwrap(), &table, slots);
-                write!(self.string, ";\n").unwrap();
+                if !self.draw_shader_def.ignore_idents.contains(&field.ident){
+                    // check if we have to unpack something else.
+                    write!(self.string, "    {} = ", &DisplayDsIdent(field.ident)).unwrap();
+                    
+                    if self.options.use_ovr_multiview && (
+                        field.ident == Ident(live_id!(camera_projection)) || 
+                        field.ident == Ident(live_id!(camera_view))) {
+                        self.write_uniform_ty_unpack(ty_expr.as_ref().unwrap(), &table, "+mvo", slots);
+                    }
+                    else{
+                        self.write_uniform_ty_unpack(ty_expr.as_ref().unwrap(), &table, "", slots);
+                    }
+                    write!(self.string, ";\n").unwrap();
+                }
                 slots += ty_expr.as_ref().unwrap().slots();
             }
             write!(self.string, "\n").unwrap();
@@ -349,7 +368,7 @@ impl<'a> DrawShaderGenerator<'a> {
         for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
             
             write!(self.string, "    {} = ", &live_ref).unwrap();
-            self.write_uniform_ty_unpack(ty, "live_table", slots);
+            self.write_uniform_ty_unpack(ty, "live_table", "", slots);
             write!(self.string, ";\n").unwrap();
             slots += ty.slots();
         }
@@ -360,6 +379,7 @@ impl<'a> DrawShaderGenerator<'a> {
         packed_attributes_size: Option<usize>,
         packed_instances_size: Option<usize>,
         packed_varyings_size: usize,
+        is_vertex_shader: bool,
     ) {
         
         if self.const_table.table.len()>0 {
@@ -392,7 +412,9 @@ impl<'a> DrawShaderGenerator<'a> {
             for (index, _item) in vec {
                 let field = &self.draw_shader_def.fields[index];
                 if let DrawShaderFieldKind::Uniform {..} = &field.kind {
-                    self.generate_uniform_decl(field);
+                    if !self.draw_shader_def.ignore_idents.contains(&field.ident){
+                        self.generate_uniform_decl(field);
+                    }
                 }
                 else {
                     panic!()
@@ -411,7 +433,7 @@ impl<'a> DrawShaderGenerator<'a> {
         
         if let Some(packed_attributes_size) = packed_attributes_size {
             self.generate_packed_var_decls(
-                "attribute",
+                if self.options.use_version_300{"in"}else{"attribute"},
                 "packed_geometry",
                 packed_attributes_size,
             );
@@ -419,13 +441,15 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, "\n").unwrap();
         if let Some(packed_instances_size) = packed_instances_size {
             self.generate_packed_var_decls(
-                "attribute",
+                if self.options.use_version_300{"in"}else{"attribute"},
                 "packed_instance",
                 packed_instances_size,
             );
         }
         write!(self.string, "\n").unwrap();
-        self.generate_packed_var_decls("varying", "packed_varying", packed_varyings_size);
+        self.generate_packed_var_decls(
+            if self.options.use_version_300{if is_vertex_shader{"out"}else{"in"}}else{"varying"},
+            "packed_varying", packed_varyings_size);
         write!(self.string, "\n").unwrap();
     }
     
@@ -543,7 +567,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
     }
     
-    fn write_uniform_ty_unpack(&mut self, ty: &Ty, prefix: &str, s: usize) {
+    fn write_uniform_ty_unpack(&mut self, ty: &Ty, prefix: &str, i:&str, s: usize) {
         match ty {
             Ty::Bool => write!(self.string, "{}[{}]>0.5?true:false", prefix, s),
             Ty::Int => write!(self.string, "int({}[{}])", prefix, s),
@@ -559,7 +583,7 @@ impl<'a> DrawShaderGenerator<'a> {
             Ty::Vec4 => write!(self.string, "vec4({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}])", prefix, s, s + 1, s + 2, s + 3),
             Ty::Mat2 => write!(self.string, "mat2({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}])", prefix, s, s + 1, s + 2, s + 3),
             Ty::Mat3 => write!(self.string, "mat3({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}], {0}[{5}], {0}[{6}], {0}[{7}], {0}[{8}], {0}[{9}])", prefix, s, s + 1, s + 2, s + 3, s + 4, s + 5, s + 6, s + 7, s + 8),
-            Ty::Mat4 => write!(self.string, "mat4({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}], {0}[{5}], {0}[{6}], {0}[{7}], {0}[{8}], {0}[{9}], {0}[{10}], {0}[{11}], {0}[{12}], {0}[{13}], {0}[{14}], {0}[{15}], {0}[{16}])", prefix, s, s + 1, s + 2, s + 3, s + 4, s + 5, s + 6, s + 7, s + 8, s + 9, s + 10, s + 11, s + 12, s + 13, s + 14, s + 15,),
+            Ty::Mat4 => write!(self.string, "mat4({0}[{1}{i}], {0}[{2}{i}], {0}[{3}{i}], {0}[{4}{i}], {0}[{5}{i}], {0}[{6}{i}], {0}[{7}{i}], {0}[{8}{i}], {0}[{9}{i}], {0}[{10}{i}], {0}[{11}{i}], {0}[{12}{i}], {0}[{13}{i}], {0}[{14}{i}], {0}[{15}{i}], {0}[{16}{i}])", prefix, s, s + 1, s + 2, s + 3, s + 4, s + 5, s + 6, s + 7, s + 8, s + 9, s + 10, s + 11, s + 12, s + 13, s + 14, s + 15,),
             //Ty::Mat4 => write!(self.string, "mat4({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}], {0}[{5}], {0}[{6}], {0}[{7}], {0}[{8}], {0}[{9}], {0}[{10}], {0}[{11}], {0}[{12}], {0}[{13}], {0}[{14}], {0}[{15}], {0}[{16}])", prefix, s, s + 4, s + 8, s + 12, s + 1, s + 5, s + 9, s + 13, s + 2, s + 6, s + 10, s + 14, s + 3, s + 7, s + 11, s + 15,),
             Ty::Enum {..} => write!(self.string, "{}[{}]", prefix, s),
             _ => panic!("unexpected as initializeable type {:?}", ty),
@@ -769,7 +793,14 @@ impl<'a> VarUnpacker<'a> {
 
 struct GlslBackendWriter<'a> {
     pub shader_registry: &'a ShaderRegistry,
-    const_table: &'a DrawShaderConstTable
+    const_table: &'a DrawShaderConstTable,
+    options: GlslOptions,
+}
+
+#[derive(Copy, Clone)]
+pub struct GlslOptions{
+    pub use_ovr_multiview: bool,
+    pub use_version_300: bool
 }
 
 impl<'a> BackendWriter for GlslBackendWriter<'a> {

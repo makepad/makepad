@@ -342,7 +342,7 @@ pub fn generate_builtins()-> HashMap<Ident, Builtin>{
         builtin!(sample2d, [
             (Ty::Texture2D, Ty::Vec2) -> Ty::Vec4
         ]),
-        builtin!(sample2d_rt, [
+        builtin!(sample2d, [
             (Ty::Texture2D, Ty::Vec2) -> Ty::Vec4
         ]),
         builtin!(sample2dOES, [
