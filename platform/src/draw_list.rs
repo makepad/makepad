@@ -205,7 +205,7 @@ impl CxDrawCall {
 #[derive(Clone)]
 #[repr(C)]
 pub struct CxDrawListUniforms {
-    pub view_transform: [f32; 16],
+    pub view_transform: Mat4,
     pub view_clip: Vec4,
     pub view_shift: Vec2,
     pub pad1: f32,
@@ -215,7 +215,7 @@ pub struct CxDrawListUniforms {
 impl Default for CxDrawListUniforms{
     fn default()->Self{
         Self{
-            view_transform: [0.0;16],
+            view_transform: Mat4::identity(),
             view_clip: vec4(-100000.0, -100000.0, 100000.0, 100000.0),
             view_shift: vec2(0.0,0.0),
             pad1: 0.0,
@@ -478,20 +478,13 @@ impl CxDrawList {
         let ys = if self.no_h_scroll {0.} else {self.snapped_scroll.y};
         Vec2 {x: xs, y: ys}
     }*/
-    
+    /*
     pub fn uniform_view_transform(&mut self, v: &Mat4) {
         //dump in uniforms
-        for i in 0..16 {
-            self.draw_list_uniforms.view_transform[i] = v.v[i];
-        }
+        self.draw_list_uniforms.view_transform = *v;
     }
     
     pub fn get_view_transform(&self) -> Mat4 {
-        //dump in uniforms
-        let mut m = Mat4::default();
-        for i in 0..16 {
-            m.v[i] = self.draw_list_uniforms.view_transform[i];
-        }
-        m
-    }
+        self.draw_list_uniforms.view_transform
+    }*/
 }

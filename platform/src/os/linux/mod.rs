@@ -11,6 +11,7 @@ pub mod openxr_sys;
 pub mod open_harmony;
 
 pub mod egl_sys;
+#[macro_use]
 pub mod gl_sys;
 pub mod libc_sys;
 pub mod opengl;
