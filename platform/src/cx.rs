@@ -146,6 +146,7 @@ pub struct AndroidParams {
     pub cache_path: String,
     pub density: f64,
     pub is_emulator: bool,
+    pub has_xr_mode: bool,
     pub android_version: String,
     pub build_number: String,
     pub kernel_version: String
@@ -212,6 +213,12 @@ impl OsType {
         }
     }
     
+    pub fn has_xr_mode(&self) -> bool {
+        match self {
+            OsType::Android(o) => o.has_xr_mode,
+            _ => false
+        }
+    }
     
     pub fn get_cache_dir(&self)->Option<String>{
         if let OsType::Android(params) = self {

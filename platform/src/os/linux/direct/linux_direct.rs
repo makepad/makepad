@@ -354,7 +354,7 @@ impl Default for CxOs {
     fn default() -> Self {
         Self {
             start_time: Instant::now(),
-            media: Default::default()
+            media: Default::default(),
         }
     }
 }

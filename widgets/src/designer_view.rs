@@ -159,7 +159,7 @@ live_design!{
                 return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
             }
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos * self.scale + self.shift);
+                return sample2d(self.image, self.pos * self.scale + self.shift);
             }
         }
         container: <DesignerContainer>{
