@@ -225,7 +225,7 @@ struct DrawCodeText {
 pub struct CodeEditor {
     #[walk] walk: Walk,
     #[live] scroll_bars: ScrollBars,
-    #[live] draw_gutter: DrawText,
+    #[live] draw_gutter: DrawText2,
     #[live] draw_text: DrawCodeText,
     #[live] token_colors: TokenColors,
     #[live] draw_indent_guide: DrawIndentGuide,
@@ -585,7 +585,7 @@ impl CodeEditor {
     pub fn decrease_font_size(&mut self) {
         if self.draw_text.text_style.font_size > 3.0 {
             self.draw_text.text_style.font_size -= 1.0;
-            self.draw_gutter.text_style.font_size = self.draw_text.text_style.font_size as f64;
+            self.draw_gutter.text_style.font_size = self.draw_text.text_style.font_size;
             if let Some(pos) = self.last_cursor_screen_pos {
                 self.keep_cursor_in_view = KeepCursorInView::FontResize(pos);
             }
@@ -595,7 +595,7 @@ impl CodeEditor {
     pub fn increase_font_size(&mut self) {
         if self.draw_text.text_style.font_size < 20.0 {
             self.draw_text.text_style.font_size += 1.0;
-            self.draw_gutter.text_style.font_size = self.draw_text.text_style.font_size as f64;
+            self.draw_gutter.text_style.font_size = self.draw_text.text_style.font_size;
             if let Some(pos) = self.last_cursor_screen_pos {
                 self.keep_cursor_in_view = KeepCursorInView::FontResize(pos);
             }
@@ -1053,7 +1053,7 @@ impl CodeEditor {
         {
             match element {
                 BlockElement::Line { line, .. } => {
-                    self.draw_gutter.font_scale = line.scale();
+                    self.draw_gutter.font_scale = line.scale() as f32;
                     buf.clear();
                     match self.gutter_chars{
                         0|1=>write!(buf, "{: >0}", line_index + 1).unwrap(),
