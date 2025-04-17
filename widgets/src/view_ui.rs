@@ -538,7 +538,7 @@ live_design! {
                 return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
             }
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos * self.scale + self.shift);// + mix(#f00,#0f0,self.pos.y);
+                return sample2d(self.image, self.pos * self.scale + self.shift);// + mix(#f00,#0f0,self.pos.y);
             }
         }
     }
@@ -578,7 +578,7 @@ live_design! {
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0),
                     max(1.0, self.border_radius)
                 )
-                let color = sample2d_rt(self.image, self.pos * self.scale + self.shift);
+                let color = sample2d(self.image, self.pos * self.scale + self.shift);
                 sdf.fill_keep_premul(color);
                 if self.border_size > 0.0 {
                     sdf.stroke(self.get_border_color(), self.border_size)

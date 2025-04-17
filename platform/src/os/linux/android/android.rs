@@ -122,7 +122,7 @@ impl Cx {
                 }
             }
         }
-        if let Err(e) = self.os.openxr.destroy_session(){
+        if let Err(e) = self.os.openxr.destroy_session(&self.os.display.as_ref().unwrap().libgl){
             crate::log!("OpenXR destroy destroy_session error: {e}")
         }
         if let Err(e) = self.os.openxr.destroy_instance(){
@@ -619,7 +619,6 @@ impl Cx {
                 major,
                 alpha,
             ).expect("Cant create EGL context")};
-            
             // SAFETY: This is loading OpenGL function pointers. It's safe as long as we have a valid EGL context.
             let libgl = LibGl::try_load(| s | {
                 for s in s{
@@ -631,7 +630,7 @@ impl Cx {
                 }
                 0 as _
             }).expect("Cant load openGL functions");
-
+            
             // SAFETY: This creates an EGL surface. It's safe as long as we have valid EGL display, config, and window.
             let surface = unsafe {(libegl.eglCreateWindowSurface.unwrap())(
                 egl_display,

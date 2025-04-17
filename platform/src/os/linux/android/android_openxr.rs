@@ -5,6 +5,7 @@ use{
                 openxr_sys::*,
                 android::android::CxAndroidDisplay,
                 gl_sys,
+                gl_sys::LibGl,
                 android::android_jni::*
             }
         },
@@ -148,7 +149,14 @@ impl Cx{
         if let Ok(()) = self.os.openxr.begin_frame(){
             // alright.
             // we're going to specialise our openGL rendering
-            
+            if !self.new_next_frames.is_empty() {
+                self.call_next_frame_event(self.os.timers.time_now());
+            }
+            if self.need_redrawing() {
+                self.call_draw_event();
+                self.opengl_compile_shaders();
+            }
+                        
             self.os.openxr.end_frame();
         }
     }
@@ -452,9 +460,9 @@ impl CxAndroidOpenXr{
         let mut gl_depth_textures = vec![0;swap_chain_len];
         let mut gl_frame_buffers = vec![0;swap_chain_len];
         let gl = &display.libgl;
-                                
+        
+        // create the openGL textures
         for i in 0..swap_chain_len{
-            // alright so 
             let color_texture = color_images[i].image;
             unsafe{
                 (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, color_texture);
@@ -531,7 +539,7 @@ impl CxAndroidOpenXr{
         Ok(())
     }
     
-    pub fn destroy_session(&mut self)->Result<(),String>{
+    pub fn destroy_session(&mut self, gl:&LibGl)->Result<(),String>{
         let openxr =  self.openxr.as_ref().ok_or("")?;
         let session = self.session.take().ok_or("")?;
         // alright lets destroy some things on the session
@@ -553,6 +561,16 @@ impl CxAndroidOpenXr{
             .log_error("xrDestroySpace");
         unsafe{(openxr.xrDestroySession)(session.handle)}
             .log_error("xrDestroySession");
+            
+        let swap_chain_len = session.color_images.len();
+        // destroy the GL resources
+        for i in 0..swap_chain_len{
+            unsafe{
+                (gl.glDeleteTextures)(1, &session.gl_depth_textures[i]);
+                (gl.glDeleteFramebuffers)(1, &session.gl_frame_buffers[i]);
+            }
+        }
+            
         Ok(())
     }
     /*  

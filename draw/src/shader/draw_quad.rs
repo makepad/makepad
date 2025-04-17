@@ -12,7 +12,6 @@ live_design!{
     use link::shaders::*;
     pub DrawQuad = {{DrawQuad}} {
         varying pos: vec2
-        
         fn clip_and_transform_vertex(self, rect_pos:vec2, rect_size:vec2) -> vec4 {
             let clipped: vec2 = clamp(
                 clamp(

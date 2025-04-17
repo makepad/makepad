@@ -248,7 +248,9 @@ pub struct CxPassColorTexture {
 #[repr(C)]
 pub struct PassUniforms {
     camera_projection: Mat4,
+    camera_projection_r: Mat4,
     camera_view: Mat4,
+    camera_view_r: Mat4,
     camera_inv: Mat4,
     dpi_factor: f32,
     dpi_dilate: f32,
