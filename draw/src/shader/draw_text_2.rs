@@ -245,17 +245,6 @@ impl DrawText2 {
                 last_row.origin_in_lpxs.y - last_row.ascender_in_lpxs,
             ) * self.font_scale;
         let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
-        /*
-        println!("Drawing the following text: {:?}", text.text);
-        println!("Current turtle position {:?}", turtle_pos);
-        println!("Draw origin in lpxs {:?}", origin_in_lpxs);
-        println!("Number of rows in text {:?}", text.rows.len());
-        println!("Last row origin in lpxs {:?}", last_row.origin_in_lpxs);
-        println!("Last row width in lpxs {:?}", last_row.width_in_lpxs);
-        println!("Last row ascender in lpxs {:?}", last_row.ascender_in_lpxs);
-        println!("New turtle position {:?}", new_turtle_pos);
-        println!("Used size in lpxs: {:?}", used_size_in_lpxs);
-        println!();*/
         let new_turtle_pos = dvec2(new_turtle_pos.x as f64, new_turtle_pos.y as f64);
         cx.turtle_mut().set_pos(new_turtle_pos);
         cx.turtle_mut()
