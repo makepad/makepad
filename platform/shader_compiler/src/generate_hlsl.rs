@@ -170,10 +170,10 @@ impl<'a> DrawShaderGenerator<'a> {
         
         for (ident, vec) in fields_as_uniform_blocks {
             let index = match ident.0{
-                live_id!(draw)=>2,
+                live_id!(draw_call)=>2,
                 live_id!(pass)=>3,
                 live_id!(user)=>5,
-                live_id!(view)=>4,
+                live_id!(draw_list)=>4,
                 _=>panic!()
             };
             writeln!(self.string, "cbuffer Uniforms_{} : register(b{}) {{", ident, index).unwrap();

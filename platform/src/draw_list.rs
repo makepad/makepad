@@ -6,7 +6,7 @@ use {
         makepad_math::*,
         os::{
             CxOsDrawCall,
-            CxOsView,
+            CxOsDrawList,
         },
         pass::PassId,
         id_pool::*,
@@ -84,7 +84,7 @@ impl std::ops::IndexMut<DrawListId> for CxDrawListPool {
 
 #[derive(Default, Clone)]
 #[repr(C)]
-pub struct DrawUniforms {
+pub struct CxDrawCallUniforms {
     pub draw_zbias: f32,
     pub pad1: f32,
     pub pad2: f32,
@@ -92,8 +92,8 @@ pub struct DrawUniforms {
 }
 
 
-impl DrawUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawUniforms>()] {
+impl CxDrawCallUniforms {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<CxDrawCallUniforms>()] {
         unsafe {std::mem::transmute(self)}
     }
     /*
@@ -178,7 +178,7 @@ pub struct CxDrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     pub options: CxDrawShaderOptions,
     pub total_instance_slots: usize,
-    pub draw_uniforms: DrawUniforms, // draw uniforms
+    pub draw_call_uniforms: CxDrawCallUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
@@ -193,7 +193,7 @@ impl CxDrawCall {
             options: draw_vars.options.clone(),
             draw_shader: draw_vars.draw_shader.unwrap(),
             total_instance_slots: mapping.instances.total_slots,
-            draw_uniforms: DrawUniforms::default(),
+            draw_call_uniforms: CxDrawCallUniforms::default(),
             user_uniforms: draw_vars.user_uniforms,
             texture_slots: draw_vars.texture_slots.clone(),
             instance_dirty: true,
@@ -289,7 +289,7 @@ pub struct CxDrawList {
     pub draw_list_uniforms: CxDrawListUniforms,
     pub draw_list_has_clip: bool,
     
-    pub os: CxOsView,
+    pub os: CxOsDrawList,
     pub rect_areas: Vec<CxRectArea>,
     pub find_appendable_draw_shader_id: Vec<u64>
 }
