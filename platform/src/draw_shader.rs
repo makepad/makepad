@@ -187,10 +187,12 @@ pub struct DrawShaderInput {
 #[cfg(any(target_arch = "wasm32"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSLTight;
 
+
 #[cfg(all(any(target_os = "android", target_os = "linux"),not(no_opengl_uniform_buffers)))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL140;
 #[cfg(all(any(target_os = "android", target_os = "linux"),no_opengl_uniform_buffers))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSLTight;
+
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os="tvos"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
@@ -233,7 +235,6 @@ impl DrawShaderInputs {
                 if (self.total_slots & 3) + slots > 4 { // goes over the boundary
                     self.total_slots += 4 - (self.total_slots & 3); // make jump to new slot
                 }
-                
                 self.inputs.push(DrawShaderInput {
                     id,
                     offset: self.total_slots,
