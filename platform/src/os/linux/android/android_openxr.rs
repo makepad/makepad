@@ -190,7 +190,7 @@ impl Cx{
             (gl.glScissor)(0, 0, session.width as i32, session.height as i32);
             
             (gl.glClearDepthf)(0.0);
-            (gl.glClearColor)(0.0, 0.3, 0.0, 0.0);
+            (gl.glClearColor)(0.0, 0.0, 0.0, 0.0);
             (gl.glClear)(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             crate::gl_log_error!(gl);
         }
@@ -496,11 +496,6 @@ impl CxAndroidOpenXr{
                 buf
             )}.to_result("xrEnumerateSwapchainImages")
         })?;
-        
-        let mut _projections = [
-            XrView::default(),
-            XrView::default(),
-        ];
         
         let mut passthrough = XrPassthroughFB(0);
         let ptci = XrPassthroughCreateInfoFB{
@@ -825,8 +820,9 @@ impl CxAndroidOpenXr{
         for eye in 0..2{
             let head_from_eye = projections[eye].pose;
             let local_from_head = local_from_head.pose;
-            let local_from_eye =XrPosef::multiply(&head_from_eye,&local_from_head);
+            let local_from_eye =XrPosef::multiply(&local_from_head, &head_from_eye);
             eyes[eye].local_from_eye  = local_from_eye;
+            
             // lets compute eye matrices and depth matrices
             if let Some(depth_image) = &depth_image{
                 let local_from_depth_eye = depth_image.views[eye].pose;
@@ -840,8 +836,8 @@ impl CxAndroidOpenXr{
                 eyes[eye].depth_view_mat = depth_view_mat;
                 eyes[eye].depth_proj_mat = depth_proj_mat;
             }
-            
-            eyes[eye].view_mat = local_from_eye.to_mat4();
+            let eye_from_local = local_from_eye.invert();
+            eyes[eye].view_mat = eye_from_local.to_mat4().transpose();
             eyes[eye].proj_mat = Mat4::from_camera_fov(&projections[eye].fov, 0.1, 100.0);
             
         }

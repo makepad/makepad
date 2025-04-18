@@ -68,24 +68,25 @@ impl Pose {
     }
     
     pub fn to_mat4(&self) -> Mat4 {
+        
         let q = self.orientation;
         let t = self.position;
         Mat4 {v: [
             (1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z),
             (2.0 * q.x * q.y - 2.0 * q.z * q.w),
             (2.0 * q.x * q.z + 2.0 * q.y * q.w),
-            0.0,
+            t.x,
             (2.0 * q.x * q.y + 2.0 * q.z * q.w),
             (1.0 - 2.0 * q.x * q.x - 2.0 * q.z * q.z),
             (2.0 * q.y * q.z - 2.0 * q.x * q.w),
-            0.0,
+            t.y,
             (2.0 * q.x * q.z - 2.0 * q.y * q.w),
             (2.0 * q.y * q.z + 2.0 * q.x * q.w),
             (1.0 - 2.0 * q.x * q.x - 2.0 * q.y * q.y),
-            0.0,
-            t.x,
-            t.y,
             t.z,
+            0.0,
+            0.0,
+            0.0,
             1.0
         ]}
     }
@@ -816,19 +817,19 @@ impl Mat4 {
         
     }
     
-    pub const fn scaled_translation(s: f32, x: f32, y: f32, z: f32) -> Mat4 {
+    pub const fn scaled_translation(sx: f32, sy:f32, sz:f32,  x: f32, y: f32, z: f32) -> Mat4 {
         Mat4 {v: [
-            s,
+            sx,
             0.0,
             0.0,
             0.0,
             0.0,
-            s,
+            sy,
             0.0,
             0.0,
             0.0,
             0.0,
-            s,
+            sz,
             0.0,
             x,
             y,

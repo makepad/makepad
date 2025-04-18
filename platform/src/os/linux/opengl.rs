@@ -960,10 +960,12 @@ impl CxOsDrawShader {
         let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) = if os_type.has_xr_mode(){(
             "#version 300 es",
             "
+            #define VIEW_ID 0
             #extension GL_OVR_multiview2 : require
             layout(num_views=2) in;
             ",
             "
+            #define VIEW_ID 0
             #extension GL_OVR_multiview2 : require
             ",
             "",
@@ -1020,8 +1022,8 @@ impl CxOsDrawShader {
 
         // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
-            vertex: [vertex.clone(), vertex],
-            pixel: [pixel.clone(), pixel],
+            vertex: [vertex.clone(), vertex.replace("#define VIEW_ID 0","#define VIEW_ID gl_ViewID_OVR")],
+            pixel: [pixel.clone(), pixel.replace("#define VIEW_ID 0","#define VIEW_ID gl_ViewID_OVR")],
             gl_shader: [None,None],
             //const_table_uniforms: Default::default(),
             live_uniforms: Default::default(),
