@@ -58,9 +58,9 @@ impl<'a> DrawShaderGenerator<'a> {
                 break;
             }
 
-            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d))) {
+            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d_rt))) {
                 writeln!(self.string, "SamplerState default_texture_sampler{{Filter=MIN_MAX_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;}};").unwrap();
-                writeln!(self.string, "float4 sample2d(Texture2D tex, float2 pos){{return tex.Sample(default_texture_sampler,pos);}}").unwrap();
+                writeln!(self.string, "float4 sample2d_rt(Texture2D tex, float2 pos){{return tex.Sample(default_texture_sampler,pos);}}").unwrap();
                 break;
             }
         };
