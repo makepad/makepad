@@ -537,7 +537,7 @@ impl<'a> Cx2d<'a> {
                     turtle.update_height_max(pos.y,size.y);
                 }
                 Flow::RightWrap=>{
-                    panic!("Cannot use abs_pos in a flow::Rightwrap");
+                    turtle.update_height_max(pos.y, size.y + walk.margin.size().y);
                 }
             }
             Rect {pos: pos + walk.margin.left_top(), size}
