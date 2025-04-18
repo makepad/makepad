@@ -3,7 +3,7 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_wasm_bridge::*,
-        makepad_math::{dvec2, DVec2, Vec3, Quat, Transform},
+        makepad_math::{dvec2, DVec2, Vec3, Quat, Pose},
         cx::{OsType, XrCapabilities, WebParams},
         window::CxWindowPool,
         area::Area,
@@ -533,7 +533,7 @@ pub struct WQuat {
 
 impl Into<Quat> for WQuat {
     fn into(self) -> Quat {
-        Quat {a: self.a, b: self.b, c: self.c, d: self.d}
+        Quat {x: self.a, y: self.b, z: self.c, w: self.d}
     }
 }
 
@@ -549,9 +549,9 @@ pub struct WXRTransform {
     pub position: WVec3,
 }
 
-impl Into<Transform> for WXRTransform {
-    fn into(self) -> Transform {
-        Transform {
+impl Into<Pose> for WXRTransform {
+    fn into(self) -> Pose {
+        Pose {
             orientation: self.orientation.into(),
             position: self.position.into()
         }
@@ -593,7 +593,7 @@ impl Into<XRInput> for WXRInput {
 #[derive(ToWasm)]
 pub struct ToWasmXRUpdate {
     pub time: f64,
-    pub head_transform: WXRTransform,
+    pub head_pose: WXRTransform,
     pub inputs: Vec<WXRInput>,
 }
 
@@ -601,7 +601,7 @@ impl ToWasmXRUpdate {
     pub fn into_xrupdate_event(self, last_inputs: Option<Vec<XRInput >>) -> XRUpdateEvent {
         XRUpdateEvent {
             time: self.time,
-            head_transform: self.head_transform.into(),
+            head_pose: self.head_pose.into(),
             inputs: self.inputs.into_iter().map( | v | v.into()).collect(),
             last_inputs
         }

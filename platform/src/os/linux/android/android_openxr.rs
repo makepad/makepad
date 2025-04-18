@@ -168,6 +168,8 @@ impl Cx{
         pass.pass_uniforms.camera_projection_r = frame.eyes[1].proj_mat;
         pass.pass_uniforms.camera_view_r = frame.eyes[1].view_mat;
         
+        pass.os.pass_uniforms.update_uniform_buffer(self.os.gl(), pass.pass_uniforms.as_slice());
+        
         // lets bind the framebuffers
         let gl_frame_buffer = session.gl_frame_buffers[frame.swap_chain_index as usize];
         

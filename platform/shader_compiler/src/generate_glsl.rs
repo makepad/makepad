@@ -390,7 +390,7 @@ impl<'a> DrawShaderGenerator<'a> {
         let live_slots = self.calc_live_slots();
         if live_slots >0 {
             if self.options.use_uniform_buffers{
-                writeln!(self.string, "uniform liveUniforms{{").unwrap();
+                writeln!(self.string, "layout (std140) uniform liveUniforms{{").unwrap();
                 for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
                     write!(self.string,"    ").unwrap();
                     self.write_var_decl(live_ref, ty);

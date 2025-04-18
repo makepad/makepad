@@ -973,6 +973,10 @@ impl CxOsApi for Cx {
     fn open_url(&mut self, _url:&str, _in_place:OpenUrlInPlace){
         crate::error!("open_url not implemented on this platform");
     }
+    
+    fn in_xr_mode(&self)->bool{
+        self.os.in_xr_mode
+    }
 }
 
 impl Default for CxOs {

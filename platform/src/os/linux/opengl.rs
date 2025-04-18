@@ -7,7 +7,7 @@ use {
         draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput}, 
         event::{Event, TextureHandleReadyEvent}, 
         makepad_live_id::*, 
-        makepad_math::{DVec2, Mat4, Vec4}, 
+        makepad_math::{DVec2, Vec4}, 
         makepad_shader_compiler::generate_glsl, 
         pass::{PassClearColor, PassClearDepth, PassId}, 
         texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureUpdated}
@@ -199,11 +199,6 @@ impl Cx {
                         GlShader::set_uniform_array(gl, &shgl.uniforms.draw_list_uniforms, draw_list_uniforms);
                         GlShader::set_uniform_array(gl, &shgl.uniforms.draw_call_uniforms, draw_call_uniforms);
                         GlShader::set_uniform_array(gl, &shgl.uniforms.user_uniforms, &draw_call.user_uniforms);
-                        GlShader::set_uniform_array(gl, &shgl.uniforms.live_uniforms, &sh.mapping.live_uniforms_buf);
-                        let ct = &sh.mapping.const_table.table;
-                        if ct.len()>0 {
-                            GlShader::set_uniform_array(gl, &shgl.uniforms.const_table_uniform, ct);
-                        }
                     }
                     
                     
@@ -751,6 +746,12 @@ impl GlShader{
             
             let uniforms = GlShaderUniforms::new(gl, program, mapping);
             
+            #[cfg(not(no_opengl_uniform_buffers))]
+            uniforms.live_uniforms_binding.bind_buffer(gl, &uniforms.live_uniforms);
+            
+            #[cfg(no_opengl_uniform_buffers)]
+            GlShader::set_uniform_array(gl, &uniforms.live_uniforms, &mapping.live_uniforms_buf);
+            
             let ct = &mapping.const_table.table;
             if ct.len()>0 {
                 GlShader::set_uniform_array(gl, &uniforms.const_table_uniform, ct);
@@ -762,20 +763,7 @@ impl GlShader{
                 instances: Self::opengl_get_attributes(gl, program, "packed_instance_", mapping.instances.total_slots),
                 textures: Self::opengl_get_texture_slots(gl, program, &mapping.textures),
                 uniforms
-                /*
-                pass_uniforms: Self::opengl_get_uniform(gl, program, "pass_table"),
-                view_uniforms: Self::opengl_get_uniform(gl, program, "view_table"),
-                draw_uniforms: Self::opengl_get_uniform(gl, program, "draw_table"),
-                user_uniforms: Self::opengl_get_uniform(gl, program, "user_table"),
-                live_uniforms: Self::opengl_get_uniform(gl, program, "live_table"),
-                const_table_uniform: Self::opengl_get_uniform(gl, program, "const_table"),
-                */
             };
-            // crate::error!("GlShader: {:#?}", t);
-            // for tex in &t.textures {
-            //     crate::error!("TEXTURE loc: {}: vertex:\n{}", tex.loc, vertex);
-            //     crate::error!("TEXTURE loc: {}: pixel:\n{}", tex.loc, pixel);
-            // }
             t
         }
     }
@@ -971,8 +959,13 @@ impl CxOsDrawShader {
         
         let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) = if os_type.has_xr_mode(){(
             "#version 300 es",
-            "",
-            "",
+            "
+            #extension GL_OVR_multiview2 : require
+            layout(num_views=2) in;
+            ",
+            "
+            #extension GL_OVR_multiview2 : require
+            ",
             "",
             "out vec4 gl_FragColor;",
             "vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}} " 
@@ -1021,7 +1014,7 @@ impl CxOsDrawShader {
 
         // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
-            vertex: [vertex.clone(), vertex.replace("int mvo = 0;","int mvo = gl_ViewID_OVR==1?16:0;")],
+            vertex: [vertex.clone(), vertex],
             pixel: [pixel.clone(), pixel],
             gl_shader: [None,None],
             //const_table_uniforms: Default::default(),
