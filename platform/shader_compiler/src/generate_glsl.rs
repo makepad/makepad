@@ -383,23 +383,16 @@ impl<'a> DrawShaderGenerator<'a> {
         is_vertex_shader: bool,
     ) {
         if self.const_table.table.len()>0 {
-            if self.options.use_uniform_buffers{
-                writeln!(self.string, "layout (std140) uniform constTable{{").unwrap();
-                writeln!(self.string, "    uniform float table[{}];", self.const_table.table.len()).unwrap();            
-                writeln!(self.string, "}} ct;").unwrap();
-            }
-            else{
-                writeln!(self.string, "uniform float const_table[{}];", self.const_table.table.len()).unwrap()
-            }
+            writeln!(self.string, "uniform float const_table[{}];", self.const_table.table.len()).unwrap()
         }
         write!(self.string, "\n").unwrap();
         
         let live_slots = self.calc_live_slots();
         if live_slots >0 {
             if self.options.use_uniform_buffers{
-                writeln!(self.string, "layout (std140) uniform liveUniforms{{").unwrap();
+                writeln!(self.string, "uniform liveUniforms{{").unwrap();
                 for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
-                    write!(self.string,"    uniform ").unwrap();
+                    write!(self.string,"    ").unwrap();
                     self.write_var_decl(live_ref, ty);
                     writeln!(self.string, ";").unwrap();
                     /*
@@ -510,7 +503,7 @@ impl<'a> DrawShaderGenerator<'a> {
     }
     
     fn generate_uniform_block_decl(&mut self, decl: &DrawShaderFieldDef) {
-        write!(self.string, "uniform ").unwrap();
+        write!(self.string, "    ").unwrap();
         self.write_var_decl(
             &decl.ident,//&DisplayDsIdent(decl.ident),
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
@@ -860,12 +853,7 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     }
     
     fn const_table_prefix(&self)->&'static str{
-        if self.options.use_uniform_buffers{
-            "ct.table"
-        }
-        else{
-            "const_table"
-        }
+        "const_table"
     }
     
     fn enum_is_float(&self) -> bool {

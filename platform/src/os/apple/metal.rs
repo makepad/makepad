@@ -107,7 +107,7 @@ impl Cx {
                 }
                 
                 // update the zbias uniform if we have it.
-                draw_call.draw_uniforms.set_zbias(*zbias);
+                draw_call.draw_call_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
                 
                 if draw_call.uniforms_dirty {
@@ -160,7 +160,7 @@ impl Cx {
                 
                 let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                 let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
-                let draw_uniforms = draw_call.draw_uniforms.as_slice();
+                let draw_call_uniforms = draw_call.draw_call_uniforms.as_slice();
                 
                 unsafe {
                     
@@ -168,15 +168,15 @@ impl Cx {
                     
                     let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
                     
-                    if let Some(id) = shp.draw_uniform_buffer_id {
-                        let () = msg_send![encoder, setVertexBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: id];
-                        let () = msg_send![encoder, setFragmentBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: id];
+                    if let Some(id) = shp.draw_call_uniform_buffer_id {
+                        let () = msg_send![encoder, setVertexBytes: draw_call_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setFragmentBytes: draw_call_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call_uniforms.len() * 4) as u64 atIndex: id];
                     }
                     if let Some(id) = shp.pass_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
                     }
-                    if let Some(id) = shp.view_uniform_buffer_id {
+                    if let Some(id) = shp.draw_list_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
                     }
@@ -601,7 +601,7 @@ pub struct MetalCx {
 
 
 #[derive(Clone, Default)]
-pub struct CxOsView {
+pub struct CxOsDrawList {
 }
 
 #[derive(Default, Clone)]
@@ -634,9 +634,9 @@ impl MetalCx {
 pub struct CxOsDrawShader {
     _library: RcObjcId,
     render_pipeline_state: RcObjcId,
-    draw_uniform_buffer_id: Option<u64>,
+    draw_call_uniform_buffer_id: Option<u64>,
     pass_uniform_buffer_id: Option<u64>,
-    view_uniform_buffer_id: Option<u64>,
+    draw_list_uniform_buffer_id: Option<u64>,
     user_uniform_buffer_id: Option<u64>,
     mtlsl: String,
 }
@@ -731,9 +731,9 @@ impl CxOsDrawShader {
         return Some(Self {
             _library: library,
             render_pipeline_state,
-            draw_uniform_buffer_id,
+            draw_call_uniform_buffer_id,
             pass_uniform_buffer_id,
-            view_uniform_buffer_id,
+            draw_list_uniform_buffer_id,
             user_uniform_buffer_id,
             mtlsl: shader.mtlsl
         });
