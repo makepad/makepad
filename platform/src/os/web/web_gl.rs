@@ -29,7 +29,7 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
-        self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
+        self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4::identity();
 
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list() {
@@ -72,7 +72,7 @@ impl Cx {
                     });
                     draw_call.instance_dirty = false;
                 }
-                draw_call.draw_uniforms.set_zbias(*zbias);
+                draw_call.draw_call_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
                 
                 // update/alloc textures?
@@ -184,8 +184,8 @@ impl Cx {
                     shader_id: draw_call.draw_shader.draw_shader_id,
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
-                    view_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
-                    draw_uniforms: WasmPtrF32::new(draw_call.draw_uniforms.as_slice()),
+                    draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
+                    draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),
                     user_uniforms: WasmPtrF32::new(draw_call.user_uniforms.as_slice()),
                     live_uniforms: WasmPtrF32::new(&sh.mapping.live_uniforms_buf),
                     const_table: WasmPtrF32::new(&sh.mapping.const_table.table),
@@ -206,7 +206,7 @@ impl Cx {
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         self.passes[pass_id].set_dpi_factor(dpi_factor);
-        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
+        self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
         pass_rect.size 
     }
     
@@ -336,15 +336,23 @@ impl Cx {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
                 let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
                 
+                let glsl_options = generate_glsl::GlslOptions{
+                    use_ovr_multiview: false,
+                    use_uniform_buffers: false,
+                    use_inout: false,
+                };
+                
                 let vertex = generate_glsl::generate_vertex_shader(
                     draw_shader_def.as_ref().unwrap(),
                     &cx_shader.mapping.const_table,
-                    &self.shader_registry
+                    &self.shader_registry,
+                    glsl_options
                 );
                 let pixel = generate_glsl::generate_pixel_shader(
                     draw_shader_def.as_ref().unwrap(),
                     &cx_shader.mapping.const_table,
-                    &self.shader_registry
+                    &self.shader_registry,
+                    glsl_options
                 );
                  
                 if cx_shader.mapping.flags.debug {
@@ -367,14 +375,6 @@ impl Cx {
                         pixel: shp.pixel.clone(),
                         geometry_slots: cx_shader.mapping.geometries.total_slots,
                         instance_slots: cx_shader.mapping.instances.total_slots,
-                        /*
-                        pass_uniforms_slots: cx_shader.mapping.pass_uniforms.total_slots,
-                        view_uniforms_slots: cx_shader.mapping.view_uniforms.total_slots,
-                        draw_uniforms_slots: cx_shader.mapping.draw_uniforms.total_slots,
-                        user_uniforms_slots: cx_shader.mapping.user_uniforms.total_slots,
-                        live_uniforms_slots: cx_shader.mapping.live_uniforms.total_slots,
-                        const_table_slots:cx_shader.mapping.const_table.table.len(),
-                        */
                         textures:cx_shader.mapping.textures.iter().map(|v| v.to_from_wasm_texture_input()).collect()
                     });
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
@@ -396,7 +396,6 @@ impl CxOsDrawShader{
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}} 
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
@@ -407,7 +406,6 @@ impl CxOsDrawShader{
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}}
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
@@ -427,7 +425,7 @@ pub struct CxOsPass {
 }
 
 #[derive(Clone, Default)]
-pub struct CxOsView {
+pub struct CxOsDrawList {
 }
 
 #[derive(Default, Clone)]
