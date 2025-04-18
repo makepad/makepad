@@ -31,17 +31,17 @@ live_design!{
                     }
                     button_1 = <Button> {
                         text: "Click me 😊"
-                        draw_text:{color:#fff}
+                        draw_text:{color:#fff, text_style:{font_size:28}}
                     }
                     text_input = <TextInput> {
                         width: 100,
                         flow: RightWrap,
                         text: "Lorem ipsum"
-                        draw_text:{color:#fff}
+                        draw_text:{color:#fff, text_style:{font_size:28}}
                     }
                     button_2 = <Button> {
                         text: "Click me 345"
-                        draw_text:{color:#fff}
+                        draw_text:{color:#fff, text_style:{font_size:28}}
                     }
                 }
             }
