@@ -968,7 +968,10 @@ impl CxOsDrawShader {
             ",
             "",
             "out vec4 gl_FragColor;",
-            "vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}} " 
+            "
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}} 
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}} 
+            " 
         )}
         else{(
             "#version 300 es",
@@ -976,7 +979,10 @@ impl CxOsDrawShader {
             "",
             "",
             "out vec4 gl_FragColor;",
-            "vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}} " 
+            "
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}} 
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}} 
+            " 
         )};
         
         let transpose_impl = "
