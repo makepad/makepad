@@ -63,8 +63,8 @@ impl<'a> DrawShaderGenerator<'a> {
                 writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
                 break;
             }
-            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d))) {
-                writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
+            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d_rt))) {
+                writeln!(self.string, "float4 sample2d_rt(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
                 break;
             }
         };
