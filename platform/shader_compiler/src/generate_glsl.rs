@@ -26,6 +26,7 @@ pub fn generate_vertex_shader(draw_shader_def: &DrawShaderDef, const_table: &Dra
         options,
         backend_writer: &GlslBackendWriter {
             options,
+            draw_shader_def,
             shader_registry,
             const_table
         }
@@ -42,7 +43,12 @@ pub fn generate_pixel_shader(draw_shader_def: &DrawShaderDef, const_table: &Draw
         shader_registry,
         string: &mut string,
         options,
-        backend_writer: &GlslBackendWriter {shader_registry, const_table, options}
+        backend_writer: &GlslBackendWriter {
+            shader_registry, 
+            draw_shader_def,
+            const_table, 
+            options
+        }
     }
     .generate_pixel_shader();
     string
@@ -329,8 +335,8 @@ impl<'a> DrawShaderGenerator<'a> {
     fn generate_uniform_block_unpack(
         &mut self,
     ) {
-        if self.options.use_ovr_multiview {
-            write!(self.string, "int mvo = 0;").unwrap();
+        if self.options.use_uniform_buffers{
+            return
         }
         for (ident, vec) in self.draw_shader_def.fields_as_uniform_blocks() {
             
@@ -344,15 +350,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 if !self.draw_shader_def.ignore_idents.contains(&field.ident){
                     // check if we have to unpack something else.
                     write!(self.string, "    {} = ", &DisplayDsIdent(field.ident)).unwrap();
-                    
-                    if self.options.use_ovr_multiview && (
-                        field.ident == Ident(live_id!(camera_projection)) || 
-                        field.ident == Ident(live_id!(camera_view))) {
-                        self.write_uniform_ty_unpack(ty_expr.as_ref().unwrap(), &table, "+mvo", slots);
-                    }
-                    else{
-                        self.write_uniform_ty_unpack(ty_expr.as_ref().unwrap(), &table, "", slots);
-                    }
+                    self.write_uniform_ty_unpack(ty_expr.as_ref().unwrap(), &table, "", slots);
                     write!(self.string, ";\n").unwrap();
                 }
                 slots += ty_expr.as_ref().unwrap().slots();
@@ -364,6 +362,9 @@ impl<'a> DrawShaderGenerator<'a> {
     fn generate_live_unpack(
         &mut self,
     ) {
+        if self.options.use_uniform_buffers{
+            return
+        }
         let mut slots = 0;
         for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
             
@@ -381,22 +382,44 @@ impl<'a> DrawShaderGenerator<'a> {
         packed_varyings_size: usize,
         is_vertex_shader: bool,
     ) {
-        
         if self.const_table.table.len()>0 {
-            writeln!(self.string, "uniform float const_table[{}];", self.const_table.table.len()).unwrap();
+            if self.options.use_uniform_buffers{
+                writeln!(self.string, "layout (std140) uniform constTable{{").unwrap();
+                writeln!(self.string, "    uniform float table[{}];", self.const_table.table.len()).unwrap();            
+                writeln!(self.string, "}} ct;").unwrap();
+            }
+            else{
+                writeln!(self.string, "uniform float const_table[{}];", self.const_table.table.len()).unwrap()
+            }
         }
         write!(self.string, "\n").unwrap();
         
         let live_slots = self.calc_live_slots();
         if live_slots >0 {
-            writeln!(self.string, "uniform float live_table[{}];", live_slots).unwrap();
-        }
-        
-        for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
-            self.write_var_decl(live_ref, ty);
-            write!(self.string, " = ").unwrap();
-            self.write_ty_init(ty);
-            writeln!(self.string, ";").unwrap();
+            if self.options.use_uniform_buffers{
+                writeln!(self.string, "layout (std140) uniform liveUniforms{{").unwrap();
+                for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
+                    write!(self.string,"    uniform ").unwrap();
+                    self.write_var_decl(live_ref, ty);
+                    writeln!(self.string, ";").unwrap();
+                    /*
+                    write!(self.string, " = ").unwrap();
+                    self.write_ty_init(ty);
+                    writeln!(self.string, ";").unwrap();
+                    */
+                }
+                writeln!(self.string, "}} lt;").unwrap();
+            }
+            else{
+                writeln!(self.string, "uniform float live_table[{}];", live_slots).unwrap();
+                        
+                for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
+                    self.write_var_decl(live_ref, ty);
+                    write!(self.string, " = ").unwrap();
+                    self.write_ty_init(ty);
+                    writeln!(self.string, ";").unwrap();
+                }
+            }
         }
         
         for (ident, vec) in self.draw_shader_def.fields_as_uniform_blocks() {
@@ -406,18 +429,35 @@ impl<'a> DrawShaderGenerator<'a> {
                 let field = &self.draw_shader_def.fields[*index];
                 slots += field.ty_expr.ty.borrow().as_ref().unwrap().slots();
             }
-            
-            writeln!(self.string, "uniform float {}_table[{}];", ident, slots).unwrap();
-            
-            for (index, _item) in vec {
-                let field = &self.draw_shader_def.fields[index];
-                if let DrawShaderFieldKind::Uniform {..} = &field.kind {
-                    if !self.draw_shader_def.ignore_idents.contains(&field.ident){
-                        self.generate_uniform_decl(field);
+            if self.options.use_uniform_buffers{
+                writeln!(self.string, "layout (std140) uniform {}Uniforms{{", ident).unwrap();
+                
+                for (index, _item) in vec {
+                    let field = &self.draw_shader_def.fields[index];
+                    if let DrawShaderFieldKind::Uniform {..} = &field.kind {
+                        //if !self.draw_shader_def.ignore_idents.contains(&field.ident){
+                            self.generate_uniform_block_decl(field);
+                        //}
+                    }
+                    else {
+                        panic!()
                     }
                 }
-                else {
-                    panic!()
+                writeln!(self.string, "}}{};", ident).unwrap();
+            }
+            else{
+                writeln!(self.string, "uniform float {}_table[{}];", ident, slots).unwrap();
+                                
+                for (index, _item) in vec {
+                    let field = &self.draw_shader_def.fields[index];
+                    if let DrawShaderFieldKind::Uniform {..} = &field.kind {
+                        if !self.draw_shader_def.ignore_idents.contains(&field.ident){
+                            self.generate_uniform_decl(field);
+                        }
+                    }
+                    else {
+                        panic!()
+                    }
                 }
             }
             write!(self.string, "\n").unwrap();
@@ -433,7 +473,7 @@ impl<'a> DrawShaderGenerator<'a> {
         
         if let Some(packed_attributes_size) = packed_attributes_size {
             self.generate_packed_var_decls(
-                if self.options.use_version_300{"in"}else{"attribute"},
+                if self.options.use_inout{"in"}else{"attribute"},
                 "packed_geometry",
                 packed_attributes_size,
             );
@@ -441,14 +481,14 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, "\n").unwrap();
         if let Some(packed_instances_size) = packed_instances_size {
             self.generate_packed_var_decls(
-                if self.options.use_version_300{"in"}else{"attribute"},
+                if self.options.use_inout{"in"}else{"attribute"},
                 "packed_instance",
                 packed_instances_size,
             );
         }
         write!(self.string, "\n").unwrap();
         self.generate_packed_var_decls(
-            if self.options.use_version_300{if is_vertex_shader{"out"}else{"in"}}else{"varying"},
+            if self.options.use_inout{if is_vertex_shader{"out"}else{"in"}}else{"varying"},
             "packed_varying", packed_varyings_size);
         write!(self.string, "\n").unwrap();
     }
@@ -467,6 +507,15 @@ impl<'a> DrawShaderGenerator<'a> {
             }
         }
         writeln!(self.string, "}};").unwrap();
+    }
+    
+    fn generate_uniform_block_decl(&mut self, decl: &DrawShaderFieldDef) {
+        write!(self.string, "uniform ").unwrap();
+        self.write_var_decl(
+            &decl.ident,//&DisplayDsIdent(decl.ident),
+            decl.ty_expr.ty.borrow().as_ref().unwrap(),
+        );
+        writeln!(self.string, ";").unwrap();
     }
     
     fn generate_uniform_decl(&mut self, decl: &DrawShaderFieldDef) {
@@ -793,6 +842,7 @@ impl<'a> VarUnpacker<'a> {
 
 struct GlslBackendWriter<'a> {
     pub shader_registry: &'a ShaderRegistry,
+    pub draw_shader_def: &'a DrawShaderDef,
     const_table: &'a DrawShaderConstTable,
     options: GlslOptions,
 }
@@ -800,12 +850,22 @@ struct GlslBackendWriter<'a> {
 #[derive(Copy, Clone)]
 pub struct GlslOptions{
     pub use_ovr_multiview: bool,
-    pub use_version_300: bool
+    pub use_uniform_buffers: bool,
+    pub use_inout: bool
 }
 
 impl<'a> BackendWriter for GlslBackendWriter<'a> {
     fn get_struct_cons_type(&self) -> StructConsType {
         StructConsType::Paren
+    }
+    
+    fn const_table_prefix(&self)->&'static str{
+        if self.options.use_uniform_buffers{
+            "ct.table"
+        }
+        else{
+            "const_table"
+        }
     }
     
     fn enum_is_float(&self) -> bool {
@@ -964,11 +1024,31 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     fn write_fn_def_hidden_params(&self, _string: &mut String, _hidden_args: &BTreeSet<HiddenArgKind >, _sep: &str) {
     }
     
-    fn generate_live_value_prefix(&self, _string: &mut String) {
+    fn generate_live_value_prefix(&self, string: &mut String) {
+        if self.options.use_uniform_buffers{
+            write!(string, "lt.").unwrap();
+        }
     }
     
     fn generate_draw_shader_field_expr(&self, string: &mut String, field_ident: Ident, _ty: &Ty) {
-        write!(string, "{}", &DisplayDsIdent(field_ident)).unwrap();
+        if self.options.use_uniform_buffers{
+            let field_def = self.draw_shader_def.find_field(field_ident).unwrap();
+                            
+            match &field_def.kind {
+                DrawShaderFieldKind::Geometry {..} |
+                DrawShaderFieldKind::Instance { ..} |
+                DrawShaderFieldKind::Varying {..} |
+                DrawShaderFieldKind::Texture {..} => {
+                     write!(string, "{}", &DisplayDsIdent(field_ident)).unwrap();
+                }
+                DrawShaderFieldKind::Uniform {block_ident, ..} => {
+                    write!(string, "{}.{}", block_ident, field_ident).unwrap()
+                }
+            }
+        }
+        else{
+            write!(string, "{}", &DisplayDsIdent(field_ident)).unwrap();
+        }
     }
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {

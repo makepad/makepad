@@ -120,6 +120,7 @@ pub const RENDERER: GLenum = 0x1F01;
 pub const SCISSOR_TEST: GLenum = 0x0C11;
 pub const CULL_FACE:GLenum = 0x0B44;
 pub const DONT_CARE:GLenum = 0x1100;
+pub const UNIFORM_BUFFER:GLenum = 0x8A11;
 
 pub type TglGenVertexArrays = unsafe extern "C" fn(n: GLsizei, arrays: *mut GLuint) -> () ;
 pub type TglBindVertexArray = unsafe extern "C" fn(array: GLuint) -> () ;
@@ -190,6 +191,9 @@ pub type TglScissor = unsafe extern "C" fn(x:GLint, y:GLint, width:GLsizei, heig
 pub type TglInvalidateFramebuffer = unsafe extern "C" fn(target:GLenum, num_attachments:GLsizei, attachments: *const GLenum);
 pub type TglDebugMessageCallback = unsafe extern "C" fn(ptr: TglDebugMessageCallbackFn, param: *const raw::c_void);
 pub type TglDebugMessageCallbackFn = unsafe extern "C" fn(source: GLenum, ty: GLenum, id: GLuint, severity:GLenum, length:GLsizei, msg: *const GLchar, param: *const raw::c_void);
+pub type TglGetUniformBlockIndex = unsafe extern "C" fn(program:GLuint, uniform_block_name: *const GLchar)->GLuint;
+pub type TglUniformBlockBinding = unsafe extern "C" fn(program: GLuint, block_index: GLuint, binding: GLuint);
+pub type TglBindBufferBase = unsafe extern "C" fn(target:GLenum, index: GLuint, buffer:GLuint);
 
 pub type TglGetDebugMessageLog = unsafe extern "C" fn(count:GLuint,
     buf_size:GLsizei,
@@ -278,6 +282,9 @@ pub struct LibGl{
     pub glDebugMessageCallback: TglDebugMessageCallback,
     pub glGetDebugMessageLog: TglGetDebugMessageLog,
     pub glDebugMessageControl: TglDebugMessageControl,
+    pub glGetUniformBlockIndex: TglGetUniformBlockIndex,
+    pub glUniformBlockBinding: TglUniformBlockBinding,
+    pub glBindBufferBase: TglBindBufferBase,
     pub glFramebufferTextureMultiviewOVR: Option<TglFramebufferTextureMultiviewOVR>,
 }
 
@@ -391,6 +398,9 @@ impl LibGl{
             glDebugMessageCallback: load!(loadfn, TglDebugMessageCallback, "glDebugMessageCallback")?,
             glGetDebugMessageLog: load!(loadfn, TglGetDebugMessageLog, "glGetDebugMessageLog")?,
             glDebugMessageControl: load!(loadfn, TglDebugMessageControl, "glDebugMessageControl")?,
+            glGetUniformBlockIndex: load!(loadfn, TglGetUniformBlockIndex, "glGetUniformBlockIndex")?,
+            glUniformBlockBinding: load!(loadfn, TglUniformBlockBinding, "glUniformBlockBinding")?,
+            glBindBufferBase: load!(loadfn, TglBindBufferBase, "glBindBufferBase")?,
             glFramebufferTextureMultiviewOVR: load!(loadfn, TglFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR").ok()
         })
     }

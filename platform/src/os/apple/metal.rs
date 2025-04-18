@@ -711,17 +711,17 @@ impl CxOsDrawShader {
             ]
         }).unwrap());
         
-        let mut draw_uniform_buffer_id = None;
+        let mut draw_call_uniform_buffer_id = None;
         let mut pass_uniform_buffer_id = None;
-        let mut view_uniform_buffer_id = None;
+        let mut draw_list_uniform_buffer_id = None;
         let mut user_uniform_buffer_id = None;
         
         let mut buffer_id = 4;
         for (field, _) in shader.fields_as_uniform_blocks {
             match field.0 {
-                live_id!(draw) => draw_uniform_buffer_id = Some(buffer_id),
+                live_id!(draw_list) => draw_list_uniform_buffer_id = Some(buffer_id),
+                live_id!(draw_call) => draw_call_uniform_buffer_id = Some(buffer_id),
                 live_id!(pass) => pass_uniform_buffer_id = Some(buffer_id),
-                live_id!(view) => view_uniform_buffer_id = Some(buffer_id),
                 live_id!(user) => user_uniform_buffer_id = Some(buffer_id),
                 _ => panic!()
             }
