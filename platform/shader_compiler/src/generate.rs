@@ -57,7 +57,11 @@ pub trait BackendWriter {
     fn enum_is_float(&self)->bool;
     
     fn use_cons_fn(&self, what: &str) -> bool;
-
+    
+    fn const_table_prefix(&self)->&'static str{
+        "const_table"
+    }
+    
     fn write_var_decl(
         &self,
         string: &mut String,
@@ -435,6 +439,7 @@ pub struct ExprGenerator<'a> {
 
 impl<'a> ExprGenerator<'a> {
     pub fn generate_expr(&mut self, in_expr: &Expr) {
+        let const_table_prefix = self.backend_writer.const_table_prefix();
         fn const_table_index_to_vec4(string: &mut String, index: usize) {
             let base = index >> 2;
             let sub = index - (base << 2);
@@ -452,7 +457,7 @@ impl<'a> ExprGenerator<'a> {
                 write!(self.string, "(").unwrap();
                 let mut sep = "";
                 for _ in 0..4 {
-                    write!(self.string, "{}const_table", sep).unwrap();
+                    write!(self.string, "{}{const_table_prefix}", sep).unwrap();
                     if self.backend_writer.const_table_is_vec4() {
                         const_table_index_to_vec4(self.string, index + const_table_offset);
                     }
@@ -466,7 +471,7 @@ impl<'a> ExprGenerator<'a> {
             },
             (Some(Some(Val::Float(_))), Some(index)) if self.const_table_offset.is_some() => {
                 let const_table_offset = self.const_table_offset.unwrap();
-                write!(self.string, "const_table").unwrap();
+                write!(self.string, "{const_table_prefix}").unwrap();
                 if self.backend_writer.const_table_is_vec4() {
                     const_table_index_to_vec4(self.string, index + const_table_offset);
                 }

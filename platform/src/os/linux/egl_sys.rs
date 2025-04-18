@@ -387,7 +387,6 @@ pub struct Egl {}
 pub unsafe fn create_egl_context(
     egl: &mut LibEgl,
     display: *mut std::ffi::c_void,
-    alpha: bool,
 ) -> Result<(EGLContext, EGLConfig, EGLDisplay), EglError> {
 
     let display = (egl.eglGetDisplay.unwrap())(display as _);
