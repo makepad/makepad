@@ -24,13 +24,13 @@ live_design! {
     SPACING_2 = {top: (SSPACING_2), right: (SSPACING_2), bottom: (SSPACING_2), left: (SSPACING_2)}
     SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
-    H2_TEXT_BOLD = {
+    
+    H2_TEXT_BOLD = <THEME_FONT_BOLD>{
         font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Bold.ttf")}
     }
-    H2_TEXT_REGULAR = {
+    
+    H2_TEXT_REGULAR = <THEME_FONT_REGULAR>{
         font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
 
     COLOR_DOWN_FULL = #000
@@ -351,7 +351,7 @@ live_design! {
             // cursor_margin_top: (SSPACING_1),
             // select_pad_edges: (SSPACING_1),
             // cursor_size: (SSPACING_1),
-            empty_message: "0",
+            empty_text: "0",
             is_numeric_only: true,
             draw_bg: {
                 color: (COLOR_DOWN_0)
