@@ -18,7 +18,6 @@ live_design!{
                     },
                     show_bg: true,
                     draw_bg:{
-                        debug: true
                         fn pixel(self) -> vec4 {
                             
                             let center = vec2(0.5, 0.5);
@@ -70,7 +69,7 @@ impl MatchEvent for App{
     }
     
     fn handle_timer(&mut self, cx:&mut Cx, _te:&TimerEvent){
-        cx.switch_to_xr();
+       cx.switch_to_xr();
     }
     
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){

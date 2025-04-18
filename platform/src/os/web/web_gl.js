@@ -247,8 +247,8 @@ export class WasmWebGL extends WasmWebBrowser {
             geom_attribs: get_attrib_locations(gl, program, "packed_geometry_", args.geometry_slots),
             inst_attribs: get_attrib_locations(gl, program, "packed_instance_", args.instance_slots),
             pass_uniform: gl.getUniformLocation(program, "pass_table"),
-            view_uniform: gl.getUniformLocation(program, "view_table"),
-            draw_uniform: gl.getUniformLocation(program, "draw_table"),
+            draw_list_uniform: gl.getUniformLocation(program, "draw_list_table"),
+            draw_call_uniform: gl.getUniformLocation(program, "draw_call_table"),
             user_uniform: gl.getUniformLocation(program, "user_table"),
             live_uniform: gl.getUniformLocation(program, "live_table"),
             const_uniform: gl.getUniformLocation(program, "const_table"),
@@ -355,8 +355,8 @@ export class WasmWebGL extends WasmWebBrowser {
         let instance_buffer = this.array_buffers[vao.inst_vb_id];
         // if vr_presenting
         // TODO CACHE buffers
-        gl.uniform1fv(shader.view_uniform, new Float32Array(this.memory.buffer, args.view_uniforms.ptr, args.view_uniforms.len));
-        gl.uniform1fv(shader.draw_uniform, new Float32Array(this.memory.buffer, args.draw_uniforms.ptr, args.draw_uniforms.len));
+        gl.uniform1fv(shader.draw_list_uniform, new Float32Array(this.memory.buffer, args.draw_list_uniforms.ptr, args.draw_list_uniforms.len));
+        gl.uniform1fv(shader.draw_call_uniform, new Float32Array(this.memory.buffer, args.draw_call_uniforms.ptr, args.draw_call_uniforms.len));
         
         if (args.user_uniforms.ptr != 0) gl.uniform1fv(shader.user_uniform, new Float32Array(this.memory.buffer, args.user_uniforms.ptr, args.user_uniforms.len));
         if (args.live_uniforms.ptr != 0) gl.uniform1fv(shader.live_uniform, new Float32Array(this.memory.buffer, args.live_uniforms.ptr, args.live_uniforms.len));

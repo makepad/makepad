@@ -431,7 +431,9 @@ impl Widget for Window {
             self.end(cx);
         }
         
-        //self.main_draw_list.set_view_transform(cx, &Mat4::scaled_translation(0.001,-1.0,-1.,-1.0));
+        if cx.in_xr_mode(){
+            self.main_draw_list.set_view_transform(cx, &Mat4::scaled_translation(0.001,-1.0,-1.,-5.0));
+        }
         
         DrawStep::done()
     }

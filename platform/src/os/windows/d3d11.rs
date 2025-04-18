@@ -146,7 +146,7 @@ impl Cx {
         
         {
             let draw_list = &mut self.draw_lists[draw_list_id];
-            draw_list.os.view_uniforms.update_with_f32_constant_data(d3d11_cx, draw_list.draw_list_uniforms.as_slice());
+            draw_list.os.draw_list_uniforms.update_with_f32_constant_data(d3d11_cx, draw_list.draw_list_uniforms.as_slice());
         }
         
         for draw_item_id in 0..draw_items_len {
@@ -186,10 +186,10 @@ impl Cx {
                 }
                 
                 // update the zbias uniform if we have it.
-                draw_call.draw_uniforms.set_zbias(*zbias);
+                draw_call.draw_call_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
                 
-                draw_item.os.draw_uniforms.update_with_f32_constant_data(d3d11_cx, draw_call.draw_uniforms.as_slice());
+                draw_item.os.draw_call_uniforms.update_with_f32_constant_data(d3d11_cx, draw_call.draw_call_uniforms.as_slice());
                 
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
@@ -248,9 +248,9 @@ impl Cx {
                     }
                     buffer_slot(d3d11_cx, 0, &shp.live_uniforms.buffer);
                     buffer_slot(d3d11_cx, 1, &shp.const_table_uniforms.buffer);
-                    buffer_slot(d3d11_cx, 2, &draw_item.os.draw_uniforms.buffer);
+                    buffer_slot(d3d11_cx, 2, &draw_item.os.draw_call_uniforms.buffer);
                     buffer_slot(d3d11_cx, 3, &self.passes[pass_id].os.pass_uniforms.buffer);
-                    buffer_slot(d3d11_cx, 4, &draw_list.os.view_uniforms.buffer);
+                    buffer_slot(d3d11_cx, 4, &draw_list.os.draw_list_uniforms.buffer);
                     buffer_slot(d3d11_cx, 5, &draw_item.os.user_uniforms.buffer);
                 }
                 
@@ -683,13 +683,13 @@ impl D3d11Cx {
 }
 
 #[derive(Clone, Default)]
-pub struct CxOsView {
-    pub view_uniforms: D3d11Buffer
+pub struct CxOsDrawList {
+    pub draw_list_uniforms: D3d11Buffer
 }
 
 #[derive(Default, Clone)]
 pub struct CxOsDrawCall {
-    pub draw_uniforms: D3d11Buffer,
+    pub draw_call_uniforms: D3d11Buffer,
     pub user_uniforms: D3d11Buffer,
     pub inst_vbuf: D3d11Buffer
 }
