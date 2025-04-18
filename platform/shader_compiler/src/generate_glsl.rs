@@ -430,6 +430,7 @@ impl<'a> DrawShaderGenerator<'a> {
                     if let DrawShaderFieldKind::Uniform {..} = &field.kind {
                         //if !self.draw_shader_def.ignore_idents.contains(&field.ident){
                             self.generate_uniform_block_decl(field);
+                            
                         //}
                     }
                     else {
@@ -504,6 +505,22 @@ impl<'a> DrawShaderGenerator<'a> {
     
     fn generate_uniform_block_decl(&mut self, decl: &DrawShaderFieldDef) {
         write!(self.string, "    ").unwrap();
+        if self.options.use_ovr_multiview{
+            if decl.ident == Ident(live_id!(camera_projection)) ||
+                decl.ident == Ident(live_id!(camera_view)){
+                self.write_var_decl(
+                    &decl.ident,//&DisplayDsIdent(decl.ident),e
+                    decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                );
+                writeln!(self.string, "[2];").unwrap();
+                return
+            }
+            if decl.ident == Ident(live_id!(camera_projection_r)) ||
+                decl.ident == Ident(live_id!(camera_view_r)){
+                return
+            }
+        }
+            
         self.write_var_decl(
             &decl.ident,//&DisplayDsIdent(decl.ident),
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
@@ -1030,7 +1047,12 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                      write!(string, "{}", &DisplayDsIdent(field_ident)).unwrap();
                 }
                 DrawShaderFieldKind::Uniform {block_ident, ..} => {
-                    write!(string, "{}.{}", block_ident, field_ident).unwrap()
+                    write!(string, "{}.{}", block_ident, field_ident).unwrap();
+                    if self.options.use_ovr_multiview && *block_ident == Ident(live_id!(pass)) &&(
+                        field_ident == Ident(live_id!(camera_projection)) ||
+                        field_ident == Ident(live_id!(camera_view))){
+                        write!(string, "[VIEW_ID]").unwrap();
+                    }
                 }
             }
         }
