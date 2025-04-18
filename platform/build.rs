@@ -12,9 +12,10 @@ fn main() {
     file.write_all(&format!("{}", cwd.display()).as_bytes()).unwrap();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target = env::var("TARGET").unwrap();
-    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,linux_direct,quest,no_android_choreographer,ohos_sim,use_unstable_unix_socket_ancillary_data_2021)");
+    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines, no_opengl_uniform_buffers, linux_direct,quest,no_android_choreographer,ohos_sim,use_unstable_unix_socket_ancillary_data_2021)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
+    println!("cargo:rustc-cfg=no_opengl_uniform_buffers");
     if let Ok(configs) = env::var("MAKEPAD"){
         for config in configs.split(['+', ',']){
             match config{
@@ -24,6 +25,7 @@ fn main() {
                 "quest"=>println!("cargo:rustc-cfg=quest"), 
                 "apple_bundle"=>println!("cargo:rustc-cfg=apple_bundle"), 
                 "ohos_sim"=>println!("cargo:rustc-cfg=ohos_sim"),
+                "no_opengl_uniform_buffers"=>println!("cargo:rustc-cfg=no_opengl_uniform_buffers"), 
                 _=>{}
             }
         }
