@@ -16,7 +16,6 @@ use {
     self::super::{
         android_media::CxAndroidMedia,
         android_jni::{self, *},
-        android_openxr::{CxAndroidOpenXr, CxAndroidXROptions},
         android_keycodes::android_to_makepad_key_code,
         super::egl_sys::{self, LibEgl},
         super::libc_sys,
@@ -24,6 +23,7 @@ use {
         
     },
     self::super::super::{
+        openxr::{CxOpenXr, CxOpenXrOptions},
         gl_sys,
         gl_sys::LibGl,
         //libc_sys,
@@ -160,7 +160,7 @@ impl Cx {
             } => {
                 
                 if self.os.in_xr_mode && self.os.openxr.session.is_none(){
-                    if let Err(e) = self.os.openxr.create_session(self.os.display.as_ref().unwrap(),CxAndroidXROptions{
+                    if let Err(e) = self.os.openxr.create_session(self.os.display.as_ref().unwrap(),CxOpenXrOptions{
                         buffer_scale: 2.0,
                         multisamples: 4
                     }){
@@ -998,7 +998,7 @@ impl Default for CxOs {
             timers: Default::default(),
             video_surfaces: HashMap::new(),
             websocket_parsers: HashMap::new(),
-            openxr: CxAndroidOpenXr::default(),
+            openxr: CxOpenXr::default(),
             activity_thread_id: None,
             render_thread_id: None,
             ignore_destroy: false,
@@ -1033,7 +1033,7 @@ pub struct CxOs {
     pub (crate) media: CxAndroidMedia,
     pub (crate) video_surfaces: HashMap<LiveId, jobject>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
-    pub (crate) openxr: CxAndroidOpenXr,
+    pub (crate) openxr: CxOpenXr,
     pub (crate) activity_thread_id: Option<u64>,
     pub (crate) render_thread_id: Option<u64>,
     pub (crate) ignore_destroy: bool,
