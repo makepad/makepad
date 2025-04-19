@@ -1265,75 +1265,135 @@ impl Widget for TextInput {
 
 impl TextInputRef {
     pub fn is_password(&self) -> bool {
-        self.borrow().unwrap().is_password()
+        if let Some(inner) = self.borrow(){
+            inner.is_password()
+        }
+        else{
+            false
+        }
     }
  
     pub fn set_is_password(&self, cx: &mut Cx, is_password: bool) {
-        self.borrow_mut().unwrap().set_is_password(cx, is_password);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_is_password(cx, is_password);
+        }
     }
  
     pub fn toggle_is_password(&self, cx: &mut Cx) {
-        self.borrow_mut().unwrap().toggle_is_password(cx);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.toggle_is_password(cx);
+        }
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.borrow().unwrap().is_read_only()
+        if let Some(inner) = self.borrow(){
+            inner.is_read_only()
+        }
+        else{
+            false
+        }
     }
 
     pub fn set_is_read_only(&self, cx: &mut Cx, is_read_only: bool) {
-        self.borrow_mut().unwrap().set_is_read_only(cx, is_read_only);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_is_read_only(cx, is_read_only);
+        }
     }
 
     pub fn toggle_is_read_only(&self, cx: &mut Cx) {
-        self.borrow_mut().unwrap().toggle_is_read_only(cx);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.toggle_is_read_only(cx);
+        }
     }
 
     pub fn is_numeric_only(&self) -> bool {
-        self.borrow().unwrap().is_numeric_only()
+        if let Some(inner) = self.borrow(){
+            inner.is_numeric_only()
+        }
+        else{
+            false
+        }
     }
 
     pub fn set_is_numeric_only(&self, cx: &mut Cx, is_numeric_only: bool) {
-        self.borrow_mut().unwrap().set_is_numeric_only(cx, is_numeric_only);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_is_numeric_only(cx, is_numeric_only);
+        }
     }
 
     pub fn toggle_is_numeric_only(&self, cx: &mut Cx) {
-        self.borrow_mut().unwrap().toggle_is_numeric_only(cx);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.toggle_is_numeric_only(cx);
+        }
     }
 
     pub fn empty_text(&self) -> String {
-        self.borrow().unwrap().empty_text().to_string()
+        if let Some(inner) = self.borrow(){
+            inner.empty_text().to_string()
+        }
+        else{
+            String::new()
+        }
     }
 
     pub fn set_empty_text(&self, cx: &mut Cx, empty_text: String) {
-        self.borrow_mut().unwrap().set_empty_text(cx, empty_text);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_empty_text(cx, empty_text);
+        }
     }
 
     pub fn text(&self) -> String {
-        self.borrow().unwrap().text().to_string()
+        if let Some(inner) = self.borrow(){
+            inner.text().to_string()
+        }
+        else{
+            String::new()
+        }
     }
 
     pub fn set_text(&self, cx: &mut Cx, text: String) {
-        self.borrow_mut().unwrap().set_text(cx, text);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_text(cx, text);
+        }
     }
 
     pub fn selection(&self) -> Selection {
-        self.borrow().unwrap().selection()
+        if let Some(inner) = self.borrow(){
+            inner.selection()
+        }
+        else{
+            Default::default()
+        }
     }
 
     pub fn set_selection(&self, cx: &mut Cx, selection: Selection) {
-        self.borrow_mut().unwrap().set_selection(cx, selection);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_selection(cx, selection);
+        }
     }
 
     pub fn cursor(&self) -> Cursor {
-        self.borrow().unwrap().cursor()
+        if let Some(inner) = self.borrow(){
+            inner.cursor()
+        }
+        else{
+            Default::default()
+        }
     }
 
     pub fn set_cursor(&self, cx: &mut Cx, cursor: Cursor, keep_selection: bool) {
-        self.borrow_mut().unwrap().set_cursor(cx, cursor, keep_selection);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_cursor(cx, cursor, keep_selection);
+        }
     }
 
     pub fn selected_text(&self) -> String {
-        self.borrow().unwrap().selected_text().to_string()
+        if let Some(inner) = self.borrow(){
+            inner.selected_text().to_string()
+        }
+        else{
+            String::new()
+        }
     }
 
     pub fn returned(&self, actions: &Actions) -> Option<String> {
