@@ -6,6 +6,8 @@ pub mod direct;
 
 #[cfg(target_os="android")]
 pub mod openxr_sys;
+#[cfg(target_os="android")]
+pub mod openxr;
 
 #[cfg(target_env="ohos")]
 pub mod open_harmony;
