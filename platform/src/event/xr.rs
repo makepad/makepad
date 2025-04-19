@@ -3,26 +3,44 @@ use {
 };
 
 #[derive(Clone, Debug, Default)]
-pub struct XRButton {
+pub struct XrButton {
     pub value: f32,
     pub pressed: bool
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct XRInput {
+pub struct XrStick {
+    pub x: f32,
+    pub y: f32,
+    pub pressed: bool
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct XrInput {
     pub active: bool,
     pub hand: u32,
-    pub grip: Pose,
-    pub ray: Pose,
-    pub buttons: Vec<XRButton>,
-    pub axes: Vec<f32>,
+    pub grip_pose: Pose,
+    pub ray_pose: Pose,
+    pub trigger: XrButton,
+    pub grip: XrButton,
+    pub a: XrButton,
+    pub b: XrButton,
+    pub x: XrButton,
+    pub y: XrButton,
+    pub menu: XrButton,
+    pub stick: XrStick,
 }
 
 #[derive(Clone, Debug)]
-pub struct XRUpdateEvent {
-    // alright what data are we stuffing in
+pub struct XrState{
     pub time: f64,
     pub head_pose: Pose,
-    pub inputs: Vec<XRInput>,
-    pub last_inputs: Option<Vec<XRInput>>
+    pub left: XrInput,
+    pub right: XrInput,
+}
+ 
+#[derive(Clone, Debug)]
+pub struct XrUpdateEvent {
+    pub now: XrState,
+    pub last: XrState,
 }
