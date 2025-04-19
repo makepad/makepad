@@ -4,7 +4,26 @@ use std::os::raw::c_char;
 use std::os::raw::c_void;
 use std::fmt;
 use std::ffi::CStr;
+use std::ffi::CString;
 use crate::os::linux::egl_sys::*;
+
+// Consts
+
+
+
+
+pub const MAX_APPLICATION_NAME_SIZE: usize = 128usize;
+pub const MAX_ENGINE_NAME_SIZE: usize = 128usize;
+pub const MAX_EXTENSION_NAME_SIZE: usize = 128usize;
+pub const MAX_API_LAYER_NAME_SIZE: usize = 256usize;
+pub const MAX_API_LAYER_DESCRIPTION_SIZE: usize = 256usize;
+pub const MAX_RUNTIME_NAME_SIZE: usize = 128usize;
+pub const MAX_SYSTEM_NAME_SIZE: usize = 256usize;
+pub const MAX_ACTION_SET_NAME_SIZE: usize = 64usize;
+pub const MAX_ACTION_NAME_SIZE: usize = 64usize;
+pub const MAX_LOCALIZED_ACTION_SET_NAME_SIZE: usize = 128usize;
+pub const MAX_LOCALIZED_ACTION_NAME_SIZE: usize = 128usize;
+
 
 
 // Macros
@@ -118,6 +137,12 @@ pub struct LibOpenXr{
     pub xrDestroySpace: TxrDestroySpace,
     pub xrDestroySession: TxrDestroySession,
     pub xrDestroyInstance: TxrDestroyInstance,
+    pub xrStringToPath: TxrStringToPath,
+    pub xrCreateActionSet: TxrCreateActionSet,
+    pub xrCreateAction: TxrCreateAction,
+    pub xrSuggestInteractionProfileBindings:TxrSuggestInteractionProfileBindings,
+    pub xrAttachSessionActionSets: TxrAttachSessionActionSets,
+    pub xrCreateActionSpace: TxrCreateActionSpace
 }
 
 
@@ -169,7 +194,12 @@ impl LibOpenXr {
             xrDestroySpace: get_proc_addr!(gipa, instance, TxrDestroySpace)?,
             xrDestroySession: get_proc_addr!(gipa, instance, TxrDestroySession)?,
             xrDestroyInstance: get_proc_addr!(gipa, instance, TxrDestroyInstance)?,
-            
+            xrStringToPath: get_proc_addr!(gipa, instance, TxrStringToPath)?,
+            xrCreateActionSet: get_proc_addr!(gipa, instance, TxrCreateActionSet)?,
+            xrCreateAction: get_proc_addr!(gipa, instance, TxrCreateAction)?,
+            xrSuggestInteractionProfileBindings: get_proc_addr!(gipa, instance, TxrSuggestInteractionProfileBindings)?,
+            xrAttachSessionActionSets: get_proc_addr!(gipa, instance, TxrAttachSessionActionSets)?,
+            xrCreateActionSpace: get_proc_addr!(gipa, instance, TxrCreateActionSpace)?,
         })
     }
 }
@@ -451,25 +481,117 @@ pub type TxrDestroyInstance = unsafe extern "C" fn(
     instance: XrInstance
 ) -> XrResult;
 
+pub type TxrStringToPath = unsafe extern "C" fn(
+    instance: XrInstance,
+    path_string: *const c_char,
+    path: *mut XrPath,
+) -> XrResult;
 
-// Consts
+pub type TxrCreateActionSet = unsafe extern "C" fn(
+    instance: XrInstance,
+    create_info: *const XrActionSetCreateInfo,
+    action_set: *mut XrActionSet,
+) -> XrResult;
 
+pub type TxrCreateAction = unsafe extern "C" fn(
+    action_set: XrActionSet,
+    create_info: *const XrActionCreateInfo,
+    action: *mut XrAction,
+) -> XrResult;
 
+pub type TxrSuggestInteractionProfileBindings = unsafe extern "C" fn(
+    instance: XrInstance,
+    suggested_bindings: *const XrInteractionProfileSuggestedBinding,
+) -> XrResult;
 
+pub type TxrAttachSessionActionSets = unsafe extern "C" fn(
+    session: XrSession,
+    attach_info: *const XrSessionActionSetsAttachInfo,
+) -> XrResult;
 
-pub const MAX_APPLICATION_NAME_SIZE: usize = 128usize;
-pub const MAX_ENGINE_NAME_SIZE: usize = 128usize;
-pub const MAX_EXTENSION_NAME_SIZE: usize = 128usize;
-pub const MAX_API_LAYER_NAME_SIZE: usize = 256usize;
-pub const MAX_API_LAYER_DESCRIPTION_SIZE: usize = 256usize;
-pub const MAX_RUNTIME_NAME_SIZE: usize = 128usize;
-pub const MAX_SYSTEM_NAME_SIZE: usize = 256usize;
-
-
+pub type TxrCreateActionSpace = unsafe extern "C" fn(
+    session: XrSession,
+    create_info: *const XrActionSpaceCreateInfo,
+    space: *mut XrSpace,
+) -> XrResult;
 
 
 // Handle types
 
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct XrAction(pub u64);
+
+impl XrAction{
+    pub fn new(
+        openxr: &LibOpenXr,
+        set: XrActionSet,
+        action_type: XrActionType,
+        action_name:&str, 
+        localized_action_name:&str,
+        sub_paths: &[XrPath]
+    )->Result<Self,String>{
+        let mut action = XrAction(0);
+        let info = XrActionCreateInfo{
+            ty: XrType::ACTION_CREATE_INFO,
+            next: 0 as *mut _,
+            action_name: xr_to_string(action_name),
+            action_type,
+            localized_action_name: if localized_action_name.len()>0{xr_to_string(localized_action_name)}else{xr_to_string(action_name)},
+            count_subaction_paths: sub_paths.len() as _,
+            subaction_paths: if sub_paths.len()>0{
+                sub_paths.as_ptr() as * const _
+            }
+            else{
+                0 as * const _
+            }
+        };
+        unsafe{(openxr.xrCreateAction)(set, &info, &mut action)}.to_result("xrCreateAction")?;
+        Ok(action)
+    }
+}
+        
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct XrActionSet(pub u64);
+
+impl XrActionSet{
+    pub fn new(
+        openxr: &LibOpenXr,
+        instance: XrInstance,
+        prio: u32, 
+        name: &str, 
+        local:&str,
+    )->Result<Self, String>{
+        let mut set = XrActionSet(0);
+        let info = XrActionSetCreateInfo{
+            ty: XrType::ACTION_SET_CREATE_INFO,
+            next: 0 as *mut _,
+            action_set_name: xr_to_string(name),
+            localized_action_set_name: xr_to_string(local),
+            priority:prio as _,
+        };
+        unsafe{(openxr.xrCreateActionSet)(instance, &info, &mut set)}.to_result("xrCreateActionSet")?;
+        Ok(set)
+    }
+}
+
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct XrPath(pub u64);
+
+impl XrPath{
+    pub fn new(openxr:&LibOpenXr, instance:XrInstance, value: &str)->Result<Self,String>{
+        let mut path = XrPath(0);
+        unsafe{(openxr.xrStringToPath)(
+            instance,
+            CString::new(value).unwrap().as_ptr(),
+            &mut path
+        )}.to_result("xrStringToPath")?;
+        Ok(path)
+    }
+}
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -494,6 +616,25 @@ pub struct XrSwapchain(pub u64);
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrSpace(pub u64);
+
+impl XrSpace{
+    pub fn new_action_space(openxr:&LibOpenXr, session:XrSession, action: XrAction, subaction_path: XrPath, pose_in_action_space:XrPosef)->Result<Self,String>{
+        let mut space = XrSpace(0);
+        let info = XrActionSpaceCreateInfo{
+            ty: XrType::ACTION_SPACE_CREATE_INFO,
+            next: 0 as *mut _,
+            action,
+            subaction_path,
+            pose_in_action_space
+        };
+        unsafe{(openxr.xrCreateActionSpace)(session, &info, &mut space)}.to_result("xrCreateActionSpace")?;
+        Ok(space)
+    }
+    
+    pub fn destroy(self, openxr:&LibOpenXr){
+        unsafe{(openxr.xrDestroySpace)(self)};
+    }
+}
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -602,6 +743,87 @@ pub struct XrRect2Di {
 
 // Struct datatypes
 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActionSpaceCreateInfo {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub action: XrAction,
+    pub subaction_path: XrPath,
+    pub pose_in_action_space: XrPosef,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSessionActionSetsAttachInfo {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub count_action_sets: u32,
+    pub action_sets: *const XrActionSet,
+}
+impl Default for XrSessionActionSetsAttachInfo{
+    fn default()->Self{
+        XrSessionActionSetsAttachInfo{
+            ty: XrType::SESSION_ACTION_SETS_ATTACH_INFO,
+            next: 0 as *mut _,
+            count_action_sets: 0,
+            action_sets: 0 as * const _
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrInteractionProfileSuggestedBinding {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub interaction_profile: XrPath,
+    pub count_suggested_bindings: u32,
+    pub suggested_bindings: *const XrActionSuggestedBinding,
+}
+
+impl Default for XrInteractionProfileSuggestedBinding{
+    fn default()->Self{
+        XrInteractionProfileSuggestedBinding{
+            ty: XrType::INTERACTION_PROFILE_SUGGESTED_BINDING,
+            next: 0 as *mut _,
+            interaction_profile: XrPath(0),
+            count_suggested_bindings: 0,
+            suggested_bindings: 0 as * const _
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActionSuggestedBinding {
+    pub action: XrAction,
+    pub binding: XrPath,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActionCreateInfo {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub action_name: [c_char; MAX_ACTION_NAME_SIZE],
+    pub action_type: XrActionType,
+    pub count_subaction_paths: u32,
+    pub subaction_paths: *const XrPath,
+    pub localized_action_name: [c_char; MAX_LOCALIZED_ACTION_NAME_SIZE],
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActionSetCreateInfo {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub action_set_name: [c_char; MAX_ACTION_SET_NAME_SIZE],
+    pub localized_action_set_name: [c_char; MAX_LOCALIZED_ACTION_SET_NAME_SIZE],
+    pub priority: u32,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1515,6 +1737,34 @@ bitmask!(XrSwapchainUsageFlags);
 // Enums
 
 
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct XrActionType(i32);
+impl XrActionType {
+    pub const BOOLEAN_INPUT: XrActionType = Self(1i32);
+    pub const FLOAT_INPUT: XrActionType = Self(2i32);
+    pub const VECTOR2F_INPUT: XrActionType = Self(3i32);
+    pub const POSE_INPUT: XrActionType = Self(4i32);
+    pub const VIBRATION_OUTPUT: XrActionType = Self(100i32);
+}
+impl fmt::Debug for XrActionType {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let name = match *self {
+            Self::BOOLEAN_INPUT => Some("BOOLEAN_INPUT"),
+            Self::FLOAT_INPUT => Some("FLOAT_INPUT"),
+            Self::VECTOR2F_INPUT => Some("VECTOR2F_INPUT"),
+            Self::POSE_INPUT => Some("POSE_INPUT"),
+            Self::VIBRATION_OUTPUT => Some("VIBRATION_OUTPUT"),
+            _ => None,
+        };
+        if let Some(name) = name{
+            write!(fmt, "{}", name)
+        }
+        else{
+            write!(fmt, "unknown XrActionType {}", self.0)
+        }
+    }
+}
 
 
 #[repr(transparent)]

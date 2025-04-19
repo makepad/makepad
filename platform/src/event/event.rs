@@ -130,7 +130,7 @@ pub enum Event {
     /// The application has lost focus and is no longer the active window receiving user input.
     AppLostFocus,
     NextFrame(NextFrameEvent),
-    XRUpdate(XRUpdateEvent),
+    XrUpdate(XrUpdateEvent),
 
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
@@ -315,7 +315,7 @@ impl Event{
             Self::AppGotFocus=>9,
             Self::AppLostFocus=>10,
             Self::NextFrame(_)=>11,
-            Self::XRUpdate(_)=>12,
+            Self::XrUpdate(_)=>12,
 
             Self::WindowDragQuery(_)=>13,
             Self::WindowCloseRequested(_)=>14,
