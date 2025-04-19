@@ -469,8 +469,11 @@ impl CxAndroidOpenXr{
         unsafe{(openxr.xrCreateReferenceSpace)(session, &local_space_info, &mut local_space)}.to_result("xrCreateReferenceSpace")?;
                 
         let format = gl_sys::SRGB8_ALPHA8L;
-        let width = config_views[0].recommended_image_rect_width;
-        let height = config_views[0].recommended_image_rect_height;
+        
+        let width = ((config_views[0].recommended_image_rect_width as f32) *1.5) as u32;
+        
+        let height = ((config_views[0].recommended_image_rect_height as f32) *1.5) as u32;
+        
         
         let swap_chain_create_info = XrSwapchainCreateInfo{
             usage_flags: 
