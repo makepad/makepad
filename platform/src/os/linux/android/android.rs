@@ -122,10 +122,9 @@ impl Cx {
                 }
             }
         }
-        if let Err(e) = self.os.openxr.destroy_session(&self.os.display.as_ref().unwrap().libgl){
-            crate::log!("OpenXR destroy destroy_session error: {e}")
-        }
-        if let Err(e) = self.os.openxr.destroy_instance(){
+        if let Err(e) = self.os.openxr.destroy_instance(
+            &self.os.display.as_ref().unwrap().libgl
+        ){
             crate::log!("OpenXR destroy destroy_instance error: {e}")
         }
         from_java_messages_clear()
