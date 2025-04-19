@@ -189,12 +189,15 @@ pub type TglFramebufferTextureMultiviewOVR = unsafe extern "C" fn(target:GLenum 
 pub type TglColorMask = unsafe extern "C" fn(r: GLboolean, g:GLboolean, b:GLboolean, a:GLboolean);
 pub type TglDepthMask = unsafe extern "C" fn(d: GLboolean);
 pub type TglScissor = unsafe extern "C" fn(x:GLint, y:GLint, width:GLsizei, height:GLsizei);
+
 pub type TglInvalidateFramebuffer = unsafe extern "C" fn(target:GLenum, num_attachments:GLsizei, attachments: *const GLenum);
 pub type TglDebugMessageCallback = unsafe extern "C" fn(ptr: TglDebugMessageCallbackFn, param: *const raw::c_void);
 pub type TglDebugMessageCallbackFn = unsafe extern "C" fn(source: GLenum, ty: GLenum, id: GLuint, severity:GLenum, length:GLsizei, msg: *const GLchar, param: *const raw::c_void);
 pub type TglGetUniformBlockIndex = unsafe extern "C" fn(program:GLuint, uniform_block_name: *const GLchar)->GLuint;
 pub type TglUniformBlockBinding = unsafe extern "C" fn(program: GLuint, block_index: GLuint, binding: GLuint);
 pub type TglBindBufferBase = unsafe extern "C" fn(target:GLenum, index: GLuint, buffer:GLuint);
+
+pub type TglFramebufferTextureMultisampleMultiviewOVR = unsafe extern "C" fn(target:GLenum , attachment:GLenum, texture:GLuint, level:GLint, samples:GLsizei, base_view_index:GLint, num_views:GLsizei);
 
 pub type TglGetDebugMessageLog = unsafe extern "C" fn(count:GLuint,
     buf_size:GLsizei,
@@ -287,6 +290,7 @@ pub struct LibGl{
     pub glUniformBlockBinding: TglUniformBlockBinding,
     pub glBindBufferBase: TglBindBufferBase,
     pub glFramebufferTextureMultiviewOVR: Option<TglFramebufferTextureMultiviewOVR>,
+    pub glFramebufferTextureMultisampleMultiviewOVR: Option<TglFramebufferTextureMultisampleMultiviewOVR>,
 }
 
 
@@ -402,7 +406,10 @@ impl LibGl{
             glGetUniformBlockIndex: load!(loadfn, TglGetUniformBlockIndex, "glGetUniformBlockIndex")?,
             glUniformBlockBinding: load!(loadfn, TglUniformBlockBinding, "glUniformBlockBinding")?,
             glBindBufferBase: load!(loadfn, TglBindBufferBase, "glBindBufferBase")?,
-            glFramebufferTextureMultiviewOVR: load!(loadfn, TglFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR").ok()
+            
+            // optional fns
+            glFramebufferTextureMultiviewOVR: load!(loadfn, TglFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR").ok(),
+            glFramebufferTextureMultisampleMultiviewOVR: load!(loadfn, TglFramebufferTextureMultisampleMultiviewOVR, "glFramebufferTextureMultisampleMultiviewOVR").ok()
         })
     }
 }

@@ -58,6 +58,11 @@ pub struct CxAndroidOpenXrSession{
     pub active: bool
 }
 
+pub struct CxAndroidXROptions{
+    pub buffer_scale: f32,
+    pub multisamples: usize
+}
+
 #[derive(Default)]
 pub struct CxAndroidOpenXr{
     loader: Option<LibOpenXrLoader>,
@@ -393,7 +398,7 @@ impl CxAndroidOpenXr{
         Ok(())
     }
     
-    pub fn create_session(&mut self, display:&CxAndroidDisplay)->Result<(),String>{
+    pub fn create_session(&mut self, display:&CxAndroidDisplay, options:CxAndroidXROptions)->Result<(),String>{
         if self.openxr.is_none(){
             return Err("OpenXR library not loaded".into());
         }
@@ -470,9 +475,9 @@ impl CxAndroidOpenXr{
                 
         let format = gl_sys::SRGB8_ALPHA8L;
         
-        let width = ((config_views[0].recommended_image_rect_width as f32) *1.5) as u32;
+        let width = ((config_views[0].recommended_image_rect_width as f32) * options.buffer_scale) as u32;
         
-        let height = ((config_views[0].recommended_image_rect_height as f32) *1.5) as u32;
+        let height = ((config_views[0].recommended_image_rect_height as f32) * options.buffer_scale) as u32;
         
         
         let swap_chain_create_info = XrSwapchainCreateInfo{
@@ -580,22 +585,48 @@ impl CxAndroidOpenXr{
                 
                 (gl.glGenFramebuffers)(1, &mut gl_frame_buffers[i]);
                 (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, gl_frame_buffers[i]);
-                (gl.glFramebufferTextureMultiviewOVR.unwrap())(
-                    gl_sys::DRAW_FRAMEBUFFER,
-                    gl_sys::DEPTH_ATTACHMENT,
-                    gl_depth_textures[i],
-                    0,
-                    0,
-                    2
-                );
-                (gl.glFramebufferTextureMultiviewOVR.unwrap())(
-                    gl_sys::DRAW_FRAMEBUFFER,
-                    gl_sys::COLOR_ATTACHMENT0,
-                    color_texture,
-                    0,
-                    0,
-                    2
-                );
+                
+                
+                if options.multisamples > 1{
+                                    
+                    (gl.glFramebufferTextureMultisampleMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::DEPTH_ATTACHMENT,
+                        gl_depth_textures[i],
+                        0,
+                        options.multisamples as _,
+                        0,
+                        2
+                    );
+                    (gl.glFramebufferTextureMultisampleMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::COLOR_ATTACHMENT0,
+                        color_texture,
+                        0,
+                        options.multisamples as _,
+                        0,
+                        2
+                    );
+                }
+                else{
+                    
+                    (gl.glFramebufferTextureMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::DEPTH_ATTACHMENT,
+                        gl_depth_textures[i],
+                        0,
+                        0,
+                        2
+                    );
+                    (gl.glFramebufferTextureMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::COLOR_ATTACHMENT0,
+                        color_texture,
+                        0,
+                        0,
+                        2
+                    );
+                }
                 (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, 0);
             }
         }
