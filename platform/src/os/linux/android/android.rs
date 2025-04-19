@@ -16,7 +16,7 @@ use {
     self::super::{
         android_media::CxAndroidMedia,
         android_jni::{self, *},
-        android_openxr::CxAndroidOpenXr,
+        android_openxr::{CxAndroidOpenXr, CxAndroidXROptions},
         android_keycodes::android_to_makepad_key_code,
         super::egl_sys::{self, LibEgl},
         super::libc_sys,
@@ -160,7 +160,10 @@ impl Cx {
             } => {
                 
                 if self.os.in_xr_mode && self.os.openxr.session.is_none(){
-                    if let Err(e) = self.os.openxr.create_session(self.os.display.as_ref().unwrap()){
+                    if let Err(e) = self.os.openxr.create_session(self.os.display.as_ref().unwrap(),CxAndroidXROptions{
+                        buffer_scale: 2.0,
+                        multisamples: 4
+                    }){
                         crate::error!("OpenXR create_xr_session failed: {}", e);
                     }
                     self.openxr_init_textures();
