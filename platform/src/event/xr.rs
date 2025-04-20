@@ -4,23 +4,27 @@ use {
 
 #[derive(Clone, Debug, Default)]
 pub struct XrButton {
-    pub value: f32,
-    pub pressed: bool
+    pub analog: f32,
+    pub pressed: bool,
+    pub last_change_time: f64,
+    pub last_pressed: bool,
+    pub touched: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct XrStick {
     pub x: f32,
     pub y: f32,
-    pub pressed: bool
+    pub pressed: bool,
+    pub touched: bool,
+    pub last: bool
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct XrInput {
+pub struct XrController {
     pub active: bool,
-    pub hand: u32,
     pub grip_pose: Pose,
-    pub ray_pose: Pose,
+    pub aim_pose: Pose,
     pub trigger: XrButton,
     pub grip: XrButton,
     pub a: XrButton,
@@ -31,12 +35,18 @@ pub struct XrInput {
     pub stick: XrStick,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
+pub struct XrHand{
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct XrState{
     pub time: f64,
     pub head_pose: Pose,
-    pub left: XrInput,
-    pub right: XrInput,
+    pub left: XrController,
+    pub right: XrController,
+    pub left_hand: XrHand,
+    pub right_hand: XrHand,
 }
  
 #[derive(Clone, Debug)]
