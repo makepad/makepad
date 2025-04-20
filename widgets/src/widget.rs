@@ -435,7 +435,8 @@ impl WidgetRef {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             // if we're in a draw event, do taht here
             if let Event::Draw(e) = event {
-                let cx = &mut Cx2d::new(cx, e);
+                let mut cx_draw = CxDraw::new(cx, e);
+                let cx = &mut Cx2d::new(&mut cx_draw);
                 return inner.widget.draw_all(cx, scope);
             }
             inner.widget.handle_event(cx, event, scope); 

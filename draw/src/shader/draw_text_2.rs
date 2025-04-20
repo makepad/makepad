@@ -1,6 +1,7 @@
 use {
     crate::{
-        cx_2d::Cx2d,
+        cx_2d::{Cx2d},
+        cx_draw::CxDraw,
         draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
         makepad_platform::*,
@@ -335,7 +336,7 @@ impl DrawText2 {
         self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, area);
     }
 
-    fn update_draw_vars(&mut self, cx: &mut Cx2d<'_>) {
+    fn update_draw_vars(&mut self, cx: &mut Cx2d) {
         let fonts = cx.fonts.borrow();
         let rasterizer = fonts.rasterizer().borrow();
         let sdfer_settings = rasterizer.sdfer_settings();
@@ -526,7 +527,7 @@ impl LiveHook for FontFamily {
         index: usize,
         nodes: &[LiveNode],
     ) -> Option<usize> {
-        Cx2d::lazy_construct_fonts(cx);
+        CxDraw::lazy_construct_fonts(cx);
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 

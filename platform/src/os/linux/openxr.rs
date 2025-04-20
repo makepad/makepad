@@ -885,7 +885,6 @@ impl CxOpenXrSession{
             active:false,
             inputs
         })
-                
         /*
         for view in config_views{
             crate::log!(
