@@ -477,6 +477,7 @@ impl Cx {
         for pass_id in &passes_todo {
             self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Xr => {}
                 CxPassParent::Window(_window_id) => {
                     self.draw_pass_to_fullscreen(*pass_id);
                 }
