@@ -84,12 +84,6 @@ impl WidgetNode for Root{
 impl Widget for Root {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        // check if we are in a draw event.
-        // Ifso we have to check if we are in XR Mode,
-        // Or in 2D windowed mode.
-        // in XR mode we also draw our hand controllers
-        // and call 'Draw3D' on the windows
-        // if we're in a draw event, do taht here
         if let Event::Draw(e) = event {
             if cx.in_xr_mode(){
                 let mut cx_draw = CxDraw::new(cx, e);
