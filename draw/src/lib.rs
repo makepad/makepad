@@ -45,6 +45,7 @@ pub use crate::{
         NavScrollIndex
     },
     draw_list_2d::{
+        DrawListExt,
         DrawList2d,
         ManyInstances,
         Redrawing,
