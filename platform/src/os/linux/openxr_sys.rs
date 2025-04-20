@@ -142,7 +142,12 @@ pub struct LibOpenXr{
     pub xrCreateAction: TxrCreateAction,
     pub xrSuggestInteractionProfileBindings:TxrSuggestInteractionProfileBindings,
     pub xrAttachSessionActionSets: TxrAttachSessionActionSets,
-    pub xrCreateActionSpace: TxrCreateActionSpace
+    pub xrCreateActionSpace: TxrCreateActionSpace,
+    pub xrGetActionStateBoolean: TxrGetActionStateBoolean,
+    pub xrGetActionStateFloat: TxrGetActionStateFloat,
+    pub xrGetActionStateVector2f: TxrGetActionStateVector2f,
+    pub xrGetActionStatePose: TxrGetActionStatePose,
+    pub xrSyncActions: TxrSyncActions,
 }
 
 
@@ -200,6 +205,11 @@ impl LibOpenXr {
             xrSuggestInteractionProfileBindings: get_proc_addr!(gipa, instance, TxrSuggestInteractionProfileBindings)?,
             xrAttachSessionActionSets: get_proc_addr!(gipa, instance, TxrAttachSessionActionSets)?,
             xrCreateActionSpace: get_proc_addr!(gipa, instance, TxrCreateActionSpace)?,
+            xrGetActionStateBoolean:  get_proc_addr!(gipa, instance, TxrGetActionStateBoolean)?,
+            xrGetActionStateFloat: get_proc_addr!(gipa, instance, TxrGetActionStateFloat)?,
+            xrGetActionStateVector2f: get_proc_addr!(gipa, instance,TxrGetActionStateVector2f)?,
+            xrGetActionStatePose: get_proc_addr!(gipa, instance, TxrGetActionStatePose)?,
+            xrSyncActions: get_proc_addr!(gipa, instance, TxrSyncActions)?,
         })
     }
 }
@@ -516,6 +526,33 @@ pub type TxrCreateActionSpace = unsafe extern "C" fn(
 ) -> XrResult;
 
 
+pub type TxrGetActionStateBoolean = unsafe extern "C" fn(
+    session: XrSession,
+    get_info: *const XrActionStateGetInfo,
+    state: *mut XrActionStateBoolean,
+) -> XrResult;
+
+pub type TxrGetActionStateFloat = unsafe extern "C" fn(
+    session: XrSession,
+    get_info: *const XrActionStateGetInfo,
+    state: *mut XrActionStateFloat,
+) -> XrResult;
+
+pub type TxrGetActionStateVector2f = unsafe extern "C" fn(
+    session: XrSession,
+    get_info: *const XrActionStateGetInfo,
+    state: *mut XrActionStateVector2f,
+) -> XrResult;
+
+pub type TxrGetActionStatePose = unsafe extern "C" fn(
+    session: XrSession,
+    get_info: *const XrActionStateGetInfo,
+    state: *mut XrActionStatePose,
+) -> XrResult;
+
+pub type TxrSyncActions =
+unsafe extern "C" fn(session: XrSession, sync_info: *const XrActionsSyncInfo) -> XrResult;
+
 // Handle types
 
 #[repr(transparent)]
@@ -524,7 +561,7 @@ pub struct XrAction(pub u64);
 
 impl XrAction{
     pub fn new(
-        openxr: &LibOpenXr,
+        xr: &LibOpenXr,
         set: XrActionSet,
         action_type: XrActionType,
         action_name:&str, 
@@ -546,7 +583,7 @@ impl XrAction{
                 0 as * const _
             }
         };
-        unsafe{(openxr.xrCreateAction)(set, &info, &mut action)}.to_result("xrCreateAction")?;
+        unsafe{(xr.xrCreateAction)(set, &info, &mut action)}.to_result("xrCreateAction")?;
         Ok(action)
     }
 }
@@ -557,7 +594,7 @@ pub struct XrActionSet(pub u64);
 
 impl XrActionSet{
     pub fn new(
-        openxr: &LibOpenXr,
+        xr: &LibOpenXr,
         instance: XrInstance,
         prio: u32, 
         name: &str, 
@@ -571,7 +608,7 @@ impl XrActionSet{
             localized_action_set_name: xr_to_string(local),
             priority:prio as _,
         };
-        unsafe{(openxr.xrCreateActionSet)(instance, &info, &mut set)}.to_result("xrCreateActionSet")?;
+        unsafe{(xr.xrCreateActionSet)(instance, &info, &mut set)}.to_result("xrCreateActionSet")?;
         Ok(set)
     }
 }
@@ -582,9 +619,9 @@ impl XrActionSet{
 pub struct XrPath(pub u64);
 
 impl XrPath{
-    pub fn new(openxr:&LibOpenXr, instance:XrInstance, value: &str)->Result<Self,String>{
+    pub fn new(xr: &LibOpenXr, instance:XrInstance, value: &str)->Result<Self,String>{
         let mut path = XrPath(0);
-        unsafe{(openxr.xrStringToPath)(
+        unsafe{(xr.xrStringToPath)(
             instance,
             CString::new(value).unwrap().as_ptr(),
             &mut path
@@ -618,7 +655,7 @@ pub struct XrSwapchain(pub u64);
 pub struct XrSpace(pub u64);
 
 impl XrSpace{
-    pub fn new_action_space(openxr:&LibOpenXr, session:XrSession, action: XrAction, subaction_path: XrPath, pose_in_action_space:XrPosef)->Result<Self,String>{
+    pub fn new_action_space(xr: &LibOpenXr, session:XrSession, action: XrAction, subaction_path: XrPath, pose_in_action_space:XrPosef)->Result<Self,String>{
         let mut space = XrSpace(0);
         let info = XrActionSpaceCreateInfo{
             ty: XrType::ACTION_SPACE_CREATE_INFO,
@@ -627,12 +664,12 @@ impl XrSpace{
             subaction_path,
             pose_in_action_space
         };
-        unsafe{(openxr.xrCreateActionSpace)(session, &info, &mut space)}.to_result("xrCreateActionSpace")?;
+        unsafe{(xr.xrCreateActionSpace)(session, &info, &mut space)}.to_result("xrCreateActionSpace")?;
         Ok(space)
     }
     
-    pub fn destroy(self, openxr:&LibOpenXr){
-        unsafe{(openxr.xrDestroySpace)(self)};
+    pub fn destroy(self, xr: &LibOpenXr){
+        unsafe{(xr.xrDestroySpace)(self)};
     }
 }
 
@@ -664,7 +701,7 @@ pub struct XrSession(pub u64);
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrBool32(pub u32);
 impl XrBool32{
-    pub fn to_bool(&self)->bool{
+    pub fn as_bool(&self)->bool{
        return self.0 == 1 
     }
 }
@@ -688,6 +725,7 @@ pub const XP_API_VERSION_1_0:XrVersion = XrVersion(
 
 pub type XrFovf = crate::makepad_math::CameraFov;
 pub type XrVector3f = crate::makepad_math::Vec3;
+pub type XrVector2f = crate::makepad_math::Vec2;
 pub type XrQuaternionf = crate::makepad_math::Quat;
 pub type XrPosef = crate::makepad_math::Pose;
 
@@ -701,6 +739,10 @@ impl XrTime {
     
     pub fn as_nanos(self) -> i64 {
         self.0
+    }
+    
+    pub fn as_secs_f64(self) -> f64 {
+        self.0 as f64 / 1e9f64
     }
 }
 
@@ -743,6 +785,200 @@ pub struct XrRect2Di {
 
 // Struct datatypes
 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActiveActionSet {
+    pub action_set: XrActionSet,
+    pub subaction_path: XrPath,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActionsSyncInfo {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub count_active_action_sets: u32,
+    pub active_action_sets: *const XrActiveActionSet,
+}
+
+
+impl Default for XrActionsSyncInfo{
+    fn default()->Self{
+        XrActionsSyncInfo{
+            ty: XrType::ACTIONS_SYNC_INFO,
+            next: 0 as *mut _,
+            count_active_action_sets: 0,
+            active_action_sets: 0 as *const _
+        }
+    }
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActionStateBoolean {
+    pub ty: XrType,
+    pub next: *mut c_void,
+    pub current_state: XrBool32,
+    pub changed_since_last_sync: XrBool32,
+    pub last_change_time: XrTime,
+    pub is_active: XrBool32,
+}
+
+impl Default for XrActionStateBoolean{
+    fn default()->Self{
+        XrActionStateBoolean{
+            ty: XrType::ACTION_STATE_BOOLEAN,
+            next: 0 as *mut _,
+            current_state: Default::default(),
+            changed_since_last_sync: Default::default(),
+            last_change_time: XrTime(0),
+            is_active: Default::default()
+        }
+    }
+}
+
+impl XrActionStateBoolean{
+    pub fn get(xr:&LibOpenXr, session:XrSession, action:XrAction, subaction_path:XrPath)->Self{
+        let info = XrActionStateGetInfo{
+            action,
+            subaction_path,
+            ..Default::default()
+        };
+        let mut state = XrActionStateBoolean::default();
+        unsafe{(xr.xrGetActionStateBoolean)(session, &info, &mut state)}.log_error("xrGetActionStateBoolean");
+        state
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActionStateFloat {
+    pub ty: XrType,
+    pub next: *mut c_void,
+    pub current_state: f32,
+    pub changed_since_last_sync: XrBool32,
+    pub last_change_time: XrTime,
+    pub is_active: XrBool32,
+}
+
+impl Default for XrActionStateFloat{
+    fn default()->Self{
+        XrActionStateFloat{
+            ty: XrType::ACTION_STATE_FLOAT,
+            next: 0 as *mut _,
+            current_state: Default::default(),
+            changed_since_last_sync: Default::default(),
+            last_change_time: XrTime(0),
+            is_active: Default::default()
+        }
+    }
+}
+
+impl XrActionStateFloat{
+    pub fn get(xr:&LibOpenXr, session:XrSession, action:XrAction, subaction_path:XrPath)->Self{
+        let info = XrActionStateGetInfo{
+            action,
+            subaction_path,
+            ..Default::default()
+        };
+        let mut state = XrActionStateFloat::default();
+        unsafe{(xr.xrGetActionStateFloat)(session, &info, &mut state)}.log_error("xrGetActionStateFloat");
+        state
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActionStateVector2f {
+    pub ty: XrType,
+    pub next: *mut c_void,
+    pub current_state: XrVector2f,
+    pub changed_since_last_sync: XrBool32,
+    pub last_change_time: XrTime,
+    pub is_active: XrBool32,
+}
+
+
+impl Default for XrActionStateVector2f{
+    fn default()->Self{
+        XrActionStateVector2f{
+            ty: XrType::ACTION_STATE_VECTOR2F,
+            next: 0 as *mut _,
+            current_state: Default::default(),
+            changed_since_last_sync: Default::default(),
+            last_change_time: XrTime(0),
+            is_active: Default::default()
+        }
+    }
+}
+
+impl XrActionStateVector2f{
+    pub fn get(xr:&LibOpenXr, session:XrSession, action:XrAction, subaction_path:XrPath)->Self{
+        let info = XrActionStateGetInfo{
+            action,
+            subaction_path,
+            ..Default::default()
+        };
+        let mut state = XrActionStateVector2f::default();
+        unsafe{(xr.xrGetActionStateVector2f)(session, &info, &mut state)}.log_error("xrGetActionStateVector2f");
+        state
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActionStatePose {
+    pub ty: XrType,
+    pub next: *mut c_void,
+    pub is_active: XrBool32,
+}
+
+impl Default for XrActionStatePose{
+    fn default()->Self{
+        XrActionStatePose{
+            ty: XrType::ACTION_STATE_POSE,
+            next: 0 as *mut _,
+            is_active: Default::default(),
+        }
+    }
+}
+
+impl XrActionStatePose{
+    pub fn get(xr:&LibOpenXr, session:XrSession, action:XrAction, subaction_path:XrPath)->Self{
+        let info = XrActionStateGetInfo{
+            action,
+            subaction_path,
+            ..Default::default()
+        };
+        let mut state = XrActionStatePose::default();
+        unsafe{(xr.xrGetActionStatePose)(session, &info, &mut state)}.log_error("xrGetActionStatePose");
+        state
+    }
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrActionStateGetInfo {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub action: XrAction,
+    pub subaction_path: XrPath,
+}
+
+impl Default for XrActionStateGetInfo{
+
+    fn default()->Self{
+        XrActionStateGetInfo{
+            ty: XrType::ACTION_STATE_GET_INFO,
+            next: 0 as *mut _,
+            action: XrAction(0),
+            subaction_path: XrPath(0),
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -800,6 +1036,15 @@ impl Default for XrInteractionProfileSuggestedBinding{
 pub struct XrActionSuggestedBinding {
     pub action: XrAction,
     pub binding: XrPath,
+}
+
+impl XrActionSuggestedBinding{
+    pub fn new(xr: &LibOpenXr, instance:XrInstance, action:XrAction, path:&str)->Result<Self,String>{
+        Ok(Self{
+            action,
+            binding: XrPath::new(xr, instance, path)?
+        })
+    }
 }
 
 #[repr(C)]
@@ -1066,6 +1311,19 @@ pub struct XrSpaceLocation {
     pub next: *mut c_void,
     pub location_flags: XrSpaceLocationFlags,
     pub pose: XrPosef,
+}
+
+impl XrSpaceLocation{
+    pub fn locate(xr:&LibOpenXr, local_space: XrSpace, time:XrTime, space:XrSpace)->Self{
+        let mut location = XrSpaceLocation::default();
+        unsafe{(xr.xrLocateSpace)(
+            space,
+            local_space,
+            time,
+            &mut location
+        )}.log_error("xrLocateSpace");
+        location
+    }
 }
 
 impl Default for XrSpaceLocation{
