@@ -188,9 +188,11 @@ impl Cx{
         for pass_id in &passes_todo {
             self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Window(_) => {
-                    // draw the main pass
+                CxPassParent::Xr=>{
                     self.openxr_draw_pass_to_multiview(*pass_id, frame);
+                }
+                CxPassParent::Window(_) => {
+                    // this cant exist..
                 }
                 CxPassParent::Pass(_) => {
                     self.draw_pass_to_texture(*pass_id, None);

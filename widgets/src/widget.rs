@@ -569,7 +569,25 @@ impl WidgetRef {
             inner.widget.draw_walk_all(cx, scope, walk)
         }
     }
-
+    
+    pub fn draw_3d_all(&self, cx: &mut Cx3d, scope: &mut Scope) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.draw_3d_all(cx, scope)
+        }
+    }
+    
+    pub fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            if let Some(nd) = inner.widget.draw_3d(cx, scope).step() {
+                if nd.is_empty() {
+                    return DrawStep::make_step_here(self.clone());
+                }
+                return DrawStep::make_step_here(nd);
+            }
+        }
+        DrawStep::done()
+    }
+    
     pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(nd) = inner.widget.draw(cx, scope).step() {
@@ -1254,7 +1272,7 @@ impl<T: Clone> Default for DrawStateWrap<T> {
 }
 
 impl<T: Clone> DrawStateWrap<T> {
-    pub fn begin(&mut self, cx: &mut Cx2d, init: T) -> bool {
+    pub fn begin(&mut self, cx: &mut CxDraw, init: T) -> bool {
         if self.redraw_id != cx.redraw_id() {
             self.redraw_id = cx.redraw_id();
             self.state = Some(init);
@@ -1264,9 +1282,9 @@ impl<T: Clone> DrawStateWrap<T> {
         }
     }
 
-    pub fn begin_with<F, S>(&mut self, cx: &mut Cx2d, v: &S, init: F) -> bool
+    pub fn begin_with<F, S>(&mut self, cx: &mut CxDraw, v: &S, init: F) -> bool
     where
-        F: FnOnce(&mut Cx2d, &S) -> T,
+        F: FnOnce(&mut CxDraw, &S) -> T,
     {
         if self.redraw_id != cx.redraw_id() {
             self.redraw_id = cx.redraw_id();
