@@ -165,7 +165,9 @@ impl Cx {
                     }){
                         crate::error!("OpenXR create_xr_session failed: {}", e);
                     }
-                    self.openxr_init_textures();
+                    else{
+                        self.openxr_init_textures();
+                    }
                 }
                 
                 unsafe {
