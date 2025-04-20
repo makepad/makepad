@@ -1,5 +1,5 @@
 use makepad_platform::*;
-use crate::Cx2d;
+use crate::{Cx2d, CxDraw};
 
 pub trait MatchEvent{
     fn handle_startup(&mut self, _cx: &mut Cx){}
@@ -96,8 +96,9 @@ pub trait MatchEvent{
     fn match_event_with_draw_2d(&mut self, cx:&mut Cx, event:&Event)->Result<(),()>{
         match event{
             Event::Draw(e)=>{
-                let cx = &mut Cx2d::new(cx, e);
-                self.handle_draw_2d(cx);
+                let mut cx_draw = CxDraw::new(cx, e);
+                let mut cx_2d = Cx2d::new(&mut cx_draw);
+                self.handle_draw_2d(&mut cx_2d);
                 Ok(())
             }
             e=>{
