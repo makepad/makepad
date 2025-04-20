@@ -822,6 +822,9 @@ impl Cx {
         for pass_id in &passes_todo {
             self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Xr=>{
+                    // cant happen
+                }
                 CxPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
                     let start = self.seconds_since_app_start();

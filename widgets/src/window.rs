@@ -431,10 +431,15 @@ impl Widget for Window {
             self.end(cx);
         }
         
+        DrawStep::done()
+    }
+    
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope:&mut Scope)->DrawStep{
+        // lets create a Cx2d in which we can draw. we dont support stepping here
+        
         if cx.in_xr_mode(){
             self.main_draw_list.set_view_transform(cx, &Mat4::scaled_translation(0.0002,-0.0002,-0.0002,-0.5,0.25,-0.5));
         }
-        
         DrawStep::done()
     }
 }
