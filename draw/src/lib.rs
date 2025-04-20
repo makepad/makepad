@@ -7,6 +7,7 @@ pub mod overlay;
 pub mod cx_2d;
 pub mod draw_list_2d;
 pub mod cx_3d;
+pub mod cx_draw;
 pub mod shader;
 pub mod turtle;
 pub mod font_atlas;
@@ -49,8 +50,9 @@ pub use crate::{
         Redrawing,
         RedrawingApi,
     },
-    cx_3d::Cx3d,
+    cx_draw::CxDraw,
     cx_2d::Cx2d,
+    cx_3d::Cx3d,
     shader::{
         //draw_shape::{DrawShape, Shape, Fill},
         draw_icon::DrawIcon,

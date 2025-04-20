@@ -649,6 +649,33 @@ live_primitive!(
     }
 );
 
+
+live_primitive!(
+    Mat4,
+    Mat4::default(),
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Array => {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::Expr {..} => {
+                panic!("Expr node found whilst deserialising DSL")
+            },
+            LiveValue::DSL {..} => nodes.skip_node(index),
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec4");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::None
+    }
+);
+
 live_primitive!(
     String,
     String::default(),
