@@ -1,5 +1,6 @@
 use {
     crate::makepad_math::*,
+    std::rc::Rc,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -51,6 +52,6 @@ pub struct XrState{
  
 #[derive(Clone, Debug)]
 pub struct XrUpdateEvent {
-    pub now: XrState,
-    pub last: XrState,
+    pub state: Rc<XrState>,
+    pub last: Rc<XrState>,
 }

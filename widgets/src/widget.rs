@@ -88,6 +88,10 @@ pub trait Widget: WidgetNode {
         DrawStep::done()
     }
     
+    fn draw_3d_all(&mut self, cx:&mut Cx3d, scope: &mut Scope){
+        while self.draw_3d(cx, scope).is_step() {}
+    }
+    
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep;
 
     fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
@@ -433,12 +437,6 @@ impl WidgetRef {
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let start = cx.new_actions.len();
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            // if we're in a draw event, do taht here
-            if let Event::Draw(e) = event {
-                let mut cx_draw = CxDraw::new(cx, e);
-                let cx = &mut Cx2d::new(&mut cx_draw);
-                return inner.widget.draw_all(cx, scope);
-            }
             inner.widget.handle_event(cx, event, scope); 
         }
         let end = cx.new_actions.len();
