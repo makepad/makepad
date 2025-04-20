@@ -110,15 +110,11 @@ impl Cx{
                 
         // alright lets set up the pass matrices
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-                
-        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         let pass = &mut self.passes[pass_id];
                 
         pass.set_dpi_factor(dpi_factor);
         pass.paint_dirty = true;
         pass.os.shader_variant = 1;
-                        
-        pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
                 
         // lets set up the right matrices and bind the right framebuffers
         pass.pass_uniforms.camera_projection = frame.eyes[0].proj_mat;

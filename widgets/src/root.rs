@@ -22,7 +22,7 @@ live_design!{
 #[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct Root {
     #[rust] components: ComponentMap<LiveId, WidgetRef>,
-    #[rust] xr_draw_list: Option<DrawList>,
+    #[rust(DrawList::new(cx))] xr_draw_list: DrawList,
     #[live] xr_pass: Pass,
 }
  
@@ -87,7 +87,9 @@ impl Widget for Root {
                 // lets begin a 3D drawlist in the global context
                 self.xr_pass.set_as_xr_pass(cx);
                 cx.begin_pass(&self.xr_pass, None);
+                self.xr_draw_list.begin_always(cx);
                 self.draw_3d_all(cx, scope);
+                self.xr_draw_list.end(cx);
                 cx.end_pass(&self.xr_pass);
                 return
             }

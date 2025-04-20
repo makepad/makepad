@@ -4,6 +4,7 @@ use {
             LiveId,
         },
         makepad_math::*,
+        cx::Cx,
         os::{
             CxOsDrawCall,
             CxOsDrawList,
@@ -29,6 +30,12 @@ use {
 
 #[derive(Debug)]
 pub struct DrawList(PoolId);
+
+impl DrawList{
+    pub fn new(cx:&mut Cx)->Self{
+        cx.draw_lists.alloc()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Copy, Hash, Ord, PartialOrd, Eq)]
 pub struct DrawListId(usize, u64);
