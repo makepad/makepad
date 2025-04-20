@@ -97,8 +97,9 @@ impl Widget for Tooltip {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         self.draw_list.begin_overlay_reuse(cx);
-
-        cx.begin_pass_sized_turtle(self.layout);
+        
+        let size = cx.current_pass_size();
+        cx.begin_sized_turtle(size, self.layout);
         self.draw_bg.begin(cx, self.walk, self.layout);
 
         if self.opened {

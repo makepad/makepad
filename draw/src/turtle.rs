@@ -200,13 +200,22 @@ impl<'a,'b> Cx2d<'a,'b> {
     }
     
     pub fn begin_pass_sized_turtle_no_clip(&mut self, layout: Layout) {
-        self.begin_pass_sized_turtle(layout);
+        let size = self.current_pass_size();
+        self.begin_sized_turtle_no_clip(size, layout)
+    }
+    
+    pub fn begin_pass_sized_turtle(&mut self, layout: Layout) {
+        let size = self.current_pass_size();
+        self.begin_sized_turtle(size, layout)
+    }
+    
+    pub fn begin_sized_turtle_no_clip(&mut self, size:DVec2,layout: Layout) {
+        self.begin_sized_turtle(size, layout);
         *self.align_list.last_mut().unwrap() = AlignEntry::Unset;
     }
-            
-    pub fn begin_pass_sized_turtle(&mut self, layout: Layout) {
-        let pass_size = self.current_pass_size();
-        self.align_list.push(AlignEntry::BeginTurtle(dvec2(0.0,0.0),pass_size));
+                    
+    pub fn begin_sized_turtle(&mut self, size:DVec2, layout: Layout) {
+        self.align_list.push(AlignEntry::BeginTurtle(dvec2(0.0,0.0),size));
         let turtle = Turtle {
             walk: Walk::fill(),
             layout,
@@ -219,8 +228,8 @@ impl<'a,'b> Cx2d<'a,'b> {
             },
             wrap_spacing: 0.0,
             origin: dvec2(0.0, 0.0),
-            width: pass_size.x,
-            height: pass_size.y,
+            width: size.x,
+            height: size.y,
             shift: dvec2(0.0, 0.0),
             width_used: layout.padding.left,
             height_used: layout.padding.top,

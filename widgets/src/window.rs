@@ -219,7 +219,8 @@ impl Window {
 
         self.main_draw_list.begin_always(cx);
         
-        cx.begin_pass_sized_turtle(Layout::flow_down());
+        let size = cx.current_pass_size();
+        cx.begin_sized_turtle(size, Layout::flow_down());
         
         self.overlay.begin(cx);
         
@@ -392,7 +393,6 @@ impl Widget for Window {
                 }
             }
             if self.desktop_button(id!(windows_buttons.close)).clicked(&actions) {
-                println!("CLOSE");
                 self.window.close(cx);
             }
             if self.desktop_button(id!(web_xr.xr_on)).clicked(&actions) {
@@ -436,10 +436,25 @@ impl Widget for Window {
     
     fn draw_3d(&mut self, cx: &mut Cx3d, scope:&mut Scope)->DrawStep{
         // lets create a Cx2d in which we can draw. we dont support stepping here
+        let cx = &mut Cx2d::new(cx.cx);
         
-        if cx.in_xr_mode(){
-            self.main_draw_list.set_view_transform(cx, &Mat4::scaled_translation(0.0002,-0.0002,-0.0002,-0.5,0.25,-0.5));
-        }
+        self.main_draw_list.begin_always(cx);
+        
+        let size = dvec2(2000.0,1000.0);
+        cx.begin_sized_turtle(size, Layout::flow_down());
+                
+        self.overlay.begin(cx);
+        
+        self.view.draw_walk_all(cx, scope, Walk::default());
+        
+        self.debug_view.draw(cx);
+                        
+        self.main_draw_list.set_view_transform(cx, &Mat4::scaled_translation(0.0002,-0.0002,-0.0002,-0.25,0.25,-0.5));
+        
+        cx.end_pass_sized_turtle();
+                
+        self.main_draw_list.end(cx);
+        
         DrawStep::done()
     }
 }
