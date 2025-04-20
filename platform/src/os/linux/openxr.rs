@@ -16,6 +16,7 @@ use{
         cx::{Cx},
         makepad_math::Mat4,
     },
+    std::rc::Rc,
     std::sync::{mpsc},
     std::ptr,
 };
@@ -982,7 +983,6 @@ impl CxOpenXrSession{
         self.active = false;
     }
     
-    
     fn new_xr_update_event(&mut self, xr: &LibOpenXr, frame:&CxOpenXrFrame)->XrUpdateEvent{
         
         let predicted_display_time = frame.frame_state.predicted_display_time;
@@ -1003,18 +1003,18 @@ impl CxOpenXrSession{
         let left = self.inputs.left.poll(xr, self.handle, local_space, predicted_display_time);
         let right = self.inputs.right.poll(xr, self.handle, local_space, predicted_display_time);
         
-        let new_state = XrState{
+        let new_state = Rc::new(XrState{
             time: (frame.frame_state.predicted_display_time.as_nanos() as f64) / 1e9f64,
             head_pose: frame.local_from_head.pose,
             left,
             right,
             left_hand: XrHand{},
             right_hand: XrHand{},
-        };
+        });
         let last_state = self.inputs.last_state.clone();
         self.inputs.last_state = new_state.clone();
         XrUpdateEvent{
-            now: new_state,
+            state: new_state,
             last: last_state
         }
     }
@@ -1029,7 +1029,7 @@ pub struct CxOpenXrInputs{
     action_set: XrActionSet,
     left: CxOpenXrController,
     right: CxOpenXrController,
-    last_state: XrState,
+    last_state: Rc<XrState>,
 }
 
 pub struct CxOpenXrController{
