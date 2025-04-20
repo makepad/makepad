@@ -401,8 +401,8 @@ impl Widget for Window {
         }
                 
         if let Event::ClearAtlasses = event {
-            Cx2d::reset_fonts_atlas(cx);
-            Cx2d::reset_icon_atlas(cx);
+            CxDraw::reset_fonts_atlas(cx);
+            CxDraw::reset_icon_atlas(cx);
         }
         
         if let Event::MouseMove(ev) = event {

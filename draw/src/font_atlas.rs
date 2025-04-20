@@ -17,7 +17,7 @@ pub use {
         glyph_rasterizer::{RasterizedGlyph, GlyphRasterizer},
         font_loader::FontLoader,
         makepad_platform::*,
-        cx_2d::Cx2d,
+        cx_draw::CxDraw,
         turtle::{Walk, Layout},
         draw_list_2d::{ManyInstances, DrawList2d, RedrawingApi},
         geometry::GeometryQuad2D,
@@ -155,7 +155,7 @@ pub struct CxFontsAtlasRc(pub Rc<RefCell<CxFontAtlas>>);
 
 impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        Cx2d::lazy_construct_font_loader(cx);
+        CxDraw::lazy_construct_font_loader(cx);
         let loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
         self.font_id = Some(loader.borrow_mut().get_or_load(cx, self.path.as_str()));
     }
@@ -180,7 +180,7 @@ impl CxFontAtlas {
     }
 }
 
-impl<'a> Cx2d<'a> {
+impl<'a> CxDraw<'a> {
     pub fn lazy_construct_font_loader(cx: &mut Cx) {
         if !cx.has_global::<Rc<RefCell<FontLoader>>>() {
             cx.set_global(Rc::new(RefCell::new(FontLoader::new())));
