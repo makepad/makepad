@@ -1,5 +1,6 @@
 use {
     std::{
+        rc::Rc,
         cell::Cell,
         collections::{HashSet, HashMap}
     },
@@ -447,6 +448,7 @@ pub struct DrawEvent {
     pub draw_lists: Vec<DrawListId>,
     pub draw_lists_and_children: Vec<DrawListId>,
     pub redraw_all: bool,
+    pub xr_state: Option<Rc<XrState>>
 }
 
 impl DrawEvent{

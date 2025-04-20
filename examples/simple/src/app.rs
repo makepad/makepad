@@ -82,7 +82,7 @@ impl MatchEvent for App{
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::XrUpdate(e) = event{
+        if let Event::XrUpdate(_e) = event{
             //log!("{:?}", e.now.left.trigger.analog);
         }
         self.match_event(cx, event);
