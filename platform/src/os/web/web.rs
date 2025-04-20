@@ -384,6 +384,7 @@ impl Cx {
         for pass_id in &passes_todo {
             self.passes[*pass_id].set_time(time as f32);
             match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Xr => {}
                 CxPassParent::Window(_) => {
                     //et dpi_factor = self.os.window_geom.dpi_factor;
                     self.draw_pass_to_canvas(*pass_id);

@@ -105,7 +105,6 @@ impl Widget for Root {
     }
     
     fn draw_3d(&mut self, cx: &mut Cx3d, scope:&mut Scope)->DrawStep{
-        // alrighty now what
         for component in self.components.values(){
             component.draw_3d_all(cx, scope);
         }
