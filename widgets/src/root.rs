@@ -15,15 +15,15 @@ live_design!{
     
     pub RootBase = {{Root}} {}
     pub Root = <RootBase> {
-        design_window = <Designer> {} 
-        
+        design_window = <Designer> {}
     }
 }
 
 #[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct Root {
-    #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] components: ComponentMap<LiveId, WidgetRef>,
+    #[rust] xr_draw_list: Option<DrawList>,
+    #[live] xr_pass: Pass,
 }
  
 impl LiveHook for Root {
@@ -49,10 +49,6 @@ impl LiveHook for Root {
     }
 }
 
-#[derive(Clone)]
-enum DrawState {
-    Window(usize),
-}
 
 impl WidgetNode for Root{
     fn redraw(&mut self, cx: &mut Cx) {
@@ -88,12 +84,18 @@ impl Widget for Root {
             if cx.in_xr_mode(){
                 let mut cx_draw = CxDraw::new(cx, e);
                 let cx = &mut Cx3d::new(&mut cx_draw);
-                return self.draw_3d_all(cx, scope);
+                // lets begin a 3D drawlist in the global context
+                self.xr_pass.set_as_xr_pass(cx);
+                cx.begin_pass(&self.xr_pass, None);
+                self.draw_3d_all(cx, scope);
+                cx.end_pass(&self.xr_pass);
+                return
             }
             else{
                 let mut cx_draw = CxDraw::new(cx, e);
                 let cx = &mut Cx2d::new(&mut cx_draw);
-                return self.draw_all(cx, scope);
+                self.draw_all(cx, scope);
+                return
             }
         }
         
@@ -102,24 +104,17 @@ impl Widget for Root {
         }
     }
     
-    fn draw_3d(&mut self, _cx: &mut Cx3d, _scope:&mut Scope)->DrawStep{
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope:&mut Scope)->DrawStep{
         // alrighty now what
+        for component in self.components.values(){
+            component.draw_3d_all(cx, scope);
+        }
         DrawStep::done()
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-         self.draw_state.begin(cx, DrawState::Window(0));
-        
-        while let Some(DrawState::Window(step)) = self.draw_state.get() {
-            
-            if let Some(component) = self.components.values_mut().nth(step){
-                let walk = component.walk(cx);
-                component.draw_walk(cx, scope, walk)?; 
-                self.draw_state.set(DrawState::Window(step+1));
-            }
-            else{
-                self.draw_state.end();
-            }
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        for component in self.components.values(){
+            component.draw_walk_all(cx, scope, walk);
         }
         DrawStep::done()
     }
