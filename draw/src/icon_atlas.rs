@@ -9,7 +9,7 @@ pub use {
     },
     makepad_html::*,
     crate::{
-        
+        draw_list_2d::DrawListExt,
         shader::draw_trapezoid::DrawTrapezoidVector,
         makepad_platform::*,
         cx_draw::CxDraw,
