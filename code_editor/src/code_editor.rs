@@ -1209,7 +1209,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
+    fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut origin_y = session.layout().line(self.line_start).y();
         for element in session
             .layout()
@@ -1247,7 +1247,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_decoration_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
+    fn draw_decoration_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut active_decoration = None;
         let decorations = session.document().decorations();
         let mut decorations = decorations.iter();
@@ -1272,7 +1272,7 @@ impl CodeEditor {
         .draw_decoration_layer(cx, session)
     }
 
-    fn draw_selection_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
+    fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut active_selection = None;
         let selections = session.selections();
         let mut selections = selections.iter();
@@ -1907,8 +1907,8 @@ impl<'a> DrawSelectionLayer<'a> {
 
     fn draw_cursor(
         &mut self,
-        cx: &mut Cx2d<'_>,
-        line: Line<'_>,
+        cx: &mut Cx2d,
+        line: Line,
         origin_y: f64,
         row_index: usize,
         column_index: usize,
@@ -1930,7 +1930,7 @@ impl<'a> DrawSelectionLayer<'a> {
 
     fn draw_cursor_bg(
         &mut self,
-        cx: &mut Cx2d<'_>,
+        cx: &mut Cx2d,
         line: Line<'_>,
         origin_y: f64,
         row_index: usize,
