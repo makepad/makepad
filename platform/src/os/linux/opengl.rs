@@ -155,23 +155,16 @@ impl Cx {
                     vao.geom_ib = geometry.os.ib.gl_buffer;
                     unsafe {
                         (gl.glBindVertexArray)(vao.vao.unwrap());
-                        crate::gl_log_error!(gl);
                         // bind the vertex and indexbuffers
                         (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, vao.geom_vb.unwrap());
-                        crate::gl_log_error!(gl);
                         for attr in &shgl.geometries {
                             if let Some(loc) = attr.loc{
                                 (gl.glVertexAttribPointer)(loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                                if crate::gl_log_error!(gl){
-                                    crate::log!("{} {:?}" , vao.vao.unwrap(), attr);
-                                }
                                 (gl.glEnableVertexAttribArray)(loc);
                                 crate::gl_log_error!(gl);
                             }
                         }
-                        crate::gl_log_error!(gl);
                         (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, vao.inst_vb.unwrap());
-                        crate::gl_log_error!(gl);
                         for attr in &shgl.instances {
                             if let Some(loc) = attr.loc{
                                 (gl.glVertexAttribPointer)(loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
@@ -185,7 +178,6 @@ impl Cx {
                         (gl.glBindVertexArray)(0);
                         (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
                         (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, 0);
-                        crate::gl_log_error!(gl);
                     }
                 }
                 unsafe {
@@ -212,7 +204,6 @@ impl Cx {
                         GlShader::set_uniform_array(gl, &shgl.uniforms.draw_call_uniforms, draw_call_uniforms);
                         GlShader::set_uniform_array(gl, &shgl.uniforms.user_uniforms, &draw_call.user_uniforms);
                     }
-                    crate::gl_log_error!(gl);
                     // lets set our textures
                     for i in 0..sh.mapping.textures.len() {
                         let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
@@ -270,7 +261,6 @@ impl Cx {
                         ptr::null(),
                         instances as i32
                     );
-                    crate::gl_log_error!(gl);
                     (gl.glBindVertexArray)(0);
                     (gl.glUseProgram)(0);
                 }
