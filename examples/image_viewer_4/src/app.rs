@@ -3,9 +3,9 @@ use {makepad_widgets::*, std::{env, path::{Path, PathBuf}}};
 live_design! {
     use link::widgets::*;
 
-    PLACEHOLDER_IMAGE = dep("crate://self/resources/placeholder_image.jpg");
-    LEFT_ARROW_ICON = dep("crate://self/resources/left_arrow_icon.svg");
-    RIGHT_ARROW_ICON = dep("crate://self/resources/right_arrow_icon.svg");
+    PLACEHOLDER = dep("crate://self/resources/placeholder.jpg");
+    LEFT_ARROW = dep("crate://self/resources/left_arrow.svg");
+    RIGHT_ARROW = dep("crate://self/resources/right_arrow.svg");
 
     ImageItem = <View> {
         width: 256,
@@ -15,7 +15,7 @@ live_design! {
             width: Fill,
             height: Fill,
             fit: Biggest,
-            source: (PLACEHOLDER_IMAGE)
+            source: (PLACEHOLDER)
         }
     }
 
@@ -52,11 +52,11 @@ live_design! {
         width: Fill,
 
         left = <SlideshowButton> {
-            draw_icon: { svg_file: (LEFT_ARROW_ICON) }
+            draw_icon: { svg_file: (LEFT_ARROW) }
         }
         <Filler> {}
         right = <SlideshowButton> {
-            draw_icon: { svg_file: (RIGHT_ARROW_ICON) }
+            draw_icon: { svg_file: (RIGHT_ARROW) }
         }
     }
 
@@ -67,7 +67,7 @@ live_design! {
             width: Fill,
             height: Fill,
             fit: Biggest,
-            source: (PLACEHOLDER_IMAGE)
+            source: (PLACEHOLDER)
         }
 
         overlay = <SlideshowOverlay> {
@@ -154,7 +154,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn load_image_paths(&mut self, cx: &mut Cx, path: &Path) {
+    pub fn update_image_paths(&mut self, cx: &mut Cx, path: &Path) {
         self.state.image_paths.clear();
         for entry in path.read_dir().unwrap() {
             let entry = entry.unwrap();
@@ -209,7 +209,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.load_image_paths(cx, env::args().nth(1).unwrap().as_ref());
+        self.update_image_paths(cx, env::args().nth(1).unwrap().as_ref());
     }
 }
  
