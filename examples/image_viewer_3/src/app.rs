@@ -82,7 +82,9 @@ impl Widget for ImageRow {
                     let image_path = &state.image_paths[image_idx];
                     let item = list.item(cx, item_idx, live_id!(ImageItem));
                     let image = item.image(id!(image));
-                    image.load_image_file_by_path_async(cx, &image_path).unwrap();
+                    image
+                        .load_image_file_by_path_async(cx, &image_path)
+                        .unwrap();
                     item.draw_all(cx, &mut Scope::empty());
                 }
             }
