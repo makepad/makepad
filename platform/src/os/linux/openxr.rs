@@ -59,8 +59,10 @@ impl Cx{
             if event_buffer.ty == XrType::EVENT_DATA_SESSION_STATE_CHANGED{
                 let edssc = unsafe{*(&event_buffer as *const _ as *const XrEventDataSessionStateChanged)};
                 match edssc.state{
-                    XrSessionState::IDLE=>{}
-                    XrSessionState::FOCUSED=>{}
+                    XrSessionState::IDLE=>{
+                    }
+                    XrSessionState::FOCUSED=>{
+                    }
                     XrSessionState::VISIBLE=>{}
                     XrSessionState::READY=>{
                         openxr.session.as_mut().unwrap().begin_session(
@@ -214,8 +216,10 @@ impl Cx{
                 &frame
             );
             let last_state = openxr.session.as_ref().unwrap().inputs.last_state.clone();
-            self.call_event_handler(&Event::XrUpdate(event));
-                        
+            if let Some(event) = event{
+                self.call_event_handler(&Event::XrUpdate(event));
+            }
+                            
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(self.os.timers.time_now());
             }
@@ -278,7 +282,12 @@ impl CxOpenXr{
             "XR_FB_passthrough\0",
             "XR_META_environment_depth\0",
             "XR_META_touch_controller_plus\0",
-            
+            "XR_EXT_hand_interaction\0",
+            "XR_META_detached_controllers\0",
+            "XR_META_simultaneous_hands_and_controllers\0",
+            "XR_EXT_hand_tracking\0",
+            "XR_FB_hand_tracking_mesh\0",
+            "XR_FB_hand_tracking_aim\0",
         ];
                 
         for ext_needed in exts_needed{
@@ -302,7 +311,7 @@ impl CxOpenXr{
             },
             enabled_api_layer_count: 0,
             enabled_api_layer_names: 0 as *const *const _,
-            enabled_extension_count: 5 as u32,
+            enabled_extension_count: exts_needed.len() as u32,
             enabled_extension_names: &xr_static_str_array(&exts_needed) as *const *const _
         };
         let mut instance = XrInstance(0);
@@ -985,8 +994,7 @@ impl CxOpenXrSession{
         self.active = false;
     }
     
-    fn new_xr_update_event(&mut self, xr: &LibOpenXr, frame:&CxOpenXrFrame)->XrUpdateEvent{
-        
+    fn new_xr_update_event(&mut self, xr: &LibOpenXr, frame:&CxOpenXrFrame)->Option<XrUpdateEvent>{
         let predicted_display_time = frame.frame_state.predicted_display_time;
         let local_space = self.local_space;
         
@@ -1000,7 +1008,10 @@ impl CxOpenXrSession{
             active_action_sets: &active_action_set as * const _,
             ..Default::default()
         };
-        unsafe{(xr.xrSyncActions)(self.handle, &sync_info)}.log_error("xrSyncActions");
+        
+        if unsafe{(xr.xrSyncActions)(self.handle, &sync_info)} != XrResult::SUCCESS{
+            return None
+        };
         
         let left = self.inputs.left.poll(xr, self.handle, local_space, predicted_display_time);
         let right = self.inputs.right.poll(xr, self.handle, local_space, predicted_display_time);
@@ -1015,10 +1026,10 @@ impl CxOpenXrSession{
         });
         let last_state = self.inputs.last_state.clone();
         self.inputs.last_state = new_state.clone();
-        XrUpdateEvent{
+        Some(XrUpdateEvent{
             state: new_state,
             last: last_state
-        }
+        })
     }
 }
 
@@ -1028,6 +1039,8 @@ pub struct CxOpenXrOptions{
 }
 
 pub struct CxOpenXrInputs{
+    left_hand_track: XrHandTrackerEXT,
+    right_hand_track: XrHandTrackerEXT,
     action_set: XrActionSet,
     left: CxOpenXrController,
     right: CxOpenXrController,
@@ -1036,10 +1049,16 @@ pub struct CxOpenXrInputs{
 
 pub struct CxOpenXrController{
     path: XrPath,
-    trigger: XrAction,
-    aim_pose: XrAction,
+    detached_path: XrPath,
+    trigger_action: XrAction,
+    aim_pose_action: XrAction,
+    grip_pose_action: XrAction,
     aim_space: XrSpace,
     grip_space: XrSpace,
+    detached_aim_pose_action: XrAction,
+    detached_grip_pose_action: XrAction,
+    detached_aim_space: XrSpace,
+    detached_grip_space: XrSpace,
 }
 
 impl CxOpenXrController{
@@ -1050,12 +1069,23 @@ fn destroy(self, xr: &LibOpenXr){
     
     fn poll(&self, xr: &LibOpenXr, session:XrSession, local_space:XrSpace, time:XrTime)->XrController{
         // lets query the trigger bool
-        let trigger = XrActionStateFloat::get(xr, session, self.trigger, self.path);
-        let aim_pose = XrActionStatePose::get(xr, session, self.aim_pose, self.path);
+        let trigger = XrActionStateFloat::get(xr, session, self.trigger_action, self.path);
+        let grip_state = XrActionStatePose::get(xr, session, self.grip_pose_action, self.path);
+        let aim_state = XrActionStatePose::get(xr, session, self.aim_pose_action, self.path);
         XrController{
-            active: aim_pose.is_active.as_bool(),
-            grip_pose: XrSpaceLocation::locate(xr, local_space, time, self.grip_space).pose,
-            aim_pose: XrSpaceLocation::locate(xr, local_space, time, self.aim_space).pose,
+            active: aim_state.is_active.as_bool(),
+            grip_pose:  if grip_state.is_active.as_bool(){
+                XrSpaceLocation::locate(xr, local_space, time, self.grip_space).pose
+            }
+            else{
+                XrSpaceLocation::locate(xr, local_space, time, self.detached_grip_space).pose
+            },
+            aim_pose: if aim_state.is_active.as_bool(){
+                XrSpaceLocation::locate(xr, local_space, time, self.aim_space).pose
+            }
+            else{
+                XrSpaceLocation::locate(xr, local_space, time, self.detached_aim_space).pose
+            },
             trigger: XrButton{
                 last_change_time: trigger.last_change_time.as_secs_f64(),
                 analog: trigger.current_state,
@@ -1077,28 +1107,47 @@ fn destroy(self, xr: &LibOpenXr){
 impl CxOpenXrInputs{
         
     pub fn new_inputs(xr: &LibOpenXr, session:XrSession, instance: XrInstance)->Result<CxOpenXrInputs,String>{
-                
+        // create handtrackers
+        let left_hand_info = XrHandTrackerCreateInfoEXT{hand: XrHandEXT::LEFT,..Default::default()};
+        let mut left_hand_track = XrHandTrackerEXT(0);
+        unsafe{(xr.xrCreateHandTrackerEXT)(session, &left_hand_info, &mut left_hand_track)}
+        .log_error("xrCreateHandTrackerEXT");
+        
+        let right_hand_info = XrHandTrackerCreateInfoEXT{hand: XrHandEXT::RIGHT,..Default::default()};
+        let mut right_hand_track = XrHandTrackerEXT(0);
+        unsafe{(xr.xrCreateHandTrackerEXT)(session, &right_hand_info, &mut right_hand_track)}
+        .log_error("xrCreateHandTrackerEXT");
+        
         let action_set = XrActionSet::new(
             xr, instance, 1, "makepad_action_set", "Main action set"
         )?;
                 
         let left_hand = XrPath::new(xr, instance, "/user/hand/left")?;
         let right_hand = XrPath::new(xr, instance, "/user/hand/right")?;
+        let left_detached = XrPath::new(xr, instance, "/user/detached_controller_meta/left")?;
+        let right_detached = XrPath::new(xr, instance, "/user/detached_controller_meta/right")?;
         let hands = [left_hand, right_hand];
+        let detached = [left_detached, right_detached];
+        
+        let trigger_action = XrAction::new(xr, action_set, XrActionType::FLOAT_INPUT, "trigger", "", &hands)?;
+        let aim_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "aim_pose", "", &hands)?;
+        let grip_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "grip_pose", "", &hands)?;
+        let detached_aim_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "detached_aim_pose", "", &detached)?;
+        let detached_grip_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "detached_grip_pose", "", &detached)?;
                 
-        let trigger = XrAction::new(xr, action_set, XrActionType::FLOAT_INPUT, "trigger", "", &hands)?;
-        let aim_pose = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "aim_pose", "", &hands)?;
-        let grip_pose = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "grip_pose", "", &hands)?;
-                
-        let interaction_profile = XrPath::new(xr, instance,  "/interaction_profiles/oculus/touch_controller_plus")?;
+        let interaction_profile = XrPath::new(xr, instance,  "/interaction_profiles/meta/touch_controller_plus")?;
                 
         let bindings = [
-            XrActionSuggestedBinding::new(xr, instance, trigger, "/user/hand/left/input/trigger")?,
-            XrActionSuggestedBinding::new(xr, instance, trigger, "/user/hand/right/input/trigger")?,
-            XrActionSuggestedBinding::new(xr, instance, aim_pose, "/user/hand/left/input/aim/pose")?,
-            XrActionSuggestedBinding::new(xr, instance, aim_pose, "/user/hand/right/input/aim/pose")?,
-            XrActionSuggestedBinding::new(xr, instance, grip_pose, "/user/hand/left/input/grip/pose")?,
-            XrActionSuggestedBinding::new(xr, instance, grip_pose, "/user/hand/right/input/grip/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, trigger_action, "/user/hand/left/input/trigger")?,
+            XrActionSuggestedBinding::new(xr, instance, trigger_action, "/user/hand/right/input/trigger")?,
+            XrActionSuggestedBinding::new(xr, instance, aim_pose_action, "/user/hand/left/input/aim/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, aim_pose_action, "/user/hand/right/input/aim/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, grip_pose_action, "/user/hand/left/input/grip/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, grip_pose_action, "/user/hand/right/input/grip/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, detached_aim_pose_action, "/user/detached_controller_meta/left/input/aim/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, detached_aim_pose_action, "/user/detached_controller_meta/right/input/aim/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, detached_grip_pose_action, "/user/detached_controller_meta/left/input/grip/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, detached_grip_pose_action, "/user/detached_controller_meta/right/input/grip/pose")?,
         ];
                 
         let suggested_bindings = XrInteractionProfileSuggestedBinding{
@@ -1125,21 +1174,40 @@ impl CxOpenXrInputs{
         )}.to_result("xrAttachSessionActionSets")?;
         let mut pose = XrPosef::default();
         pose.orientation.w = 1.0;
+        
+        let resume_info = XrSimultaneousHandsAndControllersTrackingResumeInfoMETA::default();
+        unsafe{(xr.xrResumeSimultaneousHandsAndControllersTrackingMETA)(session, &resume_info)}
+        .log_error("xrResumeSimultaneousHandsAndControllersTrackingMETA");
+        
         Ok(CxOpenXrInputs{
             action_set,
+            left_hand_track,
+            right_hand_track,
             left: CxOpenXrController{
                 path: left_hand,
-                trigger,
-                aim_pose,
-                aim_space: XrSpace::new_action_space(xr, session, aim_pose, left_hand, pose)?,
-                grip_space: XrSpace::new_action_space(xr, session, grip_pose, left_hand, pose)?
+                detached_path: left_detached,
+                trigger_action,
+                aim_pose_action,
+                grip_pose_action,
+                detached_aim_pose_action,
+                detached_grip_pose_action,
+                aim_space: XrSpace::new_action_space(xr, session, aim_pose_action, left_hand, pose)?,
+                grip_space: XrSpace::new_action_space(xr, session, grip_pose_action, left_hand, pose)?,
+                detached_aim_space: XrSpace::new_action_space(xr, session, detached_aim_pose_action, left_detached, pose)?,
+                detached_grip_space: XrSpace::new_action_space(xr, session, detached_grip_pose_action, left_detached, pose)?
             },
             right: CxOpenXrController{
                 path: right_hand,
-                trigger,
-                aim_pose,
-                aim_space: XrSpace::new_action_space(xr, session, aim_pose, right_hand, pose)?,
-                grip_space: XrSpace::new_action_space(xr, session, grip_pose, right_hand, pose)?
+                detached_path: right_detached,
+                trigger_action,
+                aim_pose_action,
+                grip_pose_action,
+                detached_aim_pose_action,
+                detached_grip_pose_action,
+                aim_space: XrSpace::new_action_space(xr, session, aim_pose_action, right_hand, pose)?,
+                grip_space: XrSpace::new_action_space(xr, session, grip_pose_action, right_hand, pose)?,
+                detached_aim_space: XrSpace::new_action_space(xr, session, detached_aim_pose_action, right_detached, pose)?,
+                detached_grip_space: XrSpace::new_action_space(xr, session, detached_grip_pose_action, right_detached, pose)?
             },
             last_state: Default::default()
         })
