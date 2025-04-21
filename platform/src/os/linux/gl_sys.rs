@@ -70,7 +70,7 @@ pub const RENDERBUFFER: GLenum = 0x8D41;
 pub const DEPTH_COMPONENT16: GLenum = 0x81A5;
 pub const DEPTH_COMPONENT24: GLenum = 0x81A6;
 pub const DYNAMIC_DRAW:GLenum = 0x88E8;
-
+pub const FRAMEBUFFER_SRGB_EXT: GLenum = 0x8DB9;
 pub const DEPTH_ATTACHMENT: GLenum = 0x8D00;
 pub const COLOR_ATTACHMENT0: GLenum = 0x8CE0;
 pub const INFO_LOG_LENGTH: GLenum = 0x8B84;

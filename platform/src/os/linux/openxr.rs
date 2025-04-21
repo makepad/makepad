@@ -138,7 +138,7 @@ impl Cx{
             (gl.glBlendEquationSeparate)(gl_sys::FUNC_ADD, gl_sys::FUNC_ADD);
             (gl.glBlendFuncSeparate)(gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA, gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA);
             (gl.glEnable)(gl_sys::BLEND);
-                        
+            (gl.glDisable)(gl_sys::FRAMEBUFFER_SRGB_EXT);
             //crate::log!("{:?} {:?}", session.width, session.height);
             (gl.glViewport)(0, 0, session.width as i32, session.height  as i32);
             (gl.glScissor)(0, 0, session.width as i32, session.height as i32);
