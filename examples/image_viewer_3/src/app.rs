@@ -3,7 +3,7 @@ use {makepad_widgets::*, std::{env, path::{Path, PathBuf}}};
 live_design! {
     use link::widgets::*;
 
-    PLACEHOLDER_IMAGE = dep("crate://self/resources/placeholder_image.jpg");
+    PLACEHOLDER = dep("crate://self/resources/placeholder.jpg");
 
     ImageItem = <View> {
         width: 256,
@@ -13,7 +13,7 @@ live_design! {
             width: Fill,
             height: Fill,
             fit: Biggest,
-            source: (PLACEHOLDER_IMAGE)
+            source: (PLACEHOLDER)
         }
     }
 
@@ -112,7 +112,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn load_image_paths(&mut self, path: &Path) {
+    pub fn update_image_paths(&mut self, path: &Path) {
         self.state.image_paths.clear();
         for entry in path.read_dir().unwrap() {
             let entry = entry.unwrap();
@@ -133,7 +133,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        self.load_image_paths(env::args().nth(1).unwrap().as_ref())
+        self.update_image_paths(env::args().nth(1).unwrap().as_ref())
     }
 }
  
