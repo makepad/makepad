@@ -301,6 +301,13 @@ impl WindowRef{
 
 impl Widget for Window {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::Draw(e) = event {
+            let mut cx_draw = CxDraw::new(cx, e);
+            let cx = &mut Cx2d::new(&mut cx_draw);
+            self.draw_all(cx, scope);
+            return
+        }
+        
         let uid = self.widget_uid();
         
         self.debug_view.handle_event(cx, event);
