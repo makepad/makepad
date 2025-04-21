@@ -1,4 +1,10 @@
-use {makepad_widgets::*, std::{env, path::{Path, PathBuf}}};
+use {
+    makepad_widgets::*,
+    std::{
+        env,
+        path::{Path, PathBuf},
+    },
+};
 
 live_design! {
     use link::widgets::*;
@@ -89,16 +95,24 @@ live_design! {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct ImageRow {
-    #[deref] view: View,
+    #[deref]
+    view: View,
 }
 
 impl Widget for ImageRow {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(
+        &mut self,
+        cx: &mut Cx2d,
+        scope: &mut Scope,
+        walk: Walk,
+    ) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let state = scope.data.get_mut::<State>().unwrap();
                 let row_idx = scope.props.get::<usize>().unwrap();
-                let item_count = state.images_per_row.min(state.image_paths.len() - row_idx * state.images_per_row);
+                let item_count = state.images_per_row.min(
+                    state.image_paths.len() - row_idx * state.images_per_row,
+                );
                 list.set_item_range(cx, 0, item_count);
                 while let Some(item_idx) = list.next_visible_item(cx) {
                     if item_idx >= item_count {
@@ -123,19 +137,29 @@ impl Widget for ImageRow {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct ImageGrid {
-    #[deref] view: View,
+    #[deref]
+    view: View,
 }
 
 impl Widget for ImageGrid {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(
+        &mut self,
+        cx: &mut Cx2d,
+        scope: &mut Scope,
+        walk: Walk,
+    ) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let state = scope.data.get_mut::<State>().unwrap();
-                let num_rows = state.image_paths.len().div_ceil(state.images_per_row);
+                let num_rows =
+                    state.image_paths.len().div_ceil(state.images_per_row);
                 list.set_item_range(cx, 0, num_rows);
                 while let Some(row_idx) = list.next_visible_item(cx) {
                     let item = list.item(cx, row_idx, live_id!(ImageRow));
-                    item.draw_all(cx, &mut Scope::with_data_props(state, &row_idx));
+                    item.draw_all(
+                        cx,
+                        &mut Scope::with_data_props(state, &row_idx),
+                    );
                 }
             }
         }
@@ -149,8 +173,10 @@ impl Widget for ImageGrid {
 
 #[derive(Live)]
 pub struct App {
-    #[live] ui: WidgetRef,
-    #[rust] state: State,
+    #[live]
+    ui: WidgetRef,
+    #[rust]
+    state: State,
 }
 
 impl App {
@@ -178,7 +204,12 @@ impl App {
             let image_path = &self.state.image_paths[image_idx];
             image.load_image_file_by_path(cx, &image_path).unwrap();
         } else {
-            image.load_image_dep_by_path(cx, "crate://self/resources/placeholder_image.jpg").unwrap();
+            image
+                .load_image_dep_by_path(
+                    cx,
+                    "crate://self/resources/placeholder_image.jpg",
+                )
+                .unwrap();
         }
         self.ui.view(id!(slideshow)).redraw(cx);
     }
@@ -203,7 +234,8 @@ impl App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.state));
+        self.ui
+            .handle_event(cx, event, &mut Scope::with_data(&mut self.state));
     }
 }
 
@@ -212,7 +244,7 @@ impl LiveHook for App {
         self.update_image_paths(cx, env::args().nth(1).unwrap().as_ref());
     }
 }
- 
+
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         makepad_widgets::live_design(cx);
@@ -227,7 +259,9 @@ impl MatchEvent for App {
         if self.ui.button(id!(right)).clicked(&actions) {
             self.navigate_right(cx);
         }
-        if let Some(event) = self.ui.view(id!(slideshow.overlay)).key_down(&actions) {
+        if let Some(event) =
+            self.ui.view(id!(slideshow.overlay)).key_down(&actions)
+        {
             match event.key_code {
                 KeyCode::ArrowLeft => self.navigate_left(cx),
                 KeyCode::ArrowRight => self.navigate_right(cx),
@@ -254,4 +288,4 @@ impl Default for State {
     }
 }
 
-app_main!(App); 
+app_main!(App);
