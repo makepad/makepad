@@ -18,8 +18,11 @@ live_design!{
             
             let normal_matrix = mat3(model_view);
             let normal = normalize(normal_matrix * self.geom_normal);
-            let dp = abs(normal.z);
-            self.lit_color = vec4(self.color.xyz * dp * self.color.a, self.color.a);
+            let dp = max(dot(normal, normalize(vec3(0.0,1.0,1.0))), 0.0);
+            let ambient = vec3(0.2,0.2,0.2)
+            let color = self.color.xyz * dp + ambient;
+            
+            self.lit_color = vec4(color * self.color.w, self.color.w);
              
             return self.camera_projection * (self.camera_view * (model_view * vec4(pos, 1.)))
         }
