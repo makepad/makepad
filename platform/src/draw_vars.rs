@@ -217,6 +217,7 @@ impl DrawVars {
                 else if live_type == LiveType::of::<Vec2>() {Some(ShaderTy::Vec2)}
                 else if live_type == LiveType::of::<Vec3>() {Some(ShaderTy::Vec3)}
                 else if live_type == LiveType::of::<Vec4>() {Some(ShaderTy::Vec4)}
+                else if live_type == LiveType::of::<Mat4>() {Some(ShaderTy::Mat4)}
                 else {None}
             }
             // ok ! we have to compile it

@@ -92,7 +92,9 @@ pub trait Widget: WidgetNode {
         while self.draw_3d(cx, scope).is_step() {}
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep;
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep{
+        DrawStep::done()
+    }
 
     fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
         let walk = self.walk(cx);

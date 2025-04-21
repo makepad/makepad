@@ -87,7 +87,10 @@ impl LiveIdInterner {
                 "state_id",
                 "user",
                 "play",
-                "ended"
+                "ended",
+                "geom_pos",
+                "geom_id",
+                "geom_uv",
             ];
             for item in &fill {
                 if map.contains(item) {

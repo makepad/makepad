@@ -9,7 +9,7 @@ live_design!{
     pub GeometryQuad2D = {{GeometryQuad2D}} {
     }
     
-    pub GeometryCube3D = {{GeometryQuad2D}} {
+    pub GeometryCube3D = {{GeometryCube3D}} {
     }
 }
 
@@ -109,9 +109,9 @@ impl GeometryFields for GeometryCube3D {
 #[derive(Live, LiveRegister)]
 pub struct GeometryCube3D {
     #[rust] pub geometry_ref: Option<GeometryRef>,
-    #[live(0.1)] width: f32,
-    #[live(0.1)] height: f32,
-    #[live(0.1)] depth: f32,
+    #[live(1.0)] width: f32,
+    #[live(1.0)] height: f32,
+    #[live(1.0)] depth: f32,
     #[live(1usize)] width_segments: usize,
     #[live(1usize)] height_segments: usize,
     #[live(1usize)] depth_segments: usize
