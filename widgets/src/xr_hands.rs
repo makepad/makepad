@@ -1,0 +1,59 @@
+use {
+    crate::{
+        makepad_derive_widget::*,
+        makepad_draw::*,
+        widget::*,
+    },
+};
+
+use crate::makepad_draw::shader::draw_cube::DrawCube; 
+
+live_design!{
+    link widgets;
+    use link::theme::*;
+    use link::shaders::*;
+    
+    pub XrHands = {{XrHands}} {
+        cube:{
+            color: #fff
+        }
+    }
+}
+
+#[derive(Live, LiveHook, Widget)]
+pub struct XrHands {
+    #[redraw] #[rust(DrawList::new(cx))] draw_list: DrawList,
+    #[area] #[live] cube: DrawCube,
+    #[live] label: DrawText
+}
+
+impl Widget for XrHands {
+    fn handle_event(&mut self, cx: &mut Cx,event:&Event, _scope:&mut Scope){
+        if let Event::XrUpdate(_e) = event{
+            self.cube.redraw(cx);
+        }
+    }
+            
+    fn draw_3d(&mut self, cx: &mut Cx3d, _scope:&mut Scope)->DrawStep{
+        //return DrawStep::done();
+        
+        self.draw_list.begin_always(cx);
+        // alright lets draw those hands
+        let xr_state = cx.draw_event.xr_state.as_ref().unwrap();
+        // alright lets draw some cubes!
+        let speed = 32.0;
+        let rot = (xr_state.time*speed).rem_euclid(360.0) as f32;
+        self.cube.transform = Mat4::txyz_s_ry_rx_txyz(
+            vec3(0.,0.,0.),
+            0.05,
+            rot,rot,
+            vec3(0.,0.,-0.3)
+        );
+        //self.cube.new_draw_call(cx);
+        self.cube.draw(cx);
+        
+        self.draw_list.end(cx);
+        DrawStep::done()
+    }
+}
+
