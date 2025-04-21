@@ -36,8 +36,19 @@ pub struct XrController {
     pub stick: XrStick,
 }
 
+const XR_HAND_JOINT_COUNT: usize = 26;
+
+#[derive(Clone, Debug, Default)]
+pub struct XrHandJoint{
+    pub tracked: bool,
+    pub valid: bool,
+    pub pose: Pose
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct XrHand{
+    pub in_view: bool,
+    pub joints: [XrHandJoint;XR_HAND_JOINT_COUNT]
 }
 
 #[derive(Clone, Debug, Default)]

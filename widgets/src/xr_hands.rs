@@ -64,7 +64,22 @@ impl Widget for XrHands {
         self.cube.draw(cx);
         
         // lets draw all the fingers
-        
+        if xr_state.left_hand.in_view{
+            for joint in &xr_state.left_hand.joints{
+                let mat = joint.pose.to_mat4();
+                self.cube.cube_size = vec3(0.01,0.01,0.015);
+                self.cube.transform = mat;
+                self.cube.draw(cx);
+            }
+        }
+        if xr_state.right_hand.in_view{
+            for joint in &xr_state.right_hand.joints{
+                let mat = joint.pose.to_mat4();
+                self.cube.cube_size = vec3(0.01,0.01,0.015);
+                self.cube.transform = mat;
+                self.cube.draw(cx);
+            }
+        }
         
         self.draw_list.end(cx);
         DrawStep::done()

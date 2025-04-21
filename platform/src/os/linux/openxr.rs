@@ -49,14 +49,14 @@ impl Cx{
         let openxr = &mut self.os.openxr;
         loop{
             let mut event_buffer = XrEventDataBuffer{
-                ty:XrType::EVENT_DATA_BUFFER,
+                ty:XrStructureType::EVENT_DATA_BUFFER,
                 next: 0 as *const _,
                 varying: [0;4000]
             };
             if unsafe{(openxr.libxr.as_ref().unwrap().xrPollEvent)(openxr.instance.unwrap(), &mut event_buffer)} != XrResult::SUCCESS{
                 break;
             }
-            if event_buffer.ty == XrType::EVENT_DATA_SESSION_STATE_CHANGED{
+            if event_buffer.ty == XrStructureType::EVENT_DATA_SESSION_STATE_CHANGED{
                 let edssc = unsafe{*(&event_buffer as *const _ as *const XrEventDataSessionStateChanged)};
                 match edssc.state{
                     XrSessionState::IDLE=>{
@@ -81,12 +81,12 @@ impl Cx{
             /*      
             //crate::log!("{:?}", event_buffer.ty);
             match event_buffer.ty{
-                XrType::EVENT_DATA_EVENTS_LOST=>{}
-                XrType::EVENT_DATA_INSTANCE_LOSS_PENDING=>{}
-                XrType::EVENT_DATA_INTERACTION_PROFILE_CHANGED=>{}
-                XrType::EVENT_DATA_PERF_SETTINGS_EXT=>{}
-                XrType::EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING=>{}
-                XrType::EVENT_DATA_SESSION_STATE_CHANGED=>{}
+                XrStructureType::EVENT_DATA_EVENTS_LOST=>{}
+                XrStructureType::EVENT_DATA_INSTANCE_LOSS_PENDING=>{}
+                XrStructureType::EVENT_DATA_INTERACTION_PROFILE_CHANGED=>{}
+                XrStructureType::EVENT_DATA_PERF_SETTINGS_EXT=>{}
+                XrStructureType::EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING=>{}
+                XrStructureType::EVENT_DATA_SESSION_STATE_CHANGED=>{}
                 x=>{
                     crate::log!("Unkown xr event {:?}",x);
                 }
@@ -258,7 +258,7 @@ impl CxOpenXr{
         // lets load em up!
         let loader = &self.loader.as_ref().unwrap();
         let loader_info = XrLoaderInitInfoAndroidKHR {
-            ty: XrType::LOADER_INIT_INFO_ANDROID_KHR,
+            ty: XrStructureType::LOADER_INIT_INFO_ANDROID_KHR,
             next: ptr::null(),
             application_vm: makepad_android_state::get_java_vm() as *mut _,
             application_context: activity_handle as *mut _,
@@ -299,7 +299,7 @@ impl CxOpenXr{
         }
                 
         let create_info = XrInstanceCreateInfo{
-            ty: XrType::INSTANCE_CREATE_INFO,
+            ty: XrStructureType::INSTANCE_CREATE_INFO,
             next: 0 as *const _,
             create_flags: XrInstanceCreateFlags(0),
             application_info: XrApplicationInfo{
@@ -654,14 +654,14 @@ impl CxOpenXrSession{
     )->Result<CxOpenXrSession,String>{
                 
         let gfx_binding = XrGraphicsBindingOpenGLESAndroidKHR{
-            ty: XrType::GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR,
+            ty: XrStructureType::GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR,
             next: 0 as *const _,
             display: display.egl_display,
             config: display.egl_config,
             context: display.egl_context,
         };
         let session_create = XrSessionCreateInfo{
-            ty: XrType::SESSION_CREATE_INFO,
+            ty: XrStructureType::SESSION_CREATE_INFO,
             next: &gfx_binding as *const _ as *const _,
             create_flags: XrSessionCreateFlags(0),
             system_id
@@ -754,7 +754,7 @@ impl CxOpenXrSession{
                 
         let mut passthrough = XrPassthroughFB(0);
         let ptci = XrPassthroughCreateInfoFB{
-            ty: XrType::PASSTHROUGH_CREATE_INFO_FB,
+            ty: XrStructureType::PASSTHROUGH_CREATE_INFO_FB,
             next: 0 as *const _,
             flags: XrPassthroughFlagsFB(0)
         };
@@ -773,7 +773,7 @@ impl CxOpenXrSession{
         unsafe{(xr.xrPassthroughLayerResumeFB)(passthrough_layer)}.to_result("xrPassthroughLayerResumeFB")?;
                 
         let edpci = XrEnvironmentDepthProviderCreateInfoMETA{
-            ty: XrType::ENVIRONMENT_DEPTH_PROVIDER_CREATE_INFO_META,
+            ty: XrStructureType::ENVIRONMENT_DEPTH_PROVIDER_CREATE_INFO_META,
             next: 0 as * const _,
             create_flags: XrEnvironmentDepthProviderCreateFlagsMETA(0)
         };
@@ -782,7 +782,7 @@ impl CxOpenXrSession{
         unsafe{(xr.xrCreateEnvironmentDepthProviderMETA)(session, &edpci, &mut depth_provider)}.to_result("xrCreateEnvironmentDepthProviderMETA")?;
                 
         let edsci = XrEnvironmentDepthSwapchainCreateInfoMETA{
-            ty: XrType::ENVIRONMENT_DEPTH_SWAPCHAIN_CREATE_INFO_META,
+            ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_CREATE_INFO_META,
             next: 0 as * const _,
             create_flags: XrEnvironmentDepthSwapchainCreateFlagsMETA(0)
         };
@@ -791,7 +791,7 @@ impl CxOpenXrSession{
         unsafe{(xr.xrCreateEnvironmentDepthSwapchainMETA)(depth_provider, &edsci, &mut depth_swap_chain)}.to_result("xrCreateEnvironmentDepthSwapchainMETA")?;
                 
         let mut edss = XrEnvironmentDepthSwapchainStateMETA{
-            ty: XrType::ENVIRONMENT_DEPTH_SWAPCHAIN_STATE_META,
+            ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_STATE_META,
             next: 0 as * mut _,
             width: 0,
             height: 0
@@ -952,7 +952,7 @@ impl CxOpenXrSession{
         assert!(self.active == false);
                  
         let session_begin_info = XrSessionBeginInfo{
-            ty: XrType::SESSION_BEGIN_INFO,
+            ty: XrStructureType::SESSION_BEGIN_INFO,
             next: 0 as * const _,
             primary_view_configuration_type: XrViewConfigurationType::PRIMARY_STEREO,
         };
@@ -1053,16 +1053,59 @@ pub struct CxOpenXrInputs{
 
 
 pub struct CxOpenXrHand{
-    _path: XrPath,
-    _tracker: XrHandTrackerEXT,
+    tracker: XrHandTrackerEXT,
+    joint_locations: [XrHandJointLocationEXT; HAND_JOINT_COUNT_EXT]
 }
 
 impl CxOpenXrHand{
-    fn destroy(self, _xr: &LibOpenXr){
+    fn destroy(self, xr: &LibOpenXr){
+        unsafe{(xr.xrDestroyHandTrackerEXT)(self.tracker)}
+        .log_error("xrDestroyHandTrackerEXT");
     }
         
-    fn poll(&self, _xr: &LibOpenXr, _session:XrSession, _local_space:XrSpace, _time:XrTime)->XrHand{
-       XrHand{}
+    fn poll(&mut self, xr: &LibOpenXr, _session:XrSession, local_space:XrSpace, time:XrTime)->XrHand{
+        let mut scale = XrHandTrackingScaleFB{
+            sensor_output: 1.0,
+            current_output: 1.0,
+            override_value_input: 1.0,
+            override_hand_scale: XrBool32::from_bool(false),
+            ..Default::default()
+        };
+        let mut aim_state = XrHandTrackingAimStateFB{
+            next: &mut scale as *mut _  as *mut _,
+            ..Default::default()
+        };
+        let mut locations = XrHandJointLocationsEXT{
+            next:  &mut aim_state as *mut _  as *mut _,
+            joint_count: HAND_JOINT_COUNT_EXT as _,
+            joint_locations: self.joint_locations.as_mut_ptr(),
+            ..Default::default()
+        };
+        let locate_info = XrHandJointsLocateInfoEXT{
+            base_space: local_space,
+            time,
+            ..Default::default()
+        }; 
+        unsafe{(xr.xrLocateHandJointsEXT)(self.tracker, &locate_info, &mut locations)}
+        .log_error("xrLocateHandJointsEXT");
+        // alrighty lets convert the joints to our XrHand
+        let mut hand = XrHand::default();
+        let mut hand_in_view = false;
+        for i in 0..self.joint_locations.len(){
+            hand.joints[i] = XrHandJoint{
+                pose: self.joint_locations[i].pose,
+                valid: 
+                    self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_VALID) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_VALID)
+                ,
+                tracked: 
+                self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_TRACKED) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_TRACKED)
+            };
+            if hand.joints[i].tracked{
+                hand_in_view = true
+            }
+        }
+        hand.in_view = hand_in_view;
+        hand
     }
 }
 
@@ -1200,12 +1243,12 @@ impl CxOpenXrInputs{
         Ok(CxOpenXrInputs{
             action_set,
             left_hand: CxOpenXrHand{
-                _path: left_hand_path,
-                _tracker:left_hand_track
+                tracker:left_hand_track,
+                joint_locations: Default::default()
             },
             right_hand: CxOpenXrHand{
-                _path: right_hand_path,
-                _tracker:right_hand_track
+                tracker:right_hand_track,
+                joint_locations: Default::default()
             },
             left_controller: CxOpenXrController{
                 path: left_hand_path,
