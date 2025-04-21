@@ -35,22 +35,36 @@ impl Widget for XrHands {
     }
             
     fn draw_3d(&mut self, cx: &mut Cx3d, _scope:&mut Scope)->DrawStep{
-        //return DrawStep::done();
-        
         self.draw_list.begin_always(cx);
         // alright lets draw those hands
         let xr_state = cx.draw_event.xr_state.as_ref().unwrap();
         // alright lets draw some cubes!
         let speed = 32.0;
+        
         let rot = (xr_state.time*speed).rem_euclid(360.0) as f32;
+        
+        self.cube.cube_size = vec3(0.05,0.05,0.05);
         self.cube.transform = Mat4::txyz_s_ry_rx_txyz(
             vec3(0.,0.,0.),
-            0.05,
+            1.0,
             rot,rot,
             vec3(0.,0.,-0.3)
         );
-        //self.cube.new_draw_call(cx);
         self.cube.draw(cx);
+        
+        // lets draw our hand controllers
+        let mata = xr_state.left.grip_pose.to_mat4();
+        self.cube.cube_size = vec3(0.05,0.05,0.05);
+        self.cube.transform = mata;
+        self.cube.draw(cx);
+        
+        let mata = xr_state.right.grip_pose.to_mat4();
+        self.cube.cube_size = vec3(0.05,0.05,0.05);
+        self.cube.transform = mata;
+        self.cube.draw(cx);
+        
+        // lets draw all the fingers
+        
         
         self.draw_list.end(cx);
         DrawStep::done()
