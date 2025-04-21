@@ -1013,16 +1013,20 @@ impl CxOpenXrSession{
             return None
         };
         
-        let left = self.inputs.left.poll(xr, self.handle, local_space, predicted_display_time);
-        let right = self.inputs.right.poll(xr, self.handle, local_space, predicted_display_time);
+        let left_controller = self.inputs.left_controller.poll(xr, self.handle, local_space, predicted_display_time);
+        let right_controller = self.inputs.right_controller.poll(xr, self.handle, local_space, predicted_display_time);
+        
+        let left_hand = self.inputs.left_hand.poll(xr, self.handle, local_space, predicted_display_time);
+        let right_hand = self.inputs.right_hand.poll(xr, self.handle, local_space, predicted_display_time);
+                
         
         let new_state = Rc::new(XrState{
             time: (frame.frame_state.predicted_display_time.as_nanos() as f64) / 1e9f64,
             head_pose: frame.local_from_head.pose,
-            left,
-            right,
-            left_hand: XrHand{},
-            right_hand: XrHand{},
+            left_controller,
+            right_controller,
+            left_hand,
+            right_hand,
         });
         let last_state = self.inputs.last_state.clone();
         self.inputs.last_state = new_state.clone();
@@ -1039,32 +1043,46 @@ pub struct CxOpenXrOptions{
 }
 
 pub struct CxOpenXrInputs{
-    left_hand_track: XrHandTrackerEXT,
-    right_hand_track: XrHandTrackerEXT,
     action_set: XrActionSet,
-    left: CxOpenXrController,
-    right: CxOpenXrController,
+    left_controller: CxOpenXrController,
+    right_controller: CxOpenXrController,
+    left_hand: CxOpenXrHand,
+    right_hand: CxOpenXrHand,
     last_state: Rc<XrState>,
+}
+
+
+pub struct CxOpenXrHand{
+    _path: XrPath,
+    _tracker: XrHandTrackerEXT,
+}
+
+impl CxOpenXrHand{
+    fn destroy(self, _xr: &LibOpenXr){
+    }
+        
+    fn poll(&self, _xr: &LibOpenXr, _session:XrSession, _local_space:XrSpace, _time:XrTime)->XrHand{
+       XrHand{}
+    }
 }
 
 pub struct CxOpenXrController{
     path: XrPath,
-    detached_path: XrPath,
     trigger_action: XrAction,
     aim_pose_action: XrAction,
     grip_pose_action: XrAction,
     aim_space: XrSpace,
     grip_space: XrSpace,
-    detached_aim_pose_action: XrAction,
-    detached_grip_pose_action: XrAction,
     detached_aim_space: XrSpace,
     detached_grip_space: XrSpace,
 }
 
 impl CxOpenXrController{
-fn destroy(self, xr: &LibOpenXr){
+    fn destroy(self, xr: &LibOpenXr){
         self.aim_space.destroy(xr);
         self.grip_space.destroy(xr);
+        self.detached_aim_space.destroy(xr);
+        self.detached_grip_space.destroy(xr);
     }
     
     fn poll(&self, xr: &LibOpenXr, session:XrSession, local_space:XrSpace, time:XrTime)->XrController{
@@ -1122,18 +1140,18 @@ impl CxOpenXrInputs{
             xr, instance, 1, "makepad_action_set", "Main action set"
         )?;
                 
-        let left_hand = XrPath::new(xr, instance, "/user/hand/left")?;
-        let right_hand = XrPath::new(xr, instance, "/user/hand/right")?;
-        let left_detached = XrPath::new(xr, instance, "/user/detached_controller_meta/left")?;
-        let right_detached = XrPath::new(xr, instance, "/user/detached_controller_meta/right")?;
-        let hands = [left_hand, right_hand];
-        let detached = [left_detached, right_detached];
+        let left_hand_path = XrPath::new(xr, instance, "/user/hand/left")?;
+        let right_hand_path = XrPath::new(xr, instance, "/user/hand/right")?;
+        let left_detached_path = XrPath::new(xr, instance, "/user/detached_controller_meta/left")?;
+        let right_detached_path = XrPath::new(xr, instance, "/user/detached_controller_meta/right")?;
+        let hand_paths = [left_hand_path, right_hand_path];
+        let detached_paths = [left_detached_path, right_detached_path];
         
-        let trigger_action = XrAction::new(xr, action_set, XrActionType::FLOAT_INPUT, "trigger", "", &hands)?;
-        let aim_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "aim_pose", "", &hands)?;
-        let grip_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "grip_pose", "", &hands)?;
-        let detached_aim_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "detached_aim_pose", "", &detached)?;
-        let detached_grip_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "detached_grip_pose", "", &detached)?;
+        let trigger_action = XrAction::new(xr, action_set, XrActionType::FLOAT_INPUT, "trigger", "", &hand_paths)?;
+        let aim_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "aim_pose", "", &hand_paths)?;
+        let grip_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "grip_pose", "", &hand_paths)?;
+        let detached_aim_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "detached_aim_pose", "", &detached_paths)?;
+        let detached_grip_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "detached_grip_pose", "", &detached_paths)?;
                 
         let interaction_profile = XrPath::new(xr, instance,  "/interaction_profiles/meta/touch_controller_plus")?;
                 
@@ -1181,41 +1199,43 @@ impl CxOpenXrInputs{
         
         Ok(CxOpenXrInputs{
             action_set,
-            left_hand_track,
-            right_hand_track,
-            left: CxOpenXrController{
-                path: left_hand,
-                detached_path: left_detached,
-                trigger_action,
-                aim_pose_action,
-                grip_pose_action,
-                detached_aim_pose_action,
-                detached_grip_pose_action,
-                aim_space: XrSpace::new_action_space(xr, session, aim_pose_action, left_hand, pose)?,
-                grip_space: XrSpace::new_action_space(xr, session, grip_pose_action, left_hand, pose)?,
-                detached_aim_space: XrSpace::new_action_space(xr, session, detached_aim_pose_action, left_detached, pose)?,
-                detached_grip_space: XrSpace::new_action_space(xr, session, detached_grip_pose_action, left_detached, pose)?
+            left_hand: CxOpenXrHand{
+                _path: left_hand_path,
+                _tracker:left_hand_track
             },
-            right: CxOpenXrController{
-                path: right_hand,
-                detached_path: right_detached,
+            right_hand: CxOpenXrHand{
+                _path: right_hand_path,
+                _tracker:right_hand_track
+            },
+            left_controller: CxOpenXrController{
+                path: left_hand_path,
                 trigger_action,
                 aim_pose_action,
                 grip_pose_action,
-                detached_aim_pose_action,
-                detached_grip_pose_action,
-                aim_space: XrSpace::new_action_space(xr, session, aim_pose_action, right_hand, pose)?,
-                grip_space: XrSpace::new_action_space(xr, session, grip_pose_action, right_hand, pose)?,
-                detached_aim_space: XrSpace::new_action_space(xr, session, detached_aim_pose_action, right_detached, pose)?,
-                detached_grip_space: XrSpace::new_action_space(xr, session, detached_grip_pose_action, right_detached, pose)?
+                aim_space: XrSpace::new_action_space(xr, session, aim_pose_action, left_hand_path, pose)?,
+                grip_space: XrSpace::new_action_space(xr, session, grip_pose_action, left_hand_path, pose)?,
+                detached_aim_space: XrSpace::new_action_space(xr, session, detached_aim_pose_action, left_detached_path, pose)?,
+                detached_grip_space: XrSpace::new_action_space(xr, session, detached_grip_pose_action, left_detached_path, pose)?
+            },
+            right_controller: CxOpenXrController{
+                path: right_hand_path,
+                trigger_action,
+                aim_pose_action,
+                grip_pose_action,
+                aim_space: XrSpace::new_action_space(xr, session, aim_pose_action, right_hand_path, pose)?,
+                grip_space: XrSpace::new_action_space(xr, session, grip_pose_action, right_hand_path, pose)?,
+                detached_aim_space: XrSpace::new_action_space(xr, session, detached_aim_pose_action, right_detached_path, pose)?,
+                detached_grip_space: XrSpace::new_action_space(xr, session, detached_grip_pose_action, right_detached_path, pose)?
             },
             last_state: Default::default()
         })
     }
     
     pub fn destroy_input(self, xr: &LibOpenXr){
-        self.left.destroy(xr);
-        self.right.destroy(xr);
+        self.left_controller.destroy(xr);
+        self.right_controller.destroy(xr);
+        self.left_hand.destroy(xr);
+        self.right_hand.destroy(xr);
     }
     
 }

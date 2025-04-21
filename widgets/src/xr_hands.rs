@@ -53,12 +53,12 @@ impl Widget for XrHands {
         self.cube.draw(cx);
         
         // lets draw our hand controllers
-        let mata = xr_state.left.grip_pose.to_mat4();
+        let mata = xr_state.left_controller.grip_pose.to_mat4();
         self.cube.cube_size = vec3(0.05,0.05,0.05);
         self.cube.transform = mata;
         self.cube.draw(cx);
         
-        let mata = xr_state.right.grip_pose.to_mat4();
+        let mata = xr_state.right_controller.grip_pose.to_mat4();
         self.cube.cube_size = vec3(0.05,0.05,0.05);
         self.cube.transform = mata;
         self.cube.draw(cx);

@@ -44,8 +44,8 @@ pub struct XrHand{
 pub struct XrState{
     pub time: f64,
     pub head_pose: Pose,
-    pub left: XrController,
-    pub right: XrController,
+    pub left_controller: XrController,
+    pub right_controller: XrController,
     pub left_hand: XrHand,
     pub right_hand: XrHand,
 }
