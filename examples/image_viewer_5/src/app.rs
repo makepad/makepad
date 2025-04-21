@@ -129,9 +129,11 @@ impl Widget for ImageRow {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let state = scope.data.get_mut::<State>().unwrap();
                 let row_idx = scope.props.get::<usize>().unwrap();
-                let item_count = state.images_per_row.min(
-                    state.image_paths.len() - row_idx * state.images_per_row,
-                );
+                let first_image_idx = row_idx * state.images_per_row;
+                let remaining_image_count =
+                    state.image_paths.len() - first_image_idx;
+                let item_count =
+                    state.images_per_row.min(remaining_image_count);
                 list.set_item_range(cx, 0, item_count);
                 while let Some(item_idx) = list.next_visible_item(cx) {
                     if item_idx >= item_count {
@@ -139,7 +141,7 @@ impl Widget for ImageRow {
                     }
                     let item = list.item(cx, item_idx, live_id!(ImageItem));
                     let image = item.image(id!(image));
-                    let image_idx = row_idx * state.images_per_row + item_idx;
+                    let image_idx = first_image_idx + item_idx;
                     let image_path = &state.image_paths[image_idx];
                     image.load_image_file_by_path(cx, &image_path).unwrap();
                     item.draw_all(cx, &mut Scope::empty());
@@ -226,7 +228,7 @@ impl App {
             image
                 .load_image_dep_by_path(
                     cx,
-                    "crate://self/resources/placeholder_image.jpg",
+                    "crate://self/resources/placeholder.jpg",
                 )
                 .unwrap();
         }
