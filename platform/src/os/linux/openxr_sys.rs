@@ -814,6 +814,30 @@ pub struct XrRect2Di {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct XrHandTrackingScaleFB {
+    pub ty: XrType,
+    pub next: *mut c_void,
+    pub sensor_output: f32,
+    pub current_output: f32,
+    pub override_hand_scale: XrBool32,
+    pub override_value_input: f32,
+}
+impl Default for XrHandTrackingScaleFB{
+    fn default()->Self{
+        XrHandTrackingScaleFB{
+            ty: XrType::HAND_TRACKING_SCALE_FB,
+            next: 0 as *mut _,
+            sensor_output: 0.0,
+            current_output: 0.0,
+            override_hand_scale: XrBool32(0),
+            override_value_input: 0.0
+        }
+    }
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct XrHandTrackerCreateInfoEXT {
     pub ty: XrType,
     pub next: *const c_void,

@@ -47,6 +47,8 @@ pub trait CxOsApi {
     fn max_texture_width()->usize{4096}
     
     fn in_xr_mode(&self)->bool{false}
+    
+    fn micro_zbias_step(&self)->f32{0.00001}
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
