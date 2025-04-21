@@ -47,11 +47,17 @@ live_design! {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct ImageRow {
-    #[deref] view: View,
+    #[deref]
+    view: View,
 }
 
 impl Widget for ImageRow {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(
+        &mut self,
+        cx: &mut Cx2d,
+        scope: &mut Scope,
+        walk: Walk,
+    ) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 4);
@@ -71,11 +77,17 @@ impl Widget for ImageRow {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct ImageGrid {
-    #[deref] view: View,
+    #[deref]
+    view: View,
 }
 
 impl Widget for ImageGrid {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(
+        &mut self,
+        cx: &mut Cx2d,
+        scope: &mut Scope,
+        walk: Walk,
+    ) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 3);
@@ -95,7 +107,8 @@ impl Widget for ImageGrid {
 
 #[derive(Live, LiveHook)]
 pub struct App {
-    #[live] ui: WidgetRef,
+    #[live]
+    ui: WidgetRef,
 }
 
 impl AppMain for App {
@@ -103,11 +116,11 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
- 
+
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         makepad_widgets::live_design(cx);
     }
 }
 
-app_main!(App); 
+app_main!(App);
