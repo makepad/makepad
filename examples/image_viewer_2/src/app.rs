@@ -92,8 +92,8 @@ impl Widget for ImageGrid {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, 3);
                 while let Some(row_idx) = list.next_visible_item(cx) {
-                    let item = list.item(cx, row_idx, live_id!(ImageRow));
-                    item.draw_all(cx, &mut Scope::empty());
+                    let row = list.item(cx, row_idx, live_id!(ImageRow));
+                    row.draw_all(cx, &mut Scope::empty());
                 }
             }
         }
