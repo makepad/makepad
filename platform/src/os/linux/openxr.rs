@@ -529,7 +529,7 @@ impl CxOpenXrFrame{
                 eyes[eye].depth_proj_mat = depth_proj_mat;
             }
             let eye_from_local = local_from_eye.invert();
-            eyes[eye].view_mat = eye_from_local.to_mat4().transpose();
+            eyes[eye].view_mat = eye_from_local.to_mat4();
             eyes[eye].proj_mat = Mat4::from_camera_fov(&projections[eye].fov, 0.1, 100.0);
                         
         }

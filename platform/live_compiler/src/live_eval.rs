@@ -355,14 +355,16 @@ pub fn live_eval_value(live_registry: &LiveRegistry, index: &mut usize, nodes: &
                         LiveValue::Vec2(vb) => LiveValue::Vec2(vb + va as f32),
                         LiveValue::Vec3(vb) => LiveValue::Vec3(vb + va as f32),
                         LiveValue::Vec4(vb) => LiveValue::Vec4(vb + va as f32),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va as f32 + Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveValue::Float64(va) => match b {
                         LiveValue::Int64(vb) => LiveValue::Float64(va + vb as f64),
                         LiveValue::Float64(vb) => LiveValue::Float64(va + vb),
-                        LiveValue::Vec2(vb) => LiveValue::Vec2(vb + va as f32),
-                        LiveValue::Vec3(vb) => LiveValue::Vec3(vb + va as f32),
-                        LiveValue::Vec4(vb) => LiveValue::Vec4(vb + va as f32),
+                        LiveValue::Vec2(vb) => LiveValue::Vec2(va as f32 + vb),
+                        LiveValue::Vec3(vb) => LiveValue::Vec3(va as f32 + vb),
+                        LiveValue::Vec4(vb) => LiveValue::Vec4(va as f32 + vb),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va as f32 + Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveValue::Vec2(va) => match b {
@@ -381,6 +383,7 @@ pub fn live_eval_value(live_registry: &LiveRegistry, index: &mut usize, nodes: &
                         LiveValue::Vec4(vb) => LiveValue::Vec4(va + vb),
                         LiveValue::Int64(vb) => LiveValue::Vec4(va + vb as f32),
                         LiveValue::Float64(vb) => LiveValue::Vec4(va + vb as f32),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va + Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
@@ -389,17 +392,19 @@ pub fn live_eval_value(live_registry: &LiveRegistry, index: &mut usize, nodes: &
                     LiveValue::Int64(va) => match b {
                         LiveValue::Int64(vb) => LiveValue::Int64(va - vb),
                         LiveValue::Float64(vb) => LiveValue::Float64((va as f64) - vb),
-                        LiveValue::Vec2(vb) => LiveValue::Vec2(vb - va as f32),
-                        LiveValue::Vec3(vb) => LiveValue::Vec3(vb - va as f32),
-                        LiveValue::Vec4(vb) => LiveValue::Vec4(vb - va as f32),
+                        LiveValue::Vec2(vb) => LiveValue::Vec2(va as f32 - vb),
+                        LiveValue::Vec3(vb) => LiveValue::Vec3(va as f32 - vb),
+                        LiveValue::Vec4(vb) => LiveValue::Vec4(va as f32 - vb),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va as f32 - Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveValue::Float64(va) => match b {
                         LiveValue::Int64(vb) => LiveValue::Float64(va - vb as f64),
                         LiveValue::Float64(vb) => LiveValue::Float64(va - vb),
-                        LiveValue::Vec2(vb) => LiveValue::Vec2(vb - va as f32),
-                        LiveValue::Vec3(vb) => LiveValue::Vec3(vb - va as f32),
-                        LiveValue::Vec4(vb) => LiveValue::Vec4(vb - va as f32),
+                        LiveValue::Vec2(vb) => LiveValue::Vec2(va as f32 - vb),
+                        LiveValue::Vec3(vb) => LiveValue::Vec3(va as f32 - vb),
+                        LiveValue::Vec4(vb) => LiveValue::Vec4(va as f32 - vb),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va as f32 - Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveValue::Vec2(va) => match b {
@@ -418,6 +423,7 @@ pub fn live_eval_value(live_registry: &LiveRegistry, index: &mut usize, nodes: &
                         LiveValue::Vec4(vb) => LiveValue::Vec4(va - vb),
                         LiveValue::Int64(vb) => LiveValue::Vec4(va - vb as f32),
                         LiveValue::Float64(vb) => LiveValue::Vec4(va - vb as f32),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va - Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
@@ -426,17 +432,19 @@ pub fn live_eval_value(live_registry: &LiveRegistry, index: &mut usize, nodes: &
                     LiveValue::Int64(va) => match b {
                         LiveValue::Int64(vb) => LiveValue::Int64(va * vb),
                         LiveValue::Float64(vb) => LiveValue::Float64((va as f64) * vb),
-                        LiveValue::Vec2(vb) => LiveValue::Vec2(vb * va as f32),
-                        LiveValue::Vec3(vb) => LiveValue::Vec3(vb * va as f32),
-                        LiveValue::Vec4(vb) => LiveValue::Vec4(vb * va as f32),
+                        LiveValue::Vec2(vb) => LiveValue::Vec2(va as f32 * vb),
+                        LiveValue::Vec3(vb) => LiveValue::Vec3(va as f32 * vb),
+                        LiveValue::Vec4(vb) => LiveValue::Vec4(va as f32 * vb),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va as f32 * Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveValue::Float64(va) => match b {
                         LiveValue::Int64(vb) => LiveValue::Float64(va * vb as f64),
                         LiveValue::Float64(vb) => LiveValue::Float64(va * vb),
-                        LiveValue::Vec2(vb) => LiveValue::Vec2(vb * va as f32),
-                        LiveValue::Vec3(vb) => LiveValue::Vec3(vb * va as f32),
-                        LiveValue::Vec4(vb) => LiveValue::Vec4(vb * va as f32),
+                        LiveValue::Vec2(vb) => LiveValue::Vec2(va as f32 * vb),
+                        LiveValue::Vec3(vb) => LiveValue::Vec3(va as f32 * vb),
+                        LiveValue::Vec4(vb) => LiveValue::Vec4(va as f32 * vb),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va as f32 * Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveValue::Vec2(va) => match b {
@@ -455,6 +463,14 @@ pub fn live_eval_value(live_registry: &LiveRegistry, index: &mut usize, nodes: &
                         LiveValue::Vec4(vb) => LiveValue::Vec4(va * vb),
                         LiveValue::Int64(vb) => LiveValue::Vec4(va * vb as f32),
                         LiveValue::Float64(vb) => LiveValue::Vec4(va * vb as f32),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va * Vec4::from_u32(vb)),
+                        _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
+                    }
+                    LiveValue::Color(va) => match b {
+                        LiveValue::Vec4(vb) => LiveValue::Vec4(Vec4::from_u32(va) * vb),
+                        LiveValue::Int64(vb) => LiveValue::Vec4(Vec4::from_u32(va) * vb as f32),
+                        LiveValue::Float64(vb) => LiveValue::Vec4(Vec4::from_u32(va) * vb as f32),
+                        LiveValue::Color(vb) => LiveValue::Vec4(Vec4::from_u32(va) * Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
@@ -463,17 +479,19 @@ pub fn live_eval_value(live_registry: &LiveRegistry, index: &mut usize, nodes: &
                     LiveValue::Int64(va) => match b {
                         LiveValue::Int64(vb) => LiveValue::Float64(va as f64 / vb as f64),
                         LiveValue::Float64(vb) => LiveValue::Float64((va as f64) / vb),
-                        LiveValue::Vec2(vb) => LiveValue::Vec2(vb / va as f32),
-                        LiveValue::Vec3(vb) => LiveValue::Vec3(vb / va as f32),
-                        LiveValue::Vec4(vb) => LiveValue::Vec4(vb / va as f32),
+                        LiveValue::Vec2(vb) => LiveValue::Vec2(va as f32 / vb),
+                        LiveValue::Vec3(vb) => LiveValue::Vec3(va as f32  / vb),
+                        LiveValue::Vec4(vb) => LiveValue::Vec4(va as f32  / vb),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va as f32 / Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveValue::Float64(va) => match b {
                         LiveValue::Int64(vb) => LiveValue::Float64(va / vb as f64),
                         LiveValue::Float64(vb) => LiveValue::Float64(va / vb),
-                        LiveValue::Vec2(vb) => LiveValue::Vec2(vb / va as f32),
-                        LiveValue::Vec3(vb) => LiveValue::Vec3(vb / va as f32),
-                        LiveValue::Vec4(vb) => LiveValue::Vec4(vb / va as f32),
+                        LiveValue::Vec2(vb) => LiveValue::Vec2(va as f32 / vb),
+                        LiveValue::Vec3(vb) => LiveValue::Vec3(va as f32 / vb),
+                        LiveValue::Vec4(vb) => LiveValue::Vec4(va as f32 / vb),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va as f32 / Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveValue::Vec2(va) => match b {
@@ -492,6 +510,7 @@ pub fn live_eval_value(live_registry: &LiveRegistry, index: &mut usize, nodes: &
                         LiveValue::Vec4(vb) => LiveValue::Vec4(va / vb),
                         LiveValue::Int64(vb) => LiveValue::Vec4(va / vb as f32),
                         LiveValue::Float64(vb) => LiveValue::Vec4(va / vb as f32),
+                        LiveValue::Color(vb) => LiveValue::Vec4(va / Vec4::from_u32(vb)),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     } _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                 },
