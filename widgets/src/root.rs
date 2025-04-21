@@ -16,6 +16,7 @@ live_design!{
     pub RootBase = {{Root}} {}
     pub Root = <RootBase> {
         design_window = <Designer> {}
+        xr_hands = <XrHands>{}
     }
 }
 
@@ -34,6 +35,9 @@ impl LiveHook for Root {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     // only open the design window 
                     if id == live_id!(design_window) && !cx.in_makepad_studio(){
+                        return nodes.skip_node(index);
+                    }
+                    if id == live_id!(xr_hands) && !cx.os_type().has_xr_mode(){
                         return nodes.skip_node(index);
                     }
                     return self.components.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
@@ -82,6 +86,9 @@ impl Widget for Root {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::Draw(e) = event {
             if cx.in_xr_mode(){
+                if  !e.xr_state.is_some(){
+                    return
+                }
                 let mut cx_draw = CxDraw::new(cx, e);
                 let cx = &mut Cx3d::new(&mut cx_draw);
                 // lets begin a 3D drawlist in the global context

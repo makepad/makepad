@@ -132,7 +132,7 @@ impl Cx{
             (gl.glColorMask)(gl_sys::TRUE, gl_sys::TRUE, gl_sys::TRUE, gl_sys::TRUE);
             (gl.glDepthMask)(gl_sys::TRUE);
             (gl.glEnable)(gl_sys::SCISSOR_TEST);
-            (gl.glDisable)(gl_sys::DEPTH_TEST);
+            (gl.glEnable)(gl_sys::DEPTH_TEST);
             (gl.glDepthFunc)(gl_sys::LEQUAL);
             (gl.glDisable)(gl_sys::CULL_FACE);
             (gl.glBlendEquationSeparate)(gl_sys::FUNC_ADD, gl_sys::FUNC_ADD);
@@ -143,7 +143,7 @@ impl Cx{
             (gl.glViewport)(0, 0, session.width as i32, session.height  as i32);
             (gl.glScissor)(0, 0, session.width as i32, session.height as i32);
                         
-            (gl.glClearDepthf)(0.0);
+            (gl.glClearDepthf)(1.0);
             (gl.glClearColor)(0.0, 0.0, 0.0, 0.0);
             (gl.glClear)(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             crate::gl_log_error!(gl);
@@ -152,7 +152,7 @@ impl Cx{
         //let panning_offset = if self.os.keyboard_visible {self.os.keyboard_panning_offset} else {0};
                 
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
+        let zbias_step = -0.1;//self.passes[pass_id].zbias_step;
         self.render_view(
             pass_id,
             draw_list_id,
@@ -213,12 +213,14 @@ impl Cx{
                 openxr.libxr.as_ref().unwrap(),
                 &frame
             );
+            let last_state = openxr.session.as_ref().unwrap().inputs.last_state.clone();
             self.call_event_handler(&Event::XrUpdate(event));
-            
+                        
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(self.os.timers.time_now());
             }
             if self.need_redrawing() {
+                self.new_draw_event.xr_state = Some(last_state);
                 self.call_draw_event();
                 self.opengl_compile_shaders();
             }

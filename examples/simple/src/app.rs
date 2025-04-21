@@ -40,7 +40,7 @@ live_design!{
                         draw_text:{color:#fff, text_style:{font_size:28}}
                     }
                     button_2 = <Button> {
-                        text: "Click me 345"
+                        text: "Click me 345 1234"
                         draw_text:{color:#fff, text_style:{font_size:28}}
                     }
                 }

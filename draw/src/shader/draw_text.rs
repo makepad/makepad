@@ -7,7 +7,7 @@ use {
     unicode_segmentation::UnicodeSegmentation,
 };
 
-const ZBIAS_STEP: f32 = 0.00001;
+const ZBIAS_STEP: f32 = -0.00001;
 
 live_design!{
     use link::shaders::*;
