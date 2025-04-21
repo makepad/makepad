@@ -277,6 +277,8 @@ impl CxOpenXr{
             "XR_KHR_android_thread_settings\0",
             "XR_FB_passthrough\0",
             "XR_META_environment_depth\0",
+            "XR_META_touch_controller_plus\0",
+            
         ];
                 
         for ext_needed in exts_needed{
@@ -1088,7 +1090,7 @@ impl CxOpenXrInputs{
         let aim_pose = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "aim_pose", "", &hands)?;
         let grip_pose = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "grip_pose", "", &hands)?;
                 
-        let interaction_profile = XrPath::new(xr, instance,  "/interaction_profiles/oculus/touch_controller")?;
+        let interaction_profile = XrPath::new(xr, instance,  "/interaction_profiles/oculus/touch_controller_plus")?;
                 
         let bindings = [
             XrActionSuggestedBinding::new(xr, instance, trigger, "/user/hand/left/input/trigger")?,
