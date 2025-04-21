@@ -124,7 +124,7 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
        }
     }
     else{
-        /*#[cfg(target_os = "android")]
+       /* #[cfg(target_os = "android")]
         {
             use std::ffi::c_int;
             extern "C" { 

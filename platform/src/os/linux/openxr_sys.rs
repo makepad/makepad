@@ -148,6 +148,10 @@ pub struct LibOpenXr{
     pub xrGetActionStateVector2f: TxrGetActionStateVector2f,
     pub xrGetActionStatePose: TxrGetActionStatePose,
     pub xrSyncActions: TxrSyncActions,
+    pub xrResumeSimultaneousHandsAndControllersTrackingMETA: TxrResumeSimultaneousHandsAndControllersTrackingMETA,
+    pub xrPauseSimultaneousHandsAndControllersTrackingMETA: TxrPauseSimultaneousHandsAndControllersTrackingMETA,
+    pub xrCreateHandTrackerEXT: TxrCreateHandTrackerEXT,
+    pub xrDestroyHandTrackerEXT: TxrDestroyHandTrackerEXT,
 }
 
 
@@ -210,6 +214,10 @@ impl LibOpenXr {
             xrGetActionStateVector2f: get_proc_addr!(gipa, instance,TxrGetActionStateVector2f)?,
             xrGetActionStatePose: get_proc_addr!(gipa, instance, TxrGetActionStatePose)?,
             xrSyncActions: get_proc_addr!(gipa, instance, TxrSyncActions)?,
+            xrResumeSimultaneousHandsAndControllersTrackingMETA:get_proc_addr!(gipa, instance, TxrResumeSimultaneousHandsAndControllersTrackingMETA)?,
+            xrPauseSimultaneousHandsAndControllersTrackingMETA:get_proc_addr!(gipa, instance, TxrPauseSimultaneousHandsAndControllersTrackingMETA)?,
+            xrCreateHandTrackerEXT: get_proc_addr!(gipa, instance, TxrCreateHandTrackerEXT)?,
+            xrDestroyHandTrackerEXT: get_proc_addr!(gipa, instance, TxrDestroyHandTrackerEXT)?,
         })
     }
 }
@@ -553,7 +561,26 @@ pub type TxrGetActionStatePose = unsafe extern "C" fn(
 pub type TxrSyncActions =
 unsafe extern "C" fn(session: XrSession, sync_info: *const XrActionsSyncInfo) -> XrResult;
 
+pub type TxrResumeSimultaneousHandsAndControllersTrackingMETA =
+unsafe extern "C" fn(session: XrSession, resume_info: *const XrSimultaneousHandsAndControllersTrackingResumeInfoMETA) -> XrResult;
+
+pub type TxrPauseSimultaneousHandsAndControllersTrackingMETA =
+unsafe extern "C" fn(session: XrSession, pause_info: *const XrSimultaneousHandsAndControllersTrackingPauseInfoMETA) -> XrResult;
+
+pub type TxrCreateHandTrackerEXT = unsafe extern "C" fn(
+    session: XrSession,
+    create_info: *const XrHandTrackerCreateInfoEXT,
+    hand_tracker: *mut XrHandTrackerEXT,
+) -> XrResult;
+
+pub type TxrDestroyHandTrackerEXT =
+unsafe extern "C" fn(hand_tracker: XrHandTrackerEXT) -> XrResult;
+
 // Handle types
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct XrHandTrackerEXT(pub u64);
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -784,6 +811,25 @@ pub struct XrRect2Di {
 
 
 // Struct datatypes
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrHandTrackerCreateInfoEXT {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub hand: XrHandEXT,
+    pub hand_joint_set: XrHandJointSetEXT,
+}
+impl Default for XrHandTrackerCreateInfoEXT{
+    fn default()->Self{
+        XrHandTrackerCreateInfoEXT{
+            ty: XrType::HAND_TRACKER_CREATE_INFO_EXT,
+            next: 0 as *mut _,
+            hand: XrHandEXT::LEFT,
+            hand_joint_set: XrHandJointSetEXT::DEFAULT
+        }
+    }
+}
 
 
 #[repr(C)]
@@ -1210,6 +1256,55 @@ impl Default for XrEnvironmentDepthImageMETA{
         }
     }
 }
+/*
+pub struct XrSystemSimultaneousHandsAndControllersPropertiesMETA {
+    pub ty: XrType,
+    pub next: *const c_void,
+    pub supports_simultaneous_hands_and_controllers: XrBool32
+}
+
+impl Default for XrSystemSimultaneousHandsAndControllersPropertiesMETA{
+    fn default()->Self{
+        XrSystemSimultaneousHandsAndControllersPropertiesMETA{
+            ty: XrType::SYSTEM_SIMULTANEOUS_HANDS_AND_CONTROLLERS_PROPERTIES_META,
+            next: 0 as *mut _,
+            supports_simultaneous_hands_and_controllers: XrBool32(0),
+        }
+    }
+}*/
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSimultaneousHandsAndControllersTrackingResumeInfoMETA {
+    pub ty: XrType,
+    pub next: *const c_void,
+}
+
+impl Default for XrSimultaneousHandsAndControllersTrackingResumeInfoMETA{
+    fn default()->Self{
+        XrSimultaneousHandsAndControllersTrackingResumeInfoMETA{
+            ty: XrType::SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_RESUME_INFO_META,
+            next: 0 as *mut _,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSimultaneousHandsAndControllersTrackingPauseInfoMETA {
+    pub ty: XrType,
+    pub next: *const c_void,
+}
+
+impl Default for XrSimultaneousHandsAndControllersTrackingPauseInfoMETA{
+    fn default()->Self{
+        XrSimultaneousHandsAndControllersTrackingPauseInfoMETA{
+            ty: XrType::SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META,
+            next: 0 as *mut _,
+        }
+    }
+}
+
 
 
 #[repr(C)]
@@ -1995,6 +2090,55 @@ bitmask!(XrSwapchainUsageFlags);
 // Enums
 
 
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct XrHandJointSetEXT(i32);
+impl XrHandJointSetEXT {
+    pub const DEFAULT: XrHandJointSetEXT = Self(0i32);
+    pub const HAND_WITH_FOREARM_ULTRA: XrHandJointSetEXT = Self(1000149000i32);
+}
+impl fmt::Debug for XrHandJointSetEXT {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let name = match *self {
+            Self::DEFAULT => Some("DEFAULT"),
+            Self::HAND_WITH_FOREARM_ULTRA => Some("HAND_WITH_FOREARM_ULTRA"),
+            _ => None,
+        };
+        if let Some(name) = name{
+            write!(fmt, "{}", name)
+        }
+        else{
+            write!(fmt, "unknown XrHandJointSetEXT {}", self.0)
+        }
+    }
+}
+
+
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct XrHandEXT(i32);
+impl XrHandEXT {
+    pub const LEFT: XrHandEXT = Self(1i32);
+    pub const RIGHT: XrHandEXT = Self(2i32);
+}
+impl fmt::Debug for XrHandEXT {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let name = match *self {
+            Self::LEFT => Some("LEFT"),
+            Self::RIGHT => Some("RIGHT"),
+            _ => None,
+        };
+        if let Some(name) = name{
+            write!(fmt, "{}", name)
+        }
+        else{
+            write!(fmt, "unknown XrHandEXT {}", self.0)
+        }
+    }
+}
+
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub struct XrActionType(i32);
@@ -2660,6 +2804,10 @@ impl XrType {
     pub const FUTURE_POLL_RESULT_EXT: XrType = Self(1000469003i32);
     pub const EVENT_DATA_USER_PRESENCE_CHANGED_EXT: XrType = Self(1000470000i32);
     pub const SYSTEM_USER_PRESENCE_PROPERTIES_EXT: XrType = Self(1000470001i32);
+        
+    pub const  SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_RESUME_INFO_META: XrType = Self(1000532002i32);
+    pub const  SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META: XrType = Self(1000532003i32);
+    
     pub const SPACES_LOCATE_INFO_KHR: XrType = Self::SPACES_LOCATE_INFO;
     pub const SPACE_LOCATIONS_KHR: XrType = Self::SPACE_LOCATIONS;
     pub const SPACE_VELOCITIES_KHR: XrType = Self::SPACE_VELOCITIES;
@@ -3244,6 +3392,14 @@ impl fmt::Debug for XrType {
             Self::SYSTEM_USER_PRESENCE_PROPERTIES_EXT => {
                 Some("SYSTEM_USER_PRESENCE_PROPERTIES_EXT")
             }
+            Self::SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_RESUME_INFO_META => {
+                Some("SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_RESUME_INFO_META")
+            }
+            Self::SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META => {
+                Some("SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META")
+            }
+            
+            
             _ => None,
         };
         if let Some(name) = name {
