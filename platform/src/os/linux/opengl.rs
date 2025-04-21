@@ -101,13 +101,13 @@ impl Cx {
                 else {
                     continue;
                 };
-                
+                                
                 let geometry = &mut self.geometries[geometry_id];
                 if geometry.dirty || geometry.os.vb.gl_buffer.is_none() || geometry.os.ib.gl_buffer.is_none() {
                     geometry.os.vb.update_array_buffer(gl,&geometry.vertices);
                     geometry.os.ib.update_index_buffer(gl,&geometry.indices);
                     geometry.dirty = false;
-                }
+                }      
                 
                 let indices = geometry.indices.len();
                 
@@ -118,7 +118,7 @@ impl Cx {
                         draw_item.os.user_uniforms.update_uniform_buffer(gl, &mut draw_call.user_uniforms);
                     }
                 }
-                
+                          
                 // update geometry?
                 let geometry = &mut self.geometries[geometry_id];
                 
@@ -132,6 +132,7 @@ impl Cx {
                         geom_ib: None,
                     });
                 }
+                                
                 let vao = draw_item.os.vao.as_mut().unwrap();
                 if vao.inst_vb != draw_item.os.inst_vb.gl_buffer
                     || vao.geom_vb != geometry.os.vb.gl_buffer
@@ -154,33 +155,44 @@ impl Cx {
                     vao.geom_ib = geometry.os.ib.gl_buffer;
                     unsafe {
                         (gl.glBindVertexArray)(vao.vao.unwrap());
-                        
+                        crate::gl_log_error!(gl);
                         // bind the vertex and indexbuffers
                         (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, vao.geom_vb.unwrap());
+                        crate::gl_log_error!(gl);
                         for attr in &shgl.geometries {
-                            (gl.glVertexAttribPointer)(attr.loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                            (gl.glEnableVertexAttribArray)(attr.loc);
+                            if let Some(loc) = attr.loc{
+                                (gl.glVertexAttribPointer)(loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
+                                if crate::gl_log_error!(gl){
+                                    crate::log!("{} {:?}" , vao.vao.unwrap(), attr);
+                                }
+                                (gl.glEnableVertexAttribArray)(loc);
+                                crate::gl_log_error!(gl);
+                            }
                         }
-                        
+                        crate::gl_log_error!(gl);
                         (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, vao.inst_vb.unwrap());
-                        
+                        crate::gl_log_error!(gl);
                         for attr in &shgl.instances {
-                            (gl.glVertexAttribPointer)(attr.loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                            (gl.glEnableVertexAttribArray)(attr.loc);
-                            (gl.glVertexAttribDivisor)(attr.loc, 1 as gl_sys::GLuint);
+                            if let Some(loc) = attr.loc{
+                                (gl.glVertexAttribPointer)(loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
+                                (gl.glEnableVertexAttribArray)(loc);
+                                (gl.glVertexAttribDivisor)(loc, 1 as gl_sys::GLuint);
+                            }
                         }
                         
                         // bind the indexbuffer
                         (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, vao.geom_ib.unwrap());
                         (gl.glBindVertexArray)(0);
+                        (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
+                        (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, 0);
+                        crate::gl_log_error!(gl);
                     }
                 }
-                
                 unsafe {
+                    crate::gl_log_error!(gl);
                     (gl.glUseProgram)(shgl.program);
                     (gl.glBindVertexArray)(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
                     let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
-                    
                     // bind all uniform buffers
                     #[cfg(not(no_opengl_uniform_buffers))]{
                         shgl.uniforms.pass_uniforms_binding.bind_buffer(gl, &self.passes[pass_id].os.pass_uniforms);
@@ -200,8 +212,6 @@ impl Cx {
                         GlShader::set_uniform_array(gl, &shgl.uniforms.draw_call_uniforms, draw_call_uniforms);
                         GlShader::set_uniform_array(gl, &shgl.uniforms.user_uniforms, &draw_call.user_uniforms);
                     }
-                    
-                    
                     crate::gl_log_error!(gl);
                     // lets set our textures
                     for i in 0..sh.mapping.textures.len() {
@@ -252,6 +262,7 @@ impl Cx {
                         }
                         (gl.glUniform1i)(shgl.textures[i].loc, i as i32);
                     }
+                    
                     (gl.glDrawElementsInstanced)(
                         gl_sys::TRIANGLES,
                         indices as i32,
@@ -260,8 +271,8 @@ impl Cx {
                         instances as i32
                     );
                     crate::gl_log_error!(gl);
-                                        
-                    //(gl.glBindVertexArray)(0);
+                    (gl.glBindVertexArray)(0);
+                    (gl.glUseProgram)(0);
                 }
                 
             }
@@ -757,6 +768,8 @@ impl GlShader{
                 GlShader::set_uniform_array(gl, &uniforms.const_table_uniform, ct);
             }
             
+            (gl.glUseProgram)(0);              
+                        
             let t = Self{
                 program,
                 geometries:Self::opengl_get_attributes(gl, program, "packed_geometry_", mapping.geometries.total_slots),
@@ -878,9 +891,11 @@ impl GlShader{
             unsafe {
                 attribs.push(
                     OpenglAttribute {
+                        name: name0.to_string(),
                         loc: {
-                            let loc = (gl.glGetAttribLocation)(program, name0.as_ptr() as *const _) as u32;
-                            loc
+                            let loc = (gl.glGetAttribLocation)(program, name0.as_ptr() as *const _);
+                            if loc < 0{None}else{Some(loc as u32)}
+                            
                         },
                         offset: (i * 4 * mem::size_of::<f32>()) as usize,
                         size: size,
@@ -1052,7 +1067,8 @@ fn get_gl_string(gl: &LibGl, key: gl_sys::GLenum) -> String {
 
 #[derive(Default, Clone, Debug)]
 pub struct OpenglAttribute {
-    pub loc: u32,
+    pub name:String,
+    pub loc: Option<u32>,
     pub size: i32,
     pub offset: usize,
     pub stride: i32
@@ -1480,9 +1496,9 @@ impl OpenglBuffer {
     
     pub fn alloc_gl_buffer(&mut self, gl: &LibGl) {
         unsafe {
-            let mut gl_buffer = std::mem::MaybeUninit::uninit();
-            (gl.glGenBuffers)(1, gl_buffer.as_mut_ptr());
-            self.gl_buffer = Some(gl_buffer.assume_init());
+            let mut gl_buffer = 0;
+            (gl.glGenBuffers)(1, &mut gl_buffer);
+            self.gl_buffer = Some(gl_buffer);
         }
     }
     
@@ -1498,6 +1514,7 @@ impl OpenglBuffer {
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW
             );
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
         }
     }
     
@@ -1513,6 +1530,7 @@ impl OpenglBuffer {
                 data.as_ptr() as *const _,
                 gl_sys::DYNAMIC_DRAW
             );
+            //(gl.glBindBuffer)(gl_sys::UNIFORM_BUFFER, 0);
             crate::gl_log_error!(gl);
         }
     }
@@ -1529,6 +1547,7 @@ impl OpenglBuffer {
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW
             );
+            (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, 0);
         }
     }
     

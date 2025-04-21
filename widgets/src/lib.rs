@@ -95,7 +95,7 @@ pub mod designer_toolbox;
 
 pub mod defer_with_redraw;
 
-//pub mod xr_input;
+pub mod xr_hands;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
@@ -240,7 +240,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::cached_widget::live_design(cx);
     crate::command_text_input::live_design(cx);
     crate::web_view::live_design(cx);
-    //crate::xr_input::live_design(cx);
+    crate::xr_hands::live_design(cx);
         
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);

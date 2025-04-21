@@ -72,6 +72,7 @@ pub use crate::{
 pub fn live_design(cx: &mut Cx) {
     crate::geometry::geometry_gen::live_design(cx);
     crate::shader::draw_quad::live_design(cx);
+    crate::shader::draw_cube::live_design(cx);
     crate::shader::draw_color::live_design(cx);
     crate::shader::draw_icon::live_design(cx);
     crate::shader::draw_text::live_design(cx);
