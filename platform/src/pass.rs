@@ -218,6 +218,12 @@ impl Pass {
         cxpass.debug = debug;
     }
     
+        
+    pub fn set_dpi_factor(&mut self, cx: &mut Cx, dpi: f64) {
+        let cxpass = &mut cx.passes[self.pass_id()];
+        cxpass.dpi_factor = Some(dpi);
+    }
+    
 }
 
 #[derive(Clone)]

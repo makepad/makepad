@@ -785,11 +785,11 @@ impl ShaderRegistry {
                     })
                 }
                 
-                if !method_set.contains(&live_id!(pixel)) {
+                if !method_set.contains(&live_id!(fragment)) {
                     return Err(LiveError {
                         origin: live_error_origin!(),
                         span: class_node.origin.token_id().unwrap().into(),
-                        message: format!("analyse_draw_shader missing pixel method")
+                        message: format!("analyse_draw_shader missing fragment method")
                     })
                 }
                 

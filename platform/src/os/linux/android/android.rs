@@ -162,7 +162,7 @@ impl Cx {
                     if let Err(e) = self.os.openxr.create_session(self.os.display.as_ref().unwrap(),CxOpenXrOptions{
                         buffer_scale: 1.5,
                         multisamples: 4,
-                        remove_hands_from_depth: true
+                        remove_hands_from_depth: false
                     }){
                         crate::error!("OpenXR create_xr_session failed: {}", e);
                     }
