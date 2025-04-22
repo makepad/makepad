@@ -245,7 +245,7 @@ live_design!{
             <TextInput> {
                 width: Fill
                 text: "",
-                empty_message: "What's up?",
+                empty_text: "What's up?",
 
                 draw_bg: {
                     instance radius: (THEME_CORNER_RADIUS)
@@ -597,7 +597,8 @@ live_design!{
                             sdf.circle(c.x, c.y, c.x - 2.)
                             sdf.fill_keep(self.get_color());
                             sdf.stroke((#f), 1);
-                            return sdf.result }
+                            return sdf.result 
+                        }
                     }
                 }
             }
@@ -861,7 +862,7 @@ live_design!{
                         self.border_radius
                     );
                 }
-                return sdf.fill(mix(
+                sdf.fill(mix(
                     self.color, 
                     mix(
                         self.color_hover,
@@ -870,6 +871,7 @@ live_design!{
                     ),
                     self.hover
                 ));
+                return sdf.result;
             }
         }
     }
@@ -885,36 +887,38 @@ live_design!{
     }
 
     App = {{App}} {
-        ui: <Window> {
-
-            window: {inner_size: vec2(428, 926)},
-            show_bg: true
-            draw_bg: {
-                fn pixel(self) -> vec4 {
-                    return (COLOR_BG);
+        ui: <Root>{
+                <Window> {
+    
+                window: {inner_size: vec2(428, 926)},
+                show_bg: true
+                draw_bg: {
+                    fn pixel(self) -> vec4 {
+                        return (COLOR_BG);
+                    }
                 }
-            }
-            body = {
-                flow: Overlay,
-                padding: 0.0
-                spacing: 0,
-                align: {
-                    x: 0.0,
-                    y: 0.0
-                },
-
-
-                <View> {
-                    flow: Down
-                    <Header> {}
-                    <Filler> {}
-                    <Menu> {}
+                body = {
+                    flow: Overlay,
+                    padding: 0.0
+                    spacing: 0,
+                    align: {
+                        x: 0.0,
+                        y: 0.0
+                    },
+    
+    
+                    <View> {
+                        flow: Down
+                        <Header> {}
+                        <Filler> {}
+                        <Menu> {}
+                    }
+    
+                    news_feed = <NewsFeed> {
+                        padding: {top: 60., bottom: 90.}
+                    }
+    
                 }
-
-                news_feed = <NewsFeed> {
-                    padding: {top: 60., bottom: 90.}
-                }
-
             }
         }
     }
@@ -971,6 +975,9 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App {
+    fn handle_startup(&mut self, cx:&mut Cx){
+        cx.switch_to_xr();
+    }
     fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
         if self.ui.button(id!(find)).clicked(&actions) {
             

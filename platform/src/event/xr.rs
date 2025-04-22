@@ -52,6 +52,17 @@ pub struct XrHand{
 }
 
 impl XrHand{
+    pub fn is_tip(id:usize)->bool{
+        match id{
+            Self::THUMB_TIP | 
+            Self::INDEX_TIP |
+            Self::MIDDLE_TIP|
+            Self::RING_TIP |
+            Self::PINKY_TIP=>true,
+            _=>false
+        }
+    }
+    
     pub const JOINT_COUNT: usize = 26;
     pub const CENTER: usize = 0;
     pub const WRIST: usize = 1;

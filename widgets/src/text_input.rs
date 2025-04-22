@@ -100,7 +100,7 @@ live_design! {
                     )
                 );
                 
-                return depth_clip(self.world, sdf.result, self.depth_clip);
+                return sdf.result;
             }
         }
 
@@ -158,7 +158,7 @@ live_design! {
                         self.focus
                     )
                 );
-                return depth_clip(self.world, sdf.result, self.depth_clip);
+                return sdf.result;
             }
         }
 
@@ -182,7 +182,7 @@ live_design! {
                 sdf.fill(
                     mix(THEME_COLOR_U_HIDDEN, self.color, self.focus)
                 );
-                return depth_clip(self.world, sdf.result, self.depth_clip);
+                return sdf.result;
             }
         }
 
