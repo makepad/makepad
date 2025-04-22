@@ -499,6 +499,10 @@ impl ShaderRegistry {
         draw_shader_def.add_uniform(id_lut!(camera_projection_r), id_lut!(pass), Ty::Mat4, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(camera_view), id_lut!(pass), Ty::Mat4, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(camera_view_r), id_lut!(pass), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(depth_projection), id_lut!(pass), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(depth_projection_r), id_lut!(pass), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(depth_view), id_lut!(pass), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(depth_view_r), id_lut!(pass), Ty::Mat4, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(camera_inv), id_lut!(pass), Ty::Mat4, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(dpi_factor), id_lut!(pass), Ty::Float, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(dpi_dilate), id_lut!(pass), Ty::Float, TokenSpan::default());

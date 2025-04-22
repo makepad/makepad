@@ -118,7 +118,11 @@ impl FileServerConnection {
                             }
                             
                             let entry_string_name = entry.file_name().to_string_lossy().to_string();
-                            let entry_string_path = if string_path != ""{format!("{}/{}", string_path, entry_string_name)}else {entry_string_name};
+                            let entry_string_path = if string_path != ""{
+                                format!("{}/{}", string_path, entry_string_name)
+                            }else {
+                                entry_string_name
+                            };
                             
                             if entry_path.is_dir() {
                                 search_files(id, set, &entry_path, &entry_string_path, sender, last_send, results);
