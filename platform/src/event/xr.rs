@@ -1,5 +1,13 @@
 use {
-    crate::makepad_math::*,
+    crate::{
+        cx::Cx,
+        Margin,
+        Area,
+        HitOptions,
+        Hit,
+        Event,
+        makepad_math::*,
+    },
     std::rc::Rc,
 };
 
@@ -51,7 +59,12 @@ pub struct XrHand{
     pub joints: [XrHandJoint;Self::JOINT_COUNT]
 }
 
+impl Event{
+
+}
+
 impl XrHand{
+    
     pub fn is_tip(id:usize)->bool{
         match id{
             Self::THUMB_TIP | 
@@ -106,4 +119,14 @@ pub struct XrState{
 pub struct XrUpdateEvent {
     pub state: Rc<XrState>,
     pub last: Rc<XrState>,
+}
+
+impl XrUpdateEvent{
+    pub fn hits_with_options_and_test<F>(&self, _cx: &mut Cx, _area: Area, _options: HitOptions, _hit_test:F) -> Hit 
+    where F: Fn(DVec2, &Rect, &Option<Margin>)->bool
+    {
+        // alright lets implement hits for XrUpdateEvent and our area.
+        
+        return Hit::Nothing
+    }
 }

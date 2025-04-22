@@ -985,7 +985,7 @@ impl CxOsApi for Cx {
     
     fn micro_zbias_step(&self)->f32{
         if self.os.in_xr_mode{
-            -0.00001
+            -0.0001
         }
         else{
             0.00001
