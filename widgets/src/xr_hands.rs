@@ -24,7 +24,7 @@ live_design!{
 pub struct XrHands {
     #[redraw] #[rust(DrawList::new(cx))] draw_list: DrawList,
     #[area] #[live] cube: DrawCube,
-    #[live] label: DrawText
+    #[live] label: DrawText2
 }
 
 impl Widget for XrHands {
