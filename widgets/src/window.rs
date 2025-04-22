@@ -447,7 +447,7 @@ impl Widget for Window {
         
         self.main_draw_list.begin_always(cx);
         
-        let size = dvec2(2000.0,1000.0);
+        let size = dvec2(1500.0,1200.0);
         cx.begin_sized_turtle(size, Layout::flow_down());
                 
         self.overlay.begin(cx);
@@ -456,7 +456,7 @@ impl Widget for Window {
         
         self.debug_view.draw(cx);
                         
-        self.main_draw_list.set_view_transform(cx, &Mat4::scaled_translation(0.0002,-0.0002,-0.0002,-0.25,0.25,-0.5));
+        self.main_draw_list.set_view_transform(cx, &Mat4::scaled_translation(0.0004,-0.0004,-0.0004,-0.25,0.25,-0.5));
         
         cx.end_pass_sized_turtle();
                 

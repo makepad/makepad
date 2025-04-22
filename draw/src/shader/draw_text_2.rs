@@ -69,7 +69,11 @@ live_design! {
         fn get_color(self) -> vec4 {
             return self.color
         }
-
+        
+        fn fragment(self) -> vec4 {
+            return depth_clip(self.world, self.pixel(), self.depth_clip);
+        }
+        
         fn pixel(self) -> vec4 {
             let dxt = length(dFdx(self.t));
             let dyt = length(dFdy(self.t));
@@ -79,12 +83,11 @@ live_design! {
                 let scale = (dxt + dyt) * self.grayscale_atlas_size.x * 0.5;
                 let s = self.sdf(scale, self.t.xy);
                 let c = self.get_color();
-                color = s * vec4(c.rgb * c.a, c.a);
+                return s * vec4(c.rgb * c.a, c.a);
             } else {
                 let c = sample2d(self.color_texture, self.t);
-                color = vec4(c.rgb * c.a, c.a);
+                return vec4(c.rgb * c.a, c.a);
             }
-            return depth_clip(self.world, color, self.depth_clip);
         }
     }
 }

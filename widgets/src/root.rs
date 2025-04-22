@@ -93,7 +93,7 @@ impl Widget for Root {
                 let cx = &mut Cx3d::new(&mut cx_draw);
                 // lets begin a 3D drawlist in the global context
                 self.xr_pass.set_as_xr_pass(cx);
-                cx.begin_pass(&self.xr_pass, None);
+                cx.begin_pass(&self.xr_pass, Some(4.0));
                 self.xr_draw_list.begin_always(cx);
                 self.draw_3d_all(cx, scope);
                 self.xr_draw_list.end(cx);
