@@ -159,6 +159,7 @@ pub struct LibOpenXr{
     pub xrCreateHandTrackerEXT: TxrCreateHandTrackerEXT,
     pub xrDestroyHandTrackerEXT: TxrDestroyHandTrackerEXT,
     pub xrLocateHandJointsEXT: TxrLocateHandJointsEXT,
+    pub xrSetEnvironmentDepthHandRemovalMETA: TxrSetEnvironmentDepthHandRemovalMETA,
 }
 
 
@@ -226,6 +227,7 @@ impl LibOpenXr {
             xrCreateHandTrackerEXT: get_proc_addr!(gipa, instance, TxrCreateHandTrackerEXT)?,
             xrDestroyHandTrackerEXT: get_proc_addr!(gipa, instance, TxrDestroyHandTrackerEXT)?,
             xrLocateHandJointsEXT: get_proc_addr!(gipa, instance, TxrLocateHandJointsEXT)?,
+            xrSetEnvironmentDepthHandRemovalMETA: get_proc_addr!(gipa, instance, TxrSetEnvironmentDepthHandRemovalMETA)?,
         })
     }
 }
@@ -590,6 +592,11 @@ pub type TxrLocateHandJointsEXT = unsafe extern "C" fn(
     locations: *mut XrHandJointLocationsEXT,
 ) -> XrResult;
 
+pub type TxrSetEnvironmentDepthHandRemovalMETA = unsafe extern "C" fn(
+    environment_depth_provider: XrEnvironmentDepthProviderMETA,
+    set_info: *const XrEnvironmentDepthHandRemovalSetInfoMETA,
+) -> XrResult;
+
 // Handle types
 
 #[repr(transparent)]
@@ -828,6 +835,24 @@ pub struct XrRect2Di {
 
 
 // Struct datatypes
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEnvironmentDepthHandRemovalSetInfoMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub enabled: XrBool32,
+}
+
+impl Default for XrEnvironmentDepthHandRemovalSetInfoMETA{
+    fn default()->Self{
+        XrEnvironmentDepthHandRemovalSetInfoMETA{
+            ty: XrStructureType::ENVIRONMENT_DEPTH_HAND_REMOVAL_SET_INFO_META,
+            next: 0 as *const _,
+            enabled: XrBool32(0)
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -1638,6 +1663,17 @@ pub struct XrEnvironmentDepthSwapchainStateMETA {
     pub height: u32,
 }
 
+impl Default for XrEnvironmentDepthSwapchainStateMETA{
+    fn default()->Self{
+        XrEnvironmentDepthSwapchainStateMETA{
+            ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_STATE_META,
+            next: 0 as * mut _,
+            width: 0,
+            height: 0
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct XrEnvironmentDepthSwapchainCreateInfoMETA {
@@ -1656,6 +1692,16 @@ pub struct XrEnvironmentDepthProviderCreateInfoMETA {
     pub ty: XrStructureType,
     pub next: *const c_void,
     pub create_flags: XrEnvironmentDepthProviderCreateFlagsMETA,
+}
+
+impl Default for XrEnvironmentDepthProviderCreateInfoMETA{
+    fn default()->Self{
+        XrEnvironmentDepthProviderCreateInfoMETA{
+            ty: XrStructureType::ENVIRONMENT_DEPTH_PROVIDER_CREATE_INFO_META,
+            next: 0 as * const _,
+            create_flags: XrEnvironmentDepthProviderCreateFlagsMETA(0),
+        }
+    }
 }
 
 #[repr(C)]
@@ -1687,6 +1733,16 @@ pub struct XrPassthroughCreateInfoFB {
     pub ty: XrStructureType,
     pub next: *const c_void,
     pub flags: XrPassthroughFlagsFB,
+}
+
+impl Default for XrPassthroughCreateInfoFB{
+    fn default()->Self{
+        XrPassthroughCreateInfoFB{
+            ty: XrStructureType::PASSTHROUGH_CREATE_INFO_FB,
+            next: 0 as *const _,
+            flags: XrPassthroughFlagsFB(0)
+        }
+    }
 }
 
 #[repr(C)]

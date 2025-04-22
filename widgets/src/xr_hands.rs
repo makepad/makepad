@@ -53,7 +53,7 @@ impl Widget for XrHands {
         );
         self.cube.draw(cx);
         
-        self.cube.depth_clip = 0.0;
+        self.cube.depth_clip = 1.0;
                                 
         // lets draw our hand controllers
         let mata = xr_state.left_controller.grip_pose.to_mat4();
@@ -68,9 +68,14 @@ impl Widget for XrHands {
         
         // lets draw all the fingers
         if xr_state.left_hand.in_view{
-            for joint in &xr_state.left_hand.joints{
+            for (index,joint) in xr_state.left_hand.joints.iter().enumerate(){
+                if index == XrHand::PINKY_TIP{
+                    self.cube.color = vec4(1.0,0.0,0.0,1.0)
+                }
+                else {
+                    self.cube.color = vec4(1.0,1.0,1.0,1.0)
+                }
                 let mat = joint.pose.to_mat4();
-                self.cube.depth_clip = 0.0;
                 self.cube.cube_size = vec3(0.01,0.01,0.015);
                 self.cube.transform = mat;
                 self.cube.draw(cx);
@@ -79,7 +84,6 @@ impl Widget for XrHands {
         if xr_state.right_hand.in_view{
             for joint in &xr_state.right_hand.joints{
                 let mat = joint.pose.to_mat4();
-                self.cube.depth_clip = 0.0;
                 self.cube.cube_size = vec3(0.01,0.01,0.015);
                 self.cube.transform = mat;
                 self.cube.draw(cx);

@@ -36,7 +36,7 @@ pub struct XrController {
     pub stick: XrStick,
 }
 
-const XR_HAND_JOINT_COUNT: usize = 26;
+
 
 #[derive(Clone, Debug, Default)]
 pub struct XrHandJoint{
@@ -48,7 +48,37 @@ pub struct XrHandJoint{
 #[derive(Clone, Debug, Default)]
 pub struct XrHand{
     pub in_view: bool,
-    pub joints: [XrHandJoint;XR_HAND_JOINT_COUNT]
+    pub joints: [XrHandJoint;Self::JOINT_COUNT]
+}
+
+impl XrHand{
+    pub const JOINT_COUNT: usize = 26;
+    pub const CENTER: usize = 0;
+    pub const WRIST: usize = 1;
+    pub const THUMB_BASE: usize = 2;
+    pub const THUMB_KNUCKLE1: usize = 3;
+    pub const THUMB_KNUCKLE2: usize = 4;
+    pub const THUMB_TIP: usize = 5;
+    pub const INDEX_BASE: usize = 6;
+    pub const INDEX_KNUCKLE1: usize = 7;
+    pub const INDEX_KNUCKLE2: usize = 8;
+    pub const INDEX_KNUCKLE3: usize = 9;
+    pub const INDEX_TIP: usize = 10;
+    pub const MIDDLE_BASE: usize = 11;
+    pub const MIDDLE_KNUCKLE1: usize = 12;
+    pub const MIDDLE_KNUCKLE2: usize = 13;
+    pub const MIDDLE_KNUCKLE3: usize = 14;
+    pub const MIDDLE_TIP: usize = 15;
+    pub const RING_BASE: usize = 16;
+    pub const RING_KNUCKLE1: usize = 17;
+    pub const RING_KNUCKLE2: usize = 18;
+    pub const RING_KNUCKLE3: usize = 19;
+    pub const RING_TIP: usize = 20;
+    pub const PINKY_BASE: usize = 21;
+    pub const PINKY_KNUCKLE1: usize = 22;
+    pub const PINKY_KNUCKLE2: usize = 23;
+    pub const PINKY_KNUCKLE3: usize = 24;
+    pub const PINKY_TIP: usize = 25;
 }
 
 #[derive(Clone, Debug, Default)]

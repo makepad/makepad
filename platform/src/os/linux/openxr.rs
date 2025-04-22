@@ -559,9 +559,8 @@ impl CxOpenXrSession{
                         
         let mut passthrough = XrPassthroughFB(0);
         let ptci = XrPassthroughCreateInfoFB{
-            ty: XrStructureType::PASSTHROUGH_CREATE_INFO_FB,
-            next: 0 as *const _,
-            flags: XrPassthroughFlagsFB(0)
+            flags: XrPassthroughFlagsFB(0),
+            ..Default::default()
         };
                         
         unsafe{(xr.xrCreatePassthroughFB)(session, &ptci, &mut passthrough)}.to_result("xrCreatePassthroughFB")?;
@@ -578,14 +577,20 @@ impl CxOpenXrSession{
         unsafe{(xr.xrPassthroughLayerResumeFB)(passthrough_layer)}.to_result("xrPassthroughLayerResumeFB")?;
                         
         let edpci = XrEnvironmentDepthProviderCreateInfoMETA{
-            ty: XrStructureType::ENVIRONMENT_DEPTH_PROVIDER_CREATE_INFO_META,
-            next: 0 as * const _,
-            create_flags: XrEnvironmentDepthProviderCreateFlagsMETA(0)
+            create_flags: XrEnvironmentDepthProviderCreateFlagsMETA(0),
+            ..Default::default()
         };
                         
         let mut depth_provider = XrEnvironmentDepthProviderMETA(0);
         unsafe{(xr.xrCreateEnvironmentDepthProviderMETA)(session, &edpci, &mut depth_provider)}.to_result("xrCreateEnvironmentDepthProviderMETA")?;
-                        
+        
+        
+        let edhrsi = XrEnvironmentDepthHandRemovalSetInfoMETA{
+            enabled: XrBool32::from_bool(options.remove_hands_from_depth),
+            ..Default::default()
+        };
+        unsafe{(xr.xrSetEnvironmentDepthHandRemovalMETA)(depth_provider, & edhrsi)}.to_result("xrSetEnvironmentDepthHandRemovalMETA")?;
+        
         let edsci = XrEnvironmentDepthSwapchainCreateInfoMETA{
             ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_CREATE_INFO_META,
             next: 0 as * const _,
@@ -1053,7 +1058,8 @@ impl CxOpenXrFrame{
 
 pub struct CxOpenXrOptions{
     pub buffer_scale: f32,
-    pub multisamples: usize
+    pub multisamples: usize,
+    pub remove_hands_from_depth: bool,
 }
 
 pub struct CxOpenXrInputs{
