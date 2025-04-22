@@ -1011,7 +1011,10 @@ impl CxOsDrawShader {
             "",
             "",
             "",
+            #[cfg(target_os="android")]
             "out vec4 gl_FragColor;",
+            #[cfg(not(target_os="android"))]
+            "",
             "
             vec4 depth_clip(vec4 w, vec4 c, float clip);
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}} 
