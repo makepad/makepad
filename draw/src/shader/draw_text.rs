@@ -1,6 +1,6 @@
 use {
     crate::{
-        cx_2d::{Cx2d},
+        cx_2d::Cx2d,
         cx_draw::CxDraw,
         draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
@@ -28,7 +28,7 @@ use {
 live_design! {
     use link::shaders::*;
 
-    pub DrawText2 = {{DrawText2}} {
+    pub DrawText = {{DrawText}} {
         color: #ffff,
 
         uniform radius: float;
@@ -91,7 +91,7 @@ live_design! {
 
 #[derive(Live, LiveRegister)]
 #[repr(C)]
-pub struct DrawText2 {
+pub struct DrawText {
     #[live]
     pub geometry: GeometryQuad2D,
     #[live]
@@ -125,7 +125,7 @@ pub struct DrawText2 {
     pub t_max: Vec2,
 }
 
-impl LiveHook for DrawText2 {
+impl LiveHook for DrawText {
     fn before_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
         self.draw_vars
             .before_apply_init_shader(cx, apply, index, nodes, &self.geometry);
@@ -137,7 +137,7 @@ impl LiveHook for DrawText2 {
     }
 }
 
-impl DrawText2 {
+impl DrawText {
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, text: &str) {
         let text = self.layout(cx, 0.0, 0.0, None, Align::default(), text);
         self.draw_text(cx, Point::new(pos.x as f32, pos.y as f32), &text);

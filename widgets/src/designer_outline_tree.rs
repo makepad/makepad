@@ -281,7 +281,7 @@ struct DrawNodeIcon {
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawNodeText {
-    #[deref] draw_super: DrawText2,
+    #[deref] draw_super: DrawText,
     #[live] scale: f32,
 }
 

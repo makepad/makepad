@@ -216,7 +216,7 @@ live_design! {
 #[repr(C)]
 struct DrawCodeText {
     #[deref]
-    draw_super: DrawText2,
+    draw_super: DrawText,
     #[live]
     outline: f32,
 }
@@ -225,7 +225,7 @@ struct DrawCodeText {
 pub struct CodeEditor {
     #[walk] walk: Walk,
     #[live] scroll_bars: ScrollBars,
-    #[live] draw_gutter: DrawText2,
+    #[live] draw_gutter: DrawText,
     #[live] draw_text: DrawCodeText,
     #[live] token_colors: TokenColors,
     #[live] draw_indent_guide: DrawIndentGuide,
