@@ -429,11 +429,11 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, bu
         let dst_dir = build_paths.out_dir.join(format!("assets/makepad/makepad_widgets/resources"));
         let remove = [
             "fa-solid-900.ttf",
-            "LXGWWenKaiBold.ttf",
+            //"LXGWWenKaiBold.ttf",
             "LiberationMono-Regular.ttf",
             "GoNotoKurrent-Bold.ttf",
            // "NotoColorEmoji.ttf",
-            "IBMPlexSans-SemiBold.ttf",
+            //"IBMPlexSans-SemiBold.ttf",
             "NotoSans-Regular.ttf",
         ];
         for remove in remove{

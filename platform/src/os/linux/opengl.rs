@@ -500,12 +500,7 @@ impl Cx {
                 );
                 
                 if cx_shader.mapping.flags.debug {
-                    
                     crate::log!("{}\n{}", vertex, pixel);
-                    crate::log!(
-                        "{:?}", cx_shader.mapping.const_table.table
-                    );
-                    
                 }
                 
                 // lets see if we have the shader already
@@ -980,45 +975,11 @@ impl CxOsDrawShader {
                 
                 gl_FragDepth = cube_depth_camera_position_hc.z;
                 
-                float depth_view_eye_z = texture(xr_depth_texture, depth_view_coord+vec3(0.0,0.0,0.0)).r;
+                float depth_view_eye_z = texture(xr_depth_texture, depth_view_coord).r;
                 if(clip  < 0.5 || depth_view_eye_z >= cube_depth_camera_position_hc.z){
                     return color;
                 }
                 return vec4(0.0,0.0,0.0,0.0);
-                
-                /* // attempt at a non-preprocessed bit more smooth edge, but its not super
-                vec2 d = vec2(0.0012,0.0012);
-                float depth_view_eye_z_1 = texture(xr_depth_texture, depth_view_coord+vec3(0.0,0.0,0.0)).r;
-                float depth_view_eye_z_2 = texture(xr_depth_texture, depth_view_coord+vec3(-d.x,-d.y,0.0)).r;
-                float depth_view_eye_z_3 = texture(xr_depth_texture, depth_view_coord+vec3(d.x,-d.y,0.0)).r;
-                float depth_view_eye_z_4 = texture(xr_depth_texture, depth_view_coord+vec3(-d.x,+d.y,0.0)).r;
-                float depth_view_eye_z_5 = texture(xr_depth_texture, depth_view_coord+vec3(+d.x,+d.y,0.0)).r;
-                
-                if(clip<0.5){
-                    return color;
-                }
-                                
-                vec4 c1 = vec4(0.0,0.0,0.0,0.0); 
-                vec4 c2 = vec4(0.0,0.0,0.0,0.0); 
-                vec4 c3 = vec4(0.0,0.0,0.0,0.0); 
-                vec4 c4 = vec4(0.0,0.0,0.0,0.0); 
-                vec4 c5 = vec4(0.0,0.0,0.0,0.0); 
-                if(depth_view_eye_z_1 >= cube_depth_camera_position_hc.z){
-                    c1 = color;
-                }
-                if(depth_view_eye_z_2 >= cube_depth_camera_position_hc.z){
-                    c2 = color;
-                }
-                if(depth_view_eye_z_3 >= cube_depth_camera_position_hc.z){
-                    c3 = color;
-                }
-                if(depth_view_eye_z_4 >= cube_depth_camera_position_hc.z){
-                    c4 = color;
-                }
-                if(depth_view_eye_z_5 >= cube_depth_camera_position_hc.z){
-                    c5 = color;
-                }
-                return (c1+c2+c3+c4+c5)/5.0;*/
             }
         ";
         let nop_depth_clip="
@@ -1594,9 +1555,9 @@ impl OpenglBuffer {
                 gl_sys::UNIFORM_BUFFER,
                 (data.len() * mem::size_of::<f32>()) as gl_sys::GLsizeiptr,
                 data.as_ptr() as *const _,
-                gl_sys::DYNAMIC_DRAW
+                gl_sys::STATIC_DRAW
             );
-            //(gl.glBindBuffer)(gl_sys::UNIFORM_BUFFER, 0);
+            (gl.glBindBuffer)(gl_sys::UNIFORM_BUFFER, 0);
             crate::gl_log_error!(gl);
         }
     }
