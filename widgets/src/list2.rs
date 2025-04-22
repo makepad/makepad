@@ -2,7 +2,6 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
-    scroll_bar::*,
 };
 
 live_design! {
@@ -10,10 +9,8 @@ live_design! {
     use link::widgets::*;
     use link::theme::*;
     use makepad_draw::shader::std::*;
-    use crate::scroll_bar::ScrollBar;
-
     pub List = {{List}} {
-        scroll_bar: <ScrollBar> {}
+        flow: Down
     }
 }
 
@@ -25,30 +22,17 @@ struct List {
     #[rust] items: Vec<WidgetRef>,
     #[rust(0.0)] scroll_pos: f64,
     #[rust] item_heights: Vec<f64>,
-    #[live] scroll_bar: ScrollBar,
 }
 
 impl Widget for List {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        // Forward events to child items
         self.items.iter().for_each(|item| {
             item.handle_event(cx, event, scope);
         });
 
-        // Handle scroll bar events
-        self.scroll_bar.handle_event_with(cx, event, &mut |cx, action| {
-            if let ScrollBarAction::Scroll { scroll_pos, .. } = action {
-                self.scroll_pos = scroll_pos;
-                cx.redraw_all();
-            }
-        });
-
-        // Handle mouse wheel scrolling
         if let Event::Scroll(e) = event {
             if self.area.rect(cx).contains(e.abs) {
                 self.scroll_pos += e.scroll.y * 10.0;
-                // Clamping is handled in draw_walk, update scroll bar here
-                self.scroll_bar.set_scroll_pos_no_action(cx, self.scroll_pos);
                 cx.redraw_all();
             }
         }
@@ -59,22 +43,18 @@ impl Widget for List {
         let viewport = cx.turtle().padded_rect();
         let viewport_height = viewport.size.y;
 
-        // Compute item heights if necessary
         if self.item_heights.len() != self.items.len() {
             self.compute_item_heights(cx);
         }
 
-        // Calculate cumulative heights and total height
         let mut cumulative_heights = vec![0.0];
         for &height in &self.item_heights {
             cumulative_heights.push(cumulative_heights.last().unwrap() + height);
         }
         let total_height = *cumulative_heights.last().unwrap();
 
-        // Clamp scroll position
         self.scroll_pos = self.scroll_pos.clamp(0.0, (total_height - viewport_height).max(0.0));
 
-        // Draw visible items
         let mut i = 0;
         while i < self.items.len() && cumulative_heights[i] < self.scroll_pos {
             i += 1;
@@ -102,15 +82,6 @@ impl Widget for List {
             i += 1;
         }
 
-        // Draw scroll bar
-        let scroll_bar_width = 15.0;
-        let scroll_bar_rect = Rect {
-            pos: dvec2(viewport.pos.x + viewport.size.x - scroll_bar_width, viewport.pos.y),
-            size: dvec2(scroll_bar_width, viewport.size.y),
-        };
-        self.scroll_bar.set_scroll_pos_no_action(cx, self.scroll_pos);
-        self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Vertical, scroll_bar_rect, dvec2(0.0, total_height));
-
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }
@@ -124,7 +95,7 @@ impl List {
             if let Size::Fixed(height) = item_walk.height {
                 self.item_heights.push(height);
             } else {
-                self.item_heights.push(50.0); // Default height
+                self.item_heights.push(50.0);
             }
         }
     }
@@ -142,14 +113,12 @@ impl List {
 
 impl ListRef {
     pub fn clear(&self) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.clear();
-        }
+        let Some(mut inner) = self.borrow_mut() else { return };
+        inner.clear();
     }
 
     pub fn add(&self, widget: WidgetRef) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.add(widget);
-        }
+        let Some(mut inner) = self.borrow_mut() else { return };
+        inner.add(widget);
     }
 }

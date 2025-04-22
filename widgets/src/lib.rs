@@ -243,7 +243,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::command_text_input::live_design(cx);
     crate::web_view::live_design(cx);
     crate::xr_hands::live_design(cx);
-        
+
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
     crate::designer_dummy::live_design(cx);
