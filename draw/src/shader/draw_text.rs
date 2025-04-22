@@ -85,7 +85,7 @@ live_design!{
             return self.blend_color(vec4(s * col.rgb * brightness * col.a, s * col.a));
         }
 
-        fn pixel(self) -> vec4 {
+        fn fragment(self) -> vec4 {
             let texel_coords = self.tex_coord1.xy;
             let dxt = length(dFdx(texel_coords));
             let dyt = length(dFdy(texel_coords));
