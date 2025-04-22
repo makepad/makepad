@@ -2399,7 +2399,12 @@ live_design! {
         width: Fill,
         height: Fill
         // padding: <SPACING_0> { align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
-
+        show_bg: true,
+        draw_bg:{
+            fn pixel(self)->vec4{
+                return #2a
+            }
+        }
         <View> {
             width: Fill,
             height: Fill

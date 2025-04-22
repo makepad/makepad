@@ -84,7 +84,7 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_varying_struct();
         
         //let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
-        //let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
+        //let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(fragment))).unwrap();
         
         for (ty_lit, ref param_tys) in all_constructor_fns{
             generate_cons_fn(self.backend_writer, self.string, ty_lit, &param_tys);
@@ -452,7 +452,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, ") : SV_TARGET{{").unwrap();
         
         write!(self.string, "    return ").unwrap();
-        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
+        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(fragment))).unwrap();
         write!(self.string, "    {}", DisplayFnName(pixel_def.fn_ptr, pixel_def.ident)).unwrap();
         write!(self.string, "(").unwrap();
         self.backend_writer.write_call_expr_hidden_args(self.string, pixel_def.hidden_args.borrow().as_ref().unwrap(), "");
