@@ -859,7 +859,7 @@ pub struct RadioButtonGroup {
 pub struct RadioButton {
     #[redraw] #[live] draw_bg: DrawRadioButton,
     #[live] draw_icon: DrawIcon,
-    #[live] draw_text: DrawText2,
+    #[live] draw_text: DrawText,
 
     #[live] value: LiveValue,
 

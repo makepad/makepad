@@ -282,11 +282,11 @@ impl StackCounter{
 // this widget has a retained and an immediate mode api
 #[derive(Live, Widget)]
 pub struct TextFlow {
-    #[live] pub draw_normal: DrawText2,
-    #[live] pub draw_italic: DrawText2,
-    #[live] pub draw_bold: DrawText2,
-    #[live] pub draw_bold_italic: DrawText2,
-    #[live] pub draw_fixed: DrawText2,
+    #[live] pub draw_normal: DrawText,
+    #[live] pub draw_italic: DrawText,
+    #[live] pub draw_bold: DrawText,
+    #[live] pub draw_bold_italic: DrawText,
+    #[live] pub draw_fixed: DrawText,
     #[live] pub draw_block: DrawFlowBlock,
     
     /// The default font size used for all text if not otherwise specified.

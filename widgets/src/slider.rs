@@ -1695,7 +1695,7 @@ pub struct Slider {
     #[rust] label_area: Area,
     #[live] label_walk: Walk,
     #[live] label_align: Align,
-    #[live] draw_text: DrawText2,
+    #[live] draw_text: DrawText,
     #[live] text: String,
     
     #[live] text_input: TextInput,

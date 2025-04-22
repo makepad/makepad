@@ -907,7 +907,7 @@ pub struct CheckBox {
     #[live] label_align: Align,
     
     #[redraw] #[live] draw_bg: DrawCheckBox,
-    #[live] draw_text: DrawText2,
+    #[live] draw_text: DrawText,
     #[live] draw_icon: DrawIcon,
     
     #[live] text: ArcStringMut,

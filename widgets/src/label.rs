@@ -216,7 +216,7 @@ pub enum LabelAction {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct Label {
-    #[redraw] #[live] draw_text: DrawText2,
+    #[redraw] #[live] draw_text: DrawText,
     
     #[walk] walk: Walk,
     #[live] align: Align,
