@@ -133,6 +133,10 @@ impl FileServerConnection {
                                     }
                                     for item in set{
                                         let needle_bytes = item.needle.as_bytes();
+                                        let needle_bytes = item.needle.as_bytes();
+                                        if needle_bytes.len()==0{
+                                            continue;
+                                        }
                                         makepad_rabin_karp::search(&bytes, &needle_bytes, &mut rk_results);
                                         for result in &rk_results{
                                             
