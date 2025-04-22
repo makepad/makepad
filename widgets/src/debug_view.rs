@@ -36,7 +36,7 @@ pub struct DrawRect {
 pub struct DebugView {
     #[live] draw_list: DrawList2d,
     #[live] rect: DrawRect,
-    #[live] label: DrawText
+    #[live] label: DrawText2
 }
 
 impl DebugView {

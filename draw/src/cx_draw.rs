@@ -6,8 +6,7 @@ use {
         rc::Rc,
     },
     crate::{
-        font_loader::FontLoader,
-        makepad_math::{DVec2},
+        makepad_math::DVec2,
         makepad_platform::{
             DrawEvent,
             Area,
@@ -21,11 +20,8 @@ use {
         },
         nav::CxNavTreeRc,
         icon_atlas::CxIconAtlasRc,
-        font_atlas::CxFontsAtlasRc,
         draw_list_2d::DrawList2d,
-        glyph_rasterizer::GlyphRasterizer,
         text::{fonts::Fonts, layouter},
-        text_shaper::TextShaper,
     },
     makepad_rustybuzz::UnicodeBuffer,
 };
@@ -44,10 +40,6 @@ pub struct CxDraw<'a> {
     pub (crate) pass_stack: Vec<PassStackItem>,
     pub draw_list_stack: Vec<DrawListId>,
     pub fonts: Rc<RefCell<Fonts>>,
-    pub font_loader: Rc<RefCell<FontLoader>>,
-    pub text_shaper: Rc<RefCell<TextShaper>>,
-    pub glyph_rasterizer: Rc<RefCell<GlyphRasterizer>>,
-    pub fonts_atlas_rc: CxFontsAtlasRc,
     pub icon_atlas_rc: CxIconAtlasRc,
     pub nav_tree_rc: CxNavTreeRc,
     pub rustybuzz_buffer: Option<UnicodeBuffer>, 
@@ -61,7 +53,6 @@ impl<'a> Drop for CxDraw<'a> {
         if !self.fonts.borrow_mut().update_textures(&mut self.cx) {
             self.cx.redraw_all();
         }
-        self.draw_font_atlas();
         self.draw_icon_atlas();
     }
 }
@@ -69,26 +60,14 @@ impl<'a> Drop for CxDraw<'a> {
 impl<'a> CxDraw<'a> {
     pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
         Self::lazy_construct_fonts(cx);
-        Self::lazy_construct_font_loader(cx);
-        Self::lazy_construct_text_shaper(cx);
-        Self::lazy_construct_glyph_rasterizer(cx);
-        Self::lazy_construct_font_atlas(cx);
         Self::lazy_construct_nav_tree(cx);
         Self::lazy_construct_icon_atlas(cx);
         cx.redraw_id += 1;
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        let font_loader = cx.get_global::<Rc<RefCell<FontLoader>>>().clone();
-        let text_shaper=  cx.get_global::<Rc<RefCell<TextShaper>>>().clone();
-        let glyph_rasterizer = cx.get_global::<Rc<RefCell<GlyphRasterizer>>>().clone();
-        let fonts_atlas_rc = cx.get_global::<CxFontsAtlasRc>().clone();
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
         let icon_atlas_rc = cx.get_global::<CxIconAtlasRc>().clone();
         Self{
             fonts,
-            font_loader,
-            text_shaper,
-            glyph_rasterizer,
-            fonts_atlas_rc,
             cx: cx,
             draw_event,
             pass_stack: Vec::new(),
