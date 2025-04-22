@@ -22,7 +22,7 @@ live_design!{
         varying pos: vec2,
         varying tex_coord1: vec2
         varying clipped: vec2
-        
+        varying world: vec4,
         fn clip_and_transform_vertex(self, rect_pos: vec2, rect_size: vec2) -> vec4 {
             let clipped: vec2 = clamp(
                 clamp(
@@ -41,14 +41,15 @@ live_design!{
                 self.icon_t2.xy,
                 self.pos.xy
             )
-            
-            // only pass the clipped position forward
-            return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
+            self.world = self.view_transform * vec4(
                 clipped.x,
                 clipped.y,
                 self.draw_depth + self.draw_zbias,
                 1.
-            )))
+            );
+            
+            // only pass the clipped position forward
+            return self.camera_projection * (self.camera_view * (self.world))
         }
         
         fn vertex(self) -> vec4 {
@@ -69,6 +70,10 @@ live_design!{
             s = pow(s, self.u_curve);
             let col = self.get_color(); //color!(white);//get_color();
             return vec4(s * col.rgb * self.u_brightness * col.a, s * col.a);
+        }
+        
+        fn fragment(self) -> vec4 {
+            return depth_clip(self.world, self.pixel(), self.depth_clip);
         }
     }
 }
@@ -91,6 +96,7 @@ pub struct DrawIcon {
     #[calc] pub rect_pos: Vec2,
     #[calc] pub rect_size: Vec2,
     #[calc] pub draw_clip: Vec4,
+    #[live(1.0)] pub depth_clip: f32,
     #[live(1.0)] pub draw_depth: f32,
     
     #[live] pub color: Vec4,

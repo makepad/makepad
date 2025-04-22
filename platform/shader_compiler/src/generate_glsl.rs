@@ -326,7 +326,7 @@ impl<'a> DrawShaderGenerator<'a> {
             }
         }
         // we need to collect all consts
-        let pixel_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
+        let pixel_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(fragment))).unwrap();
         write!(self.string, "\n").unwrap();
         writeln!(self.string, "    gl_FragColor = {}();", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
         writeln!(self.string, "}}").unwrap();
