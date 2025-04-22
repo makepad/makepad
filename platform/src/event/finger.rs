@@ -25,6 +25,7 @@ use {
         },
         window::WindowId,
         cx::Cx,
+        event::xr::XrHand,
         area::Area,
     },
 };
@@ -1341,12 +1342,7 @@ impl Event {
                 return Hit::DesignerPick(e.clone())
             },
             Event::XrUpdate(e)=>{
-                // alright so how does this work
-                // we could map our handcontroller ray / fingers 
-                // ok lets establish if a finger touches a button.
-                // we have a point where our tip of the finger is
-                // now we need to do the right finger downs and whatnot.
-                
+                return e.hits_with_options_and_test(cx, area, options, hit_test)
             },
             _ => ()
         };
