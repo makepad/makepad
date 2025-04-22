@@ -1340,6 +1340,10 @@ impl Event {
                 // but how will we communicate the widget?
                 return Hit::DesignerPick(e.clone())
             },
+            Event::XrUpdate(e)=>{
+                // alright so how does this work
+                // we could map our handcontroller ray / fingers 
+            },
             _ => ()
         };
         Hit::Nothing
