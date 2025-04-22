@@ -1447,7 +1447,7 @@ pub enum TextInputAction {
 #[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 struct DrawMaybeEmptyText {
-    #[deref] draw_super: DrawText2,
+    #[deref] draw_super: DrawText,
     #[live] is_empty: f32,
 }
 
