@@ -11,7 +11,6 @@ use {
         CxWindowPool,
         DigitDevice,
         KeyModifiers,
-        FingerUpEvent,
         makepad_math::*,
         LiveId,
         makepad_live_id::{live_id_num},
