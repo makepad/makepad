@@ -413,7 +413,7 @@ impl Widget for Piano{
                 PianoKey::new_from_ptr(cx, piano_key)
             });
             key.draw_abs(cx, depth, 0.0, Rect {pos: pos, size: white_size});
-            depth += 0.001;
+            depth += cx.micro_zbias_step();
             pos.x += white_size.x;
         }
         // draw the black keys
@@ -428,7 +428,7 @@ for i in midi_a0..midi_c8 {
                     pos: pos - dvec2(black_size.x * shift, 0.),
                     size: black_size
                 });
-                depth += 0.001
+                depth += cx.micro_zbias_step();
             }
             else {
                 pos.x += white_size.x;

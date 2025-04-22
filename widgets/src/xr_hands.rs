@@ -64,6 +64,7 @@ impl Widget for XrHands {
         let mata = xr_state.right_controller.grip_pose.to_mat4();
         self.cube.cube_size = vec3(0.05,0.05,0.05);
         self.cube.transform = mata;
+        self.cube.depth_clip = 0.0;
         self.cube.draw(cx);
         
         // lets draw all the fingers
