@@ -66,11 +66,7 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_startup(&mut self, cx:&mut Cx){
-        cx.start_timeout(0.1);
-    }
-    
-    fn handle_timer(&mut self, cx:&mut Cx, _te:&TimerEvent){
-       cx.switch_to_xr();
+        cx.switch_to_xr();
     }
     
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
