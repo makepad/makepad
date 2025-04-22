@@ -205,6 +205,7 @@ pub use {
             XrState,
             XrStick,
             XrUpdateEvent,
+            XrLocalEvent,
             DragEvent,
             DropEvent,
             DragState,

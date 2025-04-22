@@ -282,7 +282,11 @@ impl Vec3 {
     pub const fn to_vec2(&self) -> Vec2 {
         Vec2 {x: self.x, y: self.y}
     }
-    
+        
+    pub const fn to_vec4(&self) -> Vec4 {
+        Vec4 {x: self.x, y: self.y, z: self.z, w: 1.0}
+    }
+        
     pub fn scale(&self, f: f32) -> Vec3 {
         Vec3 {x: self.x * f, y: self.y * f, z: self.z * f}
     }
