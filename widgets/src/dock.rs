@@ -7,7 +7,7 @@ use crate::{
     splitter::{SplitterAction, Splitter, SplitterAlign, SplitterAxis},
     tab_bar::{TabBarAction, TabBar},
 };
-const OLD_UNIQUE_ID_PREFIX: &str = "Old Unique ";
+
 live_design!{
     link widgets;
     use link::theme::*;
