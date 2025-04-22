@@ -42,7 +42,7 @@ impl Widget for XrHands {
         let speed = 32.0;
         
         let rot = (xr_state.time*speed).rem_euclid(360.0) as f32;
-        
+        self.cube.color = vec4(1.0,1.0,1.0,1.0);
         self.cube.depth_clip = 1.0;
         self.cube.cube_size = vec3(0.05,0.05,0.05);
         self.cube.transform = Mat4::txyz_s_ry_rx_txyz(

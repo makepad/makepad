@@ -555,7 +555,12 @@ pub enum DigitDevice {
     Touch {
         uid: u64
     },
-    XR {}
+    XrHand{
+        is_left: bool,
+        index: usize
+    },
+    XrController{
+    }
 }
 
 impl DigitDevice {
@@ -564,9 +569,10 @@ impl DigitDevice {
     /// Returns true if this device is a mouse.
     pub fn is_mouse(&self) -> bool { matches!(self, Self::Mouse {..}) }
     /// Returns true if this device is an XR device.
-    pub fn is_xr(&self) -> bool { matches!(self, Self::XR {..}) }
+    pub fn is_xr_hand(&self) -> bool { matches!(self, Self::XrHand {..}) }
+    pub fn is_xr_controller(&self) -> bool { matches!(self, Self::XrController {..}) }
     /// Returns true if this device can hover: either a mouse or an XR device.
-    pub fn has_hovers(&self) -> bool { matches!(self, Self::Mouse {..} | Self::XR {..}) }
+    pub fn has_hovers(&self) -> bool { matches!(self, Self::Mouse {..} | Self::XrController {..}| Self::XrHand {..}) }
     /// Returns the `MouseButton` if this device is a mouse; otherwise `None`.
     pub fn mouse_button(&self) -> Option<MouseButton> {
         if let Self::Mouse {button} = self {
@@ -588,7 +594,8 @@ impl DigitDevice {
         match self {
             DigitDevice::Mouse { button } => button.is_primary(),
             DigitDevice::Touch {..} => true,
-            DigitDevice::XR { } => false,
+            DigitDevice::XrHand {..} => true,
+            DigitDevice::XrController {..} => true,
         }
     }
     // pub fn xr_input(&self) -> Option<usize> {if let DigitDevice::XR(input) = self {Some(*input)}else {None}}
@@ -1341,7 +1348,7 @@ impl Event {
                 // but how will we communicate the widget?
                 return Hit::DesignerPick(e.clone())
             },
-            Event::XrUpdate(e)=>{
+            Event::XrLocal(e)=>{
                 return e.hits_with_options_and_test(cx, area, options, hit_test)
             },
             _ => ()

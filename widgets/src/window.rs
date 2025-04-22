@@ -121,6 +121,7 @@ pub struct Window {
     #[rust(Texture::new(cx))] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
     #[live] show_performance_view: bool,
+    #[rust(Mat4::scaled_translation(0.0004,-0.0004,-0.0004,-0.25,0.25,-0.5))] xr_view_matrix: Mat4,
     #[deref] view: View,
     // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
     /*#[rust(Menu::main(vec![
@@ -384,7 +385,19 @@ impl Widget for Window {
             return
         }
         else {
-            self.view.handle_event(cx, event, scope);
+            // lets store our inverse matrix
+            if cx.in_xr_mode(){
+                if let Event::XrUpdate(e) = &event{
+                    let event = Event::XrLocal(XrLocalEvent::from_update_event(e, &self.xr_view_matrix));
+                    self.view.handle_event(cx, &event, scope);
+                }
+                else{
+                    self.view.handle_event(cx, event, scope);
+                }
+            }
+            else{
+                self.view.handle_event(cx, event, scope);
+            }
         }
         
         if let Event::Actions(actions) = event{
@@ -455,7 +468,7 @@ impl Widget for Window {
         
         self.debug_view.draw(cx);
                         
-        self.main_draw_list.set_view_transform(cx, &Mat4::scaled_translation(0.0004,-0.0004,-0.0004,-0.25,0.25,-0.5));
+        self.main_draw_list.set_view_transform(cx, &self.xr_view_matrix);
         
         cx.end_pass_sized_turtle();
                 
