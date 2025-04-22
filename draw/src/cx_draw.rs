@@ -6,7 +6,7 @@ use {
         rc::Rc,
     },
     crate::{
-        makepad_math::DVec2,
+        makepad_math::{DVec2,dvec2},
         makepad_platform::{
             DrawEvent,
             Area,
@@ -171,7 +171,10 @@ impl<'a> CxDraw<'a>{
     }   */
     
     pub fn current_pass_size(&self) -> DVec2 {
-        self.cx.get_pass_rect(self.pass_stack.last().unwrap().pass_id, self.current_dpi_factor()).unwrap().size
+        self.cx.get_pass_rect(
+            self.pass_stack.last().unwrap().pass_id, 
+            self.current_dpi_factor()
+        ).map(|v| v.size).unwrap_or(dvec2(0.0,0.0))
     }
         
     pub fn append_sub_draw_list(&mut self, draw_list_2d: &DrawList2d)  {

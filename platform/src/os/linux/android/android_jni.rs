@@ -124,7 +124,9 @@ static MESSAGES_TX: Mutex<Option<mpsc::Sender<FromJavaMessage>>> = Mutex::new(No
 
 pub fn send_from_java_message(message: FromJavaMessage) {
     if let Ok(mut tx) = MESSAGES_TX.lock(){
-        tx.as_mut().unwrap().send(message).ok();
+        if let Some(tx) = tx.as_mut(){
+            tx.send(message).ok();
+        }
     }
 }
 
