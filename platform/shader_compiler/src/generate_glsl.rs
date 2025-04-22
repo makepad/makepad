@@ -507,7 +507,10 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, "    ").unwrap();
         if self.options.use_ovr_multiview{
             if decl.ident == Ident(live_id!(camera_projection)) ||
-                decl.ident == Ident(live_id!(camera_view)){
+                decl.ident == Ident(live_id!(camera_view)) || 
+                decl.ident == Ident(live_id!(depth_projection)) || 
+                decl.ident == Ident(live_id!(depth_view)) 
+                {
                 self.write_var_decl(
                     &decl.ident,//&DisplayDsIdent(decl.ident),e
                     decl.ty_expr.ty.borrow().as_ref().unwrap(),
@@ -516,7 +519,9 @@ impl<'a> DrawShaderGenerator<'a> {
                 return
             }
             if decl.ident == Ident(live_id!(camera_projection_r)) ||
-                decl.ident == Ident(live_id!(camera_view_r)){
+                decl.ident == Ident(live_id!(camera_view_r)) || 
+                decl.ident == Ident(live_id!(depth_projection_r)) ||
+                decl.ident == Ident(live_id!(depth_view_r)){
                 return
             }
         }

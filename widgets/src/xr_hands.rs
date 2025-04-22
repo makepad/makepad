@@ -43,6 +43,7 @@ impl Widget for XrHands {
         
         let rot = (xr_state.time*speed).rem_euclid(360.0) as f32;
         
+        self.cube.depth_clip = 1.0;
         self.cube.cube_size = vec3(0.05,0.05,0.05);
         self.cube.transform = Mat4::txyz_s_ry_rx_txyz(
             vec3(0.,0.,0.),
@@ -52,6 +53,8 @@ impl Widget for XrHands {
         );
         self.cube.draw(cx);
         
+        self.cube.depth_clip = 0.0;
+                                
         // lets draw our hand controllers
         let mata = xr_state.left_controller.grip_pose.to_mat4();
         self.cube.cube_size = vec3(0.05,0.05,0.05);
@@ -67,6 +70,7 @@ impl Widget for XrHands {
         if xr_state.left_hand.in_view{
             for joint in &xr_state.left_hand.joints{
                 let mat = joint.pose.to_mat4();
+                self.cube.depth_clip = 0.0;
                 self.cube.cube_size = vec3(0.01,0.01,0.015);
                 self.cube.transform = mat;
                 self.cube.draw(cx);
@@ -75,6 +79,7 @@ impl Widget for XrHands {
         if xr_state.right_hand.in_view{
             for joint in &xr_state.right_hand.joints{
                 let mat = joint.pose.to_mat4();
+                self.cube.depth_clip = 0.0;
                 self.cube.cube_size = vec3(0.01,0.01,0.015);
                 self.cube.transform = mat;
                 self.cube.draw(cx);

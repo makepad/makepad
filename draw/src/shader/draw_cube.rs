@@ -12,6 +12,8 @@ live_design!{
     pub DrawCube = {{DrawCube}} {
         
         varying lit_color: vec4;
+        varying world_pos: vec4,
+        
         fn vertex(self) -> vec4 {
             let pos = self.cube_size * self.geom_pos + self.cube_pos;
             let model_view = self.view_transform * self.transform;
@@ -23,12 +25,13 @@ live_design!{
             let color = self.color.xyz * dp + ambient;
             
             self.lit_color = vec4(color * self.color.w, self.color.w);
-             
-            return self.camera_projection * (self.camera_view * (model_view * vec4(pos, 1.)))
+            let world_pos = model_view * vec4(pos, 1.);
+            self.world_pos = world_pos; 
+            return self.camera_projection * (self.camera_view * (world_pos))
         }
         
         fn pixel(self) -> vec4 {
-            return self.lit_color
+            return depth_clip(self.world_pos, self.lit_color, self.depth_clip);
         }
     }
 }
@@ -43,6 +46,7 @@ pub struct DrawCube {
     #[calc] pub transform: Mat4,
     #[live(vec3(1.0,1.0,1.0))] pub cube_size: Vec3,
     #[live(vec3(0.,0.,0.))] pub cube_pos: Vec3,
+    #[live(1.0)] pub depth_clip: f32,
 }
 
 impl LiveHook for DrawCube{

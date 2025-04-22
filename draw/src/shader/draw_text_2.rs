@@ -41,7 +41,8 @@ live_design! {
 
         varying pos: vec2
         varying t: vec2
-
+        varying world: vec4
+        
         fn vertex(self) -> vec4 {
             let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom_pos);
             let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw);
@@ -49,12 +50,13 @@ live_design! {
 
             self.pos = p_normalized;
             self.t = mix(self.t_min, self.t_max, p_normalized.xy);
-            return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
+            self.world = self.view_transform * vec4(
                 p_clipped.x,
                 p_clipped.y,
                 self.glyph_depth + self.draw_zbias,
                 1.
-            )));
+            );
+            return self.camera_projection * (self.camera_view * (self.world));
         }
 
         fn sdf(self, scale: float, p: vec2) -> float {
@@ -71,16 +73,18 @@ live_design! {
         fn pixel(self) -> vec4 {
             let dxt = length(dFdx(self.t));
             let dyt = length(dFdy(self.t));
+            let color = #0000
             if self.texture_index == 0 {
                 // TODO: Support non square atlases?
                 let scale = (dxt + dyt) * self.grayscale_atlas_size.x * 0.5;
                 let s = self.sdf(scale, self.t.xy);
                 let c = self.get_color();
-                return s * vec4(c.rgb * c.a, c.a);
+                color = s * vec4(c.rgb * c.a, c.a);
             } else {
                 let c = sample2d(self.color_texture, self.t);
-                return vec4(c.rgb * c.a, c.a);
+                color = vec4(c.rgb * c.a, c.a);
             }
+            return depth_clip(self.world, color, self.depth_clip);
         }
     }
 }
@@ -107,6 +111,8 @@ pub struct DrawText2 {
     pub rect_size: Vec2,
     #[calc]
     pub draw_clip: Vec4,
+    #[live(1.0)] 
+    pub depth_clip: f32,
     #[calc]
     pub glyph_depth: f32,
     #[live]
