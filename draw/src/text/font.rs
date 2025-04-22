@@ -40,7 +40,7 @@ pub struct Font {
     face: FontFace,
     ascender_fudge_in_ems: f32,
     descender_fudge_in_ems: f32,
-    cached_glyph_outline_bounds_in_ems: HashMap<GlyphId, Option<Rect<f32>>>,
+    cached_glyph_outline_bounds_in_ems: RefCell<HashMap<GlyphId, Option<Rect<f32>>>>,
 }
 
 impl Font {
@@ -57,7 +57,7 @@ impl Font {
             face,
             ascender_fudge_in_ems,
             descender_fudge_in_ems,
-            cached_glyph_outline_bounds_in_ems: HashMap::new(),
+            cached_glyph_outline_bounds_in_ems: RefCell::new(HashMap::new()),
         }
     }
 
@@ -105,12 +105,19 @@ impl Font {
         glyph_id: GlyphId,
         out_outline: &mut Option<GlyphOutline>,
     ) -> Option<Rect<f32>> {
-        if let Some(bounds_in_ems) = self.cached_glyph_outline_bounds_in_ems.get(&glyph_id) {
+        if let Some(bounds_in_ems) = self
+            .cached_glyph_outline_bounds_in_ems
+            .borrow()
+            .get(&glyph_id)
+        {
             return *bounds_in_ems;
         }
         if let Some(outline) = self.glyph_outline(glyph_id) {
             let bounds_in_ems = outline.bounds_in_ems();
             *out_outline = Some(outline);
+            self.cached_glyph_outline_bounds_in_ems
+                .borrow_mut()
+                .insert(glyph_id, Some(bounds_in_ems));
             Some(bounds_in_ems)
         } else {
             None
