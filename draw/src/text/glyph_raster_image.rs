@@ -9,7 +9,7 @@ use {
 
 #[derive(Clone, Debug)]
 pub struct GlyphRasterImage<'a> {
-    origin_in_pxs: Point<f32>,
+    origin_in_dpxs: Point<f32>,
     dpxs_per_em: f32,
     format: Format,
     data: &'a [u8],
@@ -18,7 +18,7 @@ pub struct GlyphRasterImage<'a> {
 impl<'a> GlyphRasterImage<'a> {
     pub fn from_raster_glyph_image(image: ttf_parser::RasterGlyphImage<'a>) -> Option<Self> {
         Some(Self {
-            origin_in_pxs: Point::new(image.x as f32, image.y as f32),
+            origin_in_dpxs: Point::new(image.x as f32, image.y as f32),
             dpxs_per_em: image.pixels_per_em as f32,
             format: Format::from_raster_image_format(image.format)?,
             data: image.data,
@@ -26,7 +26,7 @@ impl<'a> GlyphRasterImage<'a> {
     }
 
     pub fn origin_in_dpxs(&self) -> Point<f32> {
-        self.origin_in_pxs
+        self.origin_in_dpxs
     }
 
     pub fn size_in_dpxs(&self) -> Size<f32> {
