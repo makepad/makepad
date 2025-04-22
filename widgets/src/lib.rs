@@ -8,6 +8,7 @@ pub use makepad_derive_widget::*;
 pub mod button;
 pub mod cached_widget;
 pub mod label;
+pub mod list;
 pub mod image;
 pub mod image_blend;
 pub mod icon;
@@ -172,7 +173,7 @@ pub fn live_design(cx: &mut Cx) {
     else{
         cx.link(live_id!(designer), live_id!(designer_dummy));
     }
-    
+
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
@@ -185,6 +186,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::theme_mobile_light::live_design(cx);
     crate::slider::live_design(cx);
     crate::label::live_design(cx);
+    crate::list::live_design(cx);
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
     crate::multi_image::live_design(cx);
@@ -238,7 +240,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::cached_widget::live_design(cx);
     crate::command_text_input::live_design(cx);
     crate::web_view::live_design(cx);
-    
+
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
     crate::designer_dummy::live_design(cx);
