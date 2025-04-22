@@ -165,9 +165,6 @@ impl Cx {
                     }){
                         crate::error!("OpenXR create_xr_session failed: {}", e);
                     }
-                    else{
-                        self.openxr_init_textures();
-                    }
                 }
                 
                 unsafe {
@@ -983,6 +980,15 @@ impl CxOsApi for Cx {
     
     fn in_xr_mode(&self)->bool{
         self.os.in_xr_mode
+    }
+    
+    fn micro_zbias_step(&self)->f32{
+        if self.os.in_xr_mode{
+            -0.00001
+        }
+        else{
+            0.00001
+        }
     }
 }
 
