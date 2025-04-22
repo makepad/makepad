@@ -238,6 +238,7 @@ pub struct CodeEditor {
     #[rust] last_cursor_screen_pos: Option<DVec2>,
     #[live] pad_left_top: DVec2, 
     #[rust] cell_size: DVec2,
+    #[rust] cell_offset_y: f64,
     #[rust] gutter_rect: Rect,
     #[rust] gutter_chars: usize,
     #[rust] viewport_rect: Rect,
@@ -356,10 +357,14 @@ impl CodeEditor {
         let text = self.draw_text.layout(cx, 0.0, 0.0, None, Align::default(), "!");
         let first_row = text.rows.first().unwrap();
         let first_glyph = first_row.glyphs.first().unwrap();
+        let width_in_lpxs = first_glyph.advance_in_lpxs();
+        let height_in_lpxs = first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs();
+        let line_spacing_in_lpxs = height_in_lpxs * self.draw_text.text_style.line_spacing;
         self.cell_size = dvec2(
-            first_glyph.advance_in_lpxs() as f64,
-            ((first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs()) as f64) * self.draw_text.text_style.line_spacing as f64,
+            width_in_lpxs as f64,
+            line_spacing_in_lpxs as f64
         );
+        self.cell_offset_y = ((line_spacing_in_lpxs - height_in_lpxs) / 2.0) as f64;
 
         let last_added_selection =
             session.selections()[session.last_added_selection_index().unwrap()];
@@ -1073,7 +1078,7 @@ impl CodeEditor {
                             + dvec2(
                                 (1.0 - line.scale()) * -self.cell_size.x + self.gutter_rect.size.x
                                     - line.scale() * self.gutter_rect.size.x,
-                                0.0,
+                                self.cell_offset_y,
                             ),
                         &buf,
                     );
@@ -1168,7 +1173,7 @@ impl CodeEditor {
                                         self.draw_text.draw_abs(
                                             cx,
                                             DVec2 { x, y: origin_y + y } * self.cell_size
-                                                + self.viewport_rect.pos,
+                                                + self.viewport_rect.pos + self.cell_offset_y,
                                             grapheme,
                                         );
                                         byte_index += grapheme.len();
