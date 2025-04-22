@@ -4,15 +4,16 @@ use{
             linux::{
                 openxr_sys::*,
                 android::android::CxAndroidDisplay,
+                opengl::GlShader,
                 gl_sys,
                 gl_sys::LibGl,
                 android::android_jni::*
             }
         },
+        draw_shader::CxDrawShaderMapping,
         event::Event,
         event::xr::*,
         pass::{CxPassParent,PassId},
-        texture::{Texture,TextureFormat},
         cx::{Cx},
         makepad_math::Mat4,
     },
@@ -94,17 +95,6 @@ impl Cx{
         }
     }
         
-    pub (crate) fn openxr_init_textures(&mut self){
-        if self.os.openxr.depth_textures.len() == 0{
-            let session = self.os.openxr.session.as_ref().unwrap();
-            let swap_chain_len = session.color_images.len();
-            for _ in 0..swap_chain_len{
-                let texture = Texture::new_with_format(self, TextureFormat::XrDepth);
-                self.os.openxr.depth_textures.push(texture);
-            }
-        }
-    }
-        
     pub(crate) fn openxr_draw_pass_to_multiview(&mut self, pass_id:PassId, frame:&CxOpenXrFrame){
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         let session =  &self.os.openxr.session.as_ref().unwrap();
@@ -123,7 +113,13 @@ impl Cx{
         pass.pass_uniforms.camera_view = frame.eyes[0].view_mat;
         pass.pass_uniforms.camera_projection_r = frame.eyes[1].proj_mat;
         pass.pass_uniforms.camera_view_r = frame.eyes[1].view_mat;
+        
+        pass.pass_uniforms.depth_projection = frame.eyes[0].depth_proj_mat;
+        pass.pass_uniforms.depth_view = frame.eyes[0].depth_view_mat;
+        pass.pass_uniforms.depth_projection_r = frame.eyes[1].depth_proj_mat;
+        pass.pass_uniforms.depth_view_r = frame.eyes[1].depth_view_mat;
                 
+                        
         pass.os.pass_uniforms.update_uniform_buffer(self.os.gl(), pass.pass_uniforms.as_slice());
                 
         // lets bind the framebuffers
@@ -228,13 +224,16 @@ impl Cx{
                 self.call_draw_event();
                 self.opengl_compile_shaders();
             }
-                        
+            
+            // copy on the depth image
+            self.os.openxr.session.as_mut().unwrap().depth_swap_chain_index = frame.depth_image.map(|v| v.swapchain_index as usize).unwrap_or(0);
+            
             self.openxr_handle_repaint(&frame);
-                        
+            
             let openxr = &mut self.os.openxr;
             frame.end_frame(
                 openxr.libxr.as_ref().unwrap(),
-                openxr.session.as_ref().unwrap()
+                openxr.session.as_mut().unwrap()
             );
         }
     }
@@ -247,11 +246,30 @@ pub struct CxOpenXr{
     libxr: Option<LibOpenXr>,
     instance: Option<XrInstance>,
     system_id: Option<XrSystemId>,
-    depth_textures: Vec<Texture>,
     pub session: Option<CxOpenXrSession>
 }
 
 impl CxOpenXr{
+        
+    pub(crate) fn depth_texture_hook(&self, gl:&LibGl, shgl:&GlShader, mapping:&CxDrawShaderMapping){
+        // lets set the texture
+        if let Some(session) = &self.session{
+            let i = mapping.textures.len();
+            if let Some(loc) = shgl.xr_depth_texture.loc{
+                unsafe{
+                    let di = &session.depth_images[session.depth_swap_chain_index];
+                    (gl.glActiveTexture)(gl_sys::TEXTURE0 + i as u32);
+                    (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, di.image); 
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as _); 
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as _); 
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as _); 
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as _); 
+                    (gl.glUniform1i)(loc, i as i32);
+                }
+            }
+        }
+    }
+    
     pub fn create_instance(&mut self, activity_handle: jni_sys::jobject)->Result<(),String>{
         self.loader = Some(LibOpenXrLoader::try_load()?);
                 
@@ -410,6 +428,409 @@ impl CxOpenXr{
     
 }
 
+
+pub struct CxOpenXrSession{
+    pub depth_swap_chain_index: usize,
+    pub color_images: Vec<XrSwapchainImageOpenGLESKHR>,
+    pub depth_images: Vec<XrSwapchainImageOpenGLESKHR>,
+    pub gl_depth_textures: Vec<u32>,
+    pub gl_frame_buffers: Vec<u32>,
+    pub color_swap_chain: XrSwapchain,
+    pub depth_swap_chain: XrEnvironmentDepthSwapchainMETA,
+    pub depth_provider: XrEnvironmentDepthProviderMETA,
+    pub passthrough: XrPassthroughFB,
+    pub passthrough_layer: XrPassthroughLayerFB,
+    pub width: u32,
+    pub height: u32,
+    pub head_space: XrSpace,
+    pub local_space: XrSpace,
+    pub handle: XrSession,
+    pub active: bool,
+    pub inputs: CxOpenXrInputs,
+}
+
+impl CxOpenXrSession{
+            
+    pub fn create_session(
+        xr: &LibOpenXr, 
+        system_id: XrSystemId,
+        instance: XrInstance,
+        display:&CxAndroidDisplay, options:CxOpenXrOptions
+    )->Result<CxOpenXrSession,String>{
+                        
+        let gfx_binding = XrGraphicsBindingOpenGLESAndroidKHR{
+            ty: XrStructureType::GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR,
+            next: 0 as *const _,
+            display: display.egl_display,
+            config: display.egl_config,
+            context: display.egl_context,
+        };
+        let session_create = XrSessionCreateInfo{
+            ty: XrStructureType::SESSION_CREATE_INFO,
+            next: &gfx_binding as *const _ as *const _,
+            create_flags: XrSessionCreateFlags(0),
+            system_id
+        };
+                        
+        let mut session = XrSession(0);
+                        
+        unsafe{(xr.xrCreateSession)(instance, &session_create, &mut session)}.to_result("xrCreateSession")?;
+                        
+        let configs = xr_array_fetch(XrViewConfigurationType::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateViewConfigurations)(
+                instance,
+                system_id,
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateViewConfigurations")
+        })?;
+                        
+        if !configs.iter().any(|v| *v == XrViewConfigurationType::PRIMARY_STEREO){
+            return Err(format!("Could not find PRIMARY STEREO viewconfiguration"));
+        }
+                        
+        let mut config_props = XrViewConfigurationProperties::default();
+                        
+        unsafe{(xr.xrGetViewConfigurationProperties)(instance, system_id, XrViewConfigurationType::PRIMARY_STEREO, &mut  config_props)}.to_result("xrGetViewConfigurationProperties")?;
+        /*
+        crate::log!(
+            "OpenXR System Config type: {:?}, FovMutable:{}",
+            config_props.view_configuration_type,
+            config_props.fov_mutable.to_bool(),
+        );*/
+                        
+        let config_views = xr_array_fetch(XrViewConfigurationView::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateViewConfigurationViews)(
+                instance,
+                system_id,
+                XrViewConfigurationType::PRIMARY_STEREO,
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateViewConfigurationViews")
+        })?;
+                        
+        let mut head_space = XrSpace(0);
+        let head_space_info = XrReferenceSpaceCreateInfo{
+            reference_space_type: XrReferenceSpaceType::VIEW,
+            ..Default::default()
+        };
+        unsafe{(xr.xrCreateReferenceSpace)(session, &head_space_info, &mut head_space)}.to_result("xrCreateReferenceSpace")?;
+                        
+        let mut local_space = XrSpace(0);
+        let local_space_info = XrReferenceSpaceCreateInfo{
+            reference_space_type: XrReferenceSpaceType::LOCAL,
+            ..Default::default()
+        };
+        unsafe{(xr.xrCreateReferenceSpace)(session, &local_space_info, &mut local_space)}.to_result("xrCreateReferenceSpace")?;
+                                
+        let format = gl_sys::SRGB8_ALPHA8L;
+                        
+        let width = ((config_views[0].recommended_image_rect_width as f32) * options.buffer_scale) as u32;
+                        
+        let height = ((config_views[0].recommended_image_rect_height as f32) * options.buffer_scale) as u32;
+                        
+                        
+        let swap_chain_create_info = XrSwapchainCreateInfo{
+            usage_flags: 
+            XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT,
+            format: format as _,
+            width,
+            height,
+            sample_count: 1,
+            face_count:1,
+            array_size:2,
+            mip_count:1,
+            ..Default::default()
+        };
+                        
+        let mut color_swap_chain = XrSwapchain(0);
+        unsafe{(xr.xrCreateSwapchain)(session, &swap_chain_create_info, &mut color_swap_chain)}.to_result("xrCreateSwapchain")?;
+                        
+        let color_images = xr_array_fetch(XrSwapchainImageOpenGLESKHR::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateSwapchainImages)(
+                color_swap_chain,
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateSwapchainImages")
+        })?;
+                        
+        let mut passthrough = XrPassthroughFB(0);
+        let ptci = XrPassthroughCreateInfoFB{
+            ty: XrStructureType::PASSTHROUGH_CREATE_INFO_FB,
+            next: 0 as *const _,
+            flags: XrPassthroughFlagsFB(0)
+        };
+                        
+        unsafe{(xr.xrCreatePassthroughFB)(session, &ptci, &mut passthrough)}.to_result("xrCreatePassthroughFB")?;
+                        
+        let plci = XrPassthroughLayerCreateInfoFB{
+            passthrough: passthrough,
+            purpose: XrPassthroughLayerPurposeFB::RECONSTRUCTION,
+            ..Default::default()
+        };
+                        
+        let mut passthrough_layer = XrPassthroughLayerFB(0);
+        unsafe{(xr.xrCreatePassthroughLayerFB)(session, &plci, &mut passthrough_layer)}.to_result("xrCreatePassthroughLayerFB")?;
+        unsafe{(xr.xrPassthroughStartFB)(passthrough)}.to_result("xrPassthroughStartFB")?;
+        unsafe{(xr.xrPassthroughLayerResumeFB)(passthrough_layer)}.to_result("xrPassthroughLayerResumeFB")?;
+                        
+        let edpci = XrEnvironmentDepthProviderCreateInfoMETA{
+            ty: XrStructureType::ENVIRONMENT_DEPTH_PROVIDER_CREATE_INFO_META,
+            next: 0 as * const _,
+            create_flags: XrEnvironmentDepthProviderCreateFlagsMETA(0)
+        };
+                        
+        let mut depth_provider = XrEnvironmentDepthProviderMETA(0);
+        unsafe{(xr.xrCreateEnvironmentDepthProviderMETA)(session, &edpci, &mut depth_provider)}.to_result("xrCreateEnvironmentDepthProviderMETA")?;
+                        
+        let edsci = XrEnvironmentDepthSwapchainCreateInfoMETA{
+            ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_CREATE_INFO_META,
+            next: 0 as * const _,
+            create_flags: XrEnvironmentDepthSwapchainCreateFlagsMETA(0)
+        };
+                        
+        let mut depth_swap_chain = XrEnvironmentDepthSwapchainMETA(0);
+        unsafe{(xr.xrCreateEnvironmentDepthSwapchainMETA)(depth_provider, &edsci, &mut depth_swap_chain)}.to_result("xrCreateEnvironmentDepthSwapchainMETA")?;
+                        
+        let mut edss = XrEnvironmentDepthSwapchainStateMETA{
+            ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_STATE_META,
+            next: 0 as * mut _,
+            width: 0,
+            height: 0
+        };
+        unsafe{(xr.xrGetEnvironmentDepthSwapchainStateMETA)(depth_swap_chain, &mut edss)}.to_result("xrGetEnvironmentDepthSwapchainStateMETA")?;
+                        
+        let depth_images = xr_array_fetch(XrSwapchainImageOpenGLESKHR::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateEnvironmentDepthSwapchainImagesMETA)(
+                depth_swap_chain,
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateEnvironmentDepthSwapchainImagesMETA")
+        })?;
+                        
+        let swap_chain_len = color_images.len();
+        let mut gl_depth_textures = vec![0;swap_chain_len];
+        let mut gl_frame_buffers = vec![0;swap_chain_len];
+        let gl = &display.libgl;
+                        
+        // create the openGL textures
+        for i in 0..swap_chain_len{
+            let color_texture = color_images[i].image;
+            unsafe{
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, color_texture);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_BORDER as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_BORDER as i32);
+                let border_color = [0f32;4];
+                (gl.glTexParameterfv)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_BORDER_COLOR, border_color.as_ptr() as * const _);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, 0);
+                                                                    
+                // generate depth buffer
+                (gl.glGenTextures)(1, &mut gl_depth_textures[i]);
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, gl_depth_textures[i]);
+                (gl.glTexStorage3D)(gl_sys::TEXTURE_2D_ARRAY, 1, gl_sys::DEPTH_COMPONENT24, width as i32, height as i32, 2);
+                                                
+                (gl.glGenFramebuffers)(1, &mut gl_frame_buffers[i]);
+                (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, gl_frame_buffers[i]);
+                                
+                if options.multisamples > 1{
+                                                                            
+                    (gl.glFramebufferTextureMultisampleMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::DEPTH_ATTACHMENT,
+                        gl_depth_textures[i],
+                        0,
+                        options.multisamples as _,
+                        0,
+                        2
+                    );
+                    (gl.glFramebufferTextureMultisampleMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::COLOR_ATTACHMENT0,
+                        color_texture,
+                        0,
+                        options.multisamples as _,
+                        0,
+                        2
+                    );
+                }
+                else{
+                                                            
+                    (gl.glFramebufferTextureMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::DEPTH_ATTACHMENT,
+                        gl_depth_textures[i],
+                        0,
+                        0,
+                        2
+                    );
+                    (gl.glFramebufferTextureMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::COLOR_ATTACHMENT0,
+                        color_texture,
+                        0,
+                        0,
+                        2
+                    );
+                }
+                (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, 0);
+            }
+        }
+        
+        unsafe{(xr.xrStartEnvironmentDepthProviderMETA)(depth_provider)}
+            .to_result("xrStartEnvironmentDepthProviderMETA")?;
+        
+        let inputs = CxOpenXrInputs::new_inputs(xr, session, instance)?;
+                
+        Ok(CxOpenXrSession{
+            color_images,
+            depth_images,
+            color_swap_chain,
+            depth_swap_chain,
+            gl_depth_textures,
+            gl_frame_buffers,
+            depth_provider,
+            passthrough,
+            passthrough_layer,
+            width,
+            height,
+            handle:session,
+            head_space,
+            local_space,
+            active:false,
+            depth_swap_chain_index: 0,
+            inputs
+        })
+    }
+            
+    pub fn destroy_session(self, xr: &LibOpenXr, gl:&LibGl)->Result<(),String>{
+        // alright lets destroy some things on the session
+        unsafe{(xr.xrStopEnvironmentDepthProviderMETA)(self.depth_provider)}
+        .log_error("xrStopEnvironmentDepthProviderMETA");
+        unsafe{(xr.xrDestroyEnvironmentDepthProviderMETA)(self.depth_provider)}
+        .log_error("xrDestroyEnvironmentDepthProviderMETA");
+        unsafe{(xr.xrPassthroughPauseFB)(self.passthrough)}
+        .log_error("xrPassthroughPauseFB");
+        unsafe{(xr.xrDestroyPassthroughFB)(self.passthrough)}
+        .log_error("xrDestroyPassthroughFB");
+        unsafe{(xr.xrDestroySwapchain)(self.color_swap_chain)}
+        .log_error("xrDestroySwapchain");
+        unsafe{(xr.xrDestroyEnvironmentDepthSwapchainMETA)(self.depth_swap_chain)}
+        .log_error("xrDestroyEnvironmentDepthSwapchainMETA");
+        unsafe{(xr.xrDestroySpace)(self.head_space)}
+        .log_error("xrDestroySpace");
+        unsafe{(xr.xrDestroySpace)(self.local_space)}
+        .log_error("xrDestroySpace");
+        unsafe{(xr.xrDestroySession)(self.handle)}
+        .log_error("xrDestroySession");
+                            
+        let swap_chain_len = self.color_images.len();
+        // destroy the GL resources
+        for i in 0..swap_chain_len{
+            unsafe{
+                (gl.glDeleteTextures)(1, &self.gl_depth_textures[i]);
+                (gl.glDeleteFramebuffers)(1, &self.gl_frame_buffers[i]);
+            }
+        }
+                            
+        Ok(())
+    }
+        
+            
+    fn begin_session(&mut self, xr: &LibOpenXr, activity_thread: u64, render_thread: u64){
+        assert!(self.active == false);
+                         
+        let session_begin_info = XrSessionBeginInfo{
+            ty: XrStructureType::SESSION_BEGIN_INFO,
+            next: 0 as * const _,
+            primary_view_configuration_type: XrViewConfigurationType::PRIMARY_STEREO,
+        };
+                        
+        if unsafe{(xr.xrBeginSession)(self.handle, &session_begin_info)} != XrResult::SUCCESS{
+            return
+        }
+                        
+        self.active = true;
+                        
+        unsafe{(xr.xrPerfSettingsSetPerformanceLevelEXT)(
+            self.handle, 
+            XrPerfSettingsDomainEXT::CPU,
+            XrPerfSettingsLevelEXT::SUSTAINED_HIGH
+        )}.log_error("xrPerfSettingsSetPerformanceLevelEXT CPU");
+                        
+        unsafe{(xr.xrPerfSettingsSetPerformanceLevelEXT)(
+            self.handle, 
+            XrPerfSettingsDomainEXT::GPU,
+            XrPerfSettingsLevelEXT::BOOST
+        )}.log_error("xrPerfSettingsSetPerformanceLevelEXT GPU");
+                        
+                        
+        unsafe{(xr.xrSetAndroidApplicationThreadKHR)(
+            self.handle, 
+            XrAndroidThreadTypeKHR::APPLICATION_MAIN,
+            activity_thread as u32
+        )}.log_error("xrSetAndroidApplicationThreadKHR");
+                        
+        unsafe{(xr.xrSetAndroidApplicationThreadKHR)(
+            self.handle, 
+            XrAndroidThreadTypeKHR::RENDERER_MAIN,
+            render_thread as u32
+        )}.log_error("xrSetAndroidApplicationThreadKHR");     
+    }
+        
+    fn end_session(&mut self, xr: &LibOpenXr){
+        unsafe{(xr.xrEndSession)(self.handle)}.log_error("xrEndSession");
+        self.active = false;
+    }
+        
+    fn new_xr_update_event(&mut self, xr: &LibOpenXr, frame:&CxOpenXrFrame)->Option<XrUpdateEvent>{
+        let predicted_display_time = frame.frame_state.predicted_display_time;
+        let local_space = self.local_space;
+                
+        let active_action_set = XrActiveActionSet{
+            action_set: self.inputs.action_set,
+            subaction_path: XrPath(0)
+        };
+                
+        let sync_info = XrActionsSyncInfo{
+            count_active_action_sets: 1,
+            active_action_sets: &active_action_set as * const _,
+            ..Default::default()
+        };
+                
+        if unsafe{(xr.xrSyncActions)(self.handle, &sync_info)} != XrResult::SUCCESS{
+            return None
+        };
+                
+        let left_controller = self.inputs.left_controller.poll(xr, self.handle, local_space, predicted_display_time);
+        let right_controller = self.inputs.right_controller.poll(xr, self.handle, local_space, predicted_display_time);
+                
+        let left_hand = self.inputs.left_hand.poll(xr, self.handle, local_space, predicted_display_time);
+        let right_hand = self.inputs.right_hand.poll(xr, self.handle, local_space, predicted_display_time);
+                        
+                
+        let new_state = Rc::new(XrState{
+            time: (frame.frame_state.predicted_display_time.as_nanos() as f64) / 1e9f64,
+            head_pose: frame.local_from_head.pose,
+            left_controller,
+            right_controller,
+            left_hand,
+            right_hand,
+        });
+        let last_state = self.inputs.last_state.clone();
+        self.inputs.last_state = new_state.clone();
+        Some(XrUpdateEvent{
+            state: new_state,
+            last: last_state
+        })
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 pub struct CxOpenXrEye{
     pub local_from_eye: XrPosef,
@@ -507,15 +928,19 @@ impl CxOpenXrFrame{
         };
                 
         let mut di = XrEnvironmentDepthImageMETA::default();
-        let depth_image = if unsafe{(xr.xrAcquireEnvironmentDepthImageMETA)(
+        let result = unsafe{(xr.xrAcquireEnvironmentDepthImageMETA)(
             session.depth_provider,
             &environment_depth_acquire_info,
             &mut di
-        )} == XrResult::SUCCESS{
+        )};
+        let depth_image = if result == XrResult::SUCCESS{
             Some(di)
         }else{
+            //crate::log!("FAIL {:?}",result);
             None
         };
+        
+        
                 
         // TODO compute depth image matrices to go into makepad world
         let mut eyes = [CxOpenXrEye::default();2];
@@ -625,417 +1050,6 @@ impl CxOpenXrFrame{
     
 }
 
-pub struct CxOpenXrSession{
-    pub color_images: Vec<XrSwapchainImageOpenGLESKHR>,
-    pub depth_images: Vec<XrSwapchainImageOpenGLESKHR>,
-    pub gl_depth_textures: Vec<u32>,
-    pub gl_frame_buffers: Vec<u32>,
-    pub color_swap_chain: XrSwapchain,
-    pub depth_swap_chain: XrEnvironmentDepthSwapchainMETA,
-    pub depth_provider: XrEnvironmentDepthProviderMETA,
-    pub passthrough: XrPassthroughFB,
-    pub passthrough_layer: XrPassthroughLayerFB,
-    pub width: u32,
-    pub height: u32,
-    pub head_space: XrSpace,
-    pub local_space: XrSpace,
-    pub handle: XrSession,
-    pub active: bool,
-    pub inputs: CxOpenXrInputs,
-}
-
-impl CxOpenXrSession{
-        
-    pub fn create_session(
-        xr: &LibOpenXr, 
-        system_id: XrSystemId,
-        instance: XrInstance,
-        display:&CxAndroidDisplay, options:CxOpenXrOptions
-    )->Result<CxOpenXrSession,String>{
-                
-        let gfx_binding = XrGraphicsBindingOpenGLESAndroidKHR{
-            ty: XrStructureType::GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR,
-            next: 0 as *const _,
-            display: display.egl_display,
-            config: display.egl_config,
-            context: display.egl_context,
-        };
-        let session_create = XrSessionCreateInfo{
-            ty: XrStructureType::SESSION_CREATE_INFO,
-            next: &gfx_binding as *const _ as *const _,
-            create_flags: XrSessionCreateFlags(0),
-            system_id
-        };
-                
-        let mut session = XrSession(0);
-                
-        unsafe{(xr.xrCreateSession)(instance, &session_create, &mut session)}.to_result("xrCreateSession")?;
-                
-        let configs = xr_array_fetch(XrViewConfigurationType::default(), |cap, len, buf|{
-            unsafe{(xr.xrEnumerateViewConfigurations)(
-                instance,
-                system_id,
-                cap,
-                len, 
-                buf
-            )}.to_result("xrEnumerateViewConfigurations")
-        })?;
-                
-        if !configs.iter().any(|v| *v == XrViewConfigurationType::PRIMARY_STEREO){
-            return Err(format!("Could not find PRIMARY STEREO viewconfiguration"));
-        }
-                
-        let mut config_props = XrViewConfigurationProperties::default();
-                
-        unsafe{(xr.xrGetViewConfigurationProperties)(instance, system_id, XrViewConfigurationType::PRIMARY_STEREO, &mut  config_props)}.to_result("xrGetViewConfigurationProperties")?;
-        /*
-        crate::log!(
-            "OpenXR System Config type: {:?}, FovMutable:{}",
-            config_props.view_configuration_type,
-            config_props.fov_mutable.to_bool(),
-        );*/
-                
-        let config_views = xr_array_fetch(XrViewConfigurationView::default(), |cap, len, buf|{
-            unsafe{(xr.xrEnumerateViewConfigurationViews)(
-                instance,
-                system_id,
-                XrViewConfigurationType::PRIMARY_STEREO,
-                cap,
-                len, 
-                buf
-            )}.to_result("xrEnumerateViewConfigurationViews")
-        })?;
-                
-        let mut head_space = XrSpace(0);
-        let head_space_info = XrReferenceSpaceCreateInfo{
-            reference_space_type: XrReferenceSpaceType::VIEW,
-            ..Default::default()
-        };
-        unsafe{(xr.xrCreateReferenceSpace)(session, &head_space_info, &mut head_space)}.to_result("xrCreateReferenceSpace")?;
-                
-        let mut local_space = XrSpace(0);
-        let local_space_info = XrReferenceSpaceCreateInfo{
-            reference_space_type: XrReferenceSpaceType::LOCAL,
-            ..Default::default()
-        };
-        unsafe{(xr.xrCreateReferenceSpace)(session, &local_space_info, &mut local_space)}.to_result("xrCreateReferenceSpace")?;
-                        
-        let format = gl_sys::SRGB8_ALPHA8L;
-                
-        let width = ((config_views[0].recommended_image_rect_width as f32) * options.buffer_scale) as u32;
-                
-        let height = ((config_views[0].recommended_image_rect_height as f32) * options.buffer_scale) as u32;
-                
-                
-        let swap_chain_create_info = XrSwapchainCreateInfo{
-            usage_flags: 
-            XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT,
-            format: format as _,
-            width,
-            height,
-            sample_count: 1,
-            face_count:1,
-            array_size:2,
-            mip_count:1,
-            ..Default::default()
-        };
-                
-        let mut color_swap_chain = XrSwapchain(0);
-        unsafe{(xr.xrCreateSwapchain)(session, &swap_chain_create_info, &mut color_swap_chain)}.to_result("xrCreateSwapchain")?;
-                
-        let color_images = xr_array_fetch(XrSwapchainImageOpenGLESKHR::default(), |cap, len, buf|{
-            unsafe{(xr.xrEnumerateSwapchainImages)(
-                color_swap_chain,
-                cap,
-                len, 
-                buf
-            )}.to_result("xrEnumerateSwapchainImages")
-        })?;
-                
-        let mut passthrough = XrPassthroughFB(0);
-        let ptci = XrPassthroughCreateInfoFB{
-            ty: XrStructureType::PASSTHROUGH_CREATE_INFO_FB,
-            next: 0 as *const _,
-            flags: XrPassthroughFlagsFB(0)
-        };
-                
-        unsafe{(xr.xrCreatePassthroughFB)(session, &ptci, &mut passthrough)}.to_result("xrCreatePassthroughFB")?;
-                
-        let plci = XrPassthroughLayerCreateInfoFB{
-            passthrough: passthrough,
-            purpose: XrPassthroughLayerPurposeFB::RECONSTRUCTION,
-            ..Default::default()
-        };
-                
-        let mut passthrough_layer = XrPassthroughLayerFB(0);
-        unsafe{(xr.xrCreatePassthroughLayerFB)(session, &plci, &mut passthrough_layer)}.to_result("xrCreatePassthroughLayerFB")?;
-        unsafe{(xr.xrPassthroughStartFB)(passthrough)}.to_result("xrPassthroughStartFB")?;
-        unsafe{(xr.xrPassthroughLayerResumeFB)(passthrough_layer)}.to_result("xrPassthroughLayerResumeFB")?;
-                
-        let edpci = XrEnvironmentDepthProviderCreateInfoMETA{
-            ty: XrStructureType::ENVIRONMENT_DEPTH_PROVIDER_CREATE_INFO_META,
-            next: 0 as * const _,
-            create_flags: XrEnvironmentDepthProviderCreateFlagsMETA(0)
-        };
-                
-        let mut depth_provider = XrEnvironmentDepthProviderMETA(0);
-        unsafe{(xr.xrCreateEnvironmentDepthProviderMETA)(session, &edpci, &mut depth_provider)}.to_result("xrCreateEnvironmentDepthProviderMETA")?;
-                
-        let edsci = XrEnvironmentDepthSwapchainCreateInfoMETA{
-            ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_CREATE_INFO_META,
-            next: 0 as * const _,
-            create_flags: XrEnvironmentDepthSwapchainCreateFlagsMETA(0)
-        };
-                
-        let mut depth_swap_chain = XrEnvironmentDepthSwapchainMETA(0);
-        unsafe{(xr.xrCreateEnvironmentDepthSwapchainMETA)(depth_provider, &edsci, &mut depth_swap_chain)}.to_result("xrCreateEnvironmentDepthSwapchainMETA")?;
-                
-        let mut edss = XrEnvironmentDepthSwapchainStateMETA{
-            ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_STATE_META,
-            next: 0 as * mut _,
-            width: 0,
-            height: 0
-        };
-        unsafe{(xr.xrGetEnvironmentDepthSwapchainStateMETA)(depth_swap_chain, &mut edss)}.to_result("xrGetEnvironmentDepthSwapchainStateMETA")?;
-                
-        let depth_images = xr_array_fetch(XrSwapchainImageOpenGLESKHR::default(), |cap, len, buf|{
-            unsafe{(xr.xrEnumerateEnvironmentDepthSwapchainImagesMETA)(
-                depth_swap_chain,
-                cap,
-                len, 
-                buf
-            )}.to_result("xrEnumerateEnvironmentDepthSwapchainImagesMETA")
-        })?;
-                
-        let swap_chain_len = color_images.len();
-        let mut gl_depth_textures = vec![0;swap_chain_len];
-        let mut gl_frame_buffers = vec![0;swap_chain_len];
-        let gl = &display.libgl;
-                
-        // create the openGL textures
-        for i in 0..swap_chain_len{
-            let color_texture = color_images[i].image;
-            unsafe{
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, color_texture);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_BORDER as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_BORDER as i32);
-                let border_color = [0f32;4];
-                (gl.glTexParameterfv)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_BORDER_COLOR, border_color.as_ptr() as * const _);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, 0);
-                                                    
-                // generate depth buffer
-                (gl.glGenTextures)(1, &mut gl_depth_textures[i]);
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, gl_depth_textures[i]);
-                (gl.glTexStorage3D)(gl_sys::TEXTURE_2D_ARRAY, 1, gl_sys::DEPTH_COMPONENT24, width as i32, height as i32, 2);
-                                
-                (gl.glGenFramebuffers)(1, &mut gl_frame_buffers[i]);
-                (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, gl_frame_buffers[i]);
-                                
-                                
-                if options.multisamples > 1{
-                                                        
-                    (gl.glFramebufferTextureMultisampleMultiviewOVR.unwrap())(
-                        gl_sys::DRAW_FRAMEBUFFER,
-                        gl_sys::DEPTH_ATTACHMENT,
-                        gl_depth_textures[i],
-                        0,
-                        options.multisamples as _,
-                        0,
-                        2
-                    );
-                    (gl.glFramebufferTextureMultisampleMultiviewOVR.unwrap())(
-                        gl_sys::DRAW_FRAMEBUFFER,
-                        gl_sys::COLOR_ATTACHMENT0,
-                        color_texture,
-                        0,
-                        options.multisamples as _,
-                        0,
-                        2
-                    );
-                }
-                else{
-                                        
-                    (gl.glFramebufferTextureMultiviewOVR.unwrap())(
-                        gl_sys::DRAW_FRAMEBUFFER,
-                        gl_sys::DEPTH_ATTACHMENT,
-                        gl_depth_textures[i],
-                        0,
-                        0,
-                        2
-                    );
-                    (gl.glFramebufferTextureMultiviewOVR.unwrap())(
-                        gl_sys::DRAW_FRAMEBUFFER,
-                        gl_sys::COLOR_ATTACHMENT0,
-                        color_texture,
-                        0,
-                        0,
-                        2
-                    );
-                }
-                (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, 0);
-            }
-        }
-        let inputs = CxOpenXrInputs::new_inputs(xr, session, instance)?;
-        
-        Ok(CxOpenXrSession{
-            color_images,
-            depth_images,
-            color_swap_chain,
-            depth_swap_chain,
-            gl_depth_textures,
-            gl_frame_buffers,
-            depth_provider,
-            passthrough,
-            passthrough_layer,
-            width,
-            height,
-            handle:session,
-            head_space,
-            local_space,
-            active:false,
-            inputs
-        })
-        /*
-        for view in config_views{
-            crate::log!(
-                "OpenXR view rec_width:{}  rec_height:{}, rec_sample_count: {}",
-                view.recommended_image_rect_width, 
-                view.recommended_image_rect_height,
-                view.recommended_swapchain_sample_count,
-            );
-            crate::log!(
-                "OpenXR view max_width:{} max_height:{}, max_sample_count: {}",
-                view.max_image_rect_width, 
-                view.max_image_rect_height,
-                view.max_swapchain_sample_count,
-            );
-        }*/
-    }
-        
-    pub fn destroy_session(self, xr: &LibOpenXr, gl:&LibGl)->Result<(),String>{
-        // alright lets destroy some things on the session
-        unsafe{(xr.xrStopEnvironmentDepthProviderMETA)(self.depth_provider)}
-        .log_error("xrStopEnvironmentDepthProviderMETA");
-        unsafe{(xr.xrDestroyEnvironmentDepthProviderMETA)(self.depth_provider)}
-        .log_error("xrDestroyEnvironmentDepthProviderMETA");
-        unsafe{(xr.xrPassthroughPauseFB)(self.passthrough)}
-        .log_error("xrPassthroughPauseFB");
-        unsafe{(xr.xrDestroyPassthroughFB)(self.passthrough)}
-        .log_error("xrDestroyPassthroughFB");
-        unsafe{(xr.xrDestroySwapchain)(self.color_swap_chain)}
-        .log_error("xrDestroySwapchain");
-        unsafe{(xr.xrDestroyEnvironmentDepthSwapchainMETA)(self.depth_swap_chain)}
-        .log_error("xrDestroyEnvironmentDepthSwapchainMETA");
-        unsafe{(xr.xrDestroySpace)(self.head_space)}
-        .log_error("xrDestroySpace");
-        unsafe{(xr.xrDestroySpace)(self.local_space)}
-        .log_error("xrDestroySpace");
-        unsafe{(xr.xrDestroySession)(self.handle)}
-        .log_error("xrDestroySession");
-                    
-        let swap_chain_len = self.color_images.len();
-        // destroy the GL resources
-        for i in 0..swap_chain_len{
-            unsafe{
-                (gl.glDeleteTextures)(1, &self.gl_depth_textures[i]);
-                (gl.glDeleteFramebuffers)(1, &self.gl_frame_buffers[i]);
-            }
-        }
-                    
-        Ok(())
-    }
-    
-        
-    fn begin_session(&mut self, xr: &LibOpenXr, activity_thread: u64, render_thread: u64){
-        assert!(self.active == false);
-                 
-        let session_begin_info = XrSessionBeginInfo{
-            ty: XrStructureType::SESSION_BEGIN_INFO,
-            next: 0 as * const _,
-            primary_view_configuration_type: XrViewConfigurationType::PRIMARY_STEREO,
-        };
-                
-        if unsafe{(xr.xrBeginSession)(self.handle, &session_begin_info)} != XrResult::SUCCESS{
-            return
-        }
-                
-        self.active = true;
-                
-        unsafe{(xr.xrPerfSettingsSetPerformanceLevelEXT)(
-            self.handle, 
-            XrPerfSettingsDomainEXT::CPU,
-            XrPerfSettingsLevelEXT::SUSTAINED_HIGH
-        )}.log_error("xrPerfSettingsSetPerformanceLevelEXT CPU");
-                
-        unsafe{(xr.xrPerfSettingsSetPerformanceLevelEXT)(
-            self.handle, 
-            XrPerfSettingsDomainEXT::GPU,
-            XrPerfSettingsLevelEXT::BOOST
-        )}.log_error("xrPerfSettingsSetPerformanceLevelEXT GPU");
-                
-                
-        unsafe{(xr.xrSetAndroidApplicationThreadKHR)(
-            self.handle, 
-            XrAndroidThreadTypeKHR::APPLICATION_MAIN,
-            activity_thread as u32
-        )}.log_error("xrSetAndroidApplicationThreadKHR");
-                
-        unsafe{(xr.xrSetAndroidApplicationThreadKHR)(
-            self.handle, 
-            XrAndroidThreadTypeKHR::RENDERER_MAIN,
-            render_thread as u32
-        )}.log_error("xrSetAndroidApplicationThreadKHR");     
-    }
-    
-    fn end_session(&mut self, xr: &LibOpenXr){
-        unsafe{(xr.xrEndSession)(self.handle)}.log_error("xrEndSession");
-        self.active = false;
-    }
-    
-    fn new_xr_update_event(&mut self, xr: &LibOpenXr, frame:&CxOpenXrFrame)->Option<XrUpdateEvent>{
-        let predicted_display_time = frame.frame_state.predicted_display_time;
-        let local_space = self.local_space;
-        
-        let active_action_set = XrActiveActionSet{
-            action_set: self.inputs.action_set,
-            subaction_path: XrPath(0)
-        };
-        
-        let sync_info = XrActionsSyncInfo{
-            count_active_action_sets: 1,
-            active_action_sets: &active_action_set as * const _,
-            ..Default::default()
-        };
-        
-        if unsafe{(xr.xrSyncActions)(self.handle, &sync_info)} != XrResult::SUCCESS{
-            return None
-        };
-        
-        let left_controller = self.inputs.left_controller.poll(xr, self.handle, local_space, predicted_display_time);
-        let right_controller = self.inputs.right_controller.poll(xr, self.handle, local_space, predicted_display_time);
-        
-        let left_hand = self.inputs.left_hand.poll(xr, self.handle, local_space, predicted_display_time);
-        let right_hand = self.inputs.right_hand.poll(xr, self.handle, local_space, predicted_display_time);
-                
-        
-        let new_state = Rc::new(XrState{
-            time: (frame.frame_state.predicted_display_time.as_nanos() as f64) / 1e9f64,
-            head_pose: frame.local_from_head.pose,
-            left_controller,
-            right_controller,
-            left_hand,
-            right_hand,
-        });
-        let last_state = self.inputs.last_state.clone();
-        self.inputs.last_state = new_state.clone();
-        Some(XrUpdateEvent{
-            state: new_state,
-            last: last_state
-        })
-    }
-}
 
 pub struct CxOpenXrOptions{
     pub buffer_scale: f32,
