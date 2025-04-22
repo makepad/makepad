@@ -45,17 +45,20 @@ live_design! {
     SlideshowButton = <Button> {
         width: 50,
         height: Fill,
-        icon_walk: { width: 9 },
+        grab_key_focus: false,
         draw_bg: {
             color: #fff0,
             color_down: #fff2,
         }
+        icon_walk: { width: 9 },
         text: ""
     }
 
     SlideshowOverlay = <View> {
         height: Fill,
         width: Fill,
+        cursor: Arrow,
+        capture_overload: true,
 
         left = <SlideshowButton> {
             draw_icon: { svg_file: (LEFT_ARROW) }
@@ -75,10 +78,7 @@ live_design! {
             fit: Biggest,
             source: (PLACEHOLDER)
         }
-
-        overlay = <SlideshowOverlay> {
-            cursor: Arrow,
-        }
+        overlay = <SlideshowOverlay> {}
     }
 
     App = {{App}} {
