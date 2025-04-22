@@ -132,7 +132,8 @@ pub enum Event {
     AppLostFocus,
     NextFrame(NextFrameEvent),
     XrUpdate(XrUpdateEvent),
-
+    XrLocal(XrLocalEvent),
+    
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
@@ -296,6 +297,7 @@ impl Event{
             52=>"ToWasmMsg",
             
             53=>"DesignerPick",
+            54=>"XrLocal",
             _=>panic!()
         }
     }
@@ -368,6 +370,7 @@ impl Event{
             Self::ToWasmMsg(_)=>52,
             
             Self::DesignerPick(_) =>53,
+            Self::XrLocal(_)=>54
         }
     }
 
