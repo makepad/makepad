@@ -132,7 +132,7 @@ live_design! {
                         self.down
                     )
                 )
-                return sdf.result
+                return depth_clip(self.world, sdf.result, self.depth_clip);
             }
         }
         
