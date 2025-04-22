@@ -408,7 +408,6 @@ impl Widget for Window {
         }
                 
         if let Event::ClearAtlasses = event {
-            CxDraw::reset_fonts_atlas(cx);
             CxDraw::reset_icon_atlas(cx);
         }
         
