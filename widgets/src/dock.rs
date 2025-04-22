@@ -7,7 +7,7 @@ use crate::{
     splitter::{SplitterAction, Splitter, SplitterAlign, SplitterAxis},
     tab_bar::{TabBarAction, TabBar},
 };
-
+const OLD_UNIQUE_ID_PREFIX: &str = "Old Unique ";
 live_design!{
     link widgets;
     use link::theme::*;
@@ -907,8 +907,39 @@ impl Dock {
     }
 
     pub fn load_state(&mut self, cx: &mut Cx, dock_items: HashMap<LiveId, DockItem>) {
+        // Change unique ids in the hashmap's keys to strings so as to prevent them from being overwritten by LiveId::unique();
+        // When loading the dock state in a new instance, UNIQUE_LIVE_ID is AtomicU64::new(1).
+        // Dragging a tab to form a Splitter could create an split with an existing unique id, causing the previous split to be overwritten.
+        let processed_dock_items: HashMap<LiveId, DockItem> = dock_items.into_iter()
+            .map(|(k, mut v)| {
+                let new_key = if k.is_unique() {
+                    LiveId::from_str(&format!("{} {:?}", OLD_UNIQUE_ID_PREFIX, k.0))
+                } else { 
+                    k 
+                };
+                match &mut v {
+                    DockItem::Splitter { a, b, .. } => {
+                        if a.is_unique() {
+                            *a = LiveId::from_str(&format!("{} {:?}", OLD_UNIQUE_ID_PREFIX, a.0));
+                        }
+                        if b.is_unique() {
+                            *b = LiveId::from_str(&format!("{} {:?}", OLD_UNIQUE_ID_PREFIX, b.0));
+                        }
+                    }
+                    DockItem::Tabs { tabs, selected: _, closable: _ } => {
+                        tabs.iter_mut().for_each(|t| {
+                            if t.is_unique() {
+                                *t = LiveId::from_str(&format!("{} {:?}", OLD_UNIQUE_ID_PREFIX, t.0));
+                            }
+                        })
+                    }
+                    _ => {}
+                };
+                (new_key, v)
+            })
+            .collect();
         //log!("{:#?}", self.dock_items);
-        self.dock_items = dock_items;
+        self.dock_items = processed_dock_items;
         self.items.clear();
         self.tab_bars.clear();
         self.splitters.clear();
