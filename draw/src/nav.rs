@@ -3,7 +3,7 @@ use {
     std::rc::Rc,
     std::cell::RefCell,
     crate::{
-        cx_2d::Cx2d,
+        cx_draw::CxDraw,
         makepad_platform::Area,
         makepad_platform::DrawListId,
         makepad_platform::Margin,
@@ -68,7 +68,7 @@ pub enum NavRole {
     Slider,
 }
 
-impl<'a> Cx2d<'a> {
+impl<'a> CxDraw<'a> {
     
     pub fn lazy_construct_nav_tree(cx: &mut Cx) {
         // ok lets fetch/instance our CxFontsAtlasRc

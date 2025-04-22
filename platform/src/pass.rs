@@ -136,6 +136,12 @@ impl Pass {
     
     pub fn pass_id(&self) -> PassId {PassId(self.0.id)}
     
+        
+    pub fn set_as_xr_pass(&self, cx: &mut Cx) {
+        let cxpass = &mut cx.passes[self.pass_id()];
+        cxpass.parent = CxPassParent::Xr;
+    }
+    
     pub fn set_pass_parent(&self, cx: &mut Cx, pass: &Pass) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.parent = CxPassParent::Pass(pass.pass_id());
@@ -245,6 +251,10 @@ pub struct PassUniforms {
     pub camera_projection_r: Mat4,
     pub camera_view: Mat4,
     pub camera_view_r: Mat4,
+    pub depth_projection: Mat4,
+    pub depth_projection_r: Mat4,
+    pub depth_view: Mat4,
+    pub depth_view_r: Mat4,
     pub camera_inv: Mat4,
     pub dpi_factor: f32,
     pub dpi_dilate: f32,
@@ -315,6 +325,7 @@ impl Default for CxPass {
 
 #[derive(Clone, Debug)]
 pub enum CxPassParent {
+    Xr,
     Window(WindowId),
     Pass(PassId),
     None

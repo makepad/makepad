@@ -26,7 +26,8 @@ live_design!{
                             let angle = atan(uv.y, uv.x);
                             let color1 = mix(#f00, #00f, 0.5 + 10.5 * cos(angle + self.time));
                             let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
-                            return mix(color1, color2, radius);
+                            let color = mix(color1, color2, radius);
+                            return depth_clip(self.world, color, self.depth_clip);
                         }
                     }
                     button_1 = <Button> {
@@ -40,7 +41,7 @@ live_design!{
                         draw_text:{color:#fff, text_style:{font_size:28}}
                     }
                     button_2 = <Button> {
-                        text: "Click me 345"
+                        text: "Click me 345 1234"
                         draw_text:{color:#fff, text_style:{font_size:28}}
                     }
                 }
@@ -82,7 +83,7 @@ impl MatchEvent for App{
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::XrUpdate(e) = event{
+        if let Event::XrUpdate(_e) = event{
             //log!("{:?}", e.now.left.trigger.analog);
         }
         self.match_event(cx, event);

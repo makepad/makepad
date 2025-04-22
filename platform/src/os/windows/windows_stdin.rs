@@ -45,6 +45,7 @@ impl Cx {
         self.repaint_id += 1;
         for &pass_id in &passes_todo {
             match self.passes[pass_id].parent.clone() {
+                CxPassParent::Xr => {}
                 CxPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
                     let window = &mut windows[window_id.id()];

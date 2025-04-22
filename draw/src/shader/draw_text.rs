@@ -7,8 +7,6 @@ use {
     unicode_segmentation::UnicodeSegmentation,
 };
 
-const ZBIAS_STEP: f32 = 0.00001;
-
 live_design!{
     use link::shaders::*;
     pub DrawText = {{DrawText}} {
@@ -1206,7 +1204,7 @@ impl DrawText {
             self.rect_size = padded_glyph_size_lpx.into();
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
 
-            self.char_depth += ZBIAS_STEP;
+            self.char_depth += cx.micro_zbias_step();
 
             // Advance to the next position.
             position.x += advance_width;

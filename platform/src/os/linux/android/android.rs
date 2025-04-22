@@ -160,13 +160,11 @@ impl Cx {
                 
                 if self.os.in_xr_mode && self.os.openxr.session.is_none(){
                     if let Err(e) = self.os.openxr.create_session(self.os.display.as_ref().unwrap(),CxOpenXrOptions{
-                        buffer_scale: 2.0,
-                        multisamples: 4
+                        buffer_scale: 1.5,
+                        multisamples: 4,
+                        remove_hands_from_depth: true
                     }){
                         crate::error!("OpenXR create_xr_session failed: {}", e);
-                    }
-                    else{
-                        self.openxr_init_textures();
                     }
                 }
                 
@@ -822,6 +820,9 @@ impl Cx {
         for pass_id in &passes_todo {
             self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Xr=>{
+                    // cant happen
+                }
                 CxPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
                     let start = self.seconds_since_app_start();
@@ -980,6 +981,15 @@ impl CxOsApi for Cx {
     
     fn in_xr_mode(&self)->bool{
         self.os.in_xr_mode
+    }
+    
+    fn micro_zbias_step(&self)->f32{
+        if self.os.in_xr_mode{
+            -0.00001
+        }
+        else{
+            0.00001
+        }
     }
 }
 

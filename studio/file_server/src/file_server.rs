@@ -118,7 +118,11 @@ impl FileServerConnection {
                             }
                             
                             let entry_string_name = entry.file_name().to_string_lossy().to_string();
-                            let entry_string_path = if string_path != ""{format!("{}/{}", string_path, entry_string_name)}else {entry_string_name};
+                            let entry_string_path = if string_path != ""{
+                                format!("{}/{}", string_path, entry_string_name)
+                            }else {
+                                entry_string_name
+                            };
                             
                             if entry_path.is_dir() {
                                 search_files(id, set, &entry_path, &entry_string_path, sender, last_send, results);
@@ -133,6 +137,9 @@ impl FileServerConnection {
                                     }
                                     for item in set{
                                         let needle_bytes = item.needle.as_bytes();
+                                        if needle_bytes.len()==0{
+                                            continue;
+                                        }
                                         makepad_rabin_karp::search(&bytes, &needle_bytes, &mut rk_results);
                                         for result in &rk_results{
                                             

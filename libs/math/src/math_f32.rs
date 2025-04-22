@@ -70,7 +70,7 @@ impl Pose {
     pub fn to_mat4(&self) -> Mat4 {
         
         let q = self.orientation;
-        let t = self.position;
+        let t = self.position;/*
         Mat4 {v: [
             (1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z),
             (2.0 * q.x * q.y - 2.0 * q.z * q.w),
@@ -87,6 +87,24 @@ impl Pose {
             0.0,
             0.0,
             0.0,
+            1.0
+        ]}*/
+        Mat4 {v: [
+            (1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z),
+            (2.0 * q.x * q.y + 2.0 * q.z * q.w),
+            (2.0 * q.x * q.z - 2.0 * q.y * q.w),
+            0.0,
+            (2.0 * q.x * q.y - 2.0 * q.z * q.w),
+            (1.0 - 2.0 * q.x * q.x - 2.0 * q.z * q.z),
+            (2.0 * q.y * q.z + 2.0 * q.x * q.w),
+            0.0,
+            (2.0 * q.x * q.z + 2.0 * q.y * q.w),
+            (2.0 * q.y * q.z - 2.0 * q.x * q.w),
+            (1.0 - 2.0 * q.x * q.x - 2.0 * q.y * q.y),
+            0.0,
+            t.x,
+            t.y,
+            t.z,
             1.0
         ]}
     }
@@ -838,7 +856,28 @@ impl Mat4 {
         ]}
         
     }
-    
+        
+    pub const fn scale(s: f32) -> Mat4 {
+        Mat4 {v: [
+            s,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            s,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            s,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0
+        ]}
+                
+    }
     pub fn rotation(rx: f32, ry: f32, rz: f32) -> Mat4 {
         const TORAD: f32 = 0.017453292;
         let cx = f32::cos(rx * TORAD);
@@ -920,6 +959,7 @@ impl Mat4 {
         // this is probably stupid. Programmed JS for too long.
         let a = &a.v;
         let b = &b.v;
+        #[inline]
         fn d(i: &[f32; 16], x: usize, y: usize) -> f32 {i[x + 4 * y]}
         Mat4 {
             v: [
