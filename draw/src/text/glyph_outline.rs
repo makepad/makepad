@@ -16,32 +16,16 @@ pub struct GlyphOutline {
 }
 
 impl GlyphOutline {
-    pub fn origin_in_dpxs(&self, dpxs_per_em: f32) -> Point<f32> {
-        self.bounds
-            .origin
-            .apply_transform(Transform::from_scale_uniform(
-                dpxs_per_em / self.units_per_em,
-            ))
+    pub fn origin_in_ems(&self) -> Point<f32> {
+        self.bounds.origin / self.units_per_em
     }
 
-    pub fn size_in_dpxs(&self, dpxs_per_em: f32) -> Size<f32> {
-        self.bounds
-            .size
-            .apply_transform(Transform::from_scale_uniform(
-                dpxs_per_em / self.units_per_em,
-            ))
+    pub fn size_in_ems(&self) -> Size<f32> {
+        self.bounds.size / self.units_per_em
     }
 
-    pub fn bounds_in_dpxs(&self, dpxs_per_em: f32) -> Rect<f32> {
-        Rect::new(
-            self.origin_in_dpxs(dpxs_per_em),
-            self.size_in_dpxs(dpxs_per_em),
-        )
-    }
-
-    pub fn image_size(&self, dpxs_per_em: f32) -> Size<usize> {
-        let size = self.size_in_dpxs(dpxs_per_em);
-        Size::new(size.width.ceil() as usize, size.height.ceil() as usize)
+    pub fn bounds_in_ems(&self) -> Rect<f32> {
+        Rect::new(self.origin_in_ems(), self.size_in_ems())
     }
 
     pub fn rasterize(&self, dpxs_per_em: f32, output: &mut SubimageMut<R>) {
