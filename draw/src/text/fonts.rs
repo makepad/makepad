@@ -117,7 +117,7 @@ impl Fonts {
                 data[dst_y * size.width + dst_x] = pixel.r;
             }
         }
-        
+
         self.grayscale_texture.put_back_vec_u8(
             cx,
             data,
