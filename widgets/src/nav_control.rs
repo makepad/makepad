@@ -27,7 +27,7 @@ live_design!{
 pub struct NavControl {
     #[live] draw_list: DrawList2d,
     #[live] draw_focus: DrawQuad,
-    #[live] draw_text: DrawText2,
+    #[live] draw_text: DrawText,
     #[rust] _recent_focus: Area,
 }
 

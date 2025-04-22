@@ -50,7 +50,7 @@ pub use crate::{
         draw_icon::DrawIcon,
         draw_quad::DrawQuad,
         draw_line::DrawLine,
-        draw_text_2::DrawText2,
+        draw_text::DrawText,
         draw_color::DrawColor,
     },
     geometry::{
@@ -65,7 +65,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::shader::draw_cube::live_design(cx);
     crate::shader::draw_color::live_design(cx);
     crate::shader::draw_icon::live_design(cx);
-    crate::shader::draw_text_2::live_design(cx);
+    crate::shader::draw_text::live_design(cx);
     crate::shader::draw_line::live_design(cx);
     crate::shader::std::live_design(cx);
     crate::shader::draw_trapezoid::live_design(cx);
