@@ -133,7 +133,6 @@ impl FileServerConnection {
                                     }
                                     for item in set{
                                         let needle_bytes = item.needle.as_bytes();
-                                        let needle_bytes = item.needle.as_bytes();
                                         if needle_bytes.len()==0{
                                             continue;
                                         }
