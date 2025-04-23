@@ -13,7 +13,70 @@ live_design! {
     use crate::scroll_bar::ScrollBar;
 
     pub List = {{List}} {
-        scroll_bar: <ScrollBar> {}
+        scroll_bar: <ScrollBar> {
+            bar_size: 15.0
+
+                draw_bg: {
+                    instance drag: 0.0
+                    instance hover: 0.0
+
+                    uniform size: 6.0
+                    uniform border_size: 1.0
+                    uniform border_radius: 1.5
+
+                    uniform color: #1F1F1F80
+                    uniform color_hover: #09090980
+                    uniform color_drag: #00000080
+
+                    uniform border_color: #00000080
+                    uniform border_color_hover: #00000080
+                    uniform border_color_drag: #00000080
+
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                        if self.is_vertical > 0.5 {
+                            sdf.box(
+                                1.,
+                                self.rect_size.y * self.norm_scroll,
+                                self.size,
+                                self.rect_size.y * self.norm_handle,
+                                self.border_radius
+                            );
+                        }
+                        else {
+                            sdf.box(
+                                self.rect_size.x * self.norm_scroll,
+                                1.,
+                                self.rect_size.x * self.norm_handle,
+                                self.size,
+                                self.border_radius
+                            );
+                        }
+
+                        sdf.fill_keep(mix(
+                            self.color,
+                            mix(
+                                self.color_hover,
+                                self.color_drag,
+                                self.drag
+                            ),
+                            self.hover
+                        ));
+
+                        sdf.stroke(mix(
+                            self.border_color,
+                            mix(
+                                self.border_color_hover,
+                                self.border_color_drag,
+                                self.drag
+                            ),
+                            self.hover
+                        ), self.border_size);
+
+                        return sdf.result
+                    }
+                }
+        }
     }
 }
 
