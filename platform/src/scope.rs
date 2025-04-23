@@ -78,7 +78,7 @@ impl<'a,'b> Scope<'a,'b>{
         }
     }
         
-    pub fn with_data_props<T: Any + Sized>(v: &'a mut T, w: &'b T)->Self{
+    pub fn with_data_props<T: Any + Sized, U: Any + Sized>(v: &'a mut T, w: &'b U)->Self{
         Self{
             path:HeapLiveIdPath::default(),
             data:ScopeDataMut(Some(v)),
