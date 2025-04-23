@@ -206,7 +206,7 @@ impl App {
         let image = self.ui.image(id!(slideshow.image));
         if let Some(image_idx) = self.state.current_image_idx {
             let image_path = &self.state.image_paths[image_idx];
-            image.load_image_file_by_path(cx, &image_path).unwrap();
+            image.load_image_file_by_path_async(cx, &image_path).unwrap();
         } else {
             image
                 .load_image_dep_by_path(
