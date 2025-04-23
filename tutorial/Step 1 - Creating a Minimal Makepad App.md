@@ -70,7 +70,9 @@ pub struct App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        self.match_event(cx, event);
+        self.ui
+            .handle_event(cx, event, &mut Scope::with_data(&mut self.state));
     }
 }
  
@@ -166,7 +168,7 @@ In contrast, when the live design systems encounters a field marked with the `#[
 In our case, we mark the `ui` field of the `App` struct with the `#[live]` attribute. Since we have a corresponding definition for this field in the DSL, the live design system automatically populates it with the `Root` widget, as defined in the DSL. From there, the rest of the widget tree — `Window`, `View`, etc. — is built out based on the definitions in the DSL.
 
 #### Deriving the `LiveHook` trait
-The `LiveHook` trait provides several overridable methods which will be called at various points during our app's lifetime. We don't need any of these methods right now, so we could just define an empty implementation of the `LiveHook` for the `App` struct:
+The `LiveHook` trait provides several overridable methods that will be called at various points during our app's lifetime. We don't need any of these methods right now, so we could just define an empty implementation of the `LiveHook` for the `App` struct:
 ```
 impl LiveHook for App {}
 ```
