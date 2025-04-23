@@ -70,15 +70,15 @@ impl Widget for XrHands {
         // lets draw all the fingers
         for hand in [&xr_state.left_hand, &xr_state.right_hand]{
             if hand.in_view{
-                for (index,joint) in hand.joints.iter().enumerate(){
-                    if XrHand::is_tip(index){
-                        self.cube.cube_size = vec3(0.01,0.01,0.005);
-                        self.cube.color = vec4(1.0,0.0,0.0,1.0)
-                    }
-                    else {
+                for (_index,joint) in hand.joints.iter().enumerate(){
+                    //if XrHand::is_tip(index){
+                    //    self.cube.cube_size = vec3(0.01,0.01,0.005);
+                    //    self.cube.color = vec4(1.0,0.0,0.0,1.0)
+                    //}
+                    //else {
                         self.cube.cube_size = vec3(0.01,0.01,0.015);
-                        self.cube.color = vec4(1.0,1.0,1.0,1.0)
-                    }
+                        self.cube.color = vec4(1.0,1.0,1.0,1.0);
+                    //}
                     let mat = joint.pose.to_mat4();
                     self.cube.transform = mat;
                     self.cube.draw(cx);

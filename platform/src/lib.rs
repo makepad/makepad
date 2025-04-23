@@ -199,7 +199,7 @@ pub use {
             WindowClosedEvent,
             WindowDragQueryResponse,
             WindowDragQueryEvent,
-            XrButton,
+            XrFloatButton,
             XrController,
             XrHand,
             XrState,
