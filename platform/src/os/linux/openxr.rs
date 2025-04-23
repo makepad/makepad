@@ -1111,16 +1111,30 @@ impl CxOpenXrHand{
         // alrighty lets convert the joints to our XrHand
         let mut hand = XrHand::default();
         let mut hand_in_view = false;
+        let mut s = 0;
         for i in 0..self.joint_locations.len(){
-            hand.joints[i] = XrHandJoint{
+            let tracked = self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_TRACKED) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_TRACKED);
+            
+            // we're going to skip the tips and only store the distance
+            if i == 5 || i == 10 || i == 15 || i ==20 || i == 25{
+                // only store the distance to the tip so we can fit the entire
+                // tracked quest state in a UDP packet :)
+                let d = self.joint_locations[i].pose.position - self.joint_locations[i-1].pose.position;
+                hand.tips[i/5-1] = d.length();
+                continue;
+            }
+            
+            hand.joints[s] = XrHandJoint{
                 pose: self.joint_locations[i].pose,
-                valid: 
-                    self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_VALID) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_VALID)
+                /*
+                valid: self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_VALID) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_VALID)
                 ,
                 tracked: 
                 self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_TRACKED) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_TRACKED)
+                 */     
             };
-            if hand.joints[i].tracked{
+            s += 1;
+            if tracked{
                 hand_in_view = true
             }
         }
@@ -1154,7 +1168,6 @@ impl CxOpenXrController{
         let grip_state = XrActionStatePose::get(xr, session, self.grip_pose_action, self.path);
         let aim_state = XrActionStatePose::get(xr, session, self.aim_pose_action, self.path);
         XrController{
-            active: aim_state.is_active.as_bool(),
             grip_pose:  if grip_state.is_active.as_bool(){
                 XrSpaceLocation::locate(xr, local_space, time, self.grip_space).pose
             }
@@ -1167,19 +1180,18 @@ impl CxOpenXrController{
             else{
                 XrSpaceLocation::locate(xr, local_space, time, self.detached_aim_space).pose
             },
-            trigger: XrButton{
+            trigger: XrFloatButton{
+                value: trigger.current_state,
+                /*
                 last_change_time: trigger.last_change_time.as_secs_f64(),
                 analog: trigger.current_state,
                 pressed: trigger.current_state > 0.5,
                 touched: trigger.is_active.as_bool(),
-                last_pressed: false
+                last_pressed: false*/
             },
-            grip: XrButton::default(),
-            a: XrButton::default(),
-            b: XrButton::default(),
-            x: XrButton::default(),
-            y: XrButton::default(),
-            menu: XrButton::default(),
+            grip: XrFloatButton::default(),
+            buttons: 
+                if aim_state.is_active.as_bool(){XrController::ACTIVE}else{0},
             stick: XrStick::default(),            
         }
     }

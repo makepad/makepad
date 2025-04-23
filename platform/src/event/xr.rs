@@ -11,6 +11,7 @@ use {
         CxWindowPool,
         DigitDevice,
         KeyModifiers,
+        makepad_micro_serde::*,
         makepad_math::*,
         LiveId,
         makepad_live_id::{live_id_num},
@@ -18,52 +19,61 @@ use {
     std::rc::Rc,
 };
 
-#[derive(Clone, Debug, Default)]
-pub struct XrButton {
-    pub analog: f32,
-    pub pressed: bool,
-    pub last_change_time: f64,
-    pub last_pressed: bool,
-    pub touched: bool,
+#[derive(Clone, Debug, Default, SerBin, DeBin)]
+pub struct XrFloatButton {
+    pub value: f32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrStick {
     pub x: f32,
     pub y: f32,
-    pub pressed: bool,
-    pub touched: bool,
-    pub last: bool
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrController {
-    pub active: bool,
     pub grip_pose: Pose,
     pub aim_pose: Pose,
-    pub trigger: XrButton,
-    pub grip: XrButton,
-    pub a: XrButton,
-    pub b: XrButton,
-    pub x: XrButton,
-    pub y: XrButton,
-    pub menu: XrButton,
+    pub trigger: XrFloatButton,
+    pub grip: XrFloatButton,
+    pub buttons: u16,
     pub stick: XrStick,
 }
 
+impl XrController{
+    pub const ACTIVE: u16 = 1<<0;
+    pub const X: u16 = 1<<1;
+    pub const Y: u16 = 1<<2;
+    pub const A: u16 = 1<<3;
+    pub const B: u16 = 1<<4;
+    pub const MENU: u16 = 1<<5;
+    pub const ON_X: u16 = 1<<6;
+    pub const ON_Y: u16 = 1<<7;
+    pub const ON_A: u16 = 1<<8;
+    pub const ON_B: u16 = 1<<9;
+    pub const ON_STICK: u16 = 1<<10;
+    pub fn x(&self)->bool{self.buttons & Self::X != 0}
+    pub fn y(&self)->bool{self.buttons & Self::Y != 0}
+    pub fn a(&self)->bool{self.buttons & Self::A != 0}
+    pub fn b(&self)->bool{self.buttons & Self::B != 0}
+    pub fn on_x(&self)->bool{self.buttons & Self::ON_X != 0}
+    pub fn on_y(&self)->bool{self.buttons & Self::ON_Y != 0}
+    pub fn on_a(&self)->bool{self.buttons & Self::ON_A != 0}
+    pub fn on_b(&self)->bool{self.buttons & Self::ON_B != 0}
+    pub fn on_stick(&self)->bool{self.buttons & Self::ON_STICK != 0}
+    pub fn menu(&self)->bool{self.buttons & Self::MENU != 0}
+}
 
-
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrHandJoint{
-    pub tracked: bool,
-    pub valid: bool,
     pub pose: Pose
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrHand{
     pub in_view: bool,
-    pub joints: [XrHandJoint;Self::JOINT_COUNT]
+    pub joints: [XrHandJoint;Self::JOINT_COUNT],
+    pub tips: [f32;5],
 }
 
 impl Event{
@@ -71,18 +81,30 @@ impl Event{
 }
 
 impl XrHand{
-    
-    pub fn is_tip(id:usize)->bool{
-        match id{
-            Self::THUMB_TIP |
-            Self::INDEX_TIP |
-            Self::MIDDLE_TIP|
-            Self::RING_TIP |
-            Self::PINKY_TIP=>true,
-            _=>false
-        }
-    }
-    
+
+    pub const JOINT_COUNT: usize = 21;
+    pub const CENTER: usize = 0;
+    pub const WRIST: usize = 1;
+    pub const THUMB_BASE: usize = 2;
+    pub const THUMB_KNUCKLE1: usize = 3;
+    pub const THUMB_KNUCKLE2: usize = 4;
+    pub const INDEX_BASE: usize = 5;
+    pub const INDEX_KNUCKLE1: usize = 6;
+    pub const INDEX_KNUCKLE2: usize = 7;
+    pub const INDEX_KNUCKLE3: usize = 8;
+    pub const MIDDLE_BASE: usize = 9;
+    pub const MIDDLE_KNUCKLE1: usize = 10;
+    pub const MIDDLE_KNUCKLE2: usize = 11;
+    pub const MIDDLE_KNUCKLE3: usize = 12;
+    pub const RING_BASE: usize = 13;
+    pub const RING_KNUCKLE1: usize = 14;
+    pub const RING_KNUCKLE2: usize = 15;
+    pub const RING_KNUCKLE3: usize = 16;
+    pub const PINKY_BASE: usize = 17;
+    pub const PINKY_KNUCKLE1: usize = 18;
+    pub const PINKY_KNUCKLE2: usize = 19;
+    pub const PINKY_KNUCKLE3: usize = 20;
+    /*
     pub const JOINT_COUNT: usize = 26;
     pub const CENTER: usize = 0;
     pub const WRIST: usize = 1;
@@ -109,7 +131,7 @@ impl XrHand{
     pub const PINKY_KNUCKLE1: usize = 22;
     pub const PINKY_KNUCKLE2: usize = 23;
     pub const PINKY_KNUCKLE3: usize = 24;
-    pub const PINKY_TIP: usize = 25;
+    pub const PINKY_TIP: usize = 25;*/
 }
 
 #[derive(Clone, Debug)]
@@ -127,7 +149,7 @@ pub struct XrLocalEvent{
     pub time: f64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrState{
     pub time: f64,
     pub head_pose: Pose,
@@ -148,13 +170,13 @@ impl XrLocalEvent{
         // alright we have a matrix, take the inverse
         // then mul all the fingertips and store them in fingertips
         // then use that
-        let inv = mat.invert();
+        let _inv = mat.invert();
         // lets collect all fingertips
-        let mut finger_tips = SmallVec::new();
-        for (hindex, hand) in [&e.state.left_hand, &e.state.right_hand].iter().enumerate(){
+        let finger_tips = SmallVec::new();
+        for (_hindex, hand) in [&e.state.left_hand, &e.state.right_hand].iter().enumerate(){
             if hand.in_view{
-                for (index,joint) in hand.joints.iter().enumerate(){
-                    if joint.valid && joint.tracked && XrHand::is_tip(index){
+                for (_index,_joint) in hand.joints.iter().enumerate(){
+                    /*if XrHand::is_tip(index){
                         let pos = inv.transform_vec4(joint.pose.position.to_vec4()).to_vec3();
                         // todo, ignore all non-push orientations (probably a halfdome)
                         finger_tips.push(XrFingerTip{
@@ -162,7 +184,7 @@ impl XrLocalEvent{
                             is_left: hindex == 0,
                             pos
                         })
-                    }
+                    }*/
                 }
             }
         }
