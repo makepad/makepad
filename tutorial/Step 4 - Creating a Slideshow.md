@@ -10,6 +10,8 @@ At the end of this step, you will have a working implementation of a slideshow.
 In this step, you will learn:
 - How inheritance works in Makepad.
 - How key focus works in Makepad.
+- How the event-action flow works in Makepad.
+- How to respond to user actions.
 ## Adding Arrow Icons
 For the two buttons, we need some arrow icons, so let's start by adding those as resources to our app.
 
@@ -211,20 +213,17 @@ impl App {
 }
 ```
 
-Here's what this method does:
+Here's what the `set_current_image` method does:
 - It sets `current_image_idx` to the new value.
 - It gets a reference to the `Image` inside the `Slideshow`.
 - If current_image_idx is Some(image_idx):
-	- Load the 
-It updates current_image_idx to the new value.
-It obtains the <Image> inside the SlideShow.
-If current_image_index is Some(image_idx):
-Use image_idx to retrieve the corresponding path.
-Load the image with this path.
-Otherwise:
-Load the image with the placeholder image.
-Finally, it calls .redraw(cx) on the slideshow. This triggers the slideshow to be redrawn with the new image.
+	- It obtains the corresponding path for this image.
+	- It reloads the `Image` using this path.
+- Otherwise:
+	- It reloads the `Image` with the placeholder image.
+- It calls `redraw(..)` on the `Slideshow` to schedule it to be redrawn with the new image.
 
+Now that we have a method to change which image is currently displayed in the slideshow, we'll add two more helper methods: `navigate_left` and `navigate_right`. These are used to navigate the slideshow to the previous and next image, respectively:
 
 ```
 impl App {
@@ -245,3 +244,135 @@ impl App {
     }
 }
 ```
+
+Here's what these methods do:
+- `navigate_left` first decrements `current_image_idx` by 1, unless we're already at the first image.
+- `navigate_right` first increments `current_image_idx` by 1, unless we're already at the last image.
+- Both methods then call `set_current_image` to apply the change, and schedule the slideshow to be redrawn.
+### Updating the `update_image_paths` method
+Replace the definition of the `update_image_paths` method on `App` with the one here below:
+```
+    pub fn update_image_paths(&mut self, cx: &mut Cx, path: &Path) {
+        self.state.image_paths.clear();
+        for entry in path.read_dir().unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            self.state.image_paths.push(path);
+        }
+        if self.state.image_paths.is_empty() {
+            self.set_current_image(cx, None);
+        } else {
+            self.set_current_image(cx, Some(0));
+        }
+    }
+```
+
+The only thing that's changed here is the 4 new lines at the end:
+```
+        if self.state.image_paths.is_empty() {
+            self.set_current_image(cx, None);
+        } else {
+            self.set_current_image(cx, Some(0));
+        }
+```
+
+Here's what this code does:
+- If the list of images is empty, it sets the current image to None.
+- Otherwise, it sets the current image to the first image in the list.
+
+This change ensures that the slideshow is always in a valid state, even if the list of images changes.
+## Responding to User Actions
+TODO
+### The Event-Action Flow
+Let's take a look at how the event-action flow works in Makepad:
+- An event is dispatched to the app to notify it app that the user did something interesting.
+- The event **bubbles down** from the root of the app to the bottom of the widget tree.
+- When the event reaches a widget that is prepared to handle it, that widget:
+	- *Will* update itself in response to the event.
+	- *May* dispatch an action to notify the rest of the app that something interesting happened to it.
+- The action **bubbles up** from the widget to the root of the app.
+- Widgets higher up in the tree can listen to and respond to these actions.
+
+This pattern helps to separate low-level input handling from high-level UI behaviour.
+### Handling Actions
+To handle actions in our app, we can use the `MatchEvent` trait.
+
+The `MatchEvent` trait provides several overridable methods that will be called for specific events. When you call the `match_event` method on the `MatchEvent` trait with an event, it automatically forwards that event to the appropriate method.
+
+We'll start by adding a call to `match_event` to the `handle_event` method on the `App` struct:
+```
+impl AppMain for App {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.match_event(cx, event);
+        self.ui
+            .handle_event(cx, event, &mut Scope::with_data(&mut self.state));
+    }
+}
+```
+
+Next, we'll implement the `MatchEvent` trait for the `App` struct. For our use case, the method we are interested in is `handle_actions`. Here's our implementation:
+
+```
+impl MatchEvent for App {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(id!(left)).clicked(&actions) {
+            self.navigate_left(cx);
+        }
+        if self.ui.button(id!(right)).clicked(&actions) {
+            self.navigate_right(cx);
+        }
+        if let Some(event) =
+            self.ui.view(id!(slideshow.overlay)).key_down(&actions)
+        {
+            match event.key_code {
+                KeyCode::ArrowLeft => self.navigate_left(cx),
+                KeyCode::ArrowRight => self.navigate_right(cx),
+                _ => {}
+            }
+        }
+    }
+}
+```
+
+Let's look at what this code does in more detail.
+#### Handling Button Clicks
+The following code:
+```
+        if self.ui.button(id!(left)).clicked(&actions) {
+            self.navigate_left(cx);
+        }
+        if self.ui.button(id!(right)).clicked(&actions) {
+            self.navigate_right(cx);
+        }
+```
+
+checks whether one of the buttons in the slideshow were clicked. If so, it calls the appropriate helper method (either `navigate_left` or `navigate_right`) to update the slideshow.
+#### Handling Key Presses
+The following code:
+```
+        if let Some(event) =
+            self.ui.view(id!(slideshow.overlay)).key_down(&actions)
+        {
+            match event.key_code {
+                KeyCode::ArrowLeft => self.navigate_left(cx),
+                KeyCode::ArrowRight => self.navigate_right(cx),
+                _ => {}
+            }
+        }
+```
+
+checks whether the left or right arrow key was pressed while the slideshow overlay has key focus. If so, it calls the appropriate helper method (either `navigate_left` or `navigate_right`) to update the slideshow.
+## Checking our Progress so far
+Let's check our progress so far.
+
+Make sure you’re in your package directory, and run:
+```
+cargo run --release -- path/to/your/images
+```
+
+If everything is working correctly, a slideshow should now appear in your window:
+![[Slideshow.png]]
+TODO
