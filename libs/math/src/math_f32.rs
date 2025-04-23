@@ -1,7 +1,7 @@
 use{
     std::{fmt,ops},
     crate::math_f64::*,
-//    makepad_microserde::*,
+    makepad_micro_serde::*,
 //    crate::colorhex::*
 };
 
@@ -41,7 +41,7 @@ pub enum Vec2Index{
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Debug, SerBin, DeBin)]
 pub struct Pose {
     pub orientation: Quat,
     pub position: Vec3
@@ -125,7 +125,7 @@ impl Pose {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, SerBin, DeBin)]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,
@@ -251,7 +251,7 @@ pub fn vec2(x:f32, y:f32)->Vec2{
 }*/
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Debug, SerBin, DeBin)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -315,6 +315,11 @@ impl Vec3 {
         }
         Vec3::default()
     }
+    
+    pub fn length(&self) -> f32 {
+        let sz = self.x * self.x + self.y * self.y + self.z * self.z;
+        sz.sqrt()
+    }
 }
 
 /*
@@ -360,7 +365,7 @@ impl Plane {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug,PartialEq)]
+#[derive(Clone, Copy, Default, Debug,PartialEq, SerBin, DeBin)]
 pub struct Vec4 {
     pub x: f32,
     pub y: f32,
@@ -498,7 +503,7 @@ pub struct CameraFov {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, SerBin, DeBin)]
 pub struct Quat {
     pub x: f32,
     pub y: f32,
