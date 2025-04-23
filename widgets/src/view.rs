@@ -433,6 +433,12 @@ impl ViewRef {
             0
         }
     }
+
+    pub fn set_key_focus(&self, cx: &mut Cx) {
+        if let Some(inner) = self.borrow_mut() {
+            inner.set_key_focus(cx);
+        }
+    }
 }
 
 impl ViewSet {
@@ -1039,5 +1045,9 @@ impl View {
         for i in 0..self.children.len(){
             log!("Child: {}",self.children[i].0)
         }
+    }
+
+    pub fn set_key_focus(&self, cx: &mut Cx) {
+        cx.set_key_focus(self.draw_bg.area());
     }
 }
