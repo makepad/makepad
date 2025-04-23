@@ -17,13 +17,13 @@ live_design!{
             instance tex_size: vec2(0.0, 0.0),
             fn pixel(self) -> vec4 {
                 //return sample2d(self.tex, self.pos * self.tex_scale);
-                let tp1 = sample2d(self.tex, vec2(0.5/self.tex_size.x,0.5/self.tex_size.y))
-                let tp2 = sample2d(self.tex, vec2(1.5/self.tex_size.x,0.5/self.tex_size.y));
+                let tp1 = sample2d_rt(self.tex, vec2(0.5/self.tex_size.x,0.5/self.tex_size.y))
+                let tp2 = sample2d_rt(self.tex, vec2(1.5/self.tex_size.x,0.5/self.tex_size.y));
                 let tp = vec2(tp1.r*65280.0 + tp1.b*255.0,tp2.r*65280.0 + tp2.b*255.0);
                 // ok so we should be having the same size in self.pos
                 let counter = (self.rect_size * self.dpi_factor) / tp;
                 let tex_scale = tp / self.tex_size;
-                let fb = sample2d(self.tex, self.pos * tex_scale * counter)
+                let fb = sample2d_rt(self.tex, self.pos * tex_scale * counter)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #2
                 }
