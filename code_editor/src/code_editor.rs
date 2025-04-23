@@ -907,32 +907,20 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers:
-                    KeyModifiers {
-                        logo: true,
-                        shift: false,
-                        ..
-                    },
+                modifiers: KeyModifiers{ control, logo, shift, .. },
                 ..
-            }) if !self.read_only => {
+            }) if (control || logo) && !shift && !self.read_only =>{
                 if session.undo() {
                     cx.redraw_all();
                     actions.push(CodeEditorAction::TextDidChange);
                     keyboard_moved_cursor = true;
                 }
             }
-            
-            
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers:
-                    KeyModifiers {
-                        logo: true,
-                        shift: true,
-                        ..
-                    },
+                modifiers: KeyModifiers{ control, logo, shift, ..},
                 ..
-            }) if !self.read_only => {
+            }) if (control || logo) && shift && !self.read_only =>{
                 if session.redo() {
                     self.redraw(cx);
                     actions.push(CodeEditorAction::TextDidChange);
