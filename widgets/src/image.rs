@@ -116,11 +116,18 @@ impl ImageCacheImpl for Image {
 }
 
 impl LiveHook for Image{
-    fn after_apply(&mut self, cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        self.lazy_create_image_cache(cx);
-        let source = self.source.clone();
-        if source.as_str().len()>0 {
-            let _ = self.load_image_dep_by_path(cx, source.as_str(), 0);
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        match apply.from{
+            ApplyFrom::NewFromDoc{..}|// newed from DSL,
+            ApplyFrom:: UpdateFromDoc{..}|
+            ApplyFrom::Over{..}=>{
+                self.lazy_create_image_cache(cx);
+                let source = self.source.clone();
+                if source.as_str().len()>0 {
+                    let _ = self.load_image_dep_by_path(cx, source.as_str(), 0);
+                }
+            }
+            _=>()
         }
     }
 }
@@ -136,7 +143,7 @@ impl Widget for Image {
                 if let Some(AsyncImageLoad{image_path, result}) = &action.downcast_ref(){
                     if let Some(result) = result.borrow_mut().take(){
                         // we have a result for the image_cache to load up
-                        self.process_async_image_load(cx, image_path, result);
+                        self.process_async_image_load(cx, 0, image_path, result);
                     }
                     if self.async_image_size.is_some() && self.async_image_path.clone() == Some(image_path.to_path_buf()){ // see if we can load from cache
                         self.load_image_from_cache(cx, image_path, 0);
