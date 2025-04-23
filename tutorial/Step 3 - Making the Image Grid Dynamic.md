@@ -305,7 +305,7 @@ Let's check our progress so far.
 
 Make sure you’re in your package directory, and run:
 ```
-cargo run --release -- <path_to_your_images>
+cargo run --release -- path/to/your/images
 ```
 
 If everything is working correctly, the image grid should now display your images:
