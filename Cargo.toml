@@ -28,8 +28,13 @@ workspace.members = [
     "tools/auto_version",
     "libs/array_vec",
     "libs/btree",
-    "libs/btree_vec", 
-    #"experiments/scroll",
+    "libs/btree_vec",
+    "experiments/scroll",
+    "examples/image_viewer_1",
+    "examples/image_viewer_2",
+    "examples/image_viewer_3",
+    "examples/image_viewer_4",
+    "examples/image_viewer_5",
 ]
 
 workspace.exclude = [
