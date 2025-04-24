@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 use crate::module_loader::ModuleLoader;
+use crate::makepad_micro_serde::*;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
 use std::fmt;
@@ -23,8 +24,9 @@ pub const MAX_ACTION_SET_NAME_SIZE: usize = 64usize;
 pub const MAX_ACTION_NAME_SIZE: usize = 64usize;
 pub const MAX_LOCALIZED_ACTION_SET_NAME_SIZE: usize = 128usize;
 pub const MAX_LOCALIZED_ACTION_NAME_SIZE: usize = 128usize;
+pub const MAX_COLOCATION_DISCOVERY_BUFFER_SIZE_META:usize = 1024;
 pub const HAND_JOINT_COUNT_EXT:usize = 26;
-
+pub const UUID_SIZE: usize = 16usize;
 
 // Macros
 
@@ -160,6 +162,15 @@ pub struct LibOpenXr{
     pub xrDestroyHandTrackerEXT: TxrDestroyHandTrackerEXT,
     pub xrLocateHandJointsEXT: TxrLocateHandJointsEXT,
     pub xrSetEnvironmentDepthHandRemovalMETA: TxrSetEnvironmentDepthHandRemovalMETA,
+    pub xrStartColocationAdvertisementMETA: TxrStartColocationAdvertisementMETA,
+    pub xrStopColocationAdvertisementMETA: TxrStopColocationAdvertisementMETA,
+    pub xrStartColocationDiscoveryMETA: TxrStartColocationDiscoveryMETA,
+    pub xrStopColocationDiscoveryMETA: TxrStopColocationDiscoveryMETA,
+    pub xrCreateSpatialAnchorFB: TxrCreateSpatialAnchorFB,
+    pub xrShareSpacesMETA: TxrShareSpacesMETA,
+    pub xrEnumerateSpaceSupportedComponentsFB: TxrEnumerateSpaceSupportedComponentsFB,
+    pub xrSetSpaceComponentStatusFB: TxrSetSpaceComponentStatusFB,
+    pub xrQuerySpacesFB: TxrQuerySpacesFB,
 }
 
 
@@ -228,7 +239,16 @@ impl LibOpenXr {
             xrDestroyHandTrackerEXT: get_proc_addr!(gipa, instance, TxrDestroyHandTrackerEXT)?,
             xrLocateHandJointsEXT: get_proc_addr!(gipa, instance, TxrLocateHandJointsEXT)?,
             xrSetEnvironmentDepthHandRemovalMETA: get_proc_addr!(gipa, instance, TxrSetEnvironmentDepthHandRemovalMETA)?,
-        })
+            xrStartColocationAdvertisementMETA: get_proc_addr!(gipa, instance, TxrStartColocationAdvertisementMETA)?,
+            xrStopColocationAdvertisementMETA: get_proc_addr!(gipa, instance, TxrStopColocationAdvertisementMETA)?,
+            xrStartColocationDiscoveryMETA: get_proc_addr!(gipa, instance, TxrStartColocationDiscoveryMETA)?,
+            xrStopColocationDiscoveryMETA: get_proc_addr!(gipa, instance, TxrStopColocationDiscoveryMETA)?,
+            xrCreateSpatialAnchorFB: get_proc_addr!(gipa, instance, TxrCreateSpatialAnchorFB)?,
+            xrShareSpacesMETA:get_proc_addr!(gipa, instance, TxrShareSpacesMETA)?,
+            xrEnumerateSpaceSupportedComponentsFB:get_proc_addr!(gipa, instance, TxrEnumerateSpaceSupportedComponentsFB)?,
+            xrSetSpaceComponentStatusFB: get_proc_addr!(gipa, instance, TxrSetSpaceComponentStatusFB)?,
+            xrQuerySpacesFB: get_proc_addr!(gipa, instance, TxrQuerySpacesFB)?,
+         })
     }
 }
 
@@ -597,6 +617,63 @@ pub type TxrSetEnvironmentDepthHandRemovalMETA = unsafe extern "C" fn(
     set_info: *const XrEnvironmentDepthHandRemovalSetInfoMETA,
 ) -> XrResult;
 
+pub type TxrStartColocationAdvertisementMETA = unsafe extern "C" fn(
+    session: XrSession,
+    info: *const XrColocationAdvertisementStartInfoMETA,
+    request_id: *mut XrAsyncRequestIdFB
+) -> XrResult;
+
+pub type TxrStopColocationAdvertisementMETA = unsafe extern "C" fn(
+    session: XrSession,
+    info: *const XrColocationAdvertisementStopInfoMETA,
+    request_id: *mut XrAsyncRequestIdFB
+) -> XrResult;
+
+pub type TxrStartColocationDiscoveryMETA = unsafe extern "C" fn(
+    session: XrSession,
+    info: *const XrColocationDiscoveryStartInfoMETA,
+    request_id: *mut XrAsyncRequestIdFB
+) -> XrResult;
+
+pub type TxrStopColocationDiscoveryMETA = unsafe extern "C" fn(
+    session: XrSession,
+    info: *const XrColocationDiscoveryStopInfoMETA,
+    request_id: *mut XrAsyncRequestIdFB
+) -> XrResult;
+
+
+pub type TxrCreateSpatialAnchorFB = unsafe extern "C" fn(
+    session: XrSession,
+    info: *const XrSpatialAnchorCreateInfoFB,
+    request_id: *mut XrAsyncRequestIdFB,
+) -> XrResult;
+
+pub type TxrShareSpacesMETA = unsafe extern "C" fn(
+    session: XrSession,
+    info: *const XrShareSpacesInfoMETA,
+    request_id: *mut XrAsyncRequestIdFB,
+)->XrResult;
+
+pub type TxrEnumerateSpaceSupportedComponentsFB = unsafe extern "C" fn(
+    space: XrSpace,
+    component_type_capacity_input: u32,
+    component_type_count_output: *mut u32,
+    component_types: *mut XrSpaceComponentTypeFB,
+) -> XrResult;
+
+pub type TxrSetSpaceComponentStatusFB = unsafe extern "C" fn(
+    space: XrSpace,
+    info: *const XrSpaceComponentStatusSetInfoFB,
+    request_id: *mut XrAsyncRequestIdFB,
+) -> XrResult;
+
+pub type TxrQuerySpacesFB = unsafe extern "C" fn(
+    session: XrSession,
+    info: *const XrSpaceQueryInfoBaseHeaderFB,
+    request_id: *mut XrAsyncRequestIdFB,
+) -> XrResult;
+
+
 // Handle types
 
 #[repr(transparent)]
@@ -678,6 +755,11 @@ impl XrPath{
     }
 }
 
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct XrAsyncRequestIdFB(pub u64);
+
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrEnvironmentDepthSwapchainMETA(pub u64);
@@ -743,7 +825,22 @@ pub struct XrSession(pub u64);
 
 
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, SerBin, DeBin)]
+pub struct XrUuid {
+    pub data: [u8; UUID_SIZE],
+}
 
+impl XrUuid{
+    pub fn generate()->Self{
+        let mut uid = XrUuid::default();
+        let rnd = crate::makepad_live_id::LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0.to_be_bytes();
+        for i in 0..uid.data.len(){
+            uid.data[i] = rnd[i%rnd.len()];
+        }
+        uid
+    }
+}
 
 #[repr(transparent)]
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -835,6 +932,325 @@ pub struct XrRect2Di {
 
 
 // Struct datatypes
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataSpaceQueryResultsAvailableFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub request_id: XrAsyncRequestIdFB,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataSpaceSetStatusCompleteFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub request_id: XrAsyncRequestIdFB,
+    pub result: XrResult,
+    pub space: XrSpace,
+    pub uuid: XrUuid,
+    pub component_type: XrSpaceComponentTypeFB,
+    pub enabled: XrBool32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceQueryInfoBaseHeaderFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceFilterInfoBaseHeaderFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceQueryInfoFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub query_action: XrSpaceQueryActionFB,
+    pub max_result_count: u32,
+    pub timeout: XrDuration,
+    pub filter: *const XrSpaceFilterInfoBaseHeaderFB,
+    pub exclude_filter: *const XrSpaceFilterInfoBaseHeaderFB,
+}
+impl Default for XrSpaceQueryInfoFB{
+    fn default()->Self{
+        XrSpaceQueryInfoFB{
+            ty: XrStructureType::SPACE_QUERY_INFO_FB,
+            next: 0 as *const _,
+            query_action: XrSpaceQueryActionFB(0),
+            max_result_count: 0,
+            timeout: XrDuration(0),
+            filter: 0 as *const _,
+            exclude_filter: 0 as *const _,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceGroupUuidFilterInfoMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub group_uuid: XrUuid,
+}
+impl Default for XrSpaceGroupUuidFilterInfoMETA{
+    fn default()->Self{
+        XrSpaceGroupUuidFilterInfoMETA{
+            ty: XrStructureType::SPACE_GROUP_UUID_FILTER_INFO_META,
+            next: 0 as *const _,
+            group_uuid: XrUuid::default(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceStorageLocationFilterInfoFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub location: XrSpaceStorageLocationFB,
+}
+impl Default for XrSpaceStorageLocationFilterInfoFB{
+    fn default()->Self{
+        XrSpaceStorageLocationFilterInfoFB{
+            ty: XrStructureType::SPACE_STORAGE_LOCATION_FILTER_INFO_FB,
+            next: 0 as *const _,
+            location: XrSpaceStorageLocationFB(0),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataShareSpacesCompleteMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub request_id: XrAsyncRequestIdFB,
+    pub result: XrResult
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceComponentStatusSetInfoFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub component_type: XrSpaceComponentTypeFB,
+    pub enabled: XrBool32,
+    pub timeout: XrDuration,
+}
+impl Default for XrSpaceComponentStatusSetInfoFB{
+    fn default()->Self{
+        XrSpaceComponentStatusSetInfoFB{
+            ty: XrStructureType::SPACE_COMPONENT_STATUS_SET_INFO_FB,
+            next: 0 as *const _,
+            component_type: XrSpaceComponentTypeFB(0),
+            enabled: XrBool32(0),
+            timeout: XrDuration(0),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataSpatialAnchorCreateCompleteFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub request_id: XrAsyncRequestIdFB,
+    pub result: XrResult,
+    pub space: XrSpace,
+    pub uuid: XrUuid,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrShareSpacesRecipientBaseHeaderMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+} 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrShareSpacesInfoMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub space_count: u32,
+    pub spaces: *const XrSpace,
+    pub recipient_info: *const XrShareSpacesRecipientBaseHeaderMETA
+}
+impl Default for XrShareSpacesInfoMETA{
+    fn default()->Self{
+        XrShareSpacesInfoMETA{
+            ty: XrStructureType::SHARE_SPACES_INFO_META,
+            next: 0 as *const _,
+            space_count: 0,
+            spaces: 0 as *const _,
+            recipient_info: 0 as *const _,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrShareSpacesRecipientGroupsMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub group_count: u32,
+    pub groups: *const XrUuid,
+}
+impl Default for XrShareSpacesRecipientGroupsMETA{
+    fn default()->Self{
+        XrShareSpacesRecipientGroupsMETA{
+            ty: XrStructureType::SHARE_SPACES_RECIPIENT_GROUPS_META,
+            next: 0 as *const _,
+            group_count:  0,
+            groups: 0 as *mut _
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpatialAnchorCreateInfoFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub space: XrSpace,
+    pub pose_in_space: XrPosef,
+    pub time: XrTime,
+}
+impl Default for XrSpatialAnchorCreateInfoFB{
+    fn default()->Self{
+        XrSpatialAnchorCreateInfoFB{
+            ty: XrStructureType::SPATIAL_ANCHOR_CREATE_INFO_FB,
+            next: 0 as *const _,
+            space:  XrSpace(0),
+            pose_in_space: Default::default(),
+            time: XrTime(0),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct  XrColocationDiscoveryStartInfoMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+} 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrColocationDiscoveryStopInfoMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+} 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrColocationAdvertisementStartInfoMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub buffer_size: u32,
+    pub buffer: *const u8
+}
+
+impl Default for XrColocationAdvertisementStartInfoMETA{
+    fn default()->Self{
+        XrColocationAdvertisementStartInfoMETA{
+            ty: XrStructureType::COLOCATION_ADVERTISEMENT_START_INFO_META,
+            next: 0 as *const _,
+            buffer_size:  0 as _,
+            buffer: 0 as *mut _
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrColocationAdvertisementStopInfoMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+} 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataStartColocationAdvertisementCompleteMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub advertisement_request_id: XrAsyncRequestIdFB,
+    pub result: XrResult,
+    pub advertisement_uuid: XrUuid,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataStopColocationAdvertisementCompleteMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub advertisement_request_id: XrAsyncRequestIdFB,
+    pub result: XrResult,
+} 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataColocationAdvertisementCompleteMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub advertisment_request_id: XrAsyncRequestIdFB,
+    pub result: XrResult,
+} 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataStartColocationDiscoveryCompleteMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub discovery_request_id: XrAsyncRequestIdFB,
+    pub result: XrResult,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataColocationDiscoveryResultMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub discovery_request_id: XrAsyncRequestIdFB,
+    pub advertisement_uuid:  XrUuid,
+    pub buffer_size: u32,
+    pub buffer:[u8;MAX_COLOCATION_DISCOVERY_BUFFER_SIZE_META]
+} 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataColocationDiscoveryCompleteMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub discovery_request_id: XrAsyncRequestIdFB,
+    pub result: XrResult,
+} 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataStopColocationDiscoveryCompleteMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub request_id: XrAsyncRequestIdFB,
+    pub result: XrResult,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSystemColocationDiscoveryPropertiesMETA {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub supports_colocation_discovery: XrBool32,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -2283,6 +2699,91 @@ bitmask!(XrSwapchainUsageFlags);
 // Enums
 
 
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct XrSpaceQueryActionFB(pub i32);
+impl XrSpaceQueryActionFB {
+    pub const LOAD: XrSpaceQueryActionFB = Self(0i32);
+}
+impl fmt::Debug for XrSpaceQueryActionFB {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let name = match *self {
+            Self::LOAD => Some("LOAD"),
+            _ => None,
+        };
+        if let Some(name) = name{
+            write!(fmt, "{}", name)
+        }
+        else{
+            write!(fmt, "unknown XrSpaceStorageLocationFB {}", self.0)
+        }
+    }
+}
+
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct XrSpaceStorageLocationFB(pub i32);
+impl XrSpaceStorageLocationFB {
+    pub const INVALID: XrSpaceStorageLocationFB = Self(0i32);
+    pub const LOCAL: XrSpaceStorageLocationFB = Self(1i32);
+    pub const CLOUD: XrSpaceStorageLocationFB = Self(2i32);
+}
+impl fmt::Debug for XrSpaceStorageLocationFB {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let name = match *self {
+            Self::INVALID => Some("INVALID"),
+            Self::LOCAL => Some("LOCAL"),
+            Self::CLOUD => Some("CLOUD"),
+            _ => None,
+        };
+        if let Some(name) = name{
+            write!(fmt, "{}", name)
+        }
+        else{
+            write!(fmt, "unknown XrSpaceStorageLocationFB {}", self.0)
+        }
+    }
+}
+
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq, Default)]
+pub struct XrSpaceComponentTypeFB(i32);
+impl XrSpaceComponentTypeFB {
+    pub const LOCATABLE: XrSpaceComponentTypeFB = Self(0i32);
+    pub const STORABLE: XrSpaceComponentTypeFB = Self(1i32);
+    pub const SHARABLE: XrSpaceComponentTypeFB = Self(2i32);
+    pub const BOUNDED_2D: XrSpaceComponentTypeFB = Self(3i32);
+    pub const BOUNDED_3D: XrSpaceComponentTypeFB = Self(4i32);
+    pub const SEMANTIC_LABELS: XrSpaceComponentTypeFB = Self(5i32);
+    pub const ROOM_LAYOUT: XrSpaceComponentTypeFB = Self(6i32);
+    pub const SPACE_CONTAINER: XrSpaceComponentTypeFB = Self(7i32);
+    pub const TRIANGLE_MESH_M: XrSpaceComponentTypeFB = Self(1000269000i32);
+}
+impl fmt::Debug for XrSpaceComponentTypeFB {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let name = match *self {
+            Self::LOCATABLE => Some("LOCATABLE"),
+            Self::STORABLE => Some("STORABLE"),
+            Self::SHARABLE => Some("SHARABLE"),
+            Self::BOUNDED_2D => Some("BOUNDED_2D"),
+            Self::BOUNDED_3D => Some("BOUNDED_3D"),
+            Self::SEMANTIC_LABELS => Some("SEMANTIC_LABELS"),
+            Self::ROOM_LAYOUT => Some("ROOM_LAYOUT"),
+            Self::SPACE_CONTAINER => Some("SPACE_CONTAINER"),
+            Self::TRIANGLE_MESH_M => Some("TRIANGLE_MESH_M"),
+            _ => None,
+        };
+        if let Some(name) = name{
+            write!(fmt, "{}", name)
+        }
+        else{
+            write!(fmt, "unknown XrSpaceComponentTypeFB {}", self.0)
+        }
+    }
+}
+
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -2997,19 +3498,35 @@ impl XrStructureType {
     pub const FUTURE_POLL_RESULT_EXT: XrStructureType = Self(1000469003i32);
     pub const EVENT_DATA_USER_PRESENCE_CHANGED_EXT: XrStructureType = Self(1000470000i32);
     pub const SYSTEM_USER_PRESENCE_PROPERTIES_EXT: XrStructureType = Self(1000470001i32);
-        
+    
+    pub const COLOCATION_DISCOVERY_START_INFO_META: XrStructureType = Self(1000571010);
+    pub const COLOCATION_DISCOVERY_STOP_INFO_META: XrStructureType = Self(1000571011);
+    pub const COLOCATION_ADVERTISEMENT_START_INFO_META: XrStructureType = Self(1000571012);
+    pub const COLOCATION_ADVERTISEMENT_STOP_INFO_META: XrStructureType = Self(1000571013);
+    pub const EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META: XrStructureType = Self(1000571020);
+    pub const EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META: XrStructureType = Self(1000571021);
+    pub const EVENT_DATA_COLOCATION_ADVERTISEMENT_COMPLETE_META: XrStructureType = Self(1000571022);
+    pub const EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META: XrStructureType = Self(1000571023);
+    pub const EVENT_DATA_COLOCATION_DISCOVERY_RESULT_META: XrStructureType = Self(1000571024);
+    pub const EVENT_DATA_COLOCATION_DISCOVERY_COMPLETE_META: XrStructureType = Self(1000571025);
+    pub const EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META: XrStructureType = Self(1000571026);
+    pub const SYSTEM_COLOCATION_DISCOVERY_PROPERTIES_META: XrStructureType = Self(1000571030);
+    
     pub const  SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_RESUME_INFO_META: XrStructureType = Self(1000532002i32);
     pub const  SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META: XrStructureType = Self(1000532003i32);
+    
+    pub const SHARE_SPACES_RECIPIENT_GROUPS_META: XrStructureType = Self(1000572000);
+    pub const SPACE_GROUP_UUID_FILTER_INFO_META: XrStructureType = Self(1000572001);
+    pub const SYSTEM_SPATIAL_ENTITY_GROUP_SHARING_PROPERTIES_META: XrStructureType = Self(1000572100);
+    
+    pub const SHARE_SPACES_INFO_META: XrStructureType = Self(1000290001);
+    pub const EVENT_DATA_SHARE_SPACES_COMPLETE_META: XrStructureType = Self(1000290002);
     
     pub const SPACES_LOCATE_INFO_KHR: XrStructureType = Self::SPACES_LOCATE_INFO;
     pub const SPACE_LOCATIONS_KHR: XrStructureType = Self::SPACE_LOCATIONS;
     pub const SPACE_VELOCITIES_KHR: XrStructureType = Self::SPACE_VELOCITIES;
-    pub fn from_raw(x: i32) -> Self {
-        Self(x)
-    }
-    pub fn into_raw(self) -> i32 {
-        self.0
-    }
+    
+    
 }
 
 impl fmt::Debug for XrStructureType {
@@ -3591,8 +4108,59 @@ impl fmt::Debug for XrStructureType {
             Self::SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META => {
                 Some("SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META")
             }
+            Self::COLOCATION_DISCOVERY_START_INFO_META=> {
+                Some("COLOCATION_DISCOVERY_START_INFO_META")
+            }
+            Self::COLOCATION_DISCOVERY_STOP_INFO_META=> {
+                Some("COLOCATION_DISCOVERY_STOP_INFO_META")
+            }
+            Self::COLOCATION_ADVERTISEMENT_START_INFO_META=> {
+                Some("COLOCATION_ADVERTISEMENT_START_INFO_META")
+            }
+            Self::COLOCATION_ADVERTISEMENT_STOP_INFO_META=> {
+                Some("COLOCATION_ADVERTISEMENT_STOP_INFO_META")
+            }
+            Self::EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META=> {
+                Some("EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META")
+            }
+            Self::EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META=> {
+                Some("EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META")
+            }
+            Self::EVENT_DATA_COLOCATION_ADVERTISEMENT_COMPLETE_META=> {
+                Some("EVENT_DATA_COLOCATION_ADVERTISEMENT_COMPLETE_META")
+            }
+            Self::EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META=> {
+                Some("EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META")
+            }
+            Self::EVENT_DATA_COLOCATION_DISCOVERY_RESULT_META=> {
+                Some("EVENT_DATA_COLOCATION_DISCOVERY_RESULT_META")
+            }
+            Self::EVENT_DATA_COLOCATION_DISCOVERY_COMPLETE_META=> {
+                Some("EVENT_DATA_COLOCATION_DISCOVERY_COMPLETE_META")
+            }
+            Self::EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META=> {
+                Some("EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META")
+            }
+            Self::SYSTEM_COLOCATION_DISCOVERY_PROPERTIES_META=> {
+                Some("SYSTEM_COLOCATION_DISCOVERY_PROPERTIES_META")
+            }
             
-            
+            Self::SHARE_SPACES_RECIPIENT_GROUPS_META=> {
+                Some("SHARE_SPACES_RECIPIENT_GROUPS_META")
+            }
+            Self::SPACE_GROUP_UUID_FILTER_INFO_META=> {
+                Some("SPACE_GROUP_UUID_FILTER_INFO_META")
+            }
+            Self::SYSTEM_SPATIAL_ENTITY_GROUP_SHARING_PROPERTIES_META=> {
+                Some("SYSTEM_SPATIAL_ENTITY_GROUP_SHARING_PROPERTIES_META")
+            }
+                
+            Self::SHARE_SPACES_INFO_META=> {
+                Some("SHARE_SPACES_INFO_META")
+            }
+            Self::EVENT_DATA_SHARE_SPACES_COMPLETE_META=> {
+                Some("EVENT_DATA_SHARE_SPACES_COMPLETE_META")
+            }
             _ => None,
         };
         if let Some(name) = name {

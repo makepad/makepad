@@ -1,9 +1,9 @@
 [package]
-name = "makepad-net-sync"
+name = "makepad-xr-net"
 version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
-description = "Makepad net-sync multiplayer physical object system"
+description = "Makepad xr-net multiplayer physical object system"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
