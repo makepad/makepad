@@ -6,7 +6,7 @@ workspace.members = [
     "experiments/huedmx",
     "experiments/text_bare",
     "experiments/sdxl_remote",
-    "experiments/net_sync",
+    "experiments/xr_net",
     # === examples ===
     "examples/ui_zoo",
     "examples/ai_docs",

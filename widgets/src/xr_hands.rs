@@ -20,11 +20,39 @@ live_design!{
     }
 }
 
+pub struct XrPeer{
+    id: LiveId,
+    state: XrState,
+}
+
 #[derive(Live, LiveHook, Widget)]
 pub struct XrHands {
     #[redraw] #[rust(DrawList::new(cx))] draw_list: DrawList,
     #[area] #[live] cube: DrawCube,
-    #[live] label: DrawText
+    #[live] label: DrawText,
+    #[rust] peers: Vec<XrPeer>
+}
+
+impl XrHands{
+        
+        
+    pub fn join_peer(&mut self, _cx:&mut Cx, id:LiveId, state:XrState){
+        if let Some(peer) = self.peers.iter_mut().find(|v| v.id == id){
+            peer.state = state;
+        }
+        else{
+            self.peers.push(XrPeer{id, state});
+        }
+    }
+        
+    pub fn leave_peer(&mut self, _cx:&mut Cx, id:LiveId){
+        self.peers.retain(|v| v.id != id);
+    }
+        
+    pub fn update_peer(&mut self, cx:&mut Cx, id:LiveId, state:XrState){
+        self.join_peer(cx, id, state);
+    }
+    
 }
 
 impl Widget for XrHands {
@@ -33,9 +61,44 @@ impl Widget for XrHands {
             self.cube.redraw(cx);
         }
     }
-            
     fn draw_3d(&mut self, cx: &mut Cx3d, _scope:&mut Scope)->DrawStep{
         self.draw_list.begin_always(cx);
+        
+        fn draw_hands(cx: &mut Cx3d, cube:&mut DrawCube, xr_state:&XrState){
+                        
+            cube.depth_clip = 1.0;
+            // lets draw our hand controllers
+            let mata = xr_state.left_controller.grip_pose.to_mat4();
+            cube.cube_size = vec3(0.05,0.05,0.05);
+            cube.transform = mata;
+            cube.draw(cx);
+                    
+            let mata = xr_state.right_controller.grip_pose.to_mat4();
+            cube.cube_size = vec3(0.05,0.05,0.05);
+            cube.transform = mata;
+            cube.depth_clip = 0.0;
+            cube.draw(cx);
+                    
+            // lets draw all the fingers
+            for hand in [&xr_state.left_hand, &xr_state.right_hand]{
+                if hand.in_view{
+                    for (_index,joint) in hand.joints.iter().enumerate(){
+                    //if XrHand::is_tip(index){
+                        //    self.cube.cube_size = vec3(0.01,0.01,0.005);
+                        //    self.cube.color = vec4(1.0,0.0,0.0,1.0)
+                        //}
+                        //else {
+                        cube.cube_size = vec3(0.01,0.01,0.015);
+                        cube.color = vec4(1.0,1.0,1.0,1.0);
+                        //}
+                        let mat = joint.pose.to_mat4();
+                        cube.transform = mat;
+                        cube.draw(cx);
+                    }
+                }
+            }
+        }
+        
         // alright lets draw those hands
         let xr_state = cx.draw_event.xr_state.as_ref().unwrap();
         // alright lets draw some cubes!
@@ -53,37 +116,9 @@ impl Widget for XrHands {
         );
         self.cube.draw(cx);
         
-        self.cube.depth_clip = 1.0;
-                                
-        // lets draw our hand controllers
-        let mata = xr_state.left_controller.grip_pose.to_mat4();
-        self.cube.cube_size = vec3(0.05,0.05,0.05);
-        self.cube.transform = mata;
-        self.cube.draw(cx);
-        
-        let mata = xr_state.right_controller.grip_pose.to_mat4();
-        self.cube.cube_size = vec3(0.05,0.05,0.05);
-        self.cube.transform = mata;
-        self.cube.depth_clip = 0.0;
-        self.cube.draw(cx);
-        
-        // lets draw all the fingers
-        for hand in [&xr_state.left_hand, &xr_state.right_hand]{
-            if hand.in_view{
-                for (_index,joint) in hand.joints.iter().enumerate(){
-                    //if XrHand::is_tip(index){
-                    //    self.cube.cube_size = vec3(0.01,0.01,0.005);
-                    //    self.cube.color = vec4(1.0,0.0,0.0,1.0)
-                    //}
-                    //else {
-                        self.cube.cube_size = vec3(0.01,0.01,0.015);
-                        self.cube.color = vec4(1.0,1.0,1.0,1.0);
-                    //}
-                    let mat = joint.pose.to_mat4();
-                    self.cube.transform = mat;
-                    self.cube.draw(cx);
-                }
-            }
+        draw_hands(cx, &mut self.cube, &xr_state);
+        for peer in &self.peers{
+            draw_hands(cx, &mut self.cube, &peer.state)
         }
         
         self.draw_list.end(cx);
