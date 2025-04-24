@@ -40,6 +40,9 @@ pub trait WidgetNode: LiveApply {
     fn redraw(&mut self, _cx: &mut Cx);
     fn set_action_data(&mut self, _data:Arc<dyn ActionTrait>){}
     fn action_data(&self)->Option<Arc<dyn ActionTrait>>{None}
+        
+    fn set_visible(&mut self, _cx:&mut Cx, _visible:bool){}
+    fn visible(&self) -> bool {true}
 }
 
 pub trait Widget: WidgetNode {
@@ -117,12 +120,6 @@ pub trait Widget: WidgetNode {
         self.draw_all(cx, &mut Scope::empty());
     }
         
-    fn set_visible(&mut self, _cx:&mut Cx, _visible:bool){
-    }
-        
-    fn visible(&self) -> bool {
-        true
-    }
     
     fn text(&self) -> String {
         String::new()
