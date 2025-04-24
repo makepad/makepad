@@ -39,6 +39,7 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
         let mut area_field = None;
         let mut deref_field = None;
         let mut wrap_field = None;
+        let mut visible_field = None;
         let mut action_data_field = None;
         let mut find_fields = Vec::new();
         let mut redraw_fields = Vec::new();
@@ -61,6 +62,9 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
             if field.attrs.iter().any(|v| v.name == "area"){
                 area_field = Some(field.name.clone());
             }
+            if field.attrs.iter().any(|v| v.name == "visible"){
+                visible_field = Some(field.name.clone());
+            }
             if field.attrs.iter().any(|v| v.name == "action_data"){
                 action_data_field = Some(field.name.clone());
             }
@@ -79,13 +83,25 @@ pub fn derive_widget_node_impl(input: TokenStream) ->  TokenStream {
         if let Some(wrap_field) = &wrap_field{
             tb.add("    fn walk(&mut self, cx:&mut Cx) -> Walk { self.").ident(wrap_field).add(".walk(cx)}");            
             tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.").ident(wrap_field).add(".redraw(cx)}");
-            tb.add("    fn area(&self)->Area{ self.").ident(wrap_field).add(".area()}");
+            tb.add("    fn visible(&self)->bool{ self.").ident(wrap_field).add(".visible()}");
+            tb.add("    fn set_visible(&mut self, cx:&mut Cx, visible:bool){ self.").ident(wrap_field).add(".set_visible(cx, visible)}");
+                        tb.add("    fn area(&self)->Area{ self.").ident(wrap_field).add(".area()}");
             tb.add("    fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet){self.").ident(wrap_field).add(".find_widgets(path, cached, results)}");
             tb.add("   fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{");
             tb.add("       self.").ident(wrap_field).add(".uid_to_widget(uid)");
             tb.add("   }"); 
         }
         else{
+            
+            if let Some(visible_field) = &visible_field{
+                tb.add("    fn visible(&self)->bool{ self.").ident(visible_field).add("}");
+                tb.add("    fn set_visible(&mut self, cx:&mut Cx, visible:bool){ if self.").ident(visible_field).add(" != visible{self.").ident(visible_field).add(" = visible; self.redraw(cx);}}");
+            }
+            else if let Some(deref_field) = &deref_field{
+                tb.add("    fn visible(&self)->bool{ self.").ident(deref_field).add(".visible()}");
+                tb.add("    fn set_visible(&mut self, cx:&mut Cx, visible:bool){ self.").ident(deref_field).add(".set_visible(cx, visible)}");
+            }
+            
             if let Some(area_field) = &area_field{
                 tb.add("    fn area(&self)->Area{ self.").ident(area_field).add(".area()}");
             }

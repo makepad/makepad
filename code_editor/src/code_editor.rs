@@ -329,6 +329,11 @@ impl CodeEditor {
         self.scroll_bars.redraw(cx);
     }
     
+    pub fn set_visible(&mut self, _cx:&mut Cx, _visible:bool){}
+    
+    pub fn visible(&self) -> bool {true}
+    
+    
     pub fn area(&self)->Area{
         self.scroll_bars.area()
     }

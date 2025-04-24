@@ -66,6 +66,9 @@ impl WidgetNode for Root{
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
         
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){
+        if path.len() == 0{
+            return
+        }
         if let Some(component) = self.components.get(&path[0]) {
             if path.len() == 1{
                 results.push(component.clone());
