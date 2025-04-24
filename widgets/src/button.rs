@@ -484,7 +484,7 @@ pub struct Button {
     enabled: bool,
 
     #[live(true)]
-    visible: bool,
+    #[visible] visible: bool,
 
     /// It indicates if the hover state will be reset when the button is clicked.
     /// This could be useful for buttons that disappear when clicked, where the hover state
