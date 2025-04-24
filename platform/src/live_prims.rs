@@ -1,5 +1,5 @@
 use {
-    std::sync::Arc,
+    std::{str, sync::Arc},
     crate::{
         makepad_live_compiler::*,
         makepad_math::*,
@@ -705,6 +705,19 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
+            LiveValue::Dependency(path) => {
+                match cx.take_dependency(path) {
+                    Ok(bytes) => {
+                        let string = String::from_utf8_lossy(&bytes);
+                        self.push_str(&string);
+                        index + 1
+                    }
+                    Err(_) => {
+                        cx.apply_error_resource_not_found(live_error_origin!(), index, nodes, path);
+                        nodes.skip_node(index)
+                    }
+                }
+            }
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");
                 nodes.skip_node(index)
@@ -817,6 +830,19 @@ live_primitive!(
                     self.apply(cx, apply, index, nodes);
                 }
                 nodes.skip_node(index)
+            }
+            LiveValue::Dependency(path) => {
+                match cx.take_dependency(path) {
+                    Ok(bytes) => {
+                        let string = String::from_utf8_lossy(&bytes);
+                        *self = ArcStringMut::String(string.to_string());
+                        index + 1
+                    }
+                    Err(_) => {
+                        cx.apply_error_resource_not_found(live_error_origin!(), index, nodes, path);
+                        nodes.skip_node(index)
+                    }
+                }
             }
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");

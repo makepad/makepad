@@ -153,6 +153,10 @@ impl Cx {
         let live_registry = self.live_registry.borrow();
         error!("{}", live_registry.live_error_to_live_file_error(err));
     }
+
+    pub fn apply_error_resource_not_found(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path: &str) {
+        self.apply_error(origin, index, nodes, format!("resource not found at path {}", path))
+    }
         
     pub fn link(&mut self, from:LiveId, to:LiveId){
         self.live_registry.borrow_mut().link(from, to);
