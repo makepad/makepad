@@ -10,6 +10,7 @@ use{
                 android::android_jni::*
             }
         },
+        makepad_micro_serde::*,
         draw_shader::CxDrawShaderMapping,
         event::Event,
         event::xr::*,
@@ -57,27 +58,87 @@ impl Cx{
             if unsafe{(openxr.libxr.as_ref().unwrap().xrPollEvent)(openxr.instance.unwrap(), &mut event_buffer)} != XrResult::SUCCESS{
                 break;
             }
-            if event_buffer.ty == XrStructureType::EVENT_DATA_SESSION_STATE_CHANGED{
-                let edssc = unsafe{*(&event_buffer as *const _ as *const XrEventDataSessionStateChanged)};
-                match edssc.state{
-                    XrSessionState::IDLE=>{
+
+            match event_buffer.ty{
+                XrStructureType::EVENT_DATA_SESSION_STATE_CHANGED=>{
+                    let edssc = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSessionStateChanged)};
+                    match edssc.state{
+                        XrSessionState::IDLE=>{
+                        }
+                        XrSessionState::FOCUSED=>{
+                        }
+                        XrSessionState::VISIBLE=>{}
+                        XrSessionState::READY=>{
+                            openxr.session.as_mut().unwrap().begin_session(
+                                openxr.libxr.as_ref().unwrap(),
+                                self.os.activity_thread_id.unwrap(), 
+                                self.os.render_thread_id.unwrap()
+                            );
+                        }
+                        XrSessionState::STOPPING=>{
+                            openxr.session.as_mut().unwrap().end_session(openxr.libxr.as_ref().unwrap());
+                        }
+                        XrSessionState::EXITING=>{}
+                        _=>()
                     }
-                    XrSessionState::FOCUSED=>{
-                    }
-                    XrSessionState::VISIBLE=>{}
-                    XrSessionState::READY=>{
-                        openxr.session.as_mut().unwrap().begin_session(
-                            &openxr.libxr.as_ref().unwrap(),
-                            self.os.activity_thread_id.unwrap(), 
-                            self.os.render_thread_id.unwrap()
-                        );
-                    }
-                    XrSessionState::STOPPING=>{
-                        openxr.session.as_mut().unwrap().end_session(openxr.libxr.as_ref().unwrap());
-                    }
-                    XrSessionState::EXITING=>{}
-                    _=>()
                 }
+                XrStructureType::EVENT_DATA_SPATIAL_ANCHOR_CREATE_COMPLETE_FB=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSpatialAnchorCreateCompleteFB)};
+                    openxr.session.as_mut().unwrap().create_anchor_response(
+                        openxr.libxr.as_ref().unwrap(),
+                        response,
+                    );
+                }
+                XrStructureType::EVENT_DATA_SHARE_SPACES_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataShareSpacesCompleteMETA)};
+                    openxr.session.as_mut().unwrap().share_anchor_response(
+                        openxr.libxr.as_ref().unwrap(),
+                        response,
+                    );
+                }
+                XrStructureType::EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStartColocationDiscoveryCompleteMETA)};
+                    crate::log!("START_COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                },
+                XrStructureType::EVENT_DATA_COLOCATION_DISCOVERY_RESULT_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataColocationDiscoveryResultMETA)};
+                    openxr.session.as_mut().unwrap().start_colocation_discovery_result(
+                        openxr.libxr.as_ref().unwrap(),
+                        response,
+                    );
+                },
+                XrStructureType::EVENT_DATA_COLOCATION_DISCOVERY_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataColocationDiscoveryCompleteMETA)};
+                    crate::log!("COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                },
+                XrStructureType::EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStopColocationDiscoveryCompleteMETA)};
+                    crate::log!("STOP_COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                },
+                XrStructureType::EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStartColocationAdvertisementCompleteMETA)};
+                    crate::log!("START_COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?} {:?}", response.result, response.advertisement_uuid);
+                }
+                XrStructureType::EVENT_DATA_COLOCATION_ADVERTISEMENT_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataColocationAdvertisementCompleteMETA)};
+                    crate::log!("COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?}", response.result);
+                }
+                XrStructureType::EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStopColocationAdvertisementCompleteMETA)};
+                    crate::log!("STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?}", response.result);
+                }
+                XrStructureType::EVENT_DATA_SPACE_SET_STATUS_COMPLETE_FB=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSpaceSetStatusCompleteFB)};
+                    crate::log!("SPACE_SET_STATUS_COMPLETE_FB: {:?}", response.result);
+                }
+                XrStructureType::EVENT_DATA_SPACE_QUERY_RESULTS_AVAILABLE_FB=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSpaceQueryResultsAvailableFB)};
+                    openxr.session.as_mut().unwrap().query_anchors_response(
+                        openxr.libxr.as_ref().unwrap(),
+                        response,
+                    );
+                }
+                _=>()
             }
             /*      
             //crate::log!("{:?}", event_buffer.ty);
@@ -296,16 +357,21 @@ impl CxOpenXr{
         let exts_needed = [
             "XR_KHR_opengl_es_enable\0",
             "XR_EXT_performance_settings\0",
+            "XR_EXT_hand_tracking\0",
+            "XR_EXT_hand_interaction\0",
             "XR_KHR_android_thread_settings\0",
             "XR_FB_passthrough\0",
             "XR_META_environment_depth\0",
             "XR_META_touch_controller_plus\0",
-            "XR_EXT_hand_interaction\0",
             "XR_META_detached_controllers\0",
             "XR_META_simultaneous_hands_and_controllers\0",
-            "XR_EXT_hand_tracking\0",
             "XR_FB_hand_tracking_mesh\0",
             "XR_FB_hand_tracking_aim\0",
+            "XR_META_colocation_discovery\0",
+            "XR_META_spatial_entity_sharing\0",
+            "XR_META_spatial_entity_group_sharing\0",
+            "XR_FB_spatial_entity\0",
+            "XR_FB_spatial_entity_query\0",
         ];
                 
         for ext_needed in exts_needed{
@@ -447,6 +513,18 @@ pub struct CxOpenXrSession{
     pub handle: XrSession,
     pub active: bool,
     pub inputs: CxOpenXrInputs,
+    anchor_host: Option<AnchorHost>,
+}
+
+#[derive(SerBin, DeBin)]
+struct AnchorAdvertisement{
+    group_uuid: XrUuid,
+    anchor_uuid: XrUuid,
+}
+
+struct AnchorHost{
+    _space: XrSpace,
+    advertisement: AnchorAdvertisement,
 }
 
 impl CxOpenXrSession{
@@ -708,6 +786,7 @@ impl CxOpenXrSession{
             head_space,
             local_space,
             active:false,
+            anchor_host: None,
             depth_swap_chain_index: 0,
             inputs
         })
@@ -833,6 +912,205 @@ impl CxOpenXrSession{
             state: new_state,
             last: last_state
         })
+    }
+    
+    // STEP ONE. share the anchor
+    pub fn create_anchor_request(&mut self, pose:XrPosef, xr: &LibOpenXr, frame:&CxOpenXrFrame){
+        let anchor_create_info = XrSpatialAnchorCreateInfoFB{
+            space: self.local_space,
+            pose_in_space: pose,
+            time: frame.frame_state.predicted_display_time,
+            ..Default::default()
+        };
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrCreateSpatialAnchorFB)(
+            self.handle,
+            &anchor_create_info,
+            &mut request
+        )}.log_error("xrCreateSpatialAnchorFB");
+    }
+    
+    pub fn create_anchor_response(&mut self, xr: &LibOpenXr, response:&XrEventDataSpatialAnchorCreateCompleteFB){
+        // got response.
+        if response.result != XrResult::SUCCESS{
+            crate::log!("share_anchor_response failed {:?}", response.result);
+            return
+        }
+        // alright so lets get the space
+        //let space = edsacc.space;
+        //let space_uuid = edsacc.uuid;
+        let components = xr_array_fetch(XrSpaceComponentTypeFB::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateSpaceSupportedComponentsFB)(
+                response.space,
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateSpaceSupportedComponentsFB")
+        }).unwrap_or(vec![]);
+        if !components.iter().any(|v| *v == XrSpaceComponentTypeFB::STORABLE) {
+            crate::log!("share_anchor_response space not STORABLE");
+            return
+        }
+        if !components.iter().any(|v| *v == XrSpaceComponentTypeFB::SHARABLE){
+            crate::log!("share_anchor_response space not SHARABLE");
+            return
+        }
+        // flag it
+        let request = XrSpaceComponentStatusSetInfoFB{
+            component_type: XrSpaceComponentTypeFB::STORABLE,
+            enabled: XrBool32::from_bool(true),
+            ..Default::default()
+        };
+        let mut request_id = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrSetSpaceComponentStatusFB)(
+            response.space,
+            &request,
+            &mut request_id
+        )}.log_error("xrSetSpaceComponentStatusFB");
+        // its shareable
+        let request = XrSpaceComponentStatusSetInfoFB{
+            component_type: XrSpaceComponentTypeFB::SHARABLE,
+            enabled: XrBool32::from_bool(true),
+            ..Default::default()
+        };
+        let mut request_id = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrSetSpaceComponentStatusFB)(
+            response.space,
+            &request,
+            &mut request_id
+        )}.log_error("xrSetSpaceComponentStatusFB");
+        
+        let group_uuid = XrUuid::generate();
+                
+        self.anchor_host = Some(AnchorHost{
+            _space: response.space,
+            advertisement: AnchorAdvertisement{
+                anchor_uuid: response.uuid,
+                group_uuid,
+            }
+        });
+                        
+        // lets share the anchor
+        self.share_anchor_request(xr, response.space);
+    }
+    
+    pub fn share_anchor_request(&self, xr: &LibOpenXr, space:XrSpace){
+        // lets generate a uid for our space
+        let anchor_host = self.anchor_host.as_ref().unwrap();
+        
+        let recipient_info = XrShareSpacesRecipientGroupsMETA{
+            group_count: 1,
+            groups: &anchor_host.advertisement.group_uuid,
+            ..Default::default()
+        };
+        let spaces_info = XrShareSpacesInfoMETA{
+            space_count: 1,
+            spaces: &space,
+            recipient_info: &recipient_info as *const _ as *const _,
+            ..Default::default()
+        };
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrShareSpacesMETA)(
+            self.handle,
+            &spaces_info,
+            &mut request
+        )}.log_error("xrShareSpacesMETA");
+    }
+    
+    pub fn share_anchor_response(&mut self, xr: &LibOpenXr, response:&XrEventDataShareSpacesCompleteMETA){
+        if response.result != XrResult::SUCCESS{
+            crate::log!("share_anchor_response result: {:?}", response.result);
+            self.anchor_host.take();
+        }
+        else{
+            crate::log!("share_anchor_response OK");
+            self.start_colocation_advertisement_request(xr);
+        }
+    }
+    
+    pub fn start_colocation_advertisement_request(&mut self, xr: &LibOpenXr){
+        let anchor_host = self.anchor_host.as_ref().unwrap();
+        let buffer = anchor_host.advertisement.serialize_bin();
+        let advertisement_info = XrColocationAdvertisementStartInfoMETA{
+            buffer: buffer.as_ptr(),
+            buffer_size: buffer.len() as _,
+            ..Default::default()
+        };
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrStartColocationAdvertisementMETA)(
+            self.handle,
+            &advertisement_info,
+            &mut request
+        )}.log_error("xrStartColocationAdvertisementMETA");
+    }
+        
+    pub fn stop_colocation_advertisement(&mut self, xr: &LibOpenXr){
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrStopColocationAdvertisementMETA)(
+            self.handle,
+            0 as *const _,
+            &mut request
+        )}.log_error("xrStopColocationAdvertisementMETA");
+    }
+        
+    pub fn start_colocation_discovery_request(&mut self, xr: &LibOpenXr){
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrStartColocationDiscoveryMETA)(
+            self.handle,
+            0 as *const _,
+            &mut request
+        )}.log_error("xrStartColocationDiscoveryMETA");
+    }
+    
+    pub fn start_colocation_discovery_result(&mut self, xr: &LibOpenXr, response:&XrEventDataColocationDiscoveryResultMETA){
+        // alright lets parse the buffer
+        let buffer = &response.buffer[0..response.buffer_size as usize];
+        if let Ok(data) = AnchorAdvertisement::deserialize_bin(&buffer){
+            // alright! we have a discovery result
+            self.query_anchors_request(xr, data.group_uuid)
+        }
+        else{
+            crate::log!("start_colocation_discovery_result deserialize failure");
+        }
+    }
+    
+    pub fn query_anchors_request(&mut self, xr: &LibOpenXr, group_uuid:XrUuid){
+        let location_filter_info = XrSpaceStorageLocationFilterInfoFB{
+            location: XrSpaceStorageLocationFB::CLOUD,
+            ..Default::default()
+        };
+        let group_filter_info = XrSpaceGroupUuidFilterInfoMETA{
+            group_uuid,
+            next: &location_filter_info as *const _ as *const _,
+            ..Default::default()
+        };
+        let space_query_info = XrSpaceQueryInfoFB{
+            query_action: XrSpaceQueryActionFB::LOAD,
+            max_result_count: 32,
+            filter: &group_filter_info as *const _ as *const _,
+            ..Default::default()
+        };
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrQuerySpacesFB)(
+            self.handle,
+            & space_query_info as *const _ as *const _,
+            &mut request
+        )}.log_error("xrQuerySpacesFB");          
+    }
+    
+    pub fn query_anchors_response(&mut self, _xr: &LibOpenXr, _response:&XrEventDataSpaceQueryResultsAvailableFB){
+        
+        
+        
+    }
+    
+    pub fn stop_colocation_discovery(&mut self, xr: &LibOpenXr){
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrStopColocationDiscoveryMETA)(
+            self.handle,
+            0 as *const _,
+            &mut request
+        )}.log_error("xrStopColocationDiscoveryMETA");              
     }
 }
 
@@ -1114,7 +1392,9 @@ impl CxOpenXrHand{
         let mut s = 0;
         for i in 0..self.joint_locations.len(){
             let tracked = self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_TRACKED) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_TRACKED);
-            
+            /*
+            let valid = valid: self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_VALID) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_VALID)
+            */
             // we're going to skip the tips and only store the distance
             if i == 5 || i == 10 || i == 15 || i ==20 || i == 25{
                 // only store the distance to the tip so we can fit the entire
@@ -1125,13 +1405,7 @@ impl CxOpenXrHand{
             }
             
             hand.joints[s] = XrHandJoint{
-                pose: self.joint_locations[i].pose,
-                /*
-                valid: self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_VALID) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_VALID)
-                ,
-                tracked: 
-                self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_TRACKED) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_TRACKED)
-                 */     
+                pose: self.joint_locations[i].pose,    
             };
             s += 1;
             if tracked{
