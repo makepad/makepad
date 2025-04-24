@@ -385,16 +385,13 @@ impl ViewRef {
 
     pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            if inner.visible != visible{
-                inner.visible = visible;
-                inner.redraw(cx);
-            }
+            inner.set_visible(cx, visible)
         }
     }
 
     pub fn visible(&self) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.visible
+            inner.visible()
         } else {
             false
         }
@@ -624,6 +621,18 @@ impl WidgetNode for View {
             }
         }
     }
+    
+    fn set_visible(&mut self, cx:&mut Cx, visible:bool) {
+        crate::log!("SET VISIBLE {}", visible);
+        if self.visible != visible{
+            self.visible = visible;
+            self.redraw(cx);
+        }
+    }
+        
+    fn visible(&self) -> bool {
+        self.visible
+    }
 }
 
 impl Widget for View {
@@ -735,9 +744,6 @@ impl Widget for View {
         }
     }
 
-    fn visible(&self) -> bool {
-        self.visible
-    }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // the beginning state

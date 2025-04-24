@@ -926,12 +926,6 @@ pub enum CheckBoxAction {
 }
 
 impl CheckBox {
-	pub fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
-		if !self.visible {
-			self.visible = visible;
-			self.redraw(cx);
-		}
-	}
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
@@ -944,9 +938,6 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
-    fn visible(&self) -> bool {
-        self.visible
-    }
 
     fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
         self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
@@ -978,48 +969,43 @@ impl Widget for CheckBox {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
                 
-        if self.visible {
-            match event.hits(cx, self.draw_bg.area()) {
-                Hit::KeyFocus(_) => {
-                    self.animator_play(cx, id!(focus.on));
-                }
-                Hit::KeyFocusLost(_) => {
-                    self.animator_play(cx, id!(focus.off));
-                    self.draw_bg.redraw(cx);
-                }
-                Hit::FingerHoverIn(_) => {
-                    cx.set_cursor(MouseCursor::Hand);
-                    self.animator_play(cx, id!(hover.on));
-                }
-                Hit::FingerHoverOut(_) => {
-                    self.animator_play(cx, id!(hover.off));
-                },
-                Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                    self.set_key_focus(cx);
-                    if self.animator_in_state(cx, id!(active.on)) {
-                        self.animator_play(cx, id!(active.off));
-                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
-                    }
-                    else {
-                        self.animator_play(cx, id!(active.on));
-                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(true));
-                    }
-                },
-                Hit::FingerUp(_fe) => {
-                                    
-                }
-                Hit::FingerMove(_fe) => {
-                                    
-                }
-                _ => ()
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::KeyFocus(_) => {
+                self.animator_play(cx, id!(focus.on));
             }
+            Hit::KeyFocusLost(_) => {
+                self.animator_play(cx, id!(focus.off));
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.animator_play(cx, id!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animator_play(cx, id!(hover.off));
+            },
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                self.set_key_focus(cx);
+                if self.animator_in_state(cx, id!(active.on)) {
+                    self.animator_play(cx, id!(active.off));
+                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
+                }
+                else {
+                    self.animator_play(cx, id!(active.on));
+                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(true));
+                }
+            },
+            Hit::FingerUp(_fe) => {
+                                    
+            }
+            Hit::FingerMove(_fe) => {
+                                    
+            }
+            _ => ()
         }
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        if !self.visible {
-            return DrawStep::done()
-        }
         self.draw_walk(cx, walk)
     }
     
@@ -1034,19 +1020,6 @@ impl Widget for CheckBox {
 }
 
 impl CheckBoxRef {
-    pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.set_visible(cx, visible)
-        }
-    }
-
-    pub fn visible(&self) -> bool {
-        if let Some(inner) = self.borrow() {
-            inner.visible
-        } else {
-            false
-        }
-    }
 
     pub fn changed(&self, actions: &Actions) -> Option<bool> {
         if let CheckBoxAction::Change(b) = actions.find_widget_action_cast(self.widget_uid()) {
