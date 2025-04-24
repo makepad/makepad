@@ -1,6 +1,7 @@
 
 use makepad_widgets::*;
-use makepad_micro_serde::*;
+use makepad_xr_net::xr_net::*;
+use makepad_widgets::xr_hands::*;
 
 live_design!{
     use link::theme::*;
@@ -30,20 +31,6 @@ live_design!{
                             return depth_clip(self.world, color, self.depth_clip);
                         }
                     }
-                    button_1 = <Button> {
-                        text: "Click me 😊"
-                        draw_text:{color:#fff, text_style:{font_size:28}}
-                    }
-                    text_input = <TextInput> {
-                        width: 100,
-                        flow: RightWrap,
-                        text: "Lorem ipsum"
-                        draw_text:{color:#fff, text_style:{font_size:28}}
-                    }
-                    button_2 = <Button> {
-                        text: "Click me 345 1234"
-                        draw_text:{color:#fff, text_style:{font_size:28}}
-                    }
                 }
             }
         }
@@ -55,7 +42,7 @@ app_main!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[rust] counter: usize,
+    #[rust(XrNetNode::new(cx))] xr_net:XrNetNode,
  }
  
 impl LiveRegister for App {
@@ -66,22 +53,26 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_startup(&mut self, cx:&mut Cx){
-        let buf = XrState::default().serialize_bin();
-        log!("{:?}", buf.len());
         cx.switch_to_xr();
     }
     
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(b0)).clicked(&actions) {
-            self.counter += 1;
-            cx.switch_to_xr();
-        }
-    }
+    fn handle_actions(&mut self, _cx: &mut Cx, _actions:&Actions){
+}
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::XrUpdate(_e) = event{
+        if let Event::XrUpdate(e) = event{
+            self.xr_net.send_state((*e.state).clone());
+            if let Some(mut xr_hands) = self.ui.xr_hands(id!(xr_hands)).borrow_mut(){
+                while let Ok(msg) = self.xr_net.incoming_receiver.try_recv(){
+                    match msg{
+                        XrNetIncoming::Join{state,peer}=>xr_hands.join_peer(cx, peer.to_live_id(), state),
+                        XrNetIncoming::Leave{peer}=>xr_hands.leave_peer(cx, peer.to_live_id()),
+                        XrNetIncoming::Update{state,peer}=>xr_hands.update_peer(cx, peer.to_live_id(), state),
+                    }
+                }
+            }
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());

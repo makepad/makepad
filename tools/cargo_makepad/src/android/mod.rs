@@ -100,7 +100,11 @@ impl AndroidVariant {
                 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
                 <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
                 <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
-                                                                                    
+                <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API" />
+                <!-- Grants access to Shared Spatial Anchors. -->
+                <uses-permission android:name="com.oculus.permission.IMPORT_EXPORT_IOT_MAP_DATA" />
+                <uses-permission android:name="com.oculus.permission.USE_COLOCATION_DISCOVERY_API" />
+                
                 <application
                     android:label="{label}"
                     android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
