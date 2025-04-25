@@ -527,7 +527,7 @@ impl CxOpenXr{
         if let Some(session) = &mut self.session{
             let xr =  self.libxr.as_ref().unwrap();
             session.anchor_discovery = id;
-            crate::log!("Discovering anchor");
+            crate::log!("Discovering anchor {id}");
             session.start_colocation_discovery_request(xr);
         }
     }
