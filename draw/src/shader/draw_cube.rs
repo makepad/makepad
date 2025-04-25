@@ -24,7 +24,7 @@ live_design!{
             let ambient = vec3(0.2,0.2,0.2)
             let color = self.color.xyz * dp + ambient;
             
-            self.lit_color = vec4(color * self.color.w, self.color.w);
+            self.lit_color = vec4(color*2 , 0.1);
             self.world = model_view * vec4(pos, 1.);
             return self.camera_projection * (self.camera_view * (self.world))
         }

@@ -66,13 +66,12 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_startup(&mut self, cx:&mut Cx){
-        cx.switch_to_xr();
     }
     
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(b0)).clicked(&actions) {
+            log!("hi");
             self.counter += 1;
-            cx.switch_to_xr();
         }
     }
 }
