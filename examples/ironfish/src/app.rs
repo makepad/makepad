@@ -448,7 +448,6 @@ impl MatchEvent for App {
         self.preset(cx,0,false);
         self.ui.piano(id!(piano)).set_key_focus(cx);
         self.midi_input = cx.midi_input();
-        cx.switch_to_xr();
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {

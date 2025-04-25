@@ -137,6 +137,7 @@ impl Cx{
                     if response.result != XrResult::SUCCESS{
                         crate::log!("COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?}", response.result);
                     }
+                    
                 }
                 XrStructureType::EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStopColocationAdvertisementCompleteMETA)};
@@ -810,7 +811,7 @@ impl CxOpenXrSession{
         let inputs = CxOpenXrInputs::new_inputs(xr, session, instance)?;
                 
         Ok(CxOpenXrSession{
-            anchor_discovery: 0,
+            anchor_discovery: 1,
             color_images,
             depth_images,
             color_swap_chain,

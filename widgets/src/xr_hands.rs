@@ -20,9 +20,66 @@ live_design!{
     }
 }
 
+struct Bullet{
+    shot_at: f64,
+    pose: Pose,
+}
+#[derive(Default)]
+struct Bullets{
+    last_fired: f64,
+    bullets: Vec<Bullet>,
+}
+
 pub struct XrPeer{
     id: LiveId,
     state: XrState,
+    bullets: Bullets
+}
+
+impl Bullets{
+    fn handle(&mut self, cx:&mut Cx3d, cube:&mut DrawCube, xr_state:&XrState, anchor_map:&Mat4){
+                  
+        // lets emit some bullets from your pointy finger
+        if xr_state.time < self.last_fired{ // we rejoined
+            self.last_fired = xr_state.time;
+        }
+        if xr_state.time - self.last_fired > 0.05 {
+            for hand in xr_state.hands(){
+                if !hand.in_view{
+                    continue
+                }
+                for pose in [
+                    hand.joints[XrHand::THUMB_KNUCKLE2].pose,
+                    hand.joints[XrHand::INDEX_KNUCKLE3].pose,
+                    hand.joints[XrHand::MIDDLE_KNUCKLE3].pose,
+                    hand.joints[XrHand::RING_KNUCKLE3].pose,
+                    hand.joints[XrHand::PINKY_KNUCKLE3].pose,
+                                        
+                ]{
+                //let pose = hand.joints[XrHand::INDEX_KNUCKLE3].pose;
+                self.last_fired = xr_state.time;
+                self.bullets.push(Bullet{
+                    shot_at: xr_state.time,
+                    pose
+                });
+                if self.bullets.len()>4500{
+                    self.bullets.remove(0);
+                }
+            }
+            }
+        }
+        for bullet in &self.bullets{
+            let travel = (xr_state.time - bullet.shot_at) * 0.25;
+            let mat = Mat4::mul(&bullet.pose.to_mat4(), anchor_map);
+            cube.color = vec4(1.0,1.0,1.0,1.0);
+            cube.cube_size = vec3(0.01,0.01,0.01);
+            cube.cube_pos = vec3(0.0,0.0,-travel as f32);
+            cube.transform = mat;
+            cube.depth_clip = 1.0;
+            cube.draw(cx);
+        }
+    }
+    
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -30,7 +87,8 @@ pub struct XrHands {
     #[redraw] #[rust(DrawList::new(cx))] draw_list: DrawList,
     #[area] #[live] cube: DrawCube,
     #[live] label: DrawText,
-    #[rust] peers: Vec<XrPeer>
+    #[rust] peers: Vec<XrPeer>,
+    #[rust] bullets: Bullets,
 }
 
 impl XrHands{
@@ -41,7 +99,7 @@ impl XrHands{
             peer.state = state;
         }
         else{
-            self.peers.push(XrPeer{id, state});
+            self.peers.push(XrPeer{id, state, bullets:Bullets::default()});
         }
     }
         
@@ -121,8 +179,8 @@ impl Widget for XrHands {
                     let tip = hand.tips[i];
                     let mat = Mat4::mul(&joint.pose.to_mat4(), transform);
                     cube.color = vec4(1.0,0.0,0.0,1.0);
-                    cube.cube_size = vec3(0.01,0.01,0.002);
-                    cube.cube_pos = vec3(0.0,0.0,-tip);
+                    cube.cube_size = vec3(0.01,0.01,0.402);
+                    cube.cube_pos = vec3(0.0,0.0,-tip-0.25);
                     cube.transform = mat;
                     cube.depth_clip = 0.0;
                     cube.draw(cx);
@@ -158,23 +216,27 @@ impl Widget for XrHands {
         }
         
         draw_hands(cx, &mut self.cube, &Mat4::identity(), &xr_state, false);
-        
-        let mut discovery = None;
-        for peer in &self.peers{
+        self.bullets.handle(cx, &mut self.cube, &xr_state, &Mat4::identity());
+                
+        let mut discovery = 0;
+        for peer in &mut self.peers{
             if peer.state.anchor_discovery > xr_state.anchor_discovery{
-                discovery = Some(peer.state.anchor_discovery);
+                discovery = discovery.max(peer.state.anchor_discovery);
             }
             if let Some(my_anchor) = peer.state.shared_anchor{
                 if let Some(other_anchor) = xr_state.shared_anchor{
-                    let mat = Mat4::mul(&my_anchor.to_mat4().invert(), &other_anchor.to_mat4());
-                    draw_hands(cx, &mut self.cube, &mat, &peer.state, true)
+                    let anchor_map = Mat4::mul(&my_anchor.to_mat4().invert(), &other_anchor.to_mat4());
+                    draw_hands(cx, &mut self.cube, &anchor_map, &peer.state, true);
+                    
+                    peer.bullets.handle(cx, &mut self.cube, &peer.state, &anchor_map)
+
                 }
             }
             else{
                 draw_hands(cx, &mut self.cube, &Mat4::identity(), &peer.state, true)
             }
         }
-        if let Some(discovery) = discovery{
+        if discovery>0{
             cx.xr_discover_anchor(discovery);
         }
                 

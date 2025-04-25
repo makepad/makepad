@@ -176,6 +176,15 @@ pub struct XrState{
     pub left_hand: XrHand,
     pub right_hand: XrHand,
 }
+impl XrState{
+    pub fn hands(&self)->[&XrHand;2]{
+        [&self.left_hand, &self.right_hand]
+    }
+    pub fn controllers(&self)->[&XrController;2]{
+        [&self.left_controller, &self.right_controller]
+    }
+}
+
  
 #[derive(Clone, Debug)]
 pub struct XrUpdateEvent {
