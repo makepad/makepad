@@ -912,9 +912,10 @@ impl Dock {
         // Don't use LiveId::unique() as they are only unique when you run it.
         // Use dock.unique_tab_id(somerandombase) instead
 
-        // Change unique ids in the hashmap's keys to strings so as to prevent them from being overwritten by LiveId::unique();
-        // When loading the dock state in a new instance, UNIQUE_LIVE_ID is AtomicU64::new(1).
-        // Dragging a tab to form a Splitter could create an split with an existing unique id, causing the previous split to be overwritten.
+        // Changes unique ids in the hashmap's keys to strings, 
+        // to prevent collisions.
+        // Dragging a tab to form a Splitter could create an split with an existing unique id, 
+        // causing the previous split to be overwritten.
         let processed_dock_items: HashMap<LiveId, DockItem> = dock_items.into_iter()
             .map(|(k, mut v)| {
                 let new_key = if k.is_unique() {
