@@ -25,6 +25,7 @@ pub struct XrController {
     pub aim_pose: Pose,
     pub trigger: f32,
     pub grip: f32,
+    pub last_buttons: u16,
     pub buttons: u16,
     pub stick: Vec2,
 }
@@ -48,6 +49,13 @@ impl XrController{
     pub const TOUCH_THUMBREST: u16 = 1<<13;
     
     pub fn active(&self)->bool{self.buttons & Self::ACTIVE != 0}
+    
+    pub fn clicked_x(&self)->bool{self.buttons & Self::CLICK_X != 0 && self.last_buttons & Self::CLICK_X == 0}
+    pub fn clicked_y(&self)->bool{self.buttons & Self::CLICK_Y != 0 && self.last_buttons & Self::CLICK_Y == 0}
+    pub fn clicked_a(&self)->bool{self.buttons & Self::CLICK_A != 0 && self.last_buttons & Self::CLICK_A == 0}
+    pub fn clicked_b(&self)->bool{self.buttons & Self::CLICK_B != 0 && self.last_buttons & Self::CLICK_B == 0}
+    pub fn clicked_stick(&self)->bool{self.buttons & Self::CLICK_THUMBSTICK != 0 && self.last_buttons & Self::CLICK_THUMBSTICK == 0}
+    pub fn clicked_menu(&self)->bool{self.buttons & Self::CLICK_MENU != 0 && self.last_buttons & Self::CLICK_MENU == 0}
     
     pub fn click_x(&self)->bool{self.buttons & Self::CLICK_X != 0}
     pub fn click_y(&self)->bool{self.buttons & Self::CLICK_Y != 0}

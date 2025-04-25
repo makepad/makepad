@@ -912,7 +912,7 @@ pub struct CheckBox {
     
     #[live] text: ArcStringMut,
 
-    #[live(true)]
+    #[visible] #[live(true)]
     pub visible: bool,
     
     #[live] bind: String,
@@ -1006,6 +1006,9 @@ impl Widget for CheckBox {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         self.draw_walk(cx, walk)
     }
     

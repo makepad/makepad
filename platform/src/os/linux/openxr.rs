@@ -873,7 +873,8 @@ impl CxOpenXrSession{
     fn new_xr_update_event(&mut self, xr: &LibOpenXr, frame:&CxOpenXrFrame)->Option<XrUpdateEvent>{
         let predicted_display_time = frame.frame_state.predicted_display_time;
         let local_space = self.local_space;
-                
+        let last_state = self.inputs.last_state.clone();
+                        
         let active_action_set = XrActiveActionSet{
             action_set: self.inputs.action_set,
             subaction_path: XrPath(0)
@@ -889,8 +890,8 @@ impl CxOpenXrSession{
             return None
         };
                 
-        let left_controller = self.inputs.left_controller.poll(xr, self.handle, local_space, predicted_display_time, true, &self.inputs.actions);
-        let right_controller = self.inputs.right_controller.poll(xr, self.handle, local_space, predicted_display_time, false, &self.inputs.actions);
+        let left_controller = self.inputs.left_controller.poll(xr, self.handle, local_space, predicted_display_time, true, &self.inputs.actions, last_state.left_controller.buttons);
+        let right_controller = self.inputs.right_controller.poll(xr, self.handle, local_space, predicted_display_time, false, &self.inputs.actions, last_state.right_controller.buttons);
                 
         let left_hand = self.inputs.left_hand.poll(xr, self.handle, local_space, predicted_display_time);
         let right_hand = self.inputs.right_hand.poll(xr, self.handle, local_space, predicted_display_time);
@@ -911,7 +912,6 @@ impl CxOpenXrSession{
             left_hand,
             right_hand,
         });
-        let last_state = self.inputs.last_state.clone();
         self.inputs.last_state = new_state.clone();
         
         
@@ -1547,13 +1547,16 @@ impl CxOpenXrController{
         self.detached_grip_space.destroy(xr);
     }
     
-    fn poll(&self, xr: &LibOpenXr, session:XrSession, local_space:XrSpace, time:XrTime, is_left: bool, actions: &CxOpenXrInputActions)->XrController{
+    fn poll(&self, xr: &LibOpenXr, session:XrSession, local_space:XrSpace, time:XrTime, is_left: bool, actions: &CxOpenXrInputActions, last_buttons:u16)->XrController{
         // lets query the trigger bool
         let stick = XrActionStateVector2f::get(xr, session, actions.thumbstick_action, self.path);
         let trigger = XrActionStateFloat::get(xr, session, actions.trigger_action, self.path);
         let grip = XrActionStateFloat::get(xr, session, actions.grip_action, self.path);
         let grip_state = XrActionStatePose::get(xr, session, actions.grip_pose_action, self.path);
         let aim_state = XrActionStatePose::get(xr, session, actions.aim_pose_action, self.path);
+        
+        //crate::log!("{:?}", XrActionStateBoolean::get(xr, session, actions.click_x_action, self.path).current_state.as_bool());
+        
         fn bf(xr: &LibOpenXr, session:XrSession, path:XrPath, action:XrAction, flag:u16, on:bool)->u16{
             if !on{
                 return 0
@@ -1582,6 +1585,7 @@ impl CxOpenXrController{
             stick: stick.current_state,
             trigger: trigger.current_state,
             grip: grip.current_state,
+            last_buttons,
             buttons: 
                 if aim_state.is_active.as_bool(){XrController::ACTIVE}else{0}|
                 bf(xr, session, self.path, actions.click_a_action, XrController::CLICK_A, !is_left) | 
