@@ -113,6 +113,13 @@ impl XrHand{
     pub const PINKY_KNUCKLE1: usize = 18;
     pub const PINKY_KNUCKLE2: usize = 19;
     pub const PINKY_KNUCKLE3: usize = 20;
+    pub const END_KNUCKLES: [usize;5] = [
+        Self::THUMB_KNUCKLE2, 
+        Self::INDEX_KNUCKLE3, 
+        Self::MIDDLE_KNUCKLE3, 
+        Self::RING_KNUCKLE3, 
+        Self::PINKY_KNUCKLE3
+    ];
     /*
     pub const JOINT_COUNT: usize = 26;
     pub const CENTER: usize = 0;
