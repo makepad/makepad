@@ -20,48 +20,49 @@ use {
 };
 
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
-pub struct XrFloatButton {
-    pub value: f32,
-}
-
-#[derive(Clone, Debug, Default, SerBin, DeBin)]
-pub struct XrStick {
-    pub x: f32,
-    pub y: f32,
-}
-
-#[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrController {
     pub grip_pose: Pose,
     pub aim_pose: Pose,
-    pub trigger: XrFloatButton,
-    pub grip: XrFloatButton,
+    pub trigger: f32,
+    pub grip: f32,
     pub buttons: u16,
-    pub stick: XrStick,
+    pub stick: Vec2,
 }
 
 impl XrController{
-    pub const ACTIVE: u16 = 1<<0;
-    pub const X: u16 = 1<<1;
-    pub const Y: u16 = 1<<2;
-    pub const A: u16 = 1<<3;
-    pub const B: u16 = 1<<4;
-    pub const MENU: u16 = 1<<5;
-    pub const ON_X: u16 = 1<<6;
-    pub const ON_Y: u16 = 1<<7;
-    pub const ON_A: u16 = 1<<8;
-    pub const ON_B: u16 = 1<<9;
-    pub const ON_STICK: u16 = 1<<10;
-    pub fn x(&self)->bool{self.buttons & Self::X != 0}
-    pub fn y(&self)->bool{self.buttons & Self::Y != 0}
-    pub fn a(&self)->bool{self.buttons & Self::A != 0}
-    pub fn b(&self)->bool{self.buttons & Self::B != 0}
-    pub fn on_x(&self)->bool{self.buttons & Self::ON_X != 0}
-    pub fn on_y(&self)->bool{self.buttons & Self::ON_Y != 0}
-    pub fn on_a(&self)->bool{self.buttons & Self::ON_A != 0}
-    pub fn on_b(&self)->bool{self.buttons & Self::ON_B != 0}
-    pub fn on_stick(&self)->bool{self.buttons & Self::ON_STICK != 0}
-    pub fn menu(&self)->bool{self.buttons & Self::MENU != 0}
+    pub const CLICK_X: u16 = 1<<0;
+    pub const CLICK_Y: u16 = 1<<1;
+    pub const CLICK_A: u16 = 1<<2;
+    pub const CLICK_B: u16 = 1<<3;
+    pub const CLICK_MENU: u16 = 1<<4;
+    
+    pub const ACTIVE: u16 = 1<<5;
+    pub const CLICK_THUMBSTICK: u16 = 1<<6;
+        
+    pub const TOUCH_X: u16 = 1<<7;
+    pub const TOUCH_Y: u16 = 1<<8;
+    pub const TOUCH_A: u16 = 1<<9;
+    pub const TOUCH_B: u16 = 1<<10;
+    pub const TOUCH_THUMBSTICK: u16 = 1<<11;
+    pub const TOUCH_TRIGGER: u16 = 1<<12;
+    pub const TOUCH_THUMBREST: u16 = 1<<13;
+    
+    pub fn active(&self)->bool{self.buttons & Self::ACTIVE != 0}
+    
+    pub fn click_x(&self)->bool{self.buttons & Self::CLICK_X != 0}
+    pub fn click_y(&self)->bool{self.buttons & Self::CLICK_Y != 0}
+    pub fn click_a(&self)->bool{self.buttons & Self::CLICK_A != 0}
+    pub fn click_b(&self)->bool{self.buttons & Self::CLICK_B != 0}
+    pub fn click_stick(&self)->bool{self.buttons & Self::CLICK_THUMBSTICK != 0}
+    pub fn click_menu(&self)->bool{self.buttons & Self::CLICK_MENU != 0}
+        
+    pub fn touch_x(&self)->bool{self.buttons & Self::TOUCH_X != 0}
+    pub fn touch_y(&self)->bool{self.buttons & Self::TOUCH_Y != 0}
+    pub fn touch_a(&self)->bool{self.buttons & Self::TOUCH_A != 0}
+    pub fn touch_b(&self)->bool{self.buttons & Self::TOUCH_B != 0}
+    pub fn touch_thumbstick(&self)->bool{self.buttons & Self::TOUCH_THUMBSTICK != 0}
+    pub fn touch_trigger(&self)->bool{self.buttons & Self::TOUCH_TRIGGER != 0}
+    pub fn touch_thumbrest(&self)->bool{self.buttons & Self::TOUCH_THUMBREST != 0}
 }
 
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
