@@ -171,6 +171,7 @@ pub struct LibOpenXr{
     pub xrEnumerateSpaceSupportedComponentsFB: TxrEnumerateSpaceSupportedComponentsFB,
     pub xrSetSpaceComponentStatusFB: TxrSetSpaceComponentStatusFB,
     pub xrQuerySpacesFB: TxrQuerySpacesFB,
+    pub xrRetrieveSpaceQueryResultsFB: TxrRetrieveSpaceQueryResultsFB,
 }
 
 
@@ -248,6 +249,7 @@ impl LibOpenXr {
             xrEnumerateSpaceSupportedComponentsFB:get_proc_addr!(gipa, instance, TxrEnumerateSpaceSupportedComponentsFB)?,
             xrSetSpaceComponentStatusFB: get_proc_addr!(gipa, instance, TxrSetSpaceComponentStatusFB)?,
             xrQuerySpacesFB: get_proc_addr!(gipa, instance, TxrQuerySpacesFB)?,
+            xrRetrieveSpaceQueryResultsFB: get_proc_addr!(gipa, instance, TxrRetrieveSpaceQueryResultsFB)?,
          })
     }
 }
@@ -673,6 +675,12 @@ pub type TxrQuerySpacesFB = unsafe extern "C" fn(
     request_id: *mut XrAsyncRequestIdFB,
 ) -> XrResult;
 
+pub type TxrRetrieveSpaceQueryResultsFB = unsafe extern "C" fn(
+    session: XrSession,
+    request_id: XrAsyncRequestIdFB,
+    results: *mut XrSpaceQueryResultsFB,
+) -> XrResult;
+
 
 // Handle types
 
@@ -830,6 +838,7 @@ pub struct XrSession(pub u64);
 pub struct XrUuid {
     pub data: [u8; UUID_SIZE],
 }
+pub type XrUuidEXT = XrUuid;
 
 impl XrUuid{
     pub fn generate()->Self{
@@ -933,6 +942,42 @@ pub struct XrRect2Di {
 
 // Struct datatypes
 
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceQueryResultFB {
+    pub space: XrSpace,
+    pub uuid: XrUuidEXT,
+}
+impl Default for XrSpaceQueryResultFB{
+    fn default()->Self{
+        XrSpaceQueryResultFB{
+            space: XrSpace(0),
+            uuid: Default::default(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceQueryResultsFB {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub result_capacity_input: u32,
+    pub result_count_output: u32,
+    pub results: *mut XrSpaceQueryResultFB,
+}
+impl Default for XrSpaceQueryResultsFB{
+    fn default()->Self{
+        XrSpaceQueryResultsFB{
+            ty: XrStructureType::SPACE_QUERY_RESULTS_FB,
+            next: 0 as *mut _,
+            result_capacity_input: 0,
+            result_count_output: 0,
+            results: 0 as *mut _,
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -4184,10 +4229,12 @@ impl XrResult {
         }
     }
     
-    pub fn log_error(&self, name: &str){
+    pub fn log_error(&self, name: &str)->bool{
         if *self != XrResult::SUCCESS{
-            crate::log!("OpenXR error in {}: {}", name, self)
+            crate::log!("OpenXR error in {}: {}", name, self);
+            return true
         }
+        false
     }
         
     pub const SUCCESS: XrResult = Self(0i32);
