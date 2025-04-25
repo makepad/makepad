@@ -124,6 +124,7 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
        }
     }
     else{
+        /*
        #[cfg(target_os = "android")]
         {
             use std::ffi::c_int;
@@ -133,6 +134,7 @@ pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end
             let msg = format!("{}:{}:{} - {}\0", file_name, line_start, column_start, message);
             unsafe{__android_log_write(3, "Makepad\0".as_ptr(), msg.as_ptr())};
         }
+        */
         Cx::send_studio_message(AppToStudio::LogItem(StudioLogItem{
             file_name: file_name.to_string(),
             line_start,

@@ -4,7 +4,7 @@ use std::{
     fs,
     io::prelude::*,
     io::BufReader,
-    process::{Command, Stdio}
+    process::{Command, Stdio, Child}
 };
 
 pub fn shell(cwd: &Path, cmd: &str, args: &[&str]) -> Result<(), String> {
@@ -53,13 +53,50 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
     }
     let child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
     let r = child.wait_with_output().map_err( | e | {
-        println!("ERR");
         format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)
     }) ?;
     let stderr = std::str::from_utf8(&r.stderr).unwrap_or("could not decode utf8");
     let stdout = std::str::from_utf8(&r.stdout).unwrap_or("could not decode utf8");
     if !r.status.success() {
         return Err(format!("Process {} in dir {:?} returned error exit code {}\n{}\n{}", cmd, cwd, r.status, stderr, stdout));
+    }
+    Ok(format!("{}{}", stdout, stderr))
+}
+
+pub struct ShellChild{
+    child: Child,
+    cwd: PathBuf,
+    cmd: String,
+}
+
+pub fn shell_child_create(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str]) -> Result<ShellChild, String> {
+    let mut cmd_build = Command::new(cmd);
+        
+    cmd_build.args(args)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .current_dir(cwd);
+            
+    for (key, value) in env {
+        cmd_build.env(key, value);
+    }
+    let child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
+    Ok(ShellChild{
+        child,
+        cwd: cwd.into(),
+        cmd: cmd.into()
+    })
+}
+
+
+pub fn shell_child_wait(child:ShellChild)-> Result<String, String> {
+    let r = child.child.wait_with_output().map_err( | e | {
+        format!("Process {} in dir {:?} returned error {:?} ", child.cmd, child.cwd, e)
+    }) ?;
+    let stderr = std::str::from_utf8(&r.stderr).unwrap_or("could not decode utf8");
+    let stdout = std::str::from_utf8(&r.stdout).unwrap_or("could not decode utf8");
+    if !r.status.success() {
+        return Err(format!("Process {} in dir {:?} returned error exit code {}\n{}\n{}", child.cmd, child.cwd, r.status, stderr, stdout));
     }
     Ok(format!("{}{}", stdout, stderr))
 }
