@@ -153,6 +153,7 @@ pub struct XrLocalEvent{
 pub struct XrState{
     pub time: f64,
     pub head_pose: Pose,
+    pub shared_anchor: Option<Pose>,
     pub left_controller: XrController,
     pub right_controller: XrController,
     pub left_hand: XrHand,

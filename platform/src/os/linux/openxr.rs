@@ -513,7 +513,8 @@ pub struct CxOpenXrSession{
     pub handle: XrSession,
     pub active: bool,
     pub inputs: CxOpenXrInputs,
-    anchor_host: Option<AnchorHost>,
+    shared_anchor: Option<XrSpace>,
+    anchor_advertisement: Option<AnchorAdvertisement>,
 }
 
 #[derive(SerBin, DeBin)]
@@ -522,10 +523,6 @@ struct AnchorAdvertisement{
     anchor_uuid: XrUuid,
 }
 
-struct AnchorHost{
-    _space: XrSpace,
-    advertisement: AnchorAdvertisement,
-}
 
 impl CxOpenXrSession{
             
@@ -786,7 +783,8 @@ impl CxOpenXrSession{
             head_space,
             local_space,
             active:false,
-            anchor_host: None,
+            shared_anchor: None,
+            anchor_advertisement: None,
             depth_swap_chain_index: 0,
             inputs
         })
@@ -897,10 +895,17 @@ impl CxOpenXrSession{
         let left_hand = self.inputs.left_hand.poll(xr, self.handle, local_space, predicted_display_time);
         let right_hand = self.inputs.right_hand.poll(xr, self.handle, local_space, predicted_display_time);
                         
-                
+        let shared_anchor = if let Some(shared_anchor) = self.shared_anchor{
+            Some(XrSpaceLocation::locate(xr, local_space, predicted_display_time, shared_anchor).pose)
+        }
+        else{
+            None
+        };
+                        
         let new_state = Rc::new(XrState{
             time: (frame.frame_state.predicted_display_time.as_nanos() as f64) / 1e9f64,
             head_pose: frame.local_from_head.pose,
+            shared_anchor,
             left_controller,
             right_controller,
             left_hand,
@@ -908,6 +913,8 @@ impl CxOpenXrSession{
         });
         let last_state = self.inputs.last_state.clone();
         self.inputs.last_state = new_state.clone();
+        
+        
         Some(XrUpdateEvent{
             state: new_state,
             last: last_state
@@ -982,25 +989,23 @@ impl CxOpenXrSession{
         
         let group_uuid = XrUuid::generate();
                 
-        self.anchor_host = Some(AnchorHost{
-            _space: response.space,
-            advertisement: AnchorAdvertisement{
-                anchor_uuid: response.uuid,
-                group_uuid,
-            }
+        self.anchor_advertisement = Some(AnchorAdvertisement{
+            anchor_uuid: response.uuid,
+            group_uuid,
         });
-                        
+        
+        self.shared_anchor = Some(response.space);
         // lets share the anchor
         self.share_anchor_request(xr, response.space);
     }
     
     pub fn share_anchor_request(&self, xr: &LibOpenXr, space:XrSpace){
         // lets generate a uid for our space
-        let anchor_host = self.anchor_host.as_ref().unwrap();
+        let anchor_advertisement = self.anchor_advertisement.as_ref().unwrap();
         
         let recipient_info = XrShareSpacesRecipientGroupsMETA{
             group_count: 1,
-            groups: &anchor_host.advertisement.group_uuid,
+            groups: &anchor_advertisement.group_uuid,
             ..Default::default()
         };
         let spaces_info = XrShareSpacesInfoMETA{
@@ -1020,7 +1025,7 @@ impl CxOpenXrSession{
     pub fn share_anchor_response(&mut self, xr: &LibOpenXr, response:&XrEventDataShareSpacesCompleteMETA){
         if response.result != XrResult::SUCCESS{
             crate::log!("share_anchor_response result: {:?}", response.result);
-            self.anchor_host.take();
+            self.shared_anchor.take();
         }
         else{
             crate::log!("share_anchor_response OK");
@@ -1029,8 +1034,8 @@ impl CxOpenXrSession{
     }
     
     pub fn start_colocation_advertisement_request(&mut self, xr: &LibOpenXr){
-        let anchor_host = self.anchor_host.as_ref().unwrap();
-        let buffer = anchor_host.advertisement.serialize_bin();
+        let anchor_advertisement = self.anchor_advertisement.as_ref().unwrap();
+        let buffer = anchor_advertisement.serialize_bin();
         let advertisement_info = XrColocationAdvertisementStartInfoMETA{
             buffer: buffer.as_ptr(),
             buffer_size: buffer.len() as _,
@@ -1043,7 +1048,7 @@ impl CxOpenXrSession{
             &mut request
         )}.log_error("xrStartColocationAdvertisementMETA");
     }
-        
+    
     pub fn stop_colocation_advertisement(&mut self, xr: &LibOpenXr){
         let mut request = XrAsyncRequestIdFB(0);
         unsafe{(xr.xrStopColocationAdvertisementMETA)(
@@ -1098,10 +1103,95 @@ impl CxOpenXrSession{
         )}.log_error("xrQuerySpacesFB");          
     }
     
-    pub fn query_anchors_response(&mut self, _xr: &LibOpenXr, _response:&XrEventDataSpaceQueryResultsAvailableFB){
+    pub fn query_anchors_response(&mut self, xr: &LibOpenXr, response:&XrEventDataSpaceQueryResultsAvailableFB){
         
+        let mut query = XrSpaceQueryResultsFB::default();
+        if unsafe{(xr.xrRetrieveSpaceQueryResultsFB)(
+            self.handle,
+            response.request_id,
+            &mut query
+        )}.log_error("xrRetrieveSpaceQueryResultsFB"){
+            return;
+        }
         
-        
+        let mut results_vec = Vec::new();
+        results_vec.resize(query.result_count_output as usize, XrSpaceQueryResultFB::default());
+        let mut query = XrSpaceQueryResultsFB{
+            results: results_vec.as_mut_ptr() as *mut _,
+            result_capacity_input: results_vec.len() as _,
+            ..Default::default()
+        };
+        if unsafe{(xr.xrRetrieveSpaceQueryResultsFB)(
+            self.handle,
+            response.request_id,
+            &mut query
+        )}.log_error("xrRetrieveSpaceQueryResultsFB"){
+            return;
+        }
+        if results_vec.len() != 0{
+            crate::log!("query_anchors_response zero spaces returned");
+            return
+        }
+        if results_vec.len() > 1{
+            crate::log!("query_anchors_response more than one space returned {}", results_vec.len());
+        }
+        let response = results_vec[0];
+        let components = xr_array_fetch(XrSpaceComponentTypeFB::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateSpaceSupportedComponentsFB)(
+                response.space,
+                cap,
+                len, 
+                buf
+            )}.to_result("query_anchors_response xrEnumerateSpaceSupportedComponentsFB")
+        }).unwrap_or(vec![]);
+        if !components.iter().any(|v| *v == XrSpaceComponentTypeFB::LOCATABLE) {
+            crate::log!("query_anchors_response space not LOCATABLE");
+            return
+        }
+        if !components.iter().any(|v| *v == XrSpaceComponentTypeFB::SHARABLE){
+            crate::log!("query_anchors_response space not SHARABLE");
+            return
+        }
+        if !components.iter().any(|v| *v == XrSpaceComponentTypeFB::STORABLE){
+            crate::log!("query_anchors_response space not STORABLE");
+            return
+        }
+        let request = XrSpaceComponentStatusSetInfoFB{
+            component_type: XrSpaceComponentTypeFB::LOCATABLE,
+            enabled: XrBool32::from_bool(true),
+            ..Default::default()
+        };
+        let mut request_id = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrSetSpaceComponentStatusFB)(
+            response.space,
+            &request,
+            &mut request_id
+        )}.log_error("query_anchors_response xrSetSpaceComponentStatusFB LOCATABLE");
+        // its shareable
+        let request = XrSpaceComponentStatusSetInfoFB{
+            component_type: XrSpaceComponentTypeFB::SHARABLE,
+            enabled: XrBool32::from_bool(true),
+            ..Default::default()
+        };
+        let mut request_id = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrSetSpaceComponentStatusFB)(
+            response.space,
+            &request,
+            &mut request_id
+        )}.log_error("query_anchors_response xrSetSpaceComponentStatusFB SHARABLE");
+        let request = XrSpaceComponentStatusSetInfoFB{
+            component_type: XrSpaceComponentTypeFB::STORABLE,
+            enabled: XrBool32::from_bool(true),
+            ..Default::default()
+        };
+        let mut request_id = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrSetSpaceComponentStatusFB)(
+            response.space,
+            &request,
+            &mut request_id
+        )}.log_error("query_anchors_response xrSetSpaceComponentStatusFB STORABLE");
+        // alright we have a shared space!
+        self.shared_anchor = Some(response.space);
     }
     
     pub fn stop_colocation_discovery(&mut self, xr: &LibOpenXr){
