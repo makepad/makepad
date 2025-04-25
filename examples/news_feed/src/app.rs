@@ -976,7 +976,6 @@ impl LiveRegister for App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx:&mut Cx){
-        cx.switch_to_xr();
     }
     fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
         if self.ui.button(id!(find)).clicked(&actions) {
