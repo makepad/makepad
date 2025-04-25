@@ -63,7 +63,7 @@ pub struct XrNetNode{
 
 #[derive(Clone, Debug)]
 pub enum XrNetOutgoing{
-    Join(XrNetPeer),
+    Discovered(XrNetPeer),
     Leave(XrNetPeer),
     State(XrState),
 }        
@@ -103,20 +103,17 @@ impl XrNetNode{
         std::thread::spawn(move || {
             let mut read_buf = [0u8; 4096];
             // if we havent heard from a headset in 1 second we remove it from peers
-            let mut peers: Vec<XrNetPeer> = Default::default();
             while let Ok((len, mut addr)) = read_discovery_socket.recv_from(&mut read_buf) {
                 addr.set_port(STATE_PORT);
                 let compare = my_client_uid.to_be_bytes();
                 if len == compare.len() && read_buf[0..compare.len()] != compare{
-                    if peers.iter().find(|v| v.addr == addr).is_none(){
-                        let peer = XrNetPeer{
-                            addr,
-                        };
-                        outgoing_sender2.send(XrNetOutgoing::Join(peer)).ok();
-                        peers.push(peer)
-                    }
+                    let peer = XrNetPeer{
+                        addr,
+                    };
+                    outgoing_sender2.send(XrNetOutgoing::Discovered(peer)).ok();
                 }
             }
+            makepad_platform::log!("STOPPING xr listen thread");
         });
         
         
@@ -175,6 +172,7 @@ impl XrNetNode{
                     }
                 }
             }
+            makepad_platform::log!("STOPPING xr state receiver thread");
         });
         
         // xr state output thread
@@ -183,7 +181,7 @@ impl XrNetNode{
             let mut peers: Vec<XrNetPeer> = Default::default();
             while let Ok(msg) = outgoing_receiver.recv() {
                 match msg{
-                    XrNetOutgoing::Join(peer)=>{
+                    XrNetOutgoing::Discovered(peer)=>{
                         if peers.iter_mut().find(|v| v.addr == peer.addr).is_none(){
                             peers.push(peer);
                         }
@@ -199,6 +197,7 @@ impl XrNetNode{
                     }
                 }
             }
+            makepad_platform::log!("STOPPING XR STATE OUTPUT THREAD");
         });
         
         Self{
