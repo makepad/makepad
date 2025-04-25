@@ -74,22 +74,29 @@ impl Widget for XrHands {
             // alright so we have a shared anchor
             
             // lets draw our hand controllers
-            cube.color = vec4(1.0,1.0,1.0,1.0);
-            let mata = Mat4::mul(&xr_state.head_pose.to_mat4(), transform);
-            cube.cube_size = vec3(0.20,0.10,0.05);
-            cube.transform = mata;
-            cube.draw(cx);
-            
-            cube.depth_clip = 1.0;
+            if head{
+                let mata = Mat4::mul(&xr_state.head_pose.to_mat4(), transform);
+                cube.color = vec4(1.0,1.0,1.0,1.0);
+                cube.cube_size = vec3(0.20,0.10,0.05);
+                cube.cube_pos = vec3(0.0,0.0,0.0);
+                cube.transform = mata;
+                cube.depth_clip = 0.0;
+                cube.draw(cx);
+            }
             // lets draw our hand controllers
-            cube.color = vec4(0.5,0.5,0.5,1.0);
+            
             let mata = Mat4::mul(&xr_state.left_controller.grip_pose.to_mat4(), transform);
+            cube.color = vec4(0.5,0.5,0.5,1.0);
             cube.cube_size = vec3(0.05,0.05,0.05);
+            cube.cube_pos = vec3(0.0,0.0,0.0);
             cube.transform = mata;
+            cube.depth_clip = 0.0;
             cube.draw(cx);
                     
             let mata = Mat4::mul(&xr_state.right_controller.grip_pose.to_mat4(), transform);
+            cube.color = vec4(0.5,0.5,0.5,1.0);
             cube.cube_size = vec3(0.05,0.05,0.05);
+            cube.cube_pos = vec3(0.0,0.0,0.0);
             cube.transform = mata;
             cube.depth_clip = 0.0;
             cube.draw(cx);
@@ -98,18 +105,27 @@ impl Widget for XrHands {
             for hand in [&xr_state.left_hand, &xr_state.right_hand]{
                 if hand.in_view{
                     for (_index,joint) in hand.joints.iter().enumerate(){
-                    //if XrHand::is_tip(index){
-                        //    self.cube.cube_size = vec3(0.01,0.01,0.005);
-                        //    self.cube.color = vec4(1.0,0.0,0.0,1.0)
-                        //}
-                        //else {
-                        cube.cube_size = vec3(0.01,0.01,0.015);
-                        cube.color = vec4(1.0,1.0,1.0,1.0);
-                        //}
                         let mat = Mat4::mul(&joint.pose.to_mat4(), transform);
+                        cube.color = vec4(1.0,1.0,1.0,1.0);
+                        cube.cube_size = vec3(0.01,0.01,0.015);
+                        cube.cube_pos = vec3(0.0,0.0,0.0);
                         cube.transform = mat;
+                        cube.depth_clip = 0.0;
                         cube.draw(cx);
                     }
+                    // we should draw the fingertips
+                    
+                }
+                for (i, knuckle) in XrHand::END_KNUCKLES.iter().enumerate(){
+                    let joint = &hand.joints[*knuckle];
+                    let tip = hand.tips[i];
+                    let mat = Mat4::mul(&joint.pose.to_mat4(), transform);
+                    cube.color = vec4(1.0,0.0,0.0,1.0);
+                    cube.cube_size = vec3(0.01,0.01,0.002);
+                    cube.cube_pos = vec3(0.0,0.0,-tip);
+                    cube.transform = mat;
+                    cube.depth_clip = 0.0;
+                    cube.draw(cx);
                 }
             }
         }
@@ -121,14 +137,15 @@ impl Widget for XrHands {
         
         let rot = (xr_state.time*speed).rem_euclid(360.0) as f32;
         self.cube.color = vec4(1.0,1.0,1.0,1.0);
-        self.cube.depth_clip = 1.0;
         self.cube.cube_size = vec3(0.05,0.05,0.05);
+        self.cube.cube_pos = vec3(0.0,0.0,0.0);
         self.cube.transform = Mat4::txyz_s_ry_rx_txyz(
             vec3(0.,0.,0.),
             1.0,
             rot,rot,
             vec3(0.,0.,-0.3)
         );
+        self.cube.depth_clip = 1.0;
         self.cube.draw(cx);
         
         if let Some(shared_anchor) = xr_state.shared_anchor{
@@ -136,7 +153,7 @@ impl Widget for XrHands {
             self.cube.color = vec4(0.0,1.0,0.0,1.0);
             self.cube.cube_size = vec3(0.05,0.05,0.05);
             self.cube.transform = mata;
-            self.cube.depth_clip = 0.0;
+            self.cube.depth_clip = 1.0;
             self.cube.draw(cx);
         }
         
