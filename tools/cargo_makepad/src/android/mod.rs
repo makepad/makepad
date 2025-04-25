@@ -370,6 +370,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let mut sdk_path = None;
     let mut package_name = None;
     let mut app_label = None;
+    let mut devices = Vec::new();
     let mut variant = AndroidVariant::Default;
     let mut targets = vec![AndroidTarget::aarch64];
     let mut keep_sdk_sources = false;
@@ -393,6 +394,9 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         }
         else if let Some(opt) = v.strip_prefix("--abi=") {
             targets = AndroidTarget::from_str(opt)?;
+        }
+        else if let Some(d) = v.strip_prefix("--devices=") {
+            devices = d.split(",").map(|v| v.to_string()).collect()
         }
         else if let Some(opt) = v.strip_prefix("--variant=") {
             variant = AndroidVariant::from_str(opt)?;
@@ -453,7 +457,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "run" => {
-            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant, &urls)
+            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets, &variant, &urls, devices)
         }
         _ => Err(format!("{} is not a valid command or option", args[0]))
     }

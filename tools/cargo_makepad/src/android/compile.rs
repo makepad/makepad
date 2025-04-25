@@ -523,42 +523,78 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     })
 }
 
-pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], targets:&[AndroidTarget], android_variant:&AndroidVariant, urls:&AndroidSDKUrls) -> Result<(), String> {
+pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], targets:&[AndroidTarget], android_variant:&AndroidVariant, urls:&AndroidSDKUrls, devices:Vec<String>) -> Result<(), String> {
     let result = build(sdk_dir, host_os, package_name, app_label, args, targets, android_variant, urls)?;
     
     let cwd = std::env::current_dir().unwrap();
-    //println!("Installing android application");
-    shell_env_cap(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
-        "install",
-        "-r",
-        (result.dst_apk.to_str().unwrap()),
-    ]) ?;
-    println!("Starting android application: {}", result.dst_apk.file_name().unwrap().to_str().unwrap());
-    shell_env_cap(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
-        "shell",
-        "am",
-        "start",
-        "-n",
-        &format!("{0}/{0}.MakepadApp", result.java_url)
-    ]) ?;  
-    #[allow(unused_assignments)]
-    let mut pid = None;
-    loop{
-        if let Ok(thing) = shell_env_cap(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
-            "shell", 
-            "pidof", 
-            &result.java_url,
-        ]){
-            pid = Some(thing.trim().to_string());
-            break;
+    // alright so how will we do multiple targets eh
+    
+    if devices.len() == 0{
+        //println!("Installing android application");
+        shell_env_cap(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
+            "install",
+            "-r",
+            (result.dst_apk.to_str().unwrap()),
+        ]) ?;
+        println!("Starting android application: {}", result.dst_apk.file_name().unwrap().to_str().unwrap());
+        shell_env_cap(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
+            "shell",
+            "am",
+            "start",
+            "-n",
+            &format!("{0}/{0}.MakepadApp", result.java_url)
+        ]) ?;  
+        #[allow(unused_assignments)]
+        let mut pid = None;
+        loop{
+            if let Ok(thing) = shell_env_cap(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
+                "shell", 
+                "pidof", 
+                &result.java_url,
+            ]){
+                pid = Some(thing.trim().to_string());
+                break;
+            }
+        }
+        shell_env(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
+            "logcat",
+            "--pid",
+            &pid.unwrap(),
+            "Makepad:D *:S"
+        ]) ?;
+    }
+    else{
+        let mut children = Vec::new();
+        for device in &devices{
+            //println!("Installing android application");
+            children.push(shell_child_create(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
+                "-s",
+                &device,
+                "install",
+                "-r",
+                (result.dst_apk.to_str().unwrap()),
+            ]) ?);
+        }
+        for child in children{
+            shell_child_wait(child)?;
+        }
+        let mut children = Vec::new();
+        for device in &devices{
+            //println!("Installing android application");
+            children.push(shell_child_create(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
+                "-s",
+                &device,
+                "shell",
+                "am",
+                "start",
+                "-n",
+                &format!("{0}/{0}.MakepadApp", result.java_url)
+            ]) ?);
+        }
+        for child in children{
+            shell_child_wait(child)?;
         }
     }
-    shell_env(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
-        "logcat",
-        "--pid",
-        &pid.unwrap(),
-        "Makepad:D *:S"
-    ]) ?;
     Ok(())
 }
 
