@@ -57,7 +57,10 @@ impl XrHands{
 
 impl Widget for XrHands {
     fn handle_event(&mut self, cx: &mut Cx,event:&Event, _scope:&mut Scope){
-        if let Event::XrUpdate(_e) = event{
+        if let Event::XrUpdate(e) = event{
+            if e.state.left_controller.clicked_x(){
+                log!("CLICKED X");
+            }
             self.cube.redraw(cx);
         }
     }
