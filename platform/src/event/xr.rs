@@ -54,14 +54,14 @@ impl XrController{
     pub fn clicked_y(&self)->bool{self.buttons & Self::CLICK_Y != 0 && self.last_buttons & Self::CLICK_Y == 0}
     pub fn clicked_a(&self)->bool{self.buttons & Self::CLICK_A != 0 && self.last_buttons & Self::CLICK_A == 0}
     pub fn clicked_b(&self)->bool{self.buttons & Self::CLICK_B != 0 && self.last_buttons & Self::CLICK_B == 0}
-    pub fn clicked_stick(&self)->bool{self.buttons & Self::CLICK_THUMBSTICK != 0 && self.last_buttons & Self::CLICK_THUMBSTICK == 0}
+    pub fn clicked_thumbstick(&self)->bool{self.buttons & Self::CLICK_THUMBSTICK != 0 && self.last_buttons & Self::CLICK_THUMBSTICK == 0}
     pub fn clicked_menu(&self)->bool{self.buttons & Self::CLICK_MENU != 0 && self.last_buttons & Self::CLICK_MENU == 0}
     
     pub fn click_x(&self)->bool{self.buttons & Self::CLICK_X != 0}
     pub fn click_y(&self)->bool{self.buttons & Self::CLICK_Y != 0}
     pub fn click_a(&self)->bool{self.buttons & Self::CLICK_A != 0}
     pub fn click_b(&self)->bool{self.buttons & Self::CLICK_B != 0}
-    pub fn click_stick(&self)->bool{self.buttons & Self::CLICK_THUMBSTICK != 0}
+    pub fn click_thumbstick(&self)->bool{self.buttons & Self::CLICK_THUMBSTICK != 0}
     pub fn click_menu(&self)->bool{self.buttons & Self::CLICK_MENU != 0}
         
     pub fn touch_x(&self)->bool{self.buttons & Self::TOUCH_X != 0}
@@ -163,6 +163,7 @@ pub struct XrState{
     pub time: f64,
     pub head_pose: Pose,
     pub shared_anchor: Option<Pose>,
+    pub anchor_discovery: u32,
     pub left_controller: XrController,
     pub right_controller: XrController,
     pub left_hand: XrHand,

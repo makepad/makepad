@@ -940,13 +940,31 @@ impl Cx {
                         android_jni::to_java_cleanup_video_playback_resources(env, video_id);
                     }
                 },
-                CxOsOp::SwitchToXr=>{
+                CxOsOp::XrStartPresenting=>{
                     self.os.ignore_destroy = true;
-                    self.os.in_xr_mode = !self.os.in_xr_mode;
-                    unsafe {
-                        let env = attach_jni_env();
-                        android_jni::to_java_switch_activity(env);
-                    }
+                    if !self.os.in_xr_mode{
+                        self.os.in_xr_mode = true;
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_switch_activity(env);
+                        }
+                    }                        
+                }
+                CxOsOp::XrStopPresenting=>{
+                    self.os.ignore_destroy = true;
+                    if self.os.in_xr_mode{
+                        self.os.in_xr_mode = false;
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_switch_activity(env);
+                        }
+                    }       
+                }
+                CxOsOp::XrAdvertiseAnchor(pose)=>{
+                    self.os.openxr.advertise_anchor(pose);
+                }
+                CxOsOp::XrDiscoverAnchor(id)=>{
+                    self.os.openxr.discover_anchor(id);
                 }
                 CxOsOp::SetCursor(_)=>{
                     // no need

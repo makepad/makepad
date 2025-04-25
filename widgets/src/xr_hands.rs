@@ -58,25 +58,37 @@ impl XrHands{
 impl Widget for XrHands {
     fn handle_event(&mut self, cx: &mut Cx,event:&Event, _scope:&mut Scope){
         if let Event::XrUpdate(e) = event{
-            if e.state.left_controller.clicked_x(){
-                log!("CLICKED X");
+            if e.state.left_controller.clicked_menu(){
+                cx.xr_advertise_anchor(e.state.left_controller.grip_pose);
             }
+            /*if e.state.left_controller.clicked_thumbstick(){
+                cx.xr_discover_anchor();
+            }*/
             self.cube.redraw(cx);
         }
     }
     fn draw_3d(&mut self, cx: &mut Cx3d, _scope:&mut Scope)->DrawStep{
         self.draw_list.begin_always(cx);
         
-        fn draw_hands(cx: &mut Cx3d, cube:&mut DrawCube, xr_state:&XrState){
-                        
+        fn draw_hands(cx: &mut Cx3d, cube:&mut DrawCube, transform: &Mat4, xr_state:&XrState, head:bool){
+            // alright so we have a shared anchor
+            
+            // lets draw our hand controllers
+            cube.color = vec4(1.0,1.0,1.0,1.0);
+            let mata = Mat4::mul(&xr_state.head_pose.to_mat4(), transform);
+            cube.cube_size = vec3(0.20,0.10,0.05);
+            cube.transform = mata;
+            cube.draw(cx);
+            
             cube.depth_clip = 1.0;
             // lets draw our hand controllers
-            let mata = xr_state.left_controller.grip_pose.to_mat4();
+            cube.color = vec4(0.5,0.5,0.5,1.0);
+            let mata = Mat4::mul(&xr_state.left_controller.grip_pose.to_mat4(), transform);
             cube.cube_size = vec3(0.05,0.05,0.05);
             cube.transform = mata;
             cube.draw(cx);
                     
-            let mata = xr_state.right_controller.grip_pose.to_mat4();
+            let mata = Mat4::mul(&xr_state.right_controller.grip_pose.to_mat4(), transform);
             cube.cube_size = vec3(0.05,0.05,0.05);
             cube.transform = mata;
             cube.depth_clip = 0.0;
@@ -94,7 +106,7 @@ impl Widget for XrHands {
                         cube.cube_size = vec3(0.01,0.01,0.015);
                         cube.color = vec4(1.0,1.0,1.0,1.0);
                         //}
-                        let mat = joint.pose.to_mat4();
+                        let mat = Mat4::mul(&joint.pose.to_mat4(), transform);
                         cube.transform = mat;
                         cube.draw(cx);
                     }
@@ -119,11 +131,36 @@ impl Widget for XrHands {
         );
         self.cube.draw(cx);
         
-        draw_hands(cx, &mut self.cube, &xr_state);
-        for peer in &self.peers{
-            draw_hands(cx, &mut self.cube, &peer.state)
+        if let Some(shared_anchor) = xr_state.shared_anchor{
+            let mata = shared_anchor.to_mat4();
+            self.cube.color = vec4(0.0,1.0,0.0,1.0);
+            self.cube.cube_size = vec3(0.05,0.05,0.05);
+            self.cube.transform = mata;
+            self.cube.depth_clip = 0.0;
+            self.cube.draw(cx);
         }
         
+        draw_hands(cx, &mut self.cube, &Mat4::identity(), &xr_state, false);
+        
+        let mut discovery = None;
+        for peer in &self.peers{
+            if peer.state.anchor_discovery > xr_state.anchor_discovery{
+                discovery = Some(peer.state.anchor_discovery);
+            }
+            if let Some(my_anchor) = peer.state.shared_anchor{
+                if let Some(other_anchor) = xr_state.shared_anchor{
+                    let mat = Mat4::mul(&my_anchor.to_mat4().invert(), &other_anchor.to_mat4());
+                    draw_hands(cx, &mut self.cube, &mat, &peer.state, true)
+                }
+            }
+            else{
+                draw_hands(cx, &mut self.cube, &Mat4::identity(), &peer.state, true)
+            }
+        }
+        if let Some(discovery) = discovery{
+            cx.xr_discover_anchor(discovery);
+        }
+                
         self.draw_list.end(cx);
         DrawStep::done()
     }

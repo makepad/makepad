@@ -16,7 +16,7 @@ use{
         event::xr::*,
         pass::{CxPassParent,PassId},
         cx::{Cx},
-        makepad_math::Mat4,
+        makepad_math::{Mat4, Pose},
     },
     std::rc::Rc,
     std::sync::{mpsc},
@@ -98,7 +98,10 @@ impl Cx{
                 }
                 XrStructureType::EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStartColocationDiscoveryCompleteMETA)};
-                    crate::log!("START_COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("START_COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                    }
+                    
                 },
                 XrStructureType::EVENT_DATA_COLOCATION_DISCOVERY_RESULT_META=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataColocationDiscoveryResultMETA)};
@@ -109,27 +112,43 @@ impl Cx{
                 },
                 XrStructureType::EVENT_DATA_COLOCATION_DISCOVERY_COMPLETE_META=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataColocationDiscoveryCompleteMETA)};
-                    crate::log!("COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                    }
                 },
                 XrStructureType::EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStopColocationDiscoveryCompleteMETA)};
-                    crate::log!("STOP_COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("STOP_COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                    }
                 },
                 XrStructureType::EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStartColocationAdvertisementCompleteMETA)};
-                    crate::log!("START_COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?} {:?}", response.result, response.advertisement_uuid);
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("START_COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?} {:?}", response.result, response.advertisement_uuid);
+                    }
+                    else{
+                        // this signals others to reload the colocation
+                        openxr.session.as_mut().unwrap().anchor_discovery += 1;
+                    }
                 }
                 XrStructureType::EVENT_DATA_COLOCATION_ADVERTISEMENT_COMPLETE_META=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataColocationAdvertisementCompleteMETA)};
-                    crate::log!("COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?}", response.result);
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?}", response.result);
+                    }
                 }
                 XrStructureType::EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStopColocationAdvertisementCompleteMETA)};
-                    crate::log!("STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?}", response.result);
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?}", response.result);
+                    }
                 }
                 XrStructureType::EVENT_DATA_SPACE_SET_STATUS_COMPLETE_FB=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSpaceSetStatusCompleteFB)};
-                    crate::log!("SPACE_SET_STATUS_COMPLETE_FB: {:?}", response.result);
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("SPACE_SET_STATUS_COMPLETE_FB: {:?}", response.result);
+                    }
                 }
                 XrStructureType::EVENT_DATA_SPACE_QUERY_RESULTS_AVAILABLE_FB=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSpaceQueryResultsAvailableFB)};
@@ -267,8 +286,12 @@ impl Cx{
             openxr.libxr.as_ref().unwrap(),
             openxr.session.as_ref().unwrap()
         ){
+            let session = openxr.session.as_mut().unwrap();
+            session.depth_swap_chain_index = frame.depth_image.map(|v| v.swapchain_index as usize).unwrap_or(0);
+            session.frame_state = frame.frame_state;
+            
             // lets send in the state
-            let event = openxr.session.as_mut().unwrap().new_xr_update_event(
+            let event = session.new_xr_update_event(
                 openxr.libxr.as_ref().unwrap(),
                 &frame
             );
@@ -287,7 +310,7 @@ impl Cx{
             }
             
             // copy on the depth image
-            self.os.openxr.session.as_mut().unwrap().depth_swap_chain_index = frame.depth_image.map(|v| v.swapchain_index as usize).unwrap_or(0);
+            
             
             self.openxr_handle_repaint(&frame);
             
@@ -492,11 +515,26 @@ impl CxOpenXr{
         Ok(())
     }
     
+    pub fn advertise_anchor(&mut self, pose:Pose){
+        if let Some(session) = &mut self.session{
+            let xr =  self.libxr.as_ref().unwrap();
+            crate::log!("Creating advertising anchor");
+            session.create_anchor_request(pose, xr);
+        }
+    }
+    
+    pub fn discover_anchor(&mut self, id:u32){
+        if let Some(session) = &mut self.session{
+            let xr =  self.libxr.as_ref().unwrap();
+            session.anchor_discovery = id;
+            crate::log!("Discovering anchor");
+            session.start_colocation_discovery_request(xr);
+        }
+    }
 }
 
 
 pub struct CxOpenXrSession{
-    pub depth_swap_chain_index: usize,
     pub color_images: Vec<XrSwapchainImageOpenGLESKHR>,
     pub depth_images: Vec<XrSwapchainImageOpenGLESKHR>,
     pub gl_depth_textures: Vec<u32>,
@@ -512,9 +550,13 @@ pub struct CxOpenXrSession{
     pub local_space: XrSpace,
     pub handle: XrSession,
     pub active: bool,
+    pub anchor_discovery: u32,
     pub inputs: CxOpenXrInputs,
     shared_anchor: Option<XrSpace>,
     anchor_advertisement: Option<AnchorAdvertisement>,
+    // leaked from Frame onto state
+    pub depth_swap_chain_index: usize,
+    pub frame_state: XrFrameState,
 }
 
 #[derive(SerBin, DeBin)]
@@ -768,6 +810,7 @@ impl CxOpenXrSession{
         let inputs = CxOpenXrInputs::new_inputs(xr, session, instance)?;
                 
         Ok(CxOpenXrSession{
+            anchor_discovery: 0,
             color_images,
             depth_images,
             color_swap_chain,
@@ -786,6 +829,7 @@ impl CxOpenXrSession{
             shared_anchor: None,
             anchor_advertisement: None,
             depth_swap_chain_index: 0,
+            frame_state: XrFrameState::default(),
             inputs
         })
     }
@@ -904,6 +948,7 @@ impl CxOpenXrSession{
         };
                         
         let new_state = Rc::new(XrState{
+            anchor_discovery: self.anchor_discovery,
             time: (frame.frame_state.predicted_display_time.as_nanos() as f64) / 1e9f64,
             head_pose: frame.local_from_head.pose,
             shared_anchor,
@@ -922,11 +967,11 @@ impl CxOpenXrSession{
     }
     
     // STEP ONE. share the anchor
-    pub fn create_anchor_request(&mut self, pose:XrPosef, xr: &LibOpenXr, frame:&CxOpenXrFrame){
+    pub fn create_anchor_request(&mut self, pose:XrPosef, xr: &LibOpenXr){
         let anchor_create_info = XrSpatialAnchorCreateInfoFB{
             space: self.local_space,
             pose_in_space: pose,
-            time: frame.frame_state.predicted_display_time,
+            time: self.frame_state.predicted_display_time,
             ..Default::default()
         };
         let mut request = XrAsyncRequestIdFB(0);
@@ -1003,6 +1048,8 @@ impl CxOpenXrSession{
         // lets generate a uid for our space
         let anchor_advertisement = self.anchor_advertisement.as_ref().unwrap();
         
+        //crate::log!("SHARING ADVERTISEMENT: {:?}",anchor_advertisement.group_uuid);
+        
         let recipient_info = XrShareSpacesRecipientGroupsMETA{
             group_count: 1,
             groups: &anchor_advertisement.group_uuid,
@@ -1028,12 +1075,14 @@ impl CxOpenXrSession{
             self.shared_anchor.take();
         }
         else{
-            crate::log!("share_anchor_response OK");
+            crate::log!("Anchor shared!");
             self.start_colocation_advertisement_request(xr);
         }
     }
     
     pub fn start_colocation_advertisement_request(&mut self, xr: &LibOpenXr){
+        self.stop_colocation_advertisement_request(xr);
+        self.stop_colocation_discovery_request(xr);
         let anchor_advertisement = self.anchor_advertisement.as_ref().unwrap();
         let buffer = anchor_advertisement.serialize_bin();
         let advertisement_info = XrColocationAdvertisementStartInfoMETA{
@@ -1049,7 +1098,7 @@ impl CxOpenXrSession{
         )}.log_error("xrStartColocationAdvertisementMETA");
     }
     
-    pub fn stop_colocation_advertisement(&mut self, xr: &LibOpenXr){
+    pub fn stop_colocation_advertisement_request(&mut self, xr: &LibOpenXr){
         let mut request = XrAsyncRequestIdFB(0);
         unsafe{(xr.xrStopColocationAdvertisementMETA)(
             self.handle,
@@ -1059,6 +1108,9 @@ impl CxOpenXrSession{
     }
         
     pub fn start_colocation_discovery_request(&mut self, xr: &LibOpenXr){
+        self.stop_colocation_advertisement_request(xr);
+        self.stop_colocation_discovery_request(xr);
+        
         let mut request = XrAsyncRequestIdFB(0);
         unsafe{(xr.xrStartColocationDiscoveryMETA)(
             self.handle,
@@ -1068,15 +1120,26 @@ impl CxOpenXrSession{
     }
     
     pub fn start_colocation_discovery_result(&mut self, xr: &LibOpenXr, response:&XrEventDataColocationDiscoveryResultMETA){
+        
         // alright lets parse the buffer
         let buffer = &response.buffer[0..response.buffer_size as usize];
         if let Ok(data) = AnchorAdvertisement::deserialize_bin(&buffer){
             // alright! we have a discovery result
+            //crate::log!("COLOCATED DISCOVERY: {:?} {:?}",response.advertisement_uuid, data.group_uuid);
             self.query_anchors_request(xr, data.group_uuid)
         }
         else{
             crate::log!("start_colocation_discovery_result deserialize failure");
         }
+    }
+        
+    pub fn stop_colocation_discovery_request(&mut self, xr: &LibOpenXr){
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrStopColocationDiscoveryMETA)(
+            self.handle,
+            0 as *const _,
+            &mut request
+        )}.log_error("xrStopColocationDiscoveryMETA");              
     }
     
     pub fn query_anchors_request(&mut self, xr: &LibOpenXr, group_uuid:XrUuid){
@@ -1119,8 +1182,13 @@ impl CxOpenXrSession{
         let mut query = XrSpaceQueryResultsFB{
             results: results_vec.as_mut_ptr() as *mut _,
             result_capacity_input: results_vec.len() as _,
+            result_count_output: results_vec.len() as _,
             ..Default::default()
         };
+        if results_vec.len() == 0{
+            crate::log!("query_anchors_response zero spaces returned");
+            return
+        }
         if unsafe{(xr.xrRetrieveSpaceQueryResultsFB)(
             self.handle,
             response.request_id,
@@ -1128,10 +1196,7 @@ impl CxOpenXrSession{
         )}.log_error("xrRetrieveSpaceQueryResultsFB"){
             return;
         }
-        if results_vec.len() != 0{
-            crate::log!("query_anchors_response zero spaces returned");
-            return
-        }
+
         if results_vec.len() > 1{
             crate::log!("query_anchors_response more than one space returned {}", results_vec.len());
         }
@@ -1191,17 +1256,10 @@ impl CxOpenXrSession{
             &mut request_id
         )}.log_error("query_anchors_response xrSetSpaceComponentStatusFB STORABLE");
         // alright we have a shared space!
+        crate::log!("Anchor retrieved!");
         self.shared_anchor = Some(response.space);
     }
     
-    pub fn stop_colocation_discovery(&mut self, xr: &LibOpenXr){
-        let mut request = XrAsyncRequestIdFB(0);
-        unsafe{(xr.xrStopColocationDiscoveryMETA)(
-            self.handle,
-            0 as *const _,
-            &mut request
-        )}.log_error("xrStopColocationDiscoveryMETA");              
-    }
 }
 
 #[derive(Default, Clone, Copy)]
