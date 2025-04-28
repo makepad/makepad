@@ -43,8 +43,10 @@ live_design! {
     App = {{App}} {
         ui: <Root> {
             <Window> {
-                body = <View> {
-                    <ImageGrid> {}
+                body = {
+                    <View> {
+                        <ImageGrid> {}
+                    }
                 }
             }
         }
