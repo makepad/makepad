@@ -19,7 +19,7 @@ live_design! {
         height: Fit,
         align: { y: 0.5 }
         margin: { left: 60 }
-        
+
         <Icon> {
             icon_walk: { width: 12.0 }
             draw_icon: {
@@ -169,7 +169,8 @@ impl Widget for ImageRow {
                         continue;
                     }
                     let image_idx = first_image_idx + item_idx;
-                    let filtered_image_idx = state.filtered_image_idxs[image_idx];
+                    let filtered_image_idx =
+                        state.filtered_image_idxs[image_idx];
                     let image_path = &state.image_paths[filtered_image_idx];
                     let item = list.item(cx, item_idx, live_id!(ImageItem));
                     let image = item.image(id!(image));
@@ -204,8 +205,10 @@ impl Widget for ImageGrid {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let state = scope.data.get_mut::<State>().unwrap();
-                let num_rows =
-                    state.filtered_image_idxs.len().div_ceil(state.images_per_row);
+                let num_rows = state
+                    .filtered_image_idxs
+                    .len()
+                    .div_ceil(state.images_per_row);
                 while let Some(row_idx) = list.next_visible_item(cx) {
                     if row_idx >= num_rows {
                         continue;
@@ -247,16 +250,14 @@ impl App {
             }
             self.state.image_paths.push(path);
         }
-        let query = self
-            .ui
-            .text_input(id!(query))
-            .text();
+        let query = self.ui.text_input(id!(query)).text();
         self.filter_image_paths(cx, &query);
     }
 
     pub fn filter_image_paths(&mut self, cx: &mut Cx, query: &str) {
         self.state.filtered_image_idxs.clear();
-        for (image_idx, image_path) in self.state.image_paths.iter().enumerate() {
+        for (image_idx, image_path) in self.state.image_paths.iter().enumerate()
+        {
             if image_path.to_str().unwrap().contains(&query) {
                 self.state.filtered_image_idxs.push(image_idx);
             }
@@ -279,10 +280,7 @@ impl App {
                 .unwrap();
         } else {
             image
-                .load_image_dep_by_path(
-                    cx,
-                    self.placeholder.as_str(),
-                )
+                .load_image_dep_by_path(cx, self.placeholder.as_str())
                 .unwrap();
         }
         self.ui.view(id!(slideshow)).redraw(cx);

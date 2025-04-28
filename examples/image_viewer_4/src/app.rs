@@ -219,10 +219,7 @@ impl App {
                 .unwrap();
         } else {
             image
-                .load_image_dep_by_path(
-                    cx,
-                    self.placeholder.as_str(),
-                )
+                .load_image_dep_by_path(cx, self.placeholder.as_str())
                 .unwrap();
         }
         self.ui.view(id!(slideshow)).redraw(cx);
