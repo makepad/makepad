@@ -116,11 +116,18 @@ impl ImageCacheImpl for Image {
 }
 
 impl LiveHook for Image{
-    fn after_apply(&mut self, cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
-        self.lazy_create_image_cache(cx);
-        let source = self.source.clone();
-        if source.as_str().len()>0 {
-            let _ = self.load_image_dep_by_path(cx, source.as_str(), 0);
+    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+        match apply.from{
+            ApplyFrom::NewFromDoc{..}|// newed from DSL,
+            ApplyFrom:: UpdateFromDoc{..}|
+            ApplyFrom::Over{..}=>{
+                self.lazy_create_image_cache(cx);
+                let source = self.source.clone();
+                if source.as_str().len()>0 {
+                    let _ = self.load_image_dep_by_path(cx, source.as_str(), 0);
+                }
+            }
+            _=>()
         }
     }
 }

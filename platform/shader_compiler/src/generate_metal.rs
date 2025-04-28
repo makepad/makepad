@@ -57,15 +57,22 @@ impl<'a> DrawShaderGenerator<'a> {
             all_constructor_fns.extend(fn_def.constructor_fn_deps.borrow().as_ref().unwrap().iter().cloned());
         }
         
+        let mut sample_2d = false;
+        let mut depth_clip = false;
+        let mut sample_2d_rt = false;
         for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
-            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d))) {
+            if !sample_2d && fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d))) {
                 writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
-                break;
+                sample_2d = true;
             }
-            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d_rt))) {
+            if !depth_clip && fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(depth_clip))) {
+                writeln!(self.string, "float4 depth_clip(float4 w, float4 c, float clip){{return c;}}").unwrap();
+                depth_clip = true;
+            }
+            if !sample_2d_rt && fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d_rt))) {
                 writeln!(self.string, "float4 sample2d_rt(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
-                break;
+                sample_2d_rt = true;
             }
         };
         
@@ -78,7 +85,7 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_varying_struct();
         
         //let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
-        //let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
+        //let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(fragment))).unwrap();
 
         for (ty_lit, ref param_tys) in all_constructor_fns{
             generate_cons_fn(self.backend_writer, self.string, ty_lit, &param_tys);
@@ -404,7 +411,7 @@ impl<'a> DrawShaderGenerator<'a> {
         
         write!(self.string, "    return ").unwrap();
         
-        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
+        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(fragment))).unwrap();
         write!(self.string, "    {}", DisplayFnName(pixel_def.fn_ptr, pixel_def.ident)).unwrap();
         
         write!(self.string, "(").unwrap();

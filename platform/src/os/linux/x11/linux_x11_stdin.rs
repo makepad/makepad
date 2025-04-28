@@ -1,6 +1,6 @@
 use {
     crate::{
-        cx::Cx, cx_api::CxOsOp, event::{Event, WindowGeom}, gl_sys, makepad_live_id::*, makepad_math::*, makepad_micro_serde::*, os::cx_stdin::{aux_chan, HostToStdin, PollTimer, PresentableDraw, StdinToHost, Swapchain}, pass::{CxPassColorTexture, CxPassParent, PassClearColor}, texture::{Texture, TextureFormat}, thread::SignalToUI, window::CxWindowPool, CxOsApi,
+        cx::Cx, cx_api::CxOsOp, event::{Event, WindowGeom}, makepad_live_id::*, makepad_math::*, makepad_micro_serde::*, os::cx_stdin::{aux_chan, HostToStdin, PollTimer, PresentableDraw, StdinToHost, Swapchain}, pass::{CxPassColorTexture, CxPassParent, PassClearColor}, texture::{Texture, TextureFormat}, thread::SignalToUI, window::CxWindowPool, CxOsApi,
     }, std::io::{self, prelude::*, BufReader} 
 };
 
@@ -22,6 +22,7 @@ impl Cx {
         self.repaint_id += 1;
         for &pass_id in &passes_todo {
             match self.passes[pass_id].parent.clone() {
+                CxPassParent::Xr => {}
                 CxPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
                     let window = &mut windows[window_id.id()];
@@ -33,7 +34,7 @@ impl Cx {
                         self.draw_pass_to_texture(pass_id, Some(&current_image.image));
 
                         // wait for GPU to finish rendering
-                        unsafe { gl_sys::Finish(); }
+                        unsafe { (self.os.gl().glFinish)(); }
 
                         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
                         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
@@ -172,6 +173,7 @@ impl Cx {
                                 new_texture = Texture::new_with_format(self, desc);
                                 self.textures[new_texture.texture_id()]
                                 .update_from_shared_dma_buf_image(
+                                    self.os.gl(),
                                     self.os.opengl_cx.as_ref().unwrap(),
                                     &pi.image,
                                 );

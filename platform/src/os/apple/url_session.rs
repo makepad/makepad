@@ -269,6 +269,12 @@ impl OsWebSocket{
             Ok(())
         } 
     }
+    
+    pub fn close(&self){
+        unsafe{
+            let () = msg_send![*self.data_task, cancel];
+        }
+    }
             
     pub fn open(_socket_id:u64, request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
         unsafe {

@@ -53,11 +53,8 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
     for (key, value) in env {
         cmd_build.env(key, value);
     }
-     println("WAIITNG FOR {:?}",args);
     let mut child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
-    println("WAIITNG FOR {:?}",args);
     let r = child.wait().map_err( | e | format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)) ?;
-    println("done {:?}",args);
     if !r.success() {
         let mut out = String::new();
         let _ = child.stderr.unwrap().read_to_string(&mut out);
@@ -67,6 +64,36 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
     let _ = child.stdout.unwrap().read_to_string(&mut out);
     Ok(out)
 }
+
+pub fn shell_env_create(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str]) -> Result<Child, String> {
+    let mut cmd_build = Command::new(cmd);
+        
+    cmd_build.args(args)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .current_dir(cwd);
+            
+    for (key, value) in env {
+        cmd_build.env(key, value);
+    }
+    let mut child = cmd_build.spawn().map_err( | e | format!("Error starting {} in dir {:?} - {:?}", cmd, cwd, e)) ?;
+    Ok(child);
+}
+
+
+pub shell_env_wait(child:Child)-> Result<String, String> {
+    let r = child.wait().map_err( | e | format!("Process {} in dir {:?} returned error {:?} ", cmd, cwd, e)) ?;
+    if !r.success() {
+        let mut out = String::new();
+        let _ = child.stderr.unwrap().read_to_string(&mut out);
+        return Err(format!("Process {} in dir {:?} returned error exit code {} ", cmd, cwd, out));
+    }
+    let mut out = String::new();
+    let _ = child.stdout.unwrap().read_to_string(&mut out);
+    Ok(out)
+}
+
+
 
 pub fn shell_env_route(env: &[(&str, &str)], cwd: &Path, cmd: &str,  args: &[&str]) -> Result<(), String> {
 

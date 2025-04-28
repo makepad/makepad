@@ -259,7 +259,7 @@ struct DrawBgQuad {
 
 #[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawNameText {
-    #[deref] draw_super: DrawText2,
+    #[deref] draw_super: DrawText,
     #[live] is_even: f32,
     #[live] scale: f32,
     #[live] is_folder: f32,

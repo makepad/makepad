@@ -89,7 +89,7 @@ pub struct App {
         Machine::new("192.0.2.49:8188", live_id!(m1)),
         Machine::new("192.0.2.64:8188", live_id!(m2)),
         Machine::new("192.0.2.46:8188", live_id!(m3)),
-        Machine::new("192.0.2.53d:8188", live_id!(m4)),
+        Machine::new("192.0.2.53:8188", live_id!(m4)),
         Machine::new("192.0.2.45:8188", live_id!(m7)),
         Machine::new("192.0.2.59:8188", live_id!(m8)),
         //Machine::new("198.51.100.35:8188", id_lut!(m1)),
@@ -1302,7 +1302,7 @@ impl MatchEvent for App {
                                         let val = val.strip_prefix("assistant").unwrap_or(val);
                                         let val = val.to_string().replace("\"","");
                                         let val = val.trim();
-                                        self.ui.text_input(id!(prompt_input)).set_text(cx, val);
+                                        self.ui.text_input(id!(prompt_input)).set_text(cx, val.to_string());
                                         self.llm_chat.push((LLMMsg::AI,val.into()));
                                         self.ui.widget(id!(llm_chat)).redraw(cx);
                                     }

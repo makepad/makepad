@@ -11,7 +11,6 @@ use {
             generate_metal,
             generate_metal::MetalGeneratedShader,
         },
-        makepad_math::*,
         makepad_live_id::*,
         os::{
             apple::apple_sys::*,
@@ -63,7 +62,7 @@ impl Cx {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
         //self.views[view_id].set_clipping_uniforms();
-        self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
+        //self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
         
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].kind.sub_list() {
@@ -107,7 +106,7 @@ impl Cx {
                 }
                 
                 // update the zbias uniform if we have it.
-                draw_call.draw_uniforms.set_zbias(*zbias);
+                draw_call.draw_call_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
                 
                 if draw_call.uniforms_dirty {
@@ -160,22 +159,23 @@ impl Cx {
                 
                 let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                 let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
-                let draw_uniforms = draw_call.draw_uniforms.as_slice();
+                let draw_call_uniforms = draw_call.draw_call_uniforms.as_slice();
                 
                 unsafe {
                     
                     let () = msg_send![encoder, setVertexBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
+                    
                     let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
                     
-                    if let Some(id) = shp.draw_uniform_buffer_id {
-                        let () = msg_send![encoder, setVertexBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: id];
-                        let () = msg_send![encoder, setFragmentBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: id];
+                    if let Some(id) = shp.draw_call_uniform_buffer_id {
+                        let () = msg_send![encoder, setVertexBytes: draw_call_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setFragmentBytes: draw_call_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call_uniforms.len() * 4) as u64 atIndex: id];
                     }
                     if let Some(id) = shp.pass_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
                     }
-                    if let Some(id) = shp.view_uniform_buffer_id {
+                    if let Some(id) = shp.draw_list_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
                     }
@@ -287,7 +287,7 @@ impl Cx {
         
         let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some() {1.0}else {dpi_factor}).unwrap();
         
-        self.passes[pass_id].set_matrix(
+        self.passes[pass_id].set_ortho_matrix(
             pass_rect.pos, 
             pass_rect.size
         );
@@ -600,7 +600,7 @@ pub struct MetalCx {
 
 
 #[derive(Clone, Default)]
-pub struct CxOsView {
+pub struct CxOsDrawList {
 }
 
 #[derive(Default, Clone)]
@@ -633,9 +633,9 @@ impl MetalCx {
 pub struct CxOsDrawShader {
     _library: RcObjcId,
     render_pipeline_state: RcObjcId,
-    draw_uniform_buffer_id: Option<u64>,
+    draw_call_uniform_buffer_id: Option<u64>,
     pass_uniform_buffer_id: Option<u64>,
-    view_uniform_buffer_id: Option<u64>,
+    draw_list_uniform_buffer_id: Option<u64>,
     user_uniform_buffer_id: Option<u64>,
     mtlsl: String,
 }
@@ -710,17 +710,17 @@ impl CxOsDrawShader {
             ]
         }).unwrap());
         
-        let mut draw_uniform_buffer_id = None;
+        let mut draw_call_uniform_buffer_id = None;
         let mut pass_uniform_buffer_id = None;
-        let mut view_uniform_buffer_id = None;
+        let mut draw_list_uniform_buffer_id = None;
         let mut user_uniform_buffer_id = None;
         
         let mut buffer_id = 4;
         for (field, _) in shader.fields_as_uniform_blocks {
             match field.0 {
-                live_id!(draw) => draw_uniform_buffer_id = Some(buffer_id),
+                live_id!(draw_list) => draw_list_uniform_buffer_id = Some(buffer_id),
+                live_id!(draw_call) => draw_call_uniform_buffer_id = Some(buffer_id),
                 live_id!(pass) => pass_uniform_buffer_id = Some(buffer_id),
-                live_id!(view) => view_uniform_buffer_id = Some(buffer_id),
                 live_id!(user) => user_uniform_buffer_id = Some(buffer_id),
                 _ => panic!()
             }
@@ -730,9 +730,9 @@ impl CxOsDrawShader {
         return Some(Self {
             _library: library,
             render_pipeline_state,
-            draw_uniform_buffer_id,
+            draw_call_uniform_buffer_id,
             pass_uniform_buffer_id,
-            view_uniform_buffer_id,
+            draw_list_uniform_buffer_id,
             user_uniform_buffer_id,
             mtlsl: shader.mtlsl
         });
@@ -857,40 +857,43 @@ impl CxTexture {
             let texture:ObjcId = unsafe{msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]};
             self.os.texture = Some(RcObjcId::from_owned(NonNull::new(texture).unwrap()));
         }
-        if !self.take_updated().is_empty() {
-            fn update_data(texture:&Option<RcObjcId>, width: usize, height: usize, bpp: u64, data: *const std::ffi::c_void){
-                let region = MTLRegion {
-                    origin: MTLOrigin {x: 0, y: 0, z: 0},
-                    size: MTLSize {width: width as u64, height: height as u64, depth: 1}
-                };
+        let update = self.take_updated();
+        if update.is_empty(){
+            return;
+        }
+        fn update_data(texture:&Option<RcObjcId>, width: usize, height: usize, bpp: u64, data: *const std::ffi::c_void){
+
+            let region = MTLRegion {
+                origin: MTLOrigin {x: 0, y: 0, z: 0},
+                size: MTLSize {width: width as u64, height: height as u64, depth: 1}
+            };
                                             
-                let () = unsafe {msg_send![
-                    texture.as_ref().unwrap().as_id(),
-                    replaceRegion: region
-                    mipmapLevel: 0
-                    withBytes: data
-                    bytesPerRow: (width as u64) * bpp
-                ]};
-            }
+            let () = unsafe {msg_send![
+                texture.as_ref().unwrap().as_id(),
+                replaceRegion: region
+                mipmapLevel: 0
+                withBytes: data
+                bytesPerRow: (width as u64) * bpp
+            ]};
+        }
             
-            match &self.format{
-                TextureFormat::VecBGRAu8_32{width, height, data, ..}=>{
-                    update_data(&self.os.texture, *width, *height, 4,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
-                }
-                TextureFormat::VecRGBAf32{width, height, data, ..}=>{
-                    update_data(&self.os.texture, *width, *height, 16,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
-                }
-                TextureFormat::VecRu8{width, height, data, ..}=>{
-                    update_data(&self.os.texture, *width, *height, 1,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
-                }
-                TextureFormat::VecRGu8{width, height, data, ..}=>{
-                    update_data(&self.os.texture, *width, *height, 2,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
-                }
-                TextureFormat::VecRf32{width, height, data, ..}=>{
-                    update_data(&self.os.texture, *width, *height, 4,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
-                }
-                _=>panic!()
+        match &self.format{
+            TextureFormat::VecBGRAu8_32{width, height, data, ..}=>{
+                update_data(&self.os.texture, *width, *height, 4,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
             }
+            TextureFormat::VecRGBAf32{width, height, data, ..}=>{
+                update_data(&self.os.texture, *width, *height, 16,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
+            }
+            TextureFormat::VecRu8{width, height, data, ..}=>{
+                update_data(&self.os.texture, *width, *height, 1,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
+            }
+            TextureFormat::VecRGu8{width, height, data, ..}=>{
+                update_data(&self.os.texture, *width, *height, 2,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
+            }
+            TextureFormat::VecRf32{width, height, data, ..}=>{
+                update_data(&self.os.texture, *width, *height, 4,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);
+            }
+            _=>panic!()
         }
     }
     

@@ -79,7 +79,7 @@ live_design!{
             return a0 - a1;
         }
         
-        fn pixel(self) -> vec4 {
+        fn fragment(self) -> vec4 {
             let p_min = self.v_pixel.xy - 0.5;
             let p_max = self.v_pixel.xy + 0.5;
             let t_area = self.compute_clamped_trapezoid_area(p_min, p_max);

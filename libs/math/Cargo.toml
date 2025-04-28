@@ -11,3 +11,4 @@ metadata.makepad-auto-version = "WnTUkFvuaKuikBx6MjSgND96cUA="
 
 [features] 
 [dependencies]
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "0.4.0" }

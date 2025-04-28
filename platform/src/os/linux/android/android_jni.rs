@@ -124,7 +124,12 @@ static MESSAGES_TX: Mutex<Option<mpsc::Sender<FromJavaMessage>>> = Mutex::new(No
 
 pub fn send_from_java_message(message: FromJavaMessage) {
     if let Ok(mut tx) = MESSAGES_TX.lock(){
-        tx.as_mut().unwrap().send(message).ok();
+        if let Some(tx) = tx.as_mut(){
+            tx.send(message).ok();
+        }
+        else{
+            crate::log!("Receiving message from java whilst already shutdown {:?}", message);
+        }
     }
 }
 
@@ -237,7 +242,7 @@ unsafe extern "C" fn vsync_callback(
 #[cfg(not(no_android_choreographer))]
 pub unsafe fn post_vsync_callback() {
     if let Some(post_callback) = CHOREOGRAPHER_POST_CALLBACK_FN {
-        if !CHOREOGRAPHER.is_null() {
+        if !CHOREOGRAPHER.is_null() && from_java_messages_already_set() {
             post_callback(
                 CHOREOGRAPHER,
                 Some(vsync_callback),
@@ -291,6 +296,10 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
         android_version: jstring_to_string(env, android_version),
         build_number: jstring_to_string(env, build_number),
         kernel_version: jstring_to_string(env, kernel_version),
+        #[cfg(quest)]
+        has_xr_mode: true,
+        #[cfg(not(quest))]
+        has_xr_mode: false,
     }));
 }
 
@@ -557,6 +566,9 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketMessage(
     message: jni_sys::jobject,
     callback: jni_sys::jlong,
 ) {
+    if callback == 0{
+        return
+    }
     let message = unsafe { java_byte_array_to_vec(env, message) };
     let sender = unsafe { &*(callback as *const Box<(u64,Sender<WebSocketMessage>)>) };
 
@@ -572,6 +584,9 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketClosed(
     _: jni_sys::jobject,
     callback: jni_sys::jlong,
 ) {
+    if callback == 0{
+        return
+    }
     let sender = unsafe { &*(callback as *const Box<(u64,Sender<WebSocketMessage>)>) };
 
     send_from_java_message(FromJavaMessage::WebSocketClosed {
@@ -586,6 +601,9 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
     _error: jni_sys::jstring,
     callback: jni_sys::jlong,
 ) {
+    if callback == 0{
+        return
+    }
     //let error = unsafe { jstring_to_string(env, error) };
     let sender = unsafe { &*(callback as *const Box<(u64,Sender<WebSocketMessage>)>) };
 

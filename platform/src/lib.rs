@@ -3,14 +3,15 @@
 pub mod os;
 
 #[macro_use]
+pub mod log;
+
+#[macro_use]
 mod live_prims;
 
 #[macro_use]
 mod cx;
 mod cx_api;
 
-#[macro_use]
-pub mod log;
 pub mod action;
 
 pub mod live_traits;
@@ -199,9 +200,12 @@ pub use {
             WindowClosedEvent,
             WindowDragQueryResponse,
             WindowDragQueryEvent,
-            XRButton,
-            XRInput,
-            XRUpdateEvent,
+            XrController,
+            XrHand,
+            XrSceneAnchors,
+            XrState,
+            XrUpdateEvent,
+            XrLocalEvent,
             DragEvent,
             DropEvent,
             DragState,

@@ -69,6 +69,11 @@ pub fn live(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
+pub fn color(input: TokenStream) -> TokenStream {
+    color_impl(input)
+}
+
+#[proc_macro]
 pub fn live_array(input: TokenStream) -> TokenStream {
     live_array_impl(input)
 }

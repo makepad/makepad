@@ -906,8 +906,10 @@ impl Dock {
         None
     }
 
-    pub fn load_state(&mut self, cx: &mut Cx, dock_items: HashMap<LiveId, DockItem>) {
-        //log!("{:#?}", self.dock_items);
+    pub fn load_state(&mut self, cx: &mut Cx, dock_items: HashMap<LiveId, DockItem>,) {
+        // NOTE if you have a collision problem
+        // Don't use LiveId::unique() as they are only unique when you run it.
+        // Use dock.unique_tab_id(somerandombase) instead
         self.dock_items = dock_items;
         self.items.clear();
         self.tab_bars.clear();
