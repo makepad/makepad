@@ -163,11 +163,11 @@ live_design! {
         }
 
         draw_cursor: {
-            instance hover: 0.0
             instance focus: 0.0
 
             uniform border_radius: 0.5
 
+            uniform blink: 0.0
             uniform color: (THEME_COLOR_TEXT_CURSOR)
 
             fn pixel(self) -> vec4 {
@@ -180,13 +180,28 @@ live_design! {
                     self.border_radius
                 );
                 sdf.fill(
-                    mix(THEME_COLOR_U_HIDDEN, self.color, self.focus)
+                    mix(THEME_COLOR_U_HIDDEN, self.color, self.blink * self.focus)
                 );
                 return sdf.result;
             }
         }
 
         animator: {
+            blink = {
+                default: off
+                off = {
+                    from: {all: Forward {duration:0.05}}
+                    apply: {
+                        draw_cursor: {blink:0.0}
+                    }
+                }
+                on = {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {blink:1.0}
+                    }
+                }
+            }
             hover = {
                 default: off
                 off = {
@@ -510,11 +525,14 @@ pub struct TextInput {
     #[live] is_numeric_only: bool,
     #[live] empty_text: String,
     #[live] text: String,
+    #[live(0.5)] blink_speed: f64,
+
     #[rust] password_text: String,
     #[rust] laidout_text: Option<Rc<LaidoutText>>,
     #[rust] text_area: Area,
     #[rust] selection: Selection,
     #[rust] history: History,
+    #[rust] blink_timer: Timer,
 }
 
 impl TextInput {
@@ -602,6 +620,7 @@ impl TextInput {
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
         self.selection = selection;
         self.history.force_new_edit_group();
+        self.reset_blink_timer(cx);
         self.draw_bg.redraw(cx);
     }
 
@@ -622,9 +641,17 @@ impl TextInput {
             }
         );
     }
-
+    
     pub fn selected_text(&self) -> &str {
         &self.text[self.selection.start().index..self.selection.end().index]
+    }
+
+    pub fn reset_blink_timer(&mut self, cx: &mut Cx) {
+        self.animator_cut(cx, id!(blink.off));
+        if !self.is_read_only {
+            cx.stop_timer(self.blink_timer);
+            self.blink_timer = cx.start_timeout(self.blink_speed)
+        }
     }
 
     fn cursor_to_position(&self, cursor: Cursor) -> CursorPosition {
@@ -1009,6 +1036,15 @@ impl Widget for TextInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
+        }
+
+        if self.blink_timer.is_event(event).is_some() {
+            if self.animator_in_state(cx, id!(blink.off)) {
+                self.animator_play(cx, id!(blink.on));
+            } else {
+                self.animator_play(cx, id!(blink.off));
+            }
+            self.blink_timer = cx.start_timeout(self.blink_speed)
         }
 
         let uid = self.widget_uid();
