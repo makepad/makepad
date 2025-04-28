@@ -89,7 +89,7 @@ live_design!{
                 height: Fit,
 
                 text: ""
-                empty_message: "Enter prompt"
+                empty_text: "Enter prompt"
             }
 
             /*send_button = <ButtonFlatter> {

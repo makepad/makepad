@@ -30,9 +30,9 @@ impl Default for AiChatManager{
                     }
                 },
                 AiModel{
-                    name: "gemini 2.0 pro".to_string(),
+                    name: "gemini 2.5 pro".to_string(),
                     backend: AiBackend::Google{
-                        url:"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro-exp-02-05:streamGenerateContent?alt=sse&key=".to_string(),
+                        url:"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-preview-03-25:streamGenerateContent?alt=sse&key=".to_string(),
                         key:std::fs::read_to_string("GOOGLE_KEY").unwrap_or("".to_string())
                     }
                 },
