@@ -180,7 +180,7 @@ live_design! {
                     self.border_radius
                 );
                 sdf.fill(
-                    mix(THEME_COLOR_U_HIDDEN, self.color, self.blink * self.focus)
+                    mix(THEME_COLOR_U_HIDDEN, self.color, (1.0-self.blink) * self.focus)
                 );
                 return sdf.result;
             }
@@ -1012,6 +1012,17 @@ impl TextInput {
             false
         }
     }
+    
+    fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
+        if self.is_read_only{
+            self.animator_cut(cx, id!(blink.off));
+        }
+        else{
+            self.animator_cut(cx, id!(blink.off));
+            cx.stop_timer(self.blink_timer);
+            self.blink_timer = cx.start_timeout(self.blink_speed)
+        }
+    }
 }
 
 impl Widget for TextInput {
@@ -1032,7 +1043,8 @@ impl Widget for TextInput {
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
         DrawStep::done()
     }
-
+    
+    
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
@@ -1057,10 +1069,13 @@ impl Widget for TextInput {
             }
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, id!(focus.on));
+                self.reset_cursor_blinker(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
             Hit::KeyFocusLost(_) => {
                 self.animator_play(cx, id!(focus.off));
+                self.animator_play(cx, id!(blink.on));
+                cx.stop_timer(self.blink_timer);
                 cx.hide_text_ime();
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocusLost);
             }
