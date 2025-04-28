@@ -348,6 +348,9 @@ pub fn generate_builtins()-> HashMap<Ident, Builtin>{
         builtin!(sample2dOES, [
             (Ty::TextureOES, Ty::Vec2) -> Ty::Vec4
         ]),
+        builtin!(depth_clip, [
+            (Ty::Vec4, Ty::Vec4, Ty::Float) -> Ty::Vec4
+        ]),
         builtin!(sign, [
             (Ty::Float) -> Ty::Float,
             (Ty::Vec2) -> Ty::Vec2,

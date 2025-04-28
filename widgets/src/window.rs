@@ -121,6 +121,7 @@ pub struct Window {
     #[rust(Texture::new(cx))] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
     #[live] show_performance_view: bool,
+    #[rust(Mat4::nonuniform_scaled_translation(vec3(0.0004,-0.0004,-0.0004),vec3(-0.25,0.25,-0.5)))] xr_view_matrix: Mat4,
     #[deref] view: View,
     // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
     /*#[rust(Menu::main(vec![
@@ -219,7 +220,8 @@ impl Window {
 
         self.main_draw_list.begin_always(cx);
         
-        cx.begin_pass_sized_turtle(Layout::flow_down());
+        let size = cx.current_pass_size();
+        cx.begin_sized_turtle(size, Layout::flow_down());
         
         self.overlay.begin(cx);
         
@@ -300,6 +302,13 @@ impl WindowRef{
 
 impl Widget for Window {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::Draw(e) = event {
+            let mut cx_draw = CxDraw::new(cx, e);
+            let cx = &mut Cx2d::new(&mut cx_draw);
+            self.draw_all(cx, scope);
+            return
+        }
+        
         let uid = self.widget_uid();
         
         self.debug_view.handle_event(cx, event);
@@ -376,7 +385,19 @@ impl Widget for Window {
             return
         }
         else {
-            self.view.handle_event(cx, event, scope);
+            // lets store our inverse matrix
+            if cx.in_xr_mode(){
+                if let Event::XrUpdate(e) = &event{
+                    let event = Event::XrLocal(XrLocalEvent::from_update_event(e, &self.xr_view_matrix));
+                    self.view.handle_event(cx, &event, scope);
+                }
+                else{
+                    self.view.handle_event(cx, event, scope);
+                }
+            }
+            else{
+                self.view.handle_event(cx, event, scope);
+            }
         }
         
         if let Event::Actions(actions) = event{
@@ -392,7 +413,6 @@ impl Widget for Window {
                 }
             }
             if self.desktop_button(id!(windows_buttons.close)).clicked(&actions) {
-                println!("CLOSE");
                 self.window.close(cx);
             }
             if self.desktop_button(id!(web_xr.xr_on)).clicked(&actions) {
@@ -401,8 +421,7 @@ impl Widget for Window {
         }
                 
         if let Event::ClearAtlasses = event {
-            Cx2d::reset_fonts_atlas(cx);
-            Cx2d::reset_icon_atlas(cx);
+            CxDraw::reset_icon_atlas(cx);
         }
         
         if let Event::MouseMove(ev) = event {
@@ -430,6 +449,30 @@ impl Widget for Window {
             self.draw_state.end();
             self.end(cx);
         }
+        
+        DrawStep::done()
+    }
+    
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope:&mut Scope)->DrawStep{
+        // lets create a Cx2d in which we can draw. we dont support stepping here
+        let cx = &mut Cx2d::new(cx.cx);
+        
+        self.main_draw_list.begin_always(cx);
+        
+        let size = dvec2(15.0,12.0);
+        cx.begin_sized_turtle(size, Layout::flow_down());
+                
+        self.overlay.begin(cx);
+        
+        self.view.draw_walk_all(cx, scope, Walk::default());
+        
+        self.debug_view.draw(cx);
+                        
+        self.main_draw_list.set_view_transform(cx, &self.xr_view_matrix);
+        
+        cx.end_pass_sized_turtle();
+                
+        self.main_draw_list.end(cx);
         
         DrawStep::done()
     }

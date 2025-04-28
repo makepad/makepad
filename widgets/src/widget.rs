@@ -40,6 +40,9 @@ pub trait WidgetNode: LiveApply {
     fn redraw(&mut self, _cx: &mut Cx);
     fn set_action_data(&mut self, _data:Arc<dyn ActionTrait>){}
     fn action_data(&self)->Option<Arc<dyn ActionTrait>>{None}
+        
+    fn set_visible(&mut self, _cx:&mut Cx, _visible:bool){}
+    fn visible(&self) -> bool {true}
 }
 
 pub trait Widget: WidgetNode {
@@ -88,7 +91,13 @@ pub trait Widget: WidgetNode {
         DrawStep::done()
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep;
+    fn draw_3d_all(&mut self, cx:&mut Cx3d, scope: &mut Scope){
+        while self.draw_3d(cx, scope).is_step() {}
+    }
+    
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep{
+        DrawStep::done()
+    }
 
     fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
         let walk = self.walk(cx);
@@ -111,12 +120,6 @@ pub trait Widget: WidgetNode {
         self.draw_all(cx, &mut Scope::empty());
     }
         
-    fn set_visible(&mut self, _cx:&mut Cx, _visible:bool){
-    }
-        
-    fn visible(&self) -> bool {
-        true
-    }
     
     fn text(&self) -> String {
         String::new()
@@ -433,11 +436,6 @@ impl WidgetRef {
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let start = cx.new_actions.len();
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            // if we're in a draw event, do taht here
-            if let Event::Draw(e) = event {
-                let cx = &mut Cx2d::new(cx, e);
-                return inner.widget.draw_all(cx, scope);
-            }
             inner.widget.handle_event(cx, event, scope); 
         }
         let end = cx.new_actions.len();
@@ -570,7 +568,25 @@ impl WidgetRef {
             inner.widget.draw_walk_all(cx, scope, walk)
         }
     }
-
+    
+    pub fn draw_3d_all(&self, cx: &mut Cx3d, scope: &mut Scope) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.draw_3d_all(cx, scope)
+        }
+    }
+    
+    pub fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            if let Some(nd) = inner.widget.draw_3d(cx, scope).step() {
+                if nd.is_empty() {
+                    return DrawStep::make_step_here(self.clone());
+                }
+                return DrawStep::make_step_here(nd);
+            }
+        }
+        DrawStep::done()
+    }
+    
     pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             if let Some(nd) = inner.widget.draw(cx, scope).step() {
@@ -1255,7 +1271,7 @@ impl<T: Clone> Default for DrawStateWrap<T> {
 }
 
 impl<T: Clone> DrawStateWrap<T> {
-    pub fn begin(&mut self, cx: &mut Cx2d, init: T) -> bool {
+    pub fn begin(&mut self, cx: &mut CxDraw, init: T) -> bool {
         if self.redraw_id != cx.redraw_id() {
             self.redraw_id = cx.redraw_id();
             self.state = Some(init);
@@ -1265,9 +1281,9 @@ impl<T: Clone> DrawStateWrap<T> {
         }
     }
 
-    pub fn begin_with<F, S>(&mut self, cx: &mut Cx2d, v: &S, init: F) -> bool
+    pub fn begin_with<F, S>(&mut self, cx: &mut CxDraw, v: &S, init: F) -> bool
     where
-        F: FnOnce(&mut Cx2d, &S) -> T,
+        F: FnOnce(&mut CxDraw, &S) -> T,
     {
         if self.redraw_id != cx.redraw_id() {
             self.redraw_id = cx.redraw_id();

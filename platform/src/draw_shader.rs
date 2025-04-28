@@ -166,7 +166,8 @@ pub struct DrawShaderInputs {
 #[derive(Clone, Copy, Debug)]
 pub enum DrawShaderInputPacking {
     Attribute,
-    UniformsGLSL,
+    UniformsGLSLTight,
+    UniformsGLSL140,
     #[allow(dead_code)]
     UniformsHLSL,
     #[allow(dead_code)]
@@ -183,9 +184,16 @@ pub struct DrawShaderInput {
     pub live_ptr: Option<LivePtr>
 }
 
+#[cfg(any(target_arch = "wasm32"))]
+pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSLTight;
 
-#[cfg(any(target_os = "android", target_os = "linux", target_arch = "wasm32"))]
-pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL;
+
+#[cfg(all(any(target_os = "android", target_os = "linux"),not(no_opengl_uniform_buffers)))]
+pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL140;
+#[cfg(all(any(target_os = "android", target_os = "linux"),no_opengl_uniform_buffers))]
+pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSLTight;
+
+
 #[cfg(any(target_os = "macos", target_os = "ios", target_os="tvos"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
 #[cfg(any(target_os = "windows"))]
@@ -213,7 +221,20 @@ impl DrawShaderInputs {
                 });
                 self.total_slots += slots;
             }
-            DrawShaderInputPacking::UniformsGLSL => {
+            DrawShaderInputPacking::UniformsGLSLTight => {
+                self.inputs.push(DrawShaderInput {
+                    id,
+                    offset: self.total_slots,
+                    slots,
+                    ty,
+                    live_ptr
+                });
+                self.total_slots += slots;
+            }
+            DrawShaderInputPacking::UniformsGLSL140 => {
+                if (self.total_slots & 3) + slots > 4 { // goes over the boundary
+                    self.total_slots += 4 - (self.total_slots & 3); // make jump to new slot
+                }
                 self.inputs.push(DrawShaderInput {
                     id,
                     offset: self.total_slots,
@@ -256,9 +277,11 @@ impl DrawShaderInputs {
     pub fn finalize(&mut self) {
         match self.packing_method {
             DrawShaderInputPacking::Attribute => (),
-            DrawShaderInputPacking::UniformsGLSL =>(),
+            DrawShaderInputPacking::UniformsGLSLTight =>(),
             DrawShaderInputPacking::UniformsHLSL |
-            DrawShaderInputPacking::UniformsMetal => {
+            DrawShaderInputPacking::UniformsMetal|
+            DrawShaderInputPacking::UniformsGLSL140
+            => {
                 if self.total_slots & 3 > 0 {
                     self.total_slots += 4 - (self.total_slots & 3);
                 }
@@ -284,8 +307,8 @@ pub struct CxDrawShaderMapping {
     pub live_instances: DrawShaderInputs,
     pub live_uniforms: DrawShaderInputs,
     pub user_uniforms: DrawShaderInputs,
-    pub draw_uniforms: DrawShaderInputs,
-    pub view_uniforms: DrawShaderInputs,
+    pub draw_list_uniforms: DrawShaderInputs,
+    pub draw_call_uniforms: DrawShaderInputs,
     pub pass_uniforms: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
     pub uses_time: bool,
@@ -306,8 +329,8 @@ impl CxDrawShaderMapping {
         let mut live_instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         let mut user_uniforms = DrawShaderInputs::new(uniform_packing);
         let mut live_uniforms = DrawShaderInputs::new(uniform_packing);
-        let mut draw_uniforms = DrawShaderInputs::new(uniform_packing);
-        let mut view_uniforms = DrawShaderInputs::new(uniform_packing);
+        let mut draw_list_uniforms = DrawShaderInputs::new(uniform_packing);
+        let mut draw_call_uniforms = DrawShaderInputs::new(uniform_packing);
         let mut pass_uniforms = DrawShaderInputs::new(uniform_packing);
         let mut textures = Vec::new();
         let mut instance_enums = Vec::new();
@@ -343,11 +366,11 @@ impl CxDrawShaderMapping {
                 }
                 DrawShaderFieldKind::Uniform {block_ident, ..} => {
                     match block_ident.0 {
-                        live_id!(draw) => {
-                            draw_uniforms.push(field.ident.0, ty, None);
+                        live_id!(draw_call) => {
+                            draw_call_uniforms.push(field.ident.0, ty, None);
                         }
-                        live_id!(view) => {
-                            view_uniforms.push(field.ident.0, ty, None);
+                        live_id!(draw_list) => {
+                            draw_list_uniforms.push(field.ident.0, ty, None);
                         }
                         live_id!(pass) => {
                             pass_uniforms.push(field.ident.0, ty, None);
@@ -373,8 +396,8 @@ impl CxDrawShaderMapping {
         var_instances.finalize();
         user_uniforms.finalize();
         live_uniforms.finalize();
-        draw_uniforms.finalize();
-        view_uniforms.finalize();
+        draw_list_uniforms.finalize();
+        draw_call_uniforms.finalize();
         pass_uniforms.finalize();
         
         // fill up the default values for the user uniforms
@@ -396,8 +419,8 @@ impl CxDrawShaderMapping {
             live_instances,
             user_uniforms,
             live_uniforms,
-            draw_uniforms,
-            view_uniforms,
+            draw_list_uniforms,
+            draw_call_uniforms,
             pass_uniforms,
             instance_enums,
             textures,

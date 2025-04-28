@@ -2,13 +2,23 @@
 use crate::event::HttpRequest;
 use crate::web_socket::{WebSocketMessage};
 use std::sync::mpsc::{channel, Sender};
-use std::net::TcpStream;
+use std::net::{TcpStream, Shutdown};
 use std::io::{Read};
 use makepad_http::utils::write_bytes_to_tcp_stream_no_error;
 use makepad_http::websocket::{ServerWebSocket, ServerWebSocketMessageFormat, ServerWebSocketMessageHeader, ServerWebSocketMessage, SERVER_WEB_SOCKET_PONG_MESSAGE};
 
 pub struct OsWebSocket{
-    sender: Option<Sender<WebSocketMessage>>
+    sender: Option<Sender<WebSocketMessage>>,
+    stream: Option<TcpStream>,
+}
+
+impl Drop for OsWebSocket{
+    fn drop(&mut self){
+        self.sender.take();
+        if let Some(stream) = self.stream.take(){
+            stream.shutdown(Shutdown::Both).ok();
+        }
+    }
 }
 
 impl OsWebSocket{
@@ -22,7 +32,10 @@ impl OsWebSocket{
         }
         Err(())
     }
-                    
+            
+    pub fn close(&mut self){
+    }
+            
     pub fn open(_socket_id:u64, request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
         // parse the url
         let split = request.split_url();
@@ -32,27 +45,27 @@ impl OsWebSocket{
         let stream = TcpStream::connect(format!("{}:{}", split.host, split.port));
         // alright lets construct a http request
         // lets join the headers
-        
+                        
         let mut http_request = format!("GET /{} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: SxJdXBRtW7Q4awLDhflO0Q==\r\n", split.file, split.host);
         http_request.push_str(&request.get_headers_string());
         http_request.push_str("\r\n"); 
-        
+                        
         // lets write the http request
         if stream.is_err(){
             rx_sender.send(WebSocketMessage::Error("Error connecting websocket tcpstream".into())).unwrap();
-            return OsWebSocket{sender:None}
+            return OsWebSocket{sender:None, stream:None}
         }
         let mut stream = stream.unwrap();
         if write_bytes_to_tcp_stream_no_error(&mut stream, http_request.as_bytes()){
             rx_sender.send(WebSocketMessage::Error("Error writing request to websocket".into())).unwrap();
-            return OsWebSocket{sender:None}
+            return OsWebSocket{sender:None, stream:None}
         }
-        
+                        
         // lets start the thread
         let mut input_stream = stream.try_clone().unwrap();
         let mut output_stream = stream.try_clone().unwrap();
         let (sender, receiver) = channel();
-        
+                        
         let _writer_thread = std::thread::spawn(move || {
             while let Ok(msg) = receiver.recv(){
                 match msg{
@@ -76,7 +89,7 @@ impl OsWebSocket{
                 }
             }
         });
-        
+                        
         let _reader_thread = std::thread::spawn(move || {
             let mut web_socket = ServerWebSocket::new();
             let mut done = false;
@@ -123,7 +136,7 @@ impl OsWebSocket{
                 }
             }
         });
-                
-        OsWebSocket{sender:Some(sender)}
+                                
+        OsWebSocket{sender:Some(sender), stream:Some(stream)}
     }
 }

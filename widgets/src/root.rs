@@ -14,13 +14,17 @@ live_design!{
     use link::designer::Designer;
     
     pub RootBase = {{Root}} {}
-    pub Root = <RootBase> { design_window = <Designer> {} }
+    pub Root = <RootBase> {
+        design_window = <Designer> {}
+        xr_hands = <XrHands>{}
+    }
 }
 
 #[derive(Live, LiveRegisterWidget, WidgetRef)]
 pub struct Root {
-    #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust] windows: ComponentMap<LiveId, WidgetRef>,
+    #[rust] components: ComponentMap<LiveId, WidgetRef>,
+    #[rust(DrawList::new(cx))] xr_draw_list: DrawList,
+    #[live] xr_pass: Pass,
 }
  
 impl LiveHook for Root {
@@ -33,7 +37,10 @@ impl LiveHook for Root {
                     if id == live_id!(design_window) && !cx.in_makepad_studio(){
                         return nodes.skip_node(index);
                     }
-                    return self.windows.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
+                    if id == live_id!(xr_hands) && !cx.os_type().has_xr_mode(){
+                        return nodes.skip_node(index);
+                    }
+                    return self.components.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
                         .apply(cx, apply, index, nodes);
                 }
                 else {
@@ -46,15 +53,11 @@ impl LiveHook for Root {
     }
 }
 
-#[derive(Clone)]
-enum DrawState {
-    Window(usize),
-}
 
 impl WidgetNode for Root{
     fn redraw(&mut self, cx: &mut Cx) {
-        for window in self.windows.values_mut() {
-            window.redraw(cx);
+        for component in self.components.values_mut() {
+            component.redraw(cx);
         }
     }
     
@@ -63,14 +66,25 @@ impl WidgetNode for Root{
     fn walk(&mut self, _cx:&mut Cx) -> Walk {Walk::default()}
         
     fn find_widgets(&self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet){
-        for window in self.windows.values() {
-            window.find_widgets(path, cached, results);
+        if path.len() == 0{
+            return
+        }
+        if let Some(component) = self.components.get(&path[0]) {
+            if path.len() == 1{
+                results.push(component.clone());
+            }
+            else{
+                component.find_widgets(&path[1..], cached, results);
+            }
+        }
+        for component in self.components.values() {
+            component.find_widgets(path, cached, results);
         }
     }
     
     fn uid_to_widget(&self, uid:WidgetUid)->WidgetRef{
-        for window in self.windows.values() {
-            let x = window.uid_to_widget(uid);
+        for component in self.components.values() {
+            let x = component.uid_to_widget(uid);
             if !x.is_empty(){return x}
         }
         WidgetRef::empty()
@@ -81,28 +95,45 @@ impl WidgetNode for Root{
 impl Widget for Root {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        for window in self.windows.values_mut() {
-            window.handle_event(cx, event, scope);
+        if let Event::Draw(e) = event {
+            if cx.in_xr_mode(){
+                if  !e.xr_state.is_some(){
+                    return
+                }
+                let mut cx_draw = CxDraw::new(cx, e);
+                let cx = &mut Cx3d::new(&mut cx_draw);
+                // lets begin a 3D drawlist in the global context
+                self.xr_pass.set_as_xr_pass(cx);
+                cx.begin_pass(&self.xr_pass, Some(4.0));
+                self.xr_draw_list.begin_always(cx);
+                self.draw_3d_all(cx, scope);
+                self.xr_draw_list.end(cx);
+                cx.end_pass(&self.xr_pass);
+                return
+            }
+            else{
+                let mut cx_draw = CxDraw::new(cx, e);
+                let cx = &mut Cx2d::new(&mut cx_draw);
+                self.draw_all(cx, scope);
+                return
+            }
+        }
+        
+        for component in self.components.values_mut() {
+            component.handle_event(cx, event, scope);
         }
     }
     
-     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        // check if we are in a 3D mode. Ifso we wrap Cx2d in Cx3d
-        // and call into the next layer as draw_3d
-        // the window then continues back into the 2d draw context
-        
-        self.draw_state.begin(cx, DrawState::Window(0));
-        
-        while let Some(DrawState::Window(step)) = self.draw_state.get() {
-            
-            if let Some(window) = self.windows.values_mut().nth(step){
-                let walk = window.walk(cx);
-                window.draw_walk(cx, scope, walk)?; 
-                self.draw_state.set(DrawState::Window(step+1));
-            }
-            else{
-                self.draw_state.end();
-            }
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope:&mut Scope)->DrawStep{
+        for component in self.components.values(){
+            component.draw_3d_all(cx, scope);
+        }
+        DrawStep::done()
+    }
+    
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        for component in self.components.values(){
+            component.draw_walk_all(cx, scope, walk);
         }
         DrawStep::done()
     }

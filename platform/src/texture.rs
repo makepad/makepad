@@ -107,7 +107,6 @@ pub enum TextureFormat {
     VecRGu8{width:usize, height:usize, data:Option<Vec<u8>>, unpack_row_length:Option<usize>, updated: TextureUpdated},
     VecRf32{width:usize, height:usize, data:Option<Vec<f32>>, updated: TextureUpdated},
     DepthD32{size:TextureSize, initial: bool},
-    XrDepth,
     RenderBGRAu8{size:TextureSize, initial: bool},
     RenderRGBAf16{size:TextureSize, initial: bool},
     RenderRGBAf32{size:TextureSize, initial: bool},
@@ -170,14 +169,21 @@ impl TextureUpdated {
     }
 
     pub fn update(self, dirty_rect: Option<RectUsize>) -> Self {
-        match dirty_rect {
+        let new = match dirty_rect {
             Some(dirty_rect) => match self {
                 TextureUpdated::Empty => TextureUpdated::Partial(dirty_rect),
-                TextureUpdated::Partial(rect) => TextureUpdated::Partial(rect.union(dirty_rect)),
+                TextureUpdated::Partial(rect) => 
+                TextureUpdated::Partial(rect.union(dirty_rect)),
                 TextureUpdated::Full => TextureUpdated::Full,
             },
             None => TextureUpdated::Full,
+        };
+        if let TextureUpdated::Partial(p) = new{
+            if p.size == SizeUsize::new(0,0){
+                return TextureUpdated::Empty
+            }
         }
+        new
     }
 }
 
@@ -352,13 +358,6 @@ impl TextureFormat{
         false
     }
     
-    pub fn is_xr(&self) -> bool {
-        match self{
-            Self::XrDepth=>true,
-            _=>false
-        }
-    }
-
     pub fn vec_width_height(&self)->Option<(usize,usize)>{
         match self{
             Self::VecBGRAu8_32{width, height, .. }=>Some((*width,*height)),

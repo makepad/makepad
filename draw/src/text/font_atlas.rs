@@ -71,6 +71,7 @@ impl<T> FontAtlas<T> {
         }
         if self.current_point.y + padded_size.height > self.size().height {
             self.needs_reset = true;
+            crate::log!("Font atlas too small, resetting");
             return None;
         }
         let origin = self.current_point;
@@ -102,8 +103,7 @@ impl GrayscaleAtlas {
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
         let pixels = self.image.as_pixels();
-        let data =
-            unsafe { slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len()) };
+        let data = unsafe { slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len()) };
         writer.write_image_data(&data).unwrap();
     }
 }
@@ -120,8 +120,7 @@ impl ColorAtlas {
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
         let pixels = self.image.as_pixels();
-        let data =
-            unsafe { slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
+        let data = unsafe { slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
         writer.write_image_data(&data).unwrap();
     }
 }

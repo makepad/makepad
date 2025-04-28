@@ -1,5 +1,6 @@
 use {
     std::{
+        rc::Rc,
         cell::Cell,
         collections::{HashSet, HashMap}
     },
@@ -130,8 +131,9 @@ pub enum Event {
     /// The application has lost focus and is no longer the active window receiving user input.
     AppLostFocus,
     NextFrame(NextFrameEvent),
-    XRUpdate(XRUpdateEvent),
-
+    XrUpdate(XrUpdateEvent),
+    XrLocal(XrLocalEvent),
+    
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
@@ -295,6 +297,7 @@ impl Event{
             52=>"ToWasmMsg",
             
             53=>"DesignerPick",
+            54=>"XrLocal",
             _=>panic!()
         }
     }
@@ -315,7 +318,7 @@ impl Event{
             Self::AppGotFocus=>9,
             Self::AppLostFocus=>10,
             Self::NextFrame(_)=>11,
-            Self::XRUpdate(_)=>12,
+            Self::XrUpdate(_)=>12,
 
             Self::WindowDragQuery(_)=>13,
             Self::WindowCloseRequested(_)=>14,
@@ -367,6 +370,7 @@ impl Event{
             Self::ToWasmMsg(_)=>52,
             
             Self::DesignerPick(_) =>53,
+            Self::XrLocal(_)=>54
         }
     }
 
@@ -447,6 +451,7 @@ pub struct DrawEvent {
     pub draw_lists: Vec<DrawListId>,
     pub draw_lists_and_children: Vec<DrawListId>,
     pub redraw_all: bool,
+    pub xr_state: Option<Rc<XrState>>
 }
 
 impl DrawEvent{

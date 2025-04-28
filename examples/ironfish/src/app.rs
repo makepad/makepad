@@ -93,12 +93,12 @@ live_design! {
             }
 
             fn pixel(self) -> vec4{
-                let col = sample2d_rt(self.image, self.o0) ;
-                col +=  (sample2d_rt(self.image, self.o1a) + sample2d_rt(self.image, self.o1b)) * self.g1;
-                col +=  (sample2d_rt(self.image, self.o2a) + sample2d_rt(self.image, self.o2b)) * self.g2 ;
-                col +=  (sample2d_rt(self.image, self.o3a) + sample2d_rt(self.image, self.o3b)) * self.g3 ;
-                col +=  (sample2d_rt(self.image, self.o4a) + sample2d_rt(self.image, self.o4b)) * self.g4 ;
-                col +=  (sample2d_rt(self.image, self.o5a) + sample2d_rt(self.image, self.o5b)) * self.g5 ;
+                let col = sample2d(self.image, self.o0) ;
+                col +=  (sample2d(self.image, self.o1a) + sample2d(self.image, self.o1b)) * self.g1;
+                col +=  (sample2d(self.image, self.o2a) + sample2d(self.image, self.o2b)) * self.g2 ;
+                col +=  (sample2d(self.image, self.o3a) + sample2d(self.image, self.o3b)) * self.g3 ;
+                col +=  (sample2d(self.image, self.o4a) + sample2d(self.image, self.o4b)) * self.g4 ;
+                col +=  (sample2d(self.image, self.o5a) + sample2d(self.image, self.o5b)) * self.g5 ;
                 col = col * self.gaussscale;
 
                 return col ;
@@ -135,12 +135,12 @@ live_design! {
 
             fn pixel(self) -> vec4{
                 
-                let shadow = sample2d_rt(self.image, self.oShadow);
-                let main = sample2d_rt(self.image, self.o0);
+                let shadow = sample2d(self.image, self.oShadow);
+                let main = sample2d(self.image, self.o0);
 
                 let col =  (vec4(0.0,0.0,0.0,self.shadowopacity)  * shadow.a ) * ( 1 - main.a) + main;
 
-                //col +=  (sample2d_rt(self.image, self.o0) )*0.3;
+                //col +=  (sample2d(self.image, self.o0) )*0.3;
                 
 
                 return col;

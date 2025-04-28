@@ -216,7 +216,7 @@ live_design! {
 #[repr(C)]
 struct DrawCodeText {
     #[deref]
-    draw_super: DrawText2,
+    draw_super: DrawText,
     #[live]
     outline: f32,
 }
@@ -225,7 +225,7 @@ struct DrawCodeText {
 pub struct CodeEditor {
     #[walk] walk: Walk,
     #[live] scroll_bars: ScrollBars,
-    #[live] draw_gutter: DrawText2,
+    #[live] draw_gutter: DrawText,
     #[live] draw_text: DrawCodeText,
     #[live] token_colors: TokenColors,
     #[live] draw_indent_guide: DrawIndentGuide,
@@ -238,6 +238,7 @@ pub struct CodeEditor {
     #[rust] last_cursor_screen_pos: Option<DVec2>,
     #[live] pad_left_top: DVec2, 
     #[rust] cell_size: DVec2,
+    #[rust] cell_offset_y: f64,
     #[rust] gutter_rect: Rect,
     #[rust] gutter_chars: usize,
     #[rust] viewport_rect: Rect,
@@ -328,6 +329,11 @@ impl CodeEditor {
         self.scroll_bars.redraw(cx);
     }
     
+    pub fn set_visible(&mut self, _cx:&mut Cx, _visible:bool){}
+    
+    pub fn visible(&self) -> bool {true}
+    
+    
     pub fn area(&self)->Area{
         self.scroll_bars.area()
     }
@@ -356,10 +362,14 @@ impl CodeEditor {
         let text = self.draw_text.layout(cx, 0.0, 0.0, None, Align::default(), "!");
         let first_row = text.rows.first().unwrap();
         let first_glyph = first_row.glyphs.first().unwrap();
+        let width_in_lpxs = first_glyph.advance_in_lpxs();
+        let height_in_lpxs = first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs();
+        let line_spacing_in_lpxs = height_in_lpxs * self.draw_text.text_style.line_spacing;
         self.cell_size = dvec2(
-            first_glyph.advance_in_lpxs() as f64,
-            ((first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs()) as f64) * self.draw_text.text_style.line_spacing as f64,
+            width_in_lpxs as f64,
+            line_spacing_in_lpxs as f64
         );
+        self.cell_offset_y = ((line_spacing_in_lpxs - height_in_lpxs) / 2.0) as f64;
 
         let last_added_selection =
             session.selections()[session.last_added_selection_index().unwrap()];
@@ -902,32 +912,20 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers:
-                    KeyModifiers {
-                        logo: true,
-                        shift: false,
-                        ..
-                    },
+                modifiers: KeyModifiers{ control, logo, shift, .. },
                 ..
-            }) if !self.read_only => {
+            }) if (control || logo) && !shift && !self.read_only =>{
                 if session.undo() {
                     cx.redraw_all();
                     actions.push(CodeEditorAction::TextDidChange);
                     keyboard_moved_cursor = true;
                 }
             }
-            
-            
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers:
-                    KeyModifiers {
-                        logo: true,
-                        shift: true,
-                        ..
-                    },
+                modifiers: KeyModifiers{ control, logo, shift, ..},
                 ..
-            }) if !self.read_only => {
+            }) if (control || logo) && shift && !self.read_only =>{
                 if session.redo() {
                     self.redraw(cx);
                     actions.push(CodeEditorAction::TextDidChange);
@@ -1073,7 +1071,7 @@ impl CodeEditor {
                             + dvec2(
                                 (1.0 - line.scale()) * -self.cell_size.x + self.gutter_rect.size.x
                                     - line.scale() * self.gutter_rect.size.x,
-                                0.0,
+                                self.cell_offset_y,
                             ),
                         &buf,
                     );
@@ -1168,7 +1166,7 @@ impl CodeEditor {
                                         self.draw_text.draw_abs(
                                             cx,
                                             DVec2 { x, y: origin_y + y } * self.cell_size
-                                                + self.viewport_rect.pos,
+                                                + self.viewport_rect.pos + self.cell_offset_y,
                                             grapheme,
                                         );
                                         byte_index += grapheme.len();
@@ -1209,7 +1207,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
+    fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut origin_y = session.layout().line(self.line_start).y();
         for element in session
             .layout()
@@ -1247,7 +1245,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_decoration_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
+    fn draw_decoration_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut active_decoration = None;
         let decorations = session.document().decorations();
         let mut decorations = decorations.iter();
@@ -1272,7 +1270,7 @@ impl CodeEditor {
         .draw_decoration_layer(cx, session)
     }
 
-    fn draw_selection_layer(&mut self, cx: &mut Cx2d<'_>, session: &CodeSession) {
+    fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut active_selection = None;
         let selections = session.selections();
         let mut selections = selections.iter();
@@ -1907,8 +1905,8 @@ impl<'a> DrawSelectionLayer<'a> {
 
     fn draw_cursor(
         &mut self,
-        cx: &mut Cx2d<'_>,
-        line: Line<'_>,
+        cx: &mut Cx2d,
+        line: Line,
         origin_y: f64,
         row_index: usize,
         column_index: usize,
@@ -1930,7 +1928,7 @@ impl<'a> DrawSelectionLayer<'a> {
 
     fn draw_cursor_bg(
         &mut self,
-        cx: &mut Cx2d<'_>,
+        cx: &mut Cx2d,
         line: Line<'_>,
         origin_y: f64,
         row_index: usize,
