@@ -301,7 +301,7 @@ impl MatchEvent for App {
                 KeyCode::ArrowRight => self.navigate_right(cx),
                 KeyCode::Escape => self
                     .ui
-                    .page_flip(id!(body))
+                    .page_flip(id!(page_flip))
                     .set_active_page(cx, live_id!(image_browser)),
                 _ => {}
             }
