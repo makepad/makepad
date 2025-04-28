@@ -121,7 +121,7 @@ pub struct Window {
     #[rust(Texture::new(cx))] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
     #[live] show_performance_view: bool,
-    #[rust(Mat4::scaled_translation(0.0004,-0.0004,-0.0004,-0.25,0.25,-0.5))] xr_view_matrix: Mat4,
+    #[rust(Mat4::nonuniform_scaled_translation(vec3(0.0004,-0.0004,-0.0004),vec3(-0.25,0.25,-0.5)))] xr_view_matrix: Mat4,
     #[deref] view: View,
     // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
     /*#[rust(Menu::main(vec![
