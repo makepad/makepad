@@ -47,6 +47,14 @@ live_design!{
             color:#f00
             cube_size: vec3(0.02,0.02,0.02)
         }
+        draw_test:{
+            color:#f00
+            cube_size: vec3(0.02,0.02,0.02)
+        }
+        draw_head:{
+            color:#fff
+            cube_size: vec3(0.2,0.1,0.05)
+        }
         draw_grip:{
             color: #777,
             cube_size: vec3(0.05,0.05,0.05)
@@ -85,11 +93,13 @@ impl Bullets{
                 if !hand.in_view(){
                     continue
                 }
-                for pose in hand.end_knuckles(){
+                for (i,pose) in hand.end_knuckles().iter().enumerate(){
+                    if !hand.tip_active(i){continue;}
+                    
                     self.last_fired = xr_state.time;
                     self.bullets.push(Bullet{
                         shot_at: xr_state.time,
-                        pose:*pose
+                        pose:**pose
                     });
                     if self.bullets.len()>4500{
                         self.bullets.remove(0);
@@ -108,16 +118,17 @@ impl Bullets{
     }
 }
 
-const ALIGN_RESET: f64 = 0.5;
+const ALIGN_MODE: f64 = 0.4;
 struct AlignMode{
-    start_time: f64,
-    anchors: XrSceneAnchors,
+    anchor: XrAnchor,
 }
 
 #[derive(Live, LiveHook, Widget)]
 pub struct XrHands {
     #[redraw] #[rust(DrawList::new(cx))] draw_list: DrawList,
     #[live] draw_align: DrawCube,
+    #[live] draw_test: DrawCube,
+    #[live] draw_head: DrawCube,
     #[area] #[live] draw_knuckle: DrawCube,
     #[live] draw_controller: DrawCube,
     #[live] draw_bullet: DrawCube,
@@ -127,6 +138,7 @@ pub struct XrHands {
                 
     #[live] label: DrawText,
     #[rust] peers: Vec<XrPeer>,
+    #[rust] align_last_click: f64,
     #[rust] align_mode: Option<AlignMode>,
     #[rust] bullets: Bullets,
 }
@@ -135,7 +147,10 @@ impl XrHands{
     
     pub fn join_peer(&mut self, _cx:&mut Cx, id:LiveId, state:XrState){
         if let Some(peer) = self.peers.iter_mut().find(|v| v.id == id){
-            peer.state = state;
+            if state.order_counter>peer.state.order_counter ||
+               peer.state.order_counter - state.order_counter>128{
+                peer.state = state;
+            }
         }
         else{
             self.peers.push(XrPeer{id, state, bullets:Bullets::default()});
@@ -150,57 +165,51 @@ impl XrHands{
         self.join_peer(cx, id, state);
     }
     
-    fn handle_alignment(&mut self, _cx:&mut Cx, e:&XrUpdateEvent){
+    fn handle_alignment(&mut self, cx:&mut Cx, e:&XrUpdateEvent){
         // the special space gesture
         
         if e.menu_pressed() || e.clicked_menu(){
-            // alright lets toggle align / settings mode
-            if let Some(align_mode) = &mut self.align_mode{
-                // close and save the aligncubes
-                if e.state.time - align_mode.start_time < ALIGN_RESET{
-                    align_mode.anchors = XrSceneAnchors{
-                        left: e.state.vec_in_head_space(vec3(-0.2,0.0,-0.4)),
-                        right: e.state.vec_in_head_space(vec3(0.2,0.0,-0.4))
-                    }
-                }
-                else{
-                    
+            if e.state.time - self.align_last_click < ALIGN_MODE{
+                // alright lets toggle align / settings mode
+                if let Some(align_mode) = &mut self.align_mode{
+                    // lets store the anchors
+                    cx.xr_set_local_anchor(align_mode.anchor);
                     self.align_mode = None;
                 }
-                
-            }
-            else if self.align_mode.is_none(){
-                // we have to load up the alignmode settings
-                let anchors = if let Some(anchors) = &e.state.scene_anchors{
-                    *anchors
-                }
-                else{
-                    XrSceneAnchors{
-                        left: e.state.vec_in_head_space(vec3(-0.2,0.0,-0.4)),
-                        right: e.state.vec_in_head_space(vec3(0.2,0.0,-0.4))
+                else if self.align_mode.is_none(){
+                    // we have to load up the alignmode settings
+                    let anchor = if let Some(anchor) = &e.state.anchor{
+                        *anchor
                     }
-                };
+                    else{
+                        XrAnchor{
+                            left: e.state.vec_in_head_space(vec3(-0.2,0.0,-0.4)),
+                            right: e.state.vec_in_head_space(vec3(0.2,0.0,-0.4))
+                        }
+                    };
+                                    
+                    // or spawn the cubes somewhere meaningful
+                    self.align_mode = Some(AlignMode{
+                        anchor,
+                    });
+                }
                 
-                // or spawn the cubes somewhere meaningful
-                self.align_mode = Some(AlignMode{
-                    start_time: e.state.time,
-                    anchors,
-                });
             }
+            self.align_last_click = e.state.time;
         }
         // possibly move the cubes around
         if let Some(align_mode) = &mut self.align_mode{
-            if e.state.left_hand.pinch_only_index(){
-                align_mode.anchors.left = e.state.left_hand.tip_pos_thumb();
+            if e.state.left_hand.pinch_not_index(){
+                align_mode.anchor.left = e.state.left_hand.tip_pos_thumb();
             }
-            if e.state.right_hand.pinch_only_index(){
-                align_mode.anchors.right = e.state.right_hand.tip_pos_thumb();
+            if e.state.right_hand.pinch_not_index(){
+                align_mode.anchor.right = e.state.right_hand.tip_pos_thumb();
             }
             if e.state.left_controller.triggered(){
-                align_mode.anchors.left = e.state.left_controller.aim_pose.position;
+                align_mode.anchor.left = e.state.left_controller.aim_pose.position;
             }
             if e.state.right_controller.triggered(){
-                align_mode.anchors.right = e.state.right_controller.aim_pose.position;
+                align_mode.anchor.right = e.state.right_controller.aim_pose.position;
             }
         }
     }
@@ -211,11 +220,11 @@ impl XrHands{
                 // lets draw cubes from the quaternions
                 let cube = &mut self.draw_align;
                 cube.color = color!(#00f);
-                cube.transform = Mat4::translation(align.anchors.left);
+                cube.transform = Pose::new(align.anchor.to_quat(),align.anchor.left).to_mat4();
                 cube.depth_clip = 1.0;
                 cube.draw(cx);
                 cube.color = color!(#0f0);
-                cube.transform = Mat4::translation(align.anchors.right);
+                cube.transform = Pose::new(align.anchor.to_quat_rev(),align.anchor.right).to_mat4();
                 cube.draw(cx);
             //}
         }
@@ -225,9 +234,6 @@ impl XrHands{
 impl Widget for XrHands {
     fn handle_event(&mut self, cx: &mut Cx,event:&Event, _scope:&mut Scope){
         if let Event::XrUpdate(e) = event{
-            if e.clicked_menu(){
-                cx.xr_advertise_anchor(e.state.left_controller.grip_pose);
-            }
             self.handle_alignment(cx, e);
             self.redraw(cx);
         }
@@ -254,6 +260,7 @@ impl Widget for XrHands {
                     }
                 }
                 for (i, knuckle) in XrHand::END_KNUCKLES.iter().enumerate(){
+                    if !hand.tip_active(i){continue;}
                     let joint = &hand.joints[*knuckle];
                     let mat = Mat4::mul(&joint.to_mat4(), transform);
                     tip.cube_pos = vec3(0.0,0.0,-hand.tips[i]);
@@ -286,7 +293,7 @@ impl Widget for XrHands {
         }
         
         
-        fn _draw_head(
+        fn draw_head(
             cx: &mut Cx3d, 
             cube:&mut DrawCube, 
             transform: &Mat4, 
@@ -294,63 +301,63 @@ impl Widget for XrHands {
         ){
             let mata = Mat4::mul(&xr_state.head_pose.to_mat4(), transform);
             cube.color = vec4(1.0,1.0,1.0,1.0);
-            cube.cube_size = vec3(0.20,0.10,0.05);
             cube.cube_pos = vec3(0.0,0.0,0.0);
             cube.transform = mata;
             cube.depth_clip = 0.0;
             cube.draw(cx);
         }
         
-        fn _draw_democube(
+        fn draw_democube(
             cx: &mut Cx3d, 
             cube:&mut DrawCube, 
-            xr_state:&XrState, 
+            anchor:&XrAnchor, 
             ){
             let speed = 32.0; 
-            let rot = (xr_state.time*speed).rem_euclid(360.0) as f32;
+            //let rot = (xr_state.time*speed).rem_euclid(360.0) as f32;
             cube.color = vec4(1.0,1.0,1.0,1.0);
-            cube.cube_size = vec3(0.05,0.05,0.05);
-            cube.cube_pos = vec3(0.0,0.0,0.0);
-            cube.transform = Mat4::txyz_s_ry_rx_txyz(
+            cube.cube_size = vec3(0.1,0.1,0.1);
+            cube.cube_pos = vec3(0.0,0.1,0.0);
+            cube.transform = anchor.to_mat4();
+                
+            /*Mat4::txyz_s_ry_rx_txyz(
                 vec3(0.,0.,0.),
                 1.0,
                 rot,rot,
                 vec3(0.,0.,-0.3)
-            );
+            );*/
             cube.depth_clip = 1.0;
             cube.draw(cx);
         }
-        
         // alright lets draw those hands
         let xr_state = cx.draw_event.xr_state.as_ref().unwrap();
         
         self.draw_alignment(cx, xr_state);
-
+        /*
+        if let Some(align)= &self.align_mode{
+            draw_democube(cx, &mut self.draw_test, &align.anchor);
+        }*/
+            
         draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &xr_state);
         
         self.bullets.draw(cx, &mut self.draw_bullet, &xr_state, &Mat4::identity());
-        /*
-        let mut discovery = 0;
+        
         for peer in &mut self.peers{
-            if peer.state.anchor_discovery > xr_state.anchor_discovery{
-                discovery = discovery.max(peer.state.anchor_discovery);
-            }
-            if let Some(my_anchor) = peer.state.scene_anchor{
-                if let Some(other_anchor) = xr_state.scene_anchor{
-                    let anchor_map = Mat4::mul(&my_anchor.to_mat4().invert(), &other_anchor.to_mat4());
+            
+            if let Some(other_anchor) = &peer.state.anchor{
+                if let Some(my_anchor) = &xr_state.anchor{
+                    // alright we need a mapping mat4 from 2 anchors
+                    let anchor_map = other_anchor.mapping_to(my_anchor);
                     draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &anchor_map, &peer.state);
                     
+                    draw_head(cx, &mut self.draw_head, &anchor_map, &peer.state);
+                                        
                     peer.bullets.draw(cx, &mut self.draw_bullet, &peer.state, &anchor_map)
-                    
                 }
             }
             else{
                 draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &peer.state)
             }
         }
-        if discovery>0{
-            cx.xr_discover_anchor(discovery);
-        }*/
                 
         self.draw_list.end(cx);
         DrawStep::done()

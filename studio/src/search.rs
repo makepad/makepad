@@ -121,6 +121,7 @@ live_design!{
             grab_key_focus: false
             auto_tail: true
             drag_scrolling: false
+            max_pull_down: 0,
             height: Fill, width: Fill,
             flow: Down
             SearchResult = <SearchResult> {
