@@ -165,10 +165,25 @@ Replace the definition of `App` in the call to the `live_design` macro with the 
 	            }
             }
         }
+        placeholder: (PLACEHOLDER)
     }
 ```
 
-We've simply commented out our `ImageGrid`, and replaced it with our `Slideshow`. This is just a temporary measure so that we can develop our slideshow without worrying about the image grid. In the next step, we'll make it so we can switch between the image grid and the slideshow at will. 
+We've commented out our `ImageGrid`, and replaced it with our `Slideshow`. This is just a temporary measure so that we can develop our slideshow without worrying about the image grid. In the next step, we'll make it so we can switch between the image grid and the slideshow at will.
+
+We've also added a `placeholder` field, storing a reference to our placeholder image. This will allow us to refer to the placeholder image from Rust code. For this to work, we need to make sure to also add a placeholder field to the corresponding `App` struct:
+
+```
+#[derive(Live)]
+pub struct App {
+    #[live]
+    ui: WidgetRef,
+    #[live]
+    placeholder: LiveDependency,
+    #[rust]
+    state: State,
+}
+```
 ## Extending the State
 Now that we've updated the DSL code with the definitions we need, it's time to extend the state for our app with some additional fields and methods we need to make the slideshow dynamic.
 
@@ -203,6 +218,7 @@ Note that `current_image_idx` is actually an `Option<usize>`. This is to handle 
 ### Adding Helper Methods
 To facilitate updating the slideshow at runtime, we're going to add a few helper methods to the `App` struct.
 
+#### Adding the `set_current_image` method
 The `set_current_image` method is used to change which image is currently displayed in the slideshow:
 ```
 impl App {
@@ -214,10 +230,7 @@ impl App {
             image.load_image_file_by_path(cx, &image_path).unwrap();
         } else {
             image
-                .load_image_dep_by_path(
-                    cx,
-                    "crate://self/resources/placeholder_image.jpg",
-                )
+                .load_image_dep_by_path(cx, self.placeholder.as_str())
                 .unwrap();
         }
         self.ui.view(id!(slideshow)).redraw(cx);
@@ -235,6 +248,7 @@ Here's what the `set_current_image` method does:
 	- It reloads the `Image` with the placeholder image.
 - It calls `redraw(..)` on the `Slideshow` to schedule it to be redrawn with the new image.
 
+#### Adding the `navigate_left/navigate_right` methods
 Now that we have a method to change which image is currently displayed in the slideshow, we'll add two more helper methods: `navigate_left` and `navigate_right`. These are used to navigate the slideshow to the previous and next image, respectively:
 
 ```
@@ -370,7 +384,8 @@ The following code:
 
 checks whether one of the buttons in the slideshow were clicked. If so, it calls the appropriate helper method (either `navigate_left` or `navigate_right`) to update the slideshow.
 
-**Note:** Whenever an action is dispatched by a widget, 
+**Note:**
+Whenever one or more actions are dispatched by a widget, an **action event** is dispatched containing the list of dispatched actions. When the `match_event` method on the `MatchEvent` is trait called with an action event, it causes the `handle_actions` method to be called with the list of dispatched actions. To handle actions, each widget provides one or more helper methods such as the `clicked` method on Button above. When you call this method with a list of  actions, it checks if one of the actions signified a button click, and if so, returns `true`.
 #### Handling Key Presses
 The following code:
 ```
