@@ -35,7 +35,8 @@ pub enum WebSocketThreadMsg{
     },
     AppToStudio{
         message: AppToStudio
-    }
+    },
+    Terminate
 }
 
 pub struct WebSocket{
@@ -97,6 +98,13 @@ impl Cx{
                     WebSocketThreadMsg::Close{socket_id}=>{
                         sockets.lock().unwrap().borrow_mut().remove(&socket_id);
                     }
+                    WebSocketThreadMsg::Terminate{}=>{
+                        for socket in sockets.lock().unwrap().borrow_mut().values_mut(){
+                            socket.close();
+                        }
+                        sockets.lock().unwrap().borrow_mut().clear();
+                    }
+                                        
                 }
             }
             if app_to_studio.0.len()>0{
@@ -142,7 +150,17 @@ impl Cx{
                             cycle_time = collect_time; // we should now block with a max of collect time since we received the first message
                         }
                         WebSocketThreadMsg::Close{socket_id}=>{
+                            if let Some(socket) = sockets.get_mut(&socket_id){
+                                socket.close();
+                            }
                             sockets.remove(&socket_id);
+                        }
+                        WebSocketThreadMsg::Terminate=>{
+                            for socket in sockets.values_mut(){
+                                socket.close();
+                            }
+                            *WEB_SOCKET_THREAD_SENDER.lock().unwrap() = None;
+                            return;
                         }
                     },
                     Err(RecvTimeoutError::Timeout)=>{ 
@@ -180,6 +198,16 @@ impl Cx{
         }
         
     }
+    
+    pub fn stop_studio_websocket(&mut self){
+        self.studio_web_socket = None;
+        HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
+        let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
+        if let Some(sender) = &*sender{
+            sender.send(WebSocketThreadMsg::Terminate).unwrap();
+        }
+    }
+    
     
     #[cfg(any(target_os="tvos", target_os="ios"))]
     pub fn start_studio_websocket_delayed(&mut self) {
