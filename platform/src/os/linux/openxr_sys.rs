@@ -7,7 +7,7 @@ use std::fmt;
 use std::ffi::CStr;
 use std::ffi::CString;
 use crate::os::linux::egl_sys::*;
-
+use crate::makepad_live_id::LiveId;
 // Consts
 
 
@@ -172,6 +172,8 @@ pub struct LibOpenXr{
     pub xrSetSpaceComponentStatusFB: TxrSetSpaceComponentStatusFB,
     pub xrQuerySpacesFB: TxrQuerySpacesFB,
     pub xrRetrieveSpaceQueryResultsFB: TxrRetrieveSpaceQueryResultsFB,
+    pub xrSaveSpacesMETA: TxrSaveSpacesMETA,
+    pub xrEraseSpacesMETA: TxrEraseSpacesMETA,
 }
 
 
@@ -250,6 +252,8 @@ impl LibOpenXr {
             xrSetSpaceComponentStatusFB: get_proc_addr!(gipa, instance, TxrSetSpaceComponentStatusFB)?,
             xrQuerySpacesFB: get_proc_addr!(gipa, instance, TxrQuerySpacesFB)?,
             xrRetrieveSpaceQueryResultsFB: get_proc_addr!(gipa, instance, TxrRetrieveSpaceQueryResultsFB)?,
+            xrSaveSpacesMETA: get_proc_addr!(gipa, instance, TxrSaveSpacesMETA)?,
+            xrEraseSpacesMETA: get_proc_addr!(gipa, instance, TxrEraseSpacesMETA)?,
          })
     }
 }
@@ -681,6 +685,17 @@ pub type TxrRetrieveSpaceQueryResultsFB = unsafe extern "C" fn(
     results: *mut XrSpaceQueryResultsFB,
 ) -> XrResult;
 
+pub type TxrSaveSpacesMETA = unsafe extern "C" fn(
+    session: XrSession,
+    info: *const XrSpacesSaveInfoMETA,
+    request_id: *mut XrAsyncRequestIdFB,
+) -> XrResult;
+
+pub type TxrEraseSpacesMETA = unsafe extern "C" fn(
+    session: XrSession,
+    info: *const XrSpacesEraseInfoMETA,
+    request_id: *mut XrAsyncRequestIdFB,
+) -> XrResult;
 
 // Handle types
 
@@ -841,13 +856,21 @@ pub struct XrUuid {
 pub type XrUuidEXT = XrUuid;
 
 impl XrUuid{
-    pub fn generate()->Self{
+    pub fn from_bytes(b:&[u8])->Self{
         let mut uid = XrUuid::default();
-        let rnd = crate::makepad_live_id::LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0.to_be_bytes();
         for i in 0..uid.data.len(){
-            uid.data[i] = rnd[i%rnd.len()];
+            uid.data[i] = b[i%b.len()];
         }
         uid
+    }
+    pub fn generate()->Self{
+        let bytes = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0.to_be_bytes();
+        Self::from_bytes(&bytes)
+    }
+    
+    pub fn from_live_id(live_id:LiveId)->Self{
+        let bytes = live_id.0.to_be_bytes();
+        Self::from_bytes(&bytes)
     }
 }
 
@@ -941,6 +964,104 @@ pub struct XrRect2Di {
 
 
 // Struct datatypes
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceUuidFilterInfoFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub uuid_count: u32,
+    pub uuids: *const XrUuidEXT,
+}
+impl Default for XrSpaceUuidFilterInfoFB{
+    fn default()->Self{
+        XrSpaceUuidFilterInfoFB{
+            ty: XrStructureType::SPACE_UUID_FILTER_INFO_FB,
+            next: 0 as *mut _,
+            uuid_count: 0,
+            uuids: 0 as * mut _
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceComponentFilterInfoFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub component_type: XrSpaceComponentTypeFB,
+}
+impl Default for XrSpaceComponentFilterInfoFB{
+    fn default()->Self{
+        XrSpaceComponentFilterInfoFB{
+            ty: XrStructureType::SPACE_COMPONENT_FILTER_INFO_FB,
+            next: 0 as *mut _,
+            component_type: XrSpaceComponentTypeFB(0)
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataSpacesEraseResultMETA {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub request_id: XrAsyncRequestIdFB,
+    pub result: XrResult
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpacesEraseInfoMETA {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub space_count: u32,
+    pub spaces: *const XrSpace,
+    pub uuid_count: u32,
+    pub uuids: *const XrUuid,
+}
+
+impl Default for XrSpacesEraseInfoMETA{
+    fn default()->Self{
+        XrSpacesEraseInfoMETA{
+            ty: XrStructureType::SPACES_ERASE_INFO_META,
+            next: 0 as *mut _,
+            space_count: 0,
+            spaces: 0 as * const _,
+            uuid_count: 0,
+            uuids: 0 as *const _
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataSpacesSaveResultMETA {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub request_id: XrAsyncRequestIdFB,
+    pub result: XrResult
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpacesSaveInfoMETA {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub space_count: u32,
+    pub spaces: *const XrSpace
+}
+impl Default for XrSpacesSaveInfoMETA{
+    fn default()->Self{
+        XrSpacesSaveInfoMETA{
+            ty: XrStructureType::SPACES_SAVE_INFO_META,
+            next: 0 as *mut _,
+            space_count: 0,
+            spaces: 0 as *const _
+        }
+    }
+}
 
 
 #[repr(C)]
@@ -3571,7 +3692,11 @@ impl XrStructureType {
     pub const SPACE_LOCATIONS_KHR: XrStructureType = Self::SPACE_LOCATIONS;
     pub const SPACE_VELOCITIES_KHR: XrStructureType = Self::SPACE_VELOCITIES;
     
-    
+    pub const SYSTEM_SPACE_PERSISTENCE_PROPERTIES_META : XrStructureType = Self(1000259000);
+    pub const SPACES_SAVE_INFO_META: XrStructureType = Self(1000259001);
+    pub const EVENT_DATA_SPACES_SAVE_RESULT_META: XrStructureType = Self(1000259002);
+    pub const SPACES_ERASE_INFO_META: XrStructureType = Self(1000259003);
+    pub const EVENT_DATA_SPACES_ERASE_RESULT_META: XrStructureType = Self(1000259004);
 }
 
 impl fmt::Debug for XrStructureType {
@@ -4218,10 +4343,11 @@ impl fmt::Debug for XrStructureType {
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq)]
-pub struct XrResult(i32);
+pub struct XrResult(pub i32);
 impl XrResult {
     pub fn to_result(&self, name: &str)->Result<(),String>{
         if *self != XrResult::SUCCESS{
+            crate::log!("OpenXR error in {}: {}", name, self);
             Err(format!("OpenXR error in {}: {}", name, self))
         }
         else{
@@ -4356,6 +4482,15 @@ impl XrResult {
     pub const ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED_KHR: XrResult =
         Self::ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED;
     pub const ERROR_PERMISSION_INSUFFICIENT_KHR: XrResult = Self::ERROR_PERMISSION_INSUFFICIENT;
+    
+    pub const ERROR_SPACE_INSUFFICIENT_RESOURCES_META: XrResult = Self(-1000259000);
+    pub const ERROR_SPACE_STORAGE_AT_CAPACITY_META: XrResult = Self(-1000259001);
+    pub const ERROR_SPACE_INSUFFICIENT_VIEW_META: XrResult = Self(1000259002);
+    pub const ERROR_SPACE_PERMISSION_INSUFFICIENT_META: XrResult = Self(-1000259003);
+    pub const ERROR_SPACE_RATE_LIMITED_META : XrResult = Self(-1000259004);
+    pub const ERROR_SPACE_TOO_DARK_META: XrResult = Self(-1000259005);
+    pub const ERROR_SPACE_TOO_BRIGHT_META : XrResult = Self(-1000259006);
+    
     pub fn from_raw(x: i32) -> Self {
         Self(x)
     }
@@ -4566,6 +4701,15 @@ impl std::fmt::Debug for XrResult {
             }
             Self::ERROR_FUTURE_PENDING_EXT => Some("ERROR_FUTURE_PENDING_EXT"),
             Self::ERROR_FUTURE_INVALID_EXT => Some("ERROR_FUTURE_INVALID_EXT"),
+            Self::ERROR_SPACE_INSUFFICIENT_RESOURCES_META => Some("ERROR_SPACE_INSUFFICIENT_RESOURCES_META"),
+            Self::ERROR_SPACE_STORAGE_AT_CAPACITY_META => Some("ERROR_SPACE_STORAGE_AT_CAPACITY_META"),
+            Self::ERROR_SPACE_INSUFFICIENT_VIEW_META => Some("ERROR_SPACE_INSUFFICIENT_VIEW_META"),
+            Self::ERROR_SPACE_PERMISSION_INSUFFICIENT_META => Some("ERROR_SPACE_PERMISSION_INSUFFICIENT_META"),
+            Self::ERROR_SPACE_RATE_LIMITED_META => Some("ERROR_SPACE_RATE_LIMITED_META"),
+            Self::ERROR_SPACE_TOO_DARK_META => Some("ERROR_SPACE_TOO_DARK_META"),
+            Self::ERROR_SPACE_TOO_BRIGHT_META => Some("ERROR_SPACE_TOO_BRIGHT_META"),
+            
+            
             _ => None,
         };
         if let Some(reason) = reason {

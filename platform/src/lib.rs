@@ -202,7 +202,7 @@ pub use {
             WindowDragQueryEvent,
             XrController,
             XrHand,
-            XrSceneAnchors,
+            XrAnchor,
             XrState,
             XrUpdateEvent,
             XrLocalEvent,

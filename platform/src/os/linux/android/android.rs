@@ -157,11 +157,15 @@ impl Cx {
             } => {
                 
                 if self.os.in_xr_mode && self.os.openxr.session.is_none(){
+                    if self.os.openxr.libxr.is_none(){
+                        let activity_handle = makepad_android_state::get_activity();
+                        self.os.openxr.create_instance(activity_handle).ok();
+                    }                    
                     if let Err(e) = self.os.openxr.create_session(self.os.display.as_ref().unwrap(),CxOpenXrOptions{
                         buffer_scale: 1.5,
                         multisamples: 4,
                         remove_hands_from_depth: false
-                    }){
+                    },&self.os_type){
                         crate::error!("OpenXR create_xr_session failed: {}", e);
                     }
                 }
@@ -958,11 +962,11 @@ impl Cx {
                         }
                     }       
                 }
-                CxOsOp::XrAdvertiseAnchor(pose)=>{
-                    self.os.openxr.advertise_anchor(pose);
+                CxOsOp::XrAdvertiseAnchor(anchor)=>{
+                    self.os.openxr.advertise_anchor(anchor);
                 }
-                CxOsOp::XrSetLocalAnchor(pose)=>{
-                    self.os.openxr.set_local_anchor(pose);
+                CxOsOp::XrSetLocalAnchor(anchor)=>{
+                    self.os.openxr.set_local_anchor(anchor);
                 }
                 CxOsOp::XrDiscoverAnchor(id)=>{
                     self.os.openxr.discover_anchor(id);
@@ -1103,8 +1107,9 @@ impl CxAndroidDisplay {
             window as _,
             std::ptr::null_mut(),
         );
-
-        assert!(!self.surface.is_null());
+        if self.surface.is_null(){
+            return
+        }
 
         let res = (self.libegl.eglMakeCurrent.unwrap())(
             self.egl_display,

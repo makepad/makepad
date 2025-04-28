@@ -99,6 +99,13 @@ impl XrHand{
         self.pinch[Self::PINCH_STRENGTH_RING]<100 && 
         self.pinch[Self::PINCH_STRENGTH_LITTLE]<100
     }
+    
+    pub fn pinch_not_index(&self)->bool{
+        self.pinch[Self::PINCH_STRENGTH_INDEX]<100 && (
+        self.pinch[Self::PINCH_STRENGTH_MIDDLE]>160 || 
+        self.pinch[Self::PINCH_STRENGTH_RING]>160 || 
+        self.pinch[Self::PINCH_STRENGTH_LITTLE]>160) 
+    }
             
     pub fn pinch_strength_index(&self)->f32{self.pinch[Self::PINCH_STRENGTH_INDEX] as f32 / u8::MAX as f32}
     pub fn pinch_strength_middle(&self)->f32{self.pinch[Self::PINCH_STRENGTH_MIDDLE] as f32 / u8::MAX as f32}
@@ -198,18 +205,44 @@ pub struct XrLocalEvent{
     pub time: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default, SerBin, DeBin)]
-pub struct XrSceneAnchors{
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, PartialEq)]
+pub struct XrAnchor{
     pub left: Vec3,
     pub right: Vec3,
+}
+
+impl XrAnchor{
+    pub fn to_quat(&self)->Quat{
+        let mut forward = self.right - self.left;
+        forward.y = 0.0;
+        Quat::look_rotation(forward, vec3(0.0,1.0,0.0))
+    }
+    
+    pub fn to_quat_rev(&self)->Quat{
+        let mut forward = self.left - self.right;
+        forward.y = 0.0;
+        Quat::look_rotation(forward, vec3(0.0,1.0,0.0))
+    }
+    
+    pub fn to_mat4(&self)->Mat4{
+        self.to_pose().to_mat4()
+    }
+        
+    pub fn to_pose(&self)->Pose{
+        Pose{position: (self.left+self.right)/2.0, orientation:self.to_quat()}
+    }
+    
+    pub fn mapping_to(&self, other:&XrAnchor)->Mat4{
+        Mat4::mul(&self.to_pose().to_mat4().invert(), &other.to_pose().to_mat4())
+    }
 }
 
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrState{
     pub time: f64,
     pub head_pose: Pose,
-    pub anchor_discovery: u8,
-    pub scene_anchors: Option<XrSceneAnchors>,
+    pub order_counter: u8,
+    pub anchor: Option<XrAnchor>,
     pub left_controller: XrController,
     pub right_controller: XrController,
     pub left_hand: XrHand,
@@ -221,7 +254,7 @@ impl XrState{
     }
     
     pub fn scene_anchor_pose(&self)->Option<Pose>{
-        if let Some(_anchors) = &self.scene_anchors{
+        if let Some(_anchor) = &self.anchor{
             // lets construct a pose from 2 positions
             None
         }
