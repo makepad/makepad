@@ -1,0 +1,1904 @@
+use{
+    crate::{
+        os::{
+            linux::{
+                openxr_sys::*,
+                android::android::CxAndroidDisplay,
+                opengl::GlShader,
+                gl_sys,
+                gl_sys::LibGl,
+                android::android_jni::*
+            }
+        },
+        makepad_micro_serde::*,
+        draw_shader::CxDrawShaderMapping,
+        event::Event,
+        event::xr::*,
+        pass::{CxPassParent,PassId},
+        cx::{Cx},
+        makepad_math::{Mat4, Pose},
+    },
+    std::rc::Rc,
+    std::sync::{mpsc},
+    std::ptr,
+};
+use makepad_jni_sys as jni_sys;
+
+
+impl Cx{
+    pub(crate) fn openxr_render_loop(&mut self, from_java_rx: &mpsc::Receiver<FromJavaMessage>)->bool{
+        if self.os.openxr.session.is_some(){
+            loop{
+                match from_java_rx.try_recv() {
+                    Ok(FromJavaMessage::RenderLoop) => {}, // ignore this one
+                    Ok(message) => {
+                        self.handle_message(message);
+                    },
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+            self.openxr_handle_events();
+            self.handle_other_events();
+            self.openxr_handle_drawing();
+            return true
+        }
+        false
+    }
+            
+    pub(crate) fn openxr_handle_events(&mut self){
+        let openxr = &mut self.os.openxr;
+        loop{
+            let mut event_buffer = XrEventDataBuffer{
+                ty:XrStructureType::EVENT_DATA_BUFFER,
+                next: 0 as *const _,
+                varying: [0;4000]
+            };
+            if unsafe{(openxr.libxr.as_ref().unwrap().xrPollEvent)(openxr.instance.unwrap(), &mut event_buffer)} != XrResult::SUCCESS{
+                break;
+            }
+
+            match event_buffer.ty{
+                XrStructureType::EVENT_DATA_SESSION_STATE_CHANGED=>{
+                    let edssc = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSessionStateChanged)};
+                    match edssc.state{
+                        XrSessionState::IDLE=>{
+                        }
+                        XrSessionState::FOCUSED=>{
+                        }
+                        XrSessionState::VISIBLE=>{}
+                        XrSessionState::READY=>{
+                            openxr.session.as_mut().unwrap().begin_session(
+                                openxr.libxr.as_ref().unwrap(),
+                                self.os.activity_thread_id.unwrap(), 
+                                self.os.render_thread_id.unwrap()
+                            );
+                        }
+                        XrSessionState::STOPPING=>{
+                            openxr.session.as_mut().unwrap().end_session(openxr.libxr.as_ref().unwrap());
+                        }
+                        XrSessionState::EXITING=>{}
+                        _=>()
+                    }
+                }
+                XrStructureType::EVENT_DATA_SPATIAL_ANCHOR_CREATE_COMPLETE_FB=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSpatialAnchorCreateCompleteFB)};
+                    openxr.session.as_mut().unwrap().create_shareable_anchor_response(
+                        openxr.libxr.as_ref().unwrap(),
+                        response,
+                    );
+                }
+                XrStructureType::EVENT_DATA_SHARE_SPACES_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataShareSpacesCompleteMETA)};
+                    openxr.session.as_mut().unwrap().share_anchor_response(
+                        openxr.libxr.as_ref().unwrap(),
+                        response,
+                    );
+                }
+                XrStructureType::EVENT_DATA_START_COLOCATION_DISCOVERY_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStartColocationDiscoveryCompleteMETA)};
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("START_COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                    }
+                    
+                },
+                XrStructureType::EVENT_DATA_COLOCATION_DISCOVERY_RESULT_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataColocationDiscoveryResultMETA)};
+                    openxr.session.as_mut().unwrap().start_colocation_discovery_result(
+                        openxr.libxr.as_ref().unwrap(),
+                        response,
+                    );
+                },
+                XrStructureType::EVENT_DATA_COLOCATION_DISCOVERY_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataColocationDiscoveryCompleteMETA)};
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                    }
+                },
+                XrStructureType::EVENT_DATA_STOP_COLOCATION_DISCOVERY_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStopColocationDiscoveryCompleteMETA)};
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("STOP_COLOCATION_DISCOVERY_COMPLETE_META: {:?}", response.result);
+                    }
+                },
+                XrStructureType::EVENT_DATA_START_COLOCATION_ADVERTISEMENT_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStartColocationAdvertisementCompleteMETA)};
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("START_COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?} {:?}", response.result, response.advertisement_uuid);
+                    }
+                    else{
+                        // this signals others to reload the colocation
+                        openxr.session.as_mut().unwrap().anchor_discovery += 1;
+                    }
+                }
+                XrStructureType::EVENT_DATA_COLOCATION_ADVERTISEMENT_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataColocationAdvertisementCompleteMETA)};
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?}", response.result);
+                    }
+                    
+                }
+                XrStructureType::EVENT_DATA_STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataStopColocationAdvertisementCompleteMETA)};
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("STOP_COLOCATION_ADVERTISEMENT_COMPLETE_META: {:?}", response.result);
+                    }
+                }
+                XrStructureType::EVENT_DATA_SPACE_SET_STATUS_COMPLETE_FB=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSpaceSetStatusCompleteFB)};
+                    if response.result != XrResult::SUCCESS{
+                        crate::log!("SPACE_SET_STATUS_COMPLETE_FB: {:?}", response.result);
+                    }
+                }
+                XrStructureType::EVENT_DATA_SPACE_QUERY_RESULTS_AVAILABLE_FB=>{
+                    let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSpaceQueryResultsAvailableFB)};
+                    openxr.session.as_mut().unwrap().query_anchors_response(
+                        openxr.libxr.as_ref().unwrap(),
+                        response,
+                    );
+                }
+                _=>()
+            }
+            /*      
+            //crate::log!("{:?}", event_buffer.ty);
+            match event_buffer.ty{
+                XrStructureType::EVENT_DATA_EVENTS_LOST=>{}
+                XrStructureType::EVENT_DATA_INSTANCE_LOSS_PENDING=>{}
+                XrStructureType::EVENT_DATA_INTERACTION_PROFILE_CHANGED=>{}
+                XrStructureType::EVENT_DATA_PERF_SETTINGS_EXT=>{}
+                XrStructureType::EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING=>{}
+                XrStructureType::EVENT_DATA_SESSION_STATE_CHANGED=>{}
+                x=>{
+                    crate::log!("Unkown xr event {:?}",x);
+                }
+            }*/
+        }
+    }
+        
+    pub(crate) fn openxr_draw_pass_to_multiview(&mut self, pass_id:PassId, frame:&CxOpenXrFrame){
+        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        let session =  &self.os.openxr.session.as_ref().unwrap();
+        let gl = &self.os.display.as_ref().unwrap().libgl;
+                
+        // alright lets set up the pass matrices
+        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+        let pass = &mut self.passes[pass_id];
+                
+        pass.set_dpi_factor(dpi_factor);
+        pass.paint_dirty = true;
+        pass.os.shader_variant = 1;
+                
+        // lets set up the right matrices and bind the right framebuffers
+        pass.pass_uniforms.camera_projection = frame.eyes[0].proj_mat;
+        pass.pass_uniforms.camera_view = frame.eyes[0].view_mat;
+        pass.pass_uniforms.camera_projection_r = frame.eyes[1].proj_mat;
+        pass.pass_uniforms.camera_view_r = frame.eyes[1].view_mat;
+        
+        pass.pass_uniforms.depth_projection = frame.eyes[0].depth_proj_mat;
+        pass.pass_uniforms.depth_view = frame.eyes[0].depth_view_mat;
+        pass.pass_uniforms.depth_projection_r = frame.eyes[1].depth_proj_mat;
+        pass.pass_uniforms.depth_view_r = frame.eyes[1].depth_view_mat;
+                
+                        
+        pass.os.pass_uniforms.update_uniform_buffer(self.os.gl(), pass.pass_uniforms.as_slice());
+                
+        // lets bind the framebuffers
+        let gl_frame_buffer = session.gl_frame_buffers[frame.swap_chain_index as usize];
+                
+        unsafe{
+            (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, gl_frame_buffer);
+            (gl.glColorMask)(gl_sys::TRUE, gl_sys::TRUE, gl_sys::TRUE, gl_sys::TRUE);
+            (gl.glDepthMask)(gl_sys::TRUE);
+            (gl.glEnable)(gl_sys::SCISSOR_TEST);
+            (gl.glEnable)(gl_sys::DEPTH_TEST);
+            (gl.glDepthFunc)(gl_sys::LEQUAL);
+            (gl.glDisable)(gl_sys::CULL_FACE);
+            (gl.glBlendEquationSeparate)(gl_sys::FUNC_ADD, gl_sys::FUNC_ADD);
+            (gl.glBlendFuncSeparate)(gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA, gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA);
+            (gl.glEnable)(gl_sys::BLEND);
+            (gl.glDisable)(gl_sys::FRAMEBUFFER_SRGB_EXT);
+            //crate::log!("{:?} {:?}", session.width, session.height);
+            (gl.glViewport)(0, 0, session.width as i32, session.height  as i32);
+            (gl.glScissor)(0, 0, session.width as i32, session.height as i32);
+                        
+            (gl.glClearDepthf)(1.0);
+            (gl.glClearColor)(0.0, 0.0, 0.0, 0.0);
+            (gl.glClear)(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
+            crate::gl_log_error!(gl);
+        }
+                
+        //let panning_offset = if self.os.keyboard_visible {self.os.keyboard_panning_offset} else {0};
+                
+        let mut zbias = 0.0;
+        let zbias_step = -0.1;//self.passes[pass_id].zbias_step;
+        self.render_view(
+            pass_id,
+            draw_list_id,
+            &mut zbias,
+            zbias_step,
+        );
+                
+        let gl = &self.os.display.as_ref().unwrap().libgl;
+        unsafe{
+            (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, 0);
+            crate::gl_log_error!(gl);
+            // let da = [gl_sys::DEPTH_ATTACHMENT];
+            //  (gl.glInvalidateFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, 1, da.as_ptr() as _);
+            //crate::gl_log_error!(gl);
+            //glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, 1, depthAttachment);
+                                    
+        }
+                 
+                
+                
+        // Discard the depth buffer, so the tiler won't need to write it back out to memory.
+    }
+        
+    pub (crate) fn openxr_handle_repaint(&mut self, frame:&CxOpenXrFrame) {
+        //opengl_cx.make_current();
+        let mut passes_todo = Vec::new();
+        self.compute_pass_repaint_order(&mut passes_todo);
+        self.repaint_id += 1;
+        for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(self.os.timers.time_now() as f32);
+            match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Xr=>{
+                    self.openxr_draw_pass_to_multiview(*pass_id, frame);
+                }
+                CxPassParent::Window(_) => {
+                    // this cant exist..
+                }
+                CxPassParent::Pass(_) => {
+                    self.draw_pass_to_texture(*pass_id, None);
+                },
+                CxPassParent::None => {
+                    self.draw_pass_to_texture(*pass_id, None);
+                }
+            }
+        }
+                
+                
+    }
+        
+    pub(crate) fn openxr_handle_drawing(&mut self){
+        let openxr = &mut self.os.openxr;
+        if let Ok(frame) = CxOpenXrFrame::begin_frame(
+            openxr.libxr.as_ref().unwrap(),
+            openxr.session.as_ref().unwrap()
+        ){
+            let session = openxr.session.as_mut().unwrap();
+            session.depth_swap_chain_index = frame.depth_image.map(|v| v.swapchain_index as usize).unwrap_or(0);
+            session.frame_state = frame.frame_state;
+            
+            // lets send in the state
+            let event = session.new_xr_update_event(
+                openxr.libxr.as_ref().unwrap(),
+                &frame
+            );
+            let last_state = openxr.session.as_ref().unwrap().inputs.last_state.clone();
+            if let Some(event) = event{
+                self.call_event_handler(&Event::XrUpdate(event));
+            }
+                            
+            if !self.new_next_frames.is_empty() {
+                self.call_next_frame_event(self.os.timers.time_now());
+            }
+            if self.need_redrawing() {
+                self.new_draw_event.xr_state = Some(last_state);
+                self.call_draw_event();
+                self.opengl_compile_shaders();
+            }
+            
+            // copy on the depth image
+            
+            
+            self.openxr_handle_repaint(&frame);
+            
+            let openxr = &mut self.os.openxr;
+            frame.end_frame(
+                openxr.libxr.as_ref().unwrap(),
+                openxr.session.as_mut().unwrap()
+            );
+        }
+    }
+}
+
+
+#[derive(Default)]
+pub struct CxOpenXr{
+    loader: Option<LibOpenXrLoader>,
+    libxr: Option<LibOpenXr>,
+    instance: Option<XrInstance>,
+    system_id: Option<XrSystemId>,
+    pub session: Option<CxOpenXrSession>
+}
+
+impl CxOpenXr{
+        
+    pub(crate) fn depth_texture_hook(&self, gl:&LibGl, shgl:&GlShader, mapping:&CxDrawShaderMapping){
+        // lets set the texture
+        if let Some(session) = &self.session{
+            let i = mapping.textures.len();
+            if let Some(loc) = shgl.xr_depth_texture.loc{
+                unsafe{
+                    let di = &session.depth_images[session.depth_swap_chain_index];
+                    (gl.glActiveTexture)(gl_sys::TEXTURE0 + i as u32);
+                    (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, di.image); 
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as _); 
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as _); 
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as _); 
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as _); 
+                    (gl.glUniform1i)(loc, i as i32);
+                }
+            }
+        }
+    }
+    
+    pub fn create_instance(&mut self, activity_handle: jni_sys::jobject)->Result<(),String>{
+        self.loader = Some(LibOpenXrLoader::try_load()?);
+                
+        // lets load em up!
+        let loader = &self.loader.as_ref().unwrap();
+        let loader_info = XrLoaderInitInfoAndroidKHR {
+            ty: XrStructureType::LOADER_INIT_INFO_ANDROID_KHR,
+            next: ptr::null(),
+            application_vm: makepad_android_state::get_java_vm() as *mut _,
+            application_context: activity_handle as *mut _,
+        };
+                
+        unsafe{(loader.xrInitializeLoaderKHR)(&loader_info as *const _ as _,)}.to_result("xrInitializeLoaderKHR")?;
+                
+        let exts = xr_array_fetch(XrExtensionProperties::default(), |cap, len, buf|{
+            unsafe{(loader.xrEnumerateInstanceExtensionProperties)(
+                ptr::null(),
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateInstanceExtensionProperties")
+        })?;
+                
+        let exts_needed = [
+            "XR_KHR_opengl_es_enable\0",
+            "XR_EXT_performance_settings\0",
+            "XR_EXT_hand_tracking\0",
+            "XR_EXT_hand_interaction\0",
+            "XR_KHR_android_thread_settings\0",
+            "XR_FB_passthrough\0",
+            "XR_META_environment_depth\0",
+            "XR_META_touch_controller_plus\0",
+            "XR_META_detached_controllers\0",
+            "XR_META_simultaneous_hands_and_controllers\0",
+            "XR_FB_hand_tracking_mesh\0",
+            "XR_FB_hand_tracking_aim\0",
+            "XR_META_colocation_discovery\0",
+            "XR_META_spatial_entity_sharing\0",
+            "XR_META_spatial_entity_group_sharing\0",
+            "XR_FB_spatial_entity\0",
+            "XR_FB_spatial_entity_query\0",
+        ];
+                
+        for ext_needed in exts_needed{
+            if !exts.iter().any(|e|{
+                xr_string_zero_terminated(&e.extension_name) == ext_needed
+            }){
+                crate::log!("Needed extension {} not found", ext_needed);
+            }
+        }
+                
+        let create_info = XrInstanceCreateInfo{
+            ty: XrStructureType::INSTANCE_CREATE_INFO,
+            next: 0 as *const _,
+            create_flags: XrInstanceCreateFlags(0),
+            application_info: XrApplicationInfo{
+                application_name: xr_to_string("makepad_example_simple"),
+                application_version: 0,
+                engine_name: xr_to_string("Makepad"),
+                engine_version: 0,
+                api_version: XP_API_VERSION_1_0,
+            },
+            enabled_api_layer_count: 0,
+            enabled_api_layer_names: 0 as *const *const _,
+            enabled_extension_count: exts_needed.len() as u32,
+            enabled_extension_names: &xr_static_str_array(&exts_needed) as *const *const _
+        };
+        let mut instance = XrInstance(0);
+        unsafe{(loader.xrCreateInstance)(&create_info, &mut instance)}.to_result("xrCreateInstance")?;
+        self.instance = Some(instance);
+                
+        self.libxr = Some(LibOpenXr::try_load(loader, instance)?);
+        let xr = &self.libxr.as_ref().unwrap();
+                
+        let mut instance_props = XrInstanceProperties::default();
+        unsafe{(xr.xrGetInstanceProperties)(instance, &mut instance_props)}.to_result("xrGetInstanceProperties")?;
+        /*
+        crate::log!(
+            "OpenXR Runtime loaded: {}, Version: {}.{}.{}", 
+            xr_string(&instance_props.runtime_name),
+            instance_props.runtime_version.major(),        
+            instance_props.runtime_version.minor(),        
+            instance_props.runtime_version.patch(),        
+        );*/
+                
+        let mut sys_info = XrSystemGetInfo::default();
+        sys_info.form_factor = XrFormFactor::HEAD_MOUNTED_DISPLAY;
+                
+        let mut sys_id = XrSystemId(0);
+        unsafe{(xr.xrGetSystem)(instance, &mut sys_info, &mut sys_id)}.to_result("xrGetSystem")?;
+        self.system_id = Some(sys_id);
+            
+        let mut sys_props = XrSystemProperties::default();
+        unsafe{(xr.xrGetSystemProperties)(instance, sys_id, &mut sys_props)}.to_result("xrGetSystemProperties")?;
+                
+        /*crate::log!("OpenXR System props name:{} vendor_id:{}",xr_string(&sys_props.system_name), sys_props.vendor_id);*/
+        /*
+        crate::log!(
+            "OpenXR System graphics max_width:{}, max_height:{}, max_layer:{}",
+            sys_props.graphics_properties.max_swapchain_image_height,
+            sys_props.graphics_properties.max_swapchain_image_width,
+            sys_props.graphics_properties.max_layer_count
+        );
+        crate::log!(
+            "OpenXR System tracking Orientation:{}, Position:{}",
+            sys_props.tracking_properties.orientation_tracking.to_bool(),
+            sys_props.tracking_properties.position_tracking.to_bool(),
+        );*/
+                
+        let mut ogles_req = XrGraphicsRequirementsOpenGLESKHR::default();
+        unsafe{(xr.xrGetOpenGLESGraphicsRequirementsKHR)(instance, sys_id, &mut ogles_req)}.to_result("xrGetOpenGLESGraphicsRequirementsKHR")?;
+                
+        // alright its apparently time to create the EGL context
+                
+        /*
+        // lets enumerate api layers
+        let (_result, layers) = xr_array_fetch(XrApiLayerProperties::default(), |cap, len, buf|{
+            unsafe{(loader.xrEnumerateApiLayerProperties)(
+                cap,
+                len, 
+                buf
+            )};
+        }); 
+        for layer in layers{
+            crate::log!("layer: {}", std::str::from_utf8(&layer.layer_name).unwrap());
+        }*/
+                
+        // lets try load the lib
+                
+        Ok(())
+    }
+        
+    pub fn create_session(&mut self, display:&CxAndroidDisplay, options:CxOpenXrOptions)->Result<(), String>{
+        self.session = Some(CxOpenXrSession::create_session(
+            self.libxr.as_ref().unwrap(),
+            self.system_id.unwrap(),
+            self.instance.unwrap(),
+            display,
+            options
+        )?);
+        Ok(())
+    }
+        
+    pub fn destroy_instance(&mut self, libgl:&LibGl)->Result<(), String>{
+        if let Some(session) = self.session.take(){
+            if let Err(e) = session.destroy_session(
+                self.libxr.as_ref().unwrap(),
+                libgl
+            ){
+                crate::log!("OpenXR destroy destroy_session error: {e}")
+            }
+        }
+                
+        let xr =  self.libxr.as_ref().ok_or("")?;
+        let instance = self.instance.take().ok_or("")?;
+        let _system_id = self.system_id.take().ok_or("")?;
+        unsafe{(xr.xrDestroyInstance)(instance)}
+        .log_error("xrDestroyInstance");
+        Ok(())
+    }
+    
+    pub fn advertise_anchor(&mut self, pose:Pose){
+        if let Some(session) = &mut self.session{
+            let xr =  self.libxr.as_ref().unwrap();
+            crate::log!("Creating advertising anchor");
+            session.create_shareable_anchor_request(pose, xr);
+        }
+    }
+    
+    pub fn set_local_anchor(&mut self, _pose:Pose){
+        if let Some(_session) = &mut self.session{
+            let _xr =  self.libxr.as_ref().unwrap();
+            crate::log!("Setting local anchor");
+            //session.local_anchor = Some(pose);
+            //session.create_local_anchor_request(pose, xr);
+            //session.create_shareable_anchor_request(pose, xr);
+        }
+    }
+    
+    pub fn discover_anchor(&mut self, id:u8){
+        if let Some(session) = &mut self.session{
+            let xr =  self.libxr.as_ref().unwrap();
+            session.anchor_discovery = id;
+            crate::log!("Discovering anchor {id}");
+            session.start_colocation_discovery_request(xr);
+        }
+    }
+}
+
+struct SceneAnchors{
+    left: XrSpace,
+    right: XrSpace
+}
+
+pub struct CxOpenXrSession{
+    pub color_images: Vec<XrSwapchainImageOpenGLESKHR>,
+    pub depth_images: Vec<XrSwapchainImageOpenGLESKHR>,
+    pub gl_depth_textures: Vec<u32>,
+    pub gl_frame_buffers: Vec<u32>,
+    pub color_swap_chain: XrSwapchain,
+    pub depth_swap_chain: XrEnvironmentDepthSwapchainMETA,
+    pub depth_provider: XrEnvironmentDepthProviderMETA,
+    pub passthrough: XrPassthroughFB,
+    pub passthrough_layer: XrPassthroughLayerFB,
+    pub width: u32,
+    pub height: u32,
+    pub head_space: XrSpace,
+    pub local_space: XrSpace,
+    pub handle: XrSession,
+    pub active: bool,
+    pub anchor_discovery: u8,
+    pub inputs: CxOpenXrInputs,
+    
+    scene_anchors: Option<SceneAnchors>,
+    anchor_advertisement: Option<AnchorAdvertisement>,
+    // leaked from Frame onto state
+    pub depth_swap_chain_index: usize,
+    pub frame_state: XrFrameState,
+}
+
+#[derive(SerBin, DeBin)]
+struct AnchorAdvertisement{
+    group_uuid: XrUuid,
+    anchor_uuid: XrUuid,
+}
+
+
+impl CxOpenXrSession{
+            
+    pub fn create_session(
+        xr: &LibOpenXr, 
+        system_id: XrSystemId,
+        instance: XrInstance,
+        display:&CxAndroidDisplay, options:CxOpenXrOptions
+    )->Result<CxOpenXrSession,String>{
+                        
+        let gfx_binding = XrGraphicsBindingOpenGLESAndroidKHR{
+            ty: XrStructureType::GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR,
+            next: 0 as *const _,
+            display: display.egl_display,
+            config: display.egl_config,
+            context: display.egl_context,
+        };
+        let session_create = XrSessionCreateInfo{
+            ty: XrStructureType::SESSION_CREATE_INFO,
+            next: &gfx_binding as *const _ as *const _,
+            create_flags: XrSessionCreateFlags(0),
+            system_id
+        };
+                        
+        let mut session = XrSession(0);
+                        
+        unsafe{(xr.xrCreateSession)(instance, &session_create, &mut session)}.to_result("xrCreateSession")?;
+                        
+        let configs = xr_array_fetch(XrViewConfigurationType::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateViewConfigurations)(
+                instance,
+                system_id,
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateViewConfigurations")
+        })?;
+                        
+        if !configs.iter().any(|v| *v == XrViewConfigurationType::PRIMARY_STEREO){
+            return Err(format!("Could not find PRIMARY STEREO viewconfiguration"));
+        }
+                        
+        let mut config_props = XrViewConfigurationProperties::default();
+                        
+        unsafe{(xr.xrGetViewConfigurationProperties)(instance, system_id, XrViewConfigurationType::PRIMARY_STEREO, &mut  config_props)}.to_result("xrGetViewConfigurationProperties")?;
+        /*
+        crate::log!(
+            "OpenXR System Config type: {:?}, FovMutable:{}",
+            config_props.view_configuration_type,
+            config_props.fov_mutable.to_bool(),
+        );*/
+                        
+        let config_views = xr_array_fetch(XrViewConfigurationView::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateViewConfigurationViews)(
+                instance,
+                system_id,
+                XrViewConfigurationType::PRIMARY_STEREO,
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateViewConfigurationViews")
+        })?;
+                        
+        let mut head_space = XrSpace(0);
+        let head_space_info = XrReferenceSpaceCreateInfo{
+            reference_space_type: XrReferenceSpaceType::VIEW,
+            ..Default::default()
+        };
+        unsafe{(xr.xrCreateReferenceSpace)(session, &head_space_info, &mut head_space)}.to_result("xrCreateReferenceSpace")?;
+                        
+        let mut local_space = XrSpace(0);
+        let local_space_info = XrReferenceSpaceCreateInfo{
+            reference_space_type: XrReferenceSpaceType::LOCAL,
+            ..Default::default()
+        };
+        unsafe{(xr.xrCreateReferenceSpace)(session, &local_space_info, &mut local_space)}.to_result("xrCreateReferenceSpace")?;
+                                
+        let format = gl_sys::SRGB8_ALPHA8L;
+                        
+        let width = ((config_views[0].recommended_image_rect_width as f32) * options.buffer_scale) as u32;
+                        
+        let height = ((config_views[0].recommended_image_rect_height as f32) * options.buffer_scale) as u32;
+                        
+                        
+        let swap_chain_create_info = XrSwapchainCreateInfo{
+            usage_flags: 
+            XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT,
+            format: format as _,
+            width,
+            height,
+            sample_count: 1,
+            face_count:1,
+            array_size:2,
+            mip_count:1,
+            ..Default::default()
+        };
+                        
+        let mut color_swap_chain = XrSwapchain(0);
+        unsafe{(xr.xrCreateSwapchain)(session, &swap_chain_create_info, &mut color_swap_chain)}.to_result("xrCreateSwapchain")?;
+                        
+        let color_images = xr_array_fetch(XrSwapchainImageOpenGLESKHR::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateSwapchainImages)(
+                color_swap_chain,
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateSwapchainImages")
+        })?;
+                        
+        let mut passthrough = XrPassthroughFB(0);
+        let ptci = XrPassthroughCreateInfoFB{
+            flags: XrPassthroughFlagsFB(0),
+            ..Default::default()
+        };
+                        
+        unsafe{(xr.xrCreatePassthroughFB)(session, &ptci, &mut passthrough)}.to_result("xrCreatePassthroughFB")?;
+                        
+        let plci = XrPassthroughLayerCreateInfoFB{
+            passthrough: passthrough,
+            purpose: XrPassthroughLayerPurposeFB::RECONSTRUCTION,
+            ..Default::default()
+        };
+                        
+        let mut passthrough_layer = XrPassthroughLayerFB(0);
+        unsafe{(xr.xrCreatePassthroughLayerFB)(session, &plci, &mut passthrough_layer)}.to_result("xrCreatePassthroughLayerFB")?;
+        unsafe{(xr.xrPassthroughStartFB)(passthrough)}.to_result("xrPassthroughStartFB")?;
+        unsafe{(xr.xrPassthroughLayerResumeFB)(passthrough_layer)}.to_result("xrPassthroughLayerResumeFB")?;
+                        
+        let edpci = XrEnvironmentDepthProviderCreateInfoMETA{
+            create_flags: XrEnvironmentDepthProviderCreateFlagsMETA(0),
+            ..Default::default()
+        };
+                        
+        let mut depth_provider = XrEnvironmentDepthProviderMETA(0);
+        unsafe{(xr.xrCreateEnvironmentDepthProviderMETA)(session, &edpci, &mut depth_provider)}.to_result("xrCreateEnvironmentDepthProviderMETA")?;
+        
+        
+        let edhrsi = XrEnvironmentDepthHandRemovalSetInfoMETA{
+            enabled: XrBool32::from_bool(options.remove_hands_from_depth),
+            ..Default::default()
+        };
+        unsafe{(xr.xrSetEnvironmentDepthHandRemovalMETA)(depth_provider, & edhrsi)}.to_result("xrSetEnvironmentDepthHandRemovalMETA")?;
+        
+        let edsci = XrEnvironmentDepthSwapchainCreateInfoMETA{
+            ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_CREATE_INFO_META,
+            next: 0 as * const _,
+            create_flags: XrEnvironmentDepthSwapchainCreateFlagsMETA(0)
+        };
+                        
+        let mut depth_swap_chain = XrEnvironmentDepthSwapchainMETA(0);
+        unsafe{(xr.xrCreateEnvironmentDepthSwapchainMETA)(depth_provider, &edsci, &mut depth_swap_chain)}.to_result("xrCreateEnvironmentDepthSwapchainMETA")?;
+                        
+        let mut edss = XrEnvironmentDepthSwapchainStateMETA{
+            ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_STATE_META,
+            next: 0 as * mut _,
+            width: 0,
+            height: 0
+        };
+        unsafe{(xr.xrGetEnvironmentDepthSwapchainStateMETA)(depth_swap_chain, &mut edss)}.to_result("xrGetEnvironmentDepthSwapchainStateMETA")?;
+                        
+        let depth_images = xr_array_fetch(XrSwapchainImageOpenGLESKHR::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateEnvironmentDepthSwapchainImagesMETA)(
+                depth_swap_chain,
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateEnvironmentDepthSwapchainImagesMETA")
+        })?;
+                        
+        let swap_chain_len = color_images.len();
+        let mut gl_depth_textures = vec![0;swap_chain_len];
+        let mut gl_frame_buffers = vec![0;swap_chain_len];
+        let gl = &display.libgl;
+                        
+        // create the openGL textures
+        for i in 0..swap_chain_len{
+            let color_texture = color_images[i].image;
+            unsafe{
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, color_texture);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_BORDER as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_BORDER as i32);
+                let border_color = [0f32;4];
+                (gl.glTexParameterfv)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_BORDER_COLOR, border_color.as_ptr() as * const _);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D_ARRAY, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, 0);
+                                                                    
+                // generate depth buffer
+                (gl.glGenTextures)(1, &mut gl_depth_textures[i]);
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D_ARRAY, gl_depth_textures[i]);
+                (gl.glTexStorage3D)(gl_sys::TEXTURE_2D_ARRAY, 1, gl_sys::DEPTH_COMPONENT24, width as i32, height as i32, 2);
+                                                
+                (gl.glGenFramebuffers)(1, &mut gl_frame_buffers[i]);
+                (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, gl_frame_buffers[i]);
+                                
+                if options.multisamples > 1{
+                                                                            
+                    (gl.glFramebufferTextureMultisampleMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::DEPTH_ATTACHMENT,
+                        gl_depth_textures[i],
+                        0,
+                        options.multisamples as _,
+                        0,
+                        2
+                    );
+                    (gl.glFramebufferTextureMultisampleMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::COLOR_ATTACHMENT0,
+                        color_texture,
+                        0,
+                        options.multisamples as _,
+                        0,
+                        2
+                    );
+                }
+                else{
+                                                            
+                    (gl.glFramebufferTextureMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::DEPTH_ATTACHMENT,
+                        gl_depth_textures[i],
+                        0,
+                        0,
+                        2
+                    );
+                    (gl.glFramebufferTextureMultiviewOVR.unwrap())(
+                        gl_sys::DRAW_FRAMEBUFFER,
+                        gl_sys::COLOR_ATTACHMENT0,
+                        color_texture,
+                        0,
+                        0,
+                        2
+                    );
+                }
+                (gl.glBindFramebuffer)(gl_sys::DRAW_FRAMEBUFFER, 0);
+            }
+        }
+        
+        unsafe{(xr.xrStartEnvironmentDepthProviderMETA)(depth_provider)}
+            .to_result("xrStartEnvironmentDepthProviderMETA")?;
+        
+        let inputs = CxOpenXrInputs::new_inputs(xr, session, instance)?;
+                
+        Ok(CxOpenXrSession{
+            anchor_discovery: 1,
+            color_images,
+            depth_images,
+            color_swap_chain,
+            depth_swap_chain,
+            gl_depth_textures,
+            gl_frame_buffers,
+            depth_provider,
+            passthrough,
+            passthrough_layer,
+            width,
+            height,
+            handle:session,
+            head_space,
+            local_space,
+            active:false,
+            scene_anchors: None,
+            anchor_advertisement: None,
+            depth_swap_chain_index: 0,
+            frame_state: XrFrameState::default(),
+            inputs
+        })
+    }
+            
+    pub fn destroy_session(self, xr: &LibOpenXr, gl:&LibGl)->Result<(),String>{
+        // alright lets destroy some things on the session
+        unsafe{(xr.xrStopEnvironmentDepthProviderMETA)(self.depth_provider)}
+        .log_error("xrStopEnvironmentDepthProviderMETA");
+        unsafe{(xr.xrDestroyEnvironmentDepthProviderMETA)(self.depth_provider)}
+        .log_error("xrDestroyEnvironmentDepthProviderMETA");
+        unsafe{(xr.xrPassthroughPauseFB)(self.passthrough)}
+        .log_error("xrPassthroughPauseFB");
+        unsafe{(xr.xrDestroyPassthroughFB)(self.passthrough)}
+        .log_error("xrDestroyPassthroughFB");
+        unsafe{(xr.xrDestroySwapchain)(self.color_swap_chain)}
+        .log_error("xrDestroySwapchain");
+        unsafe{(xr.xrDestroyEnvironmentDepthSwapchainMETA)(self.depth_swap_chain)}
+        .log_error("xrDestroyEnvironmentDepthSwapchainMETA");
+        unsafe{(xr.xrDestroySpace)(self.head_space)}
+        .log_error("xrDestroySpace");
+        unsafe{(xr.xrDestroySpace)(self.local_space)}
+        .log_error("xrDestroySpace");
+        unsafe{(xr.xrDestroySession)(self.handle)}
+        .log_error("xrDestroySession");
+                            
+        let swap_chain_len = self.color_images.len();
+        // destroy the GL resources
+        for i in 0..swap_chain_len{
+            unsafe{
+                (gl.glDeleteTextures)(1, &self.gl_depth_textures[i]);
+                (gl.glDeleteFramebuffers)(1, &self.gl_frame_buffers[i]);
+            }
+        }
+                            
+        Ok(())
+    }
+        
+            
+    fn begin_session(&mut self, xr: &LibOpenXr, activity_thread: u64, render_thread: u64){
+        assert!(self.active == false);
+                         
+        let session_begin_info = XrSessionBeginInfo{
+            ty: XrStructureType::SESSION_BEGIN_INFO,
+            next: 0 as * const _,
+            primary_view_configuration_type: XrViewConfigurationType::PRIMARY_STEREO,
+        };
+                        
+        if unsafe{(xr.xrBeginSession)(self.handle, &session_begin_info)} != XrResult::SUCCESS{
+            return
+        }
+                        
+        self.active = true;
+                        
+        unsafe{(xr.xrPerfSettingsSetPerformanceLevelEXT)(
+            self.handle, 
+            XrPerfSettingsDomainEXT::CPU,
+            XrPerfSettingsLevelEXT::SUSTAINED_HIGH
+        )}.log_error("xrPerfSettingsSetPerformanceLevelEXT CPU");
+                        
+        unsafe{(xr.xrPerfSettingsSetPerformanceLevelEXT)(
+            self.handle, 
+            XrPerfSettingsDomainEXT::GPU,
+            XrPerfSettingsLevelEXT::BOOST
+        )}.log_error("xrPerfSettingsSetPerformanceLevelEXT GPU");
+                        
+                        
+        unsafe{(xr.xrSetAndroidApplicationThreadKHR)(
+            self.handle, 
+            XrAndroidThreadTypeKHR::APPLICATION_MAIN,
+            activity_thread as u32
+        )}.log_error("xrSetAndroidApplicationThreadKHR");
+                        
+        unsafe{(xr.xrSetAndroidApplicationThreadKHR)(
+            self.handle, 
+            XrAndroidThreadTypeKHR::RENDERER_MAIN,
+            render_thread as u32
+        )}.log_error("xrSetAndroidApplicationThreadKHR");     
+    }
+        
+    fn end_session(&mut self, xr: &LibOpenXr){
+        unsafe{(xr.xrEndSession)(self.handle)}.log_error("xrEndSession");
+        self.active = false;
+    }
+        
+    fn new_xr_update_event(&mut self, xr: &LibOpenXr, frame:&CxOpenXrFrame)->Option<XrUpdateEvent>{
+        let predicted_display_time = frame.frame_state.predicted_display_time;
+        let local_space = self.local_space;
+        let last_state = self.inputs.last_state.clone();
+                        
+        let active_action_set = XrActiveActionSet{
+            action_set: self.inputs.action_set,
+            subaction_path: XrPath(0)
+        };
+                
+        let sync_info = XrActionsSyncInfo{
+            count_active_action_sets: 1,
+            active_action_sets: &active_action_set as * const _,
+            ..Default::default()
+        };
+                
+        if unsafe{(xr.xrSyncActions)(self.handle, &sync_info)} != XrResult::SUCCESS{
+            return None
+        };
+                
+        let left_controller = self.inputs.left_controller.poll(xr, self.handle, local_space, predicted_display_time, true, &self.inputs.actions);
+        let right_controller = self.inputs.right_controller.poll(xr, self.handle, local_space, predicted_display_time, false, &self.inputs.actions);
+                
+        let left_hand = self.inputs.left_hand.poll(xr, self.handle, local_space, predicted_display_time);
+        let right_hand = self.inputs.right_hand.poll(xr, self.handle, local_space, predicted_display_time);
+                        
+        let scene_anchors = if let Some(anchors) = &self.scene_anchors{
+            let left = XrSpaceLocation::locate(xr, local_space, predicted_display_time, anchors.left).pose.position;
+            let right = XrSpaceLocation::locate(xr, local_space, predicted_display_time, anchors.right).pose.position;
+            Some(XrSceneAnchors{left, right})
+        }
+        else{
+            None
+        };
+                        
+        let new_state = Rc::new(XrState{
+            
+            anchor_discovery: self.anchor_discovery,
+            time: (frame.frame_state.predicted_display_time.as_nanos() as f64) / 1e9f64,
+            head_pose: frame.local_from_head.pose,
+            scene_anchors,
+            left_controller,
+            right_controller,
+            left_hand,
+            right_hand,
+        });
+        self.inputs.last_state = new_state.clone();
+        
+        
+        Some(XrUpdateEvent{
+            state: new_state,
+            last: last_state
+        })
+    }
+    
+    // STEP ONE. share the anchor
+    pub fn create_shareable_anchor_request(&mut self, pose:XrPosef, xr: &LibOpenXr){
+        let anchor_create_info = XrSpatialAnchorCreateInfoFB{
+            space: self.local_space,
+            pose_in_space: pose,
+            time: self.frame_state.predicted_display_time,
+            ..Default::default()
+        };
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrCreateSpatialAnchorFB)(
+            self.handle,
+            &anchor_create_info,
+            &mut request
+        )}.log_error("xrCreateSpatialAnchorFB");
+    }
+    
+    pub fn create_shareable_anchor_response(&mut self, xr: &LibOpenXr, response:&XrEventDataSpatialAnchorCreateCompleteFB){
+        // got response.
+        if response.result != XrResult::SUCCESS{
+            crate::log!("share_anchor_response failed {:?}", response.result);
+            return
+        }
+        // alright so lets get the space
+        //let space = edsacc.space;
+        //let space_uuid = edsacc.uuid;
+        let components = xr_array_fetch(XrSpaceComponentTypeFB::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateSpaceSupportedComponentsFB)(
+                response.space,
+                cap,
+                len, 
+                buf
+            )}.to_result("xrEnumerateSpaceSupportedComponentsFB")
+        }).unwrap_or(vec![]);
+        if !components.iter().any(|v| *v == XrSpaceComponentTypeFB::STORABLE) {
+            crate::log!("share_anchor_response space not STORABLE");
+            return
+        }
+        if !components.iter().any(|v| *v == XrSpaceComponentTypeFB::SHARABLE){
+            crate::log!("share_anchor_response space not SHARABLE");
+            return
+        }
+        // flag it
+        let request = XrSpaceComponentStatusSetInfoFB{
+            component_type: XrSpaceComponentTypeFB::STORABLE,
+            enabled: XrBool32::from_bool(true),
+            ..Default::default()
+        };
+        let mut request_id = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrSetSpaceComponentStatusFB)(
+            response.space,
+            &request,
+            &mut request_id
+        )}.log_error("xrSetSpaceComponentStatusFB");
+        // its shareable
+        let request = XrSpaceComponentStatusSetInfoFB{
+            component_type: XrSpaceComponentTypeFB::SHARABLE,
+            enabled: XrBool32::from_bool(true),
+            ..Default::default()
+        };
+        let mut request_id = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrSetSpaceComponentStatusFB)(
+            response.space,
+            &request,
+            &mut request_id
+        )}.log_error("xrSetSpaceComponentStatusFB");
+        
+        let group_uuid = XrUuid::generate();
+                
+        self.anchor_advertisement = Some(AnchorAdvertisement{
+            anchor_uuid: response.uuid,
+            group_uuid,
+        });
+        
+        //self.scene_anchors = Some(response.space);
+        // lets share the anchor
+        self.share_anchor_request(xr, response.space);
+    }
+    
+    pub fn share_anchor_request(&self, xr: &LibOpenXr, space:XrSpace){
+        // lets generate a uid for our space
+        let anchor_advertisement = self.anchor_advertisement.as_ref().unwrap();
+        
+        //crate::log!("SHARING ADVERTISEMENT: {:?}",anchor_advertisement.group_uuid);
+        
+        let recipient_info = XrShareSpacesRecipientGroupsMETA{
+            group_count: 1,
+            groups: &anchor_advertisement.group_uuid,
+            ..Default::default()
+        };
+        let spaces_info = XrShareSpacesInfoMETA{
+            space_count: 1,
+            spaces: &space,
+            recipient_info: &recipient_info as *const _ as *const _,
+            ..Default::default()
+        };
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrShareSpacesMETA)(
+            self.handle,
+            &spaces_info,
+            &mut request
+        )}.log_error("xrShareSpacesMETA");
+    }
+    
+    pub fn share_anchor_response(&mut self, xr: &LibOpenXr, response:&XrEventDataShareSpacesCompleteMETA){
+        if response.result != XrResult::SUCCESS{
+            crate::log!("share_anchor_response result: {:?}", response.result);
+            //self.shared_anchor.take();
+        }
+        else{
+            crate::log!("Anchor shared!");
+            self.start_colocation_advertisement_request(xr);
+        }
+    }
+    
+    pub fn start_colocation_advertisement_request(&mut self, xr: &LibOpenXr){
+        self.stop_colocation_advertisement_request(xr);
+        self.stop_colocation_discovery_request(xr);
+        let anchor_advertisement = self.anchor_advertisement.as_ref().unwrap();
+        let buffer = anchor_advertisement.serialize_bin();
+        let advertisement_info = XrColocationAdvertisementStartInfoMETA{
+            buffer: buffer.as_ptr(),
+            buffer_size: buffer.len() as _,
+            ..Default::default()
+        };
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrStartColocationAdvertisementMETA)(
+            self.handle,
+            &advertisement_info,
+            &mut request
+        )}.log_error("xrStartColocationAdvertisementMETA");
+    }
+    
+    pub fn stop_colocation_advertisement_request(&mut self, xr: &LibOpenXr){
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrStopColocationAdvertisementMETA)(
+            self.handle,
+            0 as *const _,
+            &mut request
+        )}.log_error("xrStopColocationAdvertisementMETA");
+    }
+        
+    pub fn start_colocation_discovery_request(&mut self, xr: &LibOpenXr){
+        self.stop_colocation_advertisement_request(xr);
+        self.stop_colocation_discovery_request(xr);
+        
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrStartColocationDiscoveryMETA)(
+            self.handle,
+            0 as *const _,
+            &mut request
+        )}.log_error("xrStartColocationDiscoveryMETA");
+    }
+    
+    pub fn start_colocation_discovery_result(&mut self, xr: &LibOpenXr, response:&XrEventDataColocationDiscoveryResultMETA){
+        
+        // alright lets parse the buffer
+        let buffer = &response.buffer[0..response.buffer_size as usize];
+        if let Ok(data) = AnchorAdvertisement::deserialize_bin(&buffer){
+            // alright! we have a discovery result
+            //crate::log!("COLOCATED DISCOVERY: {:?} {:?}",response.advertisement_uuid, data.group_uuid);
+            self.query_anchors_request(xr, data.group_uuid)
+        }
+        else{
+            crate::log!("start_colocation_discovery_result deserialize failure");
+        }
+    }
+        
+    pub fn stop_colocation_discovery_request(&mut self, xr: &LibOpenXr){
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrStopColocationDiscoveryMETA)(
+            self.handle,
+            0 as *const _,
+            &mut request
+        )}.log_error("xrStopColocationDiscoveryMETA");              
+    }
+    
+    pub fn query_anchors_request(&mut self, xr: &LibOpenXr, group_uuid:XrUuid){
+        let location_filter_info = XrSpaceStorageLocationFilterInfoFB{
+            location: XrSpaceStorageLocationFB::CLOUD,
+            ..Default::default()
+        };
+        let group_filter_info = XrSpaceGroupUuidFilterInfoMETA{
+            group_uuid,
+            next: &location_filter_info as *const _ as *const _,
+            ..Default::default()
+        };
+        let space_query_info = XrSpaceQueryInfoFB{
+            query_action: XrSpaceQueryActionFB::LOAD,
+            max_result_count: 32,
+            filter: &group_filter_info as *const _ as *const _,
+            ..Default::default()
+        };
+        let mut request = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrQuerySpacesFB)(
+            self.handle,
+            & space_query_info as *const _ as *const _,
+            &mut request
+        )}.log_error("xrQuerySpacesFB");          
+    }
+    
+    pub fn query_anchors_response(&mut self, xr: &LibOpenXr, response:&XrEventDataSpaceQueryResultsAvailableFB){
+        
+        let mut query = XrSpaceQueryResultsFB::default();
+        if unsafe{(xr.xrRetrieveSpaceQueryResultsFB)(
+            self.handle,
+            response.request_id,
+            &mut query
+        )}.log_error("xrRetrieveSpaceQueryResultsFB"){
+            return;
+        }
+        
+        let mut results_vec = Vec::new();
+        results_vec.resize(query.result_count_output as usize, XrSpaceQueryResultFB::default());
+        let mut query = XrSpaceQueryResultsFB{
+            results: results_vec.as_mut_ptr() as *mut _,
+            result_capacity_input: results_vec.len() as _,
+            result_count_output: results_vec.len() as _,
+            ..Default::default()
+        };
+        if results_vec.len() == 0{
+            crate::log!("query_anchors_response zero spaces returned");
+            return
+        }
+        if unsafe{(xr.xrRetrieveSpaceQueryResultsFB)(
+            self.handle,
+            response.request_id,
+            &mut query
+        )}.log_error("xrRetrieveSpaceQueryResultsFB"){
+            return;
+        }
+
+        if results_vec.len() > 1{
+            crate::log!("query_anchors_response more than one space returned {}", results_vec.len());
+        }
+        let response = results_vec[0];
+        let components = xr_array_fetch(XrSpaceComponentTypeFB::default(), |cap, len, buf|{
+            unsafe{(xr.xrEnumerateSpaceSupportedComponentsFB)(
+                response.space,
+                cap,
+                len, 
+                buf
+            )}.to_result("query_anchors_response xrEnumerateSpaceSupportedComponentsFB")
+        }).unwrap_or(vec![]);
+        if !components.iter().any(|v| *v == XrSpaceComponentTypeFB::LOCATABLE) {
+            crate::log!("query_anchors_response space not LOCATABLE");
+            return
+        }
+        if !components.iter().any(|v| *v == XrSpaceComponentTypeFB::SHARABLE){
+            crate::log!("query_anchors_response space not SHARABLE");
+            return
+        }
+        if !components.iter().any(|v| *v == XrSpaceComponentTypeFB::STORABLE){
+            crate::log!("query_anchors_response space not STORABLE");
+            return
+        }
+        let request = XrSpaceComponentStatusSetInfoFB{
+            component_type: XrSpaceComponentTypeFB::LOCATABLE,
+            enabled: XrBool32::from_bool(true),
+            ..Default::default()
+        };
+        let mut request_id = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrSetSpaceComponentStatusFB)(
+            response.space,
+            &request,
+            &mut request_id
+        )}.log_error("query_anchors_response xrSetSpaceComponentStatusFB LOCATABLE");
+        // its shareable
+        let request = XrSpaceComponentStatusSetInfoFB{
+            component_type: XrSpaceComponentTypeFB::SHARABLE,
+            enabled: XrBool32::from_bool(true),
+            ..Default::default()
+        };
+        let mut request_id = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrSetSpaceComponentStatusFB)(
+            response.space,
+            &request,
+            &mut request_id
+        )}.log_error("query_anchors_response xrSetSpaceComponentStatusFB SHARABLE");
+        let request = XrSpaceComponentStatusSetInfoFB{
+            component_type: XrSpaceComponentTypeFB::STORABLE,
+            enabled: XrBool32::from_bool(true),
+            ..Default::default()
+        };
+        let mut request_id = XrAsyncRequestIdFB(0);
+        unsafe{(xr.xrSetSpaceComponentStatusFB)(
+            response.space,
+            &request,
+            &mut request_id
+        )}.log_error("query_anchors_response xrSetSpaceComponentStatusFB STORABLE");
+        // alright we have a shared space!
+        crate::log!("Anchor retrieved!");
+        //self.shared_anchor = Some(response.space);
+    }
+    
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct CxOpenXrEye{
+    pub local_from_eye: XrPosef,
+    pub view_mat: Mat4,
+    pub proj_mat: Mat4,
+    pub depth_proj_mat: Mat4,
+    pub depth_view_mat: Mat4,
+}
+
+pub struct CxOpenXrFrame{
+    pub depth_image: Option<XrEnvironmentDepthImageMETA>,
+    pub frame_state: XrFrameState,
+    pub swap_chain_index: u32,
+    pub screen_near_z: f32,
+    pub screen_far_z: f32,
+    pub projections: [XrView;2],
+    pub local_from_head: XrSpaceLocation,
+    pub eyes: [CxOpenXrEye;2],
+}
+
+impl CxOpenXrFrame{
+        
+    fn begin_frame(xr:&LibOpenXr, session:&CxOpenXrSession)->Result<CxOpenXrFrame,()>{
+                
+        if !session.active{
+            return Err(())
+        }
+                                
+        let mut fi = XrFrameWaitInfo::default();
+        let mut frame_state = XrFrameState::default();
+        unsafe{(xr.xrWaitFrame)(session.handle, &mut fi, &mut frame_state)}.log_error("xrWaitFrame");
+                
+        let mut bf = XrFrameBeginInfo::default();
+        unsafe{(xr.xrBeginFrame)(session.handle, &mut bf)}.log_error("xrBeginFrame");
+                
+        let mut local_from_head = XrSpaceLocation::default();
+                
+        unsafe{(xr.xrLocateSpace)(
+            session.head_space,
+            session.local_space,
+            frame_state.predicted_display_time,
+            &mut local_from_head
+        )}.log_error("xrLocateSpace");
+                        
+        let projection_info = XrViewLocateInfo{
+            view_configuration_type: XrViewConfigurationType::PRIMARY_STEREO,
+            display_time: frame_state.predicted_display_time,
+            space: session.head_space,
+            ..Default::default()
+        };
+                
+        let mut view_state = XrViewState::default();
+        let mut projections = [XrView::default();2];
+        let mut num_views = 0;
+        unsafe{(xr.xrLocateViews)(
+            session.handle,
+            &projection_info,
+            &mut view_state,
+            2,
+            &mut num_views, 
+            &mut projections as *mut _
+        )}.log_error("xrLocateViews");
+                
+        // TODO poll tracked controllers here
+                
+        let mut swap_chain_index = 0;
+        let acquire_info = XrSwapchainImageAcquireInfo::default();
+        unsafe{(xr.xrAcquireSwapchainImage)(
+            session.color_swap_chain,
+            &acquire_info,
+            &mut swap_chain_index
+        )}.log_error("xrAcquireSwapchainImage");
+                         
+        // TODO COMPUTE XR EYE MATRICES FOR MAKEPAD RENDERER
+                
+                
+        let wait_info = XrSwapchainImageWaitInfo{
+            timeout: XrDuration(1000000000),
+            ..Default::default()
+        };
+        loop{
+            if unsafe{(xr.xrWaitSwapchainImage)(
+                session.color_swap_chain,
+                &wait_info
+            )} != XrResult::TIMEOUT_EXPIRED{
+                break
+            }
+            crate::log!("retry xrWaitSwapchainImage");
+        }
+                
+        let environment_depth_acquire_info = XrEnvironmentDepthImageAcquireInfoMETA{
+            space: session.local_space,
+            display_time: frame_state.predicted_display_time,
+            ..Default::default()
+        };
+                
+        let mut di = XrEnvironmentDepthImageMETA::default();
+        let result = unsafe{(xr.xrAcquireEnvironmentDepthImageMETA)(
+            session.depth_provider,
+            &environment_depth_acquire_info,
+            &mut di
+        )};
+        let depth_image = if result == XrResult::SUCCESS{
+            Some(di)
+        }else{
+            //crate::log!("FAIL {:?}",result);
+            None
+        };
+        
+        
+                
+        // TODO compute depth image matrices to go into makepad world
+        let mut eyes = [CxOpenXrEye::default();2];
+                
+        for eye in 0..2{
+            let head_from_eye = projections[eye].pose;
+            let local_from_head = local_from_head.pose;
+            let local_from_eye =XrPosef::multiply(&local_from_head, &head_from_eye);
+            eyes[eye].local_from_eye  = local_from_eye;
+                        
+            // lets compute eye matrices and depth matrices
+            if let Some(depth_image) = &depth_image{
+                let local_from_depth_eye = depth_image.views[eye].pose;
+                let depth_eye_from_local = local_from_depth_eye.invert();
+                let depth_view_mat = depth_eye_from_local.to_mat4();
+                let depth_proj_mat = Mat4::from_camera_fov(
+                    &depth_image.views[eye].fov, 
+                    depth_image.near_z,
+                    if depth_image.far_z.is_finite(){depth_image.far_z}else{0.0}, 
+                );
+                eyes[eye].depth_view_mat = depth_view_mat;
+                eyes[eye].depth_proj_mat = depth_proj_mat;
+            }
+            let eye_from_local = local_from_eye.invert();
+            eyes[eye].view_mat = eye_from_local.to_mat4();
+            eyes[eye].proj_mat = Mat4::from_camera_fov(&projections[eye].fov, 0.1, 100.0);
+                        
+        }
+        
+        Ok(CxOpenXrFrame{
+            projections,
+            local_from_head,
+            frame_state,
+            depth_image,
+            eyes,
+            swap_chain_index,
+            screen_near_z: 0.1, 
+            screen_far_z: 10.0,
+        })
+        //projection_info
+        //crate::log!("{:?}", fs);
+    }
+        
+    fn end_frame(self, xr: &LibOpenXr, session:&CxOpenXrSession){
+        let release_info = XrSwapchainImageReleaseInfo::default();
+                
+        unsafe{(xr.xrReleaseSwapchainImage)(
+            session.color_swap_chain,
+            &release_info
+        )}.log_error("xrReleaseSwapchainImage");
+                
+        // alright lets do the compositor
+                
+        let comp_passthrough = XrCompositionLayerPassthroughFB{
+            layer_handle: session.passthrough_layer,
+            flags: XrCompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA,
+            ..Default::default()
+        };
+                        
+        let mut proj_views = [XrCompositionLayerProjectionView::default();2];
+                                         
+        for eye in 0..2{
+            proj_views[eye] = XrCompositionLayerProjectionView{
+                pose: self.eyes[eye].local_from_eye,
+                fov: self.projections[eye].fov,
+                sub_image:XrSwapchainSubImage{
+                    swapchain: session.color_swap_chain,
+                    image_rect: XrRect2Di{
+                        offset:XrOffset2Di{x: 0,y: 0},
+                        extent:XrExtent2Di{
+                            width: session.width as i32,
+                            height: session.height as i32
+                        }
+                    },
+                    image_array_index: eye as u32
+                },
+                ..Default::default()
+            };
+        }
+                
+        let comp_proj = XrCompositionLayerProjection{
+            space: session.local_space,
+            view_count: 2,
+            views: &proj_views as *const _,
+            layer_flags: 
+            XrCompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA |
+            XrCompositionLayerFlags::CORRECT_CHROMATIC_ABERRATION, 
+            //XrCompositionLayerFlags::UNPREMULTIPLIED_ALPHA,
+            ..Default::default()
+        };
+                
+        let layers = [
+            &comp_passthrough as *const _ as *const XrCompositionLayerBaseHeader,
+            &comp_proj as *const _ as *const XrCompositionLayerBaseHeader
+        ];
+                
+        let fei = XrFrameEndInfo{
+            display_time: self.frame_state.predicted_display_time,
+            environment_blend_mode: XrEnvironmentBlendMode::OPAQUE,
+            layer_count: layers.len() as _,
+            layers: &layers as *const *const _,
+            ..Default::default()
+        };
+                
+        unsafe{(xr.xrEndFrame)(session.handle, &fei)}.log_error("xrEndFrame");
+    }
+    
+}
+
+
+pub struct CxOpenXrOptions{
+    pub buffer_scale: f32,
+    pub multisamples: usize,
+    pub remove_hands_from_depth: bool,
+}
+
+#[derive(Copy, Clone)]
+struct CxOpenXrInputActions{
+    trigger_action: XrAction,
+    grip_action: XrAction,
+    thumbstick_action: XrAction,
+    click_a_action: XrAction,
+    click_b_action: XrAction,
+    click_x_action: XrAction,
+    click_y_action: XrAction,
+    click_menu_action: XrAction,
+    click_thumbstick_action: XrAction,
+    touch_thumbstick_action: XrAction,
+    touch_trigger_action: XrAction,
+    touch_a_action: XrAction,
+    touch_b_action: XrAction,
+    touch_x_action: XrAction,
+    touch_y_action: XrAction,
+    touch_thumbrest_action: XrAction,
+    aim_pose_action: XrAction,
+    grip_pose_action: XrAction,
+    
+}
+
+pub struct CxOpenXrInputs{
+    actions: CxOpenXrInputActions,
+    action_set: XrActionSet,
+    left_controller: CxOpenXrController,
+    right_controller: CxOpenXrController,
+    left_hand: CxOpenXrHand,
+    right_hand: CxOpenXrHand,
+    last_state: Rc<XrState>,
+}
+
+
+pub struct CxOpenXrHand{
+    tracker: XrHandTrackerEXT,
+    joint_locations: [XrHandJointLocationEXT; HAND_JOINT_COUNT_EXT]
+}
+
+impl CxOpenXrHand{
+    fn destroy(self, xr: &LibOpenXr){
+        unsafe{(xr.xrDestroyHandTrackerEXT)(self.tracker)}
+        .log_error("xrDestroyHandTrackerEXT");
+    }
+        
+    fn poll(&mut self, xr: &LibOpenXr, _session:XrSession, local_space:XrSpace, time:XrTime)->XrHand{
+        let mut scale = XrHandTrackingScaleFB{
+            sensor_output: 1.0,
+            current_output: 1.0,
+            override_value_input: 1.0,
+            override_hand_scale: XrBool32::from_bool(false),
+            ..Default::default()
+        };
+        let mut aim_state = XrHandTrackingAimStateFB{
+            next: &mut scale as *mut _  as *mut _,
+            ..Default::default()
+        };
+        let mut locations = XrHandJointLocationsEXT{
+            next:  &mut aim_state as *mut _  as *mut _,
+            joint_count: HAND_JOINT_COUNT_EXT as _,
+            joint_locations: self.joint_locations.as_mut_ptr(),
+            ..Default::default()
+        };
+        let locate_info = XrHandJointsLocateInfoEXT{
+            base_space: local_space,
+            time,
+            ..Default::default()
+        }; 
+        unsafe{(xr.xrLocateHandJointsEXT)(self.tracker, &locate_info, &mut locations)}
+        .log_error("xrLocateHandJointsEXT");
+        // alrighty lets convert the joints to our XrHand
+        let mut hand = XrHand::default();
+        let mut hand_in_view = false;
+        let mut s = 0;
+        for i in 0..self.joint_locations.len(){
+            let tracked = self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_TRACKED) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_TRACKED);
+            // we're going to skip the tips and only store the distance
+            if i == 5 || i == 10 || i == 15 || i ==20 || i == 25{
+                // indices
+                /*
+                pub const JOINT_COUNT: usize = 26;
+                pub const CENTER: usize = 0;
+                pub const WRIST: usize = 1;
+                pub const THUMB_BASE: usize = 2;
+                pub const THUMB_KNUCKLE1: usize = 3;
+                pub const THUMB_KNUCKLE2: usize = 4;
+                pub const THUMB_TIP: usize = 5;
+                pub const INDEX_BASE: usize = 6;
+                pub const INDEX_KNUCKLE1: usize = 7;
+                pub const INDEX_KNUCKLE2: usize = 8;
+                pub const INDEX_KNUCKLE3: usize = 9;
+                pub const INDEX_TIP: usize = 10;
+                pub const MIDDLE_BASE: usize = 11;
+                pub const MIDDLE_KNUCKLE1: usize = 12;
+                pub const MIDDLE_KNUCKLE2: usize = 13;
+                pub const MIDDLE_KNUCKLE3: usize = 14;
+                pub const MIDDLE_TIP: usize = 15;
+                pub const RING_BASE: usize = 16;
+                pub const RING_KNUCKLE1: usize = 17;
+                pub const RING_KNUCKLE2: usize = 18;
+                pub const RING_KNUCKLE3: usize = 19;
+                pub const RING_TIP: usize = 20;
+                pub const PINKY_BASE: usize = 21;
+                pub const PINKY_KNUCKLE1: usize = 22;
+                pub const PINKY_KNUCKLE2: usize = 23;
+                pub const PINKY_KNUCKLE3: usize = 24;
+                pub const PINKY_TIP: usize = 25;*/
+                // only store the distance to the tip so we can fit the entire
+                // tracked quest state in a UDP packet :)
+                let d = self.joint_locations[i].pose.position - self.joint_locations[i-1].pose.position;
+                let slot = i/5-1;
+                hand.tips[slot] = d.length();
+                hand.tips_active |= if tracked{1<<slot}else{0};
+                continue;
+            }
+            
+            hand.joints[s] = self.joint_locations[i].pose;
+            s += 1;
+            if tracked{
+                hand_in_view = true
+            }
+        }
+        hand.flags |= 
+        if hand_in_view{XrHand::IN_VIEW}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::VALID){XrHand::AIM_VALID}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::INDEX_PINCHING){XrHand::PINCH_INDEX}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::MIDDLE_PINCHING){XrHand::PINCH_MIDDLE}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::RING_PINCHING){XrHand::PINCH_RING}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::LITTLE_PINCHING){XrHand::PINCH_LITTLE}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::DOMINANT_HAND){XrHand::DOMINANT_HAND}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::MENU_PRESSED){XrHand::MENU_PRESSED}else{0}|
+        //if aim_state.status.contains(XrHandTrackingAimFlagsFB::SYSTEM_GESTURE){XrHand::SYSTEM_GESTURE}else{0}|
+        0;
+        hand.aim_pose = aim_state.aim_pose;
+        hand.pinch[XrHand::PINCH_STRENGTH_INDEX] = (aim_state.pinch_strength_index * u8::MAX as f32) as u8;
+        hand.pinch[XrHand::PINCH_STRENGTH_MIDDLE] = (aim_state.pinch_strength_middle * u8::MAX as f32) as u8;
+        hand.pinch[XrHand::PINCH_STRENGTH_RING] = (aim_state.pinch_strength_ring * u8::MAX as f32) as u8;
+        hand.pinch[XrHand::PINCH_STRENGTH_LITTLE] = (aim_state.pinch_strength_little * u8::MAX as f32) as u8;
+        hand
+    }
+}
+
+pub struct CxOpenXrController{
+    path: XrPath,
+    aim_space: XrSpace,
+    grip_space: XrSpace,
+    detached_aim_space: XrSpace,
+    detached_grip_space: XrSpace,
+}
+
+impl CxOpenXrController{
+    fn destroy(self, xr: &LibOpenXr){
+        self.aim_space.destroy(xr);
+        self.grip_space.destroy(xr);
+        self.detached_aim_space.destroy(xr);
+        self.detached_grip_space.destroy(xr);
+    }
+    
+    fn poll(&self, xr: &LibOpenXr, session:XrSession, local_space:XrSpace, time:XrTime, is_left: bool, actions: &CxOpenXrInputActions)->XrController{
+        // lets query the trigger bool
+        let stick = XrActionStateVector2f::get(xr, session, actions.thumbstick_action, self.path);
+        let trigger = XrActionStateFloat::get(xr, session, actions.trigger_action, self.path);
+        let grip = XrActionStateFloat::get(xr, session, actions.grip_action, self.path);
+        let grip_state = XrActionStatePose::get(xr, session, actions.grip_pose_action, self.path);
+        let aim_state = XrActionStatePose::get(xr, session, actions.aim_pose_action, self.path);
+        
+        //crate::log!("{:?}", XrActionStateBoolean::get(xr, session, actions.click_x_action, self.path).current_state.as_bool());
+        
+        fn bf(xr: &LibOpenXr, session:XrSession, path:XrPath, action:XrAction, flag:u16, on:bool)->u16{
+            if !on{
+                return 0
+            }
+            if XrActionStateBoolean::get(xr, session, action, path).current_state.as_bool(){
+                flag
+            }
+            else{
+                0
+            }
+        }
+        
+        XrController{
+            grip_pose:  if grip_state.is_active.as_bool(){
+                XrSpaceLocation::locate(xr, local_space, time, self.grip_space).pose
+            }
+            else{
+                XrSpaceLocation::locate(xr, local_space, time, self.detached_grip_space).pose
+            },
+            aim_pose: if aim_state.is_active.as_bool(){
+                XrSpaceLocation::locate(xr, local_space, time, self.aim_space).pose
+            }
+            else{
+                XrSpaceLocation::locate(xr, local_space, time, self.detached_aim_space).pose
+            },
+            stick: stick.current_state,
+            trigger: trigger.current_state,
+            grip: grip.current_state,
+            //last_buttons,
+            buttons: 
+                if aim_state.is_active.as_bool(){XrController::ACTIVE}else{0}|
+                bf(xr, session, self.path, actions.click_a_action, XrController::CLICK_A, !is_left) | 
+                bf(xr, session, self.path, actions.click_b_action, XrController::CLICK_B, !is_left) | 
+                bf(xr, session, self.path, actions.click_x_action, XrController::CLICK_X, is_left) | 
+                bf(xr, session, self.path, actions.click_y_action, XrController::CLICK_Y, is_left) | 
+                bf(xr, session, self.path, actions.click_menu_action, XrController::CLICK_MENU, is_left) | 
+                bf(xr, session, self.path, actions.click_thumbstick_action, XrController::CLICK_THUMBSTICK, true) | 
+                bf(xr, session, self.path, actions.touch_thumbstick_action, XrController::TOUCH_THUMBSTICK, true) | 
+                bf(xr, session, self.path, actions.touch_trigger_action, XrController::TOUCH_TRIGGER, true) | 
+                bf(xr, session, self.path, actions.touch_a_action, XrController::TOUCH_A, !is_left) | 
+                bf(xr, session, self.path, actions.touch_b_action, XrController::TOUCH_B, !is_left) | 
+                bf(xr, session, self.path, actions.touch_x_action, XrController::TOUCH_X, is_left) | 
+                bf(xr, session, self.path, actions.touch_y_action, XrController::TOUCH_Y, is_left) | 
+                bf(xr, session, self.path, actions.touch_thumbrest_action, XrController::TOUCH_THUMBREST, true) 
+        }
+    }
+}
+
+impl CxOpenXrInputs{
+        
+    pub fn new_inputs(xr: &LibOpenXr, session:XrSession, instance: XrInstance)->Result<CxOpenXrInputs,String>{
+        // create handtrackers
+        let left_hand_info = XrHandTrackerCreateInfoEXT{hand: XrHandEXT::LEFT,..Default::default()};
+        let mut left_hand_track = XrHandTrackerEXT(0);
+        unsafe{(xr.xrCreateHandTrackerEXT)(session, &left_hand_info, &mut left_hand_track)}
+        .log_error("xrCreateHandTrackerEXT");
+        
+        let right_hand_info = XrHandTrackerCreateInfoEXT{hand: XrHandEXT::RIGHT,..Default::default()};
+        let mut right_hand_track = XrHandTrackerEXT(0);
+        unsafe{(xr.xrCreateHandTrackerEXT)(session, &right_hand_info, &mut right_hand_track)}
+        .log_error("xrCreateHandTrackerEXT");
+        
+        let action_set = XrActionSet::new(
+            xr, instance, 1, "makepad_action_set", "Main action set"
+        )?;
+                
+        let left_hand_path = XrPath::new(xr, instance, "/user/hand/left")?;
+        let right_hand_path = XrPath::new(xr, instance, "/user/hand/right")?;
+        let left_detached_path = XrPath::new(xr, instance, "/user/detached_controller_meta/left")?;
+        let right_detached_path = XrPath::new(xr, instance, "/user/detached_controller_meta/right")?;
+        let hand_paths = [left_hand_path, right_hand_path];
+        let detached_paths = [left_detached_path, right_detached_path];
+        
+        let trigger_action = XrAction::new(xr, action_set, XrActionType::FLOAT_INPUT, "trigger", "", &hand_paths)?;
+        let grip_action = XrAction::new(xr, action_set, XrActionType::FLOAT_INPUT, "grip", "", &hand_paths)?;
+        let thumbstick_action = XrAction::new(xr, action_set, XrActionType::VECTOR2F_INPUT, "thumbstick_xy", "", &hand_paths)?;
+        let click_a_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "click_a", "", &hand_paths)?;
+        let click_b_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "click_b", "", &hand_paths)?;
+        let click_x_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "click_x", "", &hand_paths)?;
+        let click_y_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "click_y", "", &hand_paths)?;
+        let click_menu_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "click_menu", "", &hand_paths)?;
+        let click_thumbstick_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "click_thumbstick", "", &hand_paths)?;
+        let touch_thumbstick_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "touch_thumbstick", "", &hand_paths)?;
+        let touch_trigger_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "touch_trigger", "", &hand_paths)?;
+        let touch_a_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "touch_a", "", &hand_paths)?;
+        let touch_b_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "touch_b", "", &hand_paths)?;
+        let touch_x_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "touch_x", "", &hand_paths)?;
+        let touch_y_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "touchy_y", "", &hand_paths)?;
+        let touch_thumbrest_action = XrAction::new(xr, action_set, XrActionType::BOOLEAN_INPUT, "touch_thumbrest", "", &hand_paths)?;
+                                                
+        let aim_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "aim_pose", "", &hand_paths)?;
+        let grip_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "grip_pose", "", &hand_paths)?;
+        
+        let detached_aim_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "detached_aim_pose", "", &detached_paths)?;
+        let detached_grip_pose_action = XrAction::new(xr, action_set, XrActionType::POSE_INPUT, "detached_grip_pose", "", &detached_paths)?;
+                
+        let interaction_profile = XrPath::new(xr, instance,  "/interaction_profiles/meta/touch_controller_plus")?;
+                
+        let bindings = [
+            XrActionSuggestedBinding::new(xr, instance, trigger_action, "/user/hand/left/input/trigger")?,
+            XrActionSuggestedBinding::new(xr, instance, trigger_action, "/user/hand/right/input/trigger")?,
+            
+            XrActionSuggestedBinding::new(xr, instance, grip_action, "/user/hand/left/input/squeeze/value")?,
+            XrActionSuggestedBinding::new(xr, instance, grip_action, "/user/hand/right/input/squeeze/value")?,
+            
+            XrActionSuggestedBinding::new(xr, instance, thumbstick_action, "/user/hand/left/input/thumbstick")?,
+            XrActionSuggestedBinding::new(xr, instance, thumbstick_action, "/user/hand/right/input/thumbstick")?,
+            
+            XrActionSuggestedBinding::new(xr, instance, click_a_action, "/user/hand/right/input/a/click")?,
+            XrActionSuggestedBinding::new(xr, instance, click_b_action, "/user/hand/right/input/b/click")?,
+            XrActionSuggestedBinding::new(xr, instance, click_x_action, "/user/hand/left/input/x/click")?,
+            XrActionSuggestedBinding::new(xr, instance, click_y_action, "/user/hand/left/input/y/click")?,
+            XrActionSuggestedBinding::new(xr, instance, click_menu_action, "/user/hand/left/input/menu/click")?,
+            XrActionSuggestedBinding::new(xr, instance, click_thumbstick_action, "/user/hand/left/input/thumbstick/click")?,
+            XrActionSuggestedBinding::new(xr, instance, click_thumbstick_action, "/user/hand/right/input/thumbstick/click")?,
+            XrActionSuggestedBinding::new(xr, instance, touch_thumbstick_action, "/user/hand/left/input/thumbstick/touch")?,
+            XrActionSuggestedBinding::new(xr, instance, touch_thumbstick_action, "/user/hand/right/input/thumbstick/touch")?,
+            
+            XrActionSuggestedBinding::new(xr, instance, touch_trigger_action, "/user/hand/left/input/trigger/touch")?,
+            XrActionSuggestedBinding::new(xr, instance, touch_trigger_action, "/user/hand/right/input/trigger/touch")?,
+            
+            XrActionSuggestedBinding::new(xr, instance, touch_a_action, "/user/hand/right/input/a/touch")?,
+            XrActionSuggestedBinding::new(xr, instance, touch_b_action, "/user/hand/right/input/b/touch")?,
+            XrActionSuggestedBinding::new(xr, instance, touch_x_action, "/user/hand/left/input/x/touch")?,
+            XrActionSuggestedBinding::new(xr, instance, touch_y_action, "/user/hand/left/input/y/touch")?,
+            
+            XrActionSuggestedBinding::new(xr, instance, touch_thumbrest_action, "/user/hand/left/input/thumbrest/touch")?,
+            XrActionSuggestedBinding::new(xr, instance, touch_thumbrest_action, "/user/hand/right/input/thumbrest/touch")?,
+            
+            XrActionSuggestedBinding::new(xr, instance, aim_pose_action, "/user/hand/left/input/aim/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, aim_pose_action, "/user/hand/right/input/aim/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, grip_pose_action, "/user/hand/left/input/grip/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, grip_pose_action, "/user/hand/right/input/grip/pose")?,
+            
+            XrActionSuggestedBinding::new(xr, instance, detached_aim_pose_action, "/user/detached_controller_meta/left/input/aim/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, detached_aim_pose_action, "/user/detached_controller_meta/right/input/aim/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, detached_grip_pose_action, "/user/detached_controller_meta/left/input/grip/pose")?,
+            XrActionSuggestedBinding::new(xr, instance, detached_grip_pose_action, "/user/detached_controller_meta/right/input/grip/pose")?,
+        ];
+                
+        let suggested_bindings = XrInteractionProfileSuggestedBinding{
+            interaction_profile,
+            count_suggested_bindings: bindings.len() as _,
+            suggested_bindings: bindings.as_ptr(),
+            ..Default::default()
+        };
+                
+        unsafe{(xr.xrSuggestInteractionProfileBindings)(
+            instance,
+            &suggested_bindings
+        )}.to_result("xrSuggestInteractionProfileBindings")?;
+                
+        let attach_info = XrSessionActionSetsAttachInfo{
+            count_action_sets: 1,
+            action_sets: &action_set as * const _,
+            ..Default::default()
+        };
+                    
+        unsafe{(xr.xrAttachSessionActionSets)(
+            session,
+            &attach_info
+        )}.to_result("xrAttachSessionActionSets")?;
+        let mut pose = XrPosef::default();
+        pose.orientation.w = 1.0;
+        
+        let resume_info = XrSimultaneousHandsAndControllersTrackingResumeInfoMETA::default();
+        unsafe{(xr.xrResumeSimultaneousHandsAndControllersTrackingMETA)(session, &resume_info)}
+        .log_error("xrResumeSimultaneousHandsAndControllersTrackingMETA");
+        
+        let actions = CxOpenXrInputActions{
+            trigger_action,
+            grip_action,
+            thumbstick_action,
+            click_a_action,
+            click_b_action,
+            click_x_action,
+            click_y_action,
+            click_menu_action,
+            click_thumbstick_action,
+            touch_thumbstick_action,
+            touch_trigger_action,
+            touch_a_action,
+            touch_b_action,
+            touch_x_action,
+            touch_y_action,
+            touch_thumbrest_action,
+            aim_pose_action,
+            grip_pose_action,
+        };
+        
+        Ok(CxOpenXrInputs{
+            action_set,
+            actions,
+            left_hand: CxOpenXrHand{
+                tracker:left_hand_track,
+                joint_locations: Default::default()
+            },
+            right_hand: CxOpenXrHand{
+                tracker:right_hand_track,
+                joint_locations: Default::default()
+            },
+            left_controller: CxOpenXrController{
+                path: left_hand_path,
+                aim_space: XrSpace::new_action_space(xr, session, aim_pose_action, left_hand_path, pose)?,
+                grip_space: XrSpace::new_action_space(xr, session, grip_pose_action, left_hand_path, pose)?,
+                detached_aim_space: XrSpace::new_action_space(xr, session, detached_aim_pose_action, left_detached_path, pose)?,
+                detached_grip_space: XrSpace::new_action_space(xr, session, detached_grip_pose_action, left_detached_path, pose)?
+            },
+            right_controller: CxOpenXrController{
+                path: right_hand_path,
+                aim_space: XrSpace::new_action_space(xr, session, aim_pose_action, right_hand_path, pose)?,
+                grip_space: XrSpace::new_action_space(xr, session, grip_pose_action, right_hand_path, pose)?,
+                detached_aim_space: XrSpace::new_action_space(xr, session, detached_aim_pose_action, right_detached_path, pose)?,
+                detached_grip_space: XrSpace::new_action_space(xr, session, detached_grip_pose_action, right_detached_path, pose)?
+            },
+            last_state: Default::default()
+        })
+    }
+    
+    pub fn destroy_input(self, xr: &LibOpenXr){
+        self.left_controller.destroy(xr);
+        self.right_controller.destroy(xr);
+        self.left_hand.destroy(xr);
+        self.right_hand.destroy(xr);
+    }
+    
+}

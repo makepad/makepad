@@ -23,24 +23,20 @@ live_design!{
     SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
     
-    H2_TEXT_BOLD = {
+    H2_TEXT_BOLD = <THEME_FONT_BOLD>{
         font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
     
-    H2_TEXT_REGULAR = {
+    H2_TEXT_REGULAR = <THEME_FONT_REGULAR>{
         font_size: (FONT_SIZE_H2),
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
     
-    TEXT_BOLD = {
+    TEXT_BOLD = <THEME_FONT_BOLD>{
         font_size: 10.0,
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
     
-    TEXT_MONO = {
+    TEXT_MONO = <THEME_FONT_REGULAR>{
         font_size: 10.0,
-        font: {path: dep("crate://makepad-widgets/resources/LiberationMono-Regular.ttf")}
     }
     
     COLOR_PANEL_BG = (COLOR_DOWN_2)
@@ -391,7 +387,7 @@ live_design!{
                 width: Fill,
                 margin: {top: 0.0, left: 0.0, bottom: 0.0, right: 0.0},
                 margin: {bottom: 0}
-                empty_message: "-"
+                empty_text: "-"
                 draw_bg: {
                     color: (COLOR_TEXT_INPUT)
                 }
@@ -710,7 +706,7 @@ live_design!{
                         height: Fit,
                         width: Fill,
                         margin: {bottom: 0}
-                        empty_message: "Search"
+                        empty_text: "Search"
                         draw_bg: {
                             color: (COLOR_TEXT_INPUT)
                         }

@@ -159,7 +159,7 @@ live_design!{
                 return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
             }
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos * self.scale + self.shift);
+                return sample2d(self.image, self.pos * self.scale + self.shift);
             }
         }
         container: <DesignerContainer>{
@@ -759,8 +759,8 @@ impl Widget for DesignerView {
             );
                         
             self.draw_list.begin_always(cx);
-    
-            cx.begin_pass_sized_turtle_no_clip(Layout::flow_down());
+            let size = cx.current_pass_size();
+            cx.begin_sized_turtle_no_clip(size, Layout::flow_down());
             
             let data = scope.data.get_mut::<DesignerData>().unwrap();
             

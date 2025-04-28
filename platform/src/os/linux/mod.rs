@@ -6,11 +6,14 @@ pub mod direct;
 
 #[cfg(target_os="android")]
 pub mod openxr_sys;
+#[cfg(target_os="android")]
+pub mod openxr;
 
 #[cfg(target_env="ohos")]
 pub mod open_harmony;
 
 pub mod egl_sys;
+#[macro_use]
 pub mod gl_sys;
 pub mod libc_sys;
 pub mod opengl;

@@ -1,7 +1,7 @@
 use{
     std::{fmt,ops},
     crate::math_f64::*,
-//    makepad_microserde::*,
+    makepad_micro_serde::*,
 //    crate::colorhex::*
 };
 
@@ -41,7 +41,7 @@ pub enum Vec2Index{
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Debug, SerBin, DeBin)]
 pub struct Pose {
     pub orientation: Quat,
     pub position: Vec3
@@ -68,19 +68,38 @@ impl Pose {
     }
     
     pub fn to_mat4(&self) -> Mat4 {
+        
         let q = self.orientation;
-        let t = self.position;
+        let t = self.position;/*
         Mat4 {v: [
             (1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z),
             (2.0 * q.x * q.y - 2.0 * q.z * q.w),
             (2.0 * q.x * q.z + 2.0 * q.y * q.w),
-            0.0,
+            t.x,
             (2.0 * q.x * q.y + 2.0 * q.z * q.w),
             (1.0 - 2.0 * q.x * q.x - 2.0 * q.z * q.z),
             (2.0 * q.y * q.z - 2.0 * q.x * q.w),
-            0.0,
+            t.y,
             (2.0 * q.x * q.z - 2.0 * q.y * q.w),
             (2.0 * q.y * q.z + 2.0 * q.x * q.w),
+            (1.0 - 2.0 * q.x * q.x - 2.0 * q.y * q.y),
+            t.z,
+            0.0,
+            0.0,
+            0.0,
+            1.0
+        ]}*/
+        Mat4 {v: [
+            (1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z),
+            (2.0 * q.x * q.y + 2.0 * q.z * q.w),
+            (2.0 * q.x * q.z - 2.0 * q.y * q.w),
+            0.0,
+            (2.0 * q.x * q.y - 2.0 * q.z * q.w),
+            (1.0 - 2.0 * q.x * q.x - 2.0 * q.z * q.z),
+            (2.0 * q.y * q.z + 2.0 * q.x * q.w),
+            0.0,
+            (2.0 * q.x * q.z + 2.0 * q.y * q.w),
+            (2.0 * q.y * q.z - 2.0 * q.x * q.w),
             (1.0 - 2.0 * q.x * q.x - 2.0 * q.y * q.y),
             0.0,
             t.x,
@@ -106,7 +125,7 @@ impl Pose {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, SerBin, DeBin)]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,
@@ -232,7 +251,7 @@ pub fn vec2(x:f32, y:f32)->Vec2{
 }*/
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Debug, SerBin, DeBin)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -263,7 +282,11 @@ impl Vec3 {
     pub const fn to_vec2(&self) -> Vec2 {
         Vec2 {x: self.x, y: self.y}
     }
-    
+        
+    pub const fn to_vec4(&self) -> Vec4 {
+        Vec4 {x: self.x, y: self.y, z: self.z, w: 1.0}
+    }
+        
     pub fn scale(&self, f: f32) -> Vec3 {
         Vec3 {x: self.x * f, y: self.y * f, z: self.z * f}
     }
@@ -291,6 +314,11 @@ impl Vec3 {
             };
         }
         Vec3::default()
+    }
+    
+    pub fn length(&self) -> f32 {
+        let sz = self.x * self.x + self.y * self.y + self.z * self.z;
+        sz.sqrt()
     }
 }
 
@@ -337,7 +365,7 @@ impl Plane {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug,PartialEq)]
+#[derive(Clone, Copy, Default, Debug,PartialEq, SerBin, DeBin)]
 pub struct Vec4 {
     pub x: f32,
     pub y: f32,
@@ -475,7 +503,7 @@ pub struct CameraFov {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, SerBin, DeBin)]
 pub struct Quat {
     pub x: f32,
     pub y: f32,
@@ -593,7 +621,26 @@ impl Mat4 {
         ]}
     }
     
-    
+    pub fn transpose(&self) -> Mat4 {
+        Mat4 {v: [
+            self.v[0],
+            self.v[4],
+            self.v[8],
+            self.v[12],
+            self.v[1],
+            self.v[5],
+            self.v[9],
+            self.v[13],
+            self.v[2],
+            self.v[6],
+            self.v[10],
+            self.v[14],
+            self.v[3],
+            self.v[7],
+            self.v[11],
+            self.v[15],
+        ]}
+    }
     
     pub fn txyz_s_ry_rx_txyz(t1: Vec3, s: f32, ry: f32, rx: f32, t2: Vec3) -> Mat4 {
         
@@ -764,7 +811,7 @@ impl Mat4 {
                                 
                 (tan_right + tan_left) / tan_width,
                 (tan_up + tan_down) / tan_height,
-                -2.0 * far / (far - near),
+                -(far + near) / (far - near),
                 -1.0,
                                 
                 0.0,
@@ -775,7 +822,7 @@ impl Mat4 {
         }
     }
     
-    pub const fn translation(x: f32, y: f32, z: f32) -> Mat4 {
+    pub const fn translation(v:Vec3) -> Mat4 {
         Mat4 {v: [
             1.0,
             0.0,
@@ -789,15 +836,36 @@ impl Mat4 {
             0.0,
             1.0,
             0.0,
-            x,
-            y,
-            z,
+            v.x,
+            v.y,
+            v.z,
             1.0
         ]}
         
     }
     
-    pub const fn scaled_translation(s: f32, x: f32, y: f32, z: f32) -> Mat4 {
+    pub const fn nonuniform_scaled_translation(s:Vec3,  t:Vec3) -> Mat4 {
+        Mat4 {v: [
+            s.x,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            s.y,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            s.z,
+            0.0,
+            t.x,
+            t.y,
+            t.z,
+            1.0
+        ]}
+    }
+    
+    pub const fn scaled_translation(s:f32,  t:Vec3) -> Mat4 {
         Mat4 {v: [
             s,
             0.0,
@@ -811,22 +879,43 @@ impl Mat4 {
             0.0,
             s,
             0.0,
-            x,
-            y,
-            z,
+            t.x,
+            t.y,
+            t.z,
             1.0
         ]}
+    }
         
+    pub const fn scale(s: f32) -> Mat4 {
+        Mat4 {v: [
+            s,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            s,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            s,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0
+        ]}
+                
     }
     
-    pub fn rotation(rx: f32, ry: f32, rz: f32) -> Mat4 {
-        const TORAD: f32 = 0.017453292;
-        let cx = f32::cos(rx * TORAD);
-        let cy = f32::cos(ry * TORAD);
-        let cz = f32::cos(rz * TORAD);
-        let sx = f32::sin(rx * TORAD);
-        let sy = f32::sin(ry * TORAD);
-        let sz = f32::sin(rz * TORAD);
+    pub fn rotation(r:Vec3) -> Mat4 {
+        //const TORAD: f32 = 0.017453292;
+        let cx = f32::cos(r.x);
+        let cy = f32::cos(r.y);
+        let cz = f32::cos(r.z);
+        let sx = f32::sin(r.x);
+        let sy = f32::sin(r.y);
+        let sz = f32::sin(r.z);
         let m0 = cy * cz + sx * sy * sz;
         let m1 = -sz * cy + cz * sx * sy;
         let m2 = sy * cx;
@@ -900,6 +989,7 @@ impl Mat4 {
         // this is probably stupid. Programmed JS for too long.
         let a = &a.v;
         let b = &b.v;
+        #[inline]
         fn d(i: &[f32; 16], x: usize, y: usize) -> f32 {i[x + 4 * y]}
         Mat4 {
             v: [

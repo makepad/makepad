@@ -70,6 +70,7 @@ impl Cx {
         for &pass_id in &passes_todo {
             self.passes[pass_id].set_time(time as f32);
             match self.passes[pass_id].parent.clone() {
+                CxPassParent::Xr => {}
                 CxPassParent::Window(window_id) => {
                     if let Some(swapchain) = &mut stdin_windows[window_id.id()].swapchain{
                         

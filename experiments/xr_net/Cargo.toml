@@ -1,0 +1,13 @@
+[package]
+name = "makepad-experiment-xr-net"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad xr-net experiment"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "db3R5Gxh5Njhx8E-8kuZ2plQ1AI="
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "0.6.0" }
+makepad-xr-net = { path = "../../libs/xr_net", version = "0.1.0" }
+makepad-miniz  = { path = "../../libs/miniz", version = "0.4.0" }

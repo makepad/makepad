@@ -12,6 +12,12 @@ pub struct OsWebSocket{
     pub request_id: LiveId,
 }
 
+impl Drop for OsWebSocket{
+    fn drop(&mut self){
+        unsafe {android_jni::to_java_websocket_close(self.request_id);}
+    }
+}
+
 pub type WebsocketIncomingMessageFn = Box<dyn FnMut(WebSocketMessage) + Send  + 'static>;
 
 impl OsWebSocket{
@@ -45,5 +51,9 @@ impl OsWebSocket{
             sender_ref,
             request_id
         }
+    }
+    
+    pub fn close(&self){
+        unsafe {android_jni::to_java_websocket_close(self.request_id);}
     }
 }

@@ -265,6 +265,7 @@ impl Cx {
         for pass_id in &passes_todo {
             self.passes[*pass_id].set_time(get_win32_app_global().time_now() as f32);
             match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Xr => {}
                 CxPassParent::Window(window_id) => {
                     if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
                         //let dpi_factor = window.window_geom.dpi_factor;                        

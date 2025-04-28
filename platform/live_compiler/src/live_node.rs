@@ -583,6 +583,7 @@ impl LiveValue {
 
     pub fn is_single_node(&self) -> bool {
         self.is_value_type() || match self {
+            Self::None=> true,
             Self::Id(_) |
             Self::IdPath(_) |
             Self::BareEnum(_) => true,

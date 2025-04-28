@@ -76,6 +76,7 @@ impl Cx {
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Xr => {}
                 CxPassParent::Window(_window_id) => {
                     let mtk_view = get_tvos_app_global().mtk_view.unwrap();
                     self.draw_pass(*pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));

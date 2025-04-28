@@ -1,7 +1,8 @@
 use {
     super::{
         font_face::FontFace,
-        geom::Rect,
+        geom::{Point, Rect},
+        glyph_outline,
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
         intern::Intern,
@@ -11,6 +12,7 @@ use {
     rustybuzz::ttf_parser,
     std::{
         cell::RefCell,
+        collections::HashMap,
         hash::{Hash, Hasher},
         rc::Rc,
     },
@@ -38,6 +40,7 @@ pub struct Font {
     face: FontFace,
     ascender_fudge_in_ems: f32,
     descender_fudge_in_ems: f32,
+    cached_glyph_outline_bounds_in_ems: RefCell<HashMap<GlyphId, Option<Rect<f32>>>>,
 }
 
 impl Font {
@@ -54,6 +57,7 @@ impl Font {
             face,
             ascender_fudge_in_ems,
             descender_fudge_in_ems,
+            cached_glyph_outline_bounds_in_ems: RefCell::new(HashMap::new()),
         }
     }
 
@@ -87,8 +91,6 @@ impl Font {
     }
 
     pub fn glyph_outline(&self, glyph_id: GlyphId) -> Option<GlyphOutline> {
-        use super::{geom::Point, glyph_outline};
-
         let face = self.ttf_parser_face();
         let glyph_id = ttf_parser::GlyphId(glyph_id);
         let mut builder = glyph_outline::Builder::new();
@@ -96,6 +98,30 @@ impl Font {
         let min = Point::new(bounds.x_min as f32, bounds.y_min as f32);
         let max = Point::new(bounds.x_max as f32, bounds.y_max as f32);
         Some(builder.finish(Rect::new(min, max - min), self.units_per_em()))
+    }
+
+    pub fn glyph_outline_bounds_in_ems(
+        &self,
+        glyph_id: GlyphId,
+        out_outline: &mut Option<GlyphOutline>,
+    ) -> Option<Rect<f32>> {
+        if let Some(bounds_in_ems) = self
+            .cached_glyph_outline_bounds_in_ems
+            .borrow()
+            .get(&glyph_id)
+        {
+            return *bounds_in_ems;
+        }
+        if let Some(outline) = self.glyph_outline(glyph_id) {
+            let bounds_in_ems = outline.bounds_in_ems();
+            *out_outline = Some(outline);
+            self.cached_glyph_outline_bounds_in_ems
+                .borrow_mut()
+                .insert(glyph_id, Some(bounds_in_ems));
+            Some(bounds_in_ems)
+        } else {
+            None
+        }
     }
 
     pub fn glyph_raster_image(

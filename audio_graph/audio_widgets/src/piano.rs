@@ -184,7 +184,8 @@ pub enum PianoKeyAction {
 
 impl PianoKey {
     
-    pub fn draw_abs(&mut self, cx: &mut Cx2d, is_black: f32, rect: Rect) {
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, depth: f32, is_black: f32, rect: Rect) {
+        self.draw_key.draw_depth = depth;
         self.draw_key.is_black = is_black;
         self.draw_key.draw_abs(cx, rect);
     }
@@ -402,6 +403,7 @@ impl Widget for Piano{
         let black_size:DVec2 = self.black_size.into();//vec2(15.0, 62.0);
         let piano_key = self.piano_key;
         // draw the white keys first because they go below the black ones
+        let mut depth = 1.0;
         for i in midi_a0..midi_c8 {
             if black_key_shift(i).is_some() {
                 continue;
@@ -410,21 +412,23 @@ impl Widget for Piano{
             let key = self.white_keys.get_or_insert(cx, key_id, | cx | {
                 PianoKey::new_from_ptr(cx, piano_key)
             });
-            key.draw_abs(cx, 0.0, Rect {pos: pos, size: white_size});
+            key.draw_abs(cx, depth, 0.0, Rect {pos: pos, size: white_size});
+            depth += cx.micro_zbias_step();
             pos.x += white_size.x;
         }
         // draw the black keys
         let mut pos = start_pos;
-        for i in midi_a0..midi_c8 {
+for i in midi_a0..midi_c8 {
             if let Some(shift) = black_key_shift(i) {
                 let key_id = LiveId(i as u64).into();
                 let key = self.black_keys.get_or_insert(cx, key_id, | cx | {
                     PianoKey::new_from_ptr(cx, piano_key)
                 });
-                key.draw_abs(cx, 1.0, Rect {
+                key.draw_abs(cx, depth, 1.0, Rect {
                     pos: pos - dvec2(black_size.x * shift, 0.),
                     size: black_size
                 });
+                depth += cx.micro_zbias_step();
             }
             else {
                 pos.x += white_size.x;

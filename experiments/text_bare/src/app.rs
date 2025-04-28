@@ -71,7 +71,7 @@ pub struct MyWidget {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_text: DrawText2,
+    draw_text: DrawText,
     #[walk]
     walk: Walk,
     #[layout]
