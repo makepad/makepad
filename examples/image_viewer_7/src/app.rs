@@ -5,8 +5,6 @@ live_design! {
 
     PLACEHOLDER_IMAGE = dep("crate://self/resources/placeholder_image.jpg");
     SEARCH_ICON = dep("crate://self/resources/search_icon.svg");
-    LEFT_ARROW_ICON = dep("crate://self/resources/left_arrow_icon.svg");
-    RIGHT_ARROW_ICON = dep("crate://self/resources/right_arrow_icon.svg");
     
     Search = <View> {
         width: Fit,
@@ -56,56 +54,14 @@ live_design! {
         }
     }
 
-    SlideshowButton = <Button> {
-        width: 50,
-        height: Fill,
-        icon_walk: { width: 9 },
-        draw_bg: {
-            bodytop: #fff0,
-            bodybottom: #fff2,
-        }
-        text: ""
-    }
-
-    SlideshowLeftButton = <SlideshowButton> {
-        draw_icon: { svg_file: (LEFT_ARROW_ICON) }
-    }
-
-    SlideshowRightButton = <SlideshowButton> {
-        draw_icon: { svg_file: (RIGHT_ARROW_ICON) }
-    }
-
-    SlideshowOverlay = <View> {
-        height: Fill,
-        width: Fill,
-
-        left = <SlideshowLeftButton> {}
-        <Filler> {}
-        right = <SlideshowRightButton> {}
-    }
-
-    Slideshow = <View> {
-        flow: Overlay,
-
-        image = <Image> {
-            width: Fill,
-            height: Fill,
-            fit: Biggest,
-            source: (PLACEHOLDER_IMAGE)
-        }
-
-        <SlideshowOverlay> {}
-    }
-
     App = {{App}} {
         ui: <Root> {
             <Window> {
                 body = <View> {
                     flow: Down,
 
-                    // <Search> {}
-                    // <ImageGrid> {}
-                    slideshow = <Slideshow> {}
+                    <Search> {}
+                    <ImageGrid> {}
                 }
             }
         }
@@ -218,12 +174,6 @@ impl MatchEvent for App{
         if let Some(query) = self.ui.text_input(id!(query)).changed(&actions) {
             self.state.filter_image_paths(&query);
         }
-        if self.ui.button(id!(left)).clicked(&actions) {
-            self.state.next_image();
-        }
-        if self.ui.button(id!(right)).clicked(&actions) {
-            self.state.prev_image();
-        }
     }
 }
 
@@ -232,7 +182,6 @@ pub struct State {
     image_paths: Vec<PathBuf>,
     filtered_image_paths: Vec<PathBuf>,
     images_per_row: usize,
-    current_image_index: usize,
 }
 
 impl State {
@@ -243,15 +192,6 @@ impl State {
                 self.filtered_image_paths.push(image_path.clone());
             }
         }
-        self.current_image_index = self.current_image_index.min(self.filtered_image_paths.len().saturating_sub(1));
-    }
-
-    pub fn next_image(&mut self) {
-        self.current_image_index = (self.current_image_index + 1) % self.filtered_image_paths.len();
-    }
-
-    pub fn prev_image(&mut self) {
-        self.current_image_index = (self.current_image_index + self.filtered_image_paths.len() - 1) % self.filtered_image_paths.len();
     }
 }
 
@@ -261,7 +201,6 @@ impl Default for State {
             image_paths: Vec::new(),
             filtered_image_paths: Vec::new(),
             images_per_row: 4,
-            current_image_index: 0,
         }
     }
 }
