@@ -84,7 +84,7 @@ impl Cx{
                 }
                 XrStructureType::EVENT_DATA_SPATIAL_ANCHOR_CREATE_COMPLETE_FB=>{
                     let response = &unsafe{*(&event_buffer as *const _ as *const XrEventDataSpatialAnchorCreateCompleteFB)};
-                    openxr.session.as_mut().unwrap().create_anchor_response(
+                    openxr.session.as_mut().unwrap().create_shareable_anchor_response(
                         openxr.libxr.as_ref().unwrap(),
                         response,
                     );
@@ -520,11 +520,21 @@ impl CxOpenXr{
         if let Some(session) = &mut self.session{
             let xr =  self.libxr.as_ref().unwrap();
             crate::log!("Creating advertising anchor");
-            session.create_anchor_request(pose, xr);
+            session.create_shareable_anchor_request(pose, xr);
         }
     }
     
-    pub fn discover_anchor(&mut self, id:u32){
+    pub fn set_local_anchor(&mut self, _pose:Pose){
+        if let Some(_session) = &mut self.session{
+            let _xr =  self.libxr.as_ref().unwrap();
+            crate::log!("Setting local anchor");
+            //session.local_anchor = Some(pose);
+            //session.create_local_anchor_request(pose, xr);
+            //session.create_shareable_anchor_request(pose, xr);
+        }
+    }
+    
+    pub fn discover_anchor(&mut self, id:u8){
         if let Some(session) = &mut self.session{
             let xr =  self.libxr.as_ref().unwrap();
             session.anchor_discovery = id;
@@ -534,6 +544,10 @@ impl CxOpenXr{
     }
 }
 
+struct SceneAnchors{
+    left: XrSpace,
+    right: XrSpace
+}
 
 pub struct CxOpenXrSession{
     pub color_images: Vec<XrSwapchainImageOpenGLESKHR>,
@@ -551,9 +565,10 @@ pub struct CxOpenXrSession{
     pub local_space: XrSpace,
     pub handle: XrSession,
     pub active: bool,
-    pub anchor_discovery: u32,
+    pub anchor_discovery: u8,
     pub inputs: CxOpenXrInputs,
-    shared_anchor: Option<XrSpace>,
+    
+    scene_anchors: Option<SceneAnchors>,
     anchor_advertisement: Option<AnchorAdvertisement>,
     // leaked from Frame onto state
     pub depth_swap_chain_index: usize,
@@ -827,7 +842,7 @@ impl CxOpenXrSession{
             head_space,
             local_space,
             active:false,
-            shared_anchor: None,
+            scene_anchors: None,
             anchor_advertisement: None,
             depth_swap_chain_index: 0,
             frame_state: XrFrameState::default(),
@@ -935,24 +950,27 @@ impl CxOpenXrSession{
             return None
         };
                 
-        let left_controller = self.inputs.left_controller.poll(xr, self.handle, local_space, predicted_display_time, true, &self.inputs.actions, last_state.left_controller.buttons);
-        let right_controller = self.inputs.right_controller.poll(xr, self.handle, local_space, predicted_display_time, false, &self.inputs.actions, last_state.right_controller.buttons);
+        let left_controller = self.inputs.left_controller.poll(xr, self.handle, local_space, predicted_display_time, true, &self.inputs.actions);
+        let right_controller = self.inputs.right_controller.poll(xr, self.handle, local_space, predicted_display_time, false, &self.inputs.actions);
                 
         let left_hand = self.inputs.left_hand.poll(xr, self.handle, local_space, predicted_display_time);
         let right_hand = self.inputs.right_hand.poll(xr, self.handle, local_space, predicted_display_time);
                         
-        let shared_anchor = if let Some(shared_anchor) = self.shared_anchor{
-            Some(XrSpaceLocation::locate(xr, local_space, predicted_display_time, shared_anchor).pose)
+        let scene_anchors = if let Some(anchors) = &self.scene_anchors{
+            let left = XrSpaceLocation::locate(xr, local_space, predicted_display_time, anchors.left).pose.position;
+            let right = XrSpaceLocation::locate(xr, local_space, predicted_display_time, anchors.right).pose.position;
+            Some(XrSceneAnchors{left, right})
         }
         else{
             None
         };
                         
         let new_state = Rc::new(XrState{
+            
             anchor_discovery: self.anchor_discovery,
             time: (frame.frame_state.predicted_display_time.as_nanos() as f64) / 1e9f64,
             head_pose: frame.local_from_head.pose,
-            shared_anchor,
+            scene_anchors,
             left_controller,
             right_controller,
             left_hand,
@@ -968,7 +986,7 @@ impl CxOpenXrSession{
     }
     
     // STEP ONE. share the anchor
-    pub fn create_anchor_request(&mut self, pose:XrPosef, xr: &LibOpenXr){
+    pub fn create_shareable_anchor_request(&mut self, pose:XrPosef, xr: &LibOpenXr){
         let anchor_create_info = XrSpatialAnchorCreateInfoFB{
             space: self.local_space,
             pose_in_space: pose,
@@ -983,7 +1001,7 @@ impl CxOpenXrSession{
         )}.log_error("xrCreateSpatialAnchorFB");
     }
     
-    pub fn create_anchor_response(&mut self, xr: &LibOpenXr, response:&XrEventDataSpatialAnchorCreateCompleteFB){
+    pub fn create_shareable_anchor_response(&mut self, xr: &LibOpenXr, response:&XrEventDataSpatialAnchorCreateCompleteFB){
         // got response.
         if response.result != XrResult::SUCCESS{
             crate::log!("share_anchor_response failed {:?}", response.result);
@@ -1040,7 +1058,7 @@ impl CxOpenXrSession{
             group_uuid,
         });
         
-        self.shared_anchor = Some(response.space);
+        //self.scene_anchors = Some(response.space);
         // lets share the anchor
         self.share_anchor_request(xr, response.space);
     }
@@ -1073,7 +1091,7 @@ impl CxOpenXrSession{
     pub fn share_anchor_response(&mut self, xr: &LibOpenXr, response:&XrEventDataShareSpacesCompleteMETA){
         if response.result != XrResult::SUCCESS{
             crate::log!("share_anchor_response result: {:?}", response.result);
-            self.shared_anchor.take();
+            //self.shared_anchor.take();
         }
         else{
             crate::log!("Anchor shared!");
@@ -1258,7 +1276,7 @@ impl CxOpenXrSession{
         )}.log_error("query_anchors_response xrSetSpaceComponentStatusFB STORABLE");
         // alright we have a shared space!
         crate::log!("Anchor retrieved!");
-        self.shared_anchor = Some(response.space);
+        //self.shared_anchor = Some(response.space);
     }
     
 }
@@ -1565,27 +1583,68 @@ impl CxOpenXrHand{
         let mut s = 0;
         for i in 0..self.joint_locations.len(){
             let tracked = self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_TRACKED) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_TRACKED);
-            /*
-            let valid = valid: self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::ORIENTATION_VALID) && self.joint_locations[i].location_flags.contains(XrSpaceLocationFlags::POSITION_VALID)
-            */
             // we're going to skip the tips and only store the distance
             if i == 5 || i == 10 || i == 15 || i ==20 || i == 25{
+                // indices
+                /*
+                pub const JOINT_COUNT: usize = 26;
+                pub const CENTER: usize = 0;
+                pub const WRIST: usize = 1;
+                pub const THUMB_BASE: usize = 2;
+                pub const THUMB_KNUCKLE1: usize = 3;
+                pub const THUMB_KNUCKLE2: usize = 4;
+                pub const THUMB_TIP: usize = 5;
+                pub const INDEX_BASE: usize = 6;
+                pub const INDEX_KNUCKLE1: usize = 7;
+                pub const INDEX_KNUCKLE2: usize = 8;
+                pub const INDEX_KNUCKLE3: usize = 9;
+                pub const INDEX_TIP: usize = 10;
+                pub const MIDDLE_BASE: usize = 11;
+                pub const MIDDLE_KNUCKLE1: usize = 12;
+                pub const MIDDLE_KNUCKLE2: usize = 13;
+                pub const MIDDLE_KNUCKLE3: usize = 14;
+                pub const MIDDLE_TIP: usize = 15;
+                pub const RING_BASE: usize = 16;
+                pub const RING_KNUCKLE1: usize = 17;
+                pub const RING_KNUCKLE2: usize = 18;
+                pub const RING_KNUCKLE3: usize = 19;
+                pub const RING_TIP: usize = 20;
+                pub const PINKY_BASE: usize = 21;
+                pub const PINKY_KNUCKLE1: usize = 22;
+                pub const PINKY_KNUCKLE2: usize = 23;
+                pub const PINKY_KNUCKLE3: usize = 24;
+                pub const PINKY_TIP: usize = 25;*/
                 // only store the distance to the tip so we can fit the entire
                 // tracked quest state in a UDP packet :)
                 let d = self.joint_locations[i].pose.position - self.joint_locations[i-1].pose.position;
-                hand.tips[i/5-1] = d.length();
+                let slot = i/5-1;
+                hand.tips[slot] = d.length();
+                hand.tips_active |= if tracked{1<<slot}else{0};
                 continue;
             }
             
-            hand.joints[s] = XrHandJoint{
-                pose: self.joint_locations[i].pose,    
-            };
+            hand.joints[s] = self.joint_locations[i].pose;
             s += 1;
             if tracked{
                 hand_in_view = true
             }
         }
-        hand.in_view = hand_in_view;
+        hand.flags |= 
+        if hand_in_view{XrHand::IN_VIEW}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::VALID){XrHand::AIM_VALID}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::INDEX_PINCHING){XrHand::PINCH_INDEX}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::MIDDLE_PINCHING){XrHand::PINCH_MIDDLE}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::RING_PINCHING){XrHand::PINCH_RING}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::LITTLE_PINCHING){XrHand::PINCH_LITTLE}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::DOMINANT_HAND){XrHand::DOMINANT_HAND}else{0}|
+        if aim_state.status.contains(XrHandTrackingAimFlagsFB::MENU_PRESSED){XrHand::MENU_PRESSED}else{0}|
+        //if aim_state.status.contains(XrHandTrackingAimFlagsFB::SYSTEM_GESTURE){XrHand::SYSTEM_GESTURE}else{0}|
+        0;
+        hand.aim_pose = aim_state.aim_pose;
+        hand.pinch[XrHand::PINCH_STRENGTH_INDEX] = (aim_state.pinch_strength_index * u8::MAX as f32) as u8;
+        hand.pinch[XrHand::PINCH_STRENGTH_MIDDLE] = (aim_state.pinch_strength_middle * u8::MAX as f32) as u8;
+        hand.pinch[XrHand::PINCH_STRENGTH_RING] = (aim_state.pinch_strength_ring * u8::MAX as f32) as u8;
+        hand.pinch[XrHand::PINCH_STRENGTH_LITTLE] = (aim_state.pinch_strength_little * u8::MAX as f32) as u8;
         hand
     }
 }
@@ -1606,7 +1665,7 @@ impl CxOpenXrController{
         self.detached_grip_space.destroy(xr);
     }
     
-    fn poll(&self, xr: &LibOpenXr, session:XrSession, local_space:XrSpace, time:XrTime, is_left: bool, actions: &CxOpenXrInputActions, last_buttons:u16)->XrController{
+    fn poll(&self, xr: &LibOpenXr, session:XrSession, local_space:XrSpace, time:XrTime, is_left: bool, actions: &CxOpenXrInputActions)->XrController{
         // lets query the trigger bool
         let stick = XrActionStateVector2f::get(xr, session, actions.thumbstick_action, self.path);
         let trigger = XrActionStateFloat::get(xr, session, actions.trigger_action, self.path);
@@ -1644,7 +1703,7 @@ impl CxOpenXrController{
             stick: stick.current_state,
             trigger: trigger.current_state,
             grip: grip.current_state,
-            last_buttons,
+            //last_buttons,
             buttons: 
                 if aim_state.is_active.as_bool(){XrController::ACTIVE}else{0}|
                 bf(xr, session, self.path, actions.click_a_action, XrController::CLICK_A, !is_left) | 
