@@ -57,13 +57,19 @@ impl MatchEvent for App{
     }
     
     fn handle_actions(&mut self, _cx: &mut Cx, _actions:&Actions){
-}
+    }
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::XrUpdate(e) = event{
             self.xr_net.send_state((*e.state).clone());
+            /*
+            use makepad_platform::makepad_micro_serde::*;
+            let data = (*e.state).serialize_bin();
+            let compr = makepad_miniz::compress_to_vec(&data,10);
+            log!("{:?} {:?}", data.len(), compr.len());
+            */
             if let Some(mut xr_hands) = self.ui.xr_hands(id!(xr_hands)).borrow_mut(){
                 while let Ok(msg) = self.xr_net.incoming_receiver.try_recv(){
                     match msg{

@@ -5,7 +5,6 @@ use {
         Area,
         HitOptions,
         Hit,
-        Event,
         SmallVec,
         FingerDownEvent,
         CxWindowPool,
@@ -25,7 +24,6 @@ pub struct XrController {
     pub aim_pose: Pose,
     pub trigger: f32,
     pub grip: f32,
-    pub last_buttons: u16,
     pub buttons: u16,
     pub stick: Vec2,
 }
@@ -47,16 +45,9 @@ impl XrController{
     pub const TOUCH_THUMBSTICK: u16 = 1<<11;
     pub const TOUCH_TRIGGER: u16 = 1<<12;
     pub const TOUCH_THUMBREST: u16 = 1<<13;
-    
+    pub fn triggered(&self)->bool{ self.trigger>0.8}
     pub fn active(&self)->bool{self.buttons & Self::ACTIVE != 0}
-    
-    pub fn clicked_x(&self)->bool{self.buttons & Self::CLICK_X != 0 && self.last_buttons & Self::CLICK_X == 0}
-    pub fn clicked_y(&self)->bool{self.buttons & Self::CLICK_Y != 0 && self.last_buttons & Self::CLICK_Y == 0}
-    pub fn clicked_a(&self)->bool{self.buttons & Self::CLICK_A != 0 && self.last_buttons & Self::CLICK_A == 0}
-    pub fn clicked_b(&self)->bool{self.buttons & Self::CLICK_B != 0 && self.last_buttons & Self::CLICK_B == 0}
-    pub fn clicked_thumbstick(&self)->bool{self.buttons & Self::CLICK_THUMBSTICK != 0 && self.last_buttons & Self::CLICK_THUMBSTICK == 0}
-    pub fn clicked_menu(&self)->bool{self.buttons & Self::CLICK_MENU != 0 && self.last_buttons & Self::CLICK_MENU == 0}
-    
+
     pub fn click_x(&self)->bool{self.buttons & Self::CLICK_X != 0}
     pub fn click_y(&self)->bool{self.buttons & Self::CLICK_Y != 0}
     pub fn click_a(&self)->bool{self.buttons & Self::CLICK_A != 0}
@@ -74,23 +65,60 @@ impl XrController{
 }
 
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
-pub struct XrHandJoint{
-    pub pose: Pose
-}
-
-#[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrHand{
-    pub in_view: bool,
-    pub joints: [XrHandJoint;Self::JOINT_COUNT],
+    pub flags: u8,
+    pub joints: [Pose;Self::JOINT_COUNT],
     pub tips: [f32;5],
-}
-
-impl Event{
-    
+    pub tips_active: u8,
+    pub aim_pose: Pose,
+    pub pinch: [u8;4]
 }
 
 impl XrHand{
-
+    
+    pub fn in_view(&self)->bool{self.flags & Self::IN_VIEW != 0}
+    pub fn aim_valid(&self)->bool{self.flags & Self::AIM_VALID != 0}
+    pub fn menu_pressed(&self)->bool{self.flags & Self::MENU_PRESSED != 0}
+    //pub fn system_gesture(&self)->bool{self.flags & Self::SYSTEM_GESTURE != 0}
+    pub fn dominant_hand(&self)->bool{self.flags & Self::DOMINANT_HAND != 0}
+    
+    pub fn pinch_index(&self)->bool{self.flags & Self::PINCH_INDEX != 0}
+    pub fn pinch_middle(&self)->bool{self.flags & Self::PINCH_MIDDLE != 0}
+    pub fn pinch_ring(&self)->bool{self.flags & Self::PINCH_RING != 0}
+    pub fn pinch_little(&self)->bool{self.flags & Self::PINCH_LITTLE != 0}
+    
+    pub fn pinch_only_little(&self)->bool{
+        self.pinch[Self::PINCH_STRENGTH_INDEX]<100 && 
+        self.pinch[Self::PINCH_STRENGTH_MIDDLE]<100 && 
+        self.pinch[Self::PINCH_STRENGTH_RING]<100 && 
+        self.pinch[Self::PINCH_STRENGTH_LITTLE]>160
+    }
+    pub fn pinch_only_index(&self)->bool{
+        self.pinch[Self::PINCH_STRENGTH_INDEX]>160 && 
+        self.pinch[Self::PINCH_STRENGTH_MIDDLE]<100 && 
+        self.pinch[Self::PINCH_STRENGTH_RING]<100 && 
+        self.pinch[Self::PINCH_STRENGTH_LITTLE]<100
+    }
+            
+    pub fn pinch_strength_index(&self)->f32{self.pinch[Self::PINCH_STRENGTH_INDEX] as f32 / u8::MAX as f32}
+    pub fn pinch_strength_middle(&self)->f32{self.pinch[Self::PINCH_STRENGTH_MIDDLE] as f32 / u8::MAX as f32}
+    pub fn pinch_strength_ring(&self)->f32{self.pinch[Self::PINCH_STRENGTH_RING] as f32 / u8::MAX as f32}
+    pub fn pinch_strength_pinky(&self)->f32{self.pinch[Self::PINCH_STRENGTH_LITTLE] as f32 / u8::MAX as f32}
+        
+    pub const IN_VIEW: u8 = 1<<0;
+    pub const AIM_VALID: u8 = 1<<1;
+    pub const PINCH_INDEX: u8 = 1<<2;
+    pub const PINCH_MIDDLE: u8 = 1<<3;
+    pub const PINCH_RING: u8 = 1<<4;
+    pub const PINCH_LITTLE: u8 = 1<<5;
+    pub const DOMINANT_HAND: u8 = 1<<6;
+    pub const MENU_PRESSED : u8 = 1<<7;
+    
+    pub const PINCH_STRENGTH_INDEX: usize = 0;
+    pub const PINCH_STRENGTH_MIDDLE: usize = 1;
+    pub const PINCH_STRENGTH_RING: usize = 2;
+    pub const PINCH_STRENGTH_LITTLE: usize = 3;
+    
     pub const JOINT_COUNT: usize = 21;
     pub const CENTER: usize = 0;
     pub const WRIST: usize = 1;
@@ -109,45 +137,50 @@ impl XrHand{
     pub const RING_KNUCKLE1: usize = 14;
     pub const RING_KNUCKLE2: usize = 15;
     pub const RING_KNUCKLE3: usize = 16;
-    pub const PINKY_BASE: usize = 17;
-    pub const PINKY_KNUCKLE1: usize = 18;
-    pub const PINKY_KNUCKLE2: usize = 19;
-    pub const PINKY_KNUCKLE3: usize = 20;
+    pub const LITTLE_BASE: usize = 17;
+    pub const LITTLE_KNUCKLE1: usize = 18;
+    pub const LITTLE_KNUCKLE2: usize = 19;
+    pub const LITTLE_KNUCKLE3: usize = 20;
+    
     pub const END_KNUCKLES: [usize;5] = [
         Self::THUMB_KNUCKLE2, 
         Self::INDEX_KNUCKLE3, 
         Self::MIDDLE_KNUCKLE3, 
         Self::RING_KNUCKLE3, 
-        Self::PINKY_KNUCKLE3
+        Self::LITTLE_KNUCKLE3
     ];
-    /*
-    pub const JOINT_COUNT: usize = 26;
-    pub const CENTER: usize = 0;
-    pub const WRIST: usize = 1;
-    pub const THUMB_BASE: usize = 2;
-    pub const THUMB_KNUCKLE1: usize = 3;
-    pub const THUMB_KNUCKLE2: usize = 4;
-    pub const THUMB_TIP: usize = 5;
-    pub const INDEX_BASE: usize = 6;
-    pub const INDEX_KNUCKLE1: usize = 7;
-    pub const INDEX_KNUCKLE2: usize = 8;
-    pub const INDEX_KNUCKLE3: usize = 9;
-    pub const INDEX_TIP: usize = 10;
-    pub const MIDDLE_BASE: usize = 11;
-    pub const MIDDLE_KNUCKLE1: usize = 12;
-    pub const MIDDLE_KNUCKLE2: usize = 13;
-    pub const MIDDLE_KNUCKLE3: usize = 14;
-    pub const MIDDLE_TIP: usize = 15;
-    pub const RING_BASE: usize = 16;
-    pub const RING_KNUCKLE1: usize = 17;
-    pub const RING_KNUCKLE2: usize = 18;
-    pub const RING_KNUCKLE3: usize = 19;
-    pub const RING_TIP: usize = 20;
-    pub const PINKY_BASE: usize = 21;
-    pub const PINKY_KNUCKLE1: usize = 22;
-    pub const PINKY_KNUCKLE2: usize = 23;
-    pub const PINKY_KNUCKLE3: usize = 24;
-    pub const PINKY_TIP: usize = 25;*/
+
+    pub fn end_knuckles(&self)->[&Pose;5]{
+        [
+            &self.joints[XrHand::THUMB_KNUCKLE2],
+            &self.joints[XrHand::INDEX_KNUCKLE3],
+            &self.joints[XrHand::MIDDLE_KNUCKLE3],
+            &self.joints[XrHand::RING_KNUCKLE3],
+            &self.joints[XrHand::LITTLE_KNUCKLE3],
+        ]
+    }
+            
+    pub const THUMB_TIP: usize = 0;
+    pub const INDEX_TIP: usize = 1;
+    pub const MIDDLE_TIP: usize = 2;
+    pub const RING_TIP: usize = 3;
+    pub const LITTLE_TIP: usize = 4;
+            
+    pub fn tip_active(&self,tip:usize)->bool{
+        self.tips_active & (1<<tip) != 0
+    }
+    
+    fn tip_pos(&self,tip:usize, knuckle:usize)->Vec3{
+        let pos = vec4(0.0,0.0,-self.tips[tip],1.0);
+        self.joints[knuckle].to_mat4().transform_vec4(pos).to_vec3()
+    }
+    
+    pub fn tip_pos_thumb(&self)->Vec3{self.tip_pos(0, XrHand::THUMB_KNUCKLE2)}
+    pub fn tip_pos_index(&self)->Vec3{self.tip_pos(0, XrHand::INDEX_KNUCKLE3)}
+    pub fn tip_pos_middle(&self)->Vec3{self.tip_pos(0, XrHand::MIDDLE_KNUCKLE3)}
+    pub fn tip_pos_ring(&self)->Vec3{self.tip_pos(0, XrHand::RING_KNUCKLE3)}
+    pub fn tip_pos_little(&self)->Vec3{self.tip_pos(0, XrHand::LITTLE_KNUCKLE3)}
+        
 }
 
 #[derive(Clone, Debug)]
@@ -165,18 +198,38 @@ pub struct XrLocalEvent{
     pub time: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin)]
+pub struct XrSceneAnchors{
+    pub left: Vec3,
+    pub right: Vec3,
+}
+
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrState{
     pub time: f64,
     pub head_pose: Pose,
-    pub shared_anchor: Option<Pose>,
-    pub anchor_discovery: u32,
+    pub anchor_discovery: u8,
+    pub scene_anchors: Option<XrSceneAnchors>,
     pub left_controller: XrController,
     pub right_controller: XrController,
     pub left_hand: XrHand,
     pub right_hand: XrHand,
 }
 impl XrState{
+    pub fn vec_in_head_space(&self,pos:Vec3)->Vec3{
+        self.head_pose.to_mat4().transform_vec4(pos.to_vec4()).to_vec3()
+    }
+    
+    pub fn scene_anchor_pose(&self)->Option<Pose>{
+        if let Some(_anchors) = &self.scene_anchors{
+            // lets construct a pose from 2 positions
+            None
+        }
+        else{
+            None
+        }
+    }
+    
     pub fn hands(&self)->[&XrHand;2]{
         [&self.left_hand, &self.right_hand]
     }
@@ -192,7 +245,22 @@ pub struct XrUpdateEvent {
     pub last: Rc<XrState>,
 }
 
+impl XrUpdateEvent{
+            
+    pub fn clicked_x(&self)->bool{self.state.left_controller.click_x() && !self.last.left_controller.click_x()}
+    pub fn clicked_y(&self)->bool{self.state.left_controller.click_y() && !self.last.left_controller.click_y()}
+    pub fn clicked_a(&self)->bool{self.state.right_controller.click_a() && !self.last.right_controller.click_a()}
+    pub fn clicked_b(&self)->bool{self.state.right_controller.click_b() && !self.last.right_controller.click_b()}
+    pub fn clicked_left_thumbstick(&self)->bool{self.state.left_controller.click_thumbstick() && !self.last.left_controller.click_thumbstick()}
+    pub fn clicked_right_thumbstick(&self)->bool{self.state.right_controller.click_thumbstick() && !self.last.right_controller.click_thumbstick()}
+    pub fn clicked_menu(&self)->bool{self.state.left_controller.click_menu() && !self.last.left_controller.click_menu()}
+    pub fn menu_pressed(&self)->bool{self.state.left_hand.menu_pressed() && !self.last.left_hand.menu_pressed()}
+            
+}
+
 impl XrLocalEvent{
+    
+    
     pub fn from_update_event(e:&XrUpdateEvent, mat:&Mat4)->XrLocalEvent{
         // alright we have a matrix, take the inverse
         // then mul all the fingertips and store them in fingertips
@@ -201,7 +269,7 @@ impl XrLocalEvent{
         // lets collect all fingertips
         let finger_tips = SmallVec::new();
         for (_hindex, hand) in [&e.state.left_hand, &e.state.right_hand].iter().enumerate(){
-            if hand.in_view{
+            if hand.in_view(){
                 for (_index,_joint) in hand.joints.iter().enumerate(){
                     /*if XrHand::is_tip(index){
                         let pos = inv.transform_vec4(joint.pose.position.to_vec4()).to_vec3();

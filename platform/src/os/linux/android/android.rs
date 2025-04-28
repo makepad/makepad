@@ -122,11 +122,9 @@ impl Cx {
                 }
             }
         }
-        if let Err(e) = self.os.openxr.destroy_instance(
+        self.os.openxr.destroy_instance(
             &self.os.display.as_ref().unwrap().libgl
-        ){
-            crate::log!("OpenXR destroy destroy_instance error: {e}")
-        }
+        ).ok();
         from_java_messages_clear()
     }
     
@@ -462,6 +460,7 @@ impl Cx {
                     self.call_event_handler(&Event::Shutdown);
                     self.os.quit = true;
                 }
+                
                 self.os.ignore_destroy = false;
             }
             FromJavaMessage::WindowFocusChanged { has_focus } => {
@@ -552,6 +551,7 @@ impl Cx {
         let activity_handle = unsafe {android_jni::fetch_activity_handle(activity)};
         
         let already_running = android_jni::from_java_messages_already_set();
+        
         if already_running{
             android_jni::jni_update_activity(activity_handle);
             // maybe send activity update?
@@ -570,10 +570,10 @@ impl Cx {
         
         android_jni::jni_set_activity(activity_handle);
         android_jni::jni_set_from_java_tx(from_java_tx);
-                
+                        
         // lets start a thread
         std::thread::spawn(move || {
-            
+                        
             // SAFETY: This attaches the current thread to the JVM. It's safe as long as we're in the correct thread.
             unsafe {attach_jni_env()};
             let mut cx = startup();
@@ -582,7 +582,6 @@ impl Cx {
             
             cx.os.activity_thread_id = Some(activity_thread_id);
             cx.os.render_thread_id = Some(unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 });
-            
             
             let window = loop {
                 // Here use blocking method `recv` to reduce CPU usage during cold start.
@@ -599,10 +598,10 @@ impl Cx {
                         cx.os.display_size = dvec2(width as f64, height as f64);
                         break window;
                     }
-                    _ => {}
+                    _=>()
                 }
             };
-
+            
             // SAFETY:
             // The LibEgl instance (libegl) has been properly loaded and initialized earlier.
             // We're not requesting a robust context (false), which is usually fine for most applications.
@@ -645,7 +644,6 @@ impl Cx {
             }
             
             //libgl.enable_debugging();
-                                                
 
             //cx.maybe_warn_hardware_support();
 
@@ -659,8 +657,8 @@ impl Cx {
                 window
             });
             
-           
             cx.main_loop(from_java_rx);
+            cx.stop_studio_websocket();
             
             let display = cx.os.display.take().unwrap();
 
@@ -962,6 +960,9 @@ impl Cx {
                 }
                 CxOsOp::XrAdvertiseAnchor(pose)=>{
                     self.os.openxr.advertise_anchor(pose);
+                }
+                CxOsOp::XrSetLocalAnchor(pose)=>{
+                    self.os.openxr.set_local_anchor(pose);
                 }
                 CxOsOp::XrDiscoverAnchor(id)=>{
                     self.os.openxr.discover_anchor(id);

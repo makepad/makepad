@@ -123,8 +123,9 @@ pub enum CxOsOp {
     SelectFolderDialog(FileDialog),    
     
     XrStartPresenting,
+    XrSetLocalAnchor(Pose),
     XrAdvertiseAnchor(Pose),
-    XrDiscoverAnchor(u32),
+    XrDiscoverAnchor(u8),
     XrStopPresenting,
     
 }
@@ -180,6 +181,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::XrStartPresenting=>write!(f, "XrStartPresenting"),
             Self::XrStopPresenting=>write!(f, "XrStopPresenting"),
             Self::XrAdvertiseAnchor(_)=>write!(f, "XrAdvertiseAnchor"),
+            Self::XrSetLocalAnchor(_)=>write!(f, "XrSetLocalAnchor"),
             Self::XrDiscoverAnchor(_)=>write!(f, "XrDiscoverAnchor"),
         }
     }
@@ -248,11 +250,16 @@ impl Cx {
     pub fn xr_start_presenting(&mut self) {
         self.platform_ops.push(CxOsOp::XrStartPresenting);
     }
+    
     pub fn xr_advertise_anchor(&mut self, pose:Pose) {
         self.platform_ops.push(CxOsOp::XrAdvertiseAnchor(pose));
     }
-        
-    pub fn xr_discover_anchor(&mut self, id: u32) {
+    
+    pub fn xr_set_local_anchor(&mut self, pose:Pose) {
+        self.platform_ops.push(CxOsOp::XrSetLocalAnchor(pose));
+    }
+            
+    pub fn xr_discover_anchor(&mut self, id: u8) {
         self.platform_ops.push(CxOsOp::XrDiscoverAnchor(id));
     }
         

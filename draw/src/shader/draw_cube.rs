@@ -15,18 +15,30 @@ live_design!{
         varying world: vec4,
         
         fn vertex(self) -> vec4 {
-            let pos = self.cube_size * self.geom_pos + self.cube_pos;
+            let pos = self.get_size() * self.geom_pos + self.get_pos();
             let model_view = self.view_transform * self.transform;
             
             let normal_matrix = mat3(model_view);
             let normal = normalize(normal_matrix * self.geom_normal);
             let dp = max(dot(normal, normalize(vec3(0.0,1.0,1.0))), 0.0);
-            let ambient = vec3(0.2,0.2,0.2)
-            let color = self.color.xyz * dp + ambient;
-            
-            self.lit_color = vec4(color*2 , 0.1);
+
+            self.lit_color = self.get_color(dp);
             self.world = model_view * vec4(pos, 1.);
             return self.camera_projection * (self.camera_view * (self.world))
+        }
+        
+        fn get_size(self)->vec3{
+            return self.cube_size 
+        }
+        
+        fn get_pos(self)->vec3{
+            return self.cube_pos
+        }
+                
+        fn get_color(self, dp: float)->vec4{
+            let ambient = vec3(0.2,0.2,0.2)
+            let color = self.color.xyz * dp * self.color.w + ambient;
+            return vec4(color, self.color.w);
         }
         
         fn pixel(self) -> vec4 {
@@ -49,6 +61,7 @@ pub struct DrawCube {
     #[calc] pub transform: Mat4,
     #[live(vec3(1.0,1.0,1.0))] pub cube_size: Vec3,
     #[live(vec3(0.,0.,0.))] pub cube_pos: Vec3,
+    #[live(0.0)] pub life: f32,
     #[live(1.0)] pub depth_clip: f32,
 }
 
