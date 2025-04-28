@@ -96,6 +96,10 @@ impl OsWebSocket{
         //todo!();
         Ok(())
     }
+    
+    pub fn close(&mut self){
+        
+    }
                 
     pub fn open(id:u64, request: HttpRequest, rx_sender:Sender<WebSocketMessage>)->OsWebSocket{
         // alright lets call out directly from wasm to JS
