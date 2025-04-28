@@ -42,7 +42,7 @@ live_design! {
         }
     }
 
-    SlideshowButton = <Button> {
+    SlideshowNavigationButton = <Button> {
         width: 50,
         height: Fill,
         grab_key_focus: false,
@@ -60,11 +60,11 @@ live_design! {
         cursor: Arrow,
         capture_overload: true,
 
-        left = <SlideshowButton> {
+        navigate_left = <SlideshowNavigationButton> {
             draw_icon: { svg_file: (LEFT_ARROW) }
         }
         <Filler> {}
-        right = <SlideshowButton> {
+        navigate_right = <SlideshowNavigationButton> {
             draw_icon: { svg_file: (RIGHT_ARROW) }
         }
     }
@@ -84,9 +84,11 @@ live_design! {
     App = {{App}} {
         ui: <Root> {
             <Window> {
-                body = <View> {
-                    // <ImageGrid> {}
-                    slideshow = <Slideshow> {}
+                body = {
+                    <View> {
+                        // <ImageGrid> {}
+                        slideshow = <Slideshow> {}
+                    }
                 }
             }
         }
@@ -206,7 +208,9 @@ impl App {
         let image = self.ui.image(id!(slideshow.image));
         if let Some(image_idx) = self.state.current_image_idx {
             let image_path = &self.state.image_paths[image_idx];
-            image.load_image_file_by_path_async(cx, &image_path).unwrap();
+            image
+                .load_image_file_by_path_async(cx, &image_path)
+                .unwrap();
         } else {
             image
                 .load_image_dep_by_path(
@@ -257,10 +261,10 @@ impl LiveRegister for App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(id!(left)).clicked(&actions) {
+        if self.ui.button(id!(navigate_left)).clicked(&actions) {
             self.navigate_left(cx);
         }
-        if self.ui.button(id!(right)).clicked(&actions) {
+        if self.ui.button(id!(navigate_right)).clicked(&actions) {
             self.navigate_right(cx);
         }
         if let Some(event) =

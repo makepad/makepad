@@ -36,3 +36,5 @@ CLAUDE_KEY
 experiments/websocket-windows/nodejs-websocketserver
 experiments/svgloader
 CLAUDE.md
+
+**/*.obsidian

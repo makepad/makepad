@@ -1,4 +1,4 @@
-In the previous step, we created an initial implementation image grid, and added it to our app.
+In the previous step, we created an initial implementation image gridfor our app.
 
 To keep our initial implementation simple, it had the following limitations:
 - The number of rows was fixed.
@@ -48,7 +48,6 @@ At the moment, the `State` struct contains only two fields:
 This is all the information we need for now to draw our image grid.
 ### Updating the `App` struct
 Next, replace the definition of the `App` struct in `app.rs` with the one here below:
-
 ```
 #[derive(Live, LiveHook)]
 pub struct App {
@@ -101,7 +100,6 @@ For simplicity, we have not added any error handling to the `update_image_paths`
 If any of these errors occur, our app will simply panic. That is acceptable for a tutorial, but in a real life app, we'd want more robust error handling here.
 
 We now have a method to populate the `image_paths` field with the paths to the files in a directory, but this method is not being called yet. We'll take care of that next.
-
 ## Running Initialisation at Startup
 We need to make sure that the `update_image_paths` method we defined earlier is called when the application starts.
 
