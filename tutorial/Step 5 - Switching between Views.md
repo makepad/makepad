@@ -1,4 +1,4 @@
-In the previous two steps, we created both an image grid and a slideshow for our app. In this step, we'll enable switching between the image grid and the slideshow.
+In the previous steps, we created both an image grid and a slideshow for our app. In this step, we'll make it possible to switch between the image grid and the slideshow.
 
 Our app will start out displaying the image grid. Above the image grid we'll add a menu bar containing a single button. Clicking this button will switch to the slideshow. Pressing the escape key while the slideshow is displayed will switch back to the image grid.
 ## What you will learn
