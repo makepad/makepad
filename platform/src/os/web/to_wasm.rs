@@ -3,15 +3,12 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_wasm_bridge::*,
-        makepad_math::{dvec2, DVec2, Vec3, Quat, Pose},
+        makepad_math::{dvec2, DVec2},
         cx::{OsType, XrCapabilities, WebParams},
         window::CxWindowPool,
         area::Area,
         //midi::{MidiData},
         event::{
-            XRButton,
-            XRInput,
-            XRUpdateEvent,
             KeyCode,
             KeyModifiers,
             MouseButton,
@@ -508,105 +505,6 @@ pub struct ToWasmTextCopy {
 
 // Keyboard API
 
-
-
-#[derive(ToWasm, Clone)]
-pub struct WVec3 {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-}
-
-impl Into<Vec3> for WVec3 {
-    fn into(self) -> Vec3 {
-        Vec3 {x: self.x, y: self.y, z: self.z}
-    }
-}
-
-#[derive(ToWasm, Clone)]
-pub struct WQuat {
-    pub a: f32,
-    pub b: f32,
-    pub c: f32,
-    pub d: f32,
-}
-
-impl Into<Quat> for WQuat {
-    fn into(self) -> Quat {
-        Quat {x: self.a, y: self.b, z: self.c, w: self.d}
-    }
-}
-
-#[derive(ToWasm, Clone)]
-pub struct WXRButton {
-    pub pressed: bool,
-    pub value: f32
-}
-
-#[derive(ToWasm, Clone)]
-pub struct WXRTransform {
-    pub orientation: WQuat,
-    pub position: WVec3,
-}
-
-impl Into<Pose> for WXRTransform {
-    fn into(self) -> Pose {
-        Pose {
-            orientation: self.orientation.into(),
-            position: self.position.into()
-        }
-    }
-}
-
-impl Into<XRButton> for WXRButton {
-    fn into(self) -> XRButton {
-        XRButton {
-            value: self.value,
-            pressed: self.pressed
-        }
-    }
-}
-
-#[derive(ToWasm)]
-pub struct WXRInput {
-    pub hand: u32,
-    pub active: bool,
-    pub grip: WXRTransform,
-    pub ray: WXRTransform,
-    pub buttons: Vec<WXRButton>,
-    pub axes: Vec<f32>
-}
-
-impl Into<XRInput> for WXRInput {
-    fn into(self) -> XRInput {
-        XRInput {
-            active: self.active,
-            hand: self.hand,
-            grip: self.grip.into(),
-            ray: self.ray.into(),
-            axes: self.axes,
-            buttons: self.buttons.into_iter().map( | v | v.into()).collect(),
-        }
-    }
-}
-
-#[derive(ToWasm)]
-pub struct ToWasmXRUpdate {
-    pub time: f64,
-    pub head_pose: WXRTransform,
-    pub inputs: Vec<WXRInput>,
-}
-
-impl ToWasmXRUpdate {
-    pub fn into_xrupdate_event(self, last_inputs: Option<Vec<XRInput >>) -> XRUpdateEvent {
-        XRUpdateEvent {
-            time: self.time,
-            head_pose: self.head_pose.into(),
-            inputs: self.inputs.into_iter().map( | v | v.into()).collect(),
-            last_inputs
-        }
-    }
-}
 
 #[derive(ToWasm)]
 pub struct ToWasmAppGotFocus {}

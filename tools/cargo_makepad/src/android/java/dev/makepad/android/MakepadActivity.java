@@ -520,10 +520,15 @@ public class MakepadActivity
     }
 
     public void closeWebSocket(long id) {
+        MakepadWebSocket socket = mActiveWebsockets.get(id);
+        if (socket != null) {
+            socket.closeSocketAndClearCallback();
+        }
         MakepadWebSocketReader reader = mActiveWebsocketsReaders.get(id);
         if (reader != null) {
             mWebSocketsHandler.removeCallbacks(reader);
         }
+        
         mActiveWebsocketsReaders.remove(id);
         mActiveWebsockets.remove(id);
     }
