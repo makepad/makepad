@@ -1,4 +1,4 @@
-In the previous step, we created a minimal Makepad app. In this step, we're going to create a an initial implementation of an image grid and add it to our app.
+In the previous step, we created a minimal Makepad app. In this step, we're going to create a an initial implementation of an image grid and for our app.
 
 Our image grid will be organised as follows:
 - Each image is stored in an item.
@@ -71,9 +71,11 @@ live_design! {
     App = {{App}} {
         ui: <Root> {
             <Window> {
-                body = <View> {
-                    <ImageGrid> {}
-                }
+                body = {
+	                <View> {
+	                    <ImageGrid> {}
+	                }
+	            }
             }
         }
     }
