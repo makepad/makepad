@@ -30,7 +30,8 @@ This will create a new directory named `resources`. Navigate to it, and then dow
 
 We'll be using this file as our placeholder image.
 
-**Note:** All files in the `resources` directory are automatically bundled with your app when it is built.
+**Note:**
+All files in the `resources` directory are automatically bundled with your app when it is built.
 ## Updating the DSL Code
 Now that we've added a placeholder image, we're going to update the DSL code with the definitions we need. Replace the call to the `live_design` macro in `app.rs` with the one here below:
 ```
@@ -133,7 +134,8 @@ This `Image` has the following properties:
 - `fit: Biggest` ensures the image stretches so that its *biggest* side fills its container, while maintaining its aspect ratio.
 - `source: (PLACEHOLDER)` sets our placeholder image as the image source, using the variable we defined earlier.
 
-**Note:** to evaluate an expression in Makepad DSL code, you have to enclose the expression in parentheses `(...)`. The `PLACEHOLDER` variable is an expressions too, so we have to write it as `(PLACEHOLDER)`.
+**Note:**
+to evaluate an expression in Makepad DSL code, you have to enclose the expression in parentheses `(...)`. The `PLACEHOLDER` variable is an expressions too, so we have to write it as `(PLACEHOLDER)`.
 
 ### Defining an `ImageRow`:
 The following code defines an `ImageRow`:
@@ -160,7 +162,8 @@ Within each `ImageRow`, we use a `PortalList` to list its items.
         }
 ```
 
-**Note:** A `PortalList` is like a standard list but with support for *infinite scrolling*: it can effectively handle large lists by only rendering visible items. We don’t actually need infinite scrolling, but at the time of this writing, Makepad doesn’t have a standard list yet, so we use `PortalList` as a workaround.
+**Note:**
+A `PortalList` is like a standard list but with support for *infinite scrolling*: it can effectively handle large lists by only rendering visible items. We don’t actually need infinite scrolling, but at the time of this writing, Makepad doesn’t have a standard list yet, so we use `PortalList` as a workaround.
 
 This `PortalList` has the following properties:
 - `height: 256` ensures the list has enough vertical space for each item.
