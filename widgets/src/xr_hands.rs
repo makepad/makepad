@@ -307,12 +307,12 @@ impl Widget for XrHands {
             cube.draw(cx);
         }
         
-        fn draw_democube(
+        fn _draw_democube(
             cx: &mut Cx3d, 
             cube:&mut DrawCube, 
             anchor:&XrAnchor, 
             ){
-            let speed = 32.0; 
+            let _speed = 32.0; 
             //let rot = (xr_state.time*speed).rem_euclid(360.0) as f32;
             cube.color = vec4(1.0,1.0,1.0,1.0);
             cube.cube_size = vec3(0.1,0.1,0.1);
