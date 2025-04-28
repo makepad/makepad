@@ -822,7 +822,7 @@ impl Mat4 {
         }
     }
     
-    pub const fn translation(x: f32, y: f32, z: f32) -> Mat4 {
+    pub const fn translation(v:Vec3) -> Mat4 {
         Mat4 {v: [
             1.0,
             0.0,
@@ -836,34 +836,54 @@ impl Mat4 {
             0.0,
             1.0,
             0.0,
-            x,
-            y,
-            z,
+            v.x,
+            v.y,
+            v.z,
             1.0
         ]}
         
     }
     
-    pub const fn scaled_translation(sx: f32, sy:f32, sz:f32,  x: f32, y: f32, z: f32) -> Mat4 {
+    pub const fn nonuniform_scaled_translation(s:Vec3,  t:Vec3) -> Mat4 {
         Mat4 {v: [
-            sx,
+            s.x,
             0.0,
             0.0,
             0.0,
             0.0,
-            sy,
+            s.y,
             0.0,
             0.0,
             0.0,
             0.0,
-            sz,
+            s.z,
             0.0,
-            x,
-            y,
-            z,
+            t.x,
+            t.y,
+            t.z,
             1.0
         ]}
-        
+    }
+    
+    pub const fn scaled_translation(s:f32,  t:Vec3) -> Mat4 {
+        Mat4 {v: [
+            s,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            s,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            s,
+            0.0,
+            t.x,
+            t.y,
+            t.z,
+            1.0
+        ]}
     }
         
     pub const fn scale(s: f32) -> Mat4 {
@@ -887,14 +907,15 @@ impl Mat4 {
         ]}
                 
     }
-    pub fn rotation(rx: f32, ry: f32, rz: f32) -> Mat4 {
-        const TORAD: f32 = 0.017453292;
-        let cx = f32::cos(rx * TORAD);
-        let cy = f32::cos(ry * TORAD);
-        let cz = f32::cos(rz * TORAD);
-        let sx = f32::sin(rx * TORAD);
-        let sy = f32::sin(ry * TORAD);
-        let sz = f32::sin(rz * TORAD);
+    
+    pub fn rotation(r:Vec3) -> Mat4 {
+        //const TORAD: f32 = 0.017453292;
+        let cx = f32::cos(r.x);
+        let cy = f32::cos(r.y);
+        let cz = f32::cos(r.z);
+        let sx = f32::sin(r.x);
+        let sy = f32::sin(r.y);
+        let sz = f32::sin(r.z);
         let m0 = cy * cz + sx * sy * sz;
         let m1 = -sz * cy + cz * sx * sy;
         let m2 = sy * cx;

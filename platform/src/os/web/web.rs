@@ -24,7 +24,6 @@ use {
             HttpError,
             NetworkResponse,
             Event,
-            XRInput,
             TextClipboardEvent,
             TimerEvent,
             MouseDownEvent,
@@ -207,17 +206,6 @@ impl Cx {
                 
                 live_id!(ToWasmAppLostFocus) => {
                     self.call_event_handler(&Event::AppLostFocus);
-                }
-                
-                live_id!(ToWasmXRUpdate) => {
-                    let tw = ToWasmXRUpdate::read_to_wasm(&mut to_wasm);
-                    let event = Event::XRUpdate(
-                        tw.into_xrupdate_event(self.os.xr_last_inputs.take())
-                    );
-                    self.call_event_handler(&event);
-                    if let Event::XRUpdate(event) = event {
-                        self.os.xr_last_inputs = Some(event.inputs);
-                    }
                 }
                 
                 live_id!(ToWasmRedrawAll) => {
@@ -533,7 +521,6 @@ impl CxOsApi for Cx {
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
-            ToWasmXRUpdate::to_js_code(),
             ToWasmAppGotFocus::to_js_code(),
             ToWasmAppLostFocus::to_js_code(),
             ToWasmHTTPResponse::to_js_code(),
@@ -674,8 +661,6 @@ pub struct CxOs {
     pub (crate) index_buffers: usize,
     pub (crate) vaos: usize,
     
-    pub (crate) xr_last_inputs: Option<Vec<XRInput >>,
-    
     pub (crate) to_wasm_js: Vec<String>,
     pub (crate) from_wasm_js: Vec<String>,
     
@@ -692,8 +677,6 @@ impl Default for CxOs{
             vertex_buffers: 0,
             index_buffers: 0,
             vaos: 0,
-                    
-            xr_last_inputs: None,
                     
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),
