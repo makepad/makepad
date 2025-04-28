@@ -13,7 +13,7 @@ live_design! {
     LEFT_ARROW = dep("crate://self/resources/left_arrow.svg");
     RIGHT_ARROW = dep("crate://self/resources/right_arrow.svg");
 
-    TopMenu = <View> {
+    MenuBar = <View> {
         width: Fill,
         height: Fit,
 
@@ -55,7 +55,7 @@ live_design! {
     ImageBrowser = <View> {
         flow: Down,
 
-        <TopMenu> {}
+        <MenuBar> {}
         <ImageGrid> {}
     }
 
@@ -181,6 +181,9 @@ impl Widget for ImageGrid {
                     state.image_paths.len().div_ceil(state.images_per_row);
                 list.set_item_range(cx, 0, num_rows);
                 while let Some(row_idx) = list.next_visible_item(cx) {
+                    if row_idx >= num_rows {
+                        continue;
+                    }
                     let row = list.item(cx, row_idx, live_id!(ImageRow));
                     row.draw_all(
                         cx,
