@@ -7,10 +7,9 @@ use {
 
 live_design!{
     pub GeometryQuad2D = {{GeometryQuad2D}} {
-        x1: 0.0;
-        y1: 0.0;
-        x2: 1.0;
-        y2: 1.0;
+    }
+    
+    pub GeometryCube3D = {{GeometryCube3D}} {
     }
 }
 
@@ -60,6 +59,64 @@ pub struct GeometryQuad2D {
     #[live(1.0)] pub x2: f32,
     #[live(1.0)] pub y2: f32,
 }
+
+impl LiveHook for GeometryCube3D {
+    fn after_apply(&mut self, cx: &mut Cx, _apply:&mut Apply, _index:usize, _nodes:&[LiveNode]) {
+        let mut fp = GeometryFingerprint::new(LiveType::of::<Self>());
+        fp.push(self.width);
+        fp.push(self.height);
+        fp.push(self.depth);
+        fp.push(self.width_segments as f32);
+        fp.push(self.height_segments as f32);
+        fp.push(self.depth_segments as f32);
+        // lets get the fingerprint
+        self.geometry_ref = Some(cx.get_geometry_ref(fp));
+        GeometryGen::from_cube_3d(
+            self.width,
+            self.height,
+            self.depth,
+            self.width_segments,
+            self.height_segments,
+            self.depth_segments,
+        ).to_geometry(cx, &self.geometry_ref.as_ref().unwrap().0);
+    }
+}
+
+impl GeometryFields for GeometryCube3D {
+    fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
+        fields.push(GeometryField {id: live_id!(geom_pos), ty: ShaderTy::Vec3});
+        fields.push(GeometryField {id: live_id!(geom_id), ty: ShaderTy::Float});
+        fields.push(GeometryField {id: live_id!(geom_normal), ty: ShaderTy::Vec3});
+        fields.push(GeometryField {id: live_id!(geom_uv), ty: ShaderTy::Vec2});
+    }
+    
+    fn get_geometry_id(&self) -> Option<GeometryId> {
+        // ok so what about doing a Rc<Geometry> based on input and class type
+        if let Some(gr) = &self.geometry_ref{
+            Some(gr.0.geometry_id())
+        }
+        else{
+            None
+        }
+    }
+        
+    fn live_type_check(&self) -> LiveType {
+        LiveType::of::<Self>()
+    }
+}
+
+
+#[derive(Live, LiveRegister)]
+pub struct GeometryCube3D {
+    #[rust] pub geometry_ref: Option<GeometryRef>,
+    #[live(1.0)] width: f32,
+    #[live(1.0)] height: f32,
+    #[live(1.0)] depth: f32,
+    #[live(1usize)] width_segments: usize,
+    #[live(1usize)] height_segments: usize,
+    #[live(1usize)] depth_segments: usize
+}
+
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GeometryGen {

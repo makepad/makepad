@@ -163,11 +163,11 @@ live_design! {
         }
 
         draw_cursor: {
-            instance hover: 0.0
             instance focus: 0.0
 
             uniform border_radius: 0.5
 
+            uniform blink: 0.0
             uniform color: (THEME_COLOR_TEXT_CURSOR)
 
             fn pixel(self) -> vec4 {
@@ -180,13 +180,28 @@ live_design! {
                     self.border_radius
                 );
                 sdf.fill(
-                    mix(THEME_COLOR_U_HIDDEN, self.color, self.focus)
+                    mix(THEME_COLOR_U_HIDDEN, self.color, self.blink * self.focus)
                 );
                 return sdf.result;
             }
         }
 
         animator: {
+            blink = {
+                default: off
+                off = {
+                    from: {all: Forward {duration:0.05}}
+                    apply: {
+                        draw_cursor: {blink:0.0}
+                    }
+                }
+                on = {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {blink:1.0}
+                    }
+                }
+            }
             hover = {
                 default: off
                 off = {
@@ -510,11 +525,14 @@ pub struct TextInput {
     #[live] is_numeric_only: bool,
     #[live] empty_text: String,
     #[live] text: String,
+    #[live(0.5)] blink_speed: f64,
+
     #[rust] password_text: String,
     #[rust] laidout_text: Option<Rc<LaidoutText>>,
     #[rust] text_area: Area,
     #[rust] selection: Selection,
     #[rust] history: History,
+    #[rust] blink_timer: Timer,
 }
 
 impl TextInput {
@@ -602,6 +620,7 @@ impl TextInput {
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
         self.selection = selection;
         self.history.force_new_edit_group();
+        self.reset_blink_timer(cx);
         self.draw_bg.redraw(cx);
     }
 
@@ -622,9 +641,17 @@ impl TextInput {
             }
         );
     }
-
+    
     pub fn selected_text(&self) -> &str {
         &self.text[self.selection.start().index..self.selection.end().index]
+    }
+
+    pub fn reset_blink_timer(&mut self, cx: &mut Cx) {
+        self.animator_cut(cx, id!(blink.off));
+        if !self.is_read_only {
+            cx.stop_timer(self.blink_timer);
+            self.blink_timer = cx.start_timeout(self.blink_speed)
+        }
     }
 
     fn cursor_to_position(&self, cursor: Cursor) -> CursorPosition {
@@ -1011,6 +1038,15 @@ impl Widget for TextInput {
             self.draw_bg.redraw(cx);
         }
 
+        if self.blink_timer.is_event(event).is_some() {
+            if self.animator_in_state(cx, id!(blink.off)) {
+                self.animator_play(cx, id!(blink.on));
+            } else {
+                self.animator_play(cx, id!(blink.off));
+            }
+            self.blink_timer = cx.start_timeout(self.blink_speed)
+        }
+
         let uid = self.widget_uid();
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
@@ -1265,75 +1301,135 @@ impl Widget for TextInput {
 
 impl TextInputRef {
     pub fn is_password(&self) -> bool {
-        self.borrow().unwrap().is_password()
+        if let Some(inner) = self.borrow(){
+            inner.is_password()
+        }
+        else{
+            false
+        }
     }
  
     pub fn set_is_password(&self, cx: &mut Cx, is_password: bool) {
-        self.borrow_mut().unwrap().set_is_password(cx, is_password);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_is_password(cx, is_password);
+        }
     }
  
     pub fn toggle_is_password(&self, cx: &mut Cx) {
-        self.borrow_mut().unwrap().toggle_is_password(cx);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.toggle_is_password(cx);
+        }
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.borrow().unwrap().is_read_only()
+        if let Some(inner) = self.borrow(){
+            inner.is_read_only()
+        }
+        else{
+            false
+        }
     }
 
     pub fn set_is_read_only(&self, cx: &mut Cx, is_read_only: bool) {
-        self.borrow_mut().unwrap().set_is_read_only(cx, is_read_only);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_is_read_only(cx, is_read_only);
+        }
     }
 
     pub fn toggle_is_read_only(&self, cx: &mut Cx) {
-        self.borrow_mut().unwrap().toggle_is_read_only(cx);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.toggle_is_read_only(cx);
+        }
     }
 
     pub fn is_numeric_only(&self) -> bool {
-        self.borrow().unwrap().is_numeric_only()
+        if let Some(inner) = self.borrow(){
+            inner.is_numeric_only()
+        }
+        else{
+            false
+        }
     }
 
     pub fn set_is_numeric_only(&self, cx: &mut Cx, is_numeric_only: bool) {
-        self.borrow_mut().unwrap().set_is_numeric_only(cx, is_numeric_only);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_is_numeric_only(cx, is_numeric_only);
+        }
     }
 
     pub fn toggle_is_numeric_only(&self, cx: &mut Cx) {
-        self.borrow_mut().unwrap().toggle_is_numeric_only(cx);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.toggle_is_numeric_only(cx);
+        }
     }
 
     pub fn empty_text(&self) -> String {
-        self.borrow().unwrap().empty_text().to_string()
+        if let Some(inner) = self.borrow(){
+            inner.empty_text().to_string()
+        }
+        else{
+            String::new()
+        }
     }
 
     pub fn set_empty_text(&self, cx: &mut Cx, empty_text: String) {
-        self.borrow_mut().unwrap().set_empty_text(cx, empty_text);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_empty_text(cx, empty_text);
+        }
     }
 
     pub fn text(&self) -> String {
-        self.borrow().unwrap().text().to_string()
+        if let Some(inner) = self.borrow(){
+            inner.text().to_string()
+        }
+        else{
+            String::new()
+        }
     }
 
     pub fn set_text(&self, cx: &mut Cx, text: String) {
-        self.borrow_mut().unwrap().set_text(cx, text);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_text(cx, text);
+        }
     }
 
     pub fn selection(&self) -> Selection {
-        self.borrow().unwrap().selection()
+        if let Some(inner) = self.borrow(){
+            inner.selection()
+        }
+        else{
+            Default::default()
+        }
     }
 
     pub fn set_selection(&self, cx: &mut Cx, selection: Selection) {
-        self.borrow_mut().unwrap().set_selection(cx, selection);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_selection(cx, selection);
+        }
     }
 
     pub fn cursor(&self) -> Cursor {
-        self.borrow().unwrap().cursor()
+        if let Some(inner) = self.borrow(){
+            inner.cursor()
+        }
+        else{
+            Default::default()
+        }
     }
 
     pub fn set_cursor(&self, cx: &mut Cx, cursor: Cursor, keep_selection: bool) {
-        self.borrow_mut().unwrap().set_cursor(cx, cursor, keep_selection);
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_cursor(cx, cursor, keep_selection);
+        }
     }
 
     pub fn selected_text(&self) -> String {
-        self.borrow().unwrap().selected_text().to_string()
+        if let Some(inner) = self.borrow(){
+            inner.selected_text().to_string()
+        }
+        else{
+            String::new()
+        }
     }
 
     pub fn returned(&self, actions: &Actions) -> Option<String> {
@@ -1387,7 +1483,7 @@ pub enum TextInputAction {
 #[derive(Live, LiveHook, LiveRegister)]
 #[repr(C)]
 struct DrawMaybeEmptyText {
-    #[deref] draw_super: DrawText2,
+    #[deref] draw_super: DrawText,
     #[live] is_empty: f32,
 }
 

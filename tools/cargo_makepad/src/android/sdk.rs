@@ -95,7 +95,7 @@ pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], urls:&And
         shell(src_dir, "curl", &[url, "-#", "--output", src_dir.join(url_file_name(url)).to_str().unwrap()]) ?;
         Ok(())
     }
-    curl(1, src_dir, urls.platform) ?;
+    curl(1, src_dir, urls.platform_dl) ?;
     match host_os {
         HostOs::WindowsX64 => {
             curl(2, src_dir, urls.build_tools_windows) ?;

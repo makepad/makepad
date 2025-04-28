@@ -216,10 +216,13 @@ pub enum LabelAction {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct Label {
-    #[redraw] #[live] draw_text: DrawText2,
+    #[redraw] #[live] draw_text: DrawText,
+    
     #[walk] walk: Walk,
     #[live] align: Align,
+    #[live(Flow::RightWrap)] flow: Flow,
     #[live] padding: Padding,
+    
     #[rust] area: Area,
     //margin: Margin,
     #[live] text: ArcStringMut,
@@ -235,7 +238,10 @@ impl Widget for Label {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk:Walk)->DrawStep{
         let walk = walk.with_add_padding(self.padding);
-        cx.begin_turtle(walk, Layout::default());
+        cx.begin_turtle(walk, Layout{
+            flow: self.flow,
+            ..Default::default()
+        });
         // here we need to check if the text is empty, if so we need to set it to a space
         // or the text draw will not work(seems like lazy drawtext bug)
         let _ = self.text.as_ref().is_empty().then(|| {

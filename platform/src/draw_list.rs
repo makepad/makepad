@@ -4,9 +4,10 @@ use {
             LiveId,
         },
         makepad_math::*,
+        cx::Cx,
         os::{
             CxOsDrawCall,
-            CxOsView,
+            CxOsDrawList,
         },
         pass::PassId,
         id_pool::*,
@@ -29,6 +30,12 @@ use {
 
 #[derive(Debug)]
 pub struct DrawList(PoolId);
+
+impl DrawList{
+    pub fn new(cx:&mut Cx)->Self{
+        cx.draw_lists.alloc()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Copy, Hash, Ord, PartialOrd, Eq)]
 pub struct DrawListId(usize, u64);
@@ -84,7 +91,7 @@ impl std::ops::IndexMut<DrawListId> for CxDrawListPool {
 
 #[derive(Default, Clone)]
 #[repr(C)]
-pub struct DrawUniforms {
+pub struct CxDrawCallUniforms {
     pub draw_zbias: f32,
     pub pad1: f32,
     pub pad2: f32,
@@ -92,8 +99,8 @@ pub struct DrawUniforms {
 }
 
 
-impl DrawUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawUniforms>()] {
+impl CxDrawCallUniforms {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<CxDrawCallUniforms>()] {
         unsafe {std::mem::transmute(self)}
     }
     /*
@@ -178,7 +185,7 @@ pub struct CxDrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     pub options: CxDrawShaderOptions,
     pub total_instance_slots: usize,
-    pub draw_uniforms: DrawUniforms, // draw uniforms
+    pub draw_call_uniforms: CxDrawCallUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
@@ -193,7 +200,7 @@ impl CxDrawCall {
             options: draw_vars.options.clone(),
             draw_shader: draw_vars.draw_shader.unwrap(),
             total_instance_slots: mapping.instances.total_slots,
-            draw_uniforms: DrawUniforms::default(),
+            draw_call_uniforms: CxDrawCallUniforms::default(),
             user_uniforms: draw_vars.user_uniforms,
             texture_slots: draw_vars.texture_slots.clone(),
             instance_dirty: true,
@@ -205,7 +212,7 @@ impl CxDrawCall {
 #[derive(Clone)]
 #[repr(C)]
 pub struct CxDrawListUniforms {
-    pub view_transform: [f32; 16],
+    pub view_transform: Mat4,
     pub view_clip: Vec4,
     pub view_shift: Vec2,
     pub pad1: f32,
@@ -215,7 +222,7 @@ pub struct CxDrawListUniforms {
 impl Default for CxDrawListUniforms{
     fn default()->Self{
         Self{
-            view_transform: [0.0;16],
+            view_transform: Mat4::identity(),
             view_clip: vec4(-100000.0, -100000.0, 100000.0, 100000.0),
             view_shift: vec2(0.0,0.0),
             pad1: 0.0,
@@ -289,7 +296,7 @@ pub struct CxDrawList {
     pub draw_list_uniforms: CxDrawListUniforms,
     pub draw_list_has_clip: bool,
     
-    pub os: CxOsView,
+    pub os: CxOsDrawList,
     pub rect_areas: Vec<CxRectArea>,
     pub find_appendable_draw_shader_id: Vec<u64>
 }
@@ -478,20 +485,13 @@ impl CxDrawList {
         let ys = if self.no_h_scroll {0.} else {self.snapped_scroll.y};
         Vec2 {x: xs, y: ys}
     }*/
-    
+    /*
     pub fn uniform_view_transform(&mut self, v: &Mat4) {
         //dump in uniforms
-        for i in 0..16 {
-            self.draw_list_uniforms.view_transform[i] = v.v[i];
-        }
+        self.draw_list_uniforms.view_transform = *v;
     }
     
     pub fn get_view_transform(&self) -> Mat4 {
-        //dump in uniforms
-        let mut m = Mat4::default();
-        for i in 0..16 {
-            m.v[i] = self.draw_list_uniforms.view_transform[i];
-        }
-        m
-    }
+        self.draw_list_uniforms.view_transform
+    }*/
 }

@@ -380,7 +380,7 @@ impl Egl {
             return None;
         }
         
-        gl_sys::load_with(|s| {
+        (gl.glload_with)(|s| {
             let s = CString::new(s).unwrap();
             unsafe {(libegl.eglGetProcAddress.unwrap())(s.as_ptr())}
         });

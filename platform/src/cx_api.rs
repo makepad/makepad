@@ -11,7 +11,7 @@ use {
         macos_menu::MacosMenu,
         makepad_futures::executor::Spawner,
         makepad_live_id::*,
-        makepad_math::{DVec2, Rect},
+        makepad_math::{DVec2, Rect, Pose},
         pass::{CxPassParent, CxPassRect, PassId},
         texture::Texture,
         window::WindowId,
@@ -45,6 +45,11 @@ pub trait CxOsApi {
     fn default_window_size(&self)->DVec2{dvec2(800.,600.)}
     
     fn max_texture_width()->usize{4096}
+    
+    fn in_xr_mode(&self)->bool{false}
+    
+    fn micro_zbias_step(&self)->f32{0.00001}
+    
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -64,10 +69,7 @@ pub enum CxOsOp {
     RestoreWindow(WindowId),
     HideWindow(WindowId),
     SetTopmost(WindowId, bool),
-    SwitchToXr,
     ShowInDock(bool),
-    XrStartPresenting,
-    XrStopPresenting,
 
     ShowTextIME(Area, DVec2),
     HideTextIME,
@@ -119,6 +121,13 @@ pub enum CxOsOp {
     SelectFileDialog(FileDialog),
     SaveFolderDialog(FileDialog),
     SelectFolderDialog(FileDialog),    
+    
+    XrStartPresenting,
+    XrSetLocalAnchor(Pose),
+    XrAdvertiseAnchor(Pose),
+    XrDiscoverAnchor(u8),
+    XrStopPresenting,
+    
 }
 
 impl std::fmt::Debug for CxOsOp {
@@ -135,8 +144,6 @@ impl std::fmt::Debug for CxOsOp {
             Self::HideWindow(..)=>write!(f, "HideWindow"),
             Self::SetTopmost(..)=>write!(f, "SetTopmost"),
             Self::ShowInDock(..)=>write!(f, "ShowInDock"),
-            Self::XrStartPresenting=>write!(f, "XrStartPresenting"),
-            Self::XrStopPresenting=>write!(f, "XrStopPresenting"),
             
             Self::ShowTextIME(..)=>write!(f, "ShowTextIME"),
             Self::HideTextIME=>write!(f, "HideTextIME"),
@@ -170,7 +177,12 @@ impl std::fmt::Debug for CxOsOp {
             Self::SelectFolderDialog(..)=>write!(f, "SelectFolderDialog"),
             Self::ResizeWindow(..)=>write!(f, "ResizeWindow"),
             Self::RepositionWindow(..)=>write!(f, "RepositionWindow"),
-            Self::SwitchToXr=>write!(f, "SwitchToXr")
+            
+            Self::XrStartPresenting=>write!(f, "XrStartPresenting"),
+            Self::XrStopPresenting=>write!(f, "XrStopPresenting"),
+            Self::XrAdvertiseAnchor(_)=>write!(f, "XrAdvertiseAnchor"),
+            Self::XrSetLocalAnchor(_)=>write!(f, "XrSetLocalAnchor"),
+            Self::XrDiscoverAnchor(_)=>write!(f, "XrDiscoverAnchor"),
         }
     }
 }
@@ -235,10 +247,23 @@ impl Cx {
         self.platform_ops.push(CxOsOp::UpdateMacosMenu(menu));
     }
     
-    pub fn switch_to_xr(&mut self) {
-        self.platform_ops.push(CxOsOp::SwitchToXr);
+    pub fn xr_start_presenting(&mut self) {
+        self.platform_ops.push(CxOsOp::XrStartPresenting);
     }
     
+    pub fn xr_advertise_anchor(&mut self, pose:Pose) {
+        self.platform_ops.push(CxOsOp::XrAdvertiseAnchor(pose));
+    }
+    
+    pub fn xr_set_local_anchor(&mut self, pose:Pose) {
+        self.platform_ops.push(CxOsOp::XrSetLocalAnchor(pose));
+    }
+            
+    pub fn xr_discover_anchor(&mut self, id: u8) {
+        self.platform_ops.push(CxOsOp::XrDiscoverAnchor(id));
+    }
+        
+        
     pub fn quit(&mut self) {
         self.platform_ops.push(CxOsOp::Quit);
     }
@@ -337,13 +362,6 @@ impl Cx {
         }
     }
 
-    pub fn xr_start_presenting(&mut self) {
-        self.platform_ops.push(CxOsOp::XrStartPresenting);
-    }
-
-    pub fn xr_stop_presenting(&mut self) {
-        self.platform_ops.push(CxOsOp::XrStopPresenting);
-    }
 
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f64 {
         if let Some(draw_list_id) = area.draw_list_id() {

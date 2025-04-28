@@ -13,6 +13,7 @@ use {
         dma_buf,
         egl_sys::{self, LibEgl},
         gl_sys,
+        gl_sys::LibGl,
     },
     crate::{
         cx::Cx,
@@ -35,6 +36,8 @@ impl Cx {
         
         self.setup_render_pass(pass_id);
         
+        let gl = self.os.gl();
+                
         let egl_surface = opengl_window.egl_surface;
         
         self.passes[pass_id].paint_dirty = false;
@@ -44,7 +47,7 @@ impl Cx {
         unsafe {
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
             (opengl_cx.libegl.eglMakeCurrent.unwrap())(opengl_cx.egl_display, egl_surface, egl_surface, opengl_cx.egl_context);
-            gl_sys::Viewport(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
+            (gl.glViewport)(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
         
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -63,13 +66,13 @@ impl Cx {
         
         if !self.passes[pass_id].dont_clear {
             unsafe {
-                gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
-                gl_sys::ClearDepthf(clear_depth as f32);
-                gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
-                gl_sys::Clear(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
+                (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+                (gl.glClearDepthf)(clear_depth as f32);
+                (gl.glClearColor)(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
+                (gl.glClear)(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             }
         }
-        Self::set_default_depth_and_blend_mode();
+        Self::set_default_depth_and_blend_mode(self.os.gl());
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
@@ -92,7 +95,7 @@ impl Cx {
         texture: &Texture,
     ) -> dma_buf::Image<OwnedFd> {
         let cxtexture = &mut self.textures[texture.texture_id()];
-        cxtexture.update_shared_texture();
+        cxtexture.update_shared_texture(self.os.gl());
 
         let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
         unsafe {
@@ -176,27 +179,27 @@ impl Cx {
 
 
 impl CxTexture {
-    fn update_shared_texture(&mut self) {
+    fn update_shared_texture(&mut self, gl:&LibGl) {
         if !self.alloc_shared(){
             return
         }
         let alloc = self.alloc.as_ref().unwrap();
         
         // HACK(eddyb) drain error queue, so that we can check erors below.
-        while unsafe { gl_sys::GetError() } != 0 {}
+        while unsafe { (gl.glGetError)() } != 0 {}
 
         unsafe {
             if self.os.gl_texture.is_none() {
                 let mut gl_texture = std::mem::MaybeUninit::uninit();
-                gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                 self.os.gl_texture = Some(gl_texture.assume_init());
             }
 
-            gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
 
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
-            gl_sys::TexImage2D(
+            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+            (gl.glTexImage2D)(
                 gl_sys::TEXTURE_2D,
                 0,
                 gl_sys::RGBA as i32,
@@ -207,13 +210,14 @@ impl CxTexture {
                 gl_sys::UNSIGNED_BYTE,
                 std::ptr::null()
             );
-            assert_eq!(gl_sys::GetError(), 0, "glTexImage2D({}, {}) failed", alloc.width, alloc.height);
-            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+            assert_eq!((gl.glGetError)(), 0, "glTexImage2D({}, {}) failed", alloc.width, alloc.height);
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
         }
     }
 
     pub fn update_from_shared_dma_buf_image(
         &mut self,
+        gl:&LibGl,
         opengl_cx: &OpenglCx,
         dma_buf_image: &dma_buf::Image<os::fd::OwnedFd>,
     ) {
@@ -223,9 +227,9 @@ impl CxTexture {
         let alloc = self.alloc.as_ref().unwrap();
 
         // HACK(eddyb) drain error queue, so that we can check erors below.
-        while unsafe { gl_sys::GetError() } != 0 {}
+        while unsafe { (gl.glGetError)() } != 0 {}
         opengl_cx.make_current();
-        while unsafe { gl_sys::GetError() } != 0 {}
+        while unsafe { (gl.glGetError)() } != 0 {}
 
         let dma_buf::Image { drm_format, planes: ref plane0 } = *dma_buf_image;
 
@@ -260,18 +264,18 @@ impl CxTexture {
         unsafe {
             let gl_texture = *self.os.gl_texture.get_or_insert_with(|| {
                 let mut gl_texture = std::mem::MaybeUninit::uninit();
-                gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
-                assert_eq!(gl_sys::GetError(), 0, "glGenTextures failed");
+                (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
+                assert_eq!((gl.glGetError)(), 0, "glGenTextures failed");
                 gl_texture.assume_init()
             });
 
-            gl_sys::BindTexture(gl_sys::TEXTURE_2D, gl_texture);
-            assert_eq!(gl_sys::GetError(), 0, "glBindTexture({gl_texture}) failed");
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
+            assert_eq!((gl.glGetError)(), 0, "glBindTexture({gl_texture}) failed");
 
             (opengl_cx.libegl.glEGLImageTargetTexture2DOES.unwrap())(gl_sys::TEXTURE_2D, egl_image);
-            assert_eq!(gl_sys::GetError(), 0, "glEGLImageTargetTexture2DOES failed");
+            assert_eq!((gl.glGetError)(), 0, "glEGLImageTargetTexture2DOES failed");
 
-            gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
         }
     }
 }
@@ -279,6 +283,7 @@ impl CxTexture {
 // FIXME(eddyb) move this out of `linux::x11`, since it's mostly generic EGL.
 pub struct OpenglCx {
     libegl: LibEgl,
+    pub libgl: LibGl,
     egl_display: egl_sys::EGLDisplay,
     egl_config: egl_sys::EGLConfig,
     egl_context: egl_sys::EGLContext,
@@ -352,7 +357,7 @@ impl OpenglCx {
         // Create EGL context.
         let ctx_attribs = [
             egl_sys::EGL_CONTEXT_MAJOR_VERSION,
-            2,
+            3,
             egl_sys::EGL_NONE
         ];
 
@@ -363,15 +368,21 @@ impl OpenglCx {
             ctx_attribs.as_ptr() as _,
         );
         assert!(!egl_context.is_null(), "eglCreateContext failed");
-
-        // Load GL function pointers.
-        gl_sys::load_with(|symbol| {
-            let s = CString::new(symbol).unwrap();
-            (libegl.eglGetProcAddress.unwrap())(s.as_ptr())
-        });
-
+        
+        let libgl = LibGl::try_load(| s | {
+            for s in s{
+                let s = CString::new(*s).unwrap();
+                let p = unsafe{libegl.eglGetProcAddress.unwrap()(s.as_ptr())};
+                if !p.is_null(){
+                    return p
+                }
+            }
+            0 as * const _
+        }).expect("Cant load openGL functions");
+        
         OpenglCx {
             libegl,
+            libgl,
             egl_display,
             egl_config,
             egl_context,

@@ -28,9 +28,12 @@ use std::io::Write;
 use std::env;
 live_design!{
     use crate::app_ui::*;
-
+    use link::widgets::*;
+    
     App = {{App}} {
-        ui: <AppUI> {}
+        ui: <Root>{
+            <AppUI> {}
+        }
     }
 }
  

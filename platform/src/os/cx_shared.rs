@@ -77,7 +77,7 @@ impl Cx {
             if self.passes[pass_id].paint_dirty {
                 let mut inserted = false;
                 match self.passes[pass_id].parent {
-                    CxPassParent::Window(_) => {
+                    CxPassParent::Window(_) | CxPassParent::Xr=> {
                     },
                     CxPassParent::Pass(dep_of_pass_id) => {
                         if pass_id == dep_of_pass_id {

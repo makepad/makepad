@@ -132,7 +132,7 @@ live_design! {
                         self.down
                     )
                 )
-                return sdf.result
+                return sdf.result;
             }
         }
         
@@ -464,7 +464,7 @@ pub struct Button {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_text: DrawText2,
+    draw_text: DrawText,
     #[live]
     draw_icon: DrawIcon,
     #[live]
@@ -484,7 +484,7 @@ pub struct Button {
     enabled: bool,
 
     #[live(true)]
-    visible: bool,
+    #[visible] visible: bool,
 
     /// It indicates if the hover state will be reset when the button is clicked.
     /// This could be useful for buttons that disappear when clicked, where the hover state
@@ -520,57 +520,56 @@ impl Widget for Button {
             _=>()
         }
         
-        if self.visible {
-            // The button only handles hits when it's visible and enabled.
-            // If it's not enabled, we still show the button, but we set
-            // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
-            match event.hits(cx, self.draw_bg.area()) {
-                Hit::KeyFocus(_) => {
-                    self.animator_play(cx, id!(focus.on));
+        
+        // The button only handles hits when it's visible and enabled.
+        // If it's not enabled, we still show the button, but we set
+        // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::KeyFocus(_) => {
+                self.animator_play(cx, id!(focus.on));
+            }
+            Hit::KeyFocusLost(_) => {
+                self.animator_play(cx, id!(focus.off));
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerDown(fe) if self.enabled && fe.is_primary_hit() => {
+                if self.grab_key_focus {
+                    cx.set_key_focus(self.draw_bg.area());
                 }
-                Hit::KeyFocusLost(_) => {
-                    self.animator_play(cx, id!(focus.off));
-                    self.draw_bg.redraw(cx);
+                cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
+                    self.animator_play(cx, id!(hover.down));
+                    self.set_key_focus(cx);
+            }
+            Hit::FingerHoverIn(_) => {
+                if self.enabled {
+                    cx.set_cursor(MouseCursor::Hand);
+                    self.animator_play(cx, id!(hover.on));
+                } else {
+                    cx.set_cursor(MouseCursor::NotAllowed);
                 }
-                Hit::FingerDown(fe) if self.enabled && fe.is_primary_hit() => {
-                    if self.grab_key_focus {
-                        cx.set_key_focus(self.draw_bg.area());
-                    }
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
-                        self.animator_play(cx, id!(hover.down));
-                        self.set_key_focus(cx);
-                }
-                Hit::FingerHoverIn(_) => {
-                    if self.enabled {
-                        cx.set_cursor(MouseCursor::Hand);
+            }
+            Hit::FingerHoverOut(_) if self.enabled => {
+                self.animator_play(cx, id!(hover.off));
+            }
+            Hit::FingerLongPress(_lp) if self.enabled => {
+                cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::LongPressed);
+            }
+            Hit::FingerUp(fe) if self.enabled && fe.is_primary_hit() => {
+                if fe.is_over && fe.was_tap() {
+                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
+                    if self.reset_hover_on_click {
+                        self.animator_cut(cx, id!(hover.off));
+                    } else if fe.has_hovers() {
                         self.animator_play(cx, id!(hover.on));
                     } else {
-                        cx.set_cursor(MouseCursor::NotAllowed);
-                    }
-                }
-                Hit::FingerHoverOut(_) => {
-                    self.animator_play(cx, id!(hover.off));
-                }
-                Hit::FingerLongPress(_lp) if self.enabled => {
-                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::LongPressed);
-                }
-                Hit::FingerUp(fe) if self.enabled && fe.is_primary_hit() => {
-                    if fe.is_over && fe.was_tap() {
-                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
-                        if self.reset_hover_on_click {
-                            self.animator_cut(cx, id!(hover.off));
-                        } else if fe.has_hovers() {
-                            self.animator_play(cx, id!(hover.on));
-                        } else {
-                            self.animator_play(cx, id!(hover.off));
-                        }
-                    } else {
-                        cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Released(fe.modifiers));
                         self.animator_play(cx, id!(hover.off));
                     }
+                } else {
+                    cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Released(fe.modifiers));
+                    self.animator_play(cx, id!(hover.off));
                 }
-                _ => (),
             }
+            _ => (),
         }
     }
 

@@ -124,6 +124,14 @@ public class MakepadWebSocket {
         return mCallback;
     }
 
+    public void closeSocketAndClearCallback() {
+        try {
+            mSocket.close();
+        }
+        catch(Exception e) {}
+        mCallback = 0;
+    }
+
     private String buildHandshakeRequest() throws URISyntaxException {
         URI uri = new URI(mUrl);
         String host = uri.getHost();

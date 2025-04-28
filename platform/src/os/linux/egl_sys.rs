@@ -31,7 +31,8 @@ pub const EGL_CONTEXT_MINOR_VERSION_KHR: u32 = 0x30FB;
 pub const EGL_OPENGL_ES_API: u32 = 12448;
 pub const EGL_CONTEXT_OPENGL_PROFILE_MASK: u32 = 0x30FD;
 pub const EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT: u32 = 0x0002;
-
+pub const EGL_SAMPLES: u32 = 0x3031;
+pub const EGL_OPENGL_ES3_BIT_KHR: u32 = 0x0040;
 pub const EGL_COLOR_BUFFER_TYPE: u32 = 0x303F;
 pub const EGL_RGB_BUFFER: u32 = 0x308E;
 pub const EGL_PBUFFER_BIT: u32 = 0x0001;
@@ -386,8 +387,6 @@ pub struct Egl {}
 pub unsafe fn create_egl_context(
     egl: &mut LibEgl,
     display: *mut std::ffi::c_void,
-    major: u32,
-    alpha: bool,
 ) -> Result<(EGLContext, EGLConfig, EGLDisplay), EglError> {
 
     let display = (egl.eglGetDisplay.unwrap())(display as _);
@@ -399,7 +398,6 @@ pub unsafe fn create_egl_context(
         return Err(EglError::InitializeFailed);
     }
 
-    let alpha_size = if alpha {8} else {0};
     #[rustfmt::skip]
     let cfg_attributes = vec![
         EGL_SURFACE_TYPE,
@@ -411,7 +409,7 @@ pub unsafe fn create_egl_context(
         EGL_BLUE_SIZE,
         8,
         EGL_ALPHA_SIZE,
-        alpha_size,
+        0,
         EGL_DEPTH_SIZE,
         24,
         EGL_STENCIL_SIZE,
@@ -448,7 +446,7 @@ pub unsafe fn create_egl_context(
             && r == 8
             && g == 8
             && b == 8
-            && (alpha_size == 0 || a == alpha_size as _)
+            && a == 0
             && d == 16
         {
             exact_cfg_found = true;
@@ -459,7 +457,7 @@ pub unsafe fn create_egl_context(
     if !exact_cfg_found {
         config = available_cfgs[0];
     }
-    let ctx_attributes = vec![EGL_CONTEXT_MAJOR_VERSION, major, EGL_NONE];
+    let ctx_attributes = vec![EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE];
     let context = (egl.eglCreateContext.unwrap())(
         display,
         config,
@@ -472,6 +470,111 @@ pub unsafe fn create_egl_context(
     
     return Ok((context, config, display));
 }
+
+#[cfg(target_os="android")]
+pub unsafe fn create_egl_context_openxr(
+    egl: &mut LibEgl,
+    display: *mut std::ffi::c_void,
+) -> Result<(EGLContext, EGLConfig, EGLDisplay), EglError> {
+    
+    let display = (egl.eglGetDisplay.unwrap())(display as _);
+    if display == /* EGL_NO_DISPLAY */ null_mut() {
+        return Err(EglError::NoDisplay);
+    }
+    
+    if (egl.eglInitialize.unwrap())(display, null_mut(), null_mut()) == 0 {
+        return Err(EglError::InitializeFailed);
+    }
+    
+    
+    #[rustfmt::skip]
+    let cfg_attributes = vec![
+        EGL_RED_SIZE,
+        8,
+        EGL_GREEN_SIZE,
+        8,
+        EGL_BLUE_SIZE,
+        8,
+        EGL_ALPHA_SIZE,
+        8,
+        EGL_DEPTH_SIZE,
+        0,
+        EGL_STENCIL_SIZE,
+        0,
+        EGL_SAMPLES,
+        0,
+        EGL_NONE,
+    ];
+    let mut available_cfgs: Vec<EGLConfig> = vec![null_mut(); 1024];
+    let mut cfg_count = 0;
+    
+    (egl.eglGetConfigs.unwrap())(
+         display,
+         available_cfgs.as_ptr() as _,
+         available_cfgs.len() as _,
+         &mut cfg_count as *mut _ as *mut _,
+    );
+    /*
+    (egl.eglChooseConfig.unwrap())(
+        display,
+        cfg_attributes.as_ptr() as _,
+        available_cfgs.as_ptr() as _,
+        32,
+        &mut cfg_count as *mut _ as *mut _,
+    );
+    assert!(cfg_count > 0);
+    assert!(cfg_count <= 32);
+      */  
+    // find config with 8-bit rgb buffer if available, ndk sample does not trust egl spec
+    let mut config: EGLConfig = null_mut();
+    let mut exact_cfg_found = false;
+        
+    
+    for c in &mut available_cfgs[0..cfg_count] {
+        let mut value = 0u32;
+        (egl.eglGetConfigAttrib.unwrap())(display, *c, EGL_RENDERABLE_TYPE as _, &mut value as *mut _ as *mut _); 
+        if (value & EGL_OPENGL_ES3_BIT_KHR) != EGL_OPENGL_ES3_BIT_KHR{
+            continue;
+        }
+        (egl.eglGetConfigAttrib.unwrap())(display, *c, EGL_SURFACE_TYPE as _, &mut value as *mut _ as *mut _); 
+        if (value & (EGL_WINDOW_BIT | EGL_PBUFFER_BIT)) != (EGL_WINDOW_BIT | EGL_PBUFFER_BIT) {
+            continue;
+        }
+        
+        let mut j = 0;
+        while cfg_attributes[j] != EGL_NONE{
+            let mut value = 0u32;
+            (egl.eglGetConfigAttrib.unwrap())(display, *c, cfg_attributes[j] as _, &mut value as *mut _ as *mut _); 
+            if value != cfg_attributes[j+1]{
+                crate::log!("FAILED AT {} {} {}", value, cfg_attributes[j+1], j);
+                break; 
+            }
+            j+=2;
+        }
+        if cfg_attributes[j] == EGL_NONE{
+            exact_cfg_found = true;
+            config = *c;
+            break;
+        }
+    }
+    
+    if !exact_cfg_found {
+        config = available_cfgs[0];
+    }
+    let ctx_attributes = vec![EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE];
+    let context = (egl.eglCreateContext.unwrap())(
+        display,
+        config,
+        /* EGL_NO_CONTEXT */ null_mut(),
+        ctx_attributes.as_ptr() as _,
+    );
+    if context.is_null() {
+        return Err(EglError::CreateContextFailed);
+    }
+        
+    return Ok((context, config, display));
+}
+
 
 #[cfg(target_env="ohos")]
 pub unsafe  fn create_egl_context(

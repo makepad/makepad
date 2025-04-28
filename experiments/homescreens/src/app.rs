@@ -31,8 +31,8 @@ live_design!{
             }
 
             fn pixel(self) -> vec4 {
-                let shadow = sample2d_rt(self.image, self.oShadow + vec2(cos(self.time*3.+self.o0.y*10.)*0.0013, cos(self.time+self.o0.x*100.)*0.0013));
-                let main = sample2d_rt(self.image, self.o0);
+                let shadow = sample2d(self.image, self.oShadow + vec2(cos(self.time*3.+self.o0.y*10.)*0.0013, cos(self.time+self.o0.x*100.)*0.0013));
+                let main = sample2d(self.image, self.o0);
                 let col =  (vec4(self.shadowcolor.xyz,self.shadowopacity)  * shadow.a ) * ( 1 - main.a) + main;
                 return col;
             }
@@ -60,11 +60,11 @@ live_design!{
 
             fn pixel(self) -> vec4 {
     
-                let main = sample2d_rt(self.image, self.o0);
+                let main = sample2d(self.image, self.o0);
                 let uv = self.o0  - vec2(0.03,0.07);
                 uv.y +=sin(uv.y*140.)*0.02+ (cos((uv.y + (self.time * 0.04)) * 45.0) * 0.0019) + (cos((uv.y + (self.time * 0.1)) * 10.0) * 0.002);
                 uv.x += sin(uv.y*420.)*0.02+ (sin((uv.y + (self.time * 0.07)) * 15.0) * 0.0029) + (sin((uv.y + (self.time * 0.1)) * 15.0) * 0.002);
-                let flect = sample2d_rt(self.image, uv);
+                let flect = sample2d(self.image, uv);
                 let col =  vec4(flect.xyz*0.1, flect.w * 0.1) * ( 1 - main.a) + main;
                 return col;
             }
@@ -560,8 +560,8 @@ live_design!{
                     
                                 fn old_pixel(self) -> vec4 {
                     
-                                    let shadow = sample2d_rt(self.image, self.oShadow + vec2(cos(self.time*3.+self.o0.y*10.)*0.0013, cos(self.time+self.o0.x*100.)*0.0013));
-                                    let main = sample2d_rt(self.image, self.o0);
+                                    let shadow = sample2d(self.image, self.oShadow + vec2(cos(self.time*3.+self.o0.y*10.)*0.0013, cos(self.time+self.o0.x*100.)*0.0013));
+                                    let main = sample2d(self.image, self.o0);
                                     let col =  (vec4(self.shadowcolor.xyz,self.shadowopacity)  * shadow.a ) * ( 1 - main.a) + main;
                                     return col;
                                 }
@@ -701,7 +701,7 @@ live_design!{
                                     let focus = mix(maxBlur-c.y, minBlur, S(.1, .2, c.x));
                                     let L = self.pos + n*0.52 ;
 
-                                    let col = sample2d_rt(self.image, L) + length(n*0.4)*vec4(0.,0.7,1.,1.);;
+                                    let col = sample2d(self.image, L) + length(n*0.4)*vec4(0.,0.7,1.,1.);;
 
                                     //let col = vec4(sin(L.x*100.), cos(L.y*100.), sin(L.x*100.0),1.0);
                                     

@@ -455,7 +455,7 @@ struct PopupMenuGlobal {
 
 #[derive(Live, LiveHook, LiveRegister)]#[repr(C)]
 struct DrawLabelText {
-    #[deref] draw_super: DrawText2,
+    #[deref] draw_super: DrawText,
     #[live] focus: f32,
     #[live] hover: f32,
 }

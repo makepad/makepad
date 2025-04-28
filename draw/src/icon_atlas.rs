@@ -9,10 +9,10 @@ pub use {
     },
     makepad_html::*,
     crate::{
-        
+        draw_list_2d::DrawListExt,
         shader::draw_trapezoid::DrawTrapezoidVector,
         makepad_platform::*,
-        cx_2d::Cx2d,
+        cx_draw::CxDraw,
         turtle::{Walk, Layout},
         draw_list_2d::{ManyInstances, DrawList2d, RedrawingApi},
         geometry::GeometryQuad2D,
@@ -403,7 +403,7 @@ impl CxDrawIconAtlas {
     }
 }
 
-impl<'a> Cx2d<'a> {
+impl<'a> CxDraw<'a> {
     pub fn lazy_construct_icon_atlas(cx: &mut Cx) {
         // ok lets fetch/instance our CxFontsAtlasRc
         if !cx.has_global::<CxIconAtlasRc>() {

@@ -308,7 +308,7 @@ pub struct Tab {
     
     #[live] draw_bg: DrawQuad,
     #[live] draw_icon: DrawIcon,
-    #[live] draw_text: DrawText2,
+    #[live] draw_text: DrawText,
     #[live] icon_walk: Walk,
     //#[live] draw_drag: DrawColor,
     

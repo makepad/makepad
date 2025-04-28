@@ -1,5 +1,5 @@
 use {
-    std::sync::Arc,
+    std::{str, sync::Arc},
     crate::{
         makepad_live_compiler::*,
         makepad_math::*,
@@ -649,6 +649,33 @@ live_primitive!(
     }
 );
 
+
+live_primitive!(
+    Mat4,
+    Mat4::default(),
+    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Array => {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::Expr {..} => {
+                panic!("Expr node found whilst deserialising DSL")
+            },
+            LiveValue::DSL {..} => nodes.skip_node(index),
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec4");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::None
+    }
+);
+
 live_primitive!(
     String,
     String::default(),
@@ -677,6 +704,19 @@ live_primitive!(
                     self.apply(cx, apply, index, nodes);
                 }
                 nodes.skip_node(index)
+            }
+            LiveValue::Dependency(path) => {
+                match cx.take_dependency(path) {
+                    Ok(bytes) => {
+                        let string = String::from_utf8_lossy(&bytes);
+                        self.push_str(&string);
+                        index + 1
+                    }
+                    Err(_) => {
+                        cx.apply_error_resource_not_found(live_error_origin!(), index, nodes, path);
+                        nodes.skip_node(index)
+                    }
+                }
             }
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");
@@ -790,6 +830,19 @@ live_primitive!(
                     self.apply(cx, apply, index, nodes);
                 }
                 nodes.skip_node(index)
+            }
+            LiveValue::Dependency(path) => {
+                match cx.take_dependency(path) {
+                    Ok(bytes) => {
+                        let string = String::from_utf8_lossy(&bytes);
+                        *self = ArcStringMut::String(string.to_string());
+                        index + 1
+                    }
+                    Err(_) => {
+                        cx.apply_error_resource_not_found(live_error_origin!(), index, nodes, path);
+                        nodes.skip_node(index)
+                    }
+                }
             }
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");

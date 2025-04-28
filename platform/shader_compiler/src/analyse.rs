@@ -172,7 +172,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         let mut pixel_fns = Vec::new();
         self.analyse_call_tree(
             &mut Vec::new(),
-            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap(),
+            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(fragment))).unwrap(),
             &mut pixel_fns,
             &mut all_fns,
         ) ?;
@@ -414,7 +414,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                     })
                 }
             }
-        } else if def.ident == Ident(live_id!(pixel)) {
+        } else if def.ident == Ident(live_id!(fragment)) {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => {
