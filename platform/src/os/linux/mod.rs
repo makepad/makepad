@@ -8,6 +8,10 @@ pub mod direct;
 pub mod openxr_sys;
 #[cfg(target_os="android")]
 pub mod openxr;
+#[cfg(target_os="android")]
+pub mod openxr_anchor;
+#[cfg(target_os="android")]
+pub mod openxr_input;
 
 #[cfg(target_env="ohos")]
 pub mod open_harmony;
