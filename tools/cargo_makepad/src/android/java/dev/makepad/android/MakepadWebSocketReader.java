@@ -33,8 +33,6 @@ public class MakepadWebSocketReader implements Runnable {
             return;
         }
 
-        long requestId = mWebSocket.getMakepadRequestId();
-        long callback = mWebSocket.getMakepadCallback();
         
         try {
             byte[] rawbuffer = new byte[1024*1024];
@@ -50,14 +48,18 @@ public class MakepadWebSocketReader implements Runnable {
 
                 byte[] message = Arrays.copyOfRange(rawbuffer, 0, readBytes);
                 activity.runOnUiThread(() -> {
+                    long callback = mWebSocket.getMakepadCallback();
                     MakepadNative.onWebSocketMessage(message, callback);
                 });
             }
             activity.runOnUiThread(() -> {
+                long requestId = mWebSocket.getMakepadRequestId();
+                long callback = mWebSocket.getMakepadCallback();
                 activity.webSocketConnectionDone(requestId, callback);
             });
         } catch(Exception e) {
             activity.runOnUiThread(() -> {
+                long callback = mWebSocket.getMakepadCallback();
                 MakepadNative.onWebSocketError(e.toString(), callback);
             });
 
