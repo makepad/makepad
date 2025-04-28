@@ -165,10 +165,25 @@ Replace the definition of `App` in the call to the `live_design` macro with the 
 	            }
             }
         }
+        placeholder: (PLACEHOLDER)
     }
 ```
 
-We've simply commented out our `ImageGrid`, and replaced it with our `Slideshow`. This is just a temporary measure so that we can develop our slideshow without worrying about the image grid. In the next step, we'll make it so we can switch between the image grid and the slideshow at will. 
+We've commented out our `ImageGrid`, and replaced it with our `Slideshow`. This is just a temporary measure so that we can develop our slideshow without worrying about the image grid. In the next step, we'll make it so we can switch between the image grid and the slideshow at will.
+
+We've also added a `placeholder` field, storing a reference to our placeholder image. This will allow us to refer to the placeholder image from Rust code. For this to work, we need to make sure to also add a placeholder field to the corresponding `App` struct:
+
+```
+#[derive(Live)]
+pub struct App {
+    #[live]
+    ui: WidgetRef,
+    #[live]
+    placeholder: LiveDependency,
+    #[rust]
+    state: State,
+}
+```
 ## Extending the State
 Now that we've updated the DSL code with the definitions we need, it's time to extend the state for our app with some additional fields and methods we need to make the slideshow dynamic.
 
@@ -214,10 +229,7 @@ impl App {
             image.load_image_file_by_path(cx, &image_path).unwrap();
         } else {
             image
-                .load_image_dep_by_path(
-                    cx,
-                    "crate://self/resources/placeholder_image.jpg",
-                )
+                .load_image_dep_by_path(cx, self.placeholder.as_str())
                 .unwrap();
         }
         self.ui.view(id!(slideshow)).redraw(cx);
