@@ -181,6 +181,9 @@ impl Widget for ImageGrid {
                     state.image_paths.len().div_ceil(state.images_per_row);
                 list.set_item_range(cx, 0, num_rows);
                 while let Some(row_idx) = list.next_visible_item(cx) {
+                    if row_idx >= num_rows {
+                        continue;
+                    }
                     let row = list.item(cx, row_idx, live_id!(ImageRow));
                     row.draw_all(
                         cx,
@@ -272,7 +275,8 @@ Next, we compute the number of items that belong in this row:
                 list.set_item_range(cx, 0, item_count);
 ```
 
-**Note:** Normally, the number of items per row is determined by the value of the `images_per_row` field on the `State` struct, but for the last row it can be less than that if the number of remaining images is less than that.
+**Note:**
+Normally, the number of items per row is determined by the value of the `images_per_row` field on the `State` struct, but for the last row it can be less than that if the number of remaining images is less than that.
 
 Then, for each item, we first compute the index of the corresponding image.
 ```

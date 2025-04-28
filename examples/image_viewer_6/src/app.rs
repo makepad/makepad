@@ -12,6 +12,41 @@ live_design! {
     PLACEHOLDER = dep("crate://self/resources/placeholder.jpg");
     LEFT_ARROW = dep("crate://self/resources/left_arrow.svg");
     RIGHT_ARROW = dep("crate://self/resources/right_arrow.svg");
+    LOOKING_GLASS = dep("crate://self/resources/looking_glass.svg");
+
+    SearchBox = <View> {
+        width: Fit,
+        height: Fit,
+        align: { y: 0.5 }
+        margin: { left: 60 }
+
+        <Icon> {
+            icon_walk: { width: 12.0 }
+            draw_icon: {
+                color: #8,
+                svg_file: (LOOKING_GLASS)
+            }
+        }
+
+        query = <TextInput> {
+            empty_text: "Search",
+            draw_text: {
+                text_style: { font_size: 10 },
+                color: #8
+            }
+        }
+    }
+
+    MenuBar = <View> {
+        width: Fill,
+        height: Fit,
+
+        <SearchBox> {}
+        <Filler> {}
+        slideshow_button = <Button> {
+            text: "Slideshow"
+        }
+    }
 
     ImageItem = <View> {
         width: 256,
@@ -40,6 +75,13 @@ live_design! {
 
             ImageRow = <ImageRow> {}
         }
+    }
+
+    ImageBrowser = <View> {
+        flow: Down,
+
+        <MenuBar> {}
+        <ImageGrid> {}
     }
 
     SlideshowNavigationButton = <Button> {
@@ -78,6 +120,7 @@ live_design! {
             fit: Biggest,
             source: (PLACEHOLDER)
         }
+
         overlay = <SlideshowOverlay> {}
     }
 
@@ -85,13 +128,15 @@ live_design! {
         ui: <Root> {
             <Window> {
                 body = {
-                    <View> {
-                        // <ImageGrid> {}
+                    page_flip = <PageFlip> {
+                        active_page: image_browser,
+
+                        image_browser = <ImageBrowser> {}
                         slideshow = <Slideshow> {}
                     }
                 }
             }
-        },
+        }
         placeholder: (PLACEHOLDER)
     }
 }
@@ -115,7 +160,7 @@ impl Widget for ImageRow {
                 let row_idx = scope.props.get::<usize>().unwrap();
                 let first_image_idx = row_idx * state.images_per_row;
                 let remaining_image_count =
-                    state.image_paths.len() - first_image_idx;
+                    state.filtered_image_idxs.len() - first_image_idx;
                 let item_count =
                     state.images_per_row.min(remaining_image_count);
                 list.set_item_range(cx, 0, item_count);
@@ -124,7 +169,9 @@ impl Widget for ImageRow {
                         continue;
                     }
                     let image_idx = first_image_idx + item_idx;
-                    let image_path = &state.image_paths[image_idx];
+                    let filtered_image_idx =
+                        state.filtered_image_idxs[image_idx];
+                    let image_path = &state.image_paths[filtered_image_idx];
                     let item = list.item(cx, item_idx, live_id!(ImageItem));
                     let image = item.image(id!(image));
                     image
@@ -158,9 +205,10 @@ impl Widget for ImageGrid {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let state = scope.data.get_mut::<State>().unwrap();
-                let num_rows =
-                    state.image_paths.len().div_ceil(state.images_per_row);
-                list.set_item_range(cx, 0, num_rows);
+                let num_rows = state
+                    .filtered_image_idxs
+                    .len()
+                    .div_ceil(state.images_per_row);
                 while let Some(row_idx) = list.next_visible_item(cx) {
                     if row_idx >= num_rows {
                         continue;
@@ -202,7 +250,19 @@ impl App {
             }
             self.state.image_paths.push(path);
         }
-        if self.state.image_paths.is_empty() {
+        let query = self.ui.text_input(id!(query)).text();
+        self.filter_image_paths(cx, &query);
+    }
+
+    pub fn filter_image_paths(&mut self, cx: &mut Cx, query: &str) {
+        self.state.filtered_image_idxs.clear();
+        for (image_idx, image_path) in self.state.image_paths.iter().enumerate()
+        {
+            if image_path.to_str().unwrap().contains(&query) {
+                self.state.filtered_image_idxs.push(image_idx);
+            }
+        }
+        if self.state.filtered_image_idxs.is_empty() {
             self.set_current_image(cx, None);
         } else {
             self.set_current_image(cx, Some(0));
@@ -213,7 +273,8 @@ impl App {
         self.state.current_image_idx = image_idx;
         let image = self.ui.image(id!(slideshow.image));
         if let Some(image_idx) = self.state.current_image_idx {
-            let image_path = &self.state.image_paths[image_idx];
+            let filtered_image_idx = self.state.filtered_image_idxs[image_idx];
+            let image_path = &self.state.image_paths[filtered_image_idx];
             image
                 .load_image_file_by_path_async(cx, &image_path)
                 .unwrap();
@@ -235,7 +296,7 @@ impl App {
 
     pub fn navigate_right(&mut self, cx: &mut Cx) {
         if let Some(image_idx) = self.state.current_image_idx {
-            if image_idx + 1 < self.state.image_paths.len() {
+            if image_idx + 1 < self.state.filtered_image_idxs.len() {
                 self.set_current_image(cx, Some(image_idx + 1));
             }
         }
@@ -264,6 +325,15 @@ impl LiveRegister for App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if let Some(query) = self.ui.text_input(id!(query)).changed(&actions) {
+            self.filter_image_paths(cx, &query);
+        }
+        if self.ui.button(id!(slideshow_button)).clicked(&actions) {
+            self.ui
+                .page_flip(id!(page_flip))
+                .set_active_page(cx, live_id!(slideshow));
+            self.ui.view(id!(slideshow.overlay)).set_key_focus(cx);
+        }
         if self.ui.button(id!(navigate_left)).clicked(&actions) {
             self.navigate_left(cx);
         }
@@ -276,6 +346,10 @@ impl MatchEvent for App {
             match event.key_code {
                 KeyCode::ArrowLeft => self.navigate_left(cx),
                 KeyCode::ArrowRight => self.navigate_right(cx),
+                KeyCode::Escape => self
+                    .ui
+                    .page_flip(id!(page_flip))
+                    .set_active_page(cx, live_id!(image_browser)),
                 _ => {}
             }
         }
@@ -285,6 +359,7 @@ impl MatchEvent for App {
 #[derive(Debug)]
 pub struct State {
     image_paths: Vec<PathBuf>,
+    filtered_image_idxs: Vec<usize>,
     images_per_row: usize,
     current_image_idx: Option<usize>,
 }
@@ -293,6 +368,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             image_paths: Vec::new(),
+            filtered_image_idxs: Vec::new(),
             images_per_row: 4,
             current_image_idx: None,
         }
