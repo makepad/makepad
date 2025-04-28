@@ -111,7 +111,8 @@ live_design! {
                     }
                 }
             }
-        }
+        },
+        placeholder: (PLACEHOLDER)
     }
 }
 
@@ -204,6 +205,8 @@ impl Widget for ImageGrid {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    #[live]
+    placeholder: LiveDependency,
     #[rust]
     state: State,
 }
@@ -238,7 +241,7 @@ impl App {
             image
                 .load_image_dep_by_path(
                     cx,
-                    "crate://self/resources/placeholder.jpg",
+                    self.placeholder.as_str(),
                 )
                 .unwrap();
         }
