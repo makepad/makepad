@@ -84,9 +84,11 @@ live_design! {
     App = {{App}} {
         ui: <Root> {
             <Window> {
-                body = <View> {
-                    // <ImageGrid> {}
-                    slideshow = <Slideshow> {}
+                body = {
+                    <View> {
+                        // <ImageGrid> {}
+                        slideshow = <Slideshow> {}
+                    }
                 }
             }
         }
