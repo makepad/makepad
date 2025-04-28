@@ -102,11 +102,13 @@ live_design! {
     App = {{App}} {
         ui: <Root> {
             <Window> {
-                body = <PageFlip> {
-                    active_page: image_browser,
+                body = {
+                    <PageFlip> {
+                        active_page: image_browser,
 
-                    image_browser = <ImageBrowser> {}
-                    slideshow = <Slideshow> {}
+                        image_browser = <ImageBrowser> {}
+                        slideshow = <Slideshow> {}
+                    }
                 }
             }
         }
