@@ -1,14 +1,14 @@
-In the previous two steps, we created both an image grid and a slideshow for our app. In this step, we'll enable switching between the image grid and the slideshow.
+In the previous steps, we created both an image grid and a slideshow for our app. In this step, we'll make it possible to switch between the image grid and the slideshow.
 
-Our app will start out displaying the image grid. Above the image grid we'll add a menu containing a single button. Clicking this button will switch to the slideshow. Pressing the escape key while the slideshow is displayed will switch back to the image grid.
+Our app will start out displaying the image grid. Above the image grid we'll add a menu bar containing a single button. Clicking this button will switch to the slideshow. Pressing the escape key while the slideshow is displayed will switch back to the image grid.
 ## What you will learn
 - How to use a `PageFlip` to switch between multiple views.
 ## Updating the DSL Code
 As always, we'll start by updating the DSL code with the definitions we need.
-### Defining a `TopMenu`
+### Defining a `MenuBar`
 Add the following code to the call to the `live_design` macro in `app.rs`:
 ```
-    TopMenu = <View> {
+    MenuBar = <View> {
         width: Fill,
         height: Fit,
 
@@ -19,7 +19,7 @@ Add the following code to the call to the `live_design` macro in `app.rs`:
     }
 ```
 
-This code defines a `TopMenu`. A TopMenu is a container that sits above an ImageGrid, and contains the `Button` we'll use to switch to the slideshow.
+This code defines a `MenuBar`. A `MenuBar` is a container that sits above an ImageGrid, and contains the `Button` we'll use to switch to the slideshow.
 
 This `TopMenu` has the following properties:
 - `width: Fill` ensures the menu spans the width of the window.
@@ -40,12 +40,12 @@ Add the following code to the call to the `live_design` macro in `app.rs`:
     ImageBrowser = <View> {
         flow: Down,
 
-        <TopMenu> {}
+        <MenuBar> {}
         <ImageGrid> {}
     }
 ```
 
-This code defines an `ImageBrowser`. An `ImageBrowser` combines the `TopMenu` we created earlier with our `ImageGrid`.
+This code defines an `ImageBrowser`. An `ImageBrowser` combines the `MenuBar` we created earlier with our `ImageGrid`.
 
 This `ImageBrowser` has the following properties:
 - `flow: Down` ensures the browser's children are laid out from top to bottom.
