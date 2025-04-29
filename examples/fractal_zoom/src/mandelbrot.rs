@@ -173,7 +173,7 @@ impl TileCache {
     
     fn tile_completed(&mut self, cx: &mut Cx, mut tile: Tile) {
         self.tiles_in_flight -= 1;
-        self.textures[tile.texture_index].put_back_vec_u32(cx, &mut tile.buffer, None);
+        self.textures[tile.texture_index].put_back_vec_u32(cx, tile.buffer.clone(), None);
         self.next.push(tile)
     }
     

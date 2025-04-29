@@ -15,3 +15,4 @@ makepad-widgets = {path="../../widgets", version="0.6.0"}
 
 
 
+[workspace]
