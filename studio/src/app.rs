@@ -545,8 +545,8 @@ impl MatchEvent for App{
                         let set = vec![SearchItem{
                             needle:word.clone(), 
                             prefixes: None,
-                            pre_word_boundary:!ke.modifiers.control,
-                            post_word_boundary:!ke.modifiers.control
+                            pre_word_boundary:ke.modifiers.control,
+                            post_word_boundary:ke.modifiers.control
                         }];
                         search.text_input(id!(search_input)).set_text(cx, word);
                         self.data.file_system.search_string(cx, set);
