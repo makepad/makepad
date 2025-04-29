@@ -82,7 +82,7 @@ impl Cx {
             return EventFlow::Exit
         }
         
-        let mut paint_dirty = false;
+        //let mut paint_dirty = false;
         
         //self.process_desktop_pre_event(&mut event);
         match event {
@@ -92,7 +92,7 @@ impl Cx {
                         self.repaint_pass(main_pass_id);
                     }
                 }
-                paint_dirty = true;
+                //paint_dirty = true;
                 self.call_event_handler(&Event::AppGotFocus);
             }
             XlibEvent::AppLostFocus => { 
@@ -215,14 +215,15 @@ impl Cx {
                     self.call_event_handler(&Event::LiveEdit);
                     self.redraw_all();
                 }
+                return EventFlow::Wait;
             }
         }
         
-        if self.any_passes_dirty() || self.need_redrawing() || paint_dirty {
+        //if self.any_passes_dirty() || self.need_redrawing() || paint_dirty {
             EventFlow::Poll
-        } else {
-            EventFlow::Wait
-        }
+        //} else {
+        //    EventFlow::Wait
+        // }
         
     }
 
