@@ -918,23 +918,23 @@ impl Dock {
         let processed_dock_items: HashMap<LiveId, DockItem> = dock_items.into_iter()
             .map(|(k, mut v)| {
                 let new_key = if k.is_unique() {
-                    k.bytes_append("x".as_bytes())
+                    k.bytes_append(&[b'x'])
                 } else { 
                     k
                 };
                 match &mut v {
                     DockItem::Splitter { a, b, .. } => {
                         if a.is_unique() {
-                            *a = a.bytes_append("x".as_bytes());
+                            *a = a.bytes_append(&[b'x']);
                         }
                         if b.is_unique() {
-                            *b = b.bytes_append("x".as_bytes());
+                            *b = b.bytes_append(&[b'x']);
                         }
                     }
                     DockItem::Tabs { tabs, selected: _, closable: _ } => {
                         tabs.iter_mut().for_each(|t| {
                             if t.is_unique() {
-                                *t = t.bytes_append("x".as_bytes());
+                                *t = t.bytes_append(&[b'x']);
                             }
                         })
                     }
