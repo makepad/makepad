@@ -15,7 +15,16 @@ pub fn rustup_toolchain_install(apple_targets:&[AppleTarget]) -> Result<(), Stri
             target.toolchain(),
             "--toolchain",
             "nightly"
-            ]) ?
+            ]) ?;
+        shell_env(&[],&std::env::current_dir().unwrap(), "rustup", &[
+                "component",
+                "add",
+                "rust-std",
+                "--target",
+                target.toolchain(),
+                "--toolchain",
+                "nightly"
+            ]) ?;
     }
     /*
     let cwd = std::env::current_dir().unwrap();
