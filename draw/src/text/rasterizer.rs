@@ -19,7 +19,7 @@ impl Rasterizer {
         Self {
             sdfer: Sdfer::new(settings.sdfer),
             grayscale_atlas: GrayscaleAtlas::new(settings.grayscale_atlas_size),
-            color_atlas: ColorAtlas::new(settings.grayscale_atlas_size),
+            color_atlas: ColorAtlas::new(settings.color_atlas_size),
         }
     }
 
