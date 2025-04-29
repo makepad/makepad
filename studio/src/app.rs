@@ -519,7 +519,7 @@ impl MatchEvent for App{
         
         if let Some(action) = action.as_widget_action(){
             match action.cast(){
-                CodeEditorAction::UnhandledKeyDown(ke) if ke.key_code == KeyCode::F12=>{
+                CodeEditorAction::UnhandledKeyDown(ke) if ke.key_code == KeyCode::F12 && !ke.modifiers.shift =>{
                     if let Some(word) = self.data.file_system.get_word_under_cursor_for_session(action.path.from_end(1)){
                         dock.select_tab(cx, live_id!(search));
                         let set = vec![SearchItem{
@@ -536,7 +536,19 @@ impl MatchEvent for App{
                             post_word_boundary:true
                         }];
                         search.text_input(id!(search_input)).set_text(cx, word);
-                        //search.text_input(id!(search_input)).set_text(cx, &set.iter().map(|v| v.needle.clone()).collect::<Vec<String>>().join("\\b|"));
+                        self.data.file_system.search_string(cx, set);
+                    } 
+                },
+                CodeEditorAction::UnhandledKeyDown(ke) if ke.key_code == KeyCode::F12 && ke.modifiers.shift =>{
+                    if let Some(word) = self.data.file_system.get_word_under_cursor_for_session(action.path.from_end(1)){
+                        dock.select_tab(cx, live_id!(search));
+                        let set = vec![SearchItem{
+                            needle:word.clone(), 
+                            prefixes: None,
+                            pre_word_boundary:!ke.modifiers.control,
+                            post_word_boundary:!ke.modifiers.control
+                        }];
+                        search.text_input(id!(search_input)).set_text(cx, word);
                         self.data.file_system.search_string(cx, set);
                     } 
                 },
@@ -650,7 +662,6 @@ impl MatchEvent for App{
         }
             
         if let Some(file_id) = file_tree.file_clicked(&actions) {
-            println!("FILE CLICKED");
             // ok lets open the file
             if let Some(tab_id) = self.data.file_system.file_node_id_to_tab_id(file_id) {
                 // If the tab is already open, focus it
