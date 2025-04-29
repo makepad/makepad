@@ -655,52 +655,8 @@ live_design!{
                 }
                 log_list = <LogList> {}
             }
-            Profiler = <View> {
+            Profiler = <Profiler> {
                 flow: Down,
-                <DockToolbar> {
-                    content = {
-                        <ButtonFlat> {
-                            text: "Start"
-                            icon_walk: { width: 8. }
-                            draw_icon: {
-                                svg_file: dep("crate://self/resources/icons/icon_run.svg"),
-                            }
-                        }
-                        <ButtonFlat> {
-                            text: "Clear"
-                            icon_walk: { width: 12. }
-                            draw_icon: {
-                                svg_file: dep("crate://self/resources/icons/icon_profiler_clear.svg"),
-                            }
-                        }
-                        <ButtonGroup> {
-                            height: Fit
-                            flow: Right
-                            align: { x: 0.0, y: 0.5 }
-                        }
-                        <Vr> {}
-                        <View> {
-                            width: Fit,
-                            flow: Right,
-                            spacing: 0.,
-                            <Pbold> {
-                                width: Fit,
-                                text: "Last ",
-                                margin: 0.,
-                                padding: <THEME_MSPACE_V_1> {}
-                                draw_text: { color: (THEME_COLOR_D_4) }
-                            }
-                            <P> {
-                                width: Fit,
-                                text: "500 ms",
-                                margin: 0.,
-                                padding: <THEME_MSPACE_V_1> {}
-                                draw_text: { color: (THEME_COLOR_D_4) }
-                            }
-                        }
-                    }
-                }
-                <Profiler> {}
             }
         }}
     }
