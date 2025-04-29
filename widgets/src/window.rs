@@ -276,7 +276,7 @@ impl Window {
     pub fn reposition(&self, cx: &mut Cx, size: DVec2) {
         self.window.reposition(cx, size);
     }
-    pub fn fullscreen(&self, cx: &mut Cx) {
+    pub fn fullscreen(&mut self, cx: &mut Cx) {
         self.window.fullscreen(cx);
     }
     
@@ -300,12 +300,12 @@ impl WindowRef{
             dvec2(0.0,0.0)
         }
     }
-    pub fn is_fullscreen(&self, cx:&Cx)->DVec2{
+    pub fn is_fullscreen(&self, cx:&Cx)->bool{
         if let Some(inner) = self.borrow(){
             inner.window.is_fullscreen(cx)
         }
         else{
-            dvec2(0.0,0.0)
+            false
         }
     }
     pub fn resize(&self, cx: &mut Cx, size: DVec2) {
@@ -320,11 +320,6 @@ impl WindowRef{
         }
     }
 
-    pub fn reposition(&self, cx: &mut Cx, size: DVec2) {
-        if let Some(inner) = self.borrow() {
-            inner.reposition(cx, size);
-        }
-    }
 }
 
 impl Widget for Window {
