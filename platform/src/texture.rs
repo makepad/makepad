@@ -97,7 +97,7 @@ impl TextureSize{
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum TextureFormat {
     Unknown,
     VecBGRAu8_32{width:usize, height:usize, data:Option<Vec<u32>>, updated: TextureUpdated},
@@ -114,6 +114,25 @@ pub enum TextureFormat {
     SharedBGRAu8{width:usize, height:usize, id:crate::cx_stdin::PresentableImageId, initial: bool},
     #[cfg(any(target_os = "android", target_os = "linux"))]
     VideoRGB,
+}
+
+impl std::fmt::Debug for TextureFormat{
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error>{
+        match self{
+            TextureFormat::Unknown=>write!(f, "TextureFormat::Unknown"),
+            TextureFormat::VecBGRAu8_32{width, height,..}=>write!(f, "TextureFormat::VecBGRAu8_32(width:{width},height:{height})"),
+            TextureFormat::VecMipBGRAu8_32{width, height,..}=>write!(f, "TextureFormat::VecMipBGRAu8_32(width:{width},height:{height})"),
+            TextureFormat::VecRGBAf32{width, height,..}=>write!(f, "TextureFormat::VecRGBAf32(width:{width},height:{height})"),
+            TextureFormat::VecRu8{width, height,..}=>write!(f, "TextureFormat::VecRu8(width:{width},height:{height})"),
+            TextureFormat::VecRGu8{width, height,..}=>write!(f, "TextureFormat::VecRGu8(width:{width},height:{height})"),
+            TextureFormat::VecRf32{width, height,..}=>write!(f, "TextureFormat::VecRf32(width:{width},height:{height})"),
+            TextureFormat::DepthD32{size,..}=>write!(f, "TextureFormat::DepthD32(size:{:?})", size),
+            TextureFormat::RenderBGRAu8{size,..}=>write!(f, "TextureFormat::RenderBGRAu8(size:{:?})", size),
+            TextureFormat::RenderRGBAf16{size,..}=>write!(f, "TextureFormat::RenderRGBAf16(size:{:?})", size),
+            TextureFormat::RenderRGBAf32{size,..}=>write!(f, "TextureFormat::RenderRGBAf32(size:{:?})", size),
+            TextureFormat::SharedBGRAu8{width,height,..}=>write!(f, "TextureFormat::SharedBGRAu8(width:{width},height:{height})"),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)] 

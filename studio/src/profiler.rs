@@ -56,16 +56,15 @@ live_design!{
         height: Fill, width: Fill
         <DockToolbar> {
             content = {
-                start_button = <ButtonFlat> {
-                    text: "Start"
+                running_button = <CheckBox> {
+                    text: "Running",
+                    active: true,
                     icon_walk: { width: 8. }
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/icons/icon_run.svg"),
-                    }
                 }
                 clear_button = <ButtonFlat> {
                     text: "Clear"
                     icon_walk: { width: 12. }
+                    
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_profiler_clear.svg"),
                     }
@@ -271,6 +270,7 @@ impl WidgetMatchEvent for Profiler{
     fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions, scope: &mut Scope ){
         let _data = scope.data.get_mut::<AppData>().unwrap();
         if self.button(id!(clear_button)).clicked(&actions){
+            
             crate::log!("CLICK");
         }
     }
