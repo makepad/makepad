@@ -7,7 +7,6 @@ use crate::{
     splitter::{SplitterAction, Splitter, SplitterAlign, SplitterAxis},
     tab_bar::{TabBarAction, TabBar},
 };
-const OLD_UNIQUE_ID_PREFIX: &str = "Old Unique ";
 
 live_design!{
     link widgets;
@@ -919,23 +918,23 @@ impl Dock {
         let processed_dock_items: HashMap<LiveId, DockItem> = dock_items.into_iter()
             .map(|(k, mut v)| {
                 let new_key = if k.is_unique() {
-                    LiveId::from_str(&format!("{} {:?}", OLD_UNIQUE_ID_PREFIX, k.0))
+                    k.bytes_append("x".as_bytes())
                 } else { 
                     k
                 };
                 match &mut v {
                     DockItem::Splitter { a, b, .. } => {
                         if a.is_unique() {
-                            *a = LiveId::from_str(&format!("{} {:?}", OLD_UNIQUE_ID_PREFIX, a.0));
+                            *a = a.bytes_append("x".as_bytes());
                         }
                         if b.is_unique() {
-                            *b = LiveId::from_str(&format!("{} {:?}", OLD_UNIQUE_ID_PREFIX, b.0));
+                            *b = b.bytes_append("x".as_bytes());
                         }
                     }
                     DockItem::Tabs { tabs, selected: _, closable: _ } => {
                         tabs.iter_mut().for_each(|t| {
                             if t.is_unique() {
-                                *t = LiveId::from_str(&format!("{} {:?}", OLD_UNIQUE_ID_PREFIX, t.0));
+                                *t = t.bytes_append("x".as_bytes());
                             }
                         })
                     }
