@@ -567,7 +567,7 @@ impl Widget for Button {
                     cx.set_cursor(MouseCursor::NotAllowed);
                 }
             }
-            Hit::FingerHoverOut(_) if self.enabled => {
+            Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
             Hit::FingerLongPress(_lp) if self.enabled && self.enable_long_press => {
