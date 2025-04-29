@@ -90,7 +90,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self {
+        let r = Self {
             loader: loader::Settings {
                 shaper: shaper::Settings { cache_size: 4096 },
                 rasterizer: rasterizer::Settings {
@@ -100,11 +100,12 @@ impl Default for Settings {
                         cutoff: 0.25,
                     },
                     grayscale_atlas_size: Size::new(4096, 4096),
-                    color_atlas_size: Size::new(4096, 4096),
+                    color_atlas_size: Size::new(2048, 2048),
                 },
             },
             cache_size: 4096,
-        }
+        };
+        r
     }
 }
 
