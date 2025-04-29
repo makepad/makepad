@@ -18,10 +18,10 @@ pub struct ParsedProfiles{
 }
 
 impl ParsedProfiles{
-    fn profile(&self, v:&str)->Option<&str>{
+    fn profile(&self, v:&str)->Option<&PathBuf>{
         for profile in &self.profiles{
             if profile.uuid.starts_with(v){
-                return Some(&profile.uuid)
+                return Some(&profile.path)
             }
         }
         None
@@ -73,25 +73,38 @@ impl ParsedProfiles{
         println!("\nplease set --device=<> to the right device name or hex string, comma separated for multiple\n");
     }
 }
-
-pub fn parse_profiles()->Result<ParsedProfiles, String>{
-    let cwd = std::env::current_dir().unwrap();
-    let home_dir = std::env::var("HOME").unwrap();
-    let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
-        
-    let profile_files: Vec<_> = std::fs::read_dir(profile_dir).unwrap()
-    .filter_map(Result::ok)
-    .map(|e| e.path())
-    .filter(|p| p.extension().map_or(false, |ext| ext == "mobileprovision"))
-    .collect();
+fn load_all_provisioning_profiles() -> Vec<ProvisionData> {
     let mut profiles = Vec::new();
-    for file in profile_files {
-        // lets read it
-        if let Some(profile) = ProvisionData::parse(&file) {
-            profiles.push(profile);
+
+    let home_dir = std::env::var("HOME").unwrap();
+    // < xcode 16
+    let legacy_dir = format!("{}/Library/MobileDevice/Provisioning Profiles", home_dir);
+    // >= xcode 16
+    let new_dir = format!("{}/Library/Developer/Xcode/UserData/Provisioning Profiles", home_dir);
+
+    for dir in [legacy_dir, new_dir] {
+        let profile_files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().map_or(false, |ext| ext == "mobileprovision"))
+                .collect(),
+            Err(_) => continue, // skip if the directory doesn't exist
+        };
+
+        for file in profile_files {
+            if let Some(profile) = ProvisionData::parse(&file) {
+                profiles.push(profile);
+            }
         }
     }
+
+    profiles
+}
+pub fn parse_profiles()->Result<ParsedProfiles, String>{
+    let profiles = load_all_provisioning_profiles();
     let mut certs = Vec::new();
+    let cwd = std::env::current_dir().unwrap();
     let identities = shell_env_cap(&[], &cwd, "security", &[
         "find-identity",
         "-v",
@@ -688,12 +701,8 @@ pub struct AppleArgs {
 
 pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: AppleTarget) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
-    let home_dir = std::env::var("HOME").unwrap();
     // lets parse the inputs
     let parsed = parse_profiles()?;
-    
-    //return Ok(());
-    let profile_dir = format!("{}/Library/MobileDevice/Provisioning Profiles/", home_dir);
     
     let provision = apple_args.provisioning_profile.as_ref().and_then(
         |v|{
@@ -702,7 +711,7 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
             }
             else{
                 let v = parsed.profile(v).expect("cannot find provisioning profile");
-                ProvisionData::parse(&PathBuf::from(format!("{}{}.mobileprovision", profile_dir, v)))
+                ProvisionData::parse(v)
             }
             }
     );
