@@ -131,6 +131,8 @@ impl std::fmt::Debug for TextureFormat{
             TextureFormat::RenderRGBAf16{size,..}=>write!(f, "TextureFormat::RenderRGBAf16(size:{:?})", size),
             TextureFormat::RenderRGBAf32{size,..}=>write!(f, "TextureFormat::RenderRGBAf32(size:{:?})", size),
             TextureFormat::SharedBGRAu8{width,height,..}=>write!(f, "TextureFormat::SharedBGRAu8(width:{width},height:{height})"),
+            #[cfg(any(target_os = "android", target_os = "linux"))]
+            TextureFormat::VideoRGB=>write!(f, "TextureFormat::VideoRGB"),
         }
     }
 }

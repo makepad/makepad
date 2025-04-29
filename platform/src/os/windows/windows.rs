@@ -78,7 +78,7 @@ impl Cx {
             return EventFlow::Exit
         }
         
-        let mut paint_dirty = false;
+        //let mut paint_dirty = false;
         /*match &event{
             Win32Event::Timer(time) =>{
                 
@@ -94,7 +94,7 @@ impl Cx {
                         self.repaint_pass(main_pass_id);
                     }
                 }
-                paint_dirty = true;
+                //paint_dirty = true;
                 self.call_event_handler(&Event::AppGotFocus);
             }
             Win32Event::AppLostFocus => {
@@ -245,15 +245,17 @@ impl Cx {
                     self.redraw_all();
                 }
                 self.handle_networking_events();
-                return EventFlow::Poll;
+                return EventFlow::Wait;
             }
         }
         
+        return EventFlow::Poll;
+        /*
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
             EventFlow::Poll
         } else {
             EventFlow::Wait
-        }
+        }*/
         
     }
     
