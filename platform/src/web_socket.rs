@@ -113,6 +113,7 @@ impl Cx{
         let (rx_sender, rx_receiver) = channel();
         let mut thread_sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
         *thread_sender = Some(rx_sender);
+        let mut warning_printed = false;
         self.spawn_thread(move ||{
             // this is the websocket thread.
             let mut sockets = HashMap::new();
@@ -131,7 +132,11 @@ impl Cx{
                         }
                         WebSocketThreadMsg::SendMessage{socket_id, message}=>{
                             if let Some(socket) = sockets.get_mut(&socket_id){
-                                socket.send_message(message).unwrap();
+                                if let Err(e) = socket.send_message(message) {
+                                    eprintln!("Error sending WebSocket message: {:?}", e);
+                                }
+                            } else {
+                                eprintln!("WebSocket with ID {} not found", socket_id);
                             }
                         }
                         WebSocketThreadMsg::AppToStudio{message}=>{
@@ -145,7 +150,7 @@ impl Cx{
                             sockets.remove(&socket_id);
                         }
                     },
-                    Err(RecvTimeoutError::Timeout)=>{ 
+                    Err(RecvTimeoutError::Timeout)=>{
                     }
                     Err(RecvTimeoutError::Disconnected)=>{
                         return
@@ -156,16 +161,27 @@ impl Cx{
                         // lets send it
                         if let Some(socket) = sockets.get_mut(&0){
                             socket.send_message(WebSocketMessage::Binary(app_to_studio.serialize_bin())).unwrap();
+                            if let Err(e) = socket.send_message(WebSocketMessage::Binary(app_to_studio.serialize_bin())) {
+                                eprintln!("Error sending batched AppToStudio messages: {:?}", e);
+                            }
                         }
                         app_to_studio.0.clear();
                         first_message = None;
                         cycle_time = Duration::MAX;
+                    } else {
+                        if !warning_printed{
+                            eprintln!("Only Once: Websocket with ID 0 not found - cannot send batched AppToStudio messages");
+                            warning_printed = true;
+                        }
                     }
+                    app_to_studio.0.clear();
+                    first_message = None;
+                    cycle_time = Duration::MAX;
                 }
             }
         });
     }
-    
+   
     fn start_studio_websocket(&mut self, studio_http: &str) {
         if studio_http.len() == 0{
             return
