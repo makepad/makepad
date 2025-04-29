@@ -70,7 +70,7 @@ impl MatchEvent for App{
     
     fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button_1)).clicked(&actions) {
-            log!("hi {}", TrackingHeap.total());
+            log!("hi {}", TRACKING_HEAP.total());
             self.counter += 1;
         }
     }
@@ -140,4 +140,4 @@ unsafe impl GlobalAlloc for TrackingHeapWrap {
 
 // Register our custom allocator.
 #[global_allocator]
-static TrackingHeap: TrackingHeapWrap = TrackingHeapWrap::new();
+static TRACKING_HEAP: TrackingHeapWrap = TrackingHeapWrap::new();
