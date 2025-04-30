@@ -589,29 +589,6 @@ impl TextInput {
         }
     }
 
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
-    pub fn set_text(&mut self, cx: &mut Cx, text: String) {
-        self.text = self.filter_input(text, true);
-        self.set_selection(
-            cx,
-            Selection {
-                anchor: Cursor {
-                    index: self.selection.anchor.index.min(self.text.len()),
-                    prefer_next_row: self.selection.anchor.prefer_next_row,
-                },
-                cursor: Cursor {
-                    index: self.selection.cursor.index.min(self.text.len()),
-                    prefer_next_row: self.selection.cursor.prefer_next_row,
-                }
-            }
-        );
-        self.history.clear();
-        self.laidout_text = None;
-        self.draw_bg.redraw(cx);
-    }
 
     pub fn selection(&self) -> Selection {
         self.selection
@@ -959,7 +936,7 @@ impl TextInput {
         prev_word_boundary_index
     }
 
-    fn filter_input(&self, input: String, is_set_text: bool) -> String {
+    fn filter_input(&self, input: &str, is_set_text: bool) -> String {
         if self.is_numeric_only {
             let mut contains_dot = if is_set_text {
                 false   
@@ -978,7 +955,7 @@ impl TextInput {
                 }
             }).collect()
         } else {
-            input
+            input.to_string()
         }
     }
 
@@ -1026,6 +1003,31 @@ impl TextInput {
 }
 
 impl Widget for TextInput {
+        
+    fn text(&self) -> String {
+        self.text.clone()
+    }
+    
+    fn set_text(&mut self, cx: &mut Cx, text: &str) {
+        self.text = self.filter_input(text, true);
+        self.set_selection(
+            cx,
+            Selection {
+                anchor: Cursor {
+                    index: self.selection.anchor.index.min(self.text.len()),
+                    prefer_next_row: self.selection.anchor.prefer_next_row,
+                },
+                cursor: Cursor {
+                    index: self.selection.cursor.index.min(self.text.len()),
+                    prefer_next_row: self.selection.cursor.prefer_next_row,
+                }
+            }
+        );
+        self.history.clear();
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+    }
+    
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_selection.append_to_draw_call(cx);
@@ -1271,7 +1273,7 @@ impl Widget for TextInput {
                 was_paste,
                 ..
             }) if !self.is_read_only => {
-                let input = self.filter_input(input, false);
+                let input = self.filter_input(&input, false);
                 if input.is_empty() {
                     return;
                 }
@@ -1390,21 +1392,6 @@ impl TextInputRef {
     pub fn set_empty_text(&self, cx: &mut Cx, empty_text: String) {
         if let Some(mut inner) = self.borrow_mut(){
             inner.set_empty_text(cx, empty_text);
-        }
-    }
-
-    pub fn text(&self) -> String {
-        if let Some(inner) = self.borrow(){
-            inner.text().to_string()
-        }
-        else{
-            String::new()
-        }
-    }
-
-    pub fn set_text(&self, cx: &mut Cx, text: String) {
-        if let Some(mut inner) = self.borrow_mut(){
-            inner.set_text(cx, text);
         }
     }
 
