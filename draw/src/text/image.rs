@@ -196,28 +196,49 @@ impl<'a, T> IndexMut<Point<usize>> for SubimageMut<'a, T> {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-#[repr(C)]
+#[repr(transparent)]
 pub struct R {
-    pub r: u8,
+    pub bits: u8,
 }
 
 impl R {
     pub const fn new(r: u8) -> Self {
-        Self { r }
+        Self { bits: r }
+    }
+
+    pub fn r(self) -> u8 {
+        self.bits
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-#[repr(C)]
+#[repr(transparent)]
 pub struct Bgra {
-    pub b: u8,
-    pub g: u8,
-    pub r: u8,
-    pub a: u8,
+    pub bits: u32,
 }
 
 impl Bgra {
     pub fn new(b: u8, g: u8, r: u8, a: u8) -> Self {
-        Self { b, g, r, a }
+        let b = u32::from(b);
+        let g = u32::from(g);
+        let r = u32::from(r);
+        let a = u32::from(a);
+        Self { bits: (a << 24) | (r << 16) | (g << 8) | b }
+    }
+
+    pub fn b(self) -> u8 {
+        (self.bits & 0xFF) as u8
+    }
+
+    pub fn g(self) -> u8 {
+        ((self.bits >> 8) & 0xFF) as u8
+    }
+
+    pub fn r(self) -> u8 {
+        ((self.bits >> 16) & 0xFF) as u8
+    }
+
+    pub fn a(self) -> u8 {
+        ((self.bits >> 24) & 0xFF) as u8
     }
 }
