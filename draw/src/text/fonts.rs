@@ -3,7 +3,7 @@ use {
         font::FontId,
         font_family::FontFamilyId,
         geom::Point,
-        image::Rgba,
+        image::Bgra,
         layouter::{self, LaidoutText, LayoutParams, Layouter},
         loader::{FontDefinition, FontFamilyDefinition},
         rasterizer::Rasterizer,
@@ -125,7 +125,7 @@ impl Fonts {
     }
 
     fn update_color_texture(&mut self, cx: &mut Cx) -> bool {
-        fn rgba_to_u32(pixel: Rgba) -> u32 {
+        fn rgba_to_u32(pixel: Bgra) -> u32 {
             let r = u32::from(pixel.r);
             let g = u32::from(pixel.g);
             let b = u32::from(pixel.b);
