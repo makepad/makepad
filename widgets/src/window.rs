@@ -276,7 +276,7 @@ impl Window {
     pub fn reposition(&self, cx: &mut Cx, size: DVec2) {
         self.window.reposition(cx, size);
     }
-    pub fn fullscreen(&mut self, cx: &mut Cx) {
+    pub fn set_fullscreen(&mut self, cx: &mut Cx) {
         self.window.fullscreen(cx);
     }
     
