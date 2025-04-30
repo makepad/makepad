@@ -61,22 +61,18 @@ impl<T> FontAtlas<T> {
     }
 
     fn allocate_glyph_image(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
-        const PADDING: Size<usize> = Size::new(2, 2);
-
-        let padded_size = size + PADDING;
-        if self.current_point.x + padded_size.width > self.size().width {
+        if self.current_point.x + size.width > self.size().width {
             self.current_point.x = 0;
             self.current_point.y += self.current_row_height;
             self.current_row_height = 0;
         }
-        if self.current_point.y + padded_size.height > self.size().height {
+        if self.current_point.y + size.height > self.size().height {
             self.needs_reset = true;
-            crate::log!("Font atlas too small, resetting");
             return None;
         }
         let origin = self.current_point;
-        self.current_point.x += padded_size.width;
-        self.current_row_height = self.current_row_height.max(padded_size.height);
+        self.current_point.x += size.width;
+        self.current_row_height = self.current_row_height.max(size.height);
         let rect = Rect::new(origin, size);
         self.dirty_rect = self.dirty_rect.union(rect);
         Some(rect)
