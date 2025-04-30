@@ -63,7 +63,7 @@ impl<'a> CxDraw<'a> {
         Self::lazy_construct_nav_tree(cx);
         Self::lazy_construct_icon_atlas(cx);
         cx.redraw_id += 1;
-        let mut fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         fonts.borrow_mut().prepare_atlases_if_needed(cx);
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
         let icon_atlas_rc = cx.get_global::<CxIconAtlasRc>().clone();
