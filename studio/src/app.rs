@@ -69,7 +69,7 @@ impl App {
     pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
         if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
             let dock = self.ui.dock(id!(dock));            
-            let tab_id = dock.unique_tab_id(file_id.0);
+            let tab_id = dock.unique_id(file_id.0);
             self.data.file_system.request_open_file(tab_id, file_id);
             let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
             // lets pick the template
@@ -279,7 +279,7 @@ impl MatchEvent for App{
                     }
                     else{
                         // lets open the editor
-                        let tab_id = dock.unique_tab_id(file_id.0);
+                        let tab_id = dock.unique_id(file_id.0);
                         self.data.file_system.request_open_file(tab_id, file_id);
                         // lets add a file tab 'somewhere'
                         let (tab_bar, pos) = dock.find_tab_bar_of_tab(live_id!(edit_first)).unwrap();
@@ -590,7 +590,7 @@ impl MatchEvent for App{
                     if let DragItem::FilePath {path, internal_id} = &drop_event.items[0] {
                         if let Some(internal_id) = internal_id { // from inside the dock
                             if drop_event.modifiers.logo {
-                                let tab_id = dock.unique_tab_id(internal_id.0);
+                                let tab_id = dock.unique_id(internal_id.0);
                                 dock.drop_clone(cx, drop_event.abs, *internal_id, tab_id, live_id!(CloseableTab));
                             }
                             else {
@@ -600,7 +600,7 @@ impl MatchEvent for App{
                         }
                         else { // external file, we have to create a new tab
                             if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
-                                let tab_id = dock.unique_tab_id(file_id.0);
+                                let tab_id = dock.unique_id(file_id.0);
                                 self.data.file_system.request_open_file(tab_id, file_id);
                                 let template = FileSystem::get_editor_template_from_path(&path);
                                 dock.drop_create(cx, drop_event.abs, tab_id, template, "".to_string(), live_id!(CloseableTab));
@@ -667,7 +667,7 @@ impl MatchEvent for App{
                 // If the tab is already open, focus it
                 dock.select_tab(cx, tab_id);
             } else {
-                let tab_id = dock.unique_tab_id(file_id.0);
+                let tab_id = dock.unique_id(file_id.0);
                 self.data.file_system.request_open_file(tab_id, file_id);
                 self.data.file_system.request_open_file(tab_id, file_id);
                                 
