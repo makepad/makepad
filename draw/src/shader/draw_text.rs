@@ -348,13 +348,13 @@ impl DrawText {
     fn update_draw_vars(&mut self, cx: &mut Cx2d) {
         let fonts = cx.fonts.borrow();
         let rasterizer = fonts.rasterizer().borrow();
-        let sdfer_settings = rasterizer.sdfer_settings();
+        let sdfer_settings = rasterizer.sdfer().settings();
         self.draw_vars.user_uniforms[0] = sdfer_settings.radius;
         self.draw_vars.user_uniforms[1] = sdfer_settings.cutoff;
-        let grayscale_atlas_size = rasterizer.grayscale_atlas_size();
+        let grayscale_atlas_size = rasterizer.grayscale_atlas().size();
         self.draw_vars.user_uniforms[2] = grayscale_atlas_size.width as f32;
         self.draw_vars.user_uniforms[3] = grayscale_atlas_size.height as f32;
-        let color_atlas_size = rasterizer.color_atlas_size();
+        let color_atlas_size = rasterizer.color_atlas().size();
         self.draw_vars.user_uniforms[4] = color_atlas_size.width as f32;
         self.draw_vars.user_uniforms[5] = color_atlas_size.height as f32;
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
@@ -524,7 +524,7 @@ pub struct FontFamily {
 
 impl FontFamily {
     fn to_font_family_id(&self) -> FontFamilyId {
-        (self.id.0 as usize).into()
+        (self.id.0).into()
     }
 }
 

@@ -78,7 +78,16 @@ impl<T> FontAtlas<T> {
         Some(rect)
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset_if_needed(&mut self) -> bool {
+        if self.needs_reset() {
+            self.reset();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn reset(&mut self) {
         self.needs_reset = false;
         self.dirty_rect = Rect::ZERO;
         self.current_point = Point::ZERO;
