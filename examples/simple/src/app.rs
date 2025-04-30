@@ -30,6 +30,9 @@ live_design!{
                             return depth_clip(self.world, color, self.depth_clip);
                         }
                     }
+                    <Rotary>{
+                        text:"hi"
+                    }
                     button_1 = <Button> {
                         text: "Click me 😊"
                         draw_text:{color:#fff, text_style:{font_size:18}}

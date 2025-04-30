@@ -507,7 +507,7 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Live, Widget)]
 pub struct TextInput {
     #[animator] animator: Animator,
 
@@ -533,6 +533,12 @@ pub struct TextInput {
     #[rust] selection: Selection,
     #[rust] history: History,
     #[rust] blink_timer: Timer,
+}
+
+impl LiveHook for TextInput{
+    fn after_update_from_doc(&mut self, _cx:&mut Cx){
+        self.selection = Selection::default();
+    }
 }
 
 impl TextInput {
