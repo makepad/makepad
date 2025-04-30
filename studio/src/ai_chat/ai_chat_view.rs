@@ -31,7 +31,7 @@ live_design!{
             spacing: (THEME_SPACE_3),
             padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1), top: (THEME_SPACE_1) }
             margin: { bottom: -5.}
-
+/*
             run_button = <ButtonFlat> {
                 width: Fit,
                 height: Fit,
@@ -44,7 +44,7 @@ live_design!{
                     svg_file: dep("crate://self/resources/icons/icon_run.svg"),
                 }
                 icon_walk: { width: 9. }
-            }
+            }*/
 
             <Vr> { height: 17.5}
 
