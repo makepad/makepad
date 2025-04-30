@@ -19,17 +19,17 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct FontId(usize);
+pub struct FontId(u64);
 
-impl From<usize> for FontId {
-    fn from(value: usize) -> Self {
+impl From<u64> for FontId {
+    fn from(value: u64) -> Self {
         Self(value)
     }
 }
 
 impl From<&str> for FontId {
     fn from(value: &str) -> Self {
-        Self(value.intern().as_ptr() as usize)
+        Self(value.intern().as_ptr() as u64)
     }
 }
 
