@@ -46,7 +46,15 @@ Only rewrite the live_design block and only output that code not the rest of the
 Please answer with code only and don't give explanations. 
 Don't invent new function signatures, only use what is given in the example. 
 Remove all comments from the generated code. 
-
+Please use  ```
+use link::widgets::*; 
+use link::theme::*;
+use link::shaders::*;
+``` instead of the old ```
+use makepad_widgets::theme::*;
+use makepad_widgets::shaders::*;
+use makepad_widgets::widgets::*;
+```
 Shader code is GLSL syntax, not Rust so only use GLSL functions and not rust postfix methods. 
 Don't use ```iTime``` but use ```self.time```. 
 Types in shader code are inferenced, and written as ```let variable = value```

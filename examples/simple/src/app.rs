@@ -2,26 +2,40 @@
 use makepad_widgets::*;
 
 live_design!{
-    use makepad_widgets::theme::*;
-    use makepad_widgets::shaders::*;
-    use makepad_widgets::widgets::*;
+    use link::widgets::*;
+    use link::theme::*;
+    use link::shaders::*;
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
                 body = <ScrollXYView>{
-                    width: Fill,
-                    height: Fill,
+                    flow: Down,
                     show_bg: true,
-                    draw_bg:{
-                        fn pixel(self)->vec4{
-                            let uv = self.pos * vec2(10.0, 10.0);
-                            let color = vec3(
-                                0.5 + 0.5 * cos(self.time + uv.x + 0.0),
-                                0.5 + 0.5 * cos(self.time + uv.y + 2.0),
-                                0.5 + 0.5 * cos(self.time + uv.x + 4.0)
-                            );
-                            let final_color = mix(color, vec3(0.1, 0.1, 0.1), 0.3);
-                            return vec4(final_color, 1.0);
+                    draw_bg: {
+
+                        fn hsv_to_rgb(self, hsv: vec3) -> vec3 {
+                            let k = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+                            let p = abs(fract(hsv.xxx + k.xyz) * 6.0 - k.www);
+                            let rgb = hsv.z * mix(k.xxx, clamp(p - k.xxx, 0.0, 1.0), hsv.y);
+                            return rgb;
+                        }
+
+                        fn pixel(self) -> vec4 {
+                            let uv = self.pos * 6.0;
+                            let t = self.time * 0.4;
+
+                            let pattern_x = sin(uv.x + t * 1.2);
+                            let pattern_y = cos(uv.y - t * 0.7);
+                            let pattern_diag = sin(uv.x * 0.8 + uv.y * 1.2 + t * 0.5);
+                            let pattern_dist = cos(length(uv * vec2(1.0, 1.5)) * 1.5 - t * 0.9);
+
+                            let hue = fract(0.6 + 0.4 * (pattern_x * 1.1 + pattern_y * 0.9 + pattern_diag * 0.6 + pattern_dist * 0.4));
+                            let sat = 0.7 + 0.3 * sin(uv.x * 2.5 - t * 1.5 + pattern_y * 3.14);
+                            let val = 0.65 + 0.35 * cos(uv.y * 3.5 + t * 1.1 - pattern_x * 1.57);
+
+                            let color_rgb = self.hsv_to_rgb(vec3(hue, clamp(sat, 0.5, 1.0), clamp(val, 0.4, 1.0)));
+
+                            return vec4(color_rgb, 1.0);
                         }
                     }
                 }
