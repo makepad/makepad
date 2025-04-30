@@ -3,18 +3,20 @@ use crate::makepad_widgets::*;
 //#[cfg(feature = "nightly")]
  
 live_design!{ 
-    use makepad_widgets::base::*;
-    use makepad_widgets::theme_desktop_dark::*;
+    use link::widgets::*;
+    use link::theme::*;
     
     use crate::mandelbrot::Mandelbrot;
     App = {{App}} {
-        ui: <Window> {
-            draw_bg:{color:#f00}
-            body = <Mandelbrot> {
-                width: Fill, height: Fill
-            }
-        } 
-    }  
+        ui: <Root>{
+            <Window> {
+                draw_bg:{color:#f00}
+                body = <Mandelbrot> {
+                    width: Fill, height: Fill
+                }
+            } 
+        }  
+    }
 }
 app_main!(App);
   
