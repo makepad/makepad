@@ -1,7 +1,7 @@
 use {
     super::{
         geom::{Point, Rect, Size},
-        image::{Rgba, SubimageMut},
+        image::{Bgra, SubimageMut},
     },
     makepad_rustybuzz as rustybuzz,
     rustybuzz::ttf_parser,
@@ -58,13 +58,13 @@ impl<'a> GlyphRasterImage<'a> {
         }
     }
 
-    pub fn decode(&self, image: &mut SubimageMut<Rgba>) {
+    pub fn decode(&self, image: &mut SubimageMut<Bgra>) {
         match self.format {
             Format::Png => self.decode_png(image),
         }
     }
 
-    fn decode_png(&self, image: &mut SubimageMut<Rgba>) {
+    fn decode_png(&self, image: &mut SubimageMut<Bgra>) {
         let decoder = png::Decoder::new(self.data);
         let mut reader = decoder.read_info().unwrap();
         let mut buffer = vec![0; reader.output_buffer_size()];
@@ -82,7 +82,7 @@ impl<'a> GlyphRasterImage<'a> {
                     let g = palette[base + 1];
                     let b = palette[base + 2];
                     let a = trns.map_or(255, |trns| trns.get(index).copied().unwrap_or(255));
-                    image[Point::new(x, y)] = Rgba::new(r, g, b, a);
+                    image[Point::new(x, y)] = Bgra::new(b, g, r, a);
                 };
                 match output_info.bit_depth {
                     png::BitDepth::Four => {
