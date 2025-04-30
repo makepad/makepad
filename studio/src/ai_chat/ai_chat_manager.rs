@@ -58,30 +58,14 @@ impl Default for AiChatManager{
             contexts: vec![
                 BaseContext{
                     name: "Chat".to_string(),
-                    apply: AiApply::PatchDSL,
+                    apply: AiApply::None,
                     system_pre: live_id!(CHAT_PRE),
                     system_post: live_id!(CHAT_POST),
                     general_post: live_id!(CHAT_GENERAL),
                     files: vec![]
                 },
                 BaseContext{
-                    name: "Rust".to_string(),
-                    apply: AiApply::PatchDSL,
-                    system_pre: live_id!(RUST_PRE),
-                    system_post: live_id!(RUST_POST),
-                    general_post: live_id!(RUST_GENERAL),
-                    files: vec![]
-                },
-                BaseContext{
-                    name: "Next".to_string(),
-                    apply: AiApply::WholeFile,
-                    system_pre: live_id!(NEXT_PRE),
-                    system_post: live_id!(NEXT_POST),
-                    general_post: live_id!(NEXT_GENERAL),
-                    files: vec![]
-                },
-                BaseContext{
-                    name: "Next All".to_string(),
+                    name: "Next Rust".to_string(),
                     apply: AiApply::WholeFile,
                     system_pre: live_id!(NEXT_ALL_PRE),
                     system_post: live_id!(NEXT_ALL_POST),
@@ -89,7 +73,7 @@ impl Default for AiChatManager{
                     files: vec![]
                 },
                 BaseContext{
-                    name: "Next UI".to_string(),
+                    name: "Next DSL".to_string(),
                     apply: AiApply::PatchDSL,
                     system_pre: live_id!(FNEXT_UI_PRE),
                     system_post: live_id!(NEXT_UI_POST),
@@ -97,7 +81,7 @@ impl Default for AiChatManager{
                     files: vec![]
                 },
                 BaseContext{
-                    name: "Makepad All".to_string(),
+                    name: "Makepad Rust".to_string(),
                     apply: AiApply::WholeFile,
                     system_pre: live_id!(ALL_PRE),
                     system_post: live_id!(ALL_POST),
@@ -110,7 +94,7 @@ impl Default for AiChatManager{
                     ]
                 },
                 BaseContext{
-                    name: "Makepad UI".to_string(),
+                    name: "Makepad DSL".to_string(),
                     apply: AiApply::PatchDSL,
                     system_pre: live_id!(UI_PRE),
                     system_post: live_id!(UI_POST),
@@ -273,12 +257,6 @@ impl Default for AiChatManager{
                         AiContextFile::new("Main app to rewrite","examples/simple/src/app.rs")
                     ]
                 },
-                AiProject{
-                    name:"makepad-portal-list".to_string(),
-                    files:vec![
-                        AiContextFile::new("","widgets/src/portal_list2.rs")
-                    ]
-                }
             ]
         }
     }
@@ -343,11 +321,6 @@ pub enum AiContext{
 
 #[derive(Default, Debug, SerRon, DeRon, Clone)]
 pub struct AiUserMessage{
-    pub auto_run: bool,
-    pub model: String,
-    pub project: String,
-    pub base_context: String,
-    pub context: Vec<AiContext>,
     pub message:String
 }
 
@@ -358,8 +331,13 @@ pub enum AiChatMessage{
 }
 
 
-#[derive(Debug, SerRon, DeRon, Clone)]
+#[derive(Debug, SerRon, DeRon, Clone,)]
 pub struct AiChatMessages{
+    pub context: Vec<AiContext>,
+    pub auto_run: bool,
+    pub model: String,
+    pub project: String,
+    pub base_context: String,
     pub last_time: f64,
     pub messages: Vec<AiChatMessage>
 }
@@ -368,30 +346,19 @@ impl AiChatMessages{
     fn new()->Self{
         AiChatMessages{
             last_time: 0.0,
+            auto_run: true,
+            model: "".to_string(),
+            project: "".to_string(),
+            base_context: "".to_string(),
+            context: vec![],
             messages: vec![AiChatMessage::User(AiUserMessage::default())],
         }
     }
     
     fn follow_up(&mut self){
-        if let Some(AiChatMessage::User(usr)) = self.messages.iter().rev().nth(1).cloned(){
-            let next = if usr.base_context == "Makepad UI"{
-                "Next UI"
-            }
-            else if usr.base_context == "Makepad All"{
-                "Next All"
-            }
-            else{
-                "Next"
-            };
-            self.messages.push(AiChatMessage::User(AiUserMessage{
-                auto_run: usr.auto_run,
-                model: usr.model.clone(),
-                project: usr.project.clone(),
-                base_context: next.to_string(),
-                context: vec![],
-                message:"".to_string()
-            }));
-        }
+       self.messages.push(AiChatMessage::User(AiUserMessage{
+            message:"".to_string()
+        }));
     }
 }
 
@@ -485,32 +452,20 @@ impl AiChatFile{
         // 
     }
     
-    pub fn set_base_context(&mut self, history_slot:usize, at:usize, base_context:&str){ 
-        if let AiChatMessage::User(s) = &mut self.history[history_slot].messages[at]{
-            s.base_context = base_context.to_string()
-        }
-        else{panic!()}
+    pub fn set_base_context(&mut self, history_slot:usize, base_context:&str){ 
+        self.history[history_slot].base_context = base_context.to_string()
     }
     
-    pub fn set_model(&mut self, history_slot:usize, at:usize, model:&str){ 
-        if let AiChatMessage::User(s) = &mut self.history[history_slot].messages[at]{
-            s.model = model.to_string()
-        }
-        else{panic!()}
+    pub fn set_model(&mut self, history_slot:usize, model:&str){ 
+        self.history[history_slot].model = model.to_string()
     }
     
-    pub fn set_project(&mut self, history_slot:usize, at:usize, project:&str){ 
-        if let AiChatMessage::User(s) = &mut self.history[history_slot].messages[at]{
-            s.project = project.to_string()
-        }
-        else{panic!()}
+    pub fn set_project(&mut self, history_slot:usize, project:&str){ 
+        self.history[history_slot].project = project.to_string()
     }
     
-    pub fn set_auto_run(&mut self, history_slot:usize, at:usize, auto_run:bool){ 
-        if let AiChatMessage::User(s) = &mut self.history[history_slot].messages[at]{
-            s.auto_run = auto_run
-        }
-        else{panic!()}
+    pub fn set_auto_run(&mut self, history_slot:usize,  auto_run:bool){ 
+        self.history[history_slot].auto_run = auto_run
     }
         
 }
@@ -594,8 +549,8 @@ impl AiChatManager{
                                     }
                                 }
                                 AiBackend::Google{..}=>{
-                                    println!("GOT {:?}", data);
-                                    for data in data.split("\n\n"){
+                                    log!("GOT {:?}", data);
+                                    for data in data.split("\r\n\r\n"){
                                         if let Some(data) = data.strip_prefix("data: "){
                                             match GoogleAiResponse::deserialize_json(&data){
                                                 Ok(response)=>{
@@ -663,15 +618,16 @@ impl AiChatManager{
     
     pub fn run_ai_chat(&self, cx:&mut Cx, chat_id:LiveId, history_slot:usize, item_id:usize, fs:&mut FileSystem){
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get(&chat_id){
-            let usr = doc.file.history[history_slot].messages.iter().nth(item_id);
-            let ast = doc.file.history[history_slot].messages.iter().nth(item_id+1);
+            let messages = &doc.file.history[history_slot];
+            let usr = messages.messages.iter().nth(item_id);
+            let ast = messages.messages.iter().nth(item_id+1);
             if let Some(AiChatMessage::Assistant(ast)) = ast.cloned(){
                 if let Some(AiChatMessage::User(usr)) = usr.cloned(){
                     
                     // lets check the project and the mode
                     println!("{:?}", usr);
                     
-                    if let Some(project) = self.projects.iter().find(|v| v.name == usr.project){
+                    if let Some(project) = self.projects.iter().find(|v| v.name == messages.project){
                         if let Some(first) = project.files.get(0){
                             //let file_path =  "examples/simple/src/app.rs";
                             let file_id = fs.path_to_file_node_id(&first.path).unwrap();
@@ -679,7 +635,7 @@ impl AiChatManager{
                             if let Some(new_data) = ast.strip_prefix("```rust"){
                                 if let Some(new_data) = new_data.strip_suffix("```"){
                                     // alright depending
-                                    if let Some(ctx) = self.contexts.iter().find(|v| v.name == usr.base_context){
+                                    if let Some(ctx) = self.contexts.iter().find(|v| v.name == messages.base_context){
                                         match ctx.apply{
                                             AiApply::PatchDSL=>{
                                                 fs.replace_live_design(
@@ -731,13 +687,8 @@ impl AiChatManager{
         // build the request
         let (request,backend) = if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get(&chat_id){
             // alright lets fetch which backend we want
-            let ai_model = if let Some(AiChatMessage::User(msg)) = doc.file.history[history_slot].messages.last(){
-                if let Some(backend) = self.models.iter().find(|v| v.name == msg.model){
-                    backend
-                }
-                else{
-                    self.models.first().unwrap()
-                }
+            let ai_model = if let Some(backend) = self.models.iter().find(|v| v.name == doc.file.history[history_slot].model){
+                backend
             }
             else{
                 self.models.first().unwrap()
@@ -750,60 +701,59 @@ impl AiChatManager{
                     request.set_header("Authorization".to_string(), format!("Bearer {key}"));
                     request.set_header("Content-Type".to_string(), "application/json".to_string());
                     request.set_metadata_id(chat_id); 
-                    let mut messages = Vec::new();
-                    for msg in &doc.file.history[history_slot].messages{
-                        match msg{
-                            AiChatMessage::User(v)=>{
-                                let doc = fs.file_path_as_string(AI_PROMPT_FILE).unwrap();
-                                // parse it as html
-                                let html = makepad_html::parse_html(&doc, &mut None, InternLiveId::No);
-                                let html = html.new_walker();
-                                
-                                
-                                // alright. we have to now collect our base context files
-                                // ok lets find these files
-                                let mut system_post = LiveId(0);
-                                let mut general_post = LiveId(0);
-                                                                
-                                if let Some(ctx) = self.contexts.iter().find(|ctx| ctx.name == v.base_context){
-                                    // alright lets fetch things
-                                    system_post = ctx.system_post;
-                                    general_post = ctx.general_post;
-                                    
-                                    if let Some(text) = html.find_tag_text(ctx.system_pre){
-                                        messages.push(OpenAiChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
-                                    }
-                                        
-                                    for file in &ctx.files{
-                                        if let Some(file_id) = fs.path_to_file_node_id(&file.path){
-                                            if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
-                                                let mut content = String::new();
-                                                let text = doc.as_text().to_string();
-                                                content.push_str(&format!("\n Now follows a context file with description: ```{}``` given as context to help generating correct code. The filename is ```{}```\n",file.kind, file.path));
-                                                content.push_str("```rust\n");
-                                                content.push_str(&text);
-                                                content.push_str("```\n");
-                                                 messages.push(OpenAiChatMessage {content: Some(content), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
-                                            }
-                                        }
-                                    }
+                    let mut out_messages = Vec::new();
+                    
+                    let messages = &doc.file.history[history_slot];
+                    
+                    let ai_html = fs.file_path_as_string(AI_PROMPT_FILE).unwrap();
+                    let html = makepad_html::parse_html(&ai_html, &mut None, InternLiveId::No);
+                    let html = html.new_walker();
+                    
+                    // alright lets plug in the context 'head'
+                    
+                    if let Some(ctx) = self.contexts.iter().find(|ctx| ctx.name == messages.base_context){
+                        // alright lets fetch things
+                                                            
+                        if let Some(text) = html.find_tag_text(ctx.system_pre){
+                            out_messages.push(OpenAiChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                        }
+                                              
+                        for file in &ctx.files{
+                            if let Some(file_id) = fs.path_to_file_node_id(&file.path){
+                                if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
+                                    let mut content = String::new();
+                                    let text = doc.as_text().to_string();
+                                    content.push_str(&format!("\n Now follows a context file with description: ```{}``` given as context to help generating correct code. The filename is ```{}```\n",file.kind, file.path));
+                                    content.push_str("```rust\n");
+                                    content.push_str(&text);
+                                    content.push_str("```\n");
+                                    out_messages.push(OpenAiChatMessage {content: Some(content), role: Some("user".to_string()), refusal: Some(JsonValue::Null)})
                                 }
-                                messages.push(OpenAiChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
-                                
-                                if let Some(text) = html.find_tag_text(system_post){
-                                    messages.push(OpenAiChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
-                                }
-                                if let Some(text) = html.find_tag_text(general_post){
-                                    messages.push(OpenAiChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
-                                }
-                            }
-                            AiChatMessage::Assistant(v)=>{
-                                messages.push(OpenAiChatMessage {content: Some(v.clone()), role: Some("assistant".to_string()), refusal: Some(JsonValue::Null)})
                             }
                         }
+                        
+                        if let Some(text) = html.find_tag_text(ctx.system_post){
+                            out_messages.push(OpenAiChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                        }                      
+                        
+                        for msg in &messages.messages{
+                            match msg{
+                                AiChatMessage::User(v)=>{
+                                    out_messages.push(OpenAiChatMessage {content: Some(v.message.clone()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                                }
+                                AiChatMessage::Assistant(v)=>{
+                                    out_messages.push(OpenAiChatMessage {content: Some(v.clone()), role: Some("assistant".to_string()), refusal: Some(JsonValue::Null)})
+                                }
+                            }
+                        }
+                        
+                        if let Some(text) = html.find_tag_text(ctx.general_post){
+                            out_messages.push(OpenAiChatMessage {content: Some(text.to_string()), role: Some("user".to_string()), refusal: Some(JsonValue::Null)});
+                        }
                     }
+                    
                     request.set_json_body(OpenAiChatPrompt {
-                        messages,
+                        messages: out_messages,
                         model: model.to_string(),
                         reasoning_effort:reasoning_effort.clone(),
                         max_tokens: 10000,
@@ -817,105 +767,84 @@ impl AiChatManager{
                     request.set_header("Content-Type".to_string(), "application/json".to_string());
                     request.set_metadata_id(chat_id); 
                     let mut contents = Vec::new();
-                    for msg in &doc.file.history[history_slot].messages{
-                        match msg{
-                            AiChatMessage::User(v)=>{
-                                let doc = fs.file_path_as_string(AI_PROMPT_FILE).unwrap();
-                                // parse it as html
-                                let html = makepad_html::parse_html(&doc, &mut None, InternLiveId::No);
-                                let html = html.new_walker();
-                                
-                                // alright. we have to now collect our base context files
-                                // ok lets find these files
-                                let mut system_post = LiveId(0);
-                                let mut general_post = LiveId(0);
+                    
+                    let messages = &doc.file.history[history_slot];
+                                        
+                    let ai_html = fs.file_path_as_string(AI_PROMPT_FILE).unwrap();
+                    // parse it as html
+                    let html = makepad_html::parse_html(&ai_html, &mut None, InternLiveId::No);
+                    let html = html.new_walker();
+                    
+                    if let Some(ctx) = self.contexts.iter().find(|ctx| ctx.name == messages.base_context){
+                            
+                        if let Some(text) = html.find_tag_text(ctx.system_pre){
+                            contents.push(GoogleAiContent {
+                                parts: vec![GoogleAiPart{
+                                    text:text.to_string()
+                                }],
+                                role: Some("user".to_string()), 
+                            });
+                        }
+                                                                    
+                        let mut parts = Vec::new();
+                        for file in &ctx.files{
+                            if let Some(file_id) = fs.path_to_file_node_id(&file.path){
+                                if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
+                                    let mut content = String::new();
+                                    let text = doc.as_text().to_string();
+                                    content.push_str(&format!("The following is given as context to help generating correct code. The filename is ```{}```\n", file.path));
+                                    content.push_str("```rust\n");
+                                    content.push_str(&text);
+                                    content.push_str("```\n");
+                                    parts.push(GoogleAiPart{
+                                        text:content.to_string()
+                                    })
+                                }
+                            }
+                        }
+                        
+                        contents.push(GoogleAiContent {
+                            parts,
+                            role: Some("user".to_string()), 
+                        });
                                                                                                 
-                                if let Some(ctx) = self.contexts.iter().find(|ctx| ctx.name == v.base_context){
-                                    // alright lets fetch things
-                                    system_post = ctx.system_post;
-                                    general_post = ctx.general_post;
-                                                                        
-                                    if let Some(text) = html.find_tag_text(ctx.system_pre){
-                                        contents.push(GoogleAiContent {
-                                            parts: vec![GoogleAiPart{
-                                                text:text.to_string()
-                                            }],
-                                            role: Some("user".to_string()), 
-                                        });
-                                    }
-                                    
-                                    let mut parts = Vec::new();
-                                                                            
-                                    for file in &ctx.files{
-                                        if let Some(file_id) = fs.path_to_file_node_id(&file.path){
-                                            if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
-                                                let mut content = String::new();
-                                                let text = doc.as_text().to_string();
-                                                content.push_str(&format!("The following is given as context to help generating correct code. The filename is ```{}```\n", file.path));
-                                                content.push_str("```rust\n");
-                                                content.push_str(&text);
-                                                content.push_str("```\n");
-                                                parts.push(GoogleAiPart{
-                                                    text:content.to_string()
-                                                })
-                                                
-                                            }
-                                        }
-                                    }
-                                    if let Some(ctx) = self.projects.iter().find(|ctx| ctx.name == v.project){
-                                        for file in &ctx.files{
-                                            if let Some(file_id) = fs.path_to_file_node_id(&file.path){
-                                                if let Some(OpenDocument::Code(doc)) = fs.open_documents.get(&file_id){
-                                                    let mut content = String::new();
-                                                    let text = doc.as_text().to_string();
-                                                    content.push_str(&format!("The following is part the code to work on. The filename is ```{}```\n", file.path));
-                                                    content.push_str("```rust\n");
-                                                    content.push_str(&text);
-                                                    content.push_str("```\n");
-                                                    parts.push(GoogleAiPart{
-                                                        text:content.to_string()
-                                                    })
-                                                }
-                                            }
-                                        }
-                                    }
-                                    contents.push(GoogleAiContent {
-                                        parts,
-                                        role: Some("user".to_string()), 
-                                    });
-                                }
-                                contents.push(GoogleAiContent {
-                                    parts: vec![GoogleAiPart{
-                                        text:v.message.clone()
-                                    }],
-                                    role: Some("user".to_string()), 
-                                });
-                                                                
-                                if let Some(text) = html.find_tag_text(system_post){
+                        if let Some(text) = html.find_tag_text(ctx.system_post){
+                            contents.push(GoogleAiContent {
+                                parts: vec![GoogleAiPart{
+                                    text:text.to_string()
+                                }],
+                                role: Some("user".to_string()), 
+                            });
+                        }
+                        
+                        for msg in &messages.messages{
+                            match msg{
+                                AiChatMessage::User(v)=>{
                                     contents.push(GoogleAiContent {
                                         parts: vec![GoogleAiPart{
-                                            text:text.to_string()
+                                            text:v.message.clone()
                                         }],
                                         role: Some("user".to_string()), 
                                     });
                                 }
-                                if let Some(text) = html.find_tag_text(general_post){
+                                AiChatMessage::Assistant(v)=>{
                                     contents.push(GoogleAiContent {
                                         parts: vec![GoogleAiPart{
-                                            text:text.to_string()
+                                            text:v.to_string()
                                         }],
-                                        role: Some("user".to_string()), 
+                                        role: Some("model".to_string()), 
                                     });
                                 }
                             }
-                            AiChatMessage::Assistant(v)=>{
-                                contents.push(GoogleAiContent {
-                                    parts: vec![GoogleAiPart{
-                                        text:v.to_string()
-                                    }],
-                                    role: Some("model".to_string()), 
-                                });
-                            }
+                        }
+                        
+                        if let Some(text) = html.find_tag_text(ctx.general_post){
+                            contents.push(GoogleAiContent {
+                                parts: vec![GoogleAiPart{
+                                    text:text.to_string()
+                                }],
+                                role: Some("user".to_string()), 
+                            });
                         }
                     }
                     request.set_json_body(GoogleAiChatPrompt {
