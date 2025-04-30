@@ -95,7 +95,7 @@ live_design!{
     }
 
     pub DockToolbar = <RectShadowView> {
-        width: Fill, height: 38.,
+        width: Fill, height: 40.,
         flow: Down,
         align: { x: 0., y: 0. }
         margin: { top: -1. }
