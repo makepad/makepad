@@ -63,6 +63,7 @@ live_design!{
         }
         body = <KeyboardView> {
             width: Fill, height: Fill,
+            padding:5
             keyboard_min_shift: 30,
         }
         
