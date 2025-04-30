@@ -2,98 +2,53 @@
 use makepad_widgets::*;
 
 live_design!{
-    use link::widgets::*;
     use link::theme::*;
     use link::shaders::*;
-
-    ICON_TRASH = dep("crate://self/resources/icon_trash.svg")
-
-    TodoItem = {{TodoItem}} {
-        width: Fill, height: Fit,
-        spacing: 10.,
-        flow: Right,
-        align: {x: 0.0, y: 0.5},
-        padding: { top: 10., bottom: 10., left: 10., right: 10. }
-
-        checkbox = <CheckBox> {
-            width: Fit, height: Fit,
-            text: ""
-        }
-
-        label = <Label> {
-            width: Fill, height: Fit,
-            draw_text: {
-                text_style: <THEME_FONT_REGULAR>{font_size: 12.0},
-                color: #9
-            }
-            text: "Task description"
-        }
-
-        delete_button = <Button> {
-            width: Fit, height: Fit
-            icon_walk: {width: 15, height: 15},
-            draw_icon: {
-                svg_file: (ICON_TRASH),
-                color: #9
-            }
-            text: ""
-            draw_bg: {
-                 fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    return sdf.result;
-                 }
-            }
-        }
-    }
-
-    TodoList = {{TodoList}} {
-        width: Fill, height: Fit
-        flow: Down
-        list = <PortalList> {
-            TodoItem = <TodoItem> {}
-        }
-    }
-
+    use link::widgets::*;
+        
     App = {{App}} {
-        ui: <Window> {
-            window: {inner_size: vec2(400, 600)},
-            body = <View> {
-                width: Fill, height: Fill
-                flow: Down,
-                spacing: 10.,
-                padding: 10.,
-                show_bg: true,
-                draw_bg: {
-                    fn pixel(self) -> vec4 {
-                        return #2;
+        ui: <Root>{
+            main_window = <Window>{
+                body = <View>{
+                    flow: Down,
+                    spacing: 10,
+                    align: {
+                        x: 0.5,
+                        y: 0.5
+                    },
+                    show_bg: true,
+                    draw_bg:{
+                        fn pixel(self) -> vec4 {
+                                                        
+                            let center = vec2(0.5, 0.5);
+                            let uv = self.pos - center;
+                            let radius = length(uv);
+                            let angle = atan(uv.y, uv.x);
+                            let color1 = mix(#f00, #00f, 0.5 + 10.5 * cos(angle + self.time));
+                            let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
+                            let color = mix(color1, color2, radius);
+                            return depth_clip(self.world, color, self.depth_clip);
+                        }
                     }
-                }
-
-                input_view = <View> {
-                    width: Fill, height: Fit,
-                    flow: Right,
-                    spacing: 10.,
-
-                    task_input = <TextInput> {
-                        width: Fill, height: Fit,
-                        text: ""
-                        empty_text: "Enter new task..."
+                    button_1 = <Button> {
+                        text: "Click me 😊"
+                        draw_text:{color:#fff, text_style:{font_size:18}}
                     }
-
-                    add_button = <Button> {
-                        width: Fit, height: Fit,
-                        text: "Add"
+                    text_input = <TextInput> {
+                        width: 100,
+                        flow: RightWrap,
+                        text: "Lorem ipsum"
+                        draw_text:{color:#fff, text_style:{font_size:18}}
                     }
-                }
-
-                todo_list = <TodoList> {
-                    width: Fill, height: Fill
+                    button_2 = <Button> {
+                        text: "Click me 345 1234"
+                        draw_text:{color:#fff, text_style:{font_size:18}}
+                    }
                 }
             }
         }
     }
-}
-
+}  
 
 app_main!(App); 
  
@@ -101,7 +56,7 @@ app_main!(App);
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] counter: usize,
- }
+}
  
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) { 
@@ -110,13 +65,13 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App{
-    fn handle_startup(&mut self, _cx:&mut Cx){
+    fn handle_startup(&mut self, cx:&mut Cx){
     }
-    
-    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button_1)).clicked(&actions) {
+        
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+        if self.ui.button(id!(b0)).clicked(&actions) {
+            log!("hi");
             self.counter += 1;
-            log!("HI");
         }
     }
 }
