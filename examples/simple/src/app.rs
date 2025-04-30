@@ -47,6 +47,28 @@ live_design!{
                         text: "Click me 345 1234"
                         draw_text:{color:#fff, text_style:{font_size:18}}
                     }
+                
+
+                    <SliderRound> {
+                        text: "Label",
+                        label_walk: { width: Fit }
+                        draw_bg: {
+                            val_color_1: #FFCC00
+                            val_color_1_hover: #FF9944
+                            val_color_1_focus: #FFCC44
+                            val_color_1_drag: #FFAA00
+
+                            val_color_2: #F00
+                            val_color_2_hover: #F00
+                            val_color_2_focus: #F00
+                            val_color_2_drag: #F00
+
+                            handle_color: #0000
+                            handle_color_hover: #0008
+                            handle_color_focus: #000C
+                            handle_color_drag: #000F
+                        }
+                    }
                 }
             }
         }
