@@ -253,6 +253,20 @@ impl<T> Rect<T> {
         Self::new(self.origin - padding, self.size + padding + padding)
     }
 
+    pub fn unpad(self, padding: impl Into<Size<T>>) -> Self
+    where
+        T: Add<Output = T> + Copy + Sub<Output = T>,
+    {
+        self._unpad(padding.into())
+    }
+
+    fn _unpad(self, padding: Size<T>) -> Self
+    where
+        T: Add<Output = T> + Copy + Sub<Output = T>,
+    {
+        Self::new(self.origin + padding, self.size - padding - padding)
+    }
+
     pub fn apply_transform(self, t: Transform<T>) -> Self
     where
         T: Add<Output = T> + Copy + Mul<Output = T>,
