@@ -14,10 +14,11 @@ Cargo.lock
 
 /edit_repo
 
+*.mobileprovision
 *.bat
 mandelbrot_presets.json
 makepad_settings.ron
-makepad_state.ron
+makepad_state*.ron
 key.ron
 dmx*.ron
 makepad_designer.ron
@@ -26,6 +27,7 @@ rustc*.txt
 
 OPENAI_KEY
 CLAUDE_KEY
+GOOGLE_KEY
 
 /local
 
