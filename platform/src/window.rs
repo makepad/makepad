@@ -214,7 +214,7 @@ impl WindowHandle {
         cx.windows[self.window_id()].window_geom.can_fullscreen
     }
     
-    pub fn is_fullscreen(&mut self, cx: &mut Cx) -> bool {
+    pub fn is_fullscreen(&self, cx: &Cx) -> bool {
         cx.windows[self.window_id()].window_geom.is_fullscreen
     }
     
@@ -282,7 +282,8 @@ impl CxWindow {
     
     pub fn get_position(&self) -> DVec2 {
         if !self.is_created {
-            panic!();
+            Default::default()
+            //panic!();
         }
         else {
             self.window_geom.position
