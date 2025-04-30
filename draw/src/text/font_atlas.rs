@@ -45,6 +45,10 @@ impl<T> FontAtlas<T> {
         &self.image
     }
 
+    pub unsafe fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
+        self.image.replace_pixels(pixels)
+    }
+
     pub fn take_dirty_image(&mut self) -> Subimage<'_, T> {
         let dirty_rect = self.dirty_rect;
         self.dirty_rect = Rect::ZERO;

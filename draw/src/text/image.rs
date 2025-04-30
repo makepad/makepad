@@ -3,7 +3,7 @@ use {
         geom::{Point, Rect, Size},
         num::Zero,
     },
-    std::ops::{Index, IndexMut},
+    std::{mem, ops::{Index, IndexMut}},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -46,6 +46,10 @@ impl<T> Image<T> {
 
     pub fn as_mut_pixels(&mut self) -> &mut [T] {
         &mut self.pixels
+    }
+
+    pub unsafe fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
+        mem::replace(&mut self.pixels, pixels)
     }
 
     pub fn subimage(&self, rect: Rect<usize>) -> Subimage<'_, T> {
