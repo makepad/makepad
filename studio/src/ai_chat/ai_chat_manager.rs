@@ -63,10 +63,78 @@ impl Default for AiChatManager{
                     system_post: live_id!(UI_POST),
                     general_post: live_id!(GENERAL_POST),
                     files: vec![
-                        AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app2.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),
+                        AiContextFile::new("News feed example","examples/news_feed/src/app.rs"),
+                        AiContextFile::new("Todo example","examples/todo/src/app.rs"),
+                        AiContextFile::new("Shader example","examples/shader/src/app.rs"),
+                        AiContextFile::new("Snake game example","examples/snake/src/app.rs"),
+                        AiContextFile::new("Mixed reality example","examples/mixed_reality/src/app.rs"),
+                        AiContextFile::new("Slides viewer example","examples/slides/src/app.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/app.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/demofiletree.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/layout_templates.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/lib.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/main.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_adaptiveview.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_button.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_checkbox.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_commandtextinput.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_desktopbutton.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_dropdown.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_filetree.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_foldbutton.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_foldheader.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_html.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_icon.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_iconset.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_image.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_imageblend.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_label.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_layout.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_linklabel.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_markdown.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_pageflip.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_portallist.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_radiobutton.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_rotary.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_rotatedimage.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_scrollbar.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_slider.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_slidesview.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_textinput.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_view.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/tab_widgetsoverview.rs"),
+                        AiContextFile::new("UI Examples","examples/ui_zoo/src/uizoolayouts.rs"),
+                        AiContextFile::new("Widget source","widgets/src/button.rs"),
+                        AiContextFile::new("Widget source","widgets/src/check_box.rs"),
+                        AiContextFile::new("Widget source","widgets/src/dock.rs"),
+                        AiContextFile::new("Widget source","widgets/src/drop_down.rs"),
+                        AiContextFile::new("Widget source","widgets/src/expandable_panel.rs"),
+                        AiContextFile::new("Widget source","widgets/src/file_tree.rs"),
+                        AiContextFile::new("Widget source","widgets/src/flat_list.rs"),
+                        AiContextFile::new("Widget source","widgets/src/portal_list.rs"),
+                        AiContextFile::new("Widget source","widgets/src/html.rs"),
+                        AiContextFile::new("Widget source","widgets/src/image.rs"),
+                        AiContextFile::new("Widget source","widgets/src/image_cache.rs"),
+                        AiContextFile::new("Widget source","widgets/src/label.rs"),
+                        AiContextFile::new("Widget source","widgets/src/link_label.rs"),
+                        AiContextFile::new("Widget source","widgets/src/markdown.rs"),
+                        AiContextFile::new("Widget source","widgets/src/portal_list.rs"),
+                        AiContextFile::new("Widget source","widgets/src/radio_button.rs"),
+                        AiContextFile::new("Widget source","widgets/src/scroll_bar.rs"),
+                        AiContextFile::new("Widget source","widgets/src/scroll_bars.rs"),
+                        AiContextFile::new("Widget source","widgets/src/slider.rs"),
+                        AiContextFile::new("Widget source","widgets/src/slides_view.rs"),
+                        AiContextFile::new("Widget source","widgets/src/tab.rs"),
+                        AiContextFile::new("Widget source","widgets/src/tab_bar.rs"),
+                        AiContextFile::new("Widget source","widgets/src/tab_close_button.rs"),
+                        AiContextFile::new("Widget source","widgets/src/text_flow.rs"),
+                        AiContextFile::new("Widget source","widgets/src/text_input.rs"),
+                        AiContextFile::new("Widget source","widgets/src/theme_desktop_dark.rs"),
+                        AiContextFile::new("Widget source","widgets/src/view.rs"),
+                        AiContextFile::new("Widget source","widgets/src/view_ui.rs"),
+                        AiContextFile::new("Widget source","widgets/src/widget.rs"),
+                        AiContextFile::new("Widget source","widgets/src/widget_match_event.rs"),
+                        AiContextFile::new("Widget source","widgets/src/window.rs"),
                     ]
                 },
                 BaseContext{
@@ -76,10 +144,6 @@ impl Default for AiChatManager{
                     system_post: live_id!(ALL_POST),
                     general_post: live_id!(GENERAL_POST),
                     files: vec![
-                        AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app2.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),
                     ]
                 },
                 BaseContext{
@@ -96,11 +160,7 @@ impl Default for AiChatManager{
                     system_pre: live_id!(INTERNAL_PRE),
                     system_post: live_id!(INTERNAL_POST),
                     general_post: live_id!(INTERNAL_GENERAL),
-                    files: vec![
-                        AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app2.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),                        
+                    files: vec![                   
                         AiContextFile::new("","platform/live_compiler/src/live_document.rs"),
                         AiContextFile::new("","platform/live_compiler/src/live_error.rs"),
                         AiContextFile::new("","platform/live_compiler/src/live_eval.rs"),
@@ -606,7 +666,6 @@ impl AiChatManager{
             let ast = messages.messages.iter().nth(item_id);
             //let ast = messages.messages.iter().nth(item_id+1);
                         
-            crate::log!("PATCHIN {:?}", ast);
             if let Some(AiChatMessage::Assistant(ast)) = ast.cloned(){
                 if let Some(project) = self.projects.iter().find(|v| v.name == messages.project){
                     if let Some(first) = project.files.get(0){
@@ -826,9 +885,11 @@ impl AiChatManager{
                             });
                         }
                     }
-                    request.set_json_body(GoogleAiChatPrompt {
+                    let contents = GoogleAiChatPrompt {
                         contents,
-                    });
+                    };
+                    println!("{:?}", contents);
+                    request.set_json_body(contents);
                     (request, ai_model.backend.clone())
                 }
             }
