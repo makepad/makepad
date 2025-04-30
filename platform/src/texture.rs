@@ -558,6 +558,21 @@ impl Texture {
         };
         data.take().expect("image data already taken")
     }
+    
+    pub fn swap_vec_u32(&self, cx: &mut Cx, vec: &mut Vec<u32>) {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let (data, updated) = match &mut cx_texture.format {
+            TextureFormat::VecBGRAu8_32 { data, updated, .. } => (data, updated),
+            _ => panic!("incorrect texture format for u32 image data"),
+        };
+        if data.is_none(){
+            *data = Some(vec![]);
+        }
+        if let Some(data) = data{
+            std::mem::swap(data, vec)
+        }
+        *updated = updated.update(None);
+    }
 
     pub fn put_back_vec_u32(&self, cx: &mut Cx, new_data: Vec<u32>, dirty_rect: Option<RectUsize>) {
         let cx_texture = &mut cx.textures[self.texture_id()];
