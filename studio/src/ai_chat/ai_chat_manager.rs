@@ -57,28 +57,17 @@ impl Default for AiChatManager{
             ],
             contexts: vec![
                 BaseContext{
-                    name: "Chat".to_string(),
-                    apply: AiApply::None,
-                    system_pre: live_id!(CHAT_PRE),
-                    system_post: live_id!(CHAT_POST),
-                    general_post: live_id!(CHAT_GENERAL),
-                    files: vec![]
-                },
-                BaseContext{
-                    name: "Next Rust".to_string(),
-                    apply: AiApply::WholeFile,
-                    system_pre: live_id!(NEXT_ALL_PRE),
-                    system_post: live_id!(NEXT_ALL_POST),
-                    general_post: live_id!(NEXT_ALL_GENERAL),
-                    files: vec![]
-                },
-                BaseContext{
-                    name: "Next DSL".to_string(),
+                    name: "Makepad DSL".to_string(),
                     apply: AiApply::PatchDSL,
-                    system_pre: live_id!(FNEXT_UI_PRE),
-                    system_post: live_id!(NEXT_UI_POST),
-                    general_post: live_id!(NEXT_UI_GENERAL),
-                    files: vec![]
+                    system_pre: live_id!(UI_PRE),
+                    system_post: live_id!(UI_POST),
+                    general_post: live_id!(GENERAL_POST),
+                    files: vec![
+                        AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app2.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
+                        AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),
+                    ]
                 },
                 BaseContext{
                     name: "Makepad Rust".to_string(),
@@ -94,17 +83,12 @@ impl Default for AiChatManager{
                     ]
                 },
                 BaseContext{
-                    name: "Makepad DSL".to_string(),
-                    apply: AiApply::PatchDSL,
-                    system_pre: live_id!(UI_PRE),
-                    system_post: live_id!(UI_POST),
-                    general_post: live_id!(GENERAL_POST),
-                    files: vec![
-                        AiContextFile::new("Example code","examples/ai_docs/src/app.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app2.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app3.rs"),
-                        AiContextFile::new("Example code","examples/ai_docs/src/app4.rs"),
-                    ]
+                    name: "Chat".to_string(),
+                    apply: AiApply::None,
+                    system_pre: live_id!(CHAT_PRE),
+                    system_post: live_id!(CHAT_POST),
+                    general_post: live_id!(CHAT_GENERAL),
+                    files: vec![]
                 },
                 BaseContext{
                     name: "Makepad Internal".to_string(),
