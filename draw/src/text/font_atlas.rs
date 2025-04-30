@@ -2,7 +2,7 @@ use {
     super::{
         font::{FontId, GlyphId},
         geom::{Point, Rect, Size},
-        image::{Image, Rgba, Subimage, SubimageMut, R},
+        image::{Image, Bgra, Subimage, SubimageMut, R},
         num::Zero,
     },
     std::{collections::HashMap, fs::File, io::BufWriter, path::Path, slice},
@@ -117,7 +117,7 @@ impl GrayscaleAtlas {
     }
 }
 
-pub type ColorAtlas = FontAtlas<Rgba>;
+pub type ColorAtlas = FontAtlas<Bgra>;
 
 impl ColorAtlas {
     pub fn save_to_png(&self, path: impl AsRef<Path>) {
