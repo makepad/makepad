@@ -1,8 +1,0 @@
-[package]
-name = "emoji"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-resvg = "0.41.0"
-rustybuzz = "0.14.0"
