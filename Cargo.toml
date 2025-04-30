@@ -5,6 +5,7 @@ workspace.members = [
     "experiments/tvos_viewer",
     "experiments/xr_net",
     "experiments/genai",
+    "experiments/ai_one",
     # === examples ===
     "examples/chatgpt",
     "examples/ironfish",
