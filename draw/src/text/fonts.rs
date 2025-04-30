@@ -2,8 +2,6 @@ use {
     super::{
         font::FontId,
         font_family::FontFamilyId,
-        geom::Point,
-        image::Bgra,
         layouter::{self, LaidoutText, LayoutParams, Layouter},
         loader::{FontDefinition, FontFamilyDefinition},
         rasterizer::Rasterizer,
