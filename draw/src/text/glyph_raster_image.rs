@@ -76,19 +76,40 @@ impl<'a> GlyphRasterImage<'a> {
             png::ColorType::Indexed => {
                 let palette = info.palette.as_ref().unwrap();
                 let trns = info.trns.as_ref();
-                for y in 0..height as usize {
-                    for x in 0..width as usize {
-                        let index = buffer[y * width + x] as usize;
-                        let base = 3 * index;
-                        let r = palette[base + 0];
-                        let g = palette[base + 1];
-                        let b = palette[base + 2];
-                        let a = trns.map_or(255, |trns| trns.get(index).copied().unwrap_or(255));
-                        image[Point::new(x, y)] = Rgba::new(r, g, b, a);
+                let mut set_pixel = |x, y, index| {
+                    let base = index * 3;
+                    let r = palette[base + 0];
+                    let g = palette[base + 1];
+                    let b = palette[base + 2];
+                    let a = trns.map_or(255, |trns| trns.get(index).copied().unwrap_or(255));
+                    image[Point::new(x, y)] = Rgba::new(r, g, b, a);
+                };
+                match output_info.bit_depth {
+                    png::BitDepth::Four => {
+                        let bytes_per_row = (width + 1) / 2;
+                        for y in 0..height {
+                            for x in 0..width {
+                                let byte = buffer[y * bytes_per_row + x / 2];
+                                set_pixel(x, y, if x % 2 == 0 {
+                                    byte >> 4
+                                } else {
+                                    byte & 0x0F
+                                } as usize);
+                            }
+                        }
                     }
+                    png::BitDepth::Eight => {
+                        for y in 0..height as usize {
+                            for x in 0..width as usize {
+                                set_pixel(x, y, buffer[y * width + x] as usize);
+                            }
+                        }
+                    }
+                    _ => unimplemented!("unsupported bit depth§")
                 }
+              
             }
-            _ => unimplemented!(),
+            _ => unimplemented!("unsupported color type"),
         }
     }
 }
