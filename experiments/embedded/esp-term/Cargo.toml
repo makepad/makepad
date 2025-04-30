@@ -1,0 +1,7 @@
+[package]
+name = "makepad-experiments-esp-term"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serialport = "4.3.0"

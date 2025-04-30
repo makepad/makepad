@@ -1,0 +1,25 @@
+mod vga1_8x8;
+mod vga1_8x16;
+mod vga1_16x16;
+mod vga1_16x32;
+mod vga1_bold_16x16;
+mod vga1_bold_16x32;
+mod vga2_8x8;
+mod vga2_8x16;
+mod vga2_16x16;
+mod vga2_16x32;
+mod vga2_bold_16x16;
+mod vga2_bold_16x32;
+
+pub use vga1_8x8::VGA1_8X8 as VGA1_8x8;
+pub use vga1_8x16::VGA1_8X16 as VGA1_8X16;
+pub use vga1_16x16::VGA1_16X16 as VGA1_16X16;
+pub use vga1_16x32::VGA1_16X32 as VGA1_16X32;
+pub use vga1_bold_16x16::VGA1_BOLD_16X16 as VGA1_BOLD_16X16;
+pub use vga1_bold_16x32::VGA1_BOLD_16X32 as VGA1_BOLD_16X32;
+pub use vga2_8x8::VGA2_8X8 as VGA2_8X8;
+pub use vga2_8x16::VGA2_8X16 as VGA2_8X16;
+pub use vga2_16x16::VGA2_16X16 as VGA2_16X16;
+pub use vga2_16x32::VGA2_16X32 as VGA2_16X32;
+pub use vga2_bold_16x16::VGA2_BOLD_16X16 as VGA2_BOLD_16X16;
+pub use vga2_bold_16x32::VGA2_BOLD_16X32 as VGA2_BOLD_16X32;
