@@ -3,7 +3,7 @@ use {
         geom::{Point, Rect, Size},
         num::Zero,
     },
-    std::ops::{Index, IndexMut},
+    std::{mem, ops::{Index, IndexMut}},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -48,7 +48,15 @@ impl<T> Image<T> {
         &mut self.pixels
     }
 
+    pub unsafe fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
+        mem::replace(&mut self.pixels, pixels)
+    }
+
     pub fn subimage(&self, rect: Rect<usize>) -> Subimage<'_, T> {
+        assert!(
+            Rect::from(self.size).contains_rect(rect),
+            "rect is out of bounds"
+        );
         Subimage {
             image: self,
             bounds: rect,
@@ -152,6 +160,17 @@ impl<'a, T> SubimageMut<'a, T> {
     pub fn bounds(&self) -> Rect<usize> {
         self.bounds
     }
+
+    pub fn subimage_mut(self, rect: Rect<usize>) -> SubimageMut<'a, T> {
+        assert!(
+            Rect::from(self.size()).contains_rect(rect),
+            "rect is out of bounds"
+        );
+        SubimageMut {
+            image: self.image,
+            bounds: Rect::new(self.bounds.origin + Size::from(rect.origin), rect.size),
+        }
+    }
 }
 
 impl<'a, T> Index<Point<usize>> for SubimageMut<'a, T> {
@@ -190,15 +209,15 @@ impl R {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 #[repr(C)]
-pub struct Rgba {
-    pub r: u8,
-    pub g: u8,
+pub struct Bgra {
     pub b: u8,
+    pub g: u8,
+    pub r: u8,
     pub a: u8,
 }
 
-impl Rgba {
-    pub fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self { r, g, b, a }
+impl Bgra {
+    pub fn new(b: u8, g: u8, r: u8, a: u8) -> Self {
+        Self { b, g, r, a }
     }
 }
