@@ -41,6 +41,10 @@ impl<T> FontAtlas<T> {
         self.image.size()
     }
 
+    pub fn dirty_rect(&self) -> Rect<usize> {
+        self.dirty_rect
+    }
+
     pub fn image(&self) -> &Image<T> {
         &self.image
     }
@@ -83,20 +87,15 @@ impl<T> FontAtlas<T> {
     }
 
     pub fn reset_if_needed(&mut self) -> bool {
-        if self.needs_reset() {
-            self.reset();
-            true
-        } else {
-            false
+        if !self.needs_reset() {
+            return false;
         }
-    }
-
-    fn reset(&mut self) {
         self.needs_reset = false;
         self.dirty_rect = Rect::ZERO;
         self.current_point = Point::ZERO;
         self.current_row_height = 0;
         self.cached_glyph_image_rects.clear();
+        true
     }
 }
 
