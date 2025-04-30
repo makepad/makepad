@@ -49,6 +49,10 @@ impl<T> Image<T> {
     }
 
     pub fn subimage(&self, rect: Rect<usize>) -> Subimage<'_, T> {
+        assert!(
+            Rect::from(self.size).contains_rect(rect),
+            "rect is out of bounds"
+        );
         Subimage {
             image: self,
             bounds: rect,
@@ -151,6 +155,20 @@ impl<'a, T> SubimageMut<'a, T> {
 
     pub fn bounds(&self) -> Rect<usize> {
         self.bounds
+    }
+
+    pub fn subimage_mut(self, rect: Rect<usize>) -> SubimageMut<'a, T> {
+        assert!(
+            Rect::from(self.size()).contains_rect(rect),
+            "rect is out of bounds"
+        );
+        SubimageMut {
+            image: self.image,
+            bounds: Rect::new(
+                self.bounds.origin + Size::from(rect.origin),
+                rect.size,
+            ),
+        }
     }
 }
 
