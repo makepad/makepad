@@ -90,11 +90,11 @@ impl<'a> GlyphRasterImage<'a> {
                         for y in 0..height {
                             for x in 0..width {
                                 let byte = buffer[y * bytes_per_row + x / 2];
-                                set_pixel(x, y, if x % 2 == 0 {
-                                    byte >> 4
-                                } else {
-                                    byte & 0x0F
-                                } as usize);
+                                set_pixel(
+                                    x,
+                                    y,
+                                    if x % 2 == 0 { byte >> 4 } else { byte & 0x0F } as usize,
+                                );
                             }
                         }
                     }
@@ -105,9 +105,8 @@ impl<'a> GlyphRasterImage<'a> {
                             }
                         }
                     }
-                    _ => unimplemented!("unsupported bit depth§")
+                    _ => unimplemented!("unsupported bit depth"),
                 }
-              
             }
             _ => unimplemented!("unsupported color type"),
         }
