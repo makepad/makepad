@@ -33,7 +33,7 @@ impl Sdfer {
         let mut pixels = Vec::with_capacity(coverage.size().width * coverage.size().height);
         for y in 0..coverage.size().height {
             for x in 0..coverage.size().width {
-                pixels.push(Unorm8::from_bits(coverage[Point::new(x, y)].r));
+                pixels.push(Unorm8::from_bits(coverage[Point::new(x, y)].r()));
             }
         }
         let mut coverage =
