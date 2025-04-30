@@ -2,7 +2,7 @@ use super::{
     font::{Font, GlyphId},
     font_atlas::{ColorAtlas, GlyphImage, GlyphImageKey, GrayscaleAtlas},
     geom::{Point, Rect, Size},
-    image::{Image, Rgba, Subimage, R},
+    image::Image,
     sdfer,
     sdfer::Sdfer,
 };
@@ -23,50 +23,24 @@ impl Rasterizer {
         }
     }
 
-    pub fn sdfer_settings(&self) -> sdfer::Settings {
-        self.sdfer.settings()
+    pub fn sdfer(&self) -> &Sdfer {
+        &self.sdfer
     }
 
-    pub fn grayscale_atlas_size(&self) -> Size<usize> {
-        self.grayscale_atlas.size()
+    pub fn grayscale_atlas(&self) -> &GrayscaleAtlas {
+        &self.grayscale_atlas
     }
 
-    pub fn color_atlas_size(&self) -> Size<usize> {
-        self.color_atlas.size()
+    pub fn color_atlas(&self) -> &ColorAtlas {
+        &self.color_atlas
     }
 
-    pub fn grayscale_atlas_image(&self) -> &Image<R> {
-        self.grayscale_atlas.image()
+    pub fn grayscale_atlas_mut(&mut self) -> &mut GrayscaleAtlas {
+        &mut self.grayscale_atlas
     }
 
-    pub fn color_atlas_image(&self) -> &Image<Rgba> {
-        self.color_atlas.image()
-    }
-
-    pub fn reset_grayscale_atlas_if_needed(&mut self) -> bool {
-        if self.grayscale_atlas.needs_reset() {
-            self.grayscale_atlas.reset();
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn reset_color_atlas_if_needed(&mut self) -> bool {
-        if self.color_atlas.needs_reset() {
-            self.color_atlas.reset();
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn take_grayscale_atlas_dirty_image(&mut self) -> Subimage<'_, R> {
-        self.grayscale_atlas.take_dirty_image()
-    }
-
-    pub fn take_color_atlas_dirty_image(&mut self) -> Subimage<'_, Rgba> {
-        self.color_atlas.take_dirty_image()
+    pub fn color_atlas_mut(&mut self) -> &mut ColorAtlas {
+        &mut self.color_atlas
     }
 
     pub fn rasterize_glyph(
@@ -122,7 +96,7 @@ impl Rasterizer {
 
         return Some(RasterizedGlyph {
             atlas_kind: AtlasKind::Grayscale,
-            atlas_size: self.grayscale_atlas_size(),
+            atlas_size: self.grayscale_atlas().size(),
             atlas_image_bounds,
             atlas_image_padding,
             origin_in_dpxs: bounds_in_ems.origin * dpxs_per_em,

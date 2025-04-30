@@ -23,8 +23,8 @@ impl Fonts {
     pub fn new(cx: &mut Cx, settings: layouter::Settings) -> Self {
         let layouter = Layouter::new(settings);
         let rasterizer = layouter.rasterizer().borrow();
-        let grayscale_atlas_size = rasterizer.grayscale_atlas_size();
-        let color_atlas_size = rasterizer.color_atlas_size();
+        let grayscale_atlas_size = rasterizer.grayscale_atlas().size();
+        let color_atlas_size = rasterizer.color_atlas().size();
         drop(rasterizer);
         Self {
             layouter,
@@ -97,12 +97,12 @@ impl Fonts {
 
     fn update_grayscale_texture(&mut self, cx: &mut Cx) -> bool {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
-        if rasterizer.reset_grayscale_atlas_if_needed() {
+        if rasterizer.grayscale_atlas_mut().reset_if_needed() {
             return false;
         }
         let mut data = self.grayscale_texture.take_vec_u8(cx);
-        let size = rasterizer.grayscale_atlas_size();
-        let dirty_image = rasterizer.take_grayscale_atlas_dirty_image();
+        let size = rasterizer.grayscale_atlas().size();
+        let dirty_image = rasterizer.grayscale_atlas_mut().take_dirty_image();
         let dirty_rect = dirty_image.bounds();
         for src_y in 0..dirty_rect.size.height {
             for src_x in 0..dirty_rect.size.width {
@@ -134,12 +134,12 @@ impl Fonts {
         }
 
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
-        if rasterizer.reset_color_atlas_if_needed() {
+        if rasterizer.color_atlas_mut().reset_if_needed() {
             return false;
         }
         let mut data = self.color_texture.take_vec_u32(cx);
-        let size = rasterizer.color_atlas_size();
-        let dirty_image = rasterizer.take_color_atlas_dirty_image();
+        let size = rasterizer.color_atlas().size();
+        let dirty_image = rasterizer.color_atlas_mut().take_dirty_image();
         let dirty_rect = dirty_image.bounds();
         for src_y in 0..dirty_rect.size.height {
             for src_x in 0..dirty_rect.size.width {
