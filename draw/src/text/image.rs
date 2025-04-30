@@ -164,10 +164,7 @@ impl<'a, T> SubimageMut<'a, T> {
         );
         SubimageMut {
             image: self.image,
-            bounds: Rect::new(
-                self.bounds.origin + Size::from(rect.origin),
-                rect.size,
-            ),
+            bounds: Rect::new(self.bounds.origin + Size::from(rect.origin), rect.size),
         }
     }
 }
