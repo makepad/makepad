@@ -276,6 +276,7 @@ live_design!{
         // and lets fix the portal lists scroll
         list = <PortalList>{
             drag_scrolling: false
+            max_pull_down: 0.0
             //auto_tail: true
             User = <User>{}
             Assistant = <Assistant>{}
