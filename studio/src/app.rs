@@ -42,7 +42,7 @@ pub struct App {
     #[live] pub ui: WidgetRef,
     #[rust] pub data: AppData,
 }
-
+ 
 impl LiveRegister for App{
     fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
@@ -535,7 +535,7 @@ impl MatchEvent for App{
                             pre_word_boundary:true,
                             post_word_boundary:true
                         }];
-                        search.text_input(id!(search_input)).set_text(cx, word);
+                        search.text_input(id!(search_input)).set_text(cx, &word);
                         self.data.file_system.search_string(cx, set);
                     } 
                 },
@@ -548,7 +548,7 @@ impl MatchEvent for App{
                             pre_word_boundary:ke.modifiers.control,
                             post_word_boundary:ke.modifiers.control
                         }];
-                        search.text_input(id!(search_input)).set_text(cx, word);
+                        search.text_input(id!(search_input)).set_text(cx, &word);
                         self.data.file_system.search_string(cx, set);
                     } 
                 },

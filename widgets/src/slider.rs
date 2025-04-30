@@ -1749,7 +1749,7 @@ impl Slider {
     
     pub fn update_text_input(&mut self, cx: &mut Cx) {
         let e = self.to_external();
-        self.text_input.set_text(cx, match self.precision{
+        self.text_input.set_text(cx, &match self.precision{
             0=>format!("{:.0}",e),
             1=>format!("{:.1}",e),
             2=>format!("{:.2}",e),
