@@ -556,7 +556,7 @@ impl LiveHook for FontFamily {
             let mut next_child_index = Some(index + 1);
             while let Some(child_index) = next_child_index {
                 if let LiveValue::Font(font) = &nodes[child_index].value {
-                    let font_id: FontId = (font.to_live_id().0 as usize).into();
+                    let font_id: FontId = (font.to_live_id().0).into();
                     if !fonts.is_font_known(font_id) {
                         fonts.define_font(
                             font_id,

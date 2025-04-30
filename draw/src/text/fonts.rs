@@ -33,7 +33,10 @@ impl Fonts {
                 TextureFormat::VecRu8 {
                     width: grayscale_atlas_size.width,
                     height: grayscale_atlas_size.height,
-                    data: Some(vec![0;grayscale_atlas_size.width * grayscale_atlas_size.height]),
+                    data: Some(vec![
+                        0;
+                        grayscale_atlas_size.width * grayscale_atlas_size.height
+                    ]),
                     unpack_row_length: None,
                     updated: TextureUpdated::Empty,
                 },
@@ -43,7 +46,7 @@ impl Fonts {
                 TextureFormat::VecBGRAu8_32 {
                     width: color_atlas_size.width,
                     height: color_atlas_size.height,
-                    data: Some(vec![0;color_atlas_size.width* color_atlas_size.height]),
+                    data: Some(vec![0; color_atlas_size.width * color_atlas_size.height]),
                     updated: TextureUpdated::Empty,
                 },
             ),
