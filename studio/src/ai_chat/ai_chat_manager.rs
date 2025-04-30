@@ -585,7 +585,7 @@ impl AiChatManager{
                                         
                                     }
                                     // alright so we're done.. check if we have run-when-done
-                                    doc.file.history[in_flight.history_slot].follow_up();
+                                    //doc.file.history[in_flight.history_slot].follow_up();
                                                                        
                                     //self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
                                     //fs.request_save_file_for_file_node_id(chat_id, false);
@@ -603,52 +603,47 @@ impl AiChatManager{
     pub fn run_ai_chat(&self, cx:&mut Cx, chat_id:LiveId, history_slot:usize, item_id:usize, fs:&mut FileSystem){
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get(&chat_id){
             let messages = &doc.file.history[history_slot];
-            let usr = messages.messages.iter().nth(item_id);
-            let ast = messages.messages.iter().nth(item_id+1);
+            let ast = messages.messages.iter().nth(item_id);
+            //let ast = messages.messages.iter().nth(item_id+1);
+                        
+            crate::log!("PATCHIN {:?}", ast);
             if let Some(AiChatMessage::Assistant(ast)) = ast.cloned(){
-                if let Some(AiChatMessage::User(usr)) = usr.cloned(){
-                    
-                    // lets check the project and the mode
-                    println!("{:?}", usr);
-                    
-                    if let Some(project) = self.projects.iter().find(|v| v.name == messages.project){
-                        if let Some(first) = project.files.get(0){
-                            //let file_path =  "examples/simple/src/app.rs";
-                            let file_id = fs.path_to_file_node_id(&first.path).unwrap();
-                            //let old_data = fs.file_id_as_string(file_id).unwrap();
-                            if let Some(new_data) = ast.strip_prefix("```rust"){
-                                if let Some(new_data) = new_data.strip_suffix("```"){
-                                    // alright depending
-                                    if let Some(ctx) = self.contexts.iter().find(|v| v.name == messages.base_context){
-                                        match ctx.apply{
-                                            AiApply::PatchDSL=>{
-                                                fs.replace_live_design(
-                                                    cx,
-                                                    file_id,
-                                                    &new_data
-                                                );
-                                                fs.request_save_file_for_file_node_id(file_id, false);
-                                                /*
-                                                fs.process_possible_live_reload(
-                                                    cx,
-                                                    &first.path,
-                                                    &old_data,
-                                                    &new_data,
-                                                    false
-                                                );*/
-                                            }
-                                            AiApply::WholeFile=>{
-                                                fs.replace_code_document(file_id, new_data);
-                                                fs.request_save_file_for_file_node_id(file_id, false);
-                                            }
-                                            _=>()
+                if let Some(project) = self.projects.iter().find(|v| v.name == messages.project){
+                    if let Some(first) = project.files.get(0){
+                        //let file_path =  "examples/simple/src/app.rs";
+                        let file_id = fs.path_to_file_node_id(&first.path).unwrap();
+                        //let old_data = fs.file_id_as_string(file_id).unwrap();
+                        if let Some(new_data) = ast.strip_prefix("```rust"){
+                            if let Some(new_data) = new_data.strip_suffix("```"){
+                                // alright depending
+                                if let Some(ctx) = self.contexts.iter().find(|v| v.name == messages.base_context){
+                                    match ctx.apply{
+                                        AiApply::PatchDSL=>{
+                                            fs.replace_live_design(
+                                                cx,
+                                                file_id,
+                                                &new_data
+                                            );
+                                            fs.request_save_file_for_file_node_id(file_id, false);
+                                            /*
+                                            fs.process_possible_live_reload(
+                                                cx,
+                                                &first.path,
+                                                &old_data,
+                                                &new_data,
+                                                false
+                                            );*/
                                         }
+                                        AiApply::WholeFile=>{
+                                            fs.replace_code_document(file_id, new_data);
+                                            fs.request_save_file_for_file_node_id(file_id, false);
+                                        }
+                                        _=>()
                                     }
                                 }
                             }
                         }
                     }
-                    
                 }
             }
         }

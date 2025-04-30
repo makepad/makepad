@@ -98,14 +98,18 @@ live_design!{
                         height: Fit,
                         padding: <THEME_MSPACE_2> {}
                         margin: 0.
-                        
+                        icon_walk: {
+                            width: 12, height: Fit,
+                            margin: { left: 10 }
+                        }
+                                                
                         draw_icon: {
                             color: (THEME_COLOR_U_4),
                             svg_file: dep("crate://self/resources/icons/icon_run.svg"),
                         }
                         icon_walk: { width: 9. }
                     }
-                    copy_button = <ButtonFlatter> {
+                    copy_button = <ButtonFlat> {
                         margin:{right:20}
                         icon_walk: {
                             width: 12, height: Fit,
@@ -296,12 +300,24 @@ impl AiChatView{
                     doc.auto_run = value;
                 }
                 
-                if let Some(wa) = actions.widget_action(id!(copy_button)){
-                    if wa.widget().as_button().pressed(actions){
-                        let code_view = wa.widget_nth(2).widget(id!(code_view));
-                        log!("COPY! {}", code_view.text( ));
+                // items with actions
+                let chat_list = self.view.portal_list(id!(list));
+                for (item_id, _item) in chat_list.items_with_actions(&actions) {
+                    
+                    if let Some(wa) = actions.widget_action(id!(copy_button)){
+                        if wa.widget().as_button().pressed(actions){
+                            let code_view = wa.widget_nth(2).widget(id!(code_view));
+                            log!("COPY! {}", code_view.text( ));
+                        }
+                    }
+                    if let Some(wa) = actions.widget_action(id!(run_button)){
+                        if wa.widget().as_button().pressed(actions){
+                            cx.action(AppAction::RunAiChat{chat_id, history_slot:self.history_slot, item_id});
+                            log!("RUN! {} {}", self.history_slot, item_id);
+                        }
                     }
                 }
+                    
                 if self.button(id!(history_left)).pressed(actions){
                     // first we check if our messages are the same as 'slot'.
                     // if not, we should create an undo item first
