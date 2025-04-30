@@ -585,7 +585,7 @@ impl AiChatManager{
                                         
                                     }
                                     // alright so we're done.. check if we have run-when-done
-                                    doc.file.history[in_flight.history_slot].follow_up();
+                                    //doc.file.history[in_flight.history_slot].follow_up();
                                                                        
                                     //self.redraw_ai_chat_by_id(cx, chat_id, ui, fs);
                                     //fs.request_save_file_for_file_node_id(chat_id, false);
@@ -607,9 +607,6 @@ impl AiChatManager{
             let ast = messages.messages.iter().nth(item_id+1);
             if let Some(AiChatMessage::Assistant(ast)) = ast.cloned(){
                 if let Some(AiChatMessage::User(usr)) = usr.cloned(){
-                    
-                    // lets check the project and the mode
-                    println!("{:?}", usr);
                     
                     if let Some(project) = self.projects.iter().find(|v| v.name == messages.project){
                         if let Some(first) = project.files.get(0){
