@@ -304,23 +304,8 @@ live_design! {
         }
 
         animator: {
-            blink = {
-                default: off
-                off = {
-                    from: {all: Forward {duration:0.05}}
-                    apply: {
-                        draw_cursor: {blink:0.0}
-                    }
-                }
-                on = {
-                    from: {all: Forward {duration: 0.05}}
-                    apply: {
-                        draw_cursor: {blink:1.0}
-                    }
-                }
-            }
-            hover = {
-                default: off
+            empty = {
+                default: off,
                 off = {
                     from: {all: Forward {duration: 0.}}
                     apply: {
@@ -340,6 +325,72 @@ live_design! {
                     }
                 }
             }
+            blink = {
+                default: off
+                off = {
+                    from: {all: Forward {duration:0.05}}
+                    apply: {
+                        draw_cursor: {blink:0.0}
+                    }
+                }
+                on = {
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {blink:1.0}
+                    }
+                }
+            }
+            hover = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {down: 0.0, hover: 0.0}
+                        draw_text: {down: 0.0, hover: 0.0}
+                    }
+                }
+                
+                on = {
+                    from: {
+                        all: Forward {duration: 0.1}
+                        down: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    }
+                }
+                
+                down = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    }
+                }
+            }
+
+            // hover = {
+            //     default: off
+            //     off = {
+            //         from: {all: Forward {duration: 0.}}
+            //         apply: {
+            //             draw_bg: {empty: 0.0}
+            //             draw_text: {empty: 0.0}
+            //             draw_selection: {empty: 0.0}
+            //             draw_cursor: {empty: 0.0}
+            //         }
+            //     }
+            //     on = {
+            //         from: {all: Forward {duration: 0.2}}
+            //         apply: {
+            //             draw_bg: {empty: 1.0}
+            //             draw_text: {empty: 1.0}
+            //             draw_selection: {empty: 1.0}
+            //             draw_cursor: {empty: 1.0}
+            //         }
+            //     }
+            // }
             disabled = {
                 default: off,
                 off = {
@@ -387,27 +438,6 @@ live_design! {
                     apply: {
                         draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
                         draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                    }
-                }
-            }
-            empty = {
-                default: off,
-                off = {
-                    from: {all: Forward {duration: 0.}}
-                    apply: {
-                        draw_bg: {empty: 0.0}
-                        draw_text: {empty: 0.0}
-                        draw_selection: {empty: 0.0}
-                        draw_cursor: {empty: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Forward {duration: 0.2}}
-                    apply: {
-                        draw_bg: {empty: 1.0}
-                        draw_text: {empty: 1.0}
-                        draw_selection: {empty: 1.0}
-                        draw_cursor: {empty: 1.0}
                     }
                 }
             }
@@ -1299,11 +1329,11 @@ impl TextInput {
 }
 
 impl LiveHook for TextInput {
-    // fn after_new_from_doc(&mut self, cx:&mut cx){
-    //     if self.text().is_empty() {
-    //     self.animator_play(cx, id!(empty.on));
-    //     }
-    // }
+    fn after_new_from_doc(&mut self, cx:&mut Cx){
+        if self.text().is_empty() {
+        self.animator_play(cx, id!(empty.on));
+        }
+    }
 }
 
 impl Widget for TextInput {
