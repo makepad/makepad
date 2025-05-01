@@ -53,6 +53,7 @@ live_design!{
     
     pub TextBox = <Label> {
         width: Fill, height: Fit,
+        padding: 0.
         draw_text: {
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LONGFORM_LINE_SPACING),
@@ -65,6 +66,7 @@ live_design!{
 
     pub H1 = <Label> {
         width: Fill,
+        padding: 0.
         draw_text: {
             wrap: Word
             text_style: <THEME_FONT_BOLD> {
