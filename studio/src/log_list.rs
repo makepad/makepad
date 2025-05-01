@@ -194,6 +194,7 @@ live_design!{
     pub LogList = {{LogList}}{
         height: Fill, width: Fill,
         list = <PortalList> {
+            max_pull_down: 0,
             capture_overload: false,
             grab_key_focus: false
             auto_tail: true

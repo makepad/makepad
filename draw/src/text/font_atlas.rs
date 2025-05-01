@@ -2,7 +2,7 @@ use {
     super::{
         font::{FontId, GlyphId},
         geom::{Point, Rect, Size},
-        image::{Image, Rgba, Subimage, SubimageMut, R},
+        image::{Image, Bgra, Subimage, SubimageMut, R},
         num::Zero,
     },
     std::{collections::HashMap, fs::File, io::BufWriter, path::Path, slice},
@@ -41,8 +41,16 @@ impl<T> FontAtlas<T> {
         self.image.size()
     }
 
+    pub fn dirty_rect(&self) -> Rect<usize> {
+        self.dirty_rect
+    }
+
     pub fn image(&self) -> &Image<T> {
         &self.image
+    }
+
+    pub unsafe fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
+        self.image.replace_pixels(pixels)
     }
 
     pub fn take_dirty_image(&mut self) -> Subimage<'_, T> {
@@ -61,33 +69,33 @@ impl<T> FontAtlas<T> {
     }
 
     fn allocate_glyph_image(&mut self, size: Size<usize>) -> Option<Rect<usize>> {
-        const PADDING: Size<usize> = Size::new(2, 2);
-
-        let padded_size = size + PADDING;
-        if self.current_point.x + padded_size.width > self.size().width {
+        if self.current_point.x + size.width > self.size().width {
             self.current_point.x = 0;
             self.current_point.y += self.current_row_height;
             self.current_row_height = 0;
         }
-        if self.current_point.y + padded_size.height > self.size().height {
+        if self.current_point.y + size.height > self.size().height {
             self.needs_reset = true;
-            crate::log!("Font atlas too small, resetting");
             return None;
         }
         let origin = self.current_point;
-        self.current_point.x += padded_size.width;
-        self.current_row_height = self.current_row_height.max(padded_size.height);
+        self.current_point.x += size.width;
+        self.current_row_height = self.current_row_height.max(size.height);
         let rect = Rect::new(origin, size);
         self.dirty_rect = self.dirty_rect.union(rect);
         Some(rect)
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset_if_needed(&mut self) -> bool {
+        if !self.needs_reset() {
+            return false;
+        }
         self.needs_reset = false;
         self.dirty_rect = Rect::ZERO;
         self.current_point = Point::ZERO;
         self.current_row_height = 0;
         self.cached_glyph_image_rects.clear();
+        true
     }
 }
 
@@ -108,7 +116,7 @@ impl GrayscaleAtlas {
     }
 }
 
-pub type ColorAtlas = FontAtlas<Rgba>;
+pub type ColorAtlas = FontAtlas<Bgra>;
 
 impl ColorAtlas {
     pub fn save_to_png(&self, path: impl AsRef<Path>) {

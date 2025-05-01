@@ -5,7 +5,7 @@ live_design!{
     use link::theme::*;
     use link::shaders::*;
     use link::widgets::*;
-    
+        
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
@@ -19,7 +19,7 @@ live_design!{
                     show_bg: true,
                     draw_bg:{
                         fn pixel(self) -> vec4 {
-                            
+                                                        
                             let center = vec2(0.5, 0.5);
                             let uv = self.pos - center;
                             let radius = length(uv);
@@ -30,19 +30,44 @@ live_design!{
                             return depth_clip(self.world, color, self.depth_clip);
                         }
                     }
+                    <Rotary>{
+                        text:"hi"
+                    }
                     button_1 = <Button> {
                         text: "Click me 😊"
-                        draw_text:{color:#fff, text_style:{font_size:28}}
+                        draw_text:{color:#fff, text_style:{font_size:18}}
                     }
                     text_input = <TextInput> {
                         width: 100,
                         flow: RightWrap,
                         text: "Lorem ipsum"
-                        draw_text:{color:#fff, text_style:{font_size:28}}
+                        draw_text:{color:#fff, text_style:{font_size:18}}
                     }
                     button_2 = <Button> {
                         text: "Click me 345 1234"
-                        draw_text:{color:#fff, text_style:{font_size:28}}
+                        draw_text:{color:#fff, text_style:{font_size:18}}
+                    }
+                
+
+                    <SliderRound> {
+                        text: "Label",
+                        label_walk: { width: Fit }
+                        draw_bg: {
+                            val_color_1: #FFCC00
+                            val_color_1_hover: #FF9944
+                            val_color_1_focus: #FFCC44
+                            val_color_1_drag: #FFAA00
+
+                            val_color_2: #F00
+                            val_color_2_hover: #F00
+                            val_color_2_focus: #F00
+                            val_color_2_drag: #F00
+
+                            handle_color: #0000
+                            handle_color_hover: #0008
+                            handle_color_focus: #000C
+                            handle_color_drag: #000F
+                        }
                     }
                 }
             }
@@ -56,7 +81,7 @@ app_main!(App);
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust] counter: usize,
- }
+}
  
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) { 
@@ -65,10 +90,10 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App{
-    fn handle_startup(&mut self, _cx:&mut Cx){
+    fn handle_startup(&mut self, cx:&mut Cx){
     }
-    
-    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
+        
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(b0)).clicked(&actions) {
             log!("hi");
             self.counter += 1;

@@ -2,19 +2,18 @@ use {
     super::{
         font::FontId,
         font_family::FontFamilyId,
-        geom::Point,
-        image::Rgba,
         layouter::{self, LaidoutText, LayoutParams, Layouter},
         loader::{FontDefinition, FontFamilyDefinition},
         rasterizer::Rasterizer,
     },
     makepad_platform::*,
-    std::{cell::RefCell, rc::Rc},
+    std::{cell::RefCell, mem, rc::Rc},
 };
 
 #[derive(Debug)]
 pub struct Fonts {
     layouter: Layouter,
+    needs_prepare_atlases: bool,
     grayscale_texture: Texture,
     color_texture: Texture,
 }
@@ -23,20 +22,18 @@ impl Fonts {
     pub fn new(cx: &mut Cx, settings: layouter::Settings) -> Self {
         let layouter = Layouter::new(settings);
         let rasterizer = layouter.rasterizer().borrow();
-        let grayscale_atlas_size = rasterizer.grayscale_atlas_size();
-        let color_atlas_size = rasterizer.color_atlas_size();
+        let grayscale_atlas_size = rasterizer.grayscale_atlas().size();
+        let color_atlas_size = rasterizer.color_atlas().size();
         drop(rasterizer);
         Self {
             layouter,
+            needs_prepare_atlases: false,
             grayscale_texture: Texture::new_with_format(
                 cx,
                 TextureFormat::VecRu8 {
                     width: grayscale_atlas_size.width,
                     height: grayscale_atlas_size.height,
-                    data: Some(vec![
-                        0;
-                        grayscale_atlas_size.width * grayscale_atlas_size.height
-                    ]),
+                    data: None,
                     unpack_row_length: None,
                     updated: TextureUpdated::Empty,
                 },
@@ -46,12 +43,7 @@ impl Fonts {
                 TextureFormat::VecBGRAu8_32 {
                     width: color_atlas_size.width,
                     height: color_atlas_size.height,
-                    data: Some(vec![
-                        0;
-                        grayscale_atlas_size.width
-                            * grayscale_atlas_size.height
-                            * 4
-                    ]),
+                    data: None,
                     updated: TextureUpdated::Empty,
                 },
             ),
@@ -90,78 +82,76 @@ impl Fonts {
         self.layouter.get_or_layout(params)
     }
 
-    pub fn update_textures(&mut self, cx: &mut Cx) -> bool {
-        if !self.update_grayscale_texture(cx) {
+    pub fn prepare_textures(&mut self, cx: &mut Cx) -> bool {
+        assert!(!self.needs_prepare_atlases);
+        let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+        if rasterizer.grayscale_atlas_mut().reset_if_needed() {
             return false;
         }
-        if !self.update_color_texture(cx) {
+        if rasterizer.color_atlas_mut().reset_if_needed() {
             return false;
         }
+        drop(rasterizer);
+        self.prepare_grayscale_texture(cx);
+        self.prepare_color_texture(cx);
+        self.needs_prepare_atlases = true;
         true
     }
 
-    fn update_grayscale_texture(&mut self, cx: &mut Cx) -> bool {
+    fn prepare_grayscale_texture(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
-        if rasterizer.reset_grayscale_atlas_if_needed() {
-            return false;
-        }
-        let mut data = self.grayscale_texture.take_vec_u8(cx);
-        let size = rasterizer.grayscale_atlas_size();
-        let dirty_image = rasterizer.take_grayscale_atlas_dirty_image();
-        let dirty_rect = dirty_image.bounds();
-        for src_y in 0..dirty_rect.size.height {
-            for src_x in 0..dirty_rect.size.width {
-                let dst_x = dirty_rect.origin.x + src_x;
-                let dst_y = dirty_rect.origin.y + src_y;
-                let pixel = dirty_image[Point::new(src_x, src_y)];
-                data[dst_y * size.width + dst_x] = pixel.r;
-            }
-        }
-
+        let dirty_rect = rasterizer.grayscale_atlas().dirty_rect();
+        let pixels: Vec<u8> = unsafe {
+            mem::transmute(rasterizer.grayscale_atlas_mut().replace_pixels(Vec::new()))
+        };
         self.grayscale_texture.put_back_vec_u8(
             cx,
-            data,
+            pixels,
             Some(RectUsize::new(
                 PointUsize::new(dirty_rect.origin.x, dirty_rect.origin.y),
                 SizeUsize::new(dirty_rect.size.width, dirty_rect.size.height),
             )),
         );
-        true
     }
 
-    fn update_color_texture(&mut self, cx: &mut Cx) -> bool {
-        fn rgba_to_u32(pixel: Rgba) -> u32 {
-            let r = u32::from(pixel.r);
-            let g = u32::from(pixel.g);
-            let b = u32::from(pixel.b);
-            let a = u32::from(pixel.a);
-            (a << 24) | (r << 16) | (g << 8) | b
-        }
-
+    fn prepare_color_texture(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
-        if rasterizer.reset_color_atlas_if_needed() {
-            return false;
-        }
-        let mut data = self.color_texture.take_vec_u32(cx);
-        let size = rasterizer.color_atlas_size();
-        let dirty_image = rasterizer.take_color_atlas_dirty_image();
-        let dirty_rect = dirty_image.bounds();
-        for src_y in 0..dirty_rect.size.height {
-            for src_x in 0..dirty_rect.size.width {
-                let dst_x = dirty_rect.origin.x + src_x;
-                let dst_y = dirty_rect.origin.y + src_y;
-                let pixel = dirty_image[Point::new(src_x, src_y)];
-                data[dst_y * size.width + dst_x] = rgba_to_u32(pixel);
-            }
-        }
+        let dirty_rect = rasterizer.color_atlas().dirty_rect();
+        let pixels: Vec<u32> = unsafe {
+            mem::transmute(rasterizer.color_atlas_mut().replace_pixels(Vec::new()))
+        };
         self.color_texture.put_back_vec_u32(
             cx,
-            data,
+            pixels,
             Some(RectUsize::new(
                 PointUsize::new(dirty_rect.origin.x, dirty_rect.origin.y),
                 SizeUsize::new(dirty_rect.size.width, dirty_rect.size.height),
             )),
-        );
-        true
+        )
+    }
+
+    pub fn prepare_atlases_if_needed(&mut self, cx: &mut Cx) {
+        if !self.needs_prepare_atlases {
+            return;
+        }
+        self.prepare_grayscale_atlas(cx);
+        self.prepare_color_atlas(cx);
+        self.needs_prepare_atlases = false;
+    }
+
+    fn prepare_grayscale_atlas(&mut self, cx: &mut Cx) {
+        let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+        let pixels = self.grayscale_texture.take_vec_u8(cx);
+        unsafe {
+            rasterizer.grayscale_atlas_mut().replace_pixels(mem::transmute(pixels))
+        };
+    }
+
+    fn prepare_color_atlas(&mut self, cx: &mut Cx) {
+        let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+        let pixels = self.color_texture.take_vec_u32(cx);
+        unsafe {
+            rasterizer.color_atlas_mut().replace_pixels(mem::transmute(pixels))
+        };
     }
 }

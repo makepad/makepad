@@ -11,7 +11,8 @@ use {
         macos_menu::MacosMenu,
         makepad_futures::executor::Spawner,
         makepad_live_id::*,
-        makepad_math::{DVec2, Rect, Pose},
+        event::xr::XrAnchor,
+        makepad_math::{DVec2, Rect},
         pass::{CxPassParent, CxPassRect, PassId},
         texture::Texture,
         window::WindowId,
@@ -123,8 +124,8 @@ pub enum CxOsOp {
     SelectFolderDialog(FileDialog),    
     
     XrStartPresenting,
-    XrSetLocalAnchor(Pose),
-    XrAdvertiseAnchor(Pose),
+    XrSetLocalAnchor(XrAnchor),
+    XrAdvertiseAnchor(XrAnchor),
     XrDiscoverAnchor(u8),
     XrStopPresenting,
     
@@ -251,12 +252,12 @@ impl Cx {
         self.platform_ops.push(CxOsOp::XrStartPresenting);
     }
     
-    pub fn xr_advertise_anchor(&mut self, pose:Pose) {
-        self.platform_ops.push(CxOsOp::XrAdvertiseAnchor(pose));
+    pub fn xr_advertise_anchor(&mut self, anchor:XrAnchor) {
+        self.platform_ops.push(CxOsOp::XrAdvertiseAnchor(anchor));
     }
     
-    pub fn xr_set_local_anchor(&mut self, pose:Pose) {
-        self.platform_ops.push(CxOsOp::XrSetLocalAnchor(pose));
+    pub fn xr_set_local_anchor(&mut self,  anchor:XrAnchor) {
+        self.platform_ops.push(CxOsOp::XrSetLocalAnchor(anchor));
     }
             
     pub fn xr_discover_anchor(&mut self, id: u8) {

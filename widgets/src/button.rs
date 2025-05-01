@@ -486,6 +486,25 @@ pub struct Button {
     #[live(true)]
     #[visible] visible: bool,
 
+    /// Set the long-press handling behavior of this button.
+    /// * If `false` (default), the button will ignore long-press events
+    ///   and will never emit [`ButtonAction::LongPressed`].
+    ///   * Also, the button logic will *not* call [`FingerUpEvent::was_tap()`]
+    ///     to check if the button press was a short tap.
+    ///     This means that this button will consider itself to be clicked
+    ///     (and thus emit a [`ButtonAction::Clicked`] event)
+    ///     if the finger-up/release event occurs within the button area,
+    ///     *regardless* of how long the button was pressed down before it was released.
+    /// * If `true`, the button will respond to a long-press event
+    ///   by emitting [`ButtonAction::LongPressed`], which can only occur on
+    ///   mobile platforms that support a *native* long press event.
+    ///   * Also, the button will only consider itself to be clicked
+    ///     (and thus emit [`ButtonAction::Clicked`]) if [`FingerUpEvent::was_tap()`] returns `true`,
+    ///     meaning that a long press did *not* occur and that the button was released over the button area
+    ///     within a short time frame (~0.5 seconds) after the initial down press.
+    #[live]
+    pub enable_long_press: bool,
+
     /// It indicates if the hover state will be reset when the button is clicked.
     /// This could be useful for buttons that disappear when clicked, where the hover state
     /// should not be preserved.
@@ -548,14 +567,15 @@ impl Widget for Button {
                     cx.set_cursor(MouseCursor::NotAllowed);
                 }
             }
-            Hit::FingerHoverOut(_) if self.enabled => {
+            Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
             }
-            Hit::FingerLongPress(_lp) if self.enabled => {
+            Hit::FingerLongPress(_lp) if self.enabled && self.enable_long_press => {
                 cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::LongPressed);
             }
             Hit::FingerUp(fe) if self.enabled && fe.is_primary_hit() => {
-                if fe.is_over && fe.was_tap() {
+                let was_clicked = fe.is_over && if self.enable_long_press { fe.was_tap() } else { true };
+                if was_clicked {
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
                     if self.reset_hover_on_click {
                         self.animator_cut(cx, id!(hover.off));

@@ -623,7 +623,6 @@ impl WidgetNode for View {
     }
     
     fn set_visible(&mut self, cx:&mut Cx, visible:bool) {
-        crate::log!("SET VISIBLE {}", visible);
         if self.visible != visible{
             self.visible = visible;
             self.redraw(cx);
