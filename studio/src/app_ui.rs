@@ -45,12 +45,12 @@ live_design!{
         <View> {
             width: (THEME_BEVELING * 2.0), height: Fill
             show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
+            draw_bg: { color: (THEME_COLOR_BEVEL_OUTSET_2) }
         }
         <View> {
             width: (THEME_BEVELING), height: Fill,
             show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
+            draw_bg: { color: (THEME_COLOR_BEVEL_OUTSET_1) }
         }
     }
 
@@ -72,7 +72,7 @@ live_design!{
             padding: { right: 0, left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
-                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_tab_app.svg"),
             }
         }
@@ -84,7 +84,7 @@ live_design!{
             padding: { right: 0, left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
-                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
             }
         }
@@ -97,7 +97,7 @@ live_design!{
             padding: { right: 0., left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
-                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
             }
         }
@@ -109,7 +109,7 @@ live_design!{
             padding: { right: 5., left: 0.}
             draw_icon: {
                 color: (THEME_COLOR_D_2),
-                color_active: (THEME_COLOR_TEXT_ACTIVE),
+                color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_outliner.svg"),
             }
         }
@@ -125,8 +125,8 @@ live_design!{
             preset_2 = <Button>{text:"C"}
             preset_3 = <Button>{text:"D"}
             preset_4 = <Button>{text:"P"}
-        }
-    },
+            }
+        },
         window: { inner_size: vec2(1600, 900), /*dpi_override:3.0 */},
         show_bg: true,
         draw_bg: { fn pixel(self) -> vec4 { return (THEME_COLOR_BG_APP) } }
@@ -435,10 +435,10 @@ live_design!{
                             flow: Right,
                             margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
     
-                            <ButtonFlat> { width: Fit, text: "File"}
-                            <ButtonFlat> { width: Fit, text: "Edit"}
-                            <ButtonFlat> { width: Fit, text: "Search"}
-                            <ButtonFlat> { width: Fit, text: "Debug"}
+                            <ButtonFlatter> { width: Fit, text: "File"}
+                            <ButtonFlatter> { width: Fit, text: "Edit"}
+                            <ButtonFlatter> { width: Fit, text: "Search"}
+                            <ButtonFlatter> { width: Fit, text: "Debug"}
                             <Filler> {}
                             <LinkLabel> { width: Fit, text: "Docs", url: "https://publish.obsidian.md/makepad-docs"}
                         }
@@ -554,7 +554,7 @@ live_design!{
                                 width: Fit, height: Fit,
                                 flow: Right,
                                 spacing: 0.,
-                                <ButtonFlat> {
+                                <ButtonFlatter> {
                                     width: 25.
                                     text: ""
                                     icon_walk: { width: 12. }
@@ -562,7 +562,7 @@ live_design!{
                                         svg_file: dep("crate://self/resources/icons/icon_filetree_folder_create.svg"),
                                     }
                                 }
-                                <ButtonFlat> {
+                                <ButtonFlatter> {
                                     width: 25.
                                     text: ""
                                     icon_walk: { width: 9.5 }
@@ -571,11 +571,11 @@ live_design!{
                                     }
                                 }
                             }
-                            <Vr> {}
-                            <TextInput> {
-                                width: Fill,
-                                empty_text: "Filter",
-                            }
+                        }
+                        <Vr> {}
+                        <TextInput> {
+                            width: Fill,
+                            empty_text: "Filter",
                         }
                     }
                     file_tree = <StudioFileTree> {}

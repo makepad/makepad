@@ -148,7 +148,7 @@ live_design!{
                 
         draw_block:{
             line_color: (THEME_COLOR_TEXT)
-            sep_color: (THEME_COLOR_DIVIDER)
+            sep_color: (THEME_COLOR_SHADOW)
             quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
             quote_fg_color: (THEME_COLOR_TEXT)
             code_color: (THEME_COLOR_BG_HIGHLIGHT)

@@ -23,7 +23,7 @@ live_design!{
         align: { x: 0.0, y: 0.5 }
         padding: 50.
         draw_bg: {
-            color: (THEME_COLOR_SLIDES_BG),
+            color: (THEME_COLOR_D_4),
             border_radius: (THEME_CONTAINER_CORNER_RADIUS)
         }
         title = <H1> {
@@ -41,7 +41,7 @@ live_design!{
         spacing: 10,
         padding: 50,
         draw_bg: {
-            color: (THEME_COLOR_SLIDES_CHAPTER),
+            color: (THEME_COLOR_MAKEPAD),
             border_radius: (THEME_CONTAINER_CORNER_RADIUS)
         }
         title = <H1> {

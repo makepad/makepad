@@ -27,7 +27,7 @@ live_design!{
                     self.rect_size.x - 2.0 ,
                     self.rect_size.y - 2.0
                 )
-                sdf.fill_keep(THEME_COLOR_DIVIDER)
+                sdf.fill_keep(THEME_COLOR_SHADOW)
                 return sdf.result
             }
         }
@@ -38,17 +38,17 @@ live_design!{
         }
         draw_time:{ 
             text_style: <THEME_FONT_REGULAR> {
-                line_spacing: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_WDGT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_META)
+            color: (THEME_COLOR_LABEL_OUTER)
         }
         draw_label:{
             text_style: <THEME_FONT_REGULAR> {
-                line_spacing: (THEME_FONT_LINE_SPACING),
+                line_spacing: (THEME_FONT_WDGT_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT_D)
+            color: (THEME_COLOR_LABEL_OUTER_DOWN)
         }
     }
     
