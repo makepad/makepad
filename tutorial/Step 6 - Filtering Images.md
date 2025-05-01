@@ -1,9 +1,17 @@
 In the previous steps, we created both an image grid and a slideshow for our app, and made it possible to switch between the two. In this step, we'll add a way to filter images based on a query string.
+
+Our plan of attack will be this:
+- First, we'll create a search box, and add it to the menu bar we created in the previous step.
+- Next, we'll update the state to keep track of which subset of the images should be displayed.
+- Finally, we'll update our drawing code to use the new state.
+
+At the end of this step, you'll be able to filter images by typing in a search box.
 ## What you will learn
 In this chapter, you will learn:
-- How to use a `TextInput` to create a search box.
+- How to use an `Icon` to display icons.
+- How to use a `TextInput` for inputting text.
 ## Adding Resources
-For the search box, we'll need a looking glass icon, so let's start by adding that as a resources to our app.
+For the search box, we'll need a looking glass icon, so let's start by adding that as a resource to our app.
 
 Navigate to the `resources` directory, and then download the following files to it:
 [[looking_glass.svg]]
@@ -12,14 +20,14 @@ We'll be using this file as our looking glass icon.
 ## Updating the DSL Code
 As always, we'll start by updating the DSL code with the definitions we need.
 ### Defining Variables
-TODO
+Add the following code to the call to the `live_design` macro in `app.rs`:
 ```
     LOOKING_GLASS = dep("crate://self/resources/looking_glass.svg");
 ```
 
-TODO
+This code defines a variable named `LOOKING_GLASS` to refer to the looking glass icon that we added to the `resource` directory earlier.
 ### Adding a `SearchBox`
-TODO
+Add the following code to the call to the `live_design` macro in `app.rs`:
 ```
     SearchBox = <View> {
         width: Fit,
@@ -45,8 +53,31 @@ TODO
     }
 ```
 
+This code defines a `SearchBox`. A `SearchBox` is a simple container that combines 
+an `Icon` with a `TextInput`. An `Icon` is a simple widget that displays an icon, whereas a ` TextInput` is used for inputting text.
+
+This `SearchBox` has the following properties:
+- `width: Fit` and `height: Fit` ensure that the search box takes up as much space as needed.
+- `align { y: 0.5 }` ensures that the search box is vertically centered.
+- `margin { left: 60 }` ensures the search box has a slight margin on the left (so it does not overlap with the window buttons).
+
+The `Icon` in the search box has the following properties:
+- `icon_walk { ... }` controls how the icon is laid out.
+	- `width: 12` makes the icon 12 pixels wide.
+- `draw_icon { ... }` controls how the icon is drawn.
+	- `color: #8` ensures the icon is red.
+	- `svg_file: (LOOKING_GLASS)` sets our looking glass icon as the SVG file for this icon.
+
+The `TextInput` in the search box has the following properties:
+- `empty_text: "Search"` ensures the string "Search" is displayed when the input is empty.
+- `text_style: { ... }` controls how the text is styled.
+	- `font_size: 10` ensures the text has a size of 10 points.
+- `color: #8` ensures the text is red.
+
+ We've assigned the name `query` to our text input so we can refer to it later in our state updating code.
+
 ### Updating `MenuBar`
-TODO
+Replace the definition of `MenuBar` in the call to the `live_design` macro in `app.rs` with the one here below:
 ```
     MenuBar = <View> {
         width: Fill,
@@ -60,9 +91,11 @@ TODO
     }
 ```
 
-TODO
+This adds our `SearchBox` to the `MenuBar`. We've added it before the `Filler` to ensure that it is laid out on the left.
 ## Extending the State
 Now that we've updated the DSL code with the definitions we need, it's time to extend the state for our app with some additional fields and methods we need for filtering images.
+
+Specifically, we’ll add a field to track which subset of images should be displayed, and a few helper methods for updating that state at runtime. We'll also need to update some of our existing helper methods.
 ### Updating the State Struct
 Replace the definition of the `State` struct and its corresponding implementation of the `Default` trait with the one here below:
 ```
@@ -100,8 +133,7 @@ To minimise confusion, we'll adopt the following naming conventions:
 - We'll use the name `filtered_image_idx` to refer to the indices in `filtered_image_idx`. Only those indices can be used to index into `image_paths`.
 
 ### Adding Helper Methods
-To facilitate image filtering, we're going to add a helper method to the `App` struct.
-
+To facilitate image filtering, we're going to add a new helper method to the `App` struct.
 #### Adding the `filter_image_paths` method
 The `filter_image_paths` method is used to filter the list of image paths based on a query string:
 ```
@@ -166,7 +198,7 @@ Here's what this code does:
 - It reloads the `Image` using this path.
 
 This does exactly what we said we'd do earlier: instead of indexing into `image_paths` directly, as we did previously, we now index into `filtered_image_idxs`, and then use that index to index into `image_paths`. The net result of this change is that the slideshow only displays filtered images.
-#### Updating the `navigate_left/navigate_right` methods
+### Updating the `navigate_left/navigate_right` methods
 Replace the definition of the `navigate_left`/`navigate_right` methods on `App` with the ones here below:
 ```
     pub fn navigate_left(&mut self, cx: &mut Cx) {
@@ -234,9 +266,9 @@ Here's what this code does:
 The idea is that every time the list of images is updated, we need to redo the image filtering. Since the current image is based on the filtered image list, setting the current image is now done in the `filter_image_paths` method, so we no longer need to do it here.
 
 ## Updating the Drawing Code
-TODO
-### Drawing `ImageRow`s
-Replace the definition of the `draw_walk` method in the implementation of the `Widget` trait for the ImageRow struct with the one here below:
+Finally, let's update our drawing code to use the new state.
+### Updating  the `ImageRow` struct
+Replace the definition of the `draw_walk` method in the implementation of the `Widget` trait for the `ImageRow` struct with the one here below:
 ```
 fn draw_walk(
         &mut self,
@@ -275,9 +307,26 @@ fn draw_walk(
     }
 ```
 
-TODO
-### Updating `ImageGrid`
-Replace the definition of the `draw_walk` method in the implementation of the `Widget` trait for the ImageRow struct with the one here below:
+That's quite a lot of code, but there's really only a few things that have changed here.
+
+First, there is this line:
+```
+                let remaining_image_count =
+                    state.filtered_image_idxs.len() - first_image_idx;
+```
+
+All this does is change the computation of the number of remaining images to take into account that we are now only drawing filtered images, instead of every image (by replacing `state.image_paths.len()` with `state.filtered_image_idxs.len()`).
+
+Next, there are the following lines:
+```
+                    let filtered_image_idx =
+                        state.filtered_image_idxs[image_idx];
+                    let image_path = &state.image_paths[filtered_image_idx];
+```
+
+This does the same thing we did in the `set_current_image` method earlier: instead of indexing into `image_paths` directly, as we did previously, we now index into `filtered_image_idxs`, and then use that index to index into `image_paths`. The net result of this change is that the image grid only displays filtered images.
+### Updating the `ImageGrid` struct
+Replace the definition of the `draw_walk` method in the implementation of the `Widget` trait for the `ImageGrid` struct with the one here below:
 ```
     fn draw_walk(
         &mut self,
@@ -308,7 +357,7 @@ Replace the definition of the `draw_walk` method in the implementation of the `W
     }
 ```
 
-That's quite a lot of code, but the only real change here is the following line:
+Once again, that's quite a lot of code, but the only real change here is the following line:
 ```
                 let num_rows = state
                     .filtered_image_idxs
@@ -316,7 +365,7 @@ That's quite a lot of code, but the only real change here is the following line:
                     .div_ceil(state.images_per_row);
 ```
 
-TODO
+All this does is change the computation of the number of rows to take into account that we are now only drawing filtered images, instead of every image (by replacing `state.image_paths.len()` with `state.filtered_image_idxs.len()`).
 ## Checking our Progress so far
 Let's check our progress so far.
 
