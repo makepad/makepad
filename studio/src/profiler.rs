@@ -54,6 +54,48 @@ live_design!{
     
     pub Profiler = {{Profiler}}{
         height: Fill, width: Fill
+        <DockToolbar> {
+            content = {
+                running_button = <CheckBox> {
+                    text: "Running",
+                    active: true,
+                    icon_walk: { width: 8. }
+                }
+                clear_button = <ButtonFlat> {
+                    text: "Clear"
+                    icon_walk: { width: 12. }
+                    
+                    draw_icon: {
+                        svg_file: dep("crate://self/resources/icons/icon_profiler_clear.svg"),
+                    }
+                }
+                <ButtonGroup> {
+                    height: Fit
+                    flow: Right
+                    align: { x: 0.0, y: 0.5 }
+                }
+                <Vr> {}
+                <View> {
+                    width: Fit,
+                    flow: Right,
+                    spacing: 0.,
+                    <Pbold> {
+                        width: Fit,
+                        text: "Last ",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                        draw_text: { color: (THEME_COLOR_D_4) }
+                    }
+                    <P> {
+                        width: Fit,
+                        text: "500 ms",
+                        margin: 0.,
+                        padding: <THEME_MSPACE_V_1> {}
+                        draw_text: { color: (THEME_COLOR_D_4) }
+                    }
+                }
+            }
+        }
         <ProfilerEventChart>{ }
     }
 }
@@ -224,6 +266,16 @@ struct Profiler{
     #[deref] view:View,
 }
 
+impl WidgetMatchEvent for Profiler{
+    fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions, scope: &mut Scope ){
+        let _data = scope.data.get_mut::<AppData>().unwrap();
+        if self.button(id!(clear_button)).clicked(&actions){
+            
+            crate::log!("CLICK");
+        }
+    }
+}
+
 impl Widget for Profiler {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         self.view.draw_walk_all(cx, scope, walk);
@@ -232,5 +284,6 @@ impl Widget for Profiler {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         self.view.handle_event(cx, event, scope);
+        self.widget_match_event(cx, event, scope);
     }
 }

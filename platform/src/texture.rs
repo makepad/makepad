@@ -97,7 +97,7 @@ impl TextureSize{
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum TextureFormat {
     Unknown,
     VecBGRAu8_32{width:usize, height:usize, data:Option<Vec<u32>>, updated: TextureUpdated},
@@ -114,6 +114,27 @@ pub enum TextureFormat {
     SharedBGRAu8{width:usize, height:usize, id:crate::cx_stdin::PresentableImageId, initial: bool},
     #[cfg(any(target_os = "android", target_os = "linux"))]
     VideoRGB,
+}
+
+impl std::fmt::Debug for TextureFormat{
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error>{
+        match self{
+            TextureFormat::Unknown=>write!(f, "TextureFormat::Unknown"),
+            TextureFormat::VecBGRAu8_32{width, height,..}=>write!(f, "TextureFormat::VecBGRAu8_32(width:{width},height:{height})"),
+            TextureFormat::VecMipBGRAu8_32{width, height,..}=>write!(f, "TextureFormat::VecMipBGRAu8_32(width:{width},height:{height})"),
+            TextureFormat::VecRGBAf32{width, height,..}=>write!(f, "TextureFormat::VecRGBAf32(width:{width},height:{height})"),
+            TextureFormat::VecRu8{width, height,..}=>write!(f, "TextureFormat::VecRu8(width:{width},height:{height})"),
+            TextureFormat::VecRGu8{width, height,..}=>write!(f, "TextureFormat::VecRGu8(width:{width},height:{height})"),
+            TextureFormat::VecRf32{width, height,..}=>write!(f, "TextureFormat::VecRf32(width:{width},height:{height})"),
+            TextureFormat::DepthD32{size,..}=>write!(f, "TextureFormat::DepthD32(size:{:?})", size),
+            TextureFormat::RenderBGRAu8{size,..}=>write!(f, "TextureFormat::RenderBGRAu8(size:{:?})", size),
+            TextureFormat::RenderRGBAf16{size,..}=>write!(f, "TextureFormat::RenderRGBAf16(size:{:?})", size),
+            TextureFormat::RenderRGBAf32{size,..}=>write!(f, "TextureFormat::RenderRGBAf32(size:{:?})", size),
+            TextureFormat::SharedBGRAu8{width,height,..}=>write!(f, "TextureFormat::SharedBGRAu8(width:{width},height:{height})"),
+            #[cfg(any(target_os = "android", target_os = "linux"))]
+            TextureFormat::VideoRGB=>write!(f, "TextureFormat::VideoRGB"),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)] 
@@ -536,6 +557,21 @@ impl Texture {
             _ => panic!("incorrect texture format for u32 image data"),
         };
         data.take().expect("image data already taken")
+    }
+    
+    pub fn swap_vec_u32(&self, cx: &mut Cx, vec: &mut Vec<u32>) {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let (data, updated) = match &mut cx_texture.format {
+            TextureFormat::VecBGRAu8_32 { data, updated, .. } => (data, updated),
+            _ => panic!("incorrect texture format for u32 image data"),
+        };
+        if data.is_none(){
+            *data = Some(vec![]);
+        }
+        if let Some(data) = data{
+            std::mem::swap(data, vec)
+        }
+        *updated = updated.update(None);
     }
 
     pub fn put_back_vec_u32(&self, cx: &mut Cx, new_data: Vec<u32>, dirty_rect: Option<RectUsize>) {

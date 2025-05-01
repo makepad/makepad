@@ -584,7 +584,6 @@ live_design!{
     pub SliderRound = <SliderMinimal> {
         height: 18.,
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
-
         text_input: <TextInput> {
             width: Fit,
             padding: 0.,
@@ -834,7 +833,15 @@ live_design!{
     pub Rotary = <SliderMinimal> {
         height: 95., width: 65.,
         axis: Vertical,
-
+        flow: Down
+        align:{x:0.5}
+        label_walk:{
+            margin:{top:36}
+            width: Fit
+        }
+        text_input:{ 
+            width: Fit
+        }
         draw_bg: {
             instance hover: float
             instance focus: float
@@ -1647,15 +1654,6 @@ live_design!{
 
 }
 
-#[derive(Live, LiveHook)]
-#[live_ignore]
-#[repr(u32)]
-pub enum SliderType {
-    #[pick] Horizontal = shader_enum(1),
-    Vertical = shader_enum(2),
-    Rotary = shader_enum(3),
-}
-
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
 #[live_ignore]
 pub enum DragAxis {
@@ -1677,7 +1675,6 @@ pub struct DrawSlider {
     #[deref] draw_super: DrawQuad,
     #[live] label_size: f32,
     #[live] slide_pos: f32,
-    #[live] slide_posr_type: SliderType
 }
 
 #[derive(Live, Widget)]
@@ -1749,7 +1746,7 @@ impl Slider {
     
     pub fn update_text_input(&mut self, cx: &mut Cx) {
         let e = self.to_external();
-        self.text_input.set_text(cx, match self.precision{
+        self.text_input.set_text(cx, &match self.precision{
             0=>format!("{:.0}",e),
             1=>format!("{:.1}",e),
             2=>format!("{:.2}",e),
@@ -1767,16 +1764,23 @@ impl Slider {
         self.draw_bg.slide_pos = self.relative_value as f32;
         self.draw_bg.begin(cx, walk, self.layout);
         
-        if let Some(mut dw) = cx.defer_walk(self.label_walk) {
-            //, (self.value*100.0) as usize);
+        if let Flow::Right = self.layout.flow{
+            
+            if let Some(mut dw) = cx.defer_walk(self.label_walk) {
+                //, (self.value*100.0) as usize);
+                let walk = self.text_input.walk(cx);
+                let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
+        
+                let label_walk = dw.resolve(cx);
+                cx.begin_turtle(label_walk, Layout::default());
+                self.draw_text.draw_walk(cx, label_walk, self.label_align, &self.text);
+                cx.end_turtle_with_area(&mut self.label_area);
+            }
+        }
+        else{
             let walk = self.text_input.walk(cx);
-            let mut scope = Scope::default();
-            let _ = self.text_input.draw_walk(cx, &mut scope, walk);
-
-            let label_walk = dw.resolve(cx);
-            cx.begin_turtle(label_walk, Layout::default());
-            self.draw_text.draw_walk(cx, label_walk, self.label_align, &self.text);
-            cx.end_turtle_with_area(&mut self.label_area);
+            let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
+            self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.text);
         }
         
         self.draw_bg.end(cx);

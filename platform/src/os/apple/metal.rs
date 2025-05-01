@@ -846,7 +846,6 @@ impl CxTexture {
             let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
                 msg_send![class!(MTLTextureDescriptor), new]
             }).unwrap());
-                        
             let _: () = unsafe {msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2]};
             let _: () = unsafe {msg_send![descriptor.as_id(), setDepth: 1u64]};
             let _: () = unsafe {msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared]};
@@ -876,7 +875,6 @@ impl CxTexture {
                 bytesPerRow: (width as u64) * bpp
             ]};
         }
-            
         match &self.format{
             TextureFormat::VecBGRAu8_32{width, height, data, ..}=>{
                 update_data(&self.os.texture, *width, *height, 4,  data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void);

@@ -895,7 +895,7 @@ pub enum CheckType {
     None = shader_enum(4),
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Live, Widget)]
 pub struct CheckBox {
     
     #[walk] walk: Walk,
@@ -915,8 +915,20 @@ pub struct CheckBox {
     #[visible] #[live(true)]
     pub visible: bool,
     
+    #[live(None)]
+    pub active: Option<bool>,
+    
     #[live] bind: String,
     #[action_data] #[rust] action_data: WidgetActionData,
+}
+
+// map the 'active' bool to the animator state
+impl LiveHook for CheckBox{
+    fn after_new_from_doc(&mut self, cx: &mut Cx){
+        if let Some(active) = self.active.take() {
+            self.animator_toggle(cx, active, Animate::No, id!(active.on), id!(active.off));
+        }
+    }
 }
 
 #[derive(Clone, Debug, DefaultNone)]

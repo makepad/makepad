@@ -3,7 +3,7 @@ use {
         geom::{Point, Rect, Size},
         num::Zero,
     },
-    std::ops::{Index, IndexMut},
+    std::{mem, ops::{Index, IndexMut}},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -48,7 +48,15 @@ impl<T> Image<T> {
         &mut self.pixels
     }
 
+    pub unsafe fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
+        mem::replace(&mut self.pixels, pixels)
+    }
+
     pub fn subimage(&self, rect: Rect<usize>) -> Subimage<'_, T> {
+        assert!(
+            Rect::from(self.size).contains_rect(rect),
+            "rect is out of bounds"
+        );
         Subimage {
             image: self,
             bounds: rect,
@@ -152,6 +160,17 @@ impl<'a, T> SubimageMut<'a, T> {
     pub fn bounds(&self) -> Rect<usize> {
         self.bounds
     }
+
+    pub fn subimage_mut(self, rect: Rect<usize>) -> SubimageMut<'a, T> {
+        assert!(
+            Rect::from(self.size()).contains_rect(rect),
+            "rect is out of bounds"
+        );
+        SubimageMut {
+            image: self.image,
+            bounds: Rect::new(self.bounds.origin + Size::from(rect.origin), rect.size),
+        }
+    }
 }
 
 impl<'a, T> Index<Point<usize>> for SubimageMut<'a, T> {
@@ -177,28 +196,49 @@ impl<'a, T> IndexMut<Point<usize>> for SubimageMut<'a, T> {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-#[repr(C)]
+#[repr(transparent)]
 pub struct R {
-    pub r: u8,
+    pub bits: u8,
 }
 
 impl R {
     pub const fn new(r: u8) -> Self {
-        Self { r }
+        Self { bits: r }
+    }
+
+    pub fn r(self) -> u8 {
+        self.bits
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-#[repr(C)]
-pub struct Rgba {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-    pub a: u8,
+#[repr(transparent)]
+pub struct Bgra {
+    pub bits: u32,
 }
 
-impl Rgba {
-    pub fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self { r, g, b, a }
+impl Bgra {
+    pub fn new(b: u8, g: u8, r: u8, a: u8) -> Self {
+        let b = u32::from(b);
+        let g = u32::from(g);
+        let r = u32::from(r);
+        let a = u32::from(a);
+        Self { bits: (a << 24) | (r << 16) | (g << 8) | b }
+    }
+
+    pub fn b(self) -> u8 {
+        (self.bits & 0xFF) as u8
+    }
+
+    pub fn g(self) -> u8 {
+        ((self.bits >> 8) & 0xFF) as u8
+    }
+
+    pub fn r(self) -> u8 {
+        ((self.bits >> 16) & 0xFF) as u8
+    }
+
+    pub fn a(self) -> u8 {
+        ((self.bits >> 24) & 0xFF) as u8
     }
 }
