@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoPortalList = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<PortalList>"}
+            <Markdown> { body: dep("crate://self/resources/portallist.md") } 
         }
         demos = {
             <H4> { text: "Standard" }

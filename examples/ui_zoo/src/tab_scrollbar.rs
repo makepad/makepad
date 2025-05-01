@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoScrollBar = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<ScrollBar>"}
+            <Markdown> { body: dep("crate://self/resources/scrollbar.md") } 
         }
         demos = {
             <TextBox> { text: "Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up. Just some random Text to trigger the Scrollbar widget to show up."}
