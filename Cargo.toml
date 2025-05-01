@@ -29,6 +29,22 @@ workspace.members = [
     "examples/image_viewer_4",
     "examples/image_viewer_5",
     "examples/image_viewer_6",
+    "examples/image_viewer/step_1",
+    "examples/image_viewer/step_2",
+    "examples/image_viewer/step_3",
+    "examples/image_viewer/step_4",
+    "examples/image_viewer/step_5",
+    "examples/image_viewer/step_6",
+    "examples/image_viewer/step_7",
+    "examples/image_viewer/step_8",
+    "examples/image_viewer/step_9",
+    "examples/image_viewer/step_10",
+    "examples/image_viewer/step_11",
+    "examples/image_viewer/step_12",
+    "examples/image_viewer/step_13",
+    "examples/image_viewer/step_14",
+    "examples/image_viewer/step_15",
+    "examples/image_viewer/step_16",
 ]
 
 workspace.exclude = [
