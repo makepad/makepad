@@ -802,10 +802,18 @@ impl Widget for HtmlLink {
         tf.underline.pop();
 
         let (start, end) = tf.areas_tracker.pop_tracker();
-
-        self.drawn_areas = SmallVec::from(
-            &tf.areas_tracker.areas[start..end]
-        );
+        
+        if self.drawn_areas.len() == end-start{
+            for i in 0..end-start{
+                self.drawn_areas[i] = cx.update_area_refs( self.drawn_areas[i], 
+                tf.areas_tracker.areas[i+start]);
+            }
+        }
+        else{
+            self.drawn_areas = SmallVec::from(
+                &tf.areas_tracker.areas[start..end]
+            );
+        }
 
         DrawStep::done()
     }
