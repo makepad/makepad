@@ -390,6 +390,27 @@ live_design! {
                     }
                 }
             }
+            empty = {
+                default: off,
+                off = {
+                    from: {all: Forward {duration: 0.}}
+                    apply: {
+                        draw_bg: {empty: 0.0}
+                        draw_text: {empty: 0.0}
+                        draw_selection: {empty: 0.0}
+                        draw_cursor: {empty: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {empty: 1.0}
+                        draw_text: {empty: 1.0}
+                        draw_selection: {empty: 1.0}
+                        draw_cursor: {empty: 1.0}
+                    }
+                }
+            }
             focus = {
                 default: off
                 off = {
@@ -803,11 +824,11 @@ pub struct TextInput {
     #[rust] blink_timer: Timer,
 }
 
-impl LiveHook for TextInput{
-    fn after_update_from_doc(&mut self, _cx:&mut Cx){
-        self.selection = Selection::default();
-    }
-}
+// impl LiveHook for TextInput{
+//     fn after_update_from_doc(&mut self, _cx:&mut Cx){
+//         self.selection = Selection::default();
+//     }
+// }
 
 impl TextInput {
     pub fn is_password(&self) -> bool {
@@ -1278,11 +1299,11 @@ impl TextInput {
 }
 
 impl LiveHook for TextInput {
-    fn after_new_from_doc(&mut self, cx:&mut Cx){
-        if self.text().is_empty() {
-        self.animator_play(cx, id!(empty.on));
-        }
-    }
+    // fn after_new_from_doc(&mut self, cx:&mut cx){
+    //     if self.text().is_empty() {
+    //     self.animator_play(cx, id!(empty.on));
+    //     }
+    // }
 }
 
 impl Widget for TextInput {
