@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoIconSet = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<IconSet>"}
+            <Markdown> { body: dep("crate://self/resources/iconset.md") } 
         }
         demos = {
             flow: RightWrap,

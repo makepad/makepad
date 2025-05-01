@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoDesktopButton = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<DesktopButton>"}
+            <Markdown> { body: dep("crate://self/resources/desktopbutton.md") } 
         }
         demos = {
             <H4> { text: "WindowsMax" }
