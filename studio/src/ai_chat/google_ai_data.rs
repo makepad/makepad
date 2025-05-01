@@ -45,6 +45,7 @@ pub struct GoogleAiMetadata {
     pub promptTokenCount: usize,
     pub candidatesTokenCount: usize,
     pub totalTokenCount: usize,
+    pub thoughtsTokenCount: usize,
     pub promptTokensDetails: Vec<GoogleAiTokenDetail>
 } 
 

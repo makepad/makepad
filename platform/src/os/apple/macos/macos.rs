@@ -242,7 +242,6 @@ impl Cx {
         
         // send a mouse up when dragging starts
         
-        let mut paint_dirty = false;
         match &event {
             MacosEvent::MouseDown(_) |
             MacosEvent::MouseMove(_) |
@@ -273,8 +272,8 @@ impl Cx {
                         self.redraw_all();
                     }
                     self.handle_networking_events();
-                    
-                    return EventFlow::Poll;
+                    // block till the next timer
+                    return EventFlow::Wait;
                 }
             }
             _ => ()
@@ -287,7 +286,6 @@ impl Cx {
                         self.repaint_pass(main_pass_id);
                     }
                 }
-                paint_dirty = true;
                 self.call_event_handler(&Event::AppGotFocus);
             }
             MacosEvent::AppLostFocus => {
@@ -432,11 +430,12 @@ impl Cx {
             }
         }
         
-        if self.any_passes_dirty() || self.need_redrawing()/* || self.new_next_frames.len() != 0*/ || paint_dirty {
-            EventFlow::Poll
-        } else {
-            EventFlow::Wait
-        }
+        //if self.any_passes_dirty() || self.need_redrawing()/* || self.new_next_frames.len() != 0*/ || paint_dirty {
+        // the timer is the primary wait flow   
+        EventFlow::Poll
+        //} else {
+         //   EventFlow::Wait
+       // }
     }
     
     fn dpi_override_scale(&self, pos:&mut DVec2, window_id:WindowId){

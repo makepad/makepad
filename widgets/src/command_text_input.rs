@@ -212,7 +212,7 @@ pub struct CommandTextInput {
 
 impl Widget for CommandTextInput {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
-        self.text_input_ref().set_text(cx, v.to_string());
+        self.text_input_ref().set_text(cx, v);
     }
 
     fn text(&self) -> String {
@@ -357,7 +357,7 @@ impl Widget for CommandTextInput {
                     if let TextInputAction::Changed(search) = action.cast() {
                         // disallow multiline input
                         self.search_input_ref()
-                            .set_text(cx, search.lines().next().unwrap_or_default().to_string());
+                            .set_text(cx, search.lines().next().unwrap_or_default());
 
                         cx.widget_action(
                             self.widget_uid(),
@@ -505,12 +505,12 @@ impl CommandTextInput {
     /// Clear all text and hide the popup going back to initial state.
     pub fn reset(&mut self, cx: &mut Cx) {
         self.hide_popup(cx);
-        self.text_input_ref().set_text(cx, "".to_string());
+        self.text_input_ref().set_text(cx, "");
     }
 
     fn clear_popup(&mut self, cx: &mut Cx) {
         self.trigger_position = None;
-        self.search_input_ref().set_text(cx, "".to_string());
+        self.search_input_ref().set_text(cx, "");
         self.search_input_ref().set_cursor(
             cx,
             Cursor {
