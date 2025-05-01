@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoRotary = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "Rotary"}
+            <Markdown> { body: dep("crate://self/resources/rotary.md") } 
         }
         demos = {
             <H4> { text: "<Rotary>"}

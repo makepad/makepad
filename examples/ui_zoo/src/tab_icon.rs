@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoIcon = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<Icon>"}
+            <Markdown> { body: dep("crate://self/resources/icon.md") } 
         }
         demos = {
             <H4> { text: "Standard" }

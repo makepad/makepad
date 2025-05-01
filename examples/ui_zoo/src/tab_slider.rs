@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoSlider = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "Slider"}
+            <Markdown> { body: dep("crate://self/resources/slider.md") } 
         }
         demos = {
             <H4> { text: "Slider"}
