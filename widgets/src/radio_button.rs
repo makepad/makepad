@@ -997,7 +997,7 @@ live_design!{
         }
     }
         
-    pub RadioButtonTab = <RadioButtonGradientY> {
+    pub RadioButtonTab = <RadioButton> {
         height: Fit,
         label_walk: {
             margin: {
@@ -1009,13 +1009,9 @@ live_design!{
         draw_bg: {
             radio_type: Tab
 
-            color_1: (THEME_COLOR_OUTSET_1)
-            color_1_active: (THEME_COLOR_OUTSET_1_ACTIVE)
-            color_1_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
-
-            color_2: (THEME_COLOR_OUTSET_2)
-            color_2_active: (THEME_COLOR_OUTSET_2_ACTIVE)
-            color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
+            color: (THEME_COLOR_OUTSET)
+            color_active: (THEME_COLOR_OUTSET_ACTIVE)
+            color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
             border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
             border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
@@ -1046,13 +1042,9 @@ live_design!{
 
     pub RadioButtonTabFlat = <RadioButtonTab> {
         draw_bg: {
-            color_1: (THEME_COLOR_OUTSET)
-            color_1_active: (THEME_COLOR_OUTSET_ACTIVE)
-            color_1_disabled: (THEME_COLOR_OUTSET_DISABLED)
-
-            color_2: (THEME_COLOR_OUTSET)
-            color_2_active: (THEME_COLOR_OUTSET_ACTIVE)
-            color_2_disabled: (THEME_COLOR_OUTSET_DISABLED)
+            color: (THEME_COLOR_OUTSET)
+            color_active: (THEME_COLOR_OUTSET_ACTIVE)
+            color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
             border_color_1: (THEME_COLOR_BEVEL)
             border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
