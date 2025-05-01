@@ -17,7 +17,7 @@ live_design!{
             text_style: {
                 font_size: 6
             },
-            color: (THEME_COLOR_TEXT)
+            color: (THEME_COLOR_LABEL_INNER)
         }
     }
     

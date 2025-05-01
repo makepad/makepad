@@ -122,7 +122,7 @@ live_design! {
         draw_gutter: {
             draw_depth: 1.0,
             text_style: <THEME_FONT_CODE> {},
-            color: (THEME_COLOR_TEXT_META),
+            color: (THEME_COLOR_LABEL_OUTER),
         }
         draw_text: {
             draw_depth: 1.0,

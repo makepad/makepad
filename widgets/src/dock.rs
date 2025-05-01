@@ -104,7 +104,7 @@ live_design!{
 
         draw_bg: {
             border_size: 0.0
-            border_color: (THEME_COLOR_BEVEL_LIGHT)
+            border_color: (THEME_COLOR_BEVEL_OUTSET_1)
             shadow_color: (THEME_COLOR_D_4)
             shadow_radius: 7.5
             shadow_offset: vec2(0.0, 0.0)

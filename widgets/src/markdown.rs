@@ -42,11 +42,11 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        THEME_COLOR_TEXT,
-                        THEME_COLOR_TEXT_HOVER,
+                        THEME_COLOR_LABEL_INNER,
+                        THEME_COLOR_LABEL_INNER_HOVER,
                         self.hover
                     ),
-                    THEME_COLOR_TEXT_DOWN,
+                    THEME_COLOR_LABEL_INNER_DOWN,
                     self.pressed
                 )
             }
@@ -97,8 +97,8 @@ live_design!{
                 sdf.move_to(0., self.rect_size.y - offset_y);
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                 return sdf.stroke(mix(
-                    THEME_COLOR_TEXT,
-                    THEME_COLOR_TEXT_DOWN,
+                    THEME_COLOR_LABEL_INNER,
+                    THEME_COLOR_LABEL_INNER_DOWN,
                     self.pressed
                 ), mix(0.0, 0.8, self.hover));
             }
@@ -108,11 +108,11 @@ live_design!{
             instance pressed: 0.0
             instance hover: 0.0
 
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER),
-            uniform color_pressed: (THEME_COLOR_TEXT_DOWN),
+            uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER),
+            uniform color_pressed: (THEME_COLOR_LABEL_INNER_DOWN),
 
             wrap: Word
-            color: (THEME_COLOR_TEXT),
+            color: (THEME_COLOR_LABEL_INNER),
             text_style: <THEME_FONT_REGULAR>{
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -136,7 +136,7 @@ live_design!{
         padding: <THEME_MSPACE_1> {}
                 
         font_size: (THEME_FONT_SIZE_P),
-        font_color: (THEME_COLOR_TEXT),
+        font_color: (THEME_COLOR_LABEL_INNER),
         
         paragraph_spacing: 16,
         pre_code_spacing: 8,
@@ -147,35 +147,35 @@ live_design!{
             text_style: <THEME_FONT_REGULAR> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT)
+            color: (THEME_COLOR_LABEL_INNER)
         }
         
         draw_italic: {
             text_style: <THEME_FONT_ITALIC> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT)
+            color: (THEME_COLOR_LABEL_INNER)
         }
         
         draw_bold: {
             text_style: <THEME_FONT_BOLD> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT)
+            color: (THEME_COLOR_LABEL_INNER)
         }
         
         draw_bold_italic: {
             text_style: <THEME_FONT_BOLD_ITALIC> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT)
+            color: (THEME_COLOR_LABEL_INNER)
         }
         
         draw_fixed: {
             text_style: <THEME_FONT_CODE> {
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT)
+            color: (THEME_COLOR_LABEL_INNER)
         }
         
         code_layout: {
@@ -204,10 +204,10 @@ live_design!{
         }
         
         draw_block: {
-            line_color: (THEME_COLOR_TEXT)
-            sep_color: (THEME_COLOR_DIVIDER)
+            line_color: (THEME_COLOR_LABEL_INNER)
+            sep_color: (THEME_COLOR_SHADOW)
             quote_bg_color: (THEME_COLOR_BG_HIGHLIGHT)
-            quote_fg_color: (THEME_COLOR_TEXT)
+            quote_fg_color: (THEME_COLOR_LABEL_INNER)
             code_color: (THEME_COLOR_BG_HIGHLIGHT)
             
             fn pixel(self) -> vec4 {

@@ -69,7 +69,7 @@ live_design!{
                     1.0
                 );
 
-                sdf.fill(mix(THEME_COLOR_U_HIDDEN, mix(THEME_COLOR_W, THEME_COLOR_TEXT_HOVER, self.hover), self.active));
+                sdf.fill(mix(THEME_COLOR_U_HIDDEN, mix(THEME_COLOR_W, THEME_COLOR_LABEL_OUTER_HOVER, self.hover), self.active));
 
                 // PLAY
                 sdf.rotate(self.active * 0.5 * PI + 0.5 * PI, c.x, c.y);
@@ -77,7 +77,7 @@ live_design!{
                 sdf.line_to(c.x, c.y - sz);
                 sdf.line_to(c.x + sz, c.y + sz);
                 sdf.close_path();
-                sdf.fill(mix(mix(THEME_COLOR_U_4, THEME_COLOR_TEXT_HOVER, self.hover), THEME_COLOR_U_HIDDEN, self.active));
+                sdf.fill(mix(mix(THEME_COLOR_U_4, THEME_COLOR_LABEL_OUTER_HOVER, self.hover), THEME_COLOR_U_HIDDEN, self.active));
 
                 return sdf.result
             }
