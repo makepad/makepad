@@ -13,59 +13,73 @@ live_design! {
     pub View = <ViewBase> {}
     
     pub Hr = <View> {
-        width: Fill, height: 5.,
+        width: Fill, height: (THEME_SPACE_2 * THEME_BEVELING * 1.25),
         flow: Down,
-        spacing: 0.,
-        margin: <THEME_MSPACE_V_2> {}
+        margin: 0.
 
         show_bg: true, 
         draw_bg: {
-            uniform color_1: (THEME_COLOR_BEVEL_SHADOW)
-            uniform color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform color_1: (THEME_COLOR_BEVEL_OUTSET_2)
+            uniform color_2: (THEME_COLOR_BEVEL_OUTSET_1)
             uniform border_size: (THEME_BEVELING)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let sz = self.border_size * 2.
 
-                let stroke_width = self.border_size
-                sdf.move_to(1., 0.);
-                sdf.line_to(self.rect_size.x, 0.0);
-                sdf.stroke(self.color_1, stroke_width * 2.);
+                sdf.rect(
+                    0.,
+                    self.rect_size.y * 0.5 - sz * 2,
+                    self.rect_size.x,
+                    sz + 1
+                )
 
-                let offset = stroke_width * 2.0;
-                sdf.move_to(0., 1. + stroke_width);
-                sdf.line_to(self.rect_size.x, 1. + stroke_width);
-                sdf.stroke(self.color_2, stroke_width);
+                sdf.fill(self.color_1);
 
+                sdf.rect(
+                    0,
+                    self.rect_size.y * 0.5 - sz,
+                    self.rect_size.x,
+                    sz 
+                )
+
+                sdf.fill(self.color_2);
                 return sdf.result
             }
         }
     }
     
     pub Vr = <View> {
-        width: 5., height: Fill,
+        width: (THEME_SPACE_2 * THEME_BEVELING * 1.25), height: Fill,
         flow: Right,
-        spacing: 0.,
-        margin: <THEME_MSPACE_V_2> {}
 
         show_bg: true, 
         draw_bg: {
-            uniform color_1: (THEME_COLOR_BEVEL_SHADOW)
-            uniform color_2: (THEME_COLOR_BEVEL_LIGHT)
+            uniform color_1: (THEME_COLOR_BEVEL_OUTSET_2)
+            uniform color_2: (THEME_COLOR_BEVEL_OUTSET_1)
             uniform border_size: (THEME_BEVELING)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let sz = self.border_size * 2.
 
-                let stroke_width = self.border_size;
-                sdf.move_to(1., 0.);
-                sdf.line_to(0.0, self.rect_size.y);
-                sdf.stroke(self.color_1, stroke_width * 2.);
+                sdf.rect(
+                    self.rect_size.x * 0.5,
+                    0.,
+                    sz + 1.,
+                    self.rect_size.y
+                )
 
-                let offset = stroke_width * 2.0;
-                sdf.move_to(1. + stroke_width, 0.);
-                sdf.line_to(1. + stroke_width, self.rect_size.y);
-                sdf.stroke(self.color_2, stroke_width);
+                sdf.fill(self.color_1);
+
+                sdf.rect(
+                    self.rect_size.x * 0.5 + sz,
+                    0.,
+                    sz,
+                    self.rect_size.y
+                )
+
+                sdf.fill(self.color_2);
 
                 return sdf.result
             }

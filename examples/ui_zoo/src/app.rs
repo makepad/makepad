@@ -15,7 +15,6 @@
         use crate::tab_desktopbutton::*;
         use crate::tab_dropdown::*;
         use crate::tab_filetree::*;
-        use crate::tab_foldheader::*;
         use crate::tab_foldbutton::*;
         use crate::tab_html::*;
         use crate::tab_icon::*;
@@ -71,23 +70,23 @@
                     margin: 0.,
 
                     <View> {
-                        width: Fill,
-                        height: 40.
-                        spacing: (THEME_SPACE_2)
+                        width: Fill, height: Fit,
                         flow: Right,
-
-                        padding: <THEME_MSPACE_2> {}
+                        spacing: (THEME_SPACE_2)
+                        align: { x: 0.0, y: 0.0 }
+                        padding: <THEME_MSPACE_1> {}
                         margin: 0.
+
                         show_bg: true,
                         draw_bg: { color: (THEME_COLOR_U_1) }
 
                         <SliderRound> { text: "Spacing"}
                         <Vr> {}
-                        <Pbold> { width: Fit, text: "Color", padding: { top: 1.5}}
+                        <Labelbold> { width: Fit, text: "Color"}
                         <SliderRound> { text: "Contrast" }
                         <SliderRound> { text: "Tint Factor" }
                         <Vr> {}
-                        <Pbold> { width: Fit, text: "Font", padding: { top: 1.5}}
+                        <Labelbold> { width: Fit, text: "Font"}
                         <SliderRound> { text: "Scale" }
                         <SliderRound> { text: "Contrast"}
                         <Vr> {}
@@ -122,7 +121,6 @@
                                 tDropDown,
                                 tFiletree,
                                 tFoldButton,
-                                tFoldHeader,
                                 tHTML,
                                 tIcon,
                                 tIconSet,
@@ -156,7 +154,6 @@
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
                         tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
                         tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
-                        tFoldHeader = Tab { name: "FoldHeader", template: PermanentTab, kind: TabFoldHeader }
                         tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
                         tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
                         tIconSet = Tab { name: "IconSet", template: PermanentTab, kind: TabIconSet }
@@ -186,7 +183,6 @@
                         TabDropDown = <UIZooTab> { <DemoDropdown> {} }
                         TabFiletree = <UIZooTab> { <DemoFT> {} }
                         TabFoldButton = <UIZooTab> { <DemoFoldButton> {} }
-                        TabFoldHeader = <UIZooTab> { <DemoFoldHeader> {} }
                         TabHTML = <UIZooTab> { <DemoHtml> {} }
                         TabIcon = <UIZooTab> { <DemoIcon> {} }
                         TabIconSet = <UIZooTab> { <DemoIconSet> {} }
@@ -235,9 +231,13 @@
         #[live] dropdown: DropDownEnum,
         #[live] dropdown_below: DropDownEnum,
         #[live] dropdown_flat: DropDownEnum,
+        #[live] dropdown_flat_below: DropDownEnum,
         #[live] dropdown_flatter: DropDownEnum,
+        #[live] dropdown_flatter_below: DropDownEnum,
         #[live] dropdown_gradient_x: DropDownEnum,
+        #[live] dropdown_gradient_x_below: DropDownEnum,
         #[live] dropdown_gradient_y: DropDownEnum,
+        #[live] dropdown_gradient_y_below: DropDownEnum,
         #[live] dropdown_custom: DropDownEnum,
     }
     #[derive(Live, LiveHook)]
@@ -261,7 +261,6 @@
             crate::tab_dropdown::live_design(cx);
             crate::tab_filetree::live_design(cx);
             crate::tab_foldbutton::live_design(cx);
-            crate::tab_foldheader::live_design(cx);
             crate::tab_html::live_design(cx);
             crate::tab_icon::live_design(cx);
             crate::tab_iconset::live_design(cx);
@@ -289,23 +288,26 @@
     impl MatchEvent for App{
         fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions) {
             let ui = self.ui.clone();
-            let tui = ui.dock(id!(dock)).item(live_id!(tRadioButton));
-            tui.radio_button_set(ids!(radios_demo_1.radio1, radios_demo_1.radio2, radios_demo_1.radio3, radios_demo_1.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_2.radio1, radios_demo_2.radio2, radios_demo_2.radio3, radios_demo_2.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_3.radio1, radios_demo_3.radio2, radios_demo_3.radio3, radios_demo_3.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_4.radio1, radios_demo_4.radio2, radios_demo_4.radio3, radios_demo_4.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_5.radio1, radios_demo_5.radio2, radios_demo_5.radio3, radios_demo_5.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_6.radio1, radios_demo_6.radio2, radios_demo_6.radio3, radios_demo_6.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_7.radio1, radios_demo_7.radio2, radios_demo_7.radio3, radios_demo_7.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_8.radio1, radios_demo_8.radio2, radios_demo_8.radio3, radios_demo_8.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_9.radio1, radios_demo_9.radio2, radios_demo_9.radio3, radios_demo_9.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_10.radio1, radios_demo_10.radio2, radios_demo_10.radio3, radios_demo_10.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_11.radio1, radios_demo_11.radio2, radios_demo_11.radio3, radios_demo_11.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_12.radio1, radios_demo_12.radio2, radios_demo_12.radio3, radios_demo_12.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_13.radio1, radios_demo_13.radio2, radios_demo_13.radio3, radios_demo_13.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_14.radio1, radios_demo_14.radio2, radios_demo_14.radio3, radios_demo_14.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_15.radio1, radios_demo_15.radio2, radios_demo_15.radio3, radios_demo_15.radio4)).selected(cx, actions);
-            tui.radio_button_set(ids!(radios_demo_16.radio1, radios_demo_16.radio2, radios_demo_16.radio3, radios_demo_16.radio4)).selected(cx, actions);
+
+            ui.radio_button_set(ids!(radios_demo_1.radio1, radios_demo_1.radio2, radios_demo_1.radio3, radios_demo_1.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_2.radio1, radios_demo_2.radio2, radios_demo_2.radio3, radios_demo_2.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_3.radio1, radios_demo_3.radio2, radios_demo_3.radio3, radios_demo_3.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_4.radio1, radios_demo_4.radio2, radios_demo_4.radio3, radios_demo_4.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_5.radio1, radios_demo_5.radio2, radios_demo_5.radio3, radios_demo_5.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_6.radio1, radios_demo_6.radio2, radios_demo_6.radio3, radios_demo_6.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_7.radio1, radios_demo_7.radio2, radios_demo_7.radio3, radios_demo_7.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_8.radio1, radios_demo_8.radio2, radios_demo_8.radio3, radios_demo_8.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_9.radio1, radios_demo_9.radio2, radios_demo_9.radio3, radios_demo_9.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_10.radio1, radios_demo_10.radio2, radios_demo_10.radio3, radios_demo_10.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_11.radio1, radios_demo_11.radio2, radios_demo_11.radio3, radios_demo_11.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_12.radio1, radios_demo_12.radio2, radios_demo_12.radio3, radios_demo_12.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_13.radio1, radios_demo_13.radio2, radios_demo_13.radio3, radios_demo_13.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_14.radio1, radios_demo_14.radio2, radios_demo_14.radio3, radios_demo_14.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_15.radio1, radios_demo_15.radio2, radios_demo_15.radio3, radios_demo_15.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_16.radio1, radios_demo_16.radio2, radios_demo_16.radio3, radios_demo_16.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_17.radio1, radios_demo_17.radio2, radios_demo_17.radio3, radios_demo_17.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_18.radio1, radios_demo_18.radio2, radios_demo_18.radio3, radios_demo_18.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_19.radio1, radios_demo_19.radio2, radios_demo_19.radio3, radios_demo_19.radio4)).selected(cx, actions);
 
             if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
                 log!("TEXTBOX CHANGED {}", self.counter);
@@ -358,22 +360,6 @@
                 let lbl = self.ui.label(id!(simplecheckbox_output));
                 lbl.set_text(cx,&format!("{} {}" , self.counter, check));
             }
-
-            if self.ui.fold_button(id!(folderbutton)).opening(actions) {
-                log!("FOLDER BUTTON CLICKED {} {}", self.counter, 12);
-    //            self.ui.fold_header(id!(thefoldheader)).opened = true;
-
-                self.counter += 1;
-            }
-
-            if self.ui.fold_button(id!(folderbutton)).closing(actions) {
-                log!("FOLDER BUTTON CLICKED {} {}", self.counter, 12);
-
-
-
-                self.counter += 1;
-            }
-
 
         let mut db = DataBindingStore::new();
         db.data_bind(cx, actions, &self.ui, Self::data_bind);

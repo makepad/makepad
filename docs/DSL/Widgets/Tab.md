@@ -116,11 +116,11 @@ MyTab = <Tab> {
 		fn get_color(self) -> vec4 {
 			return mix(
 				mix(
-					THEME_COLOR_TEXT_INACTIVE,
-					THEME_COLOR_TEXT_ACTIVE,
+					THEME_COLOR_LABEL_INNER_INACTIVE,
+					THEME_COLOR_LABEL_INNER_ACTIVE,
 					self.selected
 				),
-				THEME_COLOR_TEXT_HOVER,
+				THEME_COLOR_LABEL_INNER_HOVER,
 				self.hover
 			)
 		}

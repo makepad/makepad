@@ -17,7 +17,7 @@ live_design!{
         
         align: {x: 0.0, y: 0.5}
         padding: <THEME_MSPACE_3> { }
-        margin: {right: 0., top: 5.}
+        margin: {right: (THEME_SPACE_1), top: (THEME_SPACE_FACTOR)}
         
         close_button: <TabCloseButton> {}
 
@@ -28,9 +28,9 @@ live_design!{
             instance hover: 0.0
             instance active: 0.0
 
-            uniform color: (THEME_COLOR_TEXT_INACTIVE)
-            uniform color_hover: (THEME_COLOR_TEXT_HOVER)
-            uniform color_active: (THEME_COLOR_TEXT_ACTIVE)
+            uniform color: (THEME_COLOR_LABEL_INNER_INACTIVE)
+            uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+            uniform color_active: (THEME_COLOR_LABEL_INNER_ACTIVE)
 
             fn get_color(self) -> vec4 {
                 return mix(
@@ -59,7 +59,7 @@ live_design!{
 
             uniform border_color_1: (THEME_COLOR_U_HIDDEN)
             uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_active: (THEME_COLOR_BEVEL_LIGHT)
+            uniform border_color_1_active: (THEME_COLOR_BEVEL_OUTSET_1)
 
             uniform border_color_2: (THEME_COLOR_D_HIDDEN)
             uniform border_color_2_hover: (THEME_COLOR_D_HIDDEN)
@@ -71,30 +71,65 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                sdf.box_y(
-                    0.,
-                    1.,
-                    self.rect_size.x,
-                    self.rect_size.y - self.overlap_fix,
-                    self.border_radius,
-                    0.5
+                let border_sz_uv = vec2(
+                    self.border_size / self.rect_size.x,
+                    self.border_size / self.rect_size.y
                 )
 
-                sdf.fill_keep(mix(
-                        mix(self.color, self.color_hover, self.hover),
+                let scale_factor_border = vec2(
+                    self.rect_size.x / self.rect_size.x,
+                    self.rect_size.y / self.rect_size.y
+                );
+
+                let gradient_border = vec2(
+                    self.pos.x * scale_factor_border.x + dither,
+                    self.pos.y * scale_factor_border.y + dither
+                )
+
+                let sz_inner_px = vec2(
+                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.y - self.border_size * 2.
+                );
+
+                let scale_factor_fill = vec2(
+                    self.rect_size.x / sz_inner_px.x,
+                    self.rect_size.y / sz_inner_px.y
+                );
+
+                let gradient_fill = vec2(
+                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
+                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+                )
+
+                sdf.box_y(
+                    self.border_size,
+                    self.border_size,
+                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.y,
+                    self.border_radius,
+                    self.border_size * 0.5
+                )
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            self.color,
+                            self.color_hover,
+                            self.hover
+                        ),
                         self.color_active,
                         self.active
                     )
                 )
 
-                sdf.stroke_keep(
+                sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
                             self.hover
                         ),
-                        mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                        mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
                         self.active
                     ), self.border_size
                 )
@@ -187,7 +222,7 @@ live_design!{
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_1_active: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1_active: (THEME_COLOR_BEVEL_OUTSET_1)
 
             border_color_2: (THEME_COLOR_D_HIDDEN)
             border_color_2_hover: (THEME_COLOR_D_HIDDEN)
@@ -197,34 +232,65 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                sdf.box_y(
-                    0.,
-                    0.,
-                    self.rect_size.x,
-                    self.rect_size.y - 1.,
-                    self.border_radius,
-                    0.5
+                let border_sz_uv = vec2(
+                    self.border_size / self.rect_size.x,
+                    self.border_size / self.rect_size.y
                 )
 
-                sdf.fill_keep(mix(
+                let scale_factor_border = vec2(
+                    self.rect_size.x / self.rect_size.x,
+                    self.rect_size.y / self.rect_size.y
+                );
+
+                let gradient_border = vec2(
+                    self.pos.x * scale_factor_border.x + dither,
+                    self.pos.y * scale_factor_border.y + dither
+                )
+
+                let sz_inner_px = vec2(
+                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.y - self.border_size * 2.
+                );
+
+                let scale_factor_fill = vec2(
+                    self.rect_size.x / sz_inner_px.x,
+                    self.rect_size.y / sz_inner_px.y
+                );
+
+                let gradient_fill = vec2(
+                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
+                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+                )
+
+                sdf.box_y(
+                    self.border_size,
+                    self.border_size,
+                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.y,
+                    self.border_radius,
+                    self.border_size * 0.5
+                )
+
+                sdf.fill_keep(
+                    mix(
                         mix(
-                            mix(self.color_1, self.color_2, self.pos.x + dither),
-                            mix(self.color_1_hover, self.color_2_hover, self.pos.x + dither),
+                            mix(self.color_1, self.color_2, gradient_fill.x),
+                            mix(self.color_1_hover, self.color_2_hover, grydient_fill.x),
                             self.hover
                         ),
-                        mix(self.color_1_active, self.color_2_active, self.pos.x + dither),
+                        mix(self.color_1_active, self.color_2_active, gradient_fill.x),
                         self.active
                     )
                 )
 
-                sdf.stroke_keep(
+                sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
                             self.hover
                         ),
-                        mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                        mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
                         self.active
                     ), self.border_size
                 )
@@ -241,16 +307,16 @@ live_design!{
             color_dither: 1.
 
             color_1: (THEME_COLOR_D_HIDDEN)
-            color_1_hover: (THEME_COLOR_D_2)
+            color_1_hover: (THEME_COLOR_U_HIDDEN)
             color_1_active: (THEME_COLOR_BG_APP)
 
             color_2: (THEME_COLOR_D_HIDDEN)
-            color_2_hover: (THEME_COLOR_D_2)
+            color_2_hover: (THEME_COLOR_U_HIDDEN)
             color_2_active: (THEME_COLOR_BG_APP)
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_1_active: (THEME_COLOR_BEVEL_LIGHT)
+            border_color_1_active: (THEME_COLOR_BEVEL_OUTSET_1)
 
             border_color_2: (THEME_COLOR_D_HIDDEN)
             border_color_2_hover: (THEME_COLOR_D_HIDDEN)
@@ -260,35 +326,65 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
+                let border_sz_uv = vec2(
+                    self.border_size / self.rect_size.x,
+                    self.border_size / self.rect_size.y
+                )
+
+                let scale_factor_border = vec2(
+                    self.rect_size.x / self.rect_size.x,
+                    self.rect_size.y / self.rect_size.y
+                );
+
+                let gradient_border = vec2(
+                    self.pos.x * scale_factor_border.x + dither,
+                    self.pos.y * scale_factor_border.y + dither
+                )
+
+                let sz_inner_px = vec2(
+                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.y - self.border_size * 2.
+                );
+
+                let scale_factor_fill = vec2(
+                    self.rect_size.x / sz_inner_px.x,
+                    self.rect_size.y / sz_inner_px.y
+                );
+
+                let gradient_fill = vec2(
+                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
+                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+                )
+
                 sdf.box_y(
-                    0.,
-                    0.,
-                    self.rect_size.x,
+                    self.border_size,
+                    self.border_size,
+                    self.rect_size.x - self.border_size * 2.,
                     self.rect_size.y,
                     self.border_radius,
-                    0.5
+                    self.border_size * 0.5
                 )
 
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(self.color_1, self.color_2, self.pos.y + dither),
-                            mix(self.color_1_hover, self.color_2_hover, self.pos.y + dither),
+                            mix(self.color_1, self.color_2, gradient_fill.y),
+                            mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
                             self.hover
                         ),
-                        mix(self.color_1_active, self.color_2_active, self.pos.y + dither),
+                        mix(self.color_1_active, self.color_2_active, gradient_fill.y),
                         self.active
                     )
                 )
 
-                sdf.stroke_keep(
+                sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                            mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
+                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
                             self.hover
                         ),
-                        mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
+                        mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
                         self.active
                     ), self.border_size
                 )

@@ -34,7 +34,7 @@ example
 			fn pixel(self) -> vec4 {
 				let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 				sdf.circle(5., 5., 4.)
-				sdf.fill(THEME_COLOR_TEXT_META)
+				sdf.fill(THEME_COLOR_LABEL_INNER)
 				sdf.move_to(3., 5.)
 				sdf.line_to(3., 5.)
 				sdf.move_to(5., 5.)
@@ -51,7 +51,7 @@ example
 			fn pixel(self) -> vec4 {
 				let sdf = Sdf2d::viewport(self.pos * self.rect_size)
 				sdf.circle(5., 5., 4.);
-				sdf.fill(THEME_COLOR_TEXT_META);
+				sdf.fill(THEME_COLOR_LABEL_INNER);
 				let sz = 1.;
 				sdf.move_to(5., 5.);
 				sdf.line_to(5., 5.);
