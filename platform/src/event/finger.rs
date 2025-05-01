@@ -1165,6 +1165,7 @@ impl Event {
                     };
                     
                     if hover_last == area {
+                        
                         if (handled_area.is_empty() || handled_area == area) && hit_test(e.abs, &rect, &options.margin) {
                             e.handled.set(area);
                             cx.fingers.new_hover_area(digit_id, area);
