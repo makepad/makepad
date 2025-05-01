@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoRotatedImage = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<RotatedImage>"}
+            <Markdown> { body: dep("crate://self/resources/rotatedimage.md") } 
         }
         demos = {
             <RotatedImage> {

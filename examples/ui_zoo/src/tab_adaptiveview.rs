@@ -10,8 +10,7 @@ live_design!{
 
     pub DemoAdaptiveView = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<AdaptiveView>"}
-            <P> { text: "Resizing the window will make the layout block switch between a desktop and a mobile version."}
+            <Markdown> { body: dep("crate://self/resources/adaptiveview.md") } 
         }
         demos = {
             <AdaptiveView> {

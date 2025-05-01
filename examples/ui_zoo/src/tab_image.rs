@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoImage = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<Image>"}
+            <Markdown> { body: dep("crate://self/resources/image.md") } 
         }
         demos = {
             <H4> { text: "Default" }

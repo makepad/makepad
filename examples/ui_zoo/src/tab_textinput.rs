@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoTextInput = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<TextInput>"}
+            <Markdown> { body: dep("crate://self/resources/textinput.md") } 
         }
         demos = {
             <H4> { text: "TextInput" }

@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoSlidesView = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<SlidesView>"}
+            <Markdown> { body: dep("crate://self/resources/slidesview.md") } 
         }
         demos = {
             <SlidesView> {

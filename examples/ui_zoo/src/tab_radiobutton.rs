@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoRadioButton = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<RadioButton>"}
+            <Markdown> { body: dep("crate://self/resources/radiobutton.md") } 
         }
         demos = {
             <H4> { text: "Default"}
