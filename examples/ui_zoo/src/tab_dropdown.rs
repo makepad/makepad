@@ -21,7 +21,7 @@ live_design!{
 
             <H4> { text: "Standard, Position: BelowInput" }
             dropdown_below = <DropDown> {
-            popup_menu_position: BelowInput ,
+            popup_menu_position: BelowInput,
             labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
             }
@@ -33,9 +33,23 @@ live_design!{
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
             }
 
+            <H4> { text: "DropDownFlat, Position: BelowInput" }
+            dropdown_flat_below = <DropDownFlat> {
+                popup_menu_position: BelowInput,
+                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+            }
+
             <Hr> {}
             <H4> { text: "DropDownFlatter" }
             dropdown_flatter = <DropDownFlatter> {
+                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+            }
+
+            <H4> { text: "DropDownFlatter, Position: BelowInput" }
+            dropdown_flatter_below = <DropDownFlatter> {
+                popup_menu_position: BelowInput,
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
             }
@@ -47,9 +61,23 @@ live_design!{
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
             }
 
+            <H4> { text: "DropDownGradientX, Position: BelowInput" }
+            dropdown_gradient_x_below = <DropDownGradientX> {
+                popup_menu_position: BelowInput,
+                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+            }
+
             <Hr> {}
             <H4> { text: "DropDownGradientY" }
             dropdown_gradient_y = <DropDownGradientY> {
+                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+            }
+
+            <H4> { text: "DropDownGradientY, Position: BelowInput" }
+            dropdown_gradient_y_below = <DropDownGradientY> {
+                popup_menu_position: BelowInput,
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
             }
@@ -98,7 +126,6 @@ live_design!{
                         color_dither: 1.0
                         border_radius: 4.0
                         border_size: (THEME_BEVELING)
-                        inset: vec4(0.0, 0.0, 0.0, 0.0),
 
                         color_1: #4
                         color_2: #2

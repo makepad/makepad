@@ -15,12 +15,22 @@ live_design!{
         demos = {
             <H4> { text: "<Rotary>"}
             <UIZooRowH> {
+                align: { x: 0. , y: 0.}
                 <Rotary> {
                     text: "Default",
                 }
                 <Rotary> {
+                    text: "Default",
+                    draw_bg: {
+                        // border_size: 3.
+                        gap: 0.,
+                    }
+                }
+                <Rotary> {
+                    width: 300, height: 200
                     text: "Gap",
                     draw_bg: {
+                        // border_size: 3.
                         gap: 180.,
                     }
                 }
@@ -31,8 +41,11 @@ live_design!{
                     }
                 }
                 <Rotary> {
+                    width: Fill,
+                    height: 300
                     text: "val_padding",
                     draw_bg: {
+                        // border_size: 5.
                         val_size: 30.
                         val_padding: 20.,
                     }
@@ -153,53 +166,6 @@ live_design!{
             <H4> { text: "RotaryFlatter" }
             <UIZooRowH> {
                 <RotaryFlatter> { text: "RotaryFlatter" }
-            }
-
-
-            <Hr> {}
-            <H4> { text: "Rotary Solid"}
-            <UIZooRowH> {
-                <RotarySolid> {
-                    text: "Colored",
-                    draw_bg: {
-                        gap: 90.,
-                    }
-                }
-                <RotarySolid> {
-                    text: "Colored",
-                    draw_bg: {
-                        gap: 180.,
-                    }
-                }
-                <RotarySolid> {
-                    text: "Colored",
-                    draw_bg: {
-                        gap: 60.,
-                    }
-                }
-            }
-
-            <Hr> {}
-            <H4> { text: "Rotary Solid"}
-            <UIZooRowH> {
-                <RotarySolidFlat> {
-                    text: "Colored",
-                    draw_bg: {
-                        gap: 90.,
-                    }
-                }
-                <RotarySolidFlat> {
-                    text: "Colored",
-                    draw_bg: {
-                        gap: 180.,
-                    }
-                }
-                <RotarySolidFlat> {
-                    text: "Colored",
-                    draw_bg: {
-                        gap: 60.,
-                    }
-                }
             }
 
         }

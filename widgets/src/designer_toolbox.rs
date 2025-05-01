@@ -23,12 +23,12 @@ live_design!{
         <View> {
             width: (THEME_BEVELING * 2.0), height: Fill
             show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_SHADOW) }
+            draw_bg: { color: (THEME_COLOR_BEVEL_OUTSET_2) }
         }
         <View> {
             width: (THEME_BEVELING), height: Fill,
             show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_LIGHT) }
+            draw_bg: { color: (THEME_COLOR_BEVEL_OUTSET_1) }
         }
     }
     
@@ -193,7 +193,7 @@ live_design!{
             
             draw_bg: {
                 border_size: 1.0
-                border_color: (THEME_COLOR_BEVEL_LIGHT)
+                border_color: (THEME_COLOR_BEVEL_OUTSET_1)
                 shadow_color: (THEME_COLOR_D_4)
                 shadow_radius: 10.0,
                 shadow_offset: vec2(0.0, 5.0)
@@ -298,7 +298,7 @@ live_design!{
             
             draw_bg: {
                 border_size: 1.0
-                border_color: (THEME_COLOR_BEVEL_LIGHT)
+                border_color: (THEME_COLOR_BEVEL_OUTSET_1)
                 shadow_color: (THEME_COLOR_D_4)
                 shadow_radius: 10.0,
                 shadow_offset: vec2(0.0, 5.0)

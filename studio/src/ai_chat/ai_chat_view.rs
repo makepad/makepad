@@ -24,6 +24,62 @@ live_design!{
         padding: <THEME_MSPACE_2> { top: (THEME_SPACE_1+4), bottom: (THEME_SPACE_2) } 
         draw_bg: { color: (THEME_COLOR_U_1) }
 
+        <View> {
+            height: Fit, width: Fill,
+            flow: Right,
+            align: { x: 0., y: 0. },
+            spacing: (THEME_SPACE_3),
+            padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1), top: (THEME_SPACE_1) }
+            margin: { bottom: -5.}
+
+            run_button = <ButtonFlatter> {
+                width: Fit,
+                height: Fit,
+                padding: <THEME_MSPACE_2> {}
+                margin: 0.
+
+                text: "Run",
+                draw_icon: {
+                    color: (THEME_COLOR_U_4),
+                    svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+                }
+                icon_walk: { width: 9. }
+            }
+
+            <Vr> { height: 17.5}
+
+            <View> {
+                flow: Right,
+                width: Fit,
+                height: Fit,
+                spacing: (THEME_SPACE_1)
+
+                <Pbold> { width: Fit, text: "Model", margin: 0., padding: <THEME_MSPACE_V_1> {} }
+                model_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
+            }
+
+            <View> {
+                flow: Right,
+                width: Fit,
+                height: Fit,
+                spacing: (THEME_SPACE_1)
+
+                <Pbold> { width: Fit, text: "Context", margin: 0., padding: <THEME_MSPACE_V_1> {} }
+                context_dropdown = <DropDownFlat>{ width: Fit, popup_menu_position: BelowInput }
+            }
+
+            <View> {
+                flow: Right,
+                width: Fit,
+                spacing: (THEME_SPACE_1)
+
+                <Pbold> { width: Fit, text: "Project", margin: 0., padding: <THEME_MSPACE_V_1> {} }
+                project_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
+            }
+
+            <View> { width: Fill }
+
+        }
 
         <View>{
             height:Fit, width: Fill,
@@ -246,7 +302,7 @@ live_design!{
                     icon_walk: { width: 5. }
                 }
 
-                history_delete = <ButtonFlat> {
+                history_delete = <ButtonFlatter> {
                     width: Fit,
                     text: ""
                     draw_icon: {
@@ -257,7 +313,7 @@ live_design!{
 /*
                 <Vr> {}
 
-                <ButtonFlat> {
+                <ButtonFlatter> {
                     width: Fit,
                     text: ""
                     draw_icon: {
