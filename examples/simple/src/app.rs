@@ -50,8 +50,8 @@ live_design!{
                 
 
                     <SliderRound> {
-                        text: "Label",
-                        label_walk: { width: Fit }
+                        text: "HI Label123 ",
+                        label_walk: { width: Fill }
                         draw_bg: {
                             val_color_1: #FFCC00
                             val_color_1_hover: #FF9944

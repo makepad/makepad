@@ -245,13 +245,6 @@ impl<'a> Iterator for DockVisibleItemIterator<'a> {
     }
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
-pub struct DockItemId {
-    pub kind: LiveId,
-    pub id: LiveId
-}
-
-
 struct TabBarWrap {
     tab_bar: TabBar,
     contents_draw_list: DrawList2d,
