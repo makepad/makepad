@@ -29,7 +29,7 @@ Add the following code to the call to the `live_design` macro in `app.rs`:
     RIGHT_ARROW = dep("crate://self/resources/right_arrow.svg");
 ```
 
-This code defines variables named `LEFT_ARROW` and `RIGHT_ARROW` to refer to the arrow icons that we added to the `resource` directory earlier, just as we did for the placeholder image in step 2.
+This code defines variables named `LEFT_ARROW` and `RIGHT_ARROW` to refer to the arrow icons that we added to the `resource` directory earlier.
 ### Defining a `SlideshowNavigationButton`
 Add the following code to the call to the `live_design` macro in `app.rs`:
 ```
@@ -54,7 +54,7 @@ This `SlideshowNavigationButton` has the following properties:
 - `draw_bg { ... }` controls how the button's background is drawn.
 	- `color: #fff0` makes the button fully invisible by default.
 	- `color_down: #fff2` makes the button slightly more visible when it is pressed.
-- `icon_walk { ... }` controls how to button's icon is drawn.
+- `icon_walk { ... }` controls how to button's icon is laid out.
 	- `width: 9` makes the icon 9 pixels wide.
 - `text: ""` disables the label for this button.
 #### A Primer on Inheritance
@@ -187,7 +187,7 @@ pub struct App {
 ## Extending the State
 Now that we've updated the DSL code with the definitions we need, it's time to extend the state for our app with some additional fields and methods we need to make the slideshow dynamic.
 
-Specifically, we’ll add a field to track which image is currently displayed in the slideshow, and a few helper methods for updating that state at runtime.
+Specifically, we’ll add a field to track which image is currently displayed in the slideshow, and a few helper methods for updating that state at runtime. We'll also need to update some of our existing helper methods.
 ### Updating the `State` struct
 Replace the definition of the `State` struct and its corresponding implementation of the `Default` trait with the one here below:
 ```

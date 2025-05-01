@@ -1,6 +1,8 @@
 In the previous steps, we created both an image grid and a slideshow for our app. In this step, we'll make it possible to switch between the image grid and the slideshow.
 
 Our app will start out displaying the image grid. Above the image grid we'll add a menu bar containing a single button. Clicking this button will switch to the slideshow. Pressing the escape key while the slideshow is displayed will switch back to the image grid.
+
+At the end of this step, you'll be able to switch between the image grid and the slideshow.
 ## What you will learn
 - How to use a `PageFlip` to switch between multiple views.
 ## Updating the DSL Code
@@ -139,8 +141,9 @@ cargo run --release -- path/to/your/images
 ```
 
 If everything is working correctly, a menu bar with a single slideshow button should now appear above the image grid:
-![[Page Flip 1.png]]
+![[Dynamic Image Grid.png]]
 Clicking the button should cause the slideshow to appear:
-![[Page Flip 2.png]]Pressing the escape key should cause the image grid to appear again:
-![[Page Flip 1.png]]
-We're now able to switch between the image grid and the slideshow.
+![[Slideshow 1.png]]
+Pressing the escape key should cause the image grid to appear again:
+![[Dynamic Image Grid.png]]
+We now made it possible to switch between the image grid and the slideshow. In the next step, we'll add a way to filter images based on a query string.
