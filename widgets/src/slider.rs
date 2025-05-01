@@ -1132,6 +1132,238 @@ live_design!{
 
             uniform color_dither: 1.0
             
+            uniform color: (THEME_COLOR_INSET)
+            uniform color_hover: (THEME_COLOR_INSET_HOVER)
+            uniform color_focus: (THEME_COLOR_INSET_FOCUS)
+            uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
+            uniform color_drag: (THEME_COLOR_INSET_DRAG)
+
+            uniform border_color_1: (THEME_COLOR_BEVEL_INSET_2)
+            uniform border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            uniform border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            uniform border_color_1_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+
+            uniform border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            uniform border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+
+            uniform val_color_1: (THEME_COLOR_VAL_1)
+            uniform val_color_1_hover: (THEME_COLOR_VAL_1_HOVER)
+            uniform val_color_1_focus: (THEME_COLOR_VAL_1_FOCUS)
+            uniform val_color_1_disabled: (THEME_COLOR_VAL_1_DISABLED)
+            uniform val_color_1_drag: (THEME_COLOR_VAL_1_DRAG)
+
+            uniform val_color_2: (THEME_COLOR_VAL_2)
+            uniform val_color_2_hover: (THEME_COLOR_VAL_2_HOVER)
+            uniform val_color_2_focus: (THEME_COLOR_VAL_2_FOCUS)
+            uniform val_color_2_disabled: (THEME_COLOR_VAL_2_DISABLED)
+            uniform val_color_2_drag: (THEME_COLOR_VAL_2_DRAG)
+
+            uniform handle_color: (THEME_COLOR_HANDLE);
+            uniform handle_color_hover: (THEME_COLOR_HANDLE_HOVER);
+            uniform handle_color_focus: (THEME_COLOR_HANDLE_FOCUS);
+            uniform handle_color_disabled: (THEME_COLOR_HANDLE_DISABLED);
+            uniform handle_color_drag: (THEME_COLOR_HANDLE_DRAG);
+
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                let border_sz_uv = vec2(
+                    self.border_size / self.rect_size.x,
+                    self.border_size / self.rect_size.y
+                )
+
+                let gradient_border = vec2(
+                    self.pos.x + dither,
+                    self.pos.y + dither
+                )
+
+                let sz_inner_px = vec2(
+                    self.rect_size.x - self.border_size * 2.,
+                    self.rect_size.y - self.border_size * 2.
+                );
+
+                let scale_factor_fill = vec2(
+                    self.rect_size.x / sz_inner_px.x,
+                    self.rect_size.y / sz_inner_px.y
+                );
+
+                let label_sz_uv = self.label_size / self.rect_size.x;
+
+                let gradient_fill = vec2(
+                    (pow(self.pos.x, self.val_heat) - label_sz_uv) * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
+                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+                )
+
+
+                let handle_size = (SLIDER_ALT1_HANDLE_SIZE);
+                let padding = (SLIDER_ALT1_VAL_PADDING);
+
+                let track_length_bg = self.rect_size.x - self.label_size;
+                let padding_full = padding * 2.;
+                let min_size = padding_full + handle_size * 2.;
+                let track_length_val = self.rect_size.x - self.label_size - padding_full - min_size;
+
+                // Background
+                sdf.box(
+                    self.label_size + self.border_size,
+                    self.border_size,
+                    track_length_bg - self.border_size * 2.,
+                    self.rect_size.y - self.border_size * 2.,
+                    self.border_radius
+                );
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(
+                                self.color,
+                                self.color_hover,
+                                self.hover
+                            ),
+                            mix(
+                                self.color_focus,
+                                mix(
+                                    self.color_hover,
+                                    self.color_drag,
+                                    self.drag
+                                ),
+                                self.hover
+                            ),
+                            self.focus
+                        ),
+                        self.color_disabled,
+                        self.disabled
+                    )
+                )
+
+                sdf.stroke(
+                    mix(
+                        mix(
+                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                            mix(
+                                mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                mix(
+                                    mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
+                                    mix(self.border_color_1_drag, self.border_color_2_drag, gradient_border.y),
+                                    self.drag
+                                ),
+                                self.hover
+                            ),
+                            self.focus
+                        ),
+                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        self.disabled
+                    ), self.border_size
+                )
+
+                // Amount bar
+                let handle_shift = self.label_size + padding_full + handle_size;
+                let val_height = self.rect_size.y - padding_full - self.border_size * 2.;
+                let val_offset_x = self.label_size + padding + self.border_size + val_height * 0.5;
+                let val_target_x = track_length_val * self.slide_pos + min_size - self.border_size * 2. - val_height;
+
+                sdf.circle(
+                    val_offset_x,
+                    self.rect_size.y * 0.5,
+                    val_height * 0.5
+                );
+
+                sdf.box(
+                    val_offset_x,
+                    padding + self.border_size,
+                    val_target_x,
+                    self.rect_size.y - padding_full - self.border_size * 2.,
+                    1.
+                );
+
+                sdf.circle(
+                    track_length_val * self.slide_pos + handle_shift,
+                    self.rect_size.y * 0.5,
+                    val_height * 0.5
+                );
+
+                sdf.fill(
+                    mix(
+                        mix(
+                            mix(
+                                mix(self.val_color_1, self.val_color_2, gradient_fill.x),
+                                mix(self.val_color_1_hover, self.val_color_2_hover, gradient_fill.x),
+                                self.hover
+                            ),
+                            mix(
+                                mix(self.val_color_1_focus, self.val_color_2_focus, gradient_fill.x),
+                                mix(
+                                    mix(self.val_color_1_hover, self.val_color_2_hover, gradient_fill.x),
+                                    mix(self.val_color_1_drag, self.val_color_2_drag, gradient_fill.x),
+                                    self.drag
+                                ),
+                                self.hover
+                            ),
+                            self.focus
+                        ),
+                        mix(self.val_color_1_disabled, self.val_color_2_disabled, gradient_fill.x),
+                        self.disabled
+                    )
+                )
+
+                // Handle
+                sdf.circle(
+                    track_length_val * self.slide_pos + handle_shift,
+                    self.rect_size.y * 0.5,
+                    mix(0., handle_size, self.hover)
+                );
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(
+                                self.handle_color,
+                                self.handle_color_hover,
+                                self.hover
+                            ),
+                            mix(
+                                self.handle_color_focus,
+                                mix(
+                                    self.handle_color_hover,
+                                    self.handle_color_drag,
+                                    self.drag
+                                ),
+                                self.hover
+                            ),
+                            self.focus
+                        ),
+                        self.handle_color_disabled,
+                        self.disabled
+                    )
+                )
+                
+                return sdf.result
+            }
+        }
+
+    }
+
+    pub SliderRoundGradientY = <SliderRound> {
+        draw_bg: {
+            instance hover: float
+            instance focus: float
+            instance drag: float
+            instance instance: float
+
+            label_size: 75.
+
+            uniform val_heat: 10.
+
+            uniform border_size: (THEME_BEVELING)
+            uniform border_radius: (THEME_CORNER_RADIUS * 2.)
+
+            uniform color_dither: 1.0
+            
             uniform color_1: (THEME_COLOR_INSET_1)
             uniform color_1_hover: (THEME_COLOR_INSET_1_HOVER)
             uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
@@ -1240,10 +1472,7 @@ live_design!{
                                 ),
                                 self.hover
                             ),
-                            self.focus
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
-                        self.disabled
+                            self.focus), mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y), self.disabled
                     )
                 )
 
@@ -1356,17 +1585,11 @@ live_design!{
 
     pub SliderRoundFlat = <SliderRound> {
         draw_bg: {
-            color_1: (THEME_COLOR_INSET)
-            color_1_hover: (THEME_COLOR_INSET_HOVER)
-            color_1_focus: (THEME_COLOR_INSET_FOCUS)
-            color_1_disabled: (THEME_COLOR_INSET_DISABLED)
-            color_1_drag: (THEME_COLOR_INSET_DRAG)
-
-            color_2: (THEME_COLOR_INSET)
-            color_2_hover: (THEME_COLOR_INSET_HOVER)
-            color_2_focus: (THEME_COLOR_INSET_FOCUS)
-            color_2_disabled: (THEME_COLOR_INSET_DISABLED)
-            color_2_drag: (THEME_COLOR_INSET_DRAG)
+            color: (THEME_COLOR_INSET)
+            color_hover: (THEME_COLOR_INSET_HOVER)
+            color_focus: (THEME_COLOR_INSET_FOCUS)
+            color_disabled: (THEME_COLOR_INSET_DISABLED)
+            color_drag: (THEME_COLOR_INSET_DRAG)
 
             uniform border_color_1: (THEME_COLOR_BEVEL)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
