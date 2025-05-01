@@ -117,6 +117,12 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "SliderRoundGradientY"}
+            <SliderRoundGradientY> { text: "min/max", min: 0., max: 100. }
+            <SliderRoundGradientY> { text: "precision", precision: 20 }
+            <SliderRoundGradientY> { text: "stepped", step: 0.1 }
+
+            <Hr> {}
             <H4> { text: "SliderRoundFlat"}
             <SliderRoundFlat> { text: "min/max", min: 0., max: 100. }
             <SliderRoundFlat> { text: "precision", precision: 20 }
