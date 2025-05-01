@@ -48,6 +48,13 @@ pub struct Pose {
 }
 
 impl Pose {
+    pub fn new(orientation:Quat, position:Vec3)->Self{
+        Self{
+            orientation,
+            position
+        }
+    }
+    
     pub fn transform_vec3(&self, v:&Vec3)->Vec3{
         let r0 = self.orientation.rotate_vec3(v);
         r0 + self.position
@@ -503,12 +510,16 @@ pub struct CameraFov {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug, PartialEq, SerBin, DeBin)]
+#[derive(Clone, Copy, Debug, PartialEq, SerBin, DeBin)]
 pub struct Quat {
     pub x: f32,
     pub y: f32,
     pub z: f32,
     pub w: f32
+}
+
+impl Default for Quat{
+    fn default()->Self{Self{x:0.0,y:0.0,z:0.0,w:1.0}}
 }
 
 impl Quat {
@@ -588,6 +599,54 @@ impl Quat {
             y: self.y / len,
             z: self.z / len,
             w: self.w / len,
+        }
+    }
+    
+    pub fn look_rotation(forward: Vec3, up:Vec3)->Self{
+        let forward = forward.normalize();
+        let up = up.normalize();
+        let v2 = forward;
+        let v0 = Vec3::cross(up, forward).normalize();
+        let v1 = Vec3::cross(v2, v0);
+        
+        let num = (v0.x + v1.y) + v2.z;
+        if num > 0.0{
+            let num = (num+1.0).sqrt();
+            let numh = 0.5 / num;
+            return Quat{
+                x: (v1.z - v2.y) * numh,
+                y: (v2.x - v0.z) * numh,
+                z: (v0.y - v1.x) * numh,
+                w: num * 0.5,
+            }
+        }
+        if (v0.x >= v1.y) && (v0.x >= v2.z){
+            let num = (((1.0+v0.x) - v1.y) - v2.z).sqrt();
+            let numh = 0.5 / num;
+            return Quat{
+                x: 0.5 * num,
+                y: (v0.y + v1.x) * numh,
+                z: (v0.z + v2.x) * numh,
+                w: (v1.z - v2.y) * numh
+            }
+        }
+        if v1.y > v2.z{
+            let num = ((((1.0+v1.y) - v0.x) - v2.z)).sqrt();
+            let numh = 0.5 / num;
+            return Quat{
+                x: (v1.x + v0.y) * numh,
+                y: 0.5 * num,
+                z: (v2.y + v1.z) * numh,
+                w: (v2.x - v0.z) * numh
+            }
+        }
+        let num = (((1.0 + v2.z) - v0.x) - v1.y).sqrt();
+        let numh = 0.5 / num;
+        Quat{
+            x: (v2.x + v0.z) * numh,
+            y: (v2.y + v1.z) * numh,
+            z: 0.5 * num,
+            w: (v0.y - v1.x) * numh
         }
     }
     

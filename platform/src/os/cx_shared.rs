@@ -32,6 +32,7 @@ impl Cx {
         }
     }
     
+    #[allow(unused)]
     pub (crate) fn any_passes_dirty(&self) -> bool {
         for pass_id in self.passes.id_iter() {
             if self.passes[pass_id].paint_dirty {
@@ -116,7 +117,7 @@ impl Cx {
     
     pub (crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
-        if false{//Cx::has_studio_web_socket(){
+        if Cx::has_studio_web_socket(){
             let start = self.seconds_since_app_start();
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);

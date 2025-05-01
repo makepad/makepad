@@ -63,6 +63,7 @@ live_design!{
         }
         body = <KeyboardView> {
             width: Fill, height: Fill,
+            padding:5
             keyboard_min_shift: 30,
         }
         
@@ -276,6 +277,10 @@ impl Window {
     pub fn reposition(&self, cx: &mut Cx, size: DVec2) {
         self.window.reposition(cx, size);
     }
+    pub fn set_fullscreen(&mut self, cx: &mut Cx) {
+        self.window.fullscreen(cx);
+    }
+    
 }
 
 impl WindowRef{
@@ -285,6 +290,23 @@ impl WindowRef{
         }
         else{
             dvec2(0.0,0.0)
+        }
+    }
+
+    pub fn get_position(&self, cx:&Cx)->DVec2{
+        if let Some(inner) = self.borrow(){
+            inner.window.get_position(cx)
+        }
+        else{
+            dvec2(0.0,0.0)
+        }
+    }
+    pub fn is_fullscreen(&self, cx:&Cx)->bool{
+        if let Some(inner) = self.borrow(){
+            inner.window.is_fullscreen(cx)
+        }
+        else{
+            false
         }
     }
     pub fn resize(&self, cx: &mut Cx, size: DVec2) {
@@ -298,6 +320,7 @@ impl WindowRef{
             inner.reposition(cx, size);
         }
     }
+
 }
 
 impl Widget for Window {
@@ -459,7 +482,7 @@ impl Widget for Window {
         
         self.main_draw_list.begin_always(cx);
         
-        let size = dvec2(15.0,12.0);
+        let size = dvec2(1500.0,1200.0);
         cx.begin_sized_turtle(size, Layout::flow_down());
                 
         self.overlay.begin(cx);
