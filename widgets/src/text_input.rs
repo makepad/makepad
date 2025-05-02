@@ -956,28 +956,34 @@ impl TextInput {
         }
     }
 
-    fn cursor_to_position(&self, cursor: Cursor) -> CursorPosition {
-        let laidout_text = self.laidout_text.as_ref().unwrap();
+    fn cursor_to_position(&self, cursor: Cursor) -> Result<CursorPosition, ()> {
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return Err(());
+        };
         let position = laidout_text.cursor_to_position(self.cursor_to_password_cursor(cursor));
-        CursorPosition {
+        Ok(CursorPosition {
             row_index: position.row_index,
             x_in_lpxs: position.x_in_lpxs * self.draw_text.font_scale,
-        }
+        })
     }
 
-    fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Cursor {
-        let laidout_text = self.laidout_text.as_ref().unwrap();
+    fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Result<Cursor, ()> {
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return Err(());
+        };
         let cursor = laidout_text.point_in_lpxs_to_cursor(point_in_lpxs / self.draw_text.font_scale);
-        self.password_cursor_to_cursor(cursor)
+        Ok(self.password_cursor_to_cursor(cursor))
     }
 
-    fn position_to_cursor(&self, position: CursorPosition) -> Cursor {
-        let laidout_text = self.laidout_text.as_ref().unwrap();
+    fn position_to_cursor(&self, position: CursorPosition) -> Result<Cursor, ()> {
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return Err(());
+        };
         let cursor = laidout_text.position_to_cursor(CursorPosition {
             row_index: position.row_index,
             x_in_lpxs: position.x_in_lpxs / self.draw_text.font_scale,
         });
-        self.password_cursor_to_cursor(cursor)
+        Ok(self.password_cursor_to_cursor(cursor))
     }
 
     fn selection_to_password_selection(&self, selection: Selection) -> Selection {
@@ -1096,8 +1102,14 @@ impl TextInput {
         let CursorPosition {
             row_index,
             x_in_lpxs,
-        } = self.cursor_to_position(self.selection.cursor);
-        let laidout_text = self.laidout_text.as_ref().unwrap();
+        } = self
+            .cursor_to_position(self.selection.cursor)
+            .ok()
+            .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
+        let laidout_text = self
+            .laidout_text
+            .as_ref()
+            .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
         let row = &laidout_text.rows[row_index];
         let cursor_pos = dvec2(
             (x_in_lpxs - 1.0 * self.draw_text.font_scale) as f64,
@@ -1116,7 +1128,10 @@ impl TextInput {
     }
 
     fn draw_selection(&mut self, cx: &mut Cx2d, text_rect: Rect) {
-        let laidout_text = self.laidout_text.as_ref().unwrap();
+        let laidout_text = self
+            .laidout_text
+            .as_ref()
+            .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
         
         self.draw_selection.begin_many_instances(cx);
         for rect_in_lpxs in laidout_text.selection_rects_in_lpxs(
@@ -1157,8 +1172,8 @@ impl TextInput {
         );
     }
 
-    pub fn move_cursor_up(&mut self, cx: &mut Cx, keep_selection: bool) {
-        let position = self.cursor_to_position(self.selection.cursor);
+    pub fn move_cursor_up(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<(), ()> {
+        let position = self.cursor_to_position(self.selection.cursor)?;
         self.set_cursor(
             cx,
             self.position_to_cursor(CursorPosition {
@@ -1168,14 +1183,15 @@ impl TextInput {
                     position.row_index - 1
                 },
                 x_in_lpxs: position.x_in_lpxs,
-            }),
+            })?,
             keep_selection
         );
+        Ok(())
     }
 
-    pub fn move_cursor_down(&mut self, cx: &mut Cx, keep_selection: bool) {
+    pub fn move_cursor_down(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<(), ()> {
         let laidout_text = self.laidout_text.as_ref().unwrap();
-        let position = self.cursor_to_position(self.selection.cursor);
+        let position = self.cursor_to_position(self.selection.cursor)?;
         self.set_cursor(
             cx,
             self.position_to_cursor(CursorPosition {
@@ -1185,9 +1201,10 @@ impl TextInput {
                     position.row_index + 1 
                 },
                 x_in_lpxs: position.x_in_lpxs,
-            }),
+            })?,
             keep_selection
         );
+        Ok(())
     }
 
     pub fn select_all(&mut self, cx: &mut Cx) {
@@ -1451,7 +1468,11 @@ impl Widget for TextInput {
                     control: false
                 },
                 ..
-            }) => self.move_cursor_up(cx, keep_selection),
+            }) => {
+                if self.move_cursor_up(cx, keep_selection).is_err() {
+                    warning!("can't move cursor because layout was invalidated by earlier event");
+                }
+            },
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
                 modifiers: KeyModifiers {
@@ -1461,7 +1482,11 @@ impl Widget for TextInput {
                     control: false
                 },
                 ..
-            }) => self.move_cursor_down(cx, keep_selection),
+            }) => {
+                if self.move_cursor_down(cx, keep_selection).is_err() {
+                    warning!("can't move cursor because layout was invalidated by earlier event");
+                }
+            }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyA,
                 modifiers,
@@ -1475,11 +1500,15 @@ impl Widget for TextInput {
             }) if device.is_primary_hit() => {
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
+                let Ok(cursor) = self.point_in_lpxs_to_cursor(
+                    Point::new(rel.x as f32, rel.y as f32)
+                ) else {
+                    warning!("can't move cursor because layout was invalidated by earlier event");
+                    return;
+                };
                 self.set_cursor(
                     cx,
-                    self.point_in_lpxs_to_cursor(
-                    Point::new(rel.x as f32, rel.y as f32)
-                    ),
+                    cursor,
                     false
                 );
                 match tap_count {
@@ -1509,11 +1538,15 @@ impl Widget for TextInput {
             }) if device.is_primary_hit() => {
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
+                let Ok(cursor) = self.point_in_lpxs_to_cursor(
+                    Point::new(rel.x as f32, rel.y as f32)
+                ) else {
+                    warning!("can't move cursor because layout was invalidated by earlier event");
+                    return;
+                };
                 self.set_cursor(
                     cx,
-                    self.point_in_lpxs_to_cursor(
-                    Point::new(rel.x as f32, rel.y as f32)
-                    ),
+                    cursor,
                     true
                 );
                 match tap_count {
