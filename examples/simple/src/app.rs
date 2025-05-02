@@ -11,7 +11,7 @@ live_design!{
             main_window = <Window>{
                 body = <View>{
                     flow: Down,
-                    spacing: 10,
+                    spacing:30,
                     align: {
                         x: 0.5,
                         y: 0.5
