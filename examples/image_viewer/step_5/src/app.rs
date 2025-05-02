@@ -49,55 +49,17 @@ live_design! {
 pub struct App {
     #[live]
     ui: WidgetRef,
-    #[rust]
-    state: State,
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let mut scope = Scope::with_data(&mut self.state);
-        self.ui.handle_event(cx, event, &mut scope);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
 
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         makepad_widgets::live_design(cx);
-    }
-}
-
-#[derive(Debug)]
-pub struct State {
-    num_images: usize,
-    max_images_per_row: usize,
-}
-
-impl State {
-    fn num_images(&self) -> usize {
-        self.num_images
-    }
-
-    fn num_rows(&self) -> usize {
-        self.num_images().div_ceil(self.max_images_per_row)
-    }
-
-    fn first_image_idx_for_row(&self, row_idx: usize) -> usize {
-        row_idx * self.max_images_per_row
-    }
-
-    fn num_images_for_row(&self, row_idx: usize) -> usize {
-        let first_image_idx = self.first_image_idx_for_row(row_idx);
-        let num_remaining_images = self.num_images() - first_image_idx;
-        self.max_images_per_row.min(num_remaining_images)
-    }
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            num_images: 12,
-            max_images_per_row: 4,
-        }
     }
 }
 
@@ -153,15 +115,8 @@ impl Widget for ImageRow {
     ) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                let state = scope.data.get_mut::<State>().unwrap();
-                let row_idx = *scope.props.get::<usize>().unwrap();
-                
-                list.set_item_range(cx, 0, state.num_images_for_row(row_idx));
+                list.set_item_range(cx, 0, 4);
                 while let Some(item_idx) = list.next_visible_item(cx) {
-                    if item_idx >= state.num_images_for_row(row_idx) {
-                        continue;
-                    }
-                    
                     let item = list.item(cx, item_idx, live_id!(ImageItem));
                     item.draw_all(cx, &mut Scope::empty());
                 }

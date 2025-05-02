@@ -77,8 +77,6 @@ live_design! {
     }
 
     App = {{App}} {
-        placeholder: (PLACEHOLDER),
-
         ui: <Root> {
             <Window> {
                 body = <View> {
@@ -92,15 +90,13 @@ live_design! {
 #[derive(Live)]
 pub struct App {
     #[live]
-    placeholder: LiveDependency,
-    #[live]
     ui: WidgetRef,
     #[rust]
     state: State,
 }
 
 impl App {
-    fn load_images(&mut self, cx: &mut Cx, path: &Path) {
+    fn load_images(&mut self, path: &Path) {
         self.state.image_paths.clear();
         for entry in path.read_dir().unwrap() {
             let entry = entry.unwrap();
@@ -110,29 +106,6 @@ impl App {
             }
             self.state.image_paths.push(path);
         }
-
-        if self.state.image_paths.is_empty() {
-            self.set_current_image(cx, None);
-        } else {
-            self.set_current_image(cx, Some(0));
-        }
-    }
-
-    fn set_current_image(&mut self, cx: &mut Cx, image_idx: Option<usize>) {
-        self.state.current_image_idx = image_idx;
-
-        let image = self.ui.image(id!(slideshow.image));
-        if let Some(image_idx) = self.state.current_image_idx {
-            let image_path = &self.state.image_paths[image_idx];
-            image
-                .load_image_file_by_path_async(cx, &image_path)
-                .unwrap();
-        } else {
-            image
-                .load_image_dep_by_path(cx, self.placeholder.as_str())
-                .unwrap();
-        }
-        self.ui.redraw(cx);
     }
 }
 
@@ -144,9 +117,9 @@ impl AppMain for App {
 }
 
 impl LiveHook for App {
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
         let path = std::env::args().nth(1).expect("missing path");
-        self.load_images(cx, path.as_ref());
+        self.load_images(path.as_ref());
     }
 }
 
@@ -160,7 +133,6 @@ impl LiveRegister for App {
 pub struct State {
     image_paths: Vec<PathBuf>,
     max_images_per_row: usize,
-    current_image_idx: Option<usize>,
 }
 
 impl State {
@@ -188,7 +160,6 @@ impl Default for State {
         Self {
             image_paths: Vec::new(),
             max_images_per_row: 4,
-            current_image_idx: None,
         }
     }
 }

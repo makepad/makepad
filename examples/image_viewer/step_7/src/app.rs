@@ -5,8 +5,6 @@ live_design! {
     use link::widgets::*;
 
     PLACEHOLDER = dep("crate://self/resources/placeholder.jpg");
-    LEFT_ARROW = dep("crate://self/resources/left_arrow.svg");
-    RIGHT_ARROW = dep("crate://self/resources/right_arrow.svg");
 
     ImageItem = <View> {
         width: 256,
@@ -37,28 +35,11 @@ live_design! {
         }
     }
 
-    SlideshowNavigateButton = <Button> {
-        width: 50,
-        height: Fill,
-        draw_bg: {
-            color: #fff0,
-            color_down: #fff2,
-        }
-        icon_walk: { width: 9 },
-        text: "",
-        grab_key_focus: false,
-    }
-
     App = {{App}} {
         ui: <Root> {
             <Window> {
                 body = <View> {
-                    <SlideshowNavigateButton> {
-                        draw_icon: { svg_file: (LEFT_ARROW) }
-                    }
-                    <SlideshowNavigateButton> {
-                        draw_icon: { svg_file: (RIGHT_ARROW) }
-                    }
+                    <ImageGrid> {}
                 }
             }
         }
@@ -165,7 +146,7 @@ impl Widget for ImageGrid {
                     if row_idx >= state.num_rows() {
                         continue;
                     }
-                    
+
                     let row = list.item(cx, row_idx, live_id!(ImageRow));
                     let mut scope = Scope::with_data_props(state, &row_idx);
                     row.draw_all(cx, &mut scope);
@@ -197,15 +178,16 @@ impl Widget for ImageRow {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let state = scope.data.get_mut::<State>().unwrap();
                 let row_idx = *scope.props.get::<usize>().unwrap();
-                
+
                 list.set_item_range(cx, 0, state.num_images_for_row(row_idx));
                 while let Some(item_idx) = list.next_visible_item(cx) {
                     if item_idx >= state.num_images_for_row(row_idx) {
                         continue;
                     }
-                    
+
                     let item = list.item(cx, item_idx, live_id!(ImageItem));
-                    let image_idx = state.first_image_idx_for_row(row_idx) + item_idx;
+                    let first_image_idx = state.first_image_idx_for_row(row_idx);
+                    let image_idx = first_image_idx + item_idx;
                     let image_path = &state.image_paths[image_idx];
                     let image = item.image(id!(image));
                     image
