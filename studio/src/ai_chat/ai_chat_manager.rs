@@ -321,9 +321,15 @@ impl Default for AiChatManager{
                     files:vec![]
                 },
                 AiProject{
-                    name:"makepad-experiment-ai-one".to_string(),
+                    name:"makepad-experiment-ai-snake".to_string(),
                     files:vec![
-                        AiContextFile::new("Main app to rewrite","experiments/ai_one/src/app.rs")
+                        AiContextFile::new("Main app to rewrite","experiments/ai_snake/src/app.rs")
+                    ]
+                },
+                AiProject{
+                    name:"makepad-experiment-ai-mr".to_string(),
+                    files:vec![
+                        AiContextFile::new("Main app to rewrite","experiments/ai_mr/src/app.rs")
                     ]
                 },
             ]
