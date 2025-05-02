@@ -249,6 +249,19 @@ pub struct XrState{
     pub right_hand: XrHand,
 }
 impl XrState{
+    pub fn from_lerp(a:&XrState, b:&XrState, f:f32)->Self{
+        Self{
+            order_counter: b.order_counter,
+            time: (b.time - a.time)*f as f64 + a.time,
+            head_pose: Pose::from_lerp(a.head_pose, b.head_pose, f),
+            anchor: b.anchor,
+            left_controller: b.left_controller.clone(),
+            right_controller: b.right_controller.clone(),
+            left_hand: b.left_hand.clone(),
+            right_hand: b.right_hand.clone(),
+        }
+    }
+    
     pub fn vec_in_head_space(&self,pos:Vec3)->Vec3{
         self.head_pose.to_mat4().transform_vec4(pos.to_vec4()).to_vec3()
     }
