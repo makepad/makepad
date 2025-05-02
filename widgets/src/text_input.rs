@@ -26,6 +26,8 @@ live_design! {
     use link::theme::*;
     use makepad_draw::shader::std::*;
 
+    DrawMaybeEmptyText = {{DrawMaybeEmptyText}} {}
+
     pub TextInputBase = {{TextInput}} {}
     
     pub TextInput = <TextInputBase> {
@@ -202,7 +204,15 @@ live_design! {
                                     ),
                                     self.hover
                                 ),
-                                #f00,
+                                mix(
+                                    mix(
+                                        self.color_empty,
+                                        self.color_down,
+                                        self.down
+                                    ),
+                                    self.color_empty_hover,
+                                    self.hover
+                                ),
                                 self.empty
                             ),
                             self.color_focus,
@@ -821,7 +831,7 @@ pub struct TextInput {
     #[animator] animator: Animator,
 
     #[redraw] #[live] draw_bg: DrawColor,
-    #[live] draw_text: DrawText,
+    #[live] draw_text: DrawMaybeEmptyText,
     #[live] draw_selection: DrawQuad,
     #[live] draw_cursor: DrawQuad,
 
@@ -1067,6 +1077,7 @@ impl TextInput {
         let inner_walk = self.inner_walk();
         let text_rect = if self.text.is_empty() {
             self.animator_play(cx, id!(empty.on));
+            self.draw_text.is_empty = 1.0;
             self.draw_text.draw_walk(
                 cx,
                 inner_walk,
@@ -1074,7 +1085,7 @@ impl TextInput {
                 &self.empty_text
             )
         } else {
-            self.animator_play(cx, id!(empty.off));
+            self.draw_text.is_empty = 0.0;
             let laidout_text = self.laidout_text.as_ref().unwrap();
             self.draw_text.draw_walk_laidout(
                 cx,
@@ -1295,41 +1306,30 @@ impl TextInput {
         self.history.create_or_extend_edit_group(edit_kind, self.selection);
     }
 
-    fn apply_edit(&mut self, cx: &mut Cx, edit: Edit) {
+    fn apply_edit(&mut self, edit: Edit) {
         self.selection.cursor.index = edit.start + edit.replace_with.len();
         self.selection.anchor.index = self.selection.cursor.index;
         self.history.apply_edit(edit, &mut self.text);
         self.laidout_text = None;
-        self.check_text_is_empty(cx);
     }
 
-    fn undo(&mut self, cx: &mut Cx) -> bool {
+    fn undo(&mut self) -> bool {
         if let Some(new_selection) = self.history.undo(self.selection, &mut self.text) {
             self.laidout_text = None;
             self.selection = new_selection;
-            self.check_text_is_empty(cx);
             true
         } else {
             false
         }
     }
 
-    fn redo(&mut self, cx: &mut Cx) -> bool {
+    fn redo(&mut self) -> bool {
         if let Some(new_selection) = self.history.redo(self.selection, &mut self.text) {
             self.laidout_text = None;
             self.selection = new_selection;
-            self.check_text_is_empty(cx);
             true
         } else {
             false
-        }
-    }
-
-    fn check_text_is_empty(&mut self, cx: &mut Cx) {
-        if self.text.is_empty() {
-            self.animator_play(cx, id!(empty.on));
-        } else {
-            self.animator_play(cx, id!(empty.off));
         }
     }
     
@@ -1347,7 +1347,9 @@ impl TextInput {
 
 impl LiveHook for TextInput {
     fn after_new_from_doc(&mut self, cx:&mut Cx){
-        self.check_text_is_empty(cx);
+        if self.text().is_empty() {
+        self.animator_play(cx, id!(empty.on));
+        }
     }
 }
 
@@ -1580,14 +1582,11 @@ impl Widget for TextInput {
                 ..
             }) if !self.is_read_only => {
                 self.create_or_extend_edit_group(EditKind::Other);
-                self.apply_edit(
-                    cx,
-                    Edit {
-                        start: self.selection.start().index,
-                        end: self.selection.end().index,
-                        replace_with: "\n".to_string(),
-                    }
-                );
+                self.apply_edit(Edit {
+                    start: self.selection.start().index,
+                    end: self.selection.end().index,
+                    replace_with: "\n".to_string(),
+                });
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
             }
@@ -1601,14 +1600,11 @@ impl Widget for TextInput {
                     start = prev_grapheme_boundary(&self.text, start);
                 }
                 self.create_or_extend_edit_group(EditKind::Backspace);
-                self.apply_edit(
-                    cx,
-                    Edit {
-                        start,
-                        end,
-                        replace_with: String::new(),
-                    }
-                );
+                self.apply_edit(Edit {
+                    start,
+                    end,
+                    replace_with: String::new(),
+                });
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
             }
@@ -1622,14 +1618,11 @@ impl Widget for TextInput {
                     end = next_grapheme_boundary(&self.text, end);
                 }
                 self.create_or_extend_edit_group(EditKind::Delete);
-                self.apply_edit(
-                    cx,
-                    Edit {
-                        start,
-                        end,
-                        replace_with: String::new(),
-                    }
-                );
+                self.apply_edit(Edit {
+                    start,
+                    end,
+                    replace_with: String::new(),
+                });
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
             }
@@ -1641,7 +1634,7 @@ impl Widget for TextInput {
                 },
                 ..
             }) if modifiers.is_primary() && !self.is_read_only => {
-                if !self.undo(cx) {
+                if !self.undo() {
                     return;
                 }
                 self.draw_bg.redraw(cx);
@@ -1655,7 +1648,7 @@ impl Widget for TextInput {
                 },
                 ..
             }) if modifiers.is_primary() && !self.is_read_only => {
-                if !self.redo(cx) {
+                if !self.redo() {
                     return;
                 }
                 self.draw_bg.redraw(cx);
@@ -1678,14 +1671,11 @@ impl Widget for TextInput {
                         EditKind::Insert
                     }
                 );
-                self.apply_edit(
-                    cx,
-                    Edit {
-                        start: self.selection.start().index,
-                        end: self.selection.end().index,
-                        replace_with: input
-                    }
-                );
+                self.apply_edit(Edit {
+                    start: self.selection.start().index,
+                    end: self.selection.end().index,
+                    replace_with: input
+                });
                 self.animator_play(cx, id!(empty.off));
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
@@ -1697,14 +1687,11 @@ impl Widget for TextInput {
                 *event.response.borrow_mut() = Some(self.selected_text().to_string());
                 if !self.selected_text().is_empty() {
                     self.history.create_or_extend_edit_group(EditKind::Other, self.selection);
-                    self.apply_edit(
-                        cx,
-                        Edit {
-                            start: self.selection.start().index,
-                            end: self.selection.end().index,
-                            replace_with: String::new(),
-                        }
-                    );
+                    self.apply_edit(Edit {
+                        start: self.selection.start().index,
+                        end: self.selection.end().index,
+                        replace_with: String::new(),
+                    });
                     self.draw_bg.redraw(cx);
                     cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
                 }
@@ -1881,6 +1868,13 @@ pub enum TextInputAction {
     Escaped,
     Changed(String),
     KeyDownUnhandled(KeyEvent),
+}
+
+#[derive(Live, LiveHook, LiveRegister)]
+#[repr(C)]
+struct DrawMaybeEmptyText {
+    #[deref] draw_super: DrawText,
+    #[live] is_empty: f32,
 }
 
 #[derive(Clone, Debug, Default)]
