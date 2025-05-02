@@ -1,4 +1,5 @@
 
+
 use makepad_widgets::*;
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -24,12 +25,10 @@ live_design!{
             
             fn plasma_height(self, p: vec2) -> float {
                 let v = 0.0;
-                let deform = 1.0 + self.food_eaten_factor * 0.5;
-                let time_scale = 1.0 + self.food_eaten_factor * 1.0;
-                v = v + sin((p.x * 1.5 * deform + self.time * time_scale) * 2.0);
-                v = v + sin((p.y * 1.0 * deform + self.time * 0.5 * time_scale) * 3.0);
-                v = v + sin((p.x * 0.8 * deform + p.y * 1.2 * deform + self.time * 0.8 * time_scale) * 1.0);
-                v = v + sin(sqrt(p.x * p.x + p.y * p.y) * 2.5 * deform + self.time * 1.2 * time_scale);
+                v = v + sin((p.x * 1.5 + self.time) * 2.0);
+                v = v + sin((p.y * 1.0 + self.time * 0.5) * 3.0);
+                v = v + sin((p.x * 0.8 + p.y * 1.2 + self.time * 0.8) * 1.0);
+                v = v + sin(sqrt(p.x * p.x + p.y * p.y) * 2.5 + self.time * 1.2);
                 return v / 4.0;
             }
             
@@ -54,14 +53,16 @@ live_design!{
                 let p = self.pos * 8.0;
                 let height = self.plasma_height(p);
                 let normal = self.plasma_normal(p);
-                let light_dir = normalize(vec3(0.7, 0.6, 0.4));
+                
+                let light_angle = self.time * 0.6;
+                let light_dir = normalize(vec3(cos(light_angle), sin(light_angle), 0.5));
                                 
                 let diffuse = max(0.0, dot(normal, light_dir));
-                let bump_factor = pow(diffuse, 4.0); 
+                let emboss_factor = diffuse * 0.6 + 0.4;
                                 
                 let base_color = self.pastel_color(height);
                 let flash_brightness = self.food_eaten_factor * 0.8;
-                let final_color = base_color * (0.3 + bump_factor * 1.5) + vec3(flash_brightness);
+                let final_color = base_color * emboss_factor * 0.7 + vec3(flash_brightness);
                                 
                 return vec4(clamp(final_color, 0.0, 1.0), 1.0);
             }
@@ -100,9 +101,13 @@ live_design!{
             
             fn pixel(self)->vec4{
                 let p = self.pos;
-                                
-                let tube_radius = 0.4;
-                let half_length = 0.5; 
+                
+                let max_radius = 0.4;
+                let min_radius = 0.1;
+                let fade_factor = self.data1;
+                let current_radius = mix(max_radius, min_radius, fade_factor);
+
+                let half_length = 0.5;
                 let center = vec2(0.5, 0.5);
                                 
                 let angle_rad = self.data2; 
@@ -111,14 +116,14 @@ live_design!{
                 let a = center - dir_vec * half_length;
                 let b = center + dir_vec * half_length;
                 
-                let dist = self.sdf_capsule(p, a, b, tube_radius);
+                let dist = self.sdf_capsule(p, a, b, current_radius);
                                 
                 let alpha = smoothstep(0.02, 0.0, dist);
                 if alpha < 0.01 {
                     return vec4(0.0, 0.0, 0.0, 0.0);
                 }
                 
-                let normal = self.capsule_normal(p, a, b, tube_radius);
+                let normal = self.capsule_normal(p, a, b, current_radius);
                 let view_dir = normalize(vec3(0.0, 0.0, 1.0)); 
                                 
                 let base_angle = self.time * 0.5;
@@ -129,7 +134,6 @@ live_design!{
                 
                 let color1 = vec3(0.2, 1.0, 0.2);
                 let color2 = vec3(0.2, 0.6, 0.0);
-                let fade_factor = self.data1;
                 let albedo = mix(color1, color2, fade_factor);
                 
                 let shaded_color = self.phong_lighting(normal, view_dir, light_dir, albedo, ambient, specular_power);
@@ -326,10 +330,11 @@ struct SnakeGame{
     #[rust] snake_direction: (isize, isize),
     #[rust((32,32))] grid_size: (usize, usize),
     #[rust] game_timer: Timer,
+    #[rust] restart_timer: Timer,
     #[rust] game_over: bool,
     #[rust(Instant::now())] last_food_place_time: Instant,
     #[rust(Instant::now())] last_food_eaten_time: Instant,
-    #[rust] food_eaten_counter: f32,
+    #[rust] food_eaten_factor: f32,
     #[rust(0u64)] rng_state: u64,
 }
 
@@ -444,12 +449,14 @@ impl SnakeGame{
         match self.field[next_idx] {
             Field::Wall | Field::Snake => {
                 self.game_over = true;
+                cx.stop_timer(self.game_timer);
+                self.restart_timer = cx.start_timeout(2.0);
                 self.redraw(cx);
                 return;
             }
             Field::Food => {
                 ate_food = true;
-                self.food_eaten_counter = FLASH_DURATION;
+                self.food_eaten_factor = 1.0;
                 self.last_food_eaten_time = Instant::now();
                 self.place_food();
             }
@@ -476,16 +483,10 @@ impl SnakeGame{
             }
         }
         
-        if self.food_eaten_counter > 0.0 {
-             self.food_eaten_counter -= 0.1; // Assuming 0.1s tick interval
-        } else {
-            self.food_eaten_counter = 0.0;
-        }
-
         self.redraw(cx);
     }
             
-    fn restart_game(&mut self) {
+    fn restart_game(&mut self, cx: &mut Cx) {
         self.field.clear();
         self.field.resize(self.grid_size.0 * self.grid_size.1, Field::Empty);
         self.snake_body.clear();
@@ -501,8 +502,9 @@ impl SnakeGame{
                         
         self.snake_direction = (1, 0);
         self.game_over = false;
-        self.food_eaten_counter = 0.0;
+        self.food_eaten_factor = 0.0;
         self.last_food_eaten_time = Instant::now() - std::time::Duration::from_secs_f32(FLASH_DURATION); 
+        self.game_timer = cx.start_interval(0.1);
         
     }
         
@@ -522,17 +524,25 @@ impl SnakeGame{
 
 impl LiveHook for SnakeGame{
     fn after_new_from_doc(&mut self, cx:&mut Cx){
-        self.restart_game();
-        self.game_timer = cx.start_interval(0.1);
+        self.restart_game(cx);
     }
 }
 
 impl Widget for SnakeGame{
     fn draw_walk(&mut self, cx:&mut Cx2d, _scope:&mut Scope, walk:Walk)->DrawStep{
-        let time_since_food = Instant::now().duration_since(self.last_food_eaten_time).as_secs_f32();
-        let eased_factor = (1.0 - time_since_food / FLASH_DURATION).max(0.0);
-        let food_eaten_factor = eased_factor * eased_factor;
-        self.draw_bg.set_uniform(cx, id!(food_eaten_factor), &[food_eaten_factor]);
+        
+        if self.food_eaten_factor > 0.0 {
+            let time_now = Instant::now();
+            let time_since_eaten = time_now.duration_since(self.last_food_eaten_time).as_secs_f32();
+            if time_since_eaten < FLASH_DURATION {
+                self.food_eaten_factor = (1.0 - time_since_eaten / FLASH_DURATION).powf(2.0);
+            }
+            else{
+                self.food_eaten_factor = 0.0;
+            }
+        }
+        
+        self.draw_bg.set_uniform(cx, id!(food_eaten_factor), &[self.food_eaten_factor]);
 
         self.draw_bg.begin(cx, walk, self.layout);
         let bg_rect = cx.turtle().rect();
@@ -605,6 +615,9 @@ impl Widget for SnakeGame{
             }
         }
         self.draw_bg.end(cx);
+        if self.food_eaten_factor > 0.0 || self.game_over {
+            cx.redraw_area_in_draw(self.draw_bg.area());
+        }
         DrawStep::done()
     }
                 
@@ -612,12 +625,17 @@ impl Widget for SnakeGame{
         if self.game_timer.is_event(event).is_some(){
             self.next_tick(cx);
         }
+
+        if self.restart_timer.is_event(event).is_some(){
+            self.restart_game(cx);
+            self.redraw(cx);
+        }
                         
         match event{
             Event::KeyDown(ke) => {
                 if ke.key_code == KeyCode::Space && self.game_over {
-                    self.restart_game();
-                    self.game_timer = cx.start_interval(0.1);
+                    cx.stop_timer(self.restart_timer);
+                    self.restart_game(cx);
                     self.redraw(cx);
                 }
             }
@@ -651,3 +669,4 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
+
