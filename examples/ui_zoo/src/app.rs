@@ -243,9 +243,11 @@
         #[rust(DataBindingsForApp::new(cx))] bindings: DataBindingsForApp
     }
 
-    impl LiveRegister for App {
-        fn live_register(cx: &mut Cx) {
+impl LiveRegister for App {
+        fn live_register(cx: &mut Cx) { 
             crate::makepad_widgets::live_design(cx);
+            cx.link(live_id!(theme), live_id!(theme_desktop_dark));
+
             crate::layout_templates::live_design(cx);
             crate::demofiletree::live_design(cx);
 
