@@ -8,16 +8,6 @@ live_design! {
     LEFT_ARROW = dep("crate://self/resources/left_arrow.svg");
     RIGHT_ARROW = dep("crate://self/resources/right_arrow.svg");
 
-    MenuBar = <View> {
-        width: Fill,
-        height: Fit,
-
-        <Filler> {}
-        slideshow_button = <Button> {
-            text: "Slideshow"
-        }
-    }
-
     ImageItem = <View> {
         width: 256,
         height: 256,
@@ -92,7 +82,7 @@ live_design! {
         ui: <Root> {
             <Window> {
                 body = <View> {
-                    <MenuBar> {}
+                    slideshow = <Slideshow> {}
                 }
             }
         }

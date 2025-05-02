@@ -1,5 +1,4 @@
 use makepad_widgets::*;
-use std::path::{Path, PathBuf};
 
 live_design! {
     use link::widgets::*;
@@ -46,7 +45,7 @@ live_design! {
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live]
     ui: WidgetRef,
@@ -54,32 +53,10 @@ pub struct App {
     state: State,
 }
 
-impl App {
-    fn load_images(&mut self, cx: &mut Cx, path: &Path) {
-        self.state.image_paths.clear();
-        for entry in path.read_dir().unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            self.state.image_paths.push(path);
-        }
-        self.ui.redraw(cx);
-    }
-}
-
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let mut scope = Scope::with_data(&mut self.state);
         self.ui.handle_event(cx, event, &mut scope);
-    }
-}
-
-impl LiveHook for App {
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        let path = std::env::args().nth(1).expect("missing path");
-        self.load_images(cx, path.as_ref());
     }
 }
 
@@ -91,13 +68,13 @@ impl LiveRegister for App {
 
 #[derive(Debug)]
 pub struct State {
-    image_paths: Vec<PathBuf>,
+    num_images: usize,
     max_images_per_row: usize,
 }
 
 impl State {
     fn num_images(&self) -> usize {
-        self.image_paths.len()
+        self.num_images
     }
 
     fn num_rows(&self) -> usize {
@@ -118,7 +95,7 @@ impl State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            image_paths: Vec::new(),
+            num_images: 12,
             max_images_per_row: 4,
         }
     }
@@ -140,13 +117,13 @@ impl Widget for ImageGrid {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let state = scope.data.get_mut::<State>().unwrap();
-
+                
                 list.set_item_range(cx, 0, state.num_rows());
                 while let Some(row_idx) = list.next_visible_item(cx) {
                     if row_idx >= state.num_rows() {
                         continue;
                     }
-
+                    
                     let row = list.item(cx, row_idx, live_id!(ImageRow));
                     let mut scope = Scope::with_data_props(state, &row_idx);
                     row.draw_all(cx, &mut scope);
@@ -178,21 +155,14 @@ impl Widget for ImageRow {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let state = scope.data.get_mut::<State>().unwrap();
                 let row_idx = *scope.props.get::<usize>().unwrap();
-
+                
                 list.set_item_range(cx, 0, state.num_images_for_row(row_idx));
                 while let Some(item_idx) = list.next_visible_item(cx) {
                     if item_idx >= state.num_images_for_row(row_idx) {
                         continue;
                     }
-
+                    
                     let item = list.item(cx, item_idx, live_id!(ImageItem));
-                    let first_image_idx = state.first_image_idx_for_row(row_idx);
-                    let image_idx = first_image_idx + item_idx;
-                    let image_path = &state.image_paths[image_idx];
-                    let image = item.image(id!(image));
-                    image
-                        .load_image_file_by_path_async(cx, &image_path)
-                        .unwrap();
                     item.draw_all(cx, &mut Scope::empty());
                 }
             }

@@ -118,22 +118,6 @@ impl App {
         }
     }
 
-    fn navigate_left(&mut self, cx: &mut Cx) {
-        if let Some(image_idx) = self.state.current_image_idx {
-            if image_idx > 0 {
-                self.set_current_image(cx, Some(image_idx - 1));
-            }
-        }
-    }
-
-    fn navigate_right(&mut self, cx: &mut Cx) {
-        if let Some(image_idx) = self.state.current_image_idx {
-            if image_idx + 1 < self.state.image_paths.len() {
-                self.set_current_image(cx, Some(image_idx + 1));
-            }
-        }
-    }
-
     fn set_current_image(&mut self, cx: &mut Cx, image_idx: Option<usize>) {
         self.state.current_image_idx = image_idx;
 
@@ -150,12 +134,10 @@ impl App {
         }
         self.ui.redraw(cx);
     }
-    
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
         let mut scope = Scope::with_data(&mut self.state);
         self.ui.handle_event(cx, event, &mut scope);
     }
@@ -171,27 +153,6 @@ impl LiveHook for App {
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         makepad_widgets::live_design(cx);
-    }
-}
-
-impl MatchEvent for App {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(id!(navigate_left)).clicked(&actions) {
-            self.navigate_left(cx);
-        }
-        if self.ui.button(id!(navigate_right)).clicked(&actions) {
-            self.navigate_right(cx);
-        }
-
-        if let Some(event) =
-            self.ui.view(id!(slideshow.overlay)).key_down(&actions)
-        {
-            match event.key_code {
-                KeyCode::ArrowLeft => self.navigate_left(cx),
-                KeyCode::ArrowRight => self.navigate_right(cx),
-                _ => {}
-            }
-        }
     }
 }
 

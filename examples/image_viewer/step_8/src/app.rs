@@ -49,27 +49,16 @@ live_design! {
         grab_key_focus: false,
     }
 
-
-    SlideshowOverlay = <View> {
-        height: Fill,
-        width: Fill,
-        cursor: Arrow,
-        capture_overload: true,
-
-        navigate_left = <SlideshowNavigateButton> {
-            draw_icon: { svg_file: (LEFT_ARROW) }
-        }
-        <Filler> {}
-        navigate_right = <SlideshowNavigateButton> {
-            draw_icon: { svg_file: (RIGHT_ARROW) }
-        }
-    }
-
     App = {{App}} {
         ui: <Root> {
             <Window> {
                 body = <View> {
-                    <SlideshowOverlay> {}
+                    <SlideshowNavigateButton> {
+                        draw_icon: { svg_file: (LEFT_ARROW) }
+                    }
+                    <SlideshowNavigateButton> {
+                        draw_icon: { svg_file: (RIGHT_ARROW) }
+                    }
                 }
             }
         }
