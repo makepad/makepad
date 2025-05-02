@@ -202,7 +202,7 @@ live_design! {
                                     ),
                                     self.hover
                                 ),
-                                #f00,
+                                self.color_empty,
                                 self.empty
                             ),
                             self.color_focus,
