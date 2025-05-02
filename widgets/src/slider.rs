@@ -331,7 +331,7 @@ live_design!{
                     //cursor: Arrow,
                     from: {all: Snap}
                     apply: {
-                        draw_bg: { hover: 1.0 },
+                        draw_slider: { hover: 1.0 },
                         draw_text: { hover: 1.0 },
                     }
                 }
@@ -349,7 +349,7 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_bg: {focus: 1.0}
+                        draw_slider: {focus: 1.0}
                         draw_text: {focus: 1.0}
                         // draw_text: {focus: 1.0, hover: 1.0}
                     }
