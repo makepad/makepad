@@ -15,10 +15,10 @@ live_design!{
             height: Fill,
             width: Fill,
 
-            <View> {
+            <ScrollYView> {
                 flow: Down
                 width: Fill, height: Fill,
-                spacing: (THEME_SPACE_2)
+                spacing: (THEME_SPACE_3)
 
                 <View> {
                     height: Fit, width: Fill,
@@ -69,17 +69,18 @@ live_design!{
                 <SliderRound> { text: "SliderRound"}
                 <View> {
                     height: Fit,
-                    <Rotary> {}
-                    <Rotary> {}
-                    <Rotary> {}
+                    align: { x: 0.5 }
+                    spacing: (THEME_SPACE_3)
+
+                    <Rotary> { text: "Rotary" }
+                    <Rotary> { text: "Rotary" }
+                    <Rotary> { text: "Rotary" }
                 }
-                <Icon> {}
-                <IconSet> {
-                    text: ""
-                    draw_text: { color: #fff }
+                dropdown_demo = <DropDown> {
+                    width: Fill,
+                    labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                    values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
                 }
-                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
-                <DropDown> {}
                 radios_demo_20 = <View> {
                     spacing: (THEME_SPACE_2)
                     width: Fit, height: Fit,
@@ -89,10 +90,20 @@ live_design!{
                     radio4 = <RadioButton> { text: "Option 4" }
                 }
             }
-            <View> {
+            <ScrollYView> {
                 flow: Down
                 width: Fill, height: Fill,
-                spacing: (THEME_SPACE_2)
+                spacing: (THEME_SPACE_3)
+
+                <Image> { width: Fill, height: Fit, source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
+                <Icon> {
+                    icon_walk: { width: 100.  }
+                    draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
+                }
+                <IconSet> {
+                    text: ""
+                    draw_text: { color: #fff }
+                }
             }
             <View> {
                 flow: Down
