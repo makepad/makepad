@@ -78,8 +78,11 @@ live_design!{
             show_scroll_x: true
             show_scroll_y: false
             scroll_bar_x: {
-                draw_bg: {size: 3.0}
-                bar_size: 4
+                draw_bg: {
+                    color_hover: #fff6
+                    size: 5.0
+                }
+                bar_size: 10
                 use_vertical_finger_scroll: true
             }
         }
