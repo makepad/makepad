@@ -142,7 +142,7 @@
                             selected: 0
                         }
 
-                        tOverview = Tab { name: "Widgetset Overview", template: PermanentTab, kind: TabOverview }
+                        tOverview = Tab { name: "Intro", template: PermanentTab, kind: TabOverview }
                         tLayoutDemos = Tab { name: "Layout Demos", template: PermanentTab, kind: TabLayoutDemos }
                         tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
                         tCheckBox = Tab { name: "CheckBox", template: PermanentTab, kind: TabCheckBox }

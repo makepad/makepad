@@ -1,12 +1,4 @@
-Makepad is an OSS cross-platform UI framework written in Rust, accompanied by Makepad Studio, a powerful authoring application. This combination offers a streamlined approach to UI development, enabling developers and designers to create modern, high-performance applications with ease.
-
-Makepad is built with and for Rust, a modern, safe programming language. It operates natively and on the web, supporting all major platforms including Windows, Linux, macOS, iOS, and Android. It is known for its remarkably fast compilation speed which ensures a productive and interruption-free development experience.
-
-Makepad UIs are shader based. This ensures high performance, making it suitable for building applications as complex as Photoshop. It is an equally good fit for building 2.5D UIs like one finds in VR/AR applications.
-
-The framework simplifies styling compared to HTML by using an immediate mode and a simple DSL, eliminating the need for a complex DOM or CSS. It also provides direct access to the GPU, offering more control and flexibility while avoiding issues related to garbage collection, ensuring smoother performance.
-
-One of the most stand out features is live styling, which allows immediate reflection of UI changes in the code and vice versa, without the need for recompilation or restarts. This feature significantly narrows the gap between developers and designers, enhancing overall productivity.
-Makepad Studio brings it all together with its own IDE and Figma-like visual tooling, allowing designers to intuitively work directly on the actual product.
-
-Another key component is Stitch, an experimental WebAssembly (WASM) interpreter built in Rust. Renowned for its exceptional speed and lightweight performance. As of 2025 Stitch is regarded as the fastest WASM interpreter available.
+### Makepad is an open-source, cross-platform UI framework written in and for Rust. It runs natively and on the web, supporting all major platforms: Windows, Linux, macOS, iOS, and Android.
+Built on a shader-based architecture, Makepad delivers high performance, making it suitable for complex applications like Photoshop or even 3D/VR/AR experiences. It compiles exceptionally fast, ensuring a smooth and interruption-free development cycle.
+One of Makepad’s standout features is live styling—a powerful system that reflects UI code changes instantly without recompilation or restarts. This tight feedback loop bridges the gap between developers and designers, streamlining collaboration and maximizing productivity.
+This example application provides an overview of the supported widgets and their variants.
