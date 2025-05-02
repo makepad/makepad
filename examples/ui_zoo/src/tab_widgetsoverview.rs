@@ -8,36 +8,96 @@ live_design!{
     use link::widgets::*;
     use crate::layout_templates::*;
 
-    pub WidgetsOverview = <UIZooTabLayout_B> {
-        desc = {
-            <Markdown> { body: dep("crate://self/resources/widgetsoverview.md") } 
-        }
-        demos = {
+    pub WidgetsOverview = <View> {
             spacing: (THEME_SPACE_2)
             padding: <THEME_MSPACE_2> {}
+            flow: Right,
+            height: Fill,
+            width: Fill,
+
             <View> {
-                padding: <THEME_MSPACE_2> {}
+                flow: Down
+                width: Fill, height: Fill,
                 spacing: (THEME_SPACE_2)
-                flow: Right,
-                height: Fit,
 
-                <P> { text: "TestLabel", width: Fit}
-                <LinkLabel> { text: "TestButton", width: Fit}
-                <FoldButton> {
-                    height: 25, width: 15,
-                    margin: { left: (THEME_SPACE_2) }
-                    animator: { open = { default: off } },
+                <View> {
+                    height: Fit, width: Fill,
+                    <P> { text: "Label", width: Fit}
+                    <LinkLabel> { text: "Link", width: Fit}
+                    <FoldButton> { }
                 }
+                <View> {
+                    height: Fit, width: Fill,
+                    <CheckBox> { text: "CheckBox"}
+                    <CheckBox> { text: "CheckBox"}
+                    <CheckBox> { text: "CheckBox"}
+                }
+                <View> {
+                    height: Fit, width: Fill,
+                    <CheckBoxCustom> {
+                        draw_bg: { check_type: None }
+                        padding: <THEME_MSPACE_V_1> {}
+                        text:"Custom Checkbox"
+                        draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
+                        label_walk: {
+                            width: Fit, height: Fit,
+                            margin: <THEME_MSPACE_H_1> { left: 5. }
+                        }
 
-                <CheckBox> { text: "TestButton"}
-                <Toggle> { text: "TestButton"}
-                <ButtonFlat> { text: "TestButton"}
-                <Button> { text: "TestButton, disabled", enabled: true}
-                <TextInput> { text: "TestButton"}
-                <Slider> { text: "TestButton"}
-                <Slider> { text: "TestButton"}
+                        draw_text: {
+                            text_style: <THEME_FONT_REGULAR> {
+                                font_size: (THEME_FONT_SIZE_P)
+                            }
+                        }
+
+                        draw_icon: { color_active: #f00 }
+
+                        icon_walk: { width: 13.0, height: Fit }
+                    }
+
+                }
+                <View> {
+                    height: Fit, width: Fill,
+                    <Toggle> { text: "Toggle"}
+                    <Toggle> { text: "Toggle"}
+                    <Toggle> { text: "Toggle"}
+                }
+                <Button> { text: "Button", width: Fill}
+                <TextInput> { empty_text: "TextInput", width: Fill }
+                <SliderMinimal> { text: "SliderMinimal"}
+                <Slider> { text: "Slider"}
+                <SliderRound> { text: "SliderRound"}
+                <View> {
+                    height: Fit,
+                    <Rotary> {}
+                    <Rotary> {}
+                    <Rotary> {}
+                }
+                <Icon> {}
+                <IconSet> {
+                    text: ""
+                    draw_text: { color: #fff }
+                }
+                <Image> { width: Fill, height: Fill, source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
+                <DropDown> {}
+                radios_demo_20 = <View> {
+                    spacing: (THEME_SPACE_2)
+                    width: Fit, height: Fit,
+                    radio1 = <RadioButton> { text: "Option 1" }
+                    radio2 = <RadioButton> { text: "Option 2" }
+                    radio3 = <RadioButton> { text: "Option 3" }
+                    radio4 = <RadioButton> { text: "Option 4" }
+                }
             }
-
-        }
+            <View> {
+                flow: Down
+                width: Fill, height: Fill,
+                spacing: (THEME_SPACE_2)
+            }
+            <View> {
+                flow: Down
+                width: Fill, height: Fill,
+                spacing: (THEME_SPACE_2)
+            }
     }
 }
