@@ -154,8 +154,8 @@ live_design! {
 
         draw_cursor: {
           //  draw_depth: 4.0,
-            instance blink: 0.0
             instance focus: 0.0
+            instance blink: 1.0
             fn pixel(self) -> vec4 {
                 let color = mix(THEME_COLOR_U_HIDDEN, mix(self.color, THEME_COLOR_U_HIDDEN, self.blink),self.focus);
                 return vec4(color.rgb*color.a, color.a);
@@ -528,7 +528,8 @@ impl CodeEditor {
             },
         };
         self.draw_bg.draw_abs(cx, bg_rect);
-
+        self.draw_cursor.begin_many_instances(cx);
+                
         if self.show_gutter{
             self.draw_gutter(cx, session);
         }
@@ -537,7 +538,6 @@ impl CodeEditor {
         self.draw_indent_guide_layer(cx, session);
         self.draw_decoration_layer(cx, session);
         self.draw_selection_layer(cx, session);
-
         // Get the last added selection.
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
         // the cell size, then shift by the viewport origin.
@@ -548,6 +548,8 @@ impl CodeEditor {
             if height_is_fit || !self.empty_page_at_end{0.0} else {self.viewport_rect.size.y}
             +self.pad_left_top.y * self.height_scale
         );
+        
+        self.draw_cursor.end_many_instances(cx);
         
         self.scroll_bars.end(cx);
         
