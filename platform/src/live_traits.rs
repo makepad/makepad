@@ -112,9 +112,9 @@ pub trait LiveNew: LiveApply {
         return ret
     }
     
-    fn new_main(cx: &mut Cx) -> Self where Self: Sized {
+    fn new_main(cx: &mut Cx) -> Option<Self> where Self: Sized {
         let lti = Self::live_type_info(cx);
-        Self::new_from_module(cx, lti.module_id, lti.type_name).unwrap()
+        Self::new_from_module(cx, lti.module_id, lti.type_name)
     }
     
     fn register_main_module(cx: &mut Cx) {
