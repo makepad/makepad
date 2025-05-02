@@ -79,8 +79,25 @@ struct Bullets{
 
 pub struct XrPeer{
     id: LiveId,
-    state: XrState,
+    ahead: bool,
+    min_lag: f64,
+    states: Vec<XrState>,
     bullets: Bullets
+}
+
+impl XrPeer{
+    fn state(&self)->&XrState{
+        self.states.last().as_ref().unwrap()        
+    }
+    fn tween(&self, _host_time:f64)->XrState{
+        // TODO do frame tweening/prediction/packet smoothing
+        if self.states.len()>=2{
+            self.states[0].clone()
+        }
+        else{
+            self.states[0].clone()
+        }
+    }
 }
 
 impl Bullets{
@@ -145,24 +162,30 @@ pub struct XrHands {
 
 impl XrHands{
     
-    pub fn join_peer(&mut self, _cx:&mut Cx, id:LiveId, state:XrState){
-        if let Some(peer) = self.peers.iter_mut().find(|v| v.id == id){
-            if state.order_counter>peer.state.order_counter ||
-               peer.state.order_counter - state.order_counter>128{
-                peer.state = state;
-            }
-        }
-        else{
-            self.peers.push(XrPeer{id, state, bullets:Bullets::default()});
-        }
-    }
-        
     pub fn leave_peer(&mut self, _cx:&mut Cx, id:LiveId){
         self.peers.retain(|v| v.id != id);
     }
         
-    pub fn update_peer(&mut self, cx:&mut Cx, id:LiveId, state:XrState){
-        self.join_peer(cx, id, state);
+    pub fn update_peer(&mut self, _cx:&mut Cx, id:LiveId, state:XrState, e:&XrUpdateEvent){
+        if let Some(peer) = self.peers.iter_mut().find(|v| v.id == id){
+            peer.ahead = state.time > e.state.time;
+            peer.min_lag = peer.min_lag.min((state.time - e.state.time).abs());
+            let peer_state = peer.state();
+            if state.order_counter>peer_state.order_counter ||
+            peer_state.order_counter - state.order_counter>128{
+                peer.states.insert(0, state);
+            }
+            peer.states.truncate(2);
+        }
+        else{
+            self.peers.push(XrPeer{
+                id, 
+                ahead: false,
+                min_lag: 1.0,
+                states: vec![state], 
+                bullets:Bullets::default()
+            });
+        }
     }
     
     fn handle_alignment(&mut self, cx:&mut Cx, e:&XrUpdateEvent){
@@ -342,20 +365,20 @@ impl Widget for XrHands {
         self.bullets.draw(cx, &mut self.draw_bullet, &xr_state, &Mat4::identity());
         
         for peer in &mut self.peers{
-            
-            if let Some(other_anchor) = &peer.state.anchor{
+            let peer_state = peer.tween(xr_state.time);
+            if let Some(other_anchor) = &peer_state.anchor{
                 if let Some(my_anchor) = &xr_state.anchor{
                     // alright we need a mapping mat4 from 2 anchors
                     let anchor_map = other_anchor.mapping_to(my_anchor);
-                    draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &anchor_map, &peer.state);
+                    draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &anchor_map, &peer_state);
                     
-                    draw_head(cx, &mut self.draw_head, &anchor_map, &peer.state);
+                    draw_head(cx, &mut self.draw_head, &anchor_map, &peer_state);
                                         
-                    peer.bullets.draw(cx, &mut self.draw_bullet, &peer.state, &anchor_map)
+                    peer.bullets.draw(cx, &mut self.draw_bullet, &peer_state, &anchor_map)
                 }
             }
             else{
-                draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &peer.state)
+                draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &peer_state)
             }
         }
                 
