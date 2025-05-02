@@ -1,27 +1,49 @@
 
 use makepad_widgets::*;
 use std::collections::VecDeque;
+use instant::Instant;
 
 live_design!{
     use link::widgets::*;
     use link::theme::*;
     use link::shaders::*;
-                
+            
     SnakeGame = {{SnakeGame}}{
         width: Fill,
         height: Fill,
+        draw_bg:{
+            fn pixel(self)->vec4{
+                return #113311;
+            }
+        }
+        draw_snake:{
+            fn pixel(self)->vec4{
+                return #33ff33;
+            }
+        }
+        draw_head:{
+            fn pixel(self)->vec4{
+                return #66ffff;
+            }
+        }
         draw_wall: {
             fn pixel(self) -> vec4 {
-                return #f00;
+                return #ff0000;
+            }
+        }
+        draw_food: {
+            fn pixel(self) -> vec4 {
+                return #ffff00;
             }
         }
     }
-            
+        
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
                 window: {inner_size: vec2(800, 600)},
                 body = <View>{
+                    show_bg: true,
                     flow: Down,
                     game = <SnakeGame>{
                         draw_bg:{
@@ -44,6 +66,11 @@ live_design!{
                                 return #ff0000;
                             }
                         }
+                        draw_food: {
+                           fn pixel(self) -> vec4 {
+                                return #ffff00; // Yellow food
+                            }
+                        }
                     }
                 }
             }
@@ -57,6 +84,7 @@ pub enum Field{
     Wall,
     Snake,
     Head,
+    Food,
 }
 
 #[derive(Live, Widget)]
@@ -67,7 +95,8 @@ struct SnakeGame{
     #[live] draw_wall: DrawQuad,
     #[live] draw_snake: DrawQuad,
     #[live] draw_head: DrawQuad,
-            
+    #[live] draw_food: DrawQuad,
+        
     #[rust] field: Vec<Field>,
     #[rust] snake_body: VecDeque<(usize, usize)>,
     #[rust] snake_head: (usize, usize),
@@ -75,71 +104,120 @@ struct SnakeGame{
     #[rust(32,32)] grid_size: (usize, usize),
     #[rust] game_timer: Timer,
     #[rust] game_over: bool,
+    #[rust] last_food_place_time: Instant,
+    #[rust(0u64)] rng_state: u64,
 }
 
 impl SnakeGame{
+
+    fn simple_rng(&mut self) -> u64 {
+        self.rng_state = self.rng_state.wrapping_add(0xdeadbeefdeadbeef);
+        let mut x = self.rng_state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng_state = x;
+        return x.wrapping_mul(0x2545F4914F6CDD1D);
+    }
+
+    fn place_food(&mut self){
+        let (grid_w, grid_h) = self.grid_size;
+        let max_attempts = grid_w * grid_h;
+        for _ in 0..max_attempts {
+            let rand_val = self.simple_rng();
+            let x = (rand_val % grid_w as u64) as usize;
+            let y = ((rand_val / grid_w as u64) % grid_h as u64) as usize;
+            let idx = y * grid_w + x;
+            if self.field[idx] == Field::Empty {
+                self.field[idx] = Field::Food;
+                return;
+            }
+        }
+        // If no empty space is found (e.g., grid full), don't place food.
+    }
+
     fn next_tick(&mut self, cx: &mut Cx){
         if self.game_over {
             return;
         }
-                
+        
         let (grid_w, grid_h) = self.grid_size;
         let (head_x, head_y) = self.snake_head;
         let (dir_x, dir_y) = self.snake_direction;
-                
+        
         let next_x = (head_x as isize + dir_x + grid_w as isize) as usize % grid_w;
         let next_y = (head_y as isize + dir_y + grid_h as isize) as usize % grid_h;
-                
+        
         let next_idx = next_y * grid_w + next_x;
-                
+        
+        let mut ate_food = false;
+
         match self.field[next_idx] {
             Field::Wall | Field::Snake => {
                 self.game_over = true;
                 self.redraw(cx);
-                // TODO: Display game over message
                 return;
             }
-            Field::Empty | Field::Head => { // Head case should technically not happen if logic is sound
-                // Mark old head as body
-                let old_head_idx = head_y * grid_w + head_x;
-                self.field[old_head_idx] = Field::Snake;
-                                
-                // Add new head
-                self.snake_head = (next_x, next_y);
-                self.snake_body.push_front(self.snake_head);
-                self.field[next_idx] = Field::Head;
-                                
-                // Remove tail
-                if let Some(tail) = self.snake_body.pop_back() {
-                    // Only remove tail from field if it's not the new head (snake length 1)
-                    if tail != self.snake_head {
-                        let tail_idx = tail.1 * grid_w + tail.0;
-                        // Ensure we don't erase the head if snake is very short and wraps
-                        if self.field[tail_idx] != Field::Head {
-                            self.field[tail_idx] = Field::Empty;
-                        }
-                    } else {
-                        // If tail is head, put it back in deque
-                        self.snake_body.push_back(tail);
+            Field::Food => {
+                ate_food = true;
+                self.place_food();
+                // Continue to Empty/Head logic
+            }
+            Field::Empty | Field::Head => {} // Head case should technically not happen
+        }
+
+        // Common logic for moving head (after checking for collisions/food)
+        let old_head_idx = head_y * grid_w + head_x;
+        self.field[old_head_idx] = Field::Snake;
+        
+        self.snake_head = (next_x, next_y);
+        self.snake_body.push_front(self.snake_head);
+        self.field[next_idx] = Field::Head;
+        
+        if !ate_food {
+            if let Some(tail) = self.snake_body.pop_back() {
+                if tail != self.snake_head {
+                    let tail_idx = tail.1 * grid_w + tail.0;
+                    if self.field[tail_idx] != Field::Head {
+                        self.field[tail_idx] = Field::Empty;
                     }
+                } else {
+                    self.snake_body.push_back(tail);
                 }
             }
         }
+
         self.redraw(cx);
     }
-        
+    
     fn restart_game(&mut self) {
         self.field.clear();
         self.field.resize(self.grid_size.0 * self.grid_size.1, Field::Empty);
         self.snake_body.clear();
-                
+        
         self.snake_head = (self.grid_size.0 / 2, self.grid_size.1 / 2);
         self.snake_body.push_front(self.snake_head);
         let head_idx = self.snake_head.1 * self.grid_size.0 + self.snake_head.0;
         self.field[head_idx] = Field::Head;
-                
+        
+        // Ensure initial snake doesn't overwrite food
+        let mut food_x = self.grid_size.0 / 4;
+        let mut food_y = self.grid_size.1 / 4;
+        while self.field[food_y * self.grid_size.0 + food_x] != Field::Empty {
+             food_x = (food_x + 1) % self.grid_size.0;
+             if food_x == 0 {
+                food_y = (food_y + 1) % self.grid_size.1;
+             }
+        }
+
+        self.rng_state = Instant::now().duration_since(Instant::from_epoch_seconds(0)).as_nanos() as u64;
+
+        self.place_food(); // Place initial food
+        
         self.snake_direction = (1, 0);
         self.game_over = false;
+        self.last_food_place_time = Instant::now();
+
     }
 }
 
@@ -157,7 +235,7 @@ impl Widget for SnakeGame{
         let cell_w = bg_rect.size.x / self.grid_size.0 as f64;
         let cell_h = bg_rect.size.y / self.grid_size.1 as f64;
         let cell_size = dvec2(cell_w, cell_h);
-                
+        
         for y in 0..self.grid_size.1{
             for x in 0..self.grid_size.0{
                 let field = &self.field[y * self.grid_size.0 + x];
@@ -176,40 +254,43 @@ impl Widget for SnakeGame{
                     Field::Wall => {
                         self.draw_wall.draw_abs(cx, rect);
                     }
+                    Field::Food => {
+                        self.draw_food.draw_abs(cx, rect);
+                    }
                 }
             }
         }
         self.draw_bg.end(cx);
         DrawStep::done()
     }
-            
+        
     fn handle_event(&mut self, cx:&mut Cx, event:&Event, _scope:&mut Scope){
         if self.game_timer.is_event(event).is_some(){
             self.next_tick(cx);
         }
-                
+        
         match event.hits(cx, self.draw_bg.area()){
-            Hit::FingerDown(fd)=>{
+            Hit::FingerDown(_fd)=>{
                 cx.set_key_focus(self.draw_bg.area());
             }
             Hit::KeyDown(ke) => {
                 if self.game_over && ke.key_code == KeyCode::Space {
                     self.restart_game();
-                    self.game_timer = cx.start_interval(0.1); // Restart timer
+                    self.game_timer = cx.start_interval(0.1); 
                     self.redraw(cx);
                 } else if !self.game_over {
                     let current_dir = self.snake_direction;
                     match ke.key_code {
-                        KeyCode::ArrowUp if current_dir != (0, 1) => {
+                        KeyCode::ArrowUp | KeyCode::KeyW if current_dir != (0, 1) => {
                             self.snake_direction = (0,-1);
                         }
-                        KeyCode::ArrowDown if current_dir != (0, -1) => {
+                        KeyCode::ArrowDown | KeyCode::KeyS if current_dir != (0, -1) => {
                             self.snake_direction = (0,1);
                         }
-                        KeyCode::ArrowLeft if current_dir != (1, 0) => {
+                        KeyCode::ArrowLeft | KeyCode::KeyA if current_dir != (1, 0) => {
                             self.snake_direction = (-1,0);
                         }
-                        KeyCode::ArrowRight if current_dir != (-1, 0) => {
+                        KeyCode::ArrowRight | KeyCode::KeyD if current_dir != (-1, 0) => {
                             self.snake_direction = (1,0);
                         }
                         _=>()
@@ -236,6 +317,10 @@ impl LiveRegister for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::Draw(event) = event {
+            self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
+            return
+        }
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
