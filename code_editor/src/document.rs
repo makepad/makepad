@@ -71,6 +71,7 @@ impl CodeDocument {
         
         // Apply the edits to history, starting a new group for undo.
         history.force_new_group(); // Start a new undo group.
+        history.push_or_extend_group(SessionId::default(), EditKind::Other, &SelectionSet::default());
         history.apply_edit(delete_edit.clone());
         history.apply_edit(insert_edit.clone());
         

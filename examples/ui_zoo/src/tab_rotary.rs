@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoRotary = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "Rotary"}
+            <Markdown> { body: dep("crate://self/resources/rotary.md") } 
         }
         demos = {
             <H4> { text: "<Rotary>"}
@@ -41,6 +41,45 @@ live_design!{
                     }
                 }
                 <Rotary> {
+                    width: Fill,
+                    height: 300
+                    text: "val_padding",
+                    draw_bg: {
+                        // border_size: 5.
+                        val_size: 30.
+                        val_padding: 20.,
+                    }
+                }
+            }
+
+            <H4> { text: "<RotaryGradientY>"}
+            <UIZooRowH> {
+                align: { x: 0. , y: 0.}
+                <RotaryGradientY> {
+                    text: "Default",
+                }
+                <RotaryGradientY> {
+                    text: "Default",
+                    draw_bg: {
+                        // border_size: 3.
+                        gap: 0.,
+                    }
+                }
+                <RotaryGradientY> {
+                    width: 300, height: 200
+                    text: "Gap",
+                    draw_bg: {
+                        // border_size: 3.
+                        gap: 180.,
+                    }
+                }
+                <RotaryGradientY> {
+                    text: "ValSize",
+                    draw_bg: {
+                        val_size: 30.
+                    }
+                }
+                <RotaryGradientY> {
                     width: Fill,
                     height: 300
                     text: "val_padding",

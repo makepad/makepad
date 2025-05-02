@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoPageFlip = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<PageFlip>"}
+            <Markdown> { body: dep("crate://self/resources/pageflip.md") } 
         }
         demos = {
             <View> {

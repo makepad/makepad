@@ -318,13 +318,11 @@ impl AiChatView{
                     if let Some(wa) = actions.widget_action(id!(copy_button)){
                         if wa.widget().as_button().pressed(actions){
                             let code_view = wa.widget_nth(2).widget(id!(code_view));
-                            log!("COPY! {}", code_view.text( ));
                         }
                     }
                     if let Some(wa) = actions.widget_action(id!(run_button)){
                         if wa.widget().as_button().pressed(actions){
                             cx.action(AppAction::RunAiChat{chat_id, history_slot:self.history_slot, item_id});
-                            log!("RUN! {} {}", self.history_slot, item_id);
                         }
                     }
                 }
