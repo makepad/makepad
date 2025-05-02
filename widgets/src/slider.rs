@@ -1614,11 +1614,11 @@ live_design!{
     pub Rotary = <SliderMinimal> {
         height: 95., width: 65.,
         axis: Vertical,
-        flow: Down
-        align:{x:0.5}
+        flow: Right
+        align:{x:0.,y:0.0}
         label_walk:{
-            margin:{top:36}
-            width: Fit
+            margin:{top:0}
+            width: Fill
         }
         text_input:{ 
             width: Fit
