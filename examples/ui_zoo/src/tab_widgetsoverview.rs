@@ -21,7 +21,7 @@ live_design!{
                 align: {x: 0.0, y: 0.4}
                 spacing: (THEME_SPACE_3)
 
-                <Image> { width: 250, height: 36.5, source: dep("crate://self/resources/logo_makepad.png" ), fit: Biggest }
+                <Image> { margin: {bottom: 10.}, width: 250, height: 36.5, source: dep("crate://self/resources/logo_makepad.png" ), fit: Biggest }
 
                 <H4> { text: "Makepad is an open-source, cross-platform UI framework written in and for Rust. It runs natively and on the web, supporting all major platforms: Windows, Linux, macOS, iOS, and Android." } 
                 <P> {
