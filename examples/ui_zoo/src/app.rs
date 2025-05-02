@@ -79,18 +79,18 @@
                         show_bg: true,
                         draw_bg: { color: (THEME_COLOR_U_1) }
 
-                        <SliderRound> { text: "Spacing"}
-                        <Vr> {}
-                        <Labelbold> { width: Fit, text: "Color"}
-                        <SliderRound> { text: "Contrast" }
-                        <SliderRound> { text: "Tint Factor" }
-                        <Vr> {}
-                        <Labelbold> { width: Fit, text: "Font"}
-                        <SliderRound> { text: "Scale" }
                         <SliderRound> { text: "Contrast"}
+                        <Label> { width: Fit, text: "Color"}
+                        <TextInput> { text: "#f00" }
+                        <SliderRound> { text: "Tint Amount"}
                         <Vr> {}
-                        <Toggle> { text: "Label Hover"}
-                        <Toggle> { text: "Light Theme"}
+                        <Labelbold> { width: Fit, text: "Typography"}
+                        <SliderRound> { text: "Size" }
+                        <SliderRound> { text: "Contrast" }
+                        <Vr> {}
+                        <SliderRound> { text: "Bevel" }
+                        <SliderRound> { text: "Rounding"}
+                        <SliderRound> { text: "Space"}
                     }
 
                     dock = <Dock> {
