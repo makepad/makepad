@@ -50,8 +50,7 @@ live_design!{
                 
 
                     <SliderRound> {
-                        text: "HI Label123 12341234",
-                        label_walk: { width: Fit }
+                        text: "Short label",
                         draw_bg: {
                             val_color_1: #FFCC00
                             val_color_1_hover: #FF9944
