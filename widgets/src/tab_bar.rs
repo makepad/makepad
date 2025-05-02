@@ -82,7 +82,7 @@ live_design!{
                     color_hover: #fff6
                     size: 5.0
                 }
-                bar_size: 10
+                bar_size: 7.5
                 use_vertical_finger_scroll: true
             }
         }
