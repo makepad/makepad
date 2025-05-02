@@ -29,7 +29,7 @@ live_design! {
     pub TextInputBase = {{TextInput}} {}
     
     pub TextInput = <TextInputBase> {
-        width: 200,
+        width: Fill,
         height: Fit,
         padding: <THEME_MSPACE_2> {}
         flow: RightWrap,
