@@ -12,112 +12,85 @@ live_design!{
             spacing: (THEME_SPACE_2)
             padding: <THEME_MSPACE_2> {}
             flow: Down,
-            height: Fill,
-            width: Fill,
-            <Image> { width: 250, height: 36.5, source: dep("crate://self/resources/logo_makepad.png" ), fit: Biggest }
+            align: {x: 0.5, y: 0.5}
+            height: Fill, width: Fill,
 
-            <View> {
-                width: Fill, height: Fill,
+            <ScrollYView> {
+                flow: Down
+                width: 430., height: Fill,
+                align: {x: 0.0, y: 0.4}
                 spacing: (THEME_SPACE_3)
 
-                <ScrollYView> {
-                    flow: Down
-                    width: Fill, height: Fill,
-                    spacing: (THEME_SPACE_2)
-                    <Markdown> { body: dep("crate://self/resources/widgetsoverview.md") } 
+                <Image> { width: 250, height: 36.5, source: dep("crate://self/resources/logo_makepad.png" ), fit: Biggest }
+
+                <H4> { text: "Makepad is an open-source, cross-platform UI framework written in and for Rust. It runs natively and on the web, supporting all major platforms: Windows, Linux, macOS, iOS, and Android." } 
+                <P> {
+                    text: "Built on a shader-based architecture, Makepad delivers high performance, making it suitable for complex applications like Photoshop or even 3D/VR/AR experiences."
+                }
+                <P> {
+                    text: "It compiles exceptionally fast, ensuring a smooth and interruption-free development cycle."
+                }
+                <P> {
+                    text: "One of Makepad’s standout features is live styling — a powerful system that reflects UI code changes instantly without recompilation or restarts. This tight feedback loop bridges the gap between developers and designers, streamlining collaboration and maximizing productivity."
+                }
+                <Pbolditalic> {
+                    text: "This example application provides an overview of the supported widgets and their variants."
                 }
 
-                <ScrollYView> {
-                    flow: Down
-                    width: Fill, height: Fill,
-                    spacing: (THEME_SPACE_3)
+                // <View> {
+                //     spacing: (THEME_SPACE_3)
+                //     height: Fit, width: Fill,
+                //     <Button> { text: "Button"}
+                //     dropdown_demo = <DropDown> {
+                //         popup_menu_position: BelowInput,
+                //         labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                //         values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+                //     }
+                //     <TextInput> { empty_text: "TextInput", width: Fill }
+                // }
 
-                    <View> {
-                        height: Fit, width: Fill,
-                        <P> { text: "Label", width: Fit}
-                        <LinkLabel> { text: "Link", width: Fit}
-                        <FoldButton> { }
-                    }
-                    <View> {
-                        height: Fit, width: Fill,
-                        <CheckBox> { text: "CheckBox"}
-                        <CheckBox> { text: "CheckBox"}
-                        <CheckBox> { text: "CheckBox"}
-                    }
-                    <View> {
-                        height: Fit, width: Fill,
-                        <CheckBoxCustom> {
-                            draw_bg: { check_type: None }
-                            padding: <THEME_MSPACE_V_1> {}
-                            text:"Custom Checkbox"
-                            draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
-                            label_walk: {
-                                width: Fit, height: Fit,
-                                margin: <THEME_MSPACE_H_1> { left: 5. }
-                            }
+                // <Slider> { text: "Slider"}
+                // <SliderRound> { text: "SliderRound"}
+                // <View> {
+                //     height: Fit, width: Fit,
+                //     <Toggle> { text: "Toggle"}
+                //     <CheckBox> { text: "CheckBox"}
+                //     <CheckBoxCustom> {
+                //         draw_bg: { check_type: None }
+                //         padding: <THEME_MSPACE_V_1> {}
+                //         text:"Custom Checkbox"
+                //         draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
+                //         label_walk: {
+                //             width: Fit, height: Fit,
+                //             margin: <THEME_MSPACE_H_1> { left: 5. }
+                //         }
 
-                            draw_text: {
-                                text_style: <THEME_FONT_REGULAR> {
-                                    font_size: (THEME_FONT_SIZE_P)
-                                }
-                            }
+                //         draw_text: {
+                //             text_style: <THEME_FONT_REGULAR> {
+                //                 font_size: (THEME_FONT_SIZE_P)
+                //             }
+                //         }
 
-                            draw_icon: { color_active: #f00 }
+                //         draw_icon: { color_active: #f00 }
 
-                            icon_walk: { width: 13.0, height: Fit }
-                        }
-
-                    }
-                    <View> {
-                        height: Fit, width: Fill,
-                        <Toggle> { text: "Toggle"}
-                        <Toggle> { text: "Toggle"}
-                        <Toggle> { text: "Toggle"}
-                    }
-                    <Button> { text: "Button", width: Fill}
-                    <TextInput> { empty_text: "TextInput", width: Fill }
-                    <SliderMinimal> { text: "SliderMinimal"}
-                    <Slider> { text: "Slider"}
-                    <SliderRound> { text: "SliderRound"}
-                    <View> {
-                        height: Fit,
-                        align: { x: 0.5 }
-                        spacing: (THEME_SPACE_3)
-
-                        <Rotary> { text: "Rotary" }
-                        <Rotary> { text: "Rotary" }
-                        <Rotary> { text: "Rotary" }
-                    }
-                    dropdown_demo = <DropDown> {
-                        popup_menu_position: BelowInput,
-                        labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
-                        values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
-                    }
-                    radios_demo_20 = <View> {
-                        spacing: (THEME_SPACE_2)
-                        width: Fit, height: Fit,
-                        radio1 = <RadioButton> { text: "Option 1" }
-                        radio2 = <RadioButton> { text: "Option 2" }
-                        radio3 = <RadioButton> { text: "Option 3" }
-                        radio4 = <RadioButton> { text: "Option 4" }
-                    }
-                }
-                <ScrollYView> {
-                    flow: Down
-                    width: Fill, height: Fill,
-                    spacing: (THEME_SPACE_3)
-
-                    <Image> { width: Fill, height: Fit, source: dep("crate://self/resources/ducky.png" ), fit: Biggest }
-                    <Icon> {
-                        icon_walk: { width: 100.  }
-                        draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
-                    }
-                    <IconSet> {
-                        text: ""
-                        draw_text: { color: #fff }
-                    }
-                }
-
+                //         icon_walk: { width: 13.0, height: Fit }
+                //     }
+                //     <CheckBox> { text: "CheckBox"}
+                // }
+                // radios_demo_20 = <View> {
+                //     spacing: (THEME_SPACE_2)
+                //     width: Fit, height: Fit,
+                //     radio1 = <RadioButton> { text: "Option 1" }
+                //     radio2 = <RadioButton> { text: "Option 2" }
+                //     radio3 = <RadioButton> { text: "Option 3" }
+                //     radio4 = <RadioButton> { text: "Option 4" }
+                // }
+                // <View> {
+                //     height: Fit,
+                //     align: { x: 0.5 }
+                //     // <Rotary> { text: "Rotary" }
+                // }
             }
+
     }
 }
