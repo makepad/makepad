@@ -417,6 +417,7 @@ impl DrawVars {
                 // DONE!
                 cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
                 if uniform_updated{
+                    
                     // not calling redraw when uniforms change might cause
                     // incorrect drawcall splitting, so we have to. Unfortunately.
                     self.area.redraw(cx);
