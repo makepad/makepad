@@ -1087,6 +1087,7 @@ impl TextInput {
         } else {
             self.draw_text.is_empty = 0.0;
             let laidout_text = self.laidout_text.as_ref().unwrap();
+            self.animator_play(cx, id!(empty.off));
             self.draw_text.draw_walk_laidout(
                 cx,
                 inner_walk,
