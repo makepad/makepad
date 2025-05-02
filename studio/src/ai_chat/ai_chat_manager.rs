@@ -618,7 +618,6 @@ impl AiChatManager{
                                     }
                                 }
                                 AiBackend::Google{..}=>{
-                                    log!("GOT {:?}", data);
                                     for data in data.split("\r\n\r\n"){
                                         if let Some(data) = data.strip_prefix("data: "){
                                             match GoogleAiResponse::deserialize_json(&data){
