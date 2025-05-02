@@ -305,6 +305,7 @@ impl LiveRegister for App {
             ui.radio_button_set(ids!(radios_demo_17.radio1, radios_demo_17.radio2, radios_demo_17.radio3, radios_demo_17.radio4)).selected(cx, actions);
             ui.radio_button_set(ids!(radios_demo_18.radio1, radios_demo_18.radio2, radios_demo_18.radio3, radios_demo_18.radio4)).selected(cx, actions);
             ui.radio_button_set(ids!(radios_demo_19.radio1, radios_demo_19.radio2, radios_demo_19.radio3, radios_demo_19.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_20.radio1, radios_demo_20.radio2, radios_demo_20.radio3, radios_demo_20.radio4)).selected(cx, actions);
 
             if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
                 log!("TEXTBOX CHANGED {}", self.counter);
