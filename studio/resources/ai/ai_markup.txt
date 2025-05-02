@@ -16,7 +16,7 @@ You have been given components and example code as context, plus the users proje
 <GAME_POST>
 Generate the whole file including the Rust logic. 
 </GAME_POST>
-'
+
 <ALL_PRE>
 You are a Rust programming assistant for writing Makepad applications. 
 You have been given components and example code as context, plus the users project.

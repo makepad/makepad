@@ -940,7 +940,13 @@ impl LiveRegistry {
         // alright lets start at the main module
         // and then we have to hop from dependency to dependency
         let main_module_id = self.main_module.as_ref().unwrap().module_id;
-        let main_file_id = self.module_id_to_file_id.get(&main_module_id).cloned().unwrap();
+        let main_file_id = self.module_id_to_file_id.get(&main_module_id).cloned();
+        if main_file_id.is_none(){
+            // there was likely an error in the main file
+            println!("Cannot find main file id for file {}", main_module_id);
+            return;
+        }
+        let main_file_id = main_file_id.unwrap();
         
         let mut dep_order = Vec::new();
         self.doc_original_raw_imports_to_resolved_recur(main_file_id, errors, &mut dep_order);

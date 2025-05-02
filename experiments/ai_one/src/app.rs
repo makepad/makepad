@@ -1,41 +1,48 @@
 
 use makepad_widgets::*;
+use std::collections::VecDeque;
 
 live_design!{
     use link::widgets::*;
     use link::theme::*;
     use link::shaders::*;
+        
+    SnakeGame = {{SnakeGame}}{
+        width: Fill,
+        height: Fill,
+        draw_wall: {
+            fn pixel(self) -> vec4 {
+                return #f00;
+            }
+        }
+    }
+    
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
-                body = <ScrollXYView>{
+                window: {inner_size: vec2(800, 600)},
+                body = <View>{
                     flow: Down,
-                    show_bg: true,
-                    draw_bg: {
-
-                        fn hsv_to_rgb(self, hsv: vec3) -> vec3 {
-                            let k = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-                            let p = abs(fract(hsv.xxx + k.xyz) * 6.0 - k.www);
-                            let rgb = hsv.z * mix(k.xxx, clamp(p - k.xxx, 0.0, 1.0), hsv.y);
-                            return rgb;
+                    game = <SnakeGame>{
+                        draw_bg:{
+                            fn pixel(self)->vec4{
+                                return #113311;
+                            }
                         }
-
-                        fn pixel(self) -> vec4 {
-                            let uv = self.pos * 6.0;
-                            let t = self.time * 0.4;
-
-                            let pattern_x = sin(uv.x + t * 1.2);
-                            let pattern_y = cos(uv.y - t * 0.7);
-                            let pattern_diag = sin(uv.x * 0.8 + uv.y * 1.2 + t * 0.5);
-                            let pattern_dist = cos(length(uv * vec2(1.0, 1.5)) * 1.5 - t * 0.9);
-
-                            let hue = fract(0.6 + 0.4 * (pattern_x * 1.1 + pattern_y * 0.9 + pattern_diag * 0.6 + pattern_dist * 0.4));
-                            let sat = 0.7 + 0.3 * sin(uv.x * 2.5 - t * 1.5 + pattern_y * 3.14);
-                            let val = 0.65 + 0.35 * cos(uv.y * 3.5 + t * 1.1 - pattern_x * 1.57);
-
-                            let color_rgb = self.hsv_to_rgb(vec3(hue, clamp(sat, 0.5, 1.0), clamp(val, 0.4, 1.0)));
-
-                            return vec4(color_rgb, 1.0);
+                        draw_snake:{
+                            fn pixel(self)->vec4{
+                                return #33ff33;
+                            }
+                        }
+                        draw_head:{
+                            fn pixel(self)->vec4{
+                                return #66ffff;
+                            }
+                        }
+                        draw_wall: {
+                            fn pixel(self) -> vec4 {
+                                return #ff0000;
+                            }
                         }
                     }
                 }
@@ -44,13 +51,181 @@ live_design!{
     }
 }
 
+#[derive(Clone, PartialEq)]
+pub enum Field{
+    Empty,
+    Wall,
+    Snake,
+    Head,
+}
+
+#[derive(Live, Widget)]
+struct SnakeGame{
+    #[layout] layout: Layout,
+    #[walk] walk: Walk,
+    #[redraw] #[live] draw_bg: DrawQuad,
+    #[live] draw_wall: DrawQuad,
+    #[live] draw_snake: DrawQuad,
+    #[live] draw_head: DrawQuad,
+    
+    #[rust] field: Vec<Field>,
+    #[rust] snake_body: VecDeque<(usize, usize)>,
+    #[rust] snake_head: (usize, usize),
+    #[rust] snake_direction: (isize, isize),
+    #[rust(32,32)] grid_size: (usize, usize),
+    #[rust] game_timer: Timer,
+    #[rust] game_over: bool,
+}
+
+impl SnakeGame{
+    fn next_tick(&mut self, cx: &mut Cx){
+        if self.game_over {
+            return;
+        }
+
+        let (grid_w, grid_h) = self.grid_size;
+        let (head_x, head_y) = self.snake_head;
+        let (dir_x, dir_y) = self.snake_direction;
+
+        let next_x = (head_x as isize + dir_x + grid_w as isize) as usize % grid_w;
+        let next_y = (head_y as isize + dir_y + grid_h as isize) as usize % grid_h;
+
+        let next_idx = next_y * grid_w + next_x;
+
+        match self.field[next_idx] {
+            Field::Wall | Field::Snake => {
+                self.game_over = true;
+                self.redraw(cx);
+                // TODO: Display game over message
+                return;
+            }
+            Field::Empty | Field::Head => { // Head case should technically not happen if logic is sound
+                // Mark old head as body
+                let old_head_idx = head_y * grid_w + head_x;
+                self.field[old_head_idx] = Field::Snake;
+
+                // Add new head
+                self.snake_head = (next_x, next_y);
+                self.snake_body.push_front(self.snake_head);
+                self.field[next_idx] = Field::Head;
+
+                // Remove tail
+                if let Some(tail) = self.snake_body.pop_back() {
+                    // Only remove tail from field if it's not the new head (snake length 1)
+                     if tail != self.snake_head {
+                         let tail_idx = tail.1 * grid_w + tail.0;
+                         // Ensure we don't erase the head if snake is very short and wraps
+                         if self.field[tail_idx] != Field::Head {
+                            self.field[tail_idx] = Field::Empty;
+                         }
+                     } else {
+                        // If tail is head, put it back in deque
+                        self.snake_body.push_back(tail);
+                     }
+                }
+            }
+        }
+        self.redraw(cx);
+    }
+
+    fn restart_game(&mut self) {
+        self.field.clear();
+        self.field.resize(self.grid_size.0 * self.grid_size.1, Field::Empty);
+        self.snake_body.clear();
+
+        self.snake_head = (self.grid_size.0 / 2, self.grid_size.1 / 2);
+        self.snake_body.push_front(self.snake_head);
+        let head_idx = self.snake_head.1 * self.grid_size.0 + self.snake_head.0;
+        self.field[head_idx] = Field::Head;
+
+        self.snake_direction = (1, 0);
+        self.game_over = false;
+    }
+}
+
+impl LiveHook for SnakeGame{
+    fn after_new_from_doc(&mut self, cx:&mut Cx){
+        self.restart_game();
+        self.game_timer = cx.start_interval(0.1);
+    }
+}
+
+impl Widget for SnakeGame{
+    fn draw_walk(&mut self, cx:&mut Cx2d, _scope:&mut Scope, walk:Walk)->DrawStep{
+        self.draw_bg.begin(cx, walk, self.layout);
+        let bg_rect = cx.turtle().rect();
+        let cell_w = bg_rect.size.x / self.grid_size.0 as f64;
+        let cell_h = bg_rect.size.y / self.grid_size.1 as f64;
+        let cell_size = dvec2(cell_w, cell_h);
+
+        for y in 0..self.grid_size.1{
+            for x in 0..self.grid_size.0{
+                let field = &self.field[y * self.grid_size.0 + x];
+                let rect = Rect{
+                    pos: bg_rect.pos + dvec2(x as f64 * cell_w, y as f64 * cell_h),
+                    size: cell_size
+                };
+                match field{
+                    Field::Empty => {}
+                    Field::Snake => {
+                        self.draw_snake.draw_abs(cx, rect);
+                    }
+                    Field::Head => {
+                        self.draw_head.draw_abs(cx, rect);
+                    }
+                    Field::Wall => {
+                        self.draw_wall.draw_abs(cx, rect);
+                    }
+                }
+            }
+        }
+        self.draw_bg.end(cx);
+        DrawStep::done()
+    }
+    
+    fn handle_event(&mut self, cx:&mut Cx, event:&Event, _scope:&mut Scope){
+         if self.game_timer.is_event(event).is_some(){
+            self.next_tick(cx);
+         }
+
+        match event.hits(cx, self.draw_bg.area()){
+            Hit::FingerDown(fd)=>{
+                cx.set_key_focus(self.draw_bg.area());
+            }
+            Hit::KeyDown(ke) => {
+                if self.game_over && ke.key_code == KeyCode::Space {
+                    self.restart_game();
+                    self.game_timer = cx.start_interval(0.1); // Restart timer
+                    self.redraw(cx);
+                 } else if !self.game_over {
+                    let current_dir = self.snake_direction;
+                    match ke.key_code {
+                        KeyCode::ArrowUp if current_dir != (0, 1) => {
+                            self.snake_direction = (0,-1);
+                        }
+                        KeyCode::ArrowDown if current_dir != (0, -1) => {
+                            self.snake_direction = (0,1);
+                        }
+                        KeyCode::ArrowLeft if current_dir != (1, 0) => {
+                            self.snake_direction = (-1,0);
+                        }
+                        KeyCode::ArrowRight if current_dir != (-1, 0) => {
+                            self.snake_direction = (1,0);
+                        }
+                        _=>()
+                    }
+                 }
+            }
+            _=>()
+        }
+    }
+}
 
 app_main!(App); 
  
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[rust] counter: usize,
  }
  
 impl LiveRegister for App {
@@ -59,80 +234,9 @@ impl LiveRegister for App {
     }
 }
 
-impl MatchEvent for App{
-    fn handle_startup(&mut self, _cx:&mut Cx){
-    }
-    
-    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button_1)).clicked(&actions) {
-            self.counter += 1;
-            log!("HI");
-        }
-    }
-}
-
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::XrUpdate(_e) = event{
-            //log!("{:?}", e.now.left.trigger.analog);
-        }
-        self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
 
-
-
-// This is our custom allocator!
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    sync::atomic::{AtomicU64, Ordering},
-};
-
-pub struct TrackingHeapWrap{
-    count: AtomicU64,
-    total: AtomicU64,
-}
-
-impl TrackingHeapWrap {
-    // A const initializer that starts the count at 0.
-    pub const fn new() -> Self {
-        Self{
-            count: AtomicU64::new(0),
-            total: AtomicU64::new(0)
-        }
-    }
-        
-    // Returns the current count.
-    pub fn count(&self) -> u64 {
-        self.count.load(Ordering::Relaxed)
-    }
-        
-    pub fn total(&self) -> u64 {
-        self.total.load(Ordering::Relaxed)
-    }
-}
-
-unsafe impl GlobalAlloc for TrackingHeapWrap {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // Pass everything to System.
-        let count = self.count.fetch_add(1, Ordering::Relaxed); 
-        self.total.fetch_add(layout.size() as u64, Ordering::Relaxed);
-        if layout.size() > 60000000{
-            //panic!();
-            
-            println!("{count} {:?}",layout.size());
-        }
-        System.alloc(layout)
-    }
-            
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.count.fetch_sub(1, Ordering::Relaxed); 
-        self.total.fetch_sub(layout.size() as u64, Ordering::Relaxed);
-        System.dealloc(ptr, layout)
-    }
-}
-
-// Register our custom allocator.
-#[global_allocator]
-static TRACKING_HEAP: TrackingHeapWrap = TrackingHeapWrap::new();

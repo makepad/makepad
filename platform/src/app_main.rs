@@ -28,13 +28,14 @@ macro_rules!app_main {
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(move | cx, event | {
                 
                 if let Event::Startup = event {
-                    *app.borrow_mut() = Some($app::new_main(cx));
+                    *app.borrow_mut() = $app::new_main(cx);
                 }
                 if let Event::LiveEdit = event{
                     app.borrow_mut().update_main(cx);
                 }
-                
-                <dyn AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
+                if let Some(app) = &mut *app.borrow_mut(){
+                    <dyn AppMain>::handle_event(app, cx, event);
+                }
                   
             }))));
             $app::register_main_module(&mut *cx.borrow_mut());
@@ -81,12 +82,14 @@ macro_rules!app_main {
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
                     if let Event::Startup = event {
-                        *app.borrow_mut() = Some($app::new_main(cx));
+                        *app.borrow_mut() = $app::new_main(cx);
                     }
                     if let Event::LiveEdit = event{
                         app.borrow_mut().update_main(cx);
                     }
-                    app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
+                    if let Some(app) = &mut *app.borrow_mut(){
+                        app.handle_event(cx, event);
+                    }
                 })));
                 $app::register_main_module(&mut cx);
                 cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
@@ -108,7 +111,9 @@ macro_rules!app_main {
                     if let Event::LiveEdit = event{
                         app.borrow_mut().update_main(cx);
                     }
-                    app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
+                    if let Some(app) = &mut *app.borrow_mut(){
+                        app.handle_event(cx, event);
+                    }
                 })));
                 $app::register_main_module(&mut cx);
                 cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
@@ -134,7 +139,9 @@ macro_rules!app_main {
                 if let Event::LiveEdit = event{
                     app.borrow_mut().update_main(cx);
                 }
-                app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
+                if let Some(app) = &mut *app.borrow_mut(){
+                    app.handle_event(cx, event);
+                }
             })));
             $app::register_main_module(&mut cx);
             cx.init_websockets(std::option_env!("MAKEPAD_STUDIO_HTTP").unwrap_or(""));
