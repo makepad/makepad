@@ -23,13 +23,9 @@ live_design!{
         min: 0.0, max: 1.0,
         step: 0.0,
         label_align: { y: 0.0 }
-        label_walk:{width:Fit},
-        slider_walk:{width:Fill}
-        
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
         precision: 2,
         height: Fit,
-        
         hover_actions_enabled: false,
         
         draw_bg: {
@@ -1056,8 +1052,6 @@ live_design!{
     pub SliderRound = <SliderMinimal> {
         height: 18.,
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
-        
-        
         text_input: <TextInput> {
             width: Fit,
             padding: 0.,
@@ -1128,6 +1122,8 @@ live_design!{
             instance focus: float
             instance drag: float
             instance instance: float
+
+            label_size: 75.
 
             uniform val_heat: 10.
 
@@ -2581,23 +2577,21 @@ pub struct DrawSlider {
 #[designable]
 pub struct Slider {
     #[area] #[redraw] #[live] draw_bg: DrawSlider,
+    
     #[walk] walk: Walk,
 
     #[live(DragAxis::Horizontal)] pub axis: DragAxis,
     
     #[layout] layout: Layout,
     #[animator] animator: Animator,
-        
+    
+    #[rust] label_area: Area,
     #[live] label_walk: Walk,
     #[live] label_align: Align,
-        
-    #[live] slider_walk: Walk,
-    
     #[live] draw_text: DrawText,
-    #[live] text_input: TextInput,
-    
     #[live] text: String,
     
+    #[live] text_input: TextInput,
     
     #[live] precision: usize,
     
@@ -2664,49 +2658,28 @@ impl Slider {
     
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.slide_pos = self.relative_value as f32;
-        cx.begin_turtle(walk, self.layout);
-
+        self.draw_bg.begin(cx, walk, self.layout);
         
-        // alright so. how is this stuff
-        // we have the label, slider, text input normally set up as
-        // fit, fill, fit
-        // meaning we need to defer the slider
-        // text input
-        
-        // draw label
-        self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.text);
-        
-        // now defer the slider
-        if let Some(mut dw) = cx.defer_walk(self.slider_walk) {
-            // draw text input
-            let walk = self.text_input.walk(cx);
-            let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
-            // now draw the slider
-            let slider_walk = dw.resolve(cx);
-            self.draw_bg.draw_walk(cx, slider_walk);
-        }
-/*        
-        let walk = self.text_input.walk(cx);
-        let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
-        
-                
-                        
-        if let Some(mut dw) = cx.defer_walk(self.label_walk) {
-            //, (self.value*100.0) as usize);
+        if let Flow::Right = self.layout.flow{
             
-            let label_walk = dw.resolve(cx);
-            cx.begin_turtle(label_walk, Layout::default());
-            self.draw_text.draw_walk(c1x, label_walk, self.label_align, &self.text);
-            cx.end_turtle_with_area(&mut self.label_area);
-        }
+            if let Some(mut dw) = cx.defer_walk(self.label_walk) {
+                //, (self.value*100.0) as usize);
+                let walk = self.text_input.walk(cx);
+                let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
+        
+                let label_walk = dw.resolve(cx);
+                cx.begin_turtle(label_walk, Layout::default());
+                self.draw_text.draw_walk(cx, label_walk, self.label_align, &self.text);
+                cx.end_turtle_with_area(&mut self.label_area);
             }
         }
         else{
             let walk = self.text_input.walk(cx);
             let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
             self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.text);
-        }*/
-        cx.end_turtle();
+        }
+        
+        self.draw_bg.end(cx);
     }
 
     pub fn value(&self) -> f64 {
@@ -2770,7 +2743,7 @@ impl Widget for Slider {
         };
 
         if self.hover_actions_enabled {
-            match event.hits_with_capture_overload(cx, self.draw_text.area(), true) {
+            match event.hits_with_capture_overload(cx, self.label_area, true) {
                 Hit::FingerHoverIn(fh) => {
                     cx.widget_action(uid, &scope.path, SliderAction::LabelHoverIn(fh.rect));
                 }
@@ -2836,7 +2809,7 @@ impl Widget for Slider {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
                     if let DragAxis::Horizontal = self.axis {
-                        self.relative_value = (start_pos + rel.x / (fe.rect.size.x )).max(0.0).min(1.0);
+                        self.relative_value = (start_pos + rel.x / (fe.rect.size.x - self.draw_bg.label_size as f64)).max(0.0).min(1.0);
                     } else {
                         self.relative_value = (start_pos - rel.y / fe.rect.size.y as f64).max(0.0).min(1.0);
                     }
