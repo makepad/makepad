@@ -29,53 +29,8 @@ live_design!{
             flow: Right,
             align: { x: 0., y: 0. },
             spacing: (THEME_SPACE_3),
-            padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1), top: (THEME_SPACE_1) }
+            padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1), top: (THEME_SPACE_1-1) }
             margin: { bottom: -5.}
-
-            run_button = <ButtonFlatter> {
-                width: Fit,
-                height: Fit,
-                padding: <THEME_MSPACE_2> {}
-                margin: 0.
-
-                text: "Run",
-                draw_icon: {
-                    color: (THEME_COLOR_U_4),
-                    svg_file: dep("crate://self/resources/icons/icon_run.svg"),
-                }
-                icon_walk: { width: 9. }
-            }
-
-            <Vr> { height: 17.5}
-
-            <View> {
-                flow: Right,
-                width: Fit,
-                height: Fit,
-                spacing: (THEME_SPACE_1)
-
-                <Pbold> { width: Fit, text: "Model", margin: 0., padding: <THEME_MSPACE_V_1> {} }
-                model_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
-            }
-
-            <View> {
-                flow: Right,
-                width: Fit,
-                height: Fit,
-                spacing: (THEME_SPACE_1)
-
-                <Pbold> { width: Fit, text: "Context", margin: 0., padding: <THEME_MSPACE_V_1> {} }
-                context_dropdown = <DropDownFlat>{ width: Fit, popup_menu_position: BelowInput }
-            }
-
-            <View> {
-                flow: Right,
-                width: Fit,
-                spacing: (THEME_SPACE_1)
-
-                <Pbold> { width: Fit, text: "Project", margin: 0., padding: <THEME_MSPACE_V_1> {} }
-                project_dropdown = <DropDownFlat> { width: Fit, popup_menu_position: BelowInput }
-            }
 
             <View> { width: Fill }
 
@@ -138,7 +93,7 @@ live_design!{
                 height:Fit,
                 flow: Overlay
                 code_view = <CodeView>{
-                    
+                    keep_cursor_at_end: true,
                     editor:{
                         height: 200,
                         draw_bg: { color: ((THEME_COLOR_D_HIDDEN)) }
@@ -529,13 +484,12 @@ impl Widget for AiChatView {
                         while let Some(item_id) = list.next_visible_item(cx) {
                             match doc.file.history[self.history_slot].messages.get(item_id){
                                 Some(AiChatMessage::Assistant(val))=>{
+                                    let busy = item_id + 1 == doc.file.history[self.history_slot].messages.len() && 
+                                    doc.in_flight.is_some();
                                     let item = list.item(cx, item_id, live_id!(Assistant));
                                     // alright we got the assistant. lets set the markdown stuff
                                     item.widget(id!(md)).set_text(cx, &val);
-                                    item.view(id!(busy)).set_visible(cx, 
-                                        item_id + 1 == doc.file.history[self.history_slot].messages.len() && 
-                                        doc.in_flight.is_some()
-                                    );
+                                    item.view(id!(busy)).set_visible(cx, busy);
                                     item.draw_all_unscoped(cx);
                                 }
                                 Some(AiChatMessage::User(val))=>{
