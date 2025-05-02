@@ -386,6 +386,7 @@ impl AppMain for App {
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
         db.bind(id!(dropdown), ids!(dropdown));
+        db.bind(id!(dropdown_demo), ids!(dropdown_demo));
         db.bind(id!(dropdown_flat), ids!(dropdown_flat));
         db.bind(id!(dropdown_flatter), ids!(dropdown_flatter));
         db.bind(id!(dropdown_gradient_x), ids!(dropdown_gradient_x));
