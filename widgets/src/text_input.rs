@@ -271,10 +271,10 @@ live_design! {
             instance down: 0.0
             instance empty: 0.0
             instance disabled: 0.0
-
+            instance blink: 0.0
+            
             uniform border_radius: 0.5
 
-            uniform blink: 0.0
             uniform color: (THEME_COLOR_TEXT_CURSOR)
 
             fn pixel(self) -> vec4 {

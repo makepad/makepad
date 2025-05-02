@@ -104,6 +104,18 @@ impl Area {
         }
     }
     
+    pub fn redraw_id(&self) -> Option<u64> {
+        return match self {
+            Area::Instance(inst) => {
+                Some(inst.redraw_id)
+            },
+            Area::Rect(list) => {
+                Some(list.redraw_id)
+            }
+            _ => None
+        }
+    }
+    
     pub fn is_first_instance(&self) -> bool {
         return match self {
             Area::Instance(inst) => {
