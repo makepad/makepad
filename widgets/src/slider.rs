@@ -251,6 +251,18 @@ live_design!{
             padding: 0.,
             label_align: {y: 0.},
             margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
+
+            draw_text: {
+                color: (THEME_COLOR_TEXT_VAL)
+                color_hover: (THEME_COLOR_TEXT_HOVER)
+                color_focus: (THEME_COLOR_TEXT_FOCUS)
+                color_down: (THEME_COLOR_TEXT_DOWN)
+                color_disabled: (THEME_COLOR_TEXT_DISABLED)
+                color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
+                color_empty_hover: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
+                color_empty_focus: (THEME_COLOR_TEXT_FOCUS)
+            }
+
             
             draw_bg: {
                 border_radius: 0.
@@ -1064,12 +1076,14 @@ live_design!{
                 instance drag: 0.0
                 instance disabled: 0.0
 
-                color: (THEME_COLOR_LABEL_INNER)
-                uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
-                uniform color_drag: (THEME_COLOR_LABEL_INNER_DRAG)
-                uniform color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
-                uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+                color: (THEME_COLOR_TEXT_VAL)
+                uniform color_hover: (THEME_COLOR_TEXT_HOVER)
+                uniform color_focus: (THEME_COLOR_TEXT_FOCUS)
+                uniform color_drag: (THEME_COLOR_TEXT_DOWN)
+                uniform color_disabled: (THEME_COLOR_TEXT_DISABLED)
                 uniform color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
+                uniform color_empty_hover: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
+                uniform color_empty_focus: (THEME_COLOR_TEXT_FOCUS)
 
                 text_style: <THEME_FONT_REGULAR> {
                     font_size: (SLIDER_ALT1_DATA_FONTSIZE)
