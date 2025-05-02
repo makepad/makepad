@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoSlider = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "Slider"}
+            <Markdown> { body: dep("crate://self/resources/slider.md") } 
         }
         demos = {
             <H4> { text: "Slider"}
@@ -19,7 +19,14 @@ live_design!{
             <Slider> { text: "min/max", min: 0., max: 100. }
             <Slider> { text: "precision", precision: 20 }
             <Slider> { text: "stepped", step: 0.1 }
-
+            
+            <H4> { text: "SliderGradientY"}
+            <SliderGradientY> { text: "Default" }
+            <SliderGradientY> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+            <SliderGradientY> { text: "min/max", min: 0., max: 100. }
+            <SliderGradientY> { text: "precision", precision: 20 }
+            <SliderGradientY> { text: "stepped", step: 0.1 }
+            
             <Hr> {}
             <H4> { text: "SliderFlat"}
             <SliderFlat> { text: "Default" }
@@ -108,6 +115,12 @@ live_design!{
                 text: "label_size",
                 draw_bg: {label_size: 150. },
             }
+
+            <Hr> {}
+            <H4> { text: "SliderRoundGradientY"}
+            <SliderRoundGradientY> { text: "min/max", min: 0., max: 100. }
+            <SliderRoundGradientY> { text: "precision", precision: 20 }
+            <SliderRoundGradientY> { text: "stepped", step: 0.1 }
 
             <Hr> {}
             <H4> { text: "SliderRoundFlat"}

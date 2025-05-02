@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoMarkdown = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<MarkDown>" }
+            <Markdown> { body: dep("crate://self/resources/markdown.md") } 
         }
         demos = {
             <Markdown> {

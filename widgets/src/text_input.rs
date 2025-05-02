@@ -34,7 +34,7 @@ live_design! {
         width: 200,
         height: Fit,
         padding: <THEME_MSPACE_2> {}
-
+        flow: RightWrap,
         is_password: false,
         is_read_only: false,
         is_numeric_only: false

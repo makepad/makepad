@@ -8,7 +8,6 @@
         use makepad_widgets::vectorline::*;
         use crate::layout_templates::*;
 
-        use crate::tab_adaptiveview::*;
         use crate::tab_button::*;
         use crate::tab_checkbox::*;
         use crate::tab_commandtextinput::*;
@@ -45,8 +44,8 @@
             spacing: 0.
         }
 
-        <H3> { draw_bg: {color: #f00}}
-                            
+        // <H3> { draw_bg: {color: #f00}}
+ 
         App = {{App}} {
             ui: <Window> {
                 width: Fill, height: Fill,
@@ -113,7 +112,6 @@
                             tabs: [
                                 tOverview,
                                 tLayoutDemos,
-                                tAdaptiveView,
                                 tButton,
                                 tCheckBox,
                                 tCommandTextInput,
@@ -146,7 +144,6 @@
 
                         tOverview = Tab { name: "Widgetset Overview", template: PermanentTab, kind: TabOverview }
                         tLayoutDemos = Tab { name: "Layout Demos", template: PermanentTab, kind: TabLayoutDemos }
-                        tAdaptiveView = Tab { name: "Adaptive View", template: PermanentTab, kind: TabAdaptiveView }
                         tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
                         tCheckBox = Tab { name: "CheckBox", template: PermanentTab, kind: TabCheckBox }
                         tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
@@ -175,7 +172,6 @@
                         
                         TabOverview = <UIZooTab> { <WidgetsOverview> {} }
                         TabLayoutDemos = <UIZooTab> { <DemoLayout> {} }
-                        TabAdaptiveView = <UIZooTab> { <DemoAdaptiveView> {} }
                         TabButton = <UIZooTab> { <DemoButton> {} }
                         TabCheckBox = <UIZooTab> { <DemoCheckBox> {} }
                         TabCommandTextInput = <UIZooTab> { <DemoCommandTextInput> {} }
@@ -253,7 +249,6 @@
             crate::layout_templates::live_design(cx);
             crate::demofiletree::live_design(cx);
 
-            crate::tab_adaptiveview::live_design(cx);
             crate::tab_button::live_design(cx);
             crate::tab_checkbox::live_design(cx);
             crate::tab_commandtextinput::live_design(cx);
@@ -346,6 +341,10 @@
                 btn.set_text(cx,&format!("Styled button clicked: {}", self.counter));
             }
 
+            if self.ui.button(id!(find)).clicked(&actions) {
+                
+            }
+
             if self.ui.button(id!(iconbutton)).clicked(&actions) {
                 log!("ICON BUTTON CLICKED {}", self.counter);
                 self.counter += 1;
@@ -368,7 +367,6 @@
     }
 
     fn handle_startup(&mut self, cx: &mut Cx) {
-
         let ui = self.ui.clone();
         let db = DataBindingStore::from_nodes(self.bindings.live_read());
         Self::data_bind(db.data_to_widgets(cx, &ui));
