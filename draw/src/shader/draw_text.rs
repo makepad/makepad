@@ -298,15 +298,19 @@ impl DrawText {
 
     pub fn layout(
         &self,
-        cx: &mut Cx2d,
+        cx: &mut Cx,
         first_row_indent_in_lpxs: f32,
         first_row_min_line_spacing_below_in_lpxs: f32,
         wrap_width_in_lpxs: Option<f32>,
         align: Align,
         text: &str,
     ) -> Rc<LaidoutText> {
+        CxDraw::lazy_construct_fonts(cx);
+        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let mut fonts = fonts.borrow_mut();
+
         let text_len = text.len();
-        cx.fonts.borrow_mut().get_or_layout(BorrowedLayoutParams {
+        fonts.get_or_layout(BorrowedLayoutParams {
             text,
             spans: &[Span {
                 style: Style {
