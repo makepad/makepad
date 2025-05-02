@@ -1373,6 +1373,7 @@ impl Widget for TextInput {
         self.history.clear();
         self.laidout_text = None;
         self.draw_bg.redraw(cx);
+        self.check_text_is_empty(cx);
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
