@@ -1078,7 +1078,7 @@ impl Drop for CodeSession {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Default, PartialEq)]
 pub struct SessionId(usize);
 
 #[derive(Debug)]
