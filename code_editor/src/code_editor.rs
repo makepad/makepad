@@ -143,7 +143,7 @@ live_design! {
         }
         draw_indent_guide: {
            // draw_depth: 1.0,
-            color: (THEME_COLOR_U_2),
+            color: (THEME_COLOR_U_2)
         }
         draw_decoration: {
           //  draw_depth: 2.0,
@@ -234,7 +234,7 @@ pub struct CodeEditor {
     #[live] draw_cursor: DrawColor,
     #[live] draw_cursor_bg: DrawColor,
     #[live] draw_bg: DrawColor,
-    #[rust(KeepCursorInView::Off)] keep_cursor_in_view: KeepCursorInView,
+    #[rust(KeepCursorInView::Off)] pub keep_cursor_in_view: KeepCursorInView,
     #[rust] last_cursor_screen_pos: Option<DVec2>,
     #[live] pad_left_top: DVec2, 
     #[rust] cell_size: DVec2,
@@ -250,7 +250,8 @@ pub struct CodeEditor {
     #[live(false)] read_only: bool,
     #[live(true)] show_gutter: bool,
     #[live(2usize)] gutter_pad: usize,
-        
+    
+    
     #[live(0.5)] blink_speed: f64,
 
     #[animator] animator: Animator,
@@ -258,7 +259,7 @@ pub struct CodeEditor {
     #[rust] blink_timer: Timer,
 }
 
-enum KeepCursorInView {
+pub enum KeepCursorInView {
     Once,
     Always(DVec2, NextFrame),
     LockStart,

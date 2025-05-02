@@ -4,6 +4,7 @@ use {
         {CodeDocument, decoration::{DecorationSet}, CodeSession},
         makepad_widgets::*,
         CodeEditor,
+        code_editor::KeepCursorInView,
     },
     std::{
         env,
@@ -29,6 +30,8 @@ pub struct CodeView{
     #[wrap] #[live] pub editor: CodeEditor,
     // alright we have to have a session and a document.
      #[rust] pub session: Option<CodeSession>,
+     #[live(false)] keep_cursor_at_end: bool,
+     
     #[live] text: ArcStringMut,
 }
 
@@ -39,6 +42,10 @@ impl CodeView{
             let doc = CodeDocument::new(self.text.as_ref().into(), dec);
             self.session = Some(CodeSession::new(doc));
             self.session.as_mut().unwrap().handle_changes();
+            if self.keep_cursor_at_end{
+                self.session.as_mut().unwrap().set_cursor_at_file_end();
+                self.editor.keep_cursor_in_view = KeepCursorInView::Once
+            }
         }
     }
 }

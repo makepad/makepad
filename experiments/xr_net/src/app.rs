@@ -76,9 +76,9 @@ impl AppMain for App {
             if let Some(mut xr_hands) = self.ui.xr_hands(id!(xr_hands)).borrow_mut(){
                 while let Ok(msg) = self.xr_net.incoming_receiver.try_recv(){
                     match msg{
-                        XrNetIncoming::Join{state,peer}=>xr_hands.join_peer(cx, peer.to_live_id(), state),
+                        XrNetIncoming::Join{state,peer}=>xr_hands.update_peer(cx, peer.to_live_id(), state, e),
                         XrNetIncoming::Leave{peer}=>xr_hands.leave_peer(cx, peer.to_live_id()),
-                        XrNetIncoming::Update{state,peer}=>xr_hands.update_peer(cx, peer.to_live_id(), state),
+                        XrNetIncoming::Update{state,peer}=>xr_hands.update_peer(cx, peer.to_live_id(), state, e),
                     }
                 }
             }
