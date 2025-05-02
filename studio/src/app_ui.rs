@@ -547,35 +547,10 @@ live_design!{
                     flow: Down,
                     <DockToolbar> {
                         content = {
-                            align: { x: 0., y: 0.5 }
-                            spacing: (THEME_SPACE_1)
-                            <View> {
-                                align: { x: 0., y: 0.5 }
-                                width: Fit, height: Fit,
-                                flow: Right,
-                                spacing: 0.,
-                                <ButtonFlatter> {
-                                    width: 25.
-                                    text: ""
-                                    icon_walk: { width: 12. }
-                                    draw_icon: {
-                                        svg_file: dep("crate://self/resources/icons/icon_filetree_folder_create.svg"),
-                                    }
-                                }
-                                <ButtonFlatter> {
-                                    width: 25.
-                                    text: ""
-                                    icon_walk: { width: 9.5 }
-                                    draw_icon: {
-                                        svg_file: dep("crate://self/resources/icons/icon_filetree_file_create.svg"),
-                                    }
-                                }
+                            <TextInput> {
+                                width: Fill,
+                                empty_text: "Filter",
                             }
-                        }
-                        <Vr> {}
-                        <TextInput> {
-                            width: Fill,
-                            empty_text: "Filter",
                         }
                     }
                     file_tree = <StudioFileTree> {}
