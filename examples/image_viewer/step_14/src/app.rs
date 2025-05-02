@@ -99,12 +99,7 @@ live_design! {
         ui: <Root> {
             <Window> {
                 body = <View> {
-                    page_flip = <PageFlip> {
-                        active_page: image_browser,
-
-                        image_browser = <ImageBrowser> {}
-                        slideshow = <Slideshow> {}
-                    }
+                    <ImageBrowser> {}
                 }
             }
         }
@@ -198,13 +193,6 @@ impl LiveRegister for App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(id!(slideshow_button)).clicked(&actions) {
-            self.ui
-                .page_flip(id!(page_flip))
-                .set_active_page(cx, live_id!(slideshow));
-            self.ui.view(id!(slideshow.overlay)).set_key_focus(cx);
-        }
-
         if self.ui.button(id!(navigate_left)).clicked(&actions) {
             self.navigate_left(cx);
         }
@@ -216,10 +204,6 @@ impl MatchEvent for App {
             self.ui.view(id!(slideshow.overlay)).key_down(&actions)
         {
             match event.key_code {
-                KeyCode::Escape => self
-                    .ui
-                    .page_flip(id!(page_flip))
-                    .set_active_page(cx, live_id!(image_browser)),
                 KeyCode::ArrowLeft => self.navigate_left(cx),
                 KeyCode::ArrowRight => self.navigate_right(cx),
                 _ => {}

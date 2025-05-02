@@ -47,13 +47,6 @@ live_design! {
         }
     }
 
-    ImageBrowser = <View> {
-        flow: Down,
-
-        <MenuBar> {}
-        <ImageGrid> {}
-    }
-
     SlideshowNavigateButton = <Button> {
         width: 50,
         height: Fill,
@@ -99,7 +92,7 @@ live_design! {
         ui: <Root> {
             <Window> {
                 body = <View> {
-                    <ImageBrowser> {}
+                    <MenuBar> {}
                 }
             }
         }

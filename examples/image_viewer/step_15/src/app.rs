@@ -7,36 +7,11 @@ live_design! {
     PLACEHOLDER = dep("crate://self/resources/placeholder.jpg");
     LEFT_ARROW = dep("crate://self/resources/left_arrow.svg");
     RIGHT_ARROW = dep("crate://self/resources/right_arrow.svg");
-    LOOKING_GLASS = dep("crate://self/resources/looking_glass.svg");
-
-    SearchBox = <View> {
-        width: Fit,
-        height: Fit,
-        align: { y: 0.5 }
-        margin: { left: 60 }
-
-        <Icon> {
-            icon_walk: { width: 12.0 }
-            draw_icon: {
-                color: #8,
-                svg_file: (LOOKING_GLASS)
-            }
-        }
-
-        query = <TextInput> {
-            empty_text: "Search",
-            draw_text: {
-                text_style: { font_size: 10 },
-                color: #8
-            }
-        }
-    }
 
     MenuBar = <View> {
         width: Fill,
         height: Fit,
 
-        <SearchBox> {}
         <Filler> {}
         slideshow_button = <Button> {
             text: "Slideshow"
