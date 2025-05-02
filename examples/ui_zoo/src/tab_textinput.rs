@@ -87,7 +87,7 @@ live_design!{
                                 self.focus
                             ),
                             mix(self.color_empty, self.color_empty_focus, self.hover),
-                            self.is_empty
+                            self.empty
                         )
                     }
                 }
@@ -155,7 +155,7 @@ live_design!{
                                 self.focus
                             ),
                             mix(self.color_empty, self.color_empty_focus, self.hover),
-                            self.is_empty
+                            self.empty
                         )
                     }
                 }
