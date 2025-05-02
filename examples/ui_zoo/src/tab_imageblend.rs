@@ -17,7 +17,7 @@ live_design!{
             blendbutton = <Button> { text: "Blend Image"}
 
             blendimage = <ImageBlend> {
-                align: { x: 0.0, y: 0.0 }
+                align: { x:0.0, y: 0.0 }
                 image_a: {
                     source: dep("crate://self/resources/ducky.png"),
                     fit: Smallest

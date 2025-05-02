@@ -69,6 +69,21 @@ impl Default for AiChatManager{
                         AiContextFile::new("Snake game example","examples/snake/src/app.rs"),
                         AiContextFile::new("Mixed reality example","examples/mixed_reality/src/app.rs"),
                         AiContextFile::new("Slides viewer example","examples/slides/src/app.rs"),
+                    ]
+                },
+                BaseContext{
+                    name: "Makepad DSL Long".to_string(),
+                    apply: AiApply::PatchDSL,
+                    system_pre: live_id!(UI_PRE),
+                    system_post: live_id!(UI_POST),
+                    general_post: live_id!(GENERAL_POST),
+                    files: vec![
+                        AiContextFile::new("News feed example","examples/news_feed/src/app.rs"),
+                        AiContextFile::new("Todo example","examples/todo/src/app.rs"),
+                        AiContextFile::new("Shader example","examples/shader/src/app.rs"),
+                        AiContextFile::new("Snake game example","examples/snake/src/app.rs"),
+                        AiContextFile::new("Mixed reality example","examples/mixed_reality/src/app.rs"),
+                        AiContextFile::new("Slides viewer example","examples/slides/src/app.rs"),
                         AiContextFile::new("UI Examples","examples/ui_zoo/src/app.rs"),
                         AiContextFile::new("UI Examples","examples/ui_zoo/src/demofiletree.rs"),
                         AiContextFile::new("UI Examples","examples/ui_zoo/src/layout_templates.rs"),
@@ -296,9 +311,9 @@ impl Default for AiChatManager{
                     files:vec![]
                 },
                 AiProject{
-                    name:"makepad-example-simple".to_string(),
+                    name:"makepad-experiment-ai-one".to_string(),
                     files:vec![
-                        AiContextFile::new("Main app to rewrite","examples/simple/src/app.rs")
+                        AiContextFile::new("Main app to rewrite","experiments/ai_one/src/app.rs")
                     ]
                 },
             ]
@@ -888,7 +903,6 @@ impl AiChatManager{
                     let contents = GoogleAiChatPrompt {
                         contents,
                     };
-                    println!("{:?}", contents);
                     request.set_json_body(contents);
                     (request, ai_model.backend.clone())
                 }
