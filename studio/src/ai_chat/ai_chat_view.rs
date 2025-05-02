@@ -430,7 +430,7 @@ impl Widget for AiChatView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         let data = scope.data.get_mut::<AppData>().unwrap();
         let session_id = scope.path.from_end(0);
-        
+        crate::log!("DRAWING CHATG");
         if let Some(EditSession::AiChat(chat_id)) = data.file_system.get_session_mut(session_id){
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get(&chat_id){
