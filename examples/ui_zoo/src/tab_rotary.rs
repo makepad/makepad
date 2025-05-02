@@ -17,10 +17,10 @@ live_design!{
             <UIZooRowH> {
                 align: { x: 0. , y: 0.}
                 <Rotary> {
-                    text: "Default",
+                    text: "Label",
                 }
                 <Rotary> {
-                    text: "Default",
+                    text: "Label",
                     draw_bg: {
                         // border_size: 3.
                         gap: 0.,
@@ -35,7 +35,7 @@ live_design!{
                     }
                 }
                 <Rotary> {
-                    text: "ValSize",
+                    text: "Label",
                     draw_bg: {
                         val_size: 30.
                     }
@@ -43,7 +43,7 @@ live_design!{
                 <Rotary> {
                     width: Fill,
                     height: 300
-                    text: "val_padding",
+                    text: "Label",
                     draw_bg: {
                         // border_size: 5.
                         val_size: 30.
@@ -56,10 +56,10 @@ live_design!{
             <UIZooRowH> {
                 align: { x: 0. , y: 0.}
                 <RotaryGradientY> {
-                    text: "Default",
+                    text: "Label",
                 }
                 <RotaryGradientY> {
-                    text: "Default",
+                    text: "Label",
                     draw_bg: {
                         // border_size: 3.
                         gap: 0.,
@@ -74,7 +74,7 @@ live_design!{
                     }
                 }
                 <RotaryGradientY> {
-                    text: "ValSize",
+                    text: "Label",
                     draw_bg: {
                         val_size: 30.
                     }
@@ -82,7 +82,7 @@ live_design!{
                 <RotaryGradientY> {
                     width: Fill,
                     height: 300
-                    text: "val_padding",
+                    text: "Label",
                     draw_bg: {
                         // border_size: 5.
                         val_size: 30.
@@ -129,7 +129,7 @@ live_design!{
             <H4> { text: "RotaryFlat" }
             <UIZooRowH> {
                 <RotaryFlat> {
-                    text: "Default",
+                    text: "Label",
                 }
                 <RotaryFlat> {
                     text: "Gap",
@@ -138,13 +138,13 @@ live_design!{
                     }
                 }
                 <RotaryFlat> {
-                    text: "ValSize",
+                    text: "Label",
                     draw_bg: {
                         val_size: 30.
                     }
                 }
                 <RotaryFlat> {
-                    text: "val_padding",
+                    text: "Label",
                     draw_bg: {
                         val_size: 30.
                         val_padding: 20.,
