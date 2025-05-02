@@ -1076,8 +1076,6 @@ impl TextInput {
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
         let inner_walk = self.inner_walk();
         let text_rect = if self.text.is_empty() {
-            self.animator_play(cx, id!(empty.on));
-            self.draw_text.is_empty = 1.0;
             self.draw_text.draw_walk(
                 cx,
                 inner_walk,
@@ -1085,7 +1083,6 @@ impl TextInput {
                 &self.empty_text
             )
         } else {
-            self.draw_text.is_empty = 0.0;
             let laidout_text = self.laidout_text.as_ref().unwrap();
             self.draw_text.draw_walk_laidout(
                 cx,
