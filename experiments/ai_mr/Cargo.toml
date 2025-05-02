@@ -1,0 +1,12 @@
+[package]
+name = "makepad-experiment-ai-mr"
+version = "0.6.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad ai generated example"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "db3R5Gxh5Njhx8E-8kuZ2plQ1AI="
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "0.6.0" }
+
