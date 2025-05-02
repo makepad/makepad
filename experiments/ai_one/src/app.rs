@@ -6,7 +6,7 @@ live_design!{
     use link::widgets::*;
     use link::theme::*;
     use link::shaders::*;
-        
+                
     SnakeGame = {{SnakeGame}}{
         width: Fill,
         height: Fill,
@@ -16,7 +16,7 @@ live_design!{
             }
         }
     }
-    
+            
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
@@ -67,7 +67,7 @@ struct SnakeGame{
     #[live] draw_wall: DrawQuad,
     #[live] draw_snake: DrawQuad,
     #[live] draw_head: DrawQuad,
-    
+            
     #[rust] field: Vec<Field>,
     #[rust] snake_body: VecDeque<(usize, usize)>,
     #[rust] snake_head: (usize, usize),
@@ -82,16 +82,16 @@ impl SnakeGame{
         if self.game_over {
             return;
         }
-
+                
         let (grid_w, grid_h) = self.grid_size;
         let (head_x, head_y) = self.snake_head;
         let (dir_x, dir_y) = self.snake_direction;
-
+                
         let next_x = (head_x as isize + dir_x + grid_w as isize) as usize % grid_w;
         let next_y = (head_y as isize + dir_y + grid_h as isize) as usize % grid_h;
-
+                
         let next_idx = next_y * grid_w + next_x;
-
+                
         match self.field[next_idx] {
             Field::Wall | Field::Snake => {
                 self.game_over = true;
@@ -103,41 +103,41 @@ impl SnakeGame{
                 // Mark old head as body
                 let old_head_idx = head_y * grid_w + head_x;
                 self.field[old_head_idx] = Field::Snake;
-
+                                
                 // Add new head
                 self.snake_head = (next_x, next_y);
                 self.snake_body.push_front(self.snake_head);
                 self.field[next_idx] = Field::Head;
-
+                                
                 // Remove tail
                 if let Some(tail) = self.snake_body.pop_back() {
                     // Only remove tail from field if it's not the new head (snake length 1)
-                     if tail != self.snake_head {
-                         let tail_idx = tail.1 * grid_w + tail.0;
-                         // Ensure we don't erase the head if snake is very short and wraps
-                         if self.field[tail_idx] != Field::Head {
+                    if tail != self.snake_head {
+                        let tail_idx = tail.1 * grid_w + tail.0;
+                        // Ensure we don't erase the head if snake is very short and wraps
+                        if self.field[tail_idx] != Field::Head {
                             self.field[tail_idx] = Field::Empty;
-                         }
-                     } else {
+                        }
+                    } else {
                         // If tail is head, put it back in deque
                         self.snake_body.push_back(tail);
-                     }
+                    }
                 }
             }
         }
         self.redraw(cx);
     }
-
+        
     fn restart_game(&mut self) {
         self.field.clear();
         self.field.resize(self.grid_size.0 * self.grid_size.1, Field::Empty);
         self.snake_body.clear();
-
+                
         self.snake_head = (self.grid_size.0 / 2, self.grid_size.1 / 2);
         self.snake_body.push_front(self.snake_head);
         let head_idx = self.snake_head.1 * self.grid_size.0 + self.snake_head.0;
         self.field[head_idx] = Field::Head;
-
+                
         self.snake_direction = (1, 0);
         self.game_over = false;
     }
@@ -157,7 +157,7 @@ impl Widget for SnakeGame{
         let cell_w = bg_rect.size.x / self.grid_size.0 as f64;
         let cell_h = bg_rect.size.y / self.grid_size.1 as f64;
         let cell_size = dvec2(cell_w, cell_h);
-
+                
         for y in 0..self.grid_size.1{
             for x in 0..self.grid_size.0{
                 let field = &self.field[y * self.grid_size.0 + x];
@@ -182,12 +182,12 @@ impl Widget for SnakeGame{
         self.draw_bg.end(cx);
         DrawStep::done()
     }
-    
+            
     fn handle_event(&mut self, cx:&mut Cx, event:&Event, _scope:&mut Scope){
-         if self.game_timer.is_event(event).is_some(){
+        if self.game_timer.is_event(event).is_some(){
             self.next_tick(cx);
-         }
-
+        }
+                
         match event.hits(cx, self.draw_bg.area()){
             Hit::FingerDown(fd)=>{
                 cx.set_key_focus(self.draw_bg.area());
@@ -197,7 +197,7 @@ impl Widget for SnakeGame{
                     self.restart_game();
                     self.game_timer = cx.start_interval(0.1); // Restart timer
                     self.redraw(cx);
-                 } else if !self.game_over {
+                } else if !self.game_over {
                     let current_dir = self.snake_direction;
                     match ke.key_code {
                         KeyCode::ArrowUp if current_dir != (0, 1) => {
@@ -214,7 +214,7 @@ impl Widget for SnakeGame{
                         }
                         _=>()
                     }
-                 }
+                }
             }
             _=>()
         }
@@ -226,7 +226,7 @@ app_main!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     #[live] ui: WidgetRef,
- }
+}
  
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) { 
