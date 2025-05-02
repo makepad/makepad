@@ -59,8 +59,8 @@ impl Default for AiChatManager{
                 BaseContext{
                     name: "Makepad Game".to_string(),
                     apply: AiApply::WholeFile,
-                    system_pre: live_id!(UI_PRE),
-                    system_post: live_id!(UI_POST),
+                    system_pre: live_id!(GAME_PRE),
+                    system_post: live_id!(GAME_POST),
                     general_post: live_id!(GENERAL_POST),
                     files: vec![
                         AiContextFile::new("Snake game example","examples/snake/src/app.rs"),
@@ -69,8 +69,8 @@ impl Default for AiChatManager{
                 BaseContext{
                     name: "Makepad DSL".to_string(),
                     apply: AiApply::PatchDSL,
-                    system_pre: live_id!(GAME_PRE),
-                    system_post: live_id!(GAME_POST),
+                    system_pre: live_id!(UI_PRE),
+                    system_post: live_id!(UI_POST),
                     general_post: live_id!(GENERAL_POST),
                     files: vec![
                         AiContextFile::new("News feed example","examples/news_feed/src/app.rs"),
