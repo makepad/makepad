@@ -18,6 +18,7 @@ live_design!{
         editor: <CodeEditor>{
             pad_left_top: vec2(0.0,-0.0)
             height:Fit
+            empty_page_at_end: false,
             read_only: true,
             show_gutter: false
         }
