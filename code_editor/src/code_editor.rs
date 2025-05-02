@@ -250,7 +250,8 @@ pub struct CodeEditor {
     #[live(false)] read_only: bool,
     #[live(true)] show_gutter: bool,
     #[live(2usize)] gutter_pad: usize,
-    
+    #[live(true)] empty_page_at_end: bool,
+        
     
     #[live(0.5)] blink_speed: f64,
 
@@ -543,7 +544,8 @@ impl CodeEditor {
         
         cx.turtle_mut().set_used(
             session.layout().width() * self.cell_size.x +self.pad_left_top.x,
-            self.height_scale * session.layout().height() * self.cell_size.y + if height_is_fit{0.0} else {self.viewport_rect.size.y}
+            self.height_scale * session.layout().height() * self.cell_size.y + 
+            if height_is_fit || !self.empty_page_at_end{0.0} else {self.viewport_rect.size.y}
             +self.pad_left_top.y * self.height_scale
         );
         

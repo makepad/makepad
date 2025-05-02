@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoButton = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: dep("crate://self/resources/example.md") } 
+            <Markdown> { body: dep("crate://self/resources/button.md") } 
         }
         demos = {
             <H4> { text: "Standard"}

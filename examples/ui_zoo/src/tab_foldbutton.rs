@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoFoldButton = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<FoldButton>"}
+            <Markdown> { body: dep("crate://self/resources/foldbutton.md") } 
         }
         demos = {
             <H4> { text: "Standard" }

@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoImageBlend = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<ImageBlend>"}
+            <Markdown> { body: dep("crate://self/resources/imageblend.md") } 
         }
         demos = {
             <H4> { text: "Standard" }
