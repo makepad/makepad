@@ -77,18 +77,11 @@ impl Widget for ImageGrid {
         walk: Walk,
     ) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
-            if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                let state = scope.data.get_mut::<State>().unwrap();
-                
-                list.set_item_range(cx, 0, state.num_rows());
+            if let Some(mut list) = item.as_portal_list().borrow_mut() {                
+                list.set_item_range(cx, 0, 3);
                 while let Some(row_idx) = list.next_visible_item(cx) {
-                    if row_idx >= state.num_rows() {
-                        continue;
-                    }
-                    
                     let row = list.item(cx, row_idx, live_id!(ImageRow));
-                    let mut scope = Scope::with_data_props(state, &row_idx);
-                    row.draw_all(cx, &mut scope);
+                    row.draw_all(cx, &mut Scope::empty());
                 }
             }
         }

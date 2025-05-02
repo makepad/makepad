@@ -117,7 +117,7 @@ pub struct App {
 }
 
 impl App {
-    fn load_images(&mut self, cx: &mut Cx, path: &Path) {
+    fn load_image_paths(&mut self, cx: &mut Cx, path: &Path) {
         self.state.image_paths.clear();
         for entry in path.read_dir().unwrap() {
             let entry = entry.unwrap();
@@ -181,7 +181,7 @@ impl AppMain for App {
 impl LiveHook for App {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         let path = std::env::args().nth(1).expect("missing path");
-        self.load_images(cx, path.as_ref());
+        self.load_image_paths(cx, path.as_ref());
     }
 }
 
