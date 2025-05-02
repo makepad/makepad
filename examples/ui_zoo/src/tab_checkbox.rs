@@ -10,20 +10,7 @@ live_design!{
 
     pub DemoCheckBox = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "Checkbox"}
-            <P> {
-                text: "The `CheckBox` widget provides a control for user input in the form of a checkbox. It allows users to select or deselect options."
-            }
-
-            <H4> { text: "Layouting"}
-            <P> {
-                text: "Complete layouting feature set support."
-            }
-
-            <H4> { text: "Draw Shaders"}
-            <P> {
-                text: "Complete layouting feature set support."
-            }
+            <Markdown> { body: dep("crate://self/resources/checkbox.md") } 
         }
         demos = {
             <H4> { text: "Checkbox"}

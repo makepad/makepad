@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoRadioButton = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<RadioButton>"}
+            <Markdown> { body: dep("crate://self/resources/radiobutton.md") } 
         }
         demos = {
             <H4> { text: "Default"}
@@ -98,13 +98,9 @@ live_design!{
 
                             color_dither: 1.0
 
-                            color_1: #F00
-                            color_1_hover: #F44
-                            color_1_active: #F00
-
-                            color_2: #F80
-                            color_2_hover: #FA4
-                            color_2_active: #F80
+                            color: #F00
+                            color_hover: #F44
+                            color_active: #F00
 
                             border_color_1: #0
                             border_color_1_hover: #F
@@ -154,13 +150,9 @@ live_design!{
 
                             color_dither: 1.0
 
-                            color_1: #F00
-                            color_1_hover: #F44
-                            color_1_active: #F00
-
-                            color_2: #F80
-                            color_2_hover: #FA4
-                            color_2_active: #F80
+                            color: #F00
+                            color_hover: #F44
+                            color_active: #F00
 
                             border_color_1: #0
                             border_color_1_hover: #F
@@ -210,13 +202,9 @@ live_design!{
 
                             color_dither: 1.0
 
-                            color_1: #F00
-                            color_1_hover: #F44
-                            color_1_active: #F00
-
-                            color_2: #F80
-                            color_2_hover: #FA4
-                            color_2_active: #F80
+                            color: #F00
+                            color_hover: #F44
+                            color_active: #F00
 
                             border_color_1: #0
                             border_color_1_hover: #F
@@ -266,13 +254,9 @@ live_design!{
 
                             color_dither: 1.0
 
-                            color_1: #F00
-                            color_1_hover: #F44
-                            color_1_active: #F00
-
-                            color_2: #F80
-                            color_2_hover: #FA4
-                            color_2_active: #F80
+                            color: #F00
+                            color_hover: #F44
+                            color_active: #F00
 
                             border_color_1: #0
                             border_color_1_hover: #F
@@ -761,13 +745,9 @@ live_design!{
 
                         color_dither: 1.0
 
-                        color_1: #F00
-                        color_1_hover: #F44
-                        color_1_active: #300
-
-                        color_2: #F80
-                        color_2_hover: #FA4
-                        color_2_active: #310
+                        color: #F00
+                        color_hover: #F44
+                        color_active: #300
 
                         border_color_1: #0
                         border_color_1_hover: #F
@@ -793,13 +773,9 @@ live_design!{
 
                         color_dither: 1.0
 
-                        color_1: #F00
-                        color_1_hover: #F44
-                        color_1_active: #300
-
-                        color_2: #F80
-                        color_2_hover: #FA4
-                        color_2_active: #310
+                        color: #F00
+                        color_hover: #F44
+                        color_active: #300
 
                         border_color_1: #0
                         border_color_1_hover: #F
@@ -825,13 +801,9 @@ live_design!{
 
                         color_dither: 1.0
 
-                        color_1: #F00
-                        color_1_hover: #F44
-                        color_1_active: #300
-
-                        color_2: #F80
-                        color_2_hover: #FA4
-                        color_2_active: #310
+                        color: #F00
+                        color_hover: #F44
+                        color_active: #300
 
                         border_color_1: #0
                         border_color_1_hover: #F
@@ -857,13 +829,9 @@ live_design!{
 
                         color_dither: 1.0
 
-                        color_1: #F00
-                        color_1_hover: #F44
-                        color_1_active: #300
-
-                        color_2: #F80
-                        color_2_hover: #FA4
-                        color_2_active: #310
+                        color: #F00
+                        color_hover: #F44
+                        color_active: #300
 
                         border_color_1: #0
                         border_color_1_hover: #F
@@ -902,13 +870,9 @@ live_design!{
 
                         color_dither: 1.0
 
-                        color_1: #F00
-                        color_1_hover: #F44
-                        color_1_active: #300
-
-                        color_2: #F80
-                        color_2_hover: #FA4
-                        color_2_active: #310
+                        color: #F00
+                        color_hover: #F44
+                        color_active: #300
 
                         border_color_1: #0
                         border_color_1_hover: #F
@@ -933,13 +897,9 @@ live_design!{
 
                         color_dither: 1.0
 
-                        color_1: #F00
-                        color_1_hover: #F44
-                        color_1_active: #300
-
-                        color_2: #F80
-                        color_2_hover: #FA4
-                        color_2_active: #310
+                        color: #F00
+                        color_hover: #F44
+                        color_active: #300
 
                         border_color_1: #0
                         border_color_1_hover: #F
@@ -964,13 +924,9 @@ live_design!{
 
                         color_dither: 1.0
 
-                        color_1: #F00
-                        color_1_hover: #F44
-                        color_1_active: #300
-
-                        color_2: #F80
-                        color_2_hover: #FA4
-                        color_2_active: #310
+                        color: #F00
+                        color_hover: #F44
+                        color_active: #300
 
                         border_color_1: #0
                         border_color_1_hover: #F
@@ -995,13 +951,9 @@ live_design!{
 
                         color_dither: 1.0
 
-                        color_1: #F00
-                        color_1_hover: #F44
-                        color_1_active: #300
-
-                        color_2: #F80
-                        color_2_hover: #FA4
-                        color_2_active: #310
+                        color: #F00
+                        color_hover: #F44
+                        color_active: #300
 
                         border_color_1: #0
                         border_color_1_hover: #F

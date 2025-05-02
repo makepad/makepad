@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoCommandTextInput = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<CommandTextInput>"}
+            <Markdown> { body: dep("crate://self/resources/commandtextinput.md") } 
         }
         demos = {
             <H4> { text: "Standard" }

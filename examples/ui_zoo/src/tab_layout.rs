@@ -8,94 +8,263 @@ live_design!{
     use link::widgets::*;
     use crate::layout_templates::*;
 
-    BoxA = <RoundedView> {
-        height: Fill, width: Fill,
-        padding: 10., margin: 0.,
+    Box = <RoundedView> {
         show_bg: true,
         draw_bg: { color: #0F02 }
-        flow: Down,
-        align: { x: 0.5, y: 0.5}
-        <P> { width: Fit, text: "width: Fill\nheight: Fill\nflow: Down"}
+        padding: 3.
+        align: { x: 0.5, y: 0.5 }
+        draw_bg: {
+            border_size: 1.
+            border_radius: 0.
+            border_color: #fff8
+        }
     }
 
-    BoxB = <RoundedView> {
-        height: Fit, width: Fit,
-        padding: 10., margin: 0.,
-        show_bg: true,
-        draw_bg: { color: #F002 }
-        flow: Down,
-        align: { x: 0.5, y: 0.5}
-        <P> { width: Fit, text: "width: Fit\nheight: Fit\nflow: Down"}
+    BoxLabel = <P> {
+        width: Fit,
+        align: { x: 0.5 }
     }
-
-    BoxC = <RoundedView> {
-        height: 200, width: Fill,
-        padding: 10., margin: 0.,
-        spacing: 10.
-        show_bg: true,
-        draw_bg: { color: #0002 }
-        flow: Right,
-        align: { x: 0.5, y: 0.5}
-        <P> { width: Fit, text: "width: Fill\nheight: 200\nflow: Right,\n spacing: 10."}
-    }
-
 
 
     pub DemoLayout = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "LayoutDemos"}
-            <Markdown> {
-                body: "
-                The `Layout` struct controls the layout properties of elements, such as positioning, alignment, spacing, padding, and scrolling.
-                ## Fields
-                ### align
-                Specifies how child elements are aligned within the parent container along the horizontal (`x`) and vertical (`y`) axes.
-                - `x` (f64 = 0.0): Horizontal alignment. A value between `0.0` (left) and `1.0` (right).
-                - `y` (f64 = 0.0): Vertical alignment. A value between `0.0` (top) and `1.0` (bottom).
-                ### clip_x (bool = true)
-                Enables or disables horizontal clipping. When `true`, content that extends beyond the container's horizontal bounds is clipped.
-                ### clip_y (bool = true)
-                Enables or disables vertical clipping. When `true`, content that extends beyond the container's vertical bounds is clipped.
-                ### flow (`Flow::Right`)
-                Determines the layout direction of child elements within the container.
-                Possible values:
-                - `Flow::Right`: Arranges child elements horizontally from left to right.
-                - `Flow::Down`: Arranges child elements vertically from top to bottom.
-                - `Flow::Overlay`: Stacks child elements on top of each other.
-                - `Flow::RightWrap`: Arranges child elements horizontally, wrapping to the next line when the right edge is reached.
-                ### line_spacing (f64 = 0.0)
-                Specifies the spacing between lines when wrapping content or arranging elements in a vertical flow.
-                ### padding
-                Sets the internal padding of the container, controlling the distance between the container's borders and its content.
-                #### Padding Fields
-                - `left` (f64 = 0.0): Padding on the left side.
-                - `top` (f64 = 0.0): Padding on the top side.
-                - `right` (f64 = 0.0): Padding on the right side.
-                - `bottom` (f64 = 0.0): Padding on the bottom side.
-                ### scroll (DVec2 = vec2(0.0, 0.0))
-                Sets the scroll offset of the content within the container.
-                ### spacing (f64 = 0.0)
-                Specifies the spacing between child elements within the container.
-                ### Size
-                Defines how elements consume space within their parent container.
-                #### Size Variants
-                - `Size::Fixed(f64)`: Sets the element to a fixed size.
-                - `Size::Fill`: The element fills the remaining available space in the parent container, accounting for padding and margins.
-                - `Size::Fit`: The element sizes itself to fit its content.
-                - `Size::All`: The element takes up all available space in the parent container, ignoring any padding and margins.
-                "
-            }
+            <Markdown> { body: dep("crate://self/resources/layout.md") } 
         }
         demos = {
-            <BoxA> {}
-            <BoxB> {}
-            <BoxB> {}
-            <BoxC> {
-                <BoxB> {}
-                <BoxB> {}
-                <BoxA> {}
-                <Filler> {}
-                <BoxB> {}
+            <H4> { text: "Width & Height"}
+            <UIZooRowH> {
+                flow: Right,
+                height: 100.
+                <Box> {
+                    width: 100., height: 60.
+                    <BoxLabel> { text: "width: 100.\nheight: 60" }
+                }
+                <Box> {
+                    width: 100., height: Fill
+                    <BoxLabel> { text: "width: 100.\nheight: Fill" }
+                }
+                <Box> {
+                    width: 150., height: Fit
+                    <BoxLabel> { text: "width: 150.\nheight: Fit" }
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "Margin"}
+            <UIZooRowH> {
+                align: { x: 0., y: 0. }
+                flow: Right
+                spacing: 0.
+                <Box> {
+                    width: Fit, height: Fit,
+                    margin: 0.,
+                    <BoxLabel> { text: "margin: 0." }
+                }
+                <Box> {
+                    width: Fit, height: Fit,
+                    margin: 0.,
+                    <BoxLabel> { text: "margin: 0." }
+                }
+                <Box> {
+                    width: Fit, height: Fit,
+                    margin: 10.,
+                    <BoxLabel> { text: "margin: 10." }
+                }
+                <Box> {
+                    width: Fit, height: Fit,
+                    margin: {top: 0., left: 40, right: 0, bottom: 0.},
+                    <BoxLabel> { text: "margin: {top: 0., left: 40, right: 0, bottom: 0.}" }
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "Padding"}
+            <UIZooRowH> {
+                <Box> {
+                    width: Fit, height: Fit,
+                    padding: 20.
+                    <BoxLabel> { text: "padding: 20." }
+                }
+                <Box> {
+                    width: Fit, height: Fit,
+                    padding: { left: 40., right: 10. }
+                    <BoxLabel> { text: "padding: { left: 40., right: 10. }" }
+                }
+                <Box> {
+                    align: {x: 0., y: 0.}
+                    width: Fit, height: Fit,
+                    padding: { left: 40., bottom: 20., right: 25., top: 0. }
+                    <BoxLabel> { text: "padding: { left: 40., bottom: 20., right: 25., top: 0. }" }
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "Spacing"}
+            <Pbold> { text: "spacing: 10." }
+            <UIZooRowH> {
+                spacing: 10.
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+            }
+            <Pbold> { text: "spacing: 30." }
+            <UIZooRowH> {
+                spacing: 30.
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+            }
+
+            <Hr> {}
+            <H4> { text: "Flow Direction"}
+            <Pbold> { text: "flow: Right" }
+            <UIZooRowH> {
+                spacing: 10.
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+            }
+            <Pbold> { text: "flow: Down" }
+            <UIZooRowH> {
+                flow: Down,
+                spacing: 10.
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+                <Box> { height: 50, width: 50.}
+            }
+
+
+            <Hr> {}
+            <H4> { text: "Align"}
+            <Pbold> { text: "align: { x: 0., y: 0.}" }
+            <UIZooRowH> {
+                align: { x: 0., y: 0.}
+                <Box> { height: 100, width: 50.}
+                <Box> { height: 20, width: 50.}
+                <Box> { height: 50, width: 50.}
+            }
+            <Pbold> { text: "align: { x: 0.0, y: 0.5}" }
+            <UIZooRowH> {
+                align: { x: 0.0, y: 0.5}
+                <Box> { height: 100, width: 50.}
+                <Box> { height: 20, width: 50.}
+                <Box> { height: 50, width: 50.}
+            }
+            <Pbold> { text: "align: { x: 0., y: 1.}" }
+            <UIZooRowH> {
+                align: { x: 0.0, y: 1.0}
+                <Box> { height: 100, width: 50.}
+                <Box> { height: 20, width: 50.}
+                <Box> { height: 50, width: 50.}
+            }
+            <Pbold> { text: "align: { x: 0.5, y: 0.}" }
+            <UIZooRowH> {
+                align: { x: .5, y: 0.}
+                <Box> { height: 100, width: 50.}
+                <Box> { height: 20, width: 50.}
+                <Box> { height: 50, width: 50.}
+            }
+            <Pbold> { text: "align: { x: 0.0, y: 0.5}" }
+            <UIZooRowH> {
+                align: { x: 1.0, y: 1.}
+                <Box> { height: 100, width: 50.}
+                <Box> { height: 20, width: 50.}
+                <Box> { height: 50, width: 50.}
+            }
+
+
+            <Hr> {}
+            <H4> { text: "AdaptiveView"}
+            <UIZooRowH> {
+                width: Fill, height: 450.
+                flow: Down,
+                <P> { text: "Resize the window to make the UI update on lower resolutions."}
+                <AdaptiveView> {
+                    Desktop = {
+                        flow: Down,
+                        spacing: (THEME_SPACE_2)
+
+                        <View> {
+                            show_bg: true,
+                            draw_bg: {color: #800}
+
+                            width: Fill,
+                            height: Fit,
+                            padding: 10.
+
+                            <H2> { width: Fit, height: Fit, text: "Desktop"}
+                        }
+                        <View> {
+                            flow: Right,
+                            spacing: (THEME_SPACE_2)
+                            <View> {
+                                show_bg: true,
+                                draw_bg: {color: #008}
+
+                                width: 200,
+                                height: Fill,
+                                padding: 10.
+
+                                <H3> { width: Fit, height: Fit, text: "Menu"}
+                            }
+                            <View> {
+                                show_bg: true,
+                                draw_bg: {color: #080}
+
+                                width: Fill,
+                                height: Fill,
+                                padding: 10.
+
+                                <H3> { width: Fit, height: Fit, text: "Content"}
+                            }
+                        }
+                    } 
+
+                    Mobile = {
+                        flow: Down,
+                        show_bg: true,
+                        draw_bg: {color: #008}
+                        spacing: (THEME_SPACE_1)
+
+                        <View> {
+                            show_bg: true,
+                            draw_bg: {color: #800}
+
+                            width: Fill,
+                            height: Fit,
+                            padding: 10.
+
+                            <H2> { width: Fit, height: Fit, text: "Mobile"}
+                        }
+
+                        <View> {
+                            show_bg: true,
+                            draw_bg: {color: #008}
+
+                            width: 200,
+                            height: 100,
+                            padding: 10.
+
+                            <H3> { width: Fill, height: Fit, text: "Menu"}
+                        }
+
+                        <View> {
+                            show_bg: true,
+                            draw_bg: {color: #080}
+
+                            width: Fill,
+                            height: Fill,
+                            padding: 10.
+
+                            <H3> { width: Fit, height: Fit, text: "Content"}
+                        }
+                    } 
+
+                }
             }
         }
     }

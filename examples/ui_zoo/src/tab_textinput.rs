@@ -10,7 +10,7 @@ live_design!{
 
     pub DemoTextInput = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<TextInput>"}
+            <Markdown> { body: dep("crate://self/resources/textinput.md") } 
         }
         demos = {
             <H4> { text: "TextInput" }
@@ -22,7 +22,9 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "TextInput Inline Label" }
+            <H4> { text: "LextInput Inline Label"
+            }
+
             <TextInput> { empty_text: "Inline Label" }
 
             <Hr> {}

@@ -11,7 +11,7 @@ live_design!{
 
     pub DemoFT = <UIZooTabLayout_B> {
         desc = {
-            <H3> { text: "<FileTree>"}
+            <Markdown> { body: dep("crate://self/resources/filetree.md") } 
         }
         demos = {
             <DemoFileTree> { file_tree:{ width: Fill, height: Fill } }
