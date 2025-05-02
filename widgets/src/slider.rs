@@ -20,12 +20,11 @@ live_design!{
     pub SLIDER_ALT1_DATA_FONTSIZE = (THEME_FONT_SIZE_BASE);
 
     pub SliderMinimal = <SliderBase> {
-        
         min: 0.0, max: 1.0,
         step: 0.0,
         label_align: { y: 0.0 }
         label_walk:{width:Fit},
-        slider_walk:{width:Fill},
+        slider_walk:{width:Fill}
         
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
         precision: 2,
@@ -33,13 +32,7 @@ live_design!{
         
         hover_actions_enabled: false,
         
-        draw_bg:{
-            fn pixel(self)->vec4{
-                return #0000
-            }
-        }
-        
-        draw_slider: {
+        draw_bg: {
             instance hover: float
             instance focus: float
             instance drag: float
@@ -305,14 +298,14 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.}}
                     apply: {
-                        draw_slider: {disabled: 0.0}
+                        draw_bg: {disabled: 0.0}
                         draw_text: {disabled: 0.0}
                     }
                 }
                 on = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        draw_slider: {disabled: 1.0}
+                        draw_bg: {disabled: 1.0}
                         draw_text: {disabled: 1.0}
                     }
                 }
@@ -323,7 +316,7 @@ live_design!{
                     from: {all: Forward {duration: 0.2}}
                     ease: OutQuad
                     apply: {
-                        draw_slider: { hover: 0.0 },
+                        draw_bg: { hover: 0.0 },
                         draw_text: { hover: 0.0 },
                     }
                 }
@@ -331,7 +324,7 @@ live_design!{
                     //cursor: Arrow,
                     from: {all: Snap}
                     apply: {
-                        draw_slider: { hover: 1.0 },
+                        draw_bg: { hover: 1.0 },
                         draw_text: { hover: 1.0 },
                     }
                 }
@@ -341,7 +334,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        draw_slider: {focus: 0.0}
+                        draw_bg: {focus: 0.0}
                         draw_text: {focus: 0.0}
                         // draw_text: {focus: 0.0, hover: 0.0}
                     }
@@ -349,7 +342,7 @@ live_design!{
                 on = {
                     from: {all: Snap}
                     apply: {
-                        draw_slider: {focus: 1.0}
+                        draw_bg: {focus: 1.0}
                         draw_text: {focus: 1.0}
                         // draw_text: {focus: 1.0, hover: 1.0}
                     }
@@ -360,7 +353,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_slider: {drag: 0.0}
+                        draw_bg: {drag: 0.0}
                         draw_text: {drag: 0.0}
                     }
                 }
@@ -368,7 +361,7 @@ live_design!{
                     cursor: Arrow,
                     from: {all: Snap}
                     apply: {
-                        draw_slider: {drag: 1.0}
+                        draw_bg: {drag: 1.0}
                         draw_text: {drag: 1.0}
                     }
                 }
@@ -377,7 +370,7 @@ live_design!{
     }
 
     pub SliderMinimalFlat = <SliderMinimal> {
-        draw_slider: {
+        draw_bg: {
             border_color_1: (THEME_COLOR_BEVEL_OUTSET_2)
             border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_2)
             border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_2)
@@ -394,7 +387,7 @@ live_design!{
         
     pub Slider = <SliderMinimal> {
         height: 36;
-        draw_slider: {
+        draw_bg: {
             instance disabled: 0.0,
 
             uniform border_size: (THEME_BEVELING)
@@ -698,7 +691,7 @@ live_design!{
     }
 
     pub SliderGradientY = <Slider> {
-        draw_slider: {
+        draw_bg: {
             instance disabled: 0.0,
 
             uniform border_size: (THEME_BEVELING)
@@ -1008,7 +1001,7 @@ live_design!{
     }
 
     pub SliderFlat = <Slider> {
-        draw_slider: {
+        draw_bg: {
             border_size: (THEME_BEVELING)
 
             uniform color: (THEME_COLOR_INSET)
@@ -1047,7 +1040,7 @@ live_design!{
     }
 
     pub SliderFlatter = <SliderFlat> {
-        draw_slider: {
+        draw_bg: {
             instance disabled: 0.0,
 
             handle_size: 0.
@@ -1130,7 +1123,7 @@ live_design!{
 
         }
 
-        draw_slider: {
+        draw_bg: {
             instance hover: float
             instance focus: float
             instance drag: float
@@ -1360,7 +1353,7 @@ live_design!{
     }
 
     pub SliderRoundGradientY = <SliderRound> {
-        draw_slider: {
+        draw_bg: {
             instance hover: float
             instance focus: float
             instance drag: float
@@ -1634,7 +1627,7 @@ live_design!{
         text_input:{ 
             width: Fit
         }
-        draw_slider: {
+        draw_bg: {
             instance hover: float
             instance focus: float
             instance drag: float
@@ -2587,9 +2580,7 @@ pub struct DrawSlider {
 #[derive(Live, Widget)]
 #[designable]
 pub struct Slider {
-    #[live] draw_bg: DrawQuad,
-    #[area] #[redraw] #[live] draw_slider: DrawSlider,
-        
+    #[area] #[redraw] #[live] draw_bg: DrawSlider,
     #[walk] walk: Walk,
 
     #[live(DragAxis::Horizontal)] pub axis: DragAxis,
@@ -2672,8 +2663,9 @@ impl Slider {
     }
     
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_slider.slide_pos = self.relative_value as f32;
-        self.draw_bg.begin(cx, walk, self.layout);
+        self.draw_bg.slide_pos = self.relative_value as f32;
+        cx.begin_turtle(walk, self.layout);
+
         
         // alright so. how is this stuff
         // we have the label, slider, text input normally set up as
@@ -2691,7 +2683,7 @@ impl Slider {
             let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
             // now draw the slider
             let slider_walk = dw.resolve(cx);
-            self.draw_slider.draw_walk(cx, slider_walk);
+            self.draw_bg.draw_walk(cx, slider_walk);
         }
 /*        
         let walk = self.text_input.walk(cx);
@@ -2714,8 +2706,7 @@ impl Slider {
             let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
             self.draw_text.draw_walk(cx, self.label_walk, self.label_align, &self.text);
         }*/
-        
-        self.draw_bg.end(cx);
+        cx.end_turtle();
     }
 
     pub fn value(&self) -> f64 {
@@ -2790,7 +2781,7 @@ impl Widget for Slider {
             }
         }
 
-        match event.hits(cx, self.draw_slider.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 if self.animator.animator_in_state(cx, id!(disabled.on)) { return (); }
                 self.animator_play(cx, id!(hover.on));
