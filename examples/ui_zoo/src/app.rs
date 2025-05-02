@@ -45,8 +45,8 @@
             spacing: 0.
         }
 
-        <H3> { draw_bg: {color: #f00}}
-                            
+        // <H3> { draw_bg: {color: #f00}}
+ 
         App = {{App}} {
             ui: <Window> {
                 width: Fill, height: Fill,
@@ -346,6 +346,10 @@
                 btn.set_text(cx,&format!("Styled button clicked: {}", self.counter));
             }
 
+            if self.ui.button(id!(find)).clicked(&actions) {
+                
+            }
+
             if self.ui.button(id!(iconbutton)).clicked(&actions) {
                 log!("ICON BUTTON CLICKED {}", self.counter);
                 self.counter += 1;
@@ -368,7 +372,6 @@
     }
 
     fn handle_startup(&mut self, cx: &mut Cx) {
-
         let ui = self.ui.clone();
         let db = DataBindingStore::from_nodes(self.bindings.live_read());
         Self::data_bind(db.data_to_widgets(cx, &ui));
