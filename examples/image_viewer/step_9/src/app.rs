@@ -49,6 +49,7 @@ live_design! {
         grab_key_focus: false,
     }
 
+
     SlideshowOverlay = <View> {
         height: Fill,
         width: Fill,
@@ -64,23 +65,11 @@ live_design! {
         }
     }
 
-    Slideshow = <View> {
-        flow: Overlay,
-
-        image = <Image> {
-            width: Fill,
-            height: Fill,
-            fit: Biggest,
-            source: (PLACEHOLDER)
-        }
-        overlay = <SlideshowOverlay> {}
-    }
-
     App = {{App}} {
         ui: <Root> {
             <Window> {
                 body = <View> {
-                    slideshow = <Slideshow> {}
+                    <SlideshowOverlay> {}
                 }
             }
         }
@@ -96,7 +85,7 @@ pub struct App {
 }
 
 impl App {
-    fn load_images(&mut self, path: &Path) {
+    fn load_images(&mut self, cx: &mut Cx, path: &Path) {
         self.state.image_paths.clear();
         for entry in path.read_dir().unwrap() {
             let entry = entry.unwrap();
@@ -106,6 +95,7 @@ impl App {
             }
             self.state.image_paths.push(path);
         }
+        self.ui.redraw(cx);
     }
 }
 
@@ -117,9 +107,9 @@ impl AppMain for App {
 }
 
 impl LiveHook for App {
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
         let path = std::env::args().nth(1).expect("missing path");
-        self.load_images(path.as_ref());
+        self.load_images(cx, path.as_ref());
     }
 }
 
