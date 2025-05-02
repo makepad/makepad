@@ -1047,6 +1047,29 @@ impl CodeSession {
         }
         selection_state.highlighted_delimiter_positions = highlighted_delimiter_positions;
     }
+    
+        
+    pub fn set_cursor_at_file_end(&self) {
+        let position = {
+            let text = self.document().as_text();
+            let lines = text.as_lines();
+                    
+            if lines.is_empty() {
+                return;
+            }
+                    
+            let last_line_index = lines.len() - 1;
+            let last_line_byte_index = lines[last_line_index].len();
+                    
+            let position = Position {
+                line_index: last_line_index,
+                byte_index: last_line_byte_index,
+            };
+            position
+        };
+                    
+        self.set_selection(position, Affinity::After, SelectionMode::Simple, NewGroup::No);
+    }
 }
 
 impl Drop for CodeSession {
