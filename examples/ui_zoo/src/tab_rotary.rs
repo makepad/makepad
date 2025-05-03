@@ -16,13 +16,11 @@ live_design!{
             <H4> { text: "<Rotary>"}
             <UIZooRowH> {
                 align: { x: 0. , y: 0.}
-                <Rotary> {
-                    text: "Label",
-                }
+
+                <Rotary> { text: "Label" }
                 <Rotary> {
                     text: "Label",
                     draw_bg: {
-                        // border_size: 3.
                         gap: 0.,
                     }
                 }
@@ -30,7 +28,6 @@ live_design!{
                     width: 300, height: 200
                     text: "Gap",
                     draw_bg: {
-                        // border_size: 3.
                         gap: 180.,
                     }
                 }
@@ -45,7 +42,6 @@ live_design!{
                     height: 300
                     text: "Label",
                     draw_bg: {
-                        // border_size: 5.
                         val_size: 30.
                         val_padding: 20.,
                     }
@@ -61,7 +57,6 @@ live_design!{
                 <RotaryGradientY> {
                     text: "Label",
                     draw_bg: {
-                        // border_size: 3.
                         gap: 0.,
                     }
                 }
@@ -69,7 +64,6 @@ live_design!{
                     width: 300, height: 200
                     text: "Gap",
                     draw_bg: {
-                        // border_size: 3.
                         gap: 180.,
                     }
                 }
@@ -84,7 +78,6 @@ live_design!{
                     height: 300
                     text: "Label",
                     draw_bg: {
-                        // border_size: 5.
                         val_size: 30.
                         val_padding: 20.,
                     }
