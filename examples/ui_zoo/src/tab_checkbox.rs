@@ -36,17 +36,21 @@ live_design!{
             <CheckBoxFlatter> { text:"Check me out!" }
 
             <Hr> {}
-            <H4> { text: "Customized"}
+            <H4> { text: "Standard, fully customized"}
             <UIZooRowH> {
                 CheckBoxCustomized = <CheckBox> {
                     text:"Check me out!"
+                    align: { x: 0., y: .5}
+                    padding: { top: 0., left: 0., bottom: 0., right: 0.}
+                    margin: { top: 0., left: 0., bottom: 0., right: 0.}
 
                     label_walk: {
                         width: Fit, height: Fit,
-                        margin: <THEME_MSPACE_H_1> { left: 12.5 }
+                        margin: <THEME_MSPACE_H_1> { left: 5.5 }
                     }
 
                     draw_bg: {
+                        check_type: None
                         border_size: 1.0
 
                         border_color_1: #0
@@ -63,18 +67,30 @@ live_design!{
                     }  
                 
                     draw_text: {
-                        color: #A
-                        color_hover: #F
-                        color_active: #C
+                        color: #0AA
+                        color_hover: #8ff
+                        color_down: #088
+                        color_focus: #0ff
+                        color_disabled: #8
 
-                        text_style: <THEME_FONT_REGULAR> {
-                            font_size: (THEME_FONT_SIZE_P)
+                        text_style: {
+                            font_size: 8.,
+                            line_spacing: 1.4,
+                            font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
                         }
                     }
 
+                    icon_walk: {
+                        width: 20.
+                        height: Fit,
+                    }
+
                     draw_icon: {
-                        color: #F00
-                        color_active: #F00
+                        color: #0
+                        color_active: #f00
+                        color_disabled: #8
+                    
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
 
                     icon_walk: { width: 13.0, height: Fit }
@@ -215,6 +231,7 @@ live_design!{
                 simplecheckbox = <CheckBox> {text:"Check me out!"}
                 simplecheckbox_output = <Label> { text:"hmm" }
             }
+
         }
     }
 }
