@@ -93,7 +93,7 @@ live_design!{
                         let body_transp = vec4(body.xyz, 0.0);
                         let top_gradient = mix(
                             body_transp,
-                            mix(THEME_COLOR_BEVEL_OUTSET_1, THEME_COLOR_BEVEL_2, self.down),
+                            mix(THEME_COLOR_BEVEL_OUTSET_1, THEME_COLOR_BEVEL_1, self.down),
                             max(0.0, grad_top - sdf.pos.y) / grad_top
                         );
                         let bot_gradient = mix(
