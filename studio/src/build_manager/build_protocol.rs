@@ -121,6 +121,7 @@ impl BuildTarget {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, SerRon, DeRon)]
 pub struct BuildProcess {
+    pub root: String,
     pub binary: String,
     pub target: BuildTarget,
 }

@@ -8,12 +8,12 @@ use {
         makepad_code_editor::text::Position,
         makepad_live_id::*,
         makepad_micro_serde::*,
+        makepad_file_server::FileSystemRoots,
         makepad_platform::log::LogLevel,
     },
     std::{
         collections::HashMap,
         env, fmt,
-        path::PathBuf,
         sync::{mpsc::Sender, Arc, Mutex, RwLock},
     },
 };
@@ -25,7 +25,7 @@ struct BuildServerProcess {
 }
 
 struct BuildServerShared {
-    path: PathBuf,
+    roots: FileSystemRoots,
     // here we should store our connections send slots
     processes: HashMap<BuildProcess, BuildServerProcess>,
 }
@@ -35,10 +35,10 @@ pub struct BuildServer {
 }
 
 impl BuildServer {
-    pub fn new<P: Into<PathBuf>>(path: P) -> BuildServer {
+    pub fn new(roots: FileSystemRoots) -> BuildServer {
         BuildServer {
             shared: Arc::new(RwLock::new(BuildServerShared {
-                path: path.into(),
+                roots,
                 processes: Default::default(),
             })),
         }
@@ -81,7 +81,7 @@ impl BuildConnection {
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
-        let path = shared.read().unwrap().path.clone();
+        let path = shared.read().unwrap().roots.roots.get(&what.root).unwrap().clone();
 
         let http = format!("{}/{}", http, cmd_id.0);
         let mut env = vec![("RUST_BACKTRACE","1"),("MAKEPAD_STUDIO_HTTP", http.as_str()), ("MAKEPAD", "lines")];

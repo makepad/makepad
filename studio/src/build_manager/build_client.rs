@@ -5,6 +5,7 @@
 use {
     crate::{
         makepad_micro_serde::*,
+        makepad_file_server::FileSystemRoots,
         makepad_platform::{*, cx_stdin::aux_chan},
         build_manager::{
             build_protocol::{BuildCmd, BuildCmdWrap, BuildClientMessageWrap, LogItem},
@@ -54,7 +55,7 @@ impl BuildClient {
     }
     
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn new_with_local_server(path:&Path) -> Self {
+    pub fn new_with_local_server(roots:FileSystemRoots) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
         let msg_signal = SignalToUI::new();
         let (msg_sender, msg_receiver) = mpsc::channel();
@@ -69,7 +70,7 @@ impl BuildClient {
         let base_path = env::current_dir().unwrap().join(root);
         let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());
         */
-        let mut server = BuildServer::new(path);
+        let mut server = BuildServer::new(roots);
         spawn_local_cmd_handler(
             cmd_receiver,
             server.connect(Box::new({

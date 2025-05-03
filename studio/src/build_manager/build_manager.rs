@@ -3,6 +3,7 @@ use {
         app::AppAction,
         build_manager::{build_client::BuildClient, build_protocol::*},
         file_system::file_system::FileSystem,
+        makepad_file_server::FileSystemRoots,
         makepad_micro_serde::*,
         makepad_platform::makepad_live_compiler::LiveFileChange,
         makepad_platform::os::cx_stdin::{
@@ -28,8 +29,6 @@ use {
         fs::File,
         io::prelude::*,
         net::{SocketAddr, UdpSocket},
-        path::Path,
-        path::PathBuf,
         sync::mpsc,
         sync::{Arc, Mutex},
         thread, time,
@@ -39,6 +38,7 @@ use {
 
 pub const MAX_SWAPCHAIN_HISTORY: usize = 4;
 pub struct ActiveBuild {
+    pub root: String,
     pub log_index: String,
     pub process: BuildProcess,
     pub swapchain: HashMap<usize, Option<cx_stdin::Swapchain<Texture>>>,
@@ -117,7 +117,7 @@ pub struct ProfileSampleStore {
 
 #[derive(Default)]
 pub struct BuildManager {
-    root_path: PathBuf,
+    roots: FileSystemRoots,
     http_port: usize,
     pub clients: Vec<BuildClient>,
     pub log: Vec<(LiveId, LogItem)>,
@@ -132,7 +132,13 @@ pub struct BuildManager {
     pub tick_timer: Timer,
     pub designer_state: DesignerState,
     //pub send_file_change: FromUISender<LiveFileChange>,
-    pub active_build_websockets: Arc<Mutex<RefCell<Vec<(u64, LiveId, mpsc::Sender<Vec<u8>>)>>>>,
+    pub active_build_websockets: Arc<Mutex<RefCell<Vec<ActiveBuildSocket>>>>,
+}
+
+pub struct ActiveBuildSocket{
+    web_socket_id: u64, 
+    build_id: LiveId, 
+    sender: mpsc::Sender<Vec<u8>>
 }
 
 #[derive(Default, SerRon, DeRon)]
@@ -183,6 +189,7 @@ impl DesignerState{
 
 pub struct BuildBinary {
     pub open: f64,
+    pub root: String,
     pub name: String,
 }
 
@@ -218,7 +225,7 @@ fn get_local_ip() -> String {
 }
 
 impl BuildManager {
-    pub fn init(&mut self, cx: &mut Cx, path: &Path) {
+    pub fn init(&mut self, cx: &mut Cx, roots: FileSystemRoots) {
         self.http_port = if std::option_env!("MAKEPAD_STUDIO_HTTP").is_some() {
             8002
         } else {
@@ -232,8 +239,8 @@ impl BuildManager {
         
         println!("Studio http : {:?}", self.studio_http);
         self.tick_timer = cx.start_interval(0.008);
-        self.root_path = path.to_path_buf();
-        self.clients = vec![BuildClient::new_with_local_server(&self.root_path)];
+        self.roots = roots;
+        self.clients = vec![BuildClient::new_with_local_server(self.roots.clone())];
         self.designer_state.load_state();
         self.update_run_list(cx);
         //self.recompile_timer = cx.start_timeout(self.recompile_timeout);
@@ -245,23 +252,26 @@ impl BuildManager {
 
     pub fn update_run_list(&mut self, _cx: &mut Cx) {
         self.binaries.clear();
-        match shell_env_cap(&[], &self.root_path, "cargo", &["run", "--bin"]) {
-            Ok(_) => {}
-            // we expect it on stderr
-            Err(e) => {
-                let mut after_av = false;
-                for line in e.split("\n") {
-                    if after_av {
-                        let binary = line.trim().to_string();
-                        if binary.len() > 0 {
-                            self.binaries.push(BuildBinary {
-                                open: 0.0,
-                                name: binary,
-                            });
+        for (root_name, root_path) in &self.roots.roots{
+            match shell_env_cap(&[], root_path, "cargo", &["run", "--bin"]) {
+                Ok(_) => {}
+                // we expect it on stderr
+                Err(e) => {
+                    let mut after_av = false;
+                    for line in e.split("\n") {
+                        if after_av {
+                            let binary = line.trim().to_string();
+                            if binary.len() > 0 {
+                                self.binaries.push(BuildBinary {
+                                    open: 0.0,
+                                    root: root_name.clone(),
+                                    name: binary,
+                                });
+                            }
                         }
-                    }
-                    if line.contains("Available binaries:") {
-                        after_av = true;
+                        if line.contains("Available binaries:") {
+                            after_av = true;
+                        }
                     }
                 }
             }
@@ -336,14 +346,47 @@ impl BuildManager {
                 contents: live_file_change.content.clone()
             }.to_json()));
         }*/
+        // alright what do we need to do here.
+        
+        // so first off we need to find the root this thing belongs to
+        // if its 'makepad' we might need to send over 2 file names
+        // one local to the repo and one full path
+        
         if let Ok(d) = self.active_build_websockets.lock() {
-            let data = StudioToAppVec(vec![StudioToApp::LiveChange {
-                file_name: live_file_change.file_name.clone(),
-                content: live_file_change.content.clone(),
-            }])
-            .serialize_bin();
-            for (_,_,sender) in d.borrow_mut().iter_mut() {
-                let _ = sender.send(data.clone());
+            // ok so. if we have a makepad repo file
+            // we send over the full path and the stripped path
+            // if not makepad, we have to only send it to the right project
+            
+            for socket in d.borrow_mut().iter_mut() {
+                // alright so we have a file_name which includes a 'root'
+                // we also have this build_id which contains a root.
+                // if they are the same, we strip it
+                // if they are not, we send over the full path
+                let file_name = if let Some(build) = self.active.builds.get(&socket.build_id){
+                    let mut parts = live_file_change.file_name.splitn(2,"/");
+                    let root = parts.next().unwrap();
+                    let file = parts.next().unwrap();
+                    // file local to the connection
+                    if root == build.root{ 
+                        file.to_string()
+                    }
+                    // nonlocal file, make full path
+                    else if let Some(root) = self.roots.roots.get(root){
+                        root.join(file).into_os_string().into_string().unwrap()
+                    }
+                    else{
+                        file.to_string()
+                    }
+                }
+                else{
+                    live_file_change.file_name.clone()
+                };
+                let data = StudioToAppVec(vec![StudioToApp::LiveChange {
+                    file_name,
+                    content: live_file_change.content.clone(),
+                }])
+                .serialize_bin();
+                let _ = socket.sender.send(data.clone());
             }
         }
     }
@@ -430,6 +473,13 @@ impl BuildManager {
                 for msg in msgs.0 {
                     match msg {
                         AppToStudio::LogItem(item) => {
+                            let file_name = if let Some(build) = active.builds.get(&build_id){
+                                format!("{}/{}", build.root, item.file_name)
+                            }
+                            else{
+                                item.file_name
+                            };
+                            
                             let start = text::Position {
                                 line_index: item.line_start as usize,
                                 byte_index: item.column_start as usize,
@@ -439,7 +489,7 @@ impl BuildManager {
                                 byte_index: item.column_end as usize,
                             };
                             //log!("{:?} {:?}", pos, pos + loc.length);
-                            if let Some(file_id) = file_system.path_to_file_node_id(&item.file_name)
+                            if let Some(file_id) = file_system.path_to_file_node_id(&file_name)
                             {
                                 match item.level {
                                     LogLevel::Warning => {
@@ -463,7 +513,7 @@ impl BuildManager {
                                 build_id,
                                 LogItem::Location(LogItemLocation {
                                     level: item.level,
-                                    file_name: item.file_name,
+                                    file_name,
                                     start,
                                     end,
                                     message: item.message,
@@ -528,9 +578,9 @@ impl BuildManager {
                                         },
                                     ]).serialize_bin();
                                     
-                                    for (_,id,sender) in d.borrow_mut().iter_mut() {
-                                        if *id == build_id{
-                                            let _ = sender.send(data.clone());
+                                    for socket in d.borrow_mut().iter_mut() {
+                                        if socket.build_id == build_id{
+                                            let _ = socket.sender.send(data.clone());
                                         }
                                     }
                                 }
@@ -551,6 +601,7 @@ impl BuildManager {
             while let Ok(wrap) = self.clients[0].msg_receiver.try_recv() {
                 match wrap.message {
                     BuildClientMessage::LogItem(LogItem::Location(loc)) => {
+                        
                         if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name) {
                             match loc.level {
                                 LogLevel::Warning => {
@@ -707,7 +758,11 @@ impl BuildManager {
                                     .lock()
                                     .unwrap()
                                     .borrow_mut()
-                                    .push((web_socket_id, LiveId(id), response_sender));
+                                    .push(ActiveBuildSocket{
+                                        web_socket_id, 
+                                        build_id: LiveId(id), 
+                                        sender: response_sender
+                                    });
                             }
                         }
                     }
@@ -717,7 +772,7 @@ impl BuildManager {
                             .lock()
                             .unwrap()
                             .borrow_mut()
-                            .retain(|v| v.0 != web_socket_id);
+                            .retain(|v| v.web_socket_id != web_socket_id);
                     }
                     HttpServerRequest::BinaryMessage {
                         web_socket_id,
@@ -736,13 +791,6 @@ impl BuildManager {
                         response_sender,
                     } => {
                         let path = &headers.path;
-                        // ok so this live connection.. where do we do it
-                        // i mean its just a network event msg. we can ignore that
-                        // we could just handle this in 'window'
-                        // or where shall we handle it
-                        // lets give live edit an api so you can codegen/live edit shaders?
-
-                        // alright wasm http server
                         if path == "/$watch" {
                             let header = "HTTP/1.1 200 OK\r\n\
                                 Cache-Control: max-age:0\r\n\
@@ -894,6 +942,7 @@ impl BuildManager {
     pub fn start_active_build(&mut self, _cx:&mut Cx, binary_id:usize, target: BuildTarget) {
         let binary = &self. binaries[binary_id];
         let process = BuildProcess {
+            root: binary.root.clone(),
             binary: binary.name.clone(),
             target
         };
@@ -903,6 +952,7 @@ impl BuildManager {
         if self.active.builds.get(&item_id).is_none() {
             let index = self.active.builds.len();
             self.active.builds.insert(item_id, ActiveBuild {
+                root: binary.root.clone(),
                 log_index: format!("[{}]", index),
                 process: process.clone(),
                 app_area: Default::default(),
@@ -930,6 +980,7 @@ impl BuildManager {
         let binary = &self. binaries[binary_id];
                 
         let process = BuildProcess {
+            root: binary.root.clone(),
             binary: binary.name.clone(),
             target
         };
