@@ -36,6 +36,9 @@ live_design!{
                 <Pbolditalic> {
                     text: "This example application provides an overview of the currently supported widgets and their variants."
                 }
+                <Pitalic> {
+                    text: "Its source code also provides useful example code to get you started."
+                }
 
             }
 
