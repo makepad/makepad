@@ -212,14 +212,27 @@ impl<T> Rect<T> {
         true
     }
 
+    pub fn contains_point_inclusive(self, point: Point<T>) -> bool
+    where
+        T: Add<Output = T> + Copy + Ord,
+    {
+        if !(self.min().x..=self.max().x).contains(&point.x) {
+            return false;
+        }
+        if !(self.min().y..=self.max().y).contains(&point.y) {
+            return false;
+        }
+        true
+    }
+
     pub fn contains_rect(self, other: Self) -> bool
     where
         T: Add<Output = T> + Copy + Ord,
     {
-        if !self.contains_point(other.min()) && self.min() != other.min() {
+        if !self.contains_point(other.min()) {
             return false;
         }
-        if !self.contains_point(other.max()) && self.max() != other.max() {
+        if !self.contains_point_inclusive(other.max()) {
             return false;
         }
         true

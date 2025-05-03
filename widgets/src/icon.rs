@@ -13,7 +13,6 @@ live_design! {
         height: Fit,
         
         icon_walk: {
-            margin: {left: 5.0},
             width: 17.5,
             height: Fit,
         }
@@ -26,7 +25,7 @@ live_design! {
         }
 
         draw_icon: {
-            uniform color: (#f00)
+            uniform color: #f00
             fn get_color(self) -> vec4 {
                 return self.color
             }
