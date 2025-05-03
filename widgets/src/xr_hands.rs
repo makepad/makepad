@@ -20,17 +20,17 @@ live_design!{
             fn get_color(self, dp: float)->vec4{
                 let ambient = vec3(0.2,0.2,0.2) 
                 let color = self.color.xyz * dp * self.color.w + ambient;
-                return mix(#1100,#4440,self.life);
+                vec4(Pal::iq5(self.life-self.time+self.index*0.1)*1.0,0.0)*sin(self.life);//mix(#f00,#4440,3*self.life);
             }
             fn get_size(self)->vec3{
                 return self.cube_size * self.data
             }
             fn get_size(self)->vec3{
-                let size = max(3.0-(self.life),0.0)/4.0;
-                return self.cube_size * size;
+                let size = pow(max(3.0-(self.life),0.0)/4.0,1.);
+                return self.cube_size * size*vec3(0.1,1.2*sin(self.life),(6-self.index+1)*1.0);
             }
             fn get_pos(self)->vec3{
-                let travel = self.life * 0.25;
+                let travel = self.life * 0.4;
                 return vec3(0.0, 0.0, -travel)
             }
             cube_size:vec3(0.01,0.01,0.015);
@@ -69,6 +69,7 @@ live_design!{
 
 struct Bullet{
     shot_at: f64,
+    index: usize,
     pose: Pose,
 }
 #[derive(Default)]
@@ -105,7 +106,7 @@ impl Bullets{
         if xr_state.time < self.last_fired{ // we rejoined
             self.last_fired = xr_state.time;
         }
-        if xr_state.time - self.last_fired > 0.01 {
+        if xr_state.time - self.last_fired > 0.005 {
             for hand in xr_state.hands(){
                 if !hand.in_view(){
                     continue
@@ -116,6 +117,7 @@ impl Bullets{
                     self.last_fired = xr_state.time;
                     self.bullets.push(Bullet{
                         shot_at: xr_state.time,
+                        index: i,
                         pose:**pose
                     });
                     if self.bullets.len()>4500{
@@ -126,7 +128,7 @@ impl Bullets{
         }
         for bullet in &self.bullets{
             let mat = Mat4::mul(&bullet.pose.to_mat4(), anchor_map);
-
+            cube.index = bullet.index as f32;
             cube.life = (xr_state.time - bullet.shot_at) as f32;
             cube.transform = mat;
             cube.depth_clip = 1.0;
@@ -355,13 +357,10 @@ impl Widget for XrHands {
         let xr_state = cx.draw_event.xr_state.as_ref().unwrap();
         
         self.draw_alignment(cx, xr_state);
-        /*
-        if let Some(align)= &self.align_mode{
-            draw_democube(cx, &mut self.draw_test, &align.anchor);
-        }*/
             
         draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &xr_state);
         
+        let dt = profile_start();
         self.bullets.draw(cx, &mut self.draw_bullet, &xr_state, &Mat4::identity());
         
         for peer in &mut self.peers{
@@ -381,7 +380,7 @@ impl Widget for XrHands {
                 draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &peer_state)
             }
         }
-                
+        profile_end!(dt);        
         self.draw_list.end(cx);
         DrawStep::done()
     }

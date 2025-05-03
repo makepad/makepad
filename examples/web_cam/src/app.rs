@@ -71,7 +71,8 @@ impl MatchEvent for App{
             let (current_w, current_h) = self.video_input[id].get_format(cx).vec_width_height().unwrap();
             if current_w != vfb.format.width / 2 || current_h != vfb.format.height {
                 self.video_input[id] = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32{
-                    data: vec![],
+                    data: Some(vec![]),
+                    updated: TextureUpdated::Full,
                     width: vfb.format.width / 2,
                     height: vfb.format.height
                 });
