@@ -15,6 +15,14 @@ live_design!{
         demos = {
             <H4> { text: "Slider"}
             <Slider> { text: "Default" }
+            <Slider> {
+                text: "Default, disabled"
+                animator: {
+                    disabled = {
+                        default: on
+                    }
+                }
+            }
             <Slider> { text: "label_align", label_align: { x: 0.5, y: 0. } }
             <Slider> { text: "min/max", min: 0., max: 100. }
             <Slider> { text: "precision", precision: 20 }
@@ -45,6 +53,14 @@ live_design!{
 
             <H4> { text: "SliderMinimal"}
             <SliderMinimal> { text: "Default" }
+            <SliderMinimal> {
+                text: "Default, disabled"
+                animator: {
+                    disabled = {
+                        default: on
+                    }
+                }
+            }
             <SliderMinimal> { text: "label_align", label_align: { x: 0.5, y: 0. } }
             <SliderMinimal> { text: "min/max", min: 0., max: 100. }
             <SliderMinimal> { text: "precision", precision: 20 }
@@ -59,6 +75,15 @@ live_design!{
 
             <Hr> {}
             <H4> { text: "SliderRound"}
+            <SliderRound> { text: "Default" }
+            <SliderRound> {
+                text: "Disabled"
+                animator: {
+                    disabled = {
+                        default: on
+                    }
+                }
+            }
             <SliderRound> {
                 text: "Colored",
                 draw_bg: {

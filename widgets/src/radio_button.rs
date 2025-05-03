@@ -17,14 +17,15 @@ live_design!{
     pub RadioButtonGroupBase = {{RadioButtonGroup }} {}
     
     pub RadioButton = <RadioButtonBase> {
-        width: Fit, height: 15.,
-        align: { x: 0.0, y: 0.5 }
+        width: Fit, height: Fit,
+        align: { x: 0., y: 0. }
+        padding: <THEME_MSPACE_V_2> { left: (THEME_SPACE_2)}
         
         icon_walk: { margin: { left: 20. } }
         
         label_walk: {
             width: Fit, height: Fit,
-            margin: { left: 20. }
+            margin: <THEME_MSPACE_H_1> { left: 13. }
         }
         label_align: { y: 0.0 }
         

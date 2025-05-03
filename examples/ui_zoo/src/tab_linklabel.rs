@@ -19,6 +19,19 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "Standard, disabled" }
+            <UIZooRowH> {
+                <LinkLabel> {
+                    text: "Click me!"
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
+                }
+            }
+
+            <Hr> {}
             <H4> { text: "Styled" }
             <UIZooRowH> {
                 <LinkLabel> {

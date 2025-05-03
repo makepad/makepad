@@ -29,9 +29,9 @@ live_design! {
     pub TextInputBase = {{TextInput}} {}
     
     pub TextInput = <TextInputBase> {
-        width: Fill,
-        height: Fit,
-        padding: <THEME_MSPACE_2> {}
+        width: Fill, height: Fit,
+        padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
+        margin: <THEME_MSPACE_V_1> {}
         flow: RightWrap,
         is_password: false,
         is_read_only: false,
