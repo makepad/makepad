@@ -310,8 +310,79 @@ live_design!{
                 }
             }
             <SliderRound> {
-                text: "Colored",
+                text: "Standard, customized"
+                
+                min: 0.0, max: 1.0,
+                step: 0.0,
+                label_align: { x: 0., y: 0. }
+                precision: 2,
+
+                draw_text: {
+                    color: (THEME_COLOR_TEXT_VAL)
+                    color_hover: (THEME_COLOR_TEXT_HOVER)
+                    color_focus: (THEME_COLOR_TEXT_FOCUS)
+                    color_drag: (THEME_COLOR_TEXT_DOWN)
+                    color_disabled: (THEME_COLOR_TEXT_DISABLED)
+                    color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
+
+                    text_style: {
+                        font_size: 8.,
+                        line_spacing: 1.4,
+                        font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
+                    }
+                }
+
+                label_walk: {
+                    margin: { top: 0., bottom: (THEME_SPACE_1) },
+                }
+
+                text_input: <TextInput> {
+                    empty_text: "0",
+                    is_numeric_only: true,
+                    is_read_only: false,
+
+                    width: Fit,
+                    label_align: {y: 0.},
+                    margin: 0.
+                    padding: 0.
+
+                    draw_text: {
+                        color: #A
+                        color_hover: #C
+                        color_focus: #B
+                        color_down: #8
+                        color_disabled: #3
+                        color_empty: #6
+                        color_empty_hover: #7
+                        color_empty_focus: #9
+
+                        text_style: {
+                            font_size: 8.,
+                            line_spacing: 1.4,
+                            font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
+                        }
+                    }
+
+                    
+                    draw_cursor: { color: #f00 }
+
+                    draw_selection: {
+                        border_radius: 1.
+
+                        color: #0008
+                        color_hover: #000A
+                        color_focus: #000B
+                        color_empty: #0000
+                        color_disabled: #0003
+                    }
+                }
+
                 draw_bg: {
+                    label_size: 75.
+                    val_heat: 10.
+                    border_size: 0.75
+                    border_radius: (THEME_CORNER_RADIUS * 2.)
+
                     val_color_1: #FFCC00
                     val_color_1_hover: #FF9944
                     val_color_1_focus: #FFCC44
@@ -326,7 +397,33 @@ live_design!{
                     handle_color_hover: #0008
                     handle_color_focus: #000C
                     handle_color_drag: #000F
+
+                    color: (THEME_COLOR_INSET)
+                    color_hover: (THEME_COLOR_INSET_HOVER)
+                    color_focus: (THEME_COLOR_INSET_FOCUS)
+                    color_disabled: (THEME_COLOR_INSET_DISABLED)
+                    color_drag: (THEME_COLOR_INSET_DRAG)
+
+                    handle_color: (THEME_COLOR_HANDLE)
+                    handle_color_hover: (THEME_COLOR_HANDLE_HOVER)
+                    handle_color_focus: (THEME_COLOR_HANDLE_FOCUS)
+                    handle_color_drag: (THEME_COLOR_HANDLE_DRAG)
+                    handle_color_disabled: (THEME_COLOR_HANDLE_DISABLED)
+
+                    border_color_1: (#088)
+                    border_color_1_hover: (#0BB)
+                    border_color_1_focus: (#0AA)
+                    border_color_1_disabled: (#04)
+                    border_color_1_drag: (#066)
+
+                    border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+                    border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+                    border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+                    border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+                    border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+
                 }
+
             }
             <SliderRound> {
                 text: "Solid",
