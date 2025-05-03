@@ -44,8 +44,6 @@
             spacing: 0.
         }
 
-        // <H3> { draw_bg: {color: #f00}}
- 
         App = {{App}} {
             ui: <Window> {
                 width: Fill, height: Fill,
@@ -186,7 +184,6 @@
                         margin: { bottom: (THEME_SPACE_1) }
 
                         show_bg: true,
-                        // draw_bg: { color: (THEME_COLOR_U_1) }
 
                         draw_bg: {
                             uniform color_dither: 1.0
@@ -222,7 +219,7 @@
                         <View> {
                             flow: Down
                             spacing: 0.
-                            <Label> { margin: {top: (THEME_SPACE_1)}, padding: 0., width: Fit, text: "Color"}
+                            <Label> { margin: {top: (THEME_SPACE_1)}, padding: 0., width: Fit, text: "Tint Color"}
                             <TextInput> { text: "#f00" }
                         }
                         <Slider> {
@@ -230,13 +227,13 @@
                             draw_bg: { label_size: 80. }
                         }
                         <Vr> {}
-                        <Labelbold> { width: Fit, text: "Typography"}
+                        <Labelbold> { width: Fit, text: "Font"}
                         <Slider> {
                             text: "Size"
                             draw_bg: { label_size: 30. }
                         }
                         <Slider> {
-                            text: "Contrast"
+                            text: "Size Contrast"
                             draw_bg: { label_size: 55. }
                         }
                         <Vr> {}
