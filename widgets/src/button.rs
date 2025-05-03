@@ -10,7 +10,8 @@ live_design! {
         width: Fit, height: Fit,
         spacing: (THEME_SPACE_2),
         align: {x: 0.5, y: 0.5},
-        padding: <THEME_MSPACE_2> {}
+        padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
+        margin: <THEME_MSPACE_V_1> {}
         label_walk: { width: Fit, height: Fit },
         
         draw_text: {
@@ -502,7 +503,6 @@ live_design! {
         draw_bg: {
             
             color_hover: (THEME_COLOR_U_HIDDEN)
-            color_focus: (THEME_COLOR_U_HIDDEN)
             color_down: (THEME_COLOR_U_HIDDEN)
             color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 

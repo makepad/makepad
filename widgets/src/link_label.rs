@@ -15,10 +15,10 @@ live_design!{
     pub LinkLabelBase = {{LinkLabel}}<ButtonBase> {}
     pub LinkLabel = <LinkLabelBase> {
         width: Fit, height: Fit,
-        margin: <THEME_MSPACE_2> {}
+        margin: <THEME_MSPACE_V_2> {}
         padding: 0.,
         
-        label_walk: { width: Fit, height: Fit, },
+        label_walk: { width: Fit, height: Fit },
 
         draw_icon: {
             instance hover: 0.0
@@ -327,7 +327,7 @@ live_design!{
 
     pub LinkLabelIcon = <LinkLabel> {
         padding: { bottom: 2. }
-        align: {x: 0.0, y: 0.5 }
+        align: {x: 0.0, y: 0.0 }
         label_walk: { margin: { left: (THEME_SPACE_2) } }
     }
 

@@ -21,7 +21,14 @@ live_design!{
                     radio1 = <RadioButton> { text: "Option 1" }
                     radio2 = <RadioButton> { text: "Option 2" }
                     radio3 = <RadioButton> { text: "Option 3" }
-                    radio4 = <RadioButton> { text: "Option 4" }
+                    radio4 = <RadioButton> {
+                        text: "Option 4, disabled"
+                        animator: {
+                            disabled = {
+                                default: on
+                            }
+                        }
+                    }
                 }
             }
 
@@ -515,7 +522,14 @@ live_design!{
                 radio1 = <RadioButtonTab> { text: "Option 1" }
                 radio2 = <RadioButtonTab> { text: "Option 2" }
                 radio3 = <RadioButtonTab> { text: "Option 3" }
-                radio4 = <RadioButtonTab> { text: "Option 4" }
+                radio4 = <RadioButtonTab> {
+                    text: "Option 4, disabled"
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
+                }
             }
 
             <Hr> {}

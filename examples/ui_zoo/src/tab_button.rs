@@ -27,6 +27,20 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "Standard, disabled"}
+            <UIZooRowH> {
+                <Button> {
+                    text: "<Button>"
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
+                }
+            }
+
+
+            <Hr> {}
             <H4> { text: "GradientX"}
             <UIZooRowH> {
                 <ButtonGradientX> { text: "<ButtonGradientX>" }
