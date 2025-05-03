@@ -89,10 +89,10 @@ impl LiveRegister for App {
 }
 
 impl MatchEvent for App{
-    fn handle_startup(&mut self, cx:&mut Cx){
+    fn handle_startup(&mut self, _cx:&mut Cx){
     }
         
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
+    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(b0)).clicked(&actions) {
             log!("hi");
             self.counter += 1;

@@ -317,7 +317,7 @@ impl AiChatView{
                     
                     if let Some(wa) = actions.widget_action(id!(copy_button)){
                         if wa.widget().as_button().pressed(actions){
-                            let code_view = wa.widget_nth(2).widget(id!(code_view));
+                            //let code_view = wa.widget_nth(2).widget(id!(code_view));
                         }
                     }
                     if let Some(wa) = actions.widget_action(id!(run_button)){
