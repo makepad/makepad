@@ -1,4 +1,0 @@
-### Makepad is an open-source, cross-platform UI framework written in and for Rust. It runs natively and on the web, supporting all major platforms: Windows, Linux, macOS, iOS, and Android.
-Built on a shader-based architecture, Makepad delivers high performance, making it suitable for complex applications like Photoshop or even 3D/VR/AR experiences. It compiles exceptionally fast, ensuring a smooth and interruption-free development cycle.
-One of Makepad’s standout features is live styling—a powerful system that reflects UI code changes instantly without recompilation or restarts. This tight feedback loop bridges the gap between developers and designers, streamlining collaboration and maximizing productivity.
-This example application provides an overview of the supported widgets and their variants.
