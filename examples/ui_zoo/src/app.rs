@@ -68,52 +68,6 @@
                     spacing: 0.,
                     margin: 0.,
 
-                    <View> {
-                        width: Fill, height: Fit,
-                        flow: Right,
-                        spacing: (THEME_SPACE_2)
-                        align: { x: 0.0, y: 0.0 }
-                        padding: <THEME_MSPACE_1> {}
-                        margin: 0.
-
-                        show_bg: true,
-                        draw_bg: { color: (THEME_COLOR_U_1) }
-
-                        <SliderRound> {
-                            text: "Contrast"
-                            draw_bg: { label_size: 55. }
-                        }
-                        <Label> { width: Fit, text: "Color"}
-                        <TextInput> { width: 65., text: "#f00" }
-                        <SliderRound> {
-                            text: "Tint Amount"
-                            draw_bg: { label_size: 80. }
-                        }
-                        <Vr> {}
-                        <Labelbold> { width: Fit, text: "Typography"}
-                        <SliderRound> {
-                            text: "Size"
-                            draw_bg: { label_size: 30. }
-                        }
-                        <SliderRound> {
-                            text: "Contrast"
-                            draw_bg: { label_size: 55. }
-                        }
-                        <Vr> {}
-                        <SliderRound> {
-                            text: "Bevel"
-                            draw_bg: { label_size: 40. }
-                        }
-                        <SliderRound> {
-                            text: "Rounding"
-                            draw_bg: { label_size: 65. }
-                        }
-                        <SliderRound> {
-                            text: "Space"
-                            draw_bg: { label_size: 40. }
-                        }
-                    }
-
                     dock = <Dock> {
                         height: Fill, width: Fill
 
@@ -222,6 +176,57 @@
 
 
                     }
+
+                    <View> {
+                        width: Fill, height: Fit,
+                        flow: Right,
+                        spacing: (THEME_SPACE_2)
+                        align: { x: 0.0, y: 0.0 }
+                        padding: <THEME_MSPACE_2> {}
+                        margin: 0.
+
+                        show_bg: true,
+                        draw_bg: { color: (THEME_COLOR_U_1) }
+
+                        <Slider> {
+                            text: "Contrast"
+                            draw_bg: { label_size: 55. }
+                        }
+                        <View> {
+                            flow: Down
+                            spacing: 0.
+                            <Label> { margin: {top: (THEME_SPACE_1)}, padding: 0., width: Fit, text: "Color"}
+                            <TextInput> { text: "#f00" }
+                        }
+                        <Slider> {
+                            text: "Tint Amount"
+                            draw_bg: { label_size: 80. }
+                        }
+                        <Vr> {}
+                        <Labelbold> { width: Fit, text: "Typography"}
+                        <Slider> {
+                            text: "Size"
+                            draw_bg: { label_size: 30. }
+                        }
+                        <Slider> {
+                            text: "Contrast"
+                            draw_bg: { label_size: 55. }
+                        }
+                        <Vr> {}
+                        <Slider> {
+                            text: "Bevel"
+                            draw_bg: { label_size: 40. }
+                        }
+                        <Slider> {
+                            text: "Rounding"
+                            draw_bg: { label_size: 65. }
+                        }
+                        <Slider> {
+                            text: "Space"
+                            draw_bg: { label_size: 40. }
+                        }
+                    }
+
 
                 }
             }
