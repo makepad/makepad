@@ -85,359 +85,105 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "Customized"}
-            <UIZooRowH> {
-                radios_demo_6 = <View> {
-                    spacing: (THEME_SPACE_2)
-                    width: Fit, height: Fit,
-                    radio1 = <RadioButton> {
-                        text: "Option 1"
-
-                        label_walk: {
-                            width: Fit, height: Fit,
-                            margin: { left: 20. }
-                        }
-
-                        label_align: { y: 0.0 }
-                        
-                        draw_bg: {
-                            border_size: (THEME_BEVELING)
-
-                            color_dither: 1.0
-
-                            color: #F00
-                            color_hover: #F44
-                            color_active: #F00
-
-                            border_color_1: #0
-                            border_color_1_hover: #F
-                            border_color_1_active: #8
-
-                            border_color_2: #0
-                            border_color_2_hover: #F
-                            border_color_2_active: #8
-
-                            mark_color: #FFF0
-                            mark_color_active: #FFFC
-                            
-                        }
-                            
-                        draw_text: {
-                            color: #A
-                            color_hover: #F
-                            color_active: #C
-
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-
-                        icon_walk: { width: 13.0, height: Fit }
-                            
-                        draw_icon: {
-                            color_1: #F00
-                            color_1_active: #F00
-
-                            color_2: #F00
-                            color_2_active: #F00
-                        }
-                    }
-                    radio2 = <RadioButton> {
-                        text: "Option 2"
-
-                        label_walk: {
-                            width: Fit, height: Fit,
-                            margin: { left: 20. }
-                        }
-
-                        label_align: { y: 0.0 }
-                        
-                        draw_bg: {
-                            border_size: (THEME_BEVELING)
-
-                            color_dither: 1.0
-
-                            color: #F00
-                            color_hover: #F44
-                            color_active: #F00
-
-                            border_color_1: #0
-                            border_color_1_hover: #F
-                            border_color_1_active: #8
-
-                            border_color_2: #0
-                            border_color_2_hover: #F
-                            border_color_2_active: #8
-
-                            mark_color: #FFF0
-                            mark_color_active: #FFFC
-                            
-                        }
-                            
-                        draw_text: {
-                            color: #A
-                            color_hover: #F
-                            color_active: #C
-
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-
-                        icon_walk: { width: 13.0, height: Fit }
-                            
-                        draw_icon: {
-                            color_1: #F00
-                            color_1_active: #F00
-
-                            color_2: #F00
-                            color_2_active: #F00
-                        }
-                    }
-                    radio3 = <RadioButton> {
-                        text: "Option 3"
-
-                        label_walk: {
-                            width: Fit, height: Fit,
-                            margin: { left: 20. }
-                        }
-
-                        label_align: { y: 0.0 }
-                        
-                        draw_bg: {
-                            border_size: (THEME_BEVELING)
-
-                            color_dither: 1.0
-
-                            color: #F00
-                            color_hover: #F44
-                            color_active: #F00
-
-                            border_color_1: #0
-                            border_color_1_hover: #F
-                            border_color_1_active: #8
-
-                            border_color_2: #0
-                            border_color_2_hover: #F
-                            border_color_2_active: #8
-
-                            mark_color: #FFF0
-                            mark_color_active: #FFFC
-                            
-                        }
-                            
-                        draw_text: {
-                            color: #A
-                            color_hover: #F
-                            color_active: #C
-
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-
-                        icon_walk: { width: 13.0, height: Fit }
-                            
-                        draw_icon: {
-                            color_1: #F00
-                            color_1_active: #F00
-
-                            color_2: #F00
-                            color_2_active: #F00
-                        }
-                    }
-                    radio4 = <RadioButton> {
-                        text: "Option 4"
-
-                        label_walk: {
-                            width: Fit, height: Fit,
-                            margin: { left: 20. }
-                        }
-
-                        label_align: { y: 0.0 }
-                        
-                        draw_bg: {
-                            border_size: (THEME_BEVELING)
-
-                            color_dither: 1.0
-
-                            color: #F00
-                            color_hover: #F44
-                            color_active: #F00
-
-                            border_color_1: #0
-                            border_color_1_hover: #F
-                            border_color_1_active: #8
-
-                            border_color_2: #0
-                            border_color_2_hover: #F
-                            border_color_2_active: #8
-
-                            mark_color: #FFF0
-                            mark_color_active: #FFFC
-                            
-                        }
-                            
-                        draw_text: {
-                            color: #A
-                            color_hover: #F
-                            color_active: #C
-
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-
-                        icon_walk: { width: 13.0, height: Fit }
-                            
-                        draw_icon: {
-                            color_1: #F00
-                            color_1_active: #F00
-
-                            color_2: #F00
-                            color_2_active: #F00
-                        }
-                    }
-                }
-            }
-
-            <Hr> {}
-            <H4> { text: "Custom Marker"}
-            radios_demo_7 = <UIZooRowH> {
-                radio1 = <RadioButtonCustom> {
-                    text: "Option 1"
-                    icon_walk: {
-                        width: 12.5, height: Fit,
-                    }
-                    draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
-                }
-                radio2 = <RadioButtonCustom> {
-                    text: "Option 2"
-                    icon_walk: {
-                        width: 12.5, height: Fit,
-                    }
-                    draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
-                }
-                radio3 = <RadioButtonCustom> {
-                    text: "Option 3"
-                    icon_walk: {
-                        width: 12.5, height: Fit,
-                    }
-                    draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
-                }
-                radio4 = <RadioButtonCustom> {
-                    text: "Option 4"
-                    icon_walk: {
-                        width: 12.5, height: Fit,
-                    }
-                    draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
-                }
-            }
-
-            <Hr> {}
             <H4> { text: "Custom styled marker"}
             radios_demo_8 = <UIZooRowH> {
                 radio1 = <RadioButtonCustom> {
                     text: "Option 1"
-                    icon_walk: { width: 12.5, height: Fit }
+
+                    padding: { left: 20. }
+                    align: { x: 0., y: 0.5}
+                    icon_walk: { width: 12.5, height: Fit, margin: { left: 0. } }
                     draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
 
-                    label_align: { y: 0.0 }
+                    label_walk: { margin: { left: 5. } }
+                    label_align: { x: 0., y: 0. }
                     
-                    draw_text: {
-                        color: #A
-                        color_hover: #F
-                        color_active: #C
+                    draw_icon: {
+                        color_1: #800
+                        color_1_active: #f00
+                        color_1_disabled: #4
 
-                        text_style: <THEME_FONT_REGULAR> {
-                            font_size: (THEME_FONT_SIZE_P)
+                        color_2: #0
+                        color_2_active: #f00
+                        color_2_disabled: #4
+                    }
+
+                    draw_text: {
+                        color: #0AA
+                        color_hover: #0CC
+                        color_down: #088
+                        color_active: #f
+                        color_focus: #0BB
+                        color_disabled: #4
+
+                        text_style: {
+                            font_size: 8.,
+                            line_spacing: 1.4,
+                            font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
                         }
                     }
 
-                    draw_icon: {
-                        color_1: #000
-                        color_1_active: #F00
-
-                        color_2: #F00
-                        color_2_active: #F00
-                    }
                 }
-                radio2 = <RadioButtonCustom> {
+                radio2 = <RadioButton> {
                     text: "Option 2"
-                    icon_walk: { width: 12.5, height: Fit }
-                    draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
 
-                    label_align: { y: 0.0 }
-                    
+                    padding: { left: 20. }
+                    align: { x: 0., y: 0.5}
+
+                    label_walk: { margin: { left: 5. } }
+                    label_align: { x: 0., y: 0. }
+
                     draw_text: {
-                        color: #A
-                        color_hover: #F
-                        color_active: #C
+                        color: #0AA
+                        color_hover: #0CC
+                        color_down: #088
+                        color_active: #f
+                        color_focus: #0BB
+                        color_disabled: #4
 
-                        text_style: <THEME_FONT_REGULAR> {
-                            font_size: (THEME_FONT_SIZE_P)
+                        text_style: {
+                            font_size: 8.,
+                            line_spacing: 1.4,
+                            font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
                         }
                     }
 
-                    draw_icon: {
-                        color_1: #000
-                        color_1_active: #F00
+                    draw_bg: {
+                        size: 15.0,
 
-                        color_2: #F00
-                        color_2_active: #F00
-                    }
-                }
-                radio3 = <RadioButtonCustom> {
-                    text: "Option 3"
-                    icon_walk: { width: 12.5, height: Fit }
-                    draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
+                        border_size: (THEME_BEVELING)
+                        border_radius: (THEME_CORNER_RADIUS)
 
-                    label_align: { y: 0.0 }
-                    
-                    draw_text: {
+                        color_dither: 1.0
+
                         color: #A
-                        color_hover: #F
-                        color_active: #C
+                        color_hover: #C
+                        color_down: #8
+                        color_active: #A
+                        color_focus: #B
+                        color_disabled: #4
 
-                        text_style: <THEME_FONT_REGULAR> {
-                            font_size: (THEME_FONT_SIZE_P)
-                        }
+                        border_color_1: #A00
+                        border_color_1_hover: #C00
+                        border_color_1_down: #800
+                        border_color_1_active: #A00
+                        border_color_1_focus: #B00
+                        border_color_1_disabled: #400
+
+                        border_color_2: #0A0
+                        border_color_2_hover: #0C0
+                        border_color_2_down: #080
+                        border_color_2_active: #0A0
+                        border_color_2_focus: #0B0
+                        border_color_2_disabled: #040
+
+                        mark_color: #0000
+                        mark_color_active: #0
+                        mark_color_disabled: #0000
+
                     }
 
-                    draw_icon: {
-                        color_1: #000
-                        color_1_active: #F00
-
-                        color_2: #F00
-                        color_2_active: #F00
-                    }
                 }
-                radio4 = <RadioButtonCustom> {
-                    text: "Option 4"
-                    icon_walk: { width: 12.5, height: Fit }
-                    draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
-
-                    label_align: { y: 0.0 }
-                    
-                    draw_text: {
-                        color: #A
-                        color_hover: #F
-                        color_active: #C
-
-                        text_style: <THEME_FONT_REGULAR> {
-                            font_size: (THEME_FONT_SIZE_P)
-                        }
-                    }
-
-                    draw_icon: {
-                        color_1: #000
-                        color_1_active: #F00
-
-                        color_2: #F00
-                        color_2_active: #F00
-                    }
-                }
-
             }
 
             <Hr> {}
