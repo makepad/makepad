@@ -600,8 +600,13 @@ impl BuildManager {
 
             while let Ok(wrap) = self.clients[0].msg_receiver.try_recv() {
                 match wrap.message {
-                    BuildClientMessage::LogItem(LogItem::Location(loc)) => {
-                        
+                    BuildClientMessage::LogItem(LogItem::Location(mut loc)) => {
+                        loc.file_name = if let Some(build) = active.builds.get(&wrap.cmd_id){
+                            format!("{}/{}", build.root, loc.file_name)
+                        }
+                        else{
+                            loc.file_name
+                        };
                         if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name) {
                             match loc.level {
                                 LogLevel::Warning => {
