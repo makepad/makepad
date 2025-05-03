@@ -240,7 +240,6 @@ live_design!{
         label_walk: {
             width: Fill, height: Fit,
             margin: { top: 0., bottom: (THEME_SPACE_1) },
-            padding: { bottom: 5.}
         }
             
         text_input: <TextInput> {
