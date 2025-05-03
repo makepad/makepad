@@ -39,7 +39,6 @@ live_design!{
                 }
             }
 
-
             <Hr> {}
             <H4> { text: "GradientX"}
             <UIZooRowH> {
@@ -136,122 +135,72 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "Custom"}
-            styledbutton = <Button> {
-            // Allows instantiation of customly styled elements as i.e. <MyButton> {}.
+            <H4> { text: "Standard, fully customized"}
+            <UIZooRowH> {
+                <Button> {
+                    width: Fill
+                    text: "<Button>"
+                    padding: 10.,
+                    margin: { top: 0., left: 0., bottom:0., right: 0.}
+                    align: { x: 0.5, y: 0.5}
 
-                // BUTTON SPECIFIC PROPERTIES
+                    draw_text: {
+                        color: #4,
+                        color_hover: #8
+                        color_down: #2
+                        color_focus: #6
+                        color_disabled: #f
 
-                draw_bg: { // Shader object that draws the bg.
-                        fn pixel(self) -> vec4 {
-                        return mix( // State transition animations.
-                            mix(
-                                #800,
-                                mix(#800, #f, 0.5),
-                                self.hover
-                            ),
-                            #00f,
-                            self.down
-                        )
-                    }
-                },
-
-                draw_icon: { // Shader object that draws the icon.
-                    svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                    // Icon file dependency.
-
-                    fn get_color(self) -> vec4 { // Overwrite the shader's fill method.
-                        return mix( // State transition animations.
-                            mix(
-                                #f0f,
-                                #fff,
-                                self.hover
-                            ),
-                            #000,
-                            self.down
-                        )
-                    }
-                }
-
-                grab_key_focus: true, // Keyboard gets focus when clicked.
-
-                icon_walk: {
-                    margin: 10.,
-                    width: 16.,
-                    height: Fit
-                }
-
-                label_walk: {
-                    margin: 0.,
-                    width: Fit,
-                    height: Fit,
-                }
-
-                text: "Freely Styled <Button> clicked: 0", // Text label.
-
-                animator: { // State change triggered animations.
-                    hover = { // State
-                        default: off // The state's starting point.
-                        off = { // Behavior when the animation is started to the off-state
-                            from: { // Behavior depending on the prior states
-                                all: Forward {duration: 0.1}, // Default animation direction and speed in secs.
-                                down: Forward {duration: 0.25} // Direction and speed for 'pressed' in secs.
-                            }
-                            apply: { // Shader methods to animate
-                                draw_bg: { down: 0.0, hover: 0.0 } // Timeline target positions for the given states.
-                                draw_icon: { down: 0.0, hover: 0.0 }
-                                draw_text: { down: 0.0, hover: 0.0 }
-                            }
-                        }
-
-                        on = { // Behavior when the animation is started to the on-state
-                            from: {
-                                all: Forward {duration: 0.1},
-                                pressed: Forward {duration: 0.5}
-                            }
-                            apply: {
-                                draw_bg: { down: 0.0, hover: [{time: 0.0, value: 1.0}] },
-                                // pressed: 'pressed' timeline target position
-                                // hover, time: Normalized timeline from 0.0 - 1.0. 'duration' then determines the actual playback duration of this animation in seconds.
-                                // hover, value: target timeline position
-                                draw_icon: { down: 0.0, hover: [{time: 0.0, value: 1.0}] },
-                                draw_text: { down: 0.0, hover: [{time: 0.0, value: 1.0}] }
-                            }
-                        }
-            
-                        pressed = { // Behavior when the animation is started to the pressed-state
-                            from: {all: Forward {duration: 0.2}}
-                            apply: {
-                                draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0}, 
-                                draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0},
-                                draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0}
-                            }
+                        text_style: {
+                            font_size: 8.,
+                            line_spacing: 1.4,
+                            font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
                         }
                     }
+
+                    icon_walk: {
+                        width: 20.
+                        height: Fit,
+                    }
+
+                    draw_icon: {
+                        color: #A00
+                        color_hover: #f00
+                        color_down: #800
+                        color_focus: #fff
+                        color_disabled: #000
+                    
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                    }
+
+                    draw_bg: {
+                        color_dither: 1.0
+
+                        border_size: 1.
+                        border_radius: 6.
+
+                        color: #A
+                        color_hover: #C
+                        color_down: #9
+                        color_focus: #B
+                        color_disabled: #8
+
+                        border_color_1: #0
+                        border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
+                        border_color_1_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
+                        border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
+                        border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+
+                        border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
+                        border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
+                        border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
+                        border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
+                        border_color_2_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
+                    }
+
                 }
-
-                // LAYOUT PROPERTIES
-
-                height: Fit,
-                // Element assumes the height of its children.
-
-                width: Fill,
-                // Element assumes the width of its children.
-
-                margin: 5.0
-                padding: { top: 3.0, right: 6.0, bottom: 3.0, left: 6.0 },
-                // Individual space between the element's border and its content
-                // for top and left.
-
-                flow: Right,
-                // Stacks children from left to right.
-
-                spacing: 5.0,
-                // A spacing of 10.0 between children.
-
-                align: { x: 0.5, y: 0.5 },
-                // Positions children at the left (x) bottom (y) corner of the parent.
             }
+
         }
     }
 }
