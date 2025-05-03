@@ -1,8 +1,7 @@
-
+/* WARNING. AI GENERATED */
 use makepad_widgets::*;
 use std::collections::VecDeque;
 use std::time::Instant;
-use std::cmp::Ordering;
 use std::f32::consts::PI;
 
 live_design!{
