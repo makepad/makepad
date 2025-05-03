@@ -14,8 +14,17 @@ live_design!{
         }
         demos = {
             <H4> { text: "Checkbox"}
+            <CheckBox> { text:"Check me out!" }
+            
+            <Hr> {}
+            <H4> { text: "Checkbox, disabled"}
             <CheckBox> {
                 text:"Check me out!"
+                animator: {
+                    disabled = {
+                        default: on
+                    }
+                }
             }
 
             <Hr> {}

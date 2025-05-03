@@ -14,7 +14,7 @@ live_design! {
         
         icon_walk: {
             margin: {left: 5.0},
-            width: Fit,
+            width: 17.5,
             height: Fit,
         }
         

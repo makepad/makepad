@@ -15,7 +15,6 @@ live_design!{
         demos = {
             <H4> { text: "Standard" }
             <Icon> {
-                icon_walk: { width: 100.  }
                 draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
             }
 
