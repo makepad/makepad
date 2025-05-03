@@ -3,7 +3,7 @@ use {
         makepad_micro_serde::*,
         makepad_platform::*,
         makepad_file_protocol::{FileRequest, FileClientMessage},
-        makepad_file_server::{FileServerConnection, FileServer},
+        makepad_file_server::{FileServerConnection, FileServer, FileSystemRoots},
     },
     std::{
         //env,
@@ -11,8 +11,6 @@ use {
         net::{ TcpStream},
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
-        path::Path,
-        //path::PathBuf
     },
 };
 
@@ -30,9 +28,9 @@ pub struct FileClientInner {
 }
 
 impl FileClient {
-    pub fn init(&mut self, _cx:&mut Cx, path:&Path){
+    pub fn init(&mut self, _cx:&mut Cx, roots:FileSystemRoots){
         if self.inner.is_none() {
-            self.inner = Some(FileClientInner::new_with_local_server(path))
+            self.inner = Some(FileClientInner::new_with_local_server(roots))
         }
     }
     
@@ -60,7 +58,7 @@ impl FileClient {
 }
 
 impl FileClientInner {
-    pub fn new_with_local_server(path:&Path) -> Self {
+    pub fn new_with_local_server(roots:FileSystemRoots) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
         let message_signal = SignalToUI::new();
         let (message_sender, message_receiver) = mpsc::channel();
@@ -76,7 +74,7 @@ impl FileClientInner {
         let base_path = env::current_dir().unwrap().join(root);
         let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());*/
         
-        let mut server = FileServer::new(path);
+        let mut server = FileServer::new(roots);
         spawn_local_request_handler(
             request_receiver,
             server.connect(Box::new({

@@ -29,13 +29,13 @@ live_design!{
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
             //return mix(#f00,#ff0,self.pos.y);
-            return vec4(Pal::iq2(index - self.color_cycle*-1.0),1);
+            return vec4(Pal::iq1(index - self.color_cycle*-1.0),1);
             
         }
     }
     
     pub Mandelbrot = {{Mandelbrot}} {
-        max_iter: 256,
+        max_iter: 2560,
     }
 }
 

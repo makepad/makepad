@@ -27,6 +27,7 @@ impl Widget for StudioFileTree {
             scope.data.get_mut::<AppData>().unwrap().file_system.draw_file_node(
                 cx,
                 live_id!(root).into(),
+                0,
                 &mut self.file_tree
             );
         }
