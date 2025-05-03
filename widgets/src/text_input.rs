@@ -359,28 +359,6 @@ live_design! {
                     }
                 }
             }
-
-            // hover = {
-            //     default: off
-            //     off = {
-            //         from: {all: Forward {duration: 0.}}
-            //         apply: {
-            //             draw_bg: {empty: 0.0}
-            //             draw_text: {empty: 0.0}
-            //             draw_selection: {empty: 0.0}
-            //             draw_cursor: {empty: 0.0}
-            //         }
-            //     }
-            //     on = {
-            //         from: {all: Forward {duration: 0.2}}
-            //         apply: {
-            //             draw_bg: {empty: 1.0}
-            //             draw_text: {empty: 1.0}
-            //             draw_selection: {empty: 1.0}
-            //             draw_cursor: {empty: 1.0}
-            //         }
-            //     }
-            // }
             disabled = {
                 default: off,
                 off = {

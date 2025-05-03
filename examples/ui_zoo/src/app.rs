@@ -220,7 +220,7 @@
                             flow: Down
                             spacing: 0.
                             <Label> { margin: {top: (THEME_SPACE_1)}, padding: 0., width: Fit, text: "Tint Color"}
-                            <TextInput> { text: "#f00" }
+                            <TextInput> { empty_text: "Hex color", text: "#f00" }
                         }
                         <Slider> {
                             text: "Tint Amount"
@@ -275,6 +275,7 @@
         #[live] fnumber: f32,
         #[live] inumber: i32,
         #[live] dropdown: DropDownEnum,
+        #[live] dropdown_customized: DropDownEnum,
         #[live] dropdown_below: DropDownEnum,
         #[live] dropdown_flat: DropDownEnum,
         #[live] dropdown_flat_below: DropDownEnum,
@@ -343,7 +344,7 @@ impl LiveRegister for App {
             ui.radio_button_set(ids!(radios_demo_5.radio1, radios_demo_5.radio2, radios_demo_5.radio3, radios_demo_5.radio4)).selected(cx, actions);
             ui.radio_button_set(ids!(radios_demo_6.radio1, radios_demo_6.radio2, radios_demo_6.radio3, radios_demo_6.radio4)).selected(cx, actions);
             ui.radio_button_set(ids!(radios_demo_7.radio1, radios_demo_7.radio2, radios_demo_7.radio3, radios_demo_7.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_8.radio1, radios_demo_8.radio2, radios_demo_8.radio3, radios_demo_8.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids!(radios_demo_8.radio1, radios_demo_8.radio2)).selected(cx, actions);
             ui.radio_button_set(ids!(radios_demo_9.radio1, radios_demo_9.radio2, radios_demo_9.radio3, radios_demo_9.radio4)).selected(cx, actions);
             ui.radio_button_set(ids!(radios_demo_10.radio1, radios_demo_10.radio2, radios_demo_10.radio3, radios_demo_10.radio4)).selected(cx, actions);
             ui.radio_button_set(ids!(radios_demo_11.radio1, radios_demo_11.radio2, radios_demo_11.radio3, radios_demo_11.radio4)).selected(cx, actions);
