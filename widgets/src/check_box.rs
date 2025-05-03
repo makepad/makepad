@@ -272,7 +272,9 @@ live_design!{
             }
         }
             
-        icon_walk: { width: 13.0, height: Fit }
+        icon_walk: {
+            width: 14.0, height: Fit
+        }
             
         animator: {
             disabled = {
@@ -1492,7 +1494,11 @@ live_design!{
 
     pub CheckBoxCustom = <CheckBox> {
         draw_bg: { check_type: None }
-        align: { x: 0.0, y: 0.5}
+        width: Fit, height: Fit,
+
+        padding: <THEME_MSPACE_2> {}
+        align: { x: 0., y: 0.5 }
+
         label_walk: {
             margin: <THEME_MSPACE_H_2> {}
         }
