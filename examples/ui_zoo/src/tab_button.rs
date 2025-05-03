@@ -136,14 +136,13 @@ live_design!{
 
             <Hr> {}
             <H4> { text: "Standard, fully customized"}
-            <P> { text: "Example for styling" }
             <UIZooRowH> {
                 <Button> {
                     width: Fill
                     text: "<Button>"
                     padding: 10.,
-                    align: { x: 0.5, y: 0.5}
                     margin: { top: 0., left: 0., bottom:0., right: 0.}
+                    align: { x: 0.5, y: 0.5}
 
                     draw_text: {
                         color: #4,
@@ -157,7 +156,6 @@ live_design!{
                             line_spacing: 1.4,
                             font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
                         }
-
                     }
 
                     icon_walk: {
