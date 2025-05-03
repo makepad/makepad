@@ -147,6 +147,69 @@ live_design!{
                     }
                 }
             }
+
+            <Hr> {}
+            <H4> { text: "Standard, fully customized" }
+            dropdown_customized = <DropDown> {
+                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+
+                popup_menu_position: BelowInput,
+
+                width: Fill, height: Fit,
+                align: { x: 0., y: .5 }
+                padding: 10.
+                margin: 10.
+            
+                draw_text: {
+                    color: #4
+                    color_hover: #6
+                    color_down: #0
+                    color_focus: #8
+                    color_disabled: #C
+
+                    text_style: {
+                        font_size: 8.,
+                        line_spacing: 1.4,
+                        font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
+                    }
+                }
+
+                draw_bg: {
+                    border_size: (THEME_BEVELING)
+                    border_radius: (THEME_CORNER_RADIUS)
+
+                    color_dither: 1.0
+
+                    color: #A
+                    color_hover: #C
+                    color_down: #9
+                    color_focus: #B
+                    color_disabled: #8
+
+                    border_color_1: #0
+                    border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
+                    border_color_1_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
+                    border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
+                    border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+
+                    border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
+                    border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
+                    border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
+                    border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
+                    border_color_2_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
+
+                    arrow_color: (THEME_COLOR_LABEL_INNER)
+                    arrow_color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+                    arrow_color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+                    arrow_color_down: (THEME_COLOR_LABEL_INNER_DOWN)
+                    arrow_color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+                }
+
+
+            }
+
+
         }
     }
 }
