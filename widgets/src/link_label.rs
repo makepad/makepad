@@ -327,7 +327,7 @@ live_design!{
 
     pub LinkLabelIcon = <LinkLabel> {
         padding: { bottom: 2. }
-        align: {x: 0.0, y: 0.5 }
+        align: {x: 0.0, y: 0.0 }
         label_walk: { margin: { left: (THEME_SPACE_2) } }
     }
 
