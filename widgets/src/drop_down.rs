@@ -24,9 +24,10 @@ live_design!{
     
     pub DropDown = <DropDownBase> {
         width: Fit, height: Fit,
-        margin: 0.,
-        padding: <THEME_MSPACE_2> { right: 22.5 }
         align: {x: 0., y: 0.}
+
+        padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: 22.5 }
+        margin: <THEME_MSPACE_V_1> {}
         
         draw_text: {
             instance disabled: 0.0,
