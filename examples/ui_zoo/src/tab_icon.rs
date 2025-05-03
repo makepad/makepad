@@ -31,6 +31,21 @@ live_design!{
                 icon_walk: { width: 100.  }
                 draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
             }
+
+            <H4> { text: "Standard, fully customized" }
+            <Icon> {
+                width: Fit, height: Fit,
+                padding: 20.
+
+                icon_walk: {
+                    width: 50.
+                    margin: 10.
+                }
+
+                draw_bg: { color: #0 }
+                draw_icon: { color: #0f0 }
+                draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg") }
+            }
         }
     }
 }
