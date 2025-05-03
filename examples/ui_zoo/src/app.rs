@@ -183,10 +183,37 @@
                         spacing: (THEME_SPACE_2)
                         align: { x: 0.0, y: 0.0 }
                         padding: <THEME_MSPACE_2> {}
-                        margin: 0.
+                        margin: { bottom: (THEME_SPACE_1) }
 
                         show_bg: true,
-                        draw_bg: { color: (THEME_COLOR_U_1) }
+                        // draw_bg: { color: (THEME_COLOR_U_1) }
+
+                        draw_bg: {
+                            uniform color_dither: 1.0
+                            uniform border_radius: 0.
+                            uniform border_size: (THEME_BEVELING)
+                            uniform color_1: (THEME_COLOR_BG_APP * 0.9);
+                            uniform color_2: #282828;
+
+                            fn pixel(self) -> vec4 {
+                                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                                sdf.rect(
+                                    -2.,
+                                    1.,
+                                    self.rect_size.x + 2.,
+                                    self.rect_size.y + 30.
+                                )
+
+                                sdf.fill_keep((THEME_COLOR_U_1));
+
+                                sdf.stroke(
+                                    mix((THEME_COLOR_BEVEL_OUTSET_1), #fff0, pow(self.pos.y, 0.1)), self.border_size
+                                )
+                                return sdf.result
+                            }
+                        }
 
                         <Slider> {
                             text: "Contrast"
