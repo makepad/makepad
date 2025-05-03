@@ -249,11 +249,8 @@ live_design!{
 
             width: Fit,
             label_align: {y: 0.},
-            // padding: 0.
             margin: 0.
-            // margin: { bottom: (THEME_SPACE_2) },
             padding: 0.
-            // margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
 
             draw_text: {
                 color: (THEME_COLOR_TEXT_VAL)
