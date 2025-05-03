@@ -337,14 +337,14 @@ live_design!{
                             from: {all: Forward {duration: 0.1}}
                             apply: {
                                 draw_text: {hover: 0.0},
-                                draw_highlight: {hover: 0.0}
+                                draw_selection: {hover: 0.0}
                             }
                         }
                         on = {
                             from: {all: Snap}
                             apply: {
                                 draw_text: {hover: 1.0},
-                                draw_highlight: {hover: 1.0}
+                                draw_selection: {hover: 1.0}
                             }
                         }
                     }
@@ -363,7 +363,7 @@ live_design!{
                                     }
                                 }
                                 draw_cursor: {focus: 0.0},
-                                draw_highlight: {focus: 0.0}
+                                draw_selection: {focus: 0.0}
                             }
                         }
                         on = {
@@ -379,7 +379,7 @@ live_design!{
                                     }
                                 }
                                 draw_cursor: {focus: 1.0},
-                                draw_highlight: {focus: 1.0}
+                                draw_selection: {focus: 1.0}
                             }
                         }
                     }
@@ -644,7 +644,7 @@ live_design!{
                 <TextInput> {
                     width: Fill,
 
-                    empty_message: "Reply"
+                    empty_text: "Reply"
                     margin: { top: -17. }
 
                     draw_bg: {
@@ -703,7 +703,7 @@ live_design!{
                         instance focus: 0.0
                         wrap: Word,
                         text_style: <THEME_FONT_REGULAR> {
-                            line_spacing: (THEME_FONT_LINE_SPACING),
+                            line_spacing: (THEME_FONT_WDGT_LINE_SPACING),
                             font_size: (THEME_FONT_SIZE_P)
                         }
                         fn get_color(self) -> vec4 {
@@ -739,14 +739,14 @@ live_design!{
                                 from: {all: Forward {duration: 0.1}}
                                 apply: {
                                     draw_text: {hover: 0.0},
-                                    draw_highlight: {hover: 0.0}
+                                    draw_selection: {hover: 0.0}
                                 }
                             }
                             on = {
                                 from: {all: Snap}
                                 apply: {
                                     draw_text: {hover: 1.0},
-                                    draw_highlight: {hover: 1.0}
+                                    draw_selection: {hover: 1.0}
                                 }
                             }
                         }
@@ -766,7 +766,7 @@ live_design!{
                                         }
                                     }
                                     draw_cursor: {focus: 0.0},
-                                    draw_highlight: {focus: 0.0}
+                                    draw_selection: {focus: 0.0}
                                 }
                             }
                             on = {
@@ -783,7 +783,7 @@ live_design!{
                                         }
                                     }
                                     draw_cursor: {focus: 1.0},
-                                    draw_highlight: {focus: 1.0}
+                                    draw_selection: {focus: 1.0}
                                 }
                             }
                         }
