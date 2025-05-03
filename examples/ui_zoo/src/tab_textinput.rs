@@ -22,6 +22,17 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "TextInput, Disabled" }
+            <TextInput> {
+                empty_text: "Inline Label"
+                animator: {
+                    disabled = {
+                        default: on
+                    }
+                }
+            }
+            
+            <Hr> {}
             <H4> { text: "TextInput Inline Label" }
             <TextInput> { empty_text: "Inline Label" }
 
