@@ -44,8 +44,6 @@
             spacing: 0.
         }
 
-        // <H3> { draw_bg: {color: #f00}}
- 
         App = {{App}} {
             ui: <Window> {
                 width: Fill, height: Fill,
@@ -67,31 +65,6 @@
                     flow: Down,
                     spacing: 0.,
                     margin: 0.,
-
-                    <View> {
-                        width: Fill, height: Fit,
-                        flow: Right,
-                        spacing: (THEME_SPACE_2)
-                        align: { x: 0.0, y: 0.0 }
-                        padding: <THEME_MSPACE_1> {}
-                        margin: 0.
-
-                        show_bg: true,
-                        draw_bg: { color: (THEME_COLOR_U_1) }
-
-                        <SliderRound> { text: "Spacing"}
-                        <Vr> {}
-                        <Labelbold> { width: Fit, text: "Color"}
-                        <SliderRound> { text: "Contrast" }
-                        <SliderRound> { text: "Tint Factor" }
-                        <Vr> {}
-                        <Labelbold> { width: Fit, text: "Font"}
-                        <SliderRound> { text: "Scale" }
-                        <SliderRound> { text: "Contrast"}
-                        <Vr> {}
-                        <Toggle> { text: "Label Hover"}
-                        <Toggle> { text: "Light Theme"}
-                    }
 
                     dock = <Dock> {
                         height: Fill, width: Fill
@@ -142,7 +115,7 @@
                             selected: 0
                         }
 
-                        tOverview = Tab { name: "Widgetset Overview", template: PermanentTab, kind: TabOverview }
+                        tOverview = Tab { name: "Intro", template: PermanentTab, kind: TabOverview }
                         tLayoutDemos = Tab { name: "Layout Demos", template: PermanentTab, kind: TabLayoutDemos }
                         tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
                         tCheckBox = Tab { name: "CheckBox", template: PermanentTab, kind: TabCheckBox }
@@ -201,6 +174,83 @@
 
 
                     }
+
+                    <View> {
+                        width: Fill, height: Fit,
+                        flow: Right,
+                        spacing: (THEME_SPACE_2)
+                        align: { x: 0.0, y: 0.0 }
+                        padding: <THEME_MSPACE_2> {}
+                        margin: { bottom: (THEME_SPACE_1) }
+
+                        show_bg: true,
+
+                        draw_bg: {
+                            uniform color_dither: 1.0
+                            uniform border_radius: 0.
+                            uniform border_size: (THEME_BEVELING)
+                            uniform color_1: (THEME_COLOR_BG_APP * 0.9);
+                            uniform color_2: #282828;
+
+                            fn pixel(self) -> vec4 {
+                                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                                sdf.rect(
+                                    -2.,
+                                    1.,
+                                    self.rect_size.x + 2.,
+                                    self.rect_size.y + 30.
+                                )
+
+                                sdf.fill_keep((THEME_COLOR_U_1));
+
+                                sdf.stroke(
+                                    mix((THEME_COLOR_BEVEL_OUTSET_1), #fff0, pow(self.pos.y, 0.1)), self.border_size
+                                )
+                                return sdf.result
+                            }
+                        }
+
+                        <Slider> {
+                            text: "Contrast"
+                            draw_bg: { label_size: 55. }
+                        }
+                        <View> {
+                            flow: Down
+                            spacing: 0.
+                            <Label> { margin: {top: (THEME_SPACE_1)}, padding: 0., width: Fit, text: "Tint Color"}
+                            <TextInput> { text: "#f00" }
+                        }
+                        <Slider> {
+                            text: "Tint Amount"
+                            draw_bg: { label_size: 80. }
+                        }
+                        <Vr> {}
+                        <Labelbold> { width: Fit, text: "Font"}
+                        <Slider> {
+                            text: "Size"
+                            draw_bg: { label_size: 30. }
+                        }
+                        <Slider> {
+                            text: "Size Contrast"
+                            draw_bg: { label_size: 55. }
+                        }
+                        <Vr> {}
+                        <Slider> {
+                            text: "Bevel"
+                            draw_bg: { label_size: 40. }
+                        }
+                        <Slider> {
+                            text: "Rounding"
+                            draw_bg: { label_size: 65. }
+                        }
+                        <Slider> {
+                            text: "Space"
+                            draw_bg: { label_size: 40. }
+                        }
+                    }
+
 
                 }
             }
@@ -386,6 +436,7 @@ impl AppMain for App {
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
         db.bind(id!(dropdown), ids!(dropdown));
+        db.bind(id!(dropdown_disabled), ids!(dropdown_disabled));
         db.bind(id!(dropdown_demo), ids!(dropdown_demo));
         db.bind(id!(dropdown_flat), ids!(dropdown_flat));
         db.bind(id!(dropdown_flatter), ids!(dropdown_flatter));
