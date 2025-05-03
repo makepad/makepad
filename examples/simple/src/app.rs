@@ -93,7 +93,7 @@ impl MatchEvent for App{
     }
         
     fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(b0)).clicked(&actions) {
+        if self.ui.button(id!(button_1)).clicked(&actions) {
             log!("hi");
             self.counter += 1;
         }

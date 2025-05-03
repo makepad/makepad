@@ -1,12 +1,13 @@
 use {
     std::collections::{HashMap, hash_map},
-    std::path::Path,
+    std::path::{Path},
     crate::{
         makepad_code_editor::{CodeDocument, decoration::{Decoration, DecorationSet}, CodeSession},
         makepad_platform::makepad_live_compiler::LiveFileChange,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
         file_system::FileClient,
+        makepad_file_server::FileSystemRoots,
         ai_chat::ai_chat_manager::AiChatDocument,
         makepad_file_protocol::{
             SearchResult,
@@ -112,8 +113,8 @@ impl FileSystem {
         }
     }
     
-    pub fn init(&mut self, cx: &mut Cx, path:&Path) {
-        self.file_client.init(cx, path);
+    pub fn init(&mut self, cx: &mut Cx, roots:FileSystemRoots) {
+        self.file_client.init(cx, roots);
         self.reload_file_tree();
     }
     
@@ -232,6 +233,8 @@ impl FileSystem {
                                     dock.redraw(cx);
                                 }
                                 Err(FileError::CannotOpen(_unix_path)) => {
+                                }
+                                Err(FileError::RootNotFound(_unix_path)) => {
                                 }
                                 Err(FileError::Unknown(err)) => {
                                     log!("File error unknown {}", err);
@@ -524,15 +527,22 @@ impl FileSystem {
         };
     }
     
-    pub fn draw_file_node(&self, cx: &mut Cx2d, file_node_id: LiveId, file_tree: &mut FileTree) {
+    pub fn draw_file_node(&self, cx: &mut Cx2d, file_node_id: LiveId, level: usize, file_tree: &mut FileTree) {
         if let Some(file_node) = self.file_nodes.get(&file_node_id) {
             match &file_node.child_edges {
                 Some(child_edges) => {
-                    if file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok() {
+                    if level == 0{
                         for child_edge in child_edges {
-                            self.draw_file_node(cx, child_edge.file_node_id, file_tree);
+                            self.draw_file_node(cx, child_edge.file_node_id, level + 1, file_tree);
                         }
-                        file_tree.end_folder();
+                    }
+                    else{
+                        if file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok() {
+                            for child_edge in child_edges {
+                                self.draw_file_node(cx, child_edge.file_node_id, level + 1, file_tree);
+                            }
+                            file_tree.end_folder();
+                        }
                     }
                 }
                 None => {

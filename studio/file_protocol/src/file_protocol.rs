@@ -162,6 +162,7 @@ pub enum FileNotification {
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum FileError {
     Unknown(String),
+    RootNotFound(String),
     CannotOpen(String)
 }
 

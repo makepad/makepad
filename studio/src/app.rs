@@ -8,6 +8,7 @@ use crate::{
     makepad_widgets::file_tree::*,
     makepad_platform::os::cx_stdin::*,
     makepad_file_protocol::SearchItem,
+    makepad_file_server::FileSystemRoots,
     file_system::file_system::*,
     studio_editor::*,
     run_view::*,
@@ -26,6 +27,8 @@ use crate::{
 use std::fs::File;
 use std::io::Write;
 use std::env;
+use std::collections::BTreeMap;
+
 live_design!{
     use crate::app_ui::*;
     use link::widgets::*;
@@ -175,18 +178,31 @@ pub enum AppAction{
 
 impl MatchEvent for App{
     fn handle_startup(&mut self, cx:&mut Cx){
-        let mut root = "./".to_string();
+        let mut roots = BTreeMap::new();
+        let current_dir = env::current_dir().unwrap();
+        
         for arg in std::env::args(){
             if let Some(prefix) = arg.strip_prefix("--root="){
-                root = prefix.to_string();
-                break;
+                for root in prefix.split(","){
+                    let mut parts = root.splitn(2,":");
+                    let base = parts.next().expect("name:path expected");
+                    let path = parts.next().expect("name:path expected");
+                    let dir = current_dir.clone();
+                    roots.insert(base.to_string(), dir.join(path));
+                }
+            }
+            else{
             }
         }
-        let root_path = env::current_dir().unwrap().join(root);
-                
-        self.data.file_system.init(cx, &root_path);
-        self.data.build_manager.init(cx, &root_path);
-        
+        if roots.is_empty(){
+            let dir1 = current_dir.join("./");
+            roots.insert("makepad".to_string(),dir1);
+            roots.insert("experiments".to_string(),current_dir.join("../experiments"));
+            roots.insert("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake"));
+        }
+        let roots = FileSystemRoots{roots};
+        self.data.file_system.init(cx, roots.clone());
+        self.data.build_manager.init(cx, roots);
                 
         //self.data.build_manager.discover_external_ip(cx);
         self.data.build_manager.start_http_server();
