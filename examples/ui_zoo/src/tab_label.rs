@@ -17,14 +17,18 @@ live_design!{
             <Label> { text:"Default single line text" }
             
             <Hr> {}
-            <H4> { text: "Styled" }
+            <H4> { text: "Standard, fully customized" }
             <Label> {
                 draw_text: {
-                    color: (THEME_COLOR_MAKEPAD)
+                    color: #0f0,
+
                     text_style: {
-                        font_size: 20,
+                        font_size: 20.,
+                        line_spacing: 1.4,
+                        font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
                     }
-                },
+                    wrap: Word
+                }
                 text: "You can style text using colors and fonts"
             }
             
