@@ -22,7 +22,7 @@ live_design!{
     pub SliderMinimal = <SliderBase> {
         min: 0.0, max: 1.0,
         step: 0.0,
-        label_align: { y: 0.0 }
+        label_align: { x: 0., y: 0. }
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
         precision: 2,
         height: Fit,
@@ -239,7 +239,8 @@ live_design!{
             
         label_walk: {
             width: Fill, height: Fit,
-            margin: { top: 0. },
+            margin: { top: 0., bottom: (THEME_SPACE_1) },
+            padding: { bottom: 5.}
         }
             
         text_input: <TextInput> {
@@ -248,9 +249,12 @@ live_design!{
             is_read_only: false,
 
             width: Fit,
-            padding: 0.,
             label_align: {y: 0.},
-            margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
+            // padding: 0.
+            margin: 0.
+            // margin: { bottom: (THEME_SPACE_2) },
+            padding: 0.
+            // margin: { bottom: (THEME_SPACE_2), left: (THEME_SPACE_2) }
 
             draw_text: {
                 color: (THEME_COLOR_TEXT_VAL)
