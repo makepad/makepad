@@ -371,7 +371,7 @@ impl BuildManager {
                         file.to_string()
                     }
                     // nonlocal file, make full path
-                    else if let Some(root) = self.roots.roots.get(root){
+                    else if let Some(root) = self.roots.find_root(root){
                         root.join(file).into_os_string().into_string().unwrap()
                     }
                     else{

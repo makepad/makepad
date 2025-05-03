@@ -25,7 +25,6 @@ use {
         time::Duration,
         path::{Path, PathBuf},
         sync::{Arc, RwLock, Mutex},
-        collections::BTreeMap,
     },
 };
 
@@ -447,10 +446,19 @@ impl fmt::Debug for dyn NotificationSender {
 
 #[derive(Debug, Clone, Default)]
 pub struct FileSystemRoots{
-    pub roots: BTreeMap<String, PathBuf>
+    pub roots: Vec<(String, PathBuf)>
 }
 
 impl FileSystemRoots{
+    pub fn find_root(&self, root:&str)->Option<PathBuf>{
+        if let Some(p) = self.roots.iter().find(|v| v.0 == root){
+            Some(p.1.clone())
+        }
+        else{
+            None
+        }
+    }
+    
     fn make_full_path(&self, child_path:&String)->Result<PathBuf,FileError>{
         let mut parts = child_path.splitn(2,"/");
         let root = parts.next().unwrap();
