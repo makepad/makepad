@@ -14,12 +14,12 @@ live_design!{
         }
         demos = {
             <H4> { text: "Checkbox"}
-            <CheckBox> { text:"Check me out!" }
+            <CheckBox> { text:"<CheckBox>" }
             
             <Hr> {}
             <H4> { text: "Checkbox, disabled"}
             <CheckBox> {
-                text:"Check me out!"
+                text:"<CheckBox>"
                 animator: {
                     disabled = {
                         default: on
@@ -28,18 +28,10 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "CheckBoxFlat"}
-            <CheckBoxFlat> { text:"Check me out!" }
-
-            <Hr> {}
-            <H4> { text: "CheckBoxFlatter"}
-            <CheckBoxFlatter> { text:"Check me out!" }
-
-            <Hr> {}
             <H4> { text: "Standard, fully customized"}
             <UIZooRowH> {
                 CheckBoxCustomized = <CheckBox> {
-                    text:"Check me out!"
+                    text:"<CheckBox>"
                     align: { x: 0., y: .5}
                     padding: { top: 0., left: 0., bottom: 0., right: 0.}
                     margin: { top: 0., left: 0., bottom: 0., right: 0.}
@@ -99,127 +91,50 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "CheckBoxFlat"}
+            <CheckBoxFlat> { text:"<CheckBoxFlat>" }
+
+            <Hr> {}
+            <H4> { text: "CheckBoxFlatter"}
+            <CheckBoxFlatter> { text:"<CheckBoxFlat>" }
+
+            <Hr> {}
             <H4> { text: "CheckBoxGradientX"}
-            <CheckBoxGradientX> { text:"Check me out!" }
+            <CheckBoxGradientX> { text:"<CheckBoxGradientX>" }
 
             <Hr> {}
             <H4> { text: "CheckBoxGradientY"}
-            <CheckBoxGradientY> { text:"Check me out!" }
+            <CheckBoxGradientY> { text:"<CheckBoxGradientY>" }
 
 
             <Hr> {}
             <H4> { text: "Toggle"}
             <UIZooRowH> {
-                <Toggle> {text:"Check me out!" }
+                <Toggle> {text:"<Toggle>" }
             }
 
             <Hr> {}
             <H4> { text: "ToggleFlat"}
             <UIZooRowH> {
-                <ToggleFlat> {text:"Check me out!" }
+                <ToggleFlat> {text:"<ToggleFlat>" }
             }
 
             <Hr> {}
             <H4> { text: "ToggleFlatter"}
             <UIZooRowH> {
-                <ToggleFlatter> {text:"Check me out!" }
+                <ToggleFlatter> {text:"<ToggleFlatter>" }
             }
 
             <Hr> {}
             <H4> { text: "ToggleGradientX"}
             <UIZooRowH> {
-                <ToggleGradientX> {text:"Check me out!" }
+                <ToggleGradientX> {text:"<ToggleGradientX>" }
             }
 
             <Hr> {}
             <H4> { text: "ToggleGradientY"}
             <UIZooRowH> {
-                <ToggleGradientY> {text:"Check me out!" }
-            }
-
-            <Hr> {}
-            <H4> { text: "Toggle Customized"}
-            <Toggle> {
-                text:"Check me out!"
-
-                draw_bg: {
-                    border_size: 1.0
-
-                    border_color_1: #0
-                    border_color_1_hover: #F
-                    border_color_1_active: #8
-
-                    border_color_2: #0
-                    border_color_2_hover: #F
-                    border_color_2_active: #8
-
-                    mark_color: #FFFF
-                    mark_color_hover: #FFFF
-                    mark_color_active: #FFFC
-                }  
-            
-                draw_text: {
-                    color: #A
-                    color_hover: #F
-                    color_active: #C
-
-                    text_style: <THEME_FONT_REGULAR> {
-                        font_size: (THEME_FONT_SIZE_P)
-                    }
-                }
-
-                draw_icon: {
-                    color: #F00
-                    color_active: #F00
-                }
-
-                icon_walk: { width: 13.0, height: Fit }
-
-            }
-            <Hr> {}
-
-            <H4> { text: "Custom Icon Mode"}
-            <UIZooRowH> {
-                <CheckBoxCustom> {
-                    text:"Check me out!"
-                    draw_bg: { check_type: None }
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                    }
-
-                    label_walk: {
-                        width: Fit, height: Fit,
-                        margin: <THEME_MSPACE_H_1> { left: 12.5 }
-                    }
-
-                    draw_bg: {
-                        border_size: 1.0
-                    }  
-                
-                    draw_text: {
-                        color: #330
-                        color_hover: #8
-                        color_active: #F80
-
-                        text_style: <THEME_FONT_REGULAR> {
-                            font_size: (THEME_FONT_SIZE_P)
-                        }
-                    }
-
-                    draw_icon: {
-
-                    }
-
-                    icon_walk: { width: 13.0, height: Fit }
-                }
-
-                <CheckBoxCustom> {
-                    text:"Check me out!"
-                    draw_bg: { check_type: None }
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                    }
-                }
+                <ToggleGradientY> {text:"<ToggleGradientY>" }
             }
 
             <Hr> {} 
@@ -228,8 +143,8 @@ live_design!{
                 height: Fit
                 flow: Right
                 align: { x: 0.0, y: 0.5}
-                simplecheckbox = <CheckBox> {text:"Check me out!"}
-                simplecheckbox_output = <Label> { text:"hmm" }
+                simplecheckbox = <CheckBox> {text:"<CheckBox>"}
+                simplecheckbox_output = <Label> { text:"" }
             }
 
         }
