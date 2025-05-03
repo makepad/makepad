@@ -27,7 +27,6 @@ use crate::{
 use std::fs::File;
 use std::io::Write;
 use std::env;
-use std::collections::BTreeMap;
 
 live_design!{
     use crate::app_ui::*;
@@ -178,7 +177,7 @@ pub enum AppAction{
 
 impl MatchEvent for App{
     fn handle_startup(&mut self, cx:&mut Cx){
-        let mut roots = BTreeMap::new();
+        let mut roots = Vec::new();
         let current_dir = env::current_dir().unwrap();
         
         for arg in std::env::args(){
@@ -188,7 +187,7 @@ impl MatchEvent for App{
                     let base = parts.next().expect("name:path expected");
                     let path = parts.next().expect("name:path expected");
                     let dir = current_dir.clone();
-                    roots.insert(base.to_string(), dir.join(path));
+                    roots.push((base.to_string(), dir.join(path)));
                 }
             }
             else{
@@ -196,9 +195,9 @@ impl MatchEvent for App{
         }
         if roots.is_empty(){
             let dir1 = current_dir.join("./");
-            roots.insert("makepad".to_string(),dir1);
-            roots.insert("experiments".to_string(),current_dir.join("../experiments"));
-            roots.insert("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake"));
+            roots.push(("makepad".to_string(),dir1));
+            roots.push(("experiments".to_string(),current_dir.join("../experiments")));
+            roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake")));
         }
         let roots = FileSystemRoots{roots};
         self.data.file_system.init(cx, roots.clone());
