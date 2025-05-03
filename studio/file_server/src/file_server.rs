@@ -25,6 +25,7 @@ use {
         time::Duration,
         path::{Path, PathBuf},
         sync::{Arc, RwLock, Mutex},
+        collections::BTreeMap,
     },
 };
 
@@ -37,11 +38,11 @@ pub struct FileServer {
 
 impl FileServer {
     /// Creates a new collab server rooted at the given path.
-    pub fn new<P: Into<PathBuf >> (root_path: P) -> FileServer {
+    pub fn new(roots: FileSystemRoots) -> FileServer {
         FileServer {
             next_connection_id: 0,
             shared: Arc::new(RwLock::new(Shared {
-                root_path: root_path.into(),
+                roots,
             })),
         }
     }
@@ -95,7 +96,7 @@ impl FileServerConnection {
     
     fn search_start(&self, what:Vec<SearchItem>, id:u64) {
         let mut sender = self._notification_sender.clone();
-        let root_path = self.shared.read().unwrap().root_path.clone();
+        let roots = self.shared.read().unwrap().roots.clone();
         thread::spawn(move || {
             
             // A recursive helper function for traversing the entries of a directory and creating the
@@ -204,7 +205,9 @@ impl FileServerConnection {
             }
             let mut last_send = Instant::now();
             let mut results = Vec::new();
-            search_files(id, &what, &root_path, "", &mut sender, &mut last_send, &mut results);
+            for (root_name, root_path) in roots.roots{
+                search_files(id, &what, &root_path, &root_name, &mut sender, &mut last_send, &mut results);
+            }
             if results.len()>0{
                 sender.send_notification(FileNotification::SearchResults{
                     id,
@@ -287,19 +290,21 @@ impl FileServerConnection {
             Ok(entries)
         }
         
-        let root_path = self.shared.read().unwrap().root_path.clone();
-        
-        let root = FileNodeData::Directory {
-            entries: get_directory_entries(&root_path, with_data) ?,
-        };
-        Ok(FileTreeData {root_path: "".into(), root})
+        let roots = self.shared.read().unwrap().roots.clone();
+        let mut entries = Vec::new();
+        for (root_name, root_path) in roots.roots{
+            entries.push(DirectoryEntry{
+                name: root_name,
+                node: FileNodeData::Directory {
+                    entries: get_directory_entries(&root_path, with_data) ?,
+                }
+            });
+        }
+        Ok(FileTreeData {root_path: "".into(), root:FileNodeData::Directory {
+            entries,
+        }})
     }
     
-    fn make_full_path(&self, child_path:&String)->PathBuf{
-        let mut path = self.shared.read().unwrap().root_path.clone();
-        path.push(child_path);
-        path
-    }
     
     fn start_observation(&self) {
         let open_files = self.open_files.clone();
@@ -311,9 +316,8 @@ impl FileServerConnection {
                 if let Ok(mut files) = open_files.lock(){
                     for (path, file_id, last_content) in files.iter_mut() {
                         let full_path = {
-                            let shared = shared.read().unwrap();
-                            shared.root_path.join(&path)
-                        };
+                            shared.read().unwrap().roots.make_full_path(&path)
+                        }.unwrap();
                         if let Ok(bytes) = fs::read(&full_path) {
                             if bytes.len() > 0 && bytes != *last_content {
                                 let new_data = String::from_utf8_lossy(&bytes);
@@ -342,7 +346,7 @@ impl FileServerConnection {
     
     // Handles an `OpenFile` request.
     fn open_file(&self, child_path: String, id:u64) -> Result<OpenFileResponse, FileError> {
-        let path = self.make_full_path(&child_path);
+        let path = self.shared.read().unwrap().roots.make_full_path(&child_path)?;
         
         let bytes = fs::read(&path).map_err(
             | error | FileError::Unknown(error.to_string())
@@ -390,7 +394,7 @@ impl FileServerConnection {
             open_files.push((child_path.clone(), id, new_data.as_bytes().to_vec()));
         }
         
-        let path = self.make_full_path(&child_path);
+        let path = self.shared.read().unwrap().roots.make_full_path(&child_path)?;
         
         let old_data = String::from_utf8_lossy(&fs::read(&path).map_err(
             | error | FileError::Unknown(error.to_string())
@@ -441,10 +445,36 @@ impl fmt::Debug for dyn NotificationSender {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct FileSystemRoots{
+    pub roots: BTreeMap<String, PathBuf>
+}
+
+impl FileSystemRoots{
+    fn make_full_path(&self, child_path:&String)->Result<PathBuf,FileError>{
+        let mut parts = child_path.splitn(2,"/");
+        let root = parts.next().unwrap();
+        let file = parts.next().unwrap();
+        for (root_name, root_path) in &self.roots{
+            // lets split off the first directory
+            if root_name == root{
+                let mut path = root_path.clone();
+                path.push(file);
+                return Ok(path)
+            }
+        }
+        return Err(FileError::RootNotFound(child_path.clone()))
+    }
+}
+
 // State that is shared between every connection.
 #[derive(Debug)]
 struct Shared {
-    root_path: PathBuf,
+    roots: FileSystemRoots
+}
+
+impl Shared{
+        
 }
 
 /// An identifier for a connection.
