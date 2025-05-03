@@ -17,22 +17,6 @@ live_design!{
             <Label> { text:"Default single line text" }
             
             <Hr> {}
-            <H4> { text: "Standard, fully customized" }
-            <Label> {
-                draw_text: {
-                    color: #0f0,
-
-                    text_style: {
-                        font_size: 20.,
-                        line_spacing: 1.4,
-                        font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
-                    }
-                    wrap: Word
-                }
-                text: "You can style text using colors and fonts"
-            }
-            
-            <Hr> {}
             <H4> { text: "LabelGradientX" }
             <LabelGradientX> { text: "<LabelGradientY>" }
             <LabelGradientX> {
@@ -61,9 +45,25 @@ live_design!{
                 
                 text: "<LabelGradientY>"
             }
+
+            <Hr> {}
+            <H4> { text: "Standard, fully customized" }
+            <Label> {
+                draw_text: {
+                    color: #0f0,
+
+                    text_style: {
+                        font_size: 20.,
+                        line_spacing: 1.4,
+                        font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
+                    }
+                    wrap: Word
+                }
+                text: "You can style text using colors and fonts"
+            }
             
             <Hr> {}
-            <H4> { text: "Customized" }
+            <H4> { text: "Custom Shader" }
             <Label> {
                 draw_text: {
                     fn get_color(self) ->vec4{
@@ -76,7 +76,7 @@ live_design!{
                 },
                 text: "OR EVEN SOME PIXELSHADERS"
             }
-
+            
             <Hr> {}
             <H4> { text: "TextBox" }
             <TextBox> {
