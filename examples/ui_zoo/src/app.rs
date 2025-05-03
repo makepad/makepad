@@ -79,18 +79,39 @@
                         show_bg: true,
                         draw_bg: { color: (THEME_COLOR_U_1) }
 
-                        <SliderRound> { text: "Contrast"}
+                        <SliderRound> {
+                            text: "Contrast"
+                            draw_bg: { label_size: 55. }
+                        }
                         <Label> { width: Fit, text: "Color"}
-                        <TextInput> { text: "#f00" }
-                        <SliderRound> { text: "Tint Amount"}
+                        <TextInput> { width: 65., text: "#f00" }
+                        <SliderRound> {
+                            text: "Tint Amount"
+                            draw_bg: { label_size: 80. }
+                        }
                         <Vr> {}
                         <Labelbold> { width: Fit, text: "Typography"}
-                        <SliderRound> { text: "Size" }
-                        <SliderRound> { text: "Contrast" }
+                        <SliderRound> {
+                            text: "Size"
+                            draw_bg: { label_size: 30. }
+                        }
+                        <SliderRound> {
+                            text: "Contrast"
+                            draw_bg: { label_size: 55. }
+                        }
                         <Vr> {}
-                        <SliderRound> { text: "Bevel" }
-                        <SliderRound> { text: "Rounding"}
-                        <SliderRound> { text: "Space"}
+                        <SliderRound> {
+                            text: "Bevel"
+                            draw_bg: { label_size: 40. }
+                        }
+                        <SliderRound> {
+                            text: "Rounding"
+                            draw_bg: { label_size: 65. }
+                        }
+                        <SliderRound> {
+                            text: "Space"
+                            draw_bg: { label_size: 40. }
+                        }
                     }
 
                     dock = <Dock> {
