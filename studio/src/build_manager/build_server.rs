@@ -81,7 +81,7 @@ impl BuildConnection {
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
-        let path = shared.read().unwrap().roots.roots.get(&what.root).unwrap().clone();
+        let path = shared.read().unwrap().roots.find_root(&what.root).unwrap().clone();
 
         let http = format!("{}/{}", http, cmd_id.0);
         let mut env = vec![("RUST_BACKTRACE","1"),("MAKEPAD_STUDIO_HTTP", http.as_str()), ("MAKEPAD", "lines")];
@@ -274,7 +274,7 @@ impl BuildConnection {
             env.push(("RUSTUP_TOOLCHAIN", "nightly"));
         }
 
-        let process = ChildProcess::start("cargo", &args, path, &env, is_in_studio)
+        let process = ChildProcess::start("cargo", &args, path.to_path_buf(), &env, is_in_studio)
             .expect("Cannot start process");
 
         shared.write().unwrap().processes.insert(
