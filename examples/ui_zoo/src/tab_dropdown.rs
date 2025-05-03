@@ -22,8 +22,20 @@ live_design!{
             <H4> { text: "Standard, Position: BelowInput" }
             dropdown_below = <DropDown> {
             popup_menu_position: BelowInput,
-            labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+            }
+
+            <Hr> {}
+            <H4> { text: "Standard, disabled" }
+            dropdown_disabled = <DropDown> {
+                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
+                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
+                animator: {
+                    disabled = {
+                        default: on
+                    }
+                }
             }
 
             <Hr> {}

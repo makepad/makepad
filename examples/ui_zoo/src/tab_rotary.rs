@@ -18,6 +18,15 @@ live_design!{
                 align: { x: 0. , y: 0.}
 
                 <Rotary> { text: "Label" }
+
+                <Rotary> {
+                    text: "Label"
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
+                }
                 <Rotary> {
                     text: "Label",
                     draw_bg: {
