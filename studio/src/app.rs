@@ -184,9 +184,9 @@ impl MatchEvent for App{
         }
         if roots.is_empty(){
             let dir1 = current_dir.join("./");
-            roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake")));
+            //roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake")));
             roots.push(("makepad".to_string(),dir1));
-            roots.push(("experiments".to_string(),current_dir.join("../experiments")));
+            //roots.push(("experiments".to_string(),current_dir.join("../experiments")));
         }
         let roots = FileSystemRoots{roots};
         self.data.file_system.init(cx, roots.clone());
