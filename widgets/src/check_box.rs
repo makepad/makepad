@@ -28,7 +28,7 @@ live_design!{
             instance disabled: 0.0,
             instance down: 0.0,
 
-            uniform size: 15.0;
+            uniform size: 14.0;
 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
