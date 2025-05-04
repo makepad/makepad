@@ -39,6 +39,15 @@ pub enum FileRequest {
         path: String, 
         id: u64
     },
+    LoadSnapshotImage{
+        root: String,
+        hash: String,
+    },
+    SaveSnapshotImage{
+        root: String,
+        hash: String,
+        data: Vec<u8>,
+    },
     /// Requests the collab server to apply the given delta to the given revision of the file with
     /// the given id.
     SaveFile{
@@ -93,6 +102,27 @@ pub struct OpenFileResponse{
     pub id: u64, 
 }
 
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct LoadSnapshotImageResponse{
+    pub root: String,
+    pub hash: String,
+    pub data: Vec<u8>, 
+}
+
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct LoadSnapshotImageError{
+    pub root: String,
+    pub hash: String,
+    pub error: FileError,
+}
+
+
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct SaveSnapshotImageResponse{
+    pub root: String,
+    pub hash: String,
+}
+
 /// Each `Response` corresponds to the `Request` with the same name.
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum FileResponse {
@@ -104,6 +134,10 @@ pub enum FileResponse {
     /// The result of requesting the collab server to apply a delta to a revision of the file with
     /// the given id.
     SaveFile(Result<SaveFileResponse, FileError>),
+    
+    LoadSnapshotImage(Result<LoadSnapshotImageResponse, LoadSnapshotImageError>),
+    SaveSnapshotImage(Result<SaveSnapshotImageResponse, FileError>),
+            
     // Existing variants...
     SearchInProgress(u64)
 }
@@ -176,7 +210,7 @@ pub enum FileNotification {
 pub enum FileError {
     Unknown(String),
     RootNotFound(String),
-    CannotOpen(String)
+    CannotOpen(String),
 }
 
 /// An identifier for files on the collab server.

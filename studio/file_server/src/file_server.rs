@@ -1,22 +1,7 @@
 use {
     makepad_shell::*,
     crate::{
-        makepad_file_protocol::{
-            DirectoryEntry,
-            FileNodeData,
-            FileTreeData,
-            FileError,
-            FileNotification,
-            FileRequest,
-            GitCommit,
-            GitLog,
-            FileResponse,
-            SearchItem,
-            SearchResult,
-            SaveKind,
-            SaveFileResponse,
-            OpenFileResponse
-        },
+        makepad_file_protocol::*,
     },
     std::{
         time::Instant,
@@ -93,6 +78,8 @@ impl FileServerConnection {
             FileRequest::LoadFileTree {with_data} => FileResponse::LoadFileTree(self.load_file_tree(with_data)),
             FileRequest::OpenFile{path,id} => FileResponse::OpenFile(self.open_file(path, id)),
             FileRequest::SaveFile{path, data, id, patch} => FileResponse::SaveFile(self.save_file(path, data, id, patch)),
+            FileRequest::LoadSnapshotImage{root, hash}=>FileResponse::LoadSnapshotImage(self.load_snapshot_image(root, hash)),
+            FileRequest::SaveSnapshotImage{root, hash, data}=>FileResponse::SaveSnapshotImage(self.save_snapshot_image(root, hash, data))
         }
     }
     
@@ -374,6 +361,38 @@ impl FileServerConnection {
         });
     }
     
+    fn load_snapshot_image(&self, root: String, hash:String) -> Result<LoadSnapshotImageResponse, LoadSnapshotImageError> {
+        // alright letrs find the root
+        let root_path = self.shared.read().unwrap().roots.find_root(&root).map_err(|error|{
+            LoadSnapshotImageError{error, root:root.clone(), hash:hash.clone()}
+        })?;
+        let path = root_path.join("snapshots").join(&hash).with_extension("png");
+        let bytes = fs::read(&path).map_err(
+            | error | LoadSnapshotImageError{error:FileError::Unknown(error.to_string()), root:root.clone(), hash:hash.clone()}
+        ) ?;
+        
+        return Ok(LoadSnapshotImageResponse{
+            root,
+            hash,
+            data: bytes,
+        })
+    }
+    
+    fn save_snapshot_image(&self, root: String, hash:String, data:Vec<u8>) -> Result<SaveSnapshotImageResponse, FileError> {
+        // alright letrs find the root
+        let root_path = self.shared.read().unwrap().roots.find_root(&root)?;
+        let path = root_path.join("snapshots").join(&hash).with_extension("png");
+                
+        fs::write(&path, data).map_err(
+            | error | FileError::Unknown(error.to_string())
+        ) ?;
+                
+        return Ok(SaveSnapshotImageResponse{
+            root,
+            hash,
+        })
+    }
+    
     // Handles an `OpenFile` request.
     fn open_file(&self, child_path: String, id:u64) -> Result<OpenFileResponse, FileError> {
         let path = self.shared.read().unwrap().roots.make_full_path(&child_path)?;
@@ -504,12 +523,12 @@ impl FileSystemRoots{
         }
     }
     
-    pub fn find_root(&self, root:&str)->Option<PathBuf>{
+    pub fn find_root(&self, root:&str)->Result<PathBuf,FileError>{
         if let Some(p) = self.roots.iter().find(|v| v.0 == root){
-            Some(p.1.clone())
+            Ok(p.1.clone())
         }
         else{
-            None
+            Err(FileError::RootNotFound(root.to_string()))
         }
     }
     
