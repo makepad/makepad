@@ -134,7 +134,7 @@ live_design!{
 
             <Hr> {}
             <H4> { text: "Styling Attributes Reference" }
-            <TextInputGradientY> {
+            <TextInput> {
                 width: Fill, height: Fit,
                 padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
                 margin: <THEME_MSPACE_V_1> {}
