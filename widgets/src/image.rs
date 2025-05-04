@@ -97,7 +97,7 @@ pub struct Image {
     #[live(ImageAnimation::BounceFps(25.0))] animation: ImageAnimation,
     #[rust] last_time: Option<f64>,
     #[rust] animation_frame: f64,
-    #[visible] visible: bool,
+    #[visible] #[live(true)] visible: bool,
     #[rust] next_frame: NextFrame,
     #[live] fit: ImageFit,
     #[live] source: LiveDependency,
