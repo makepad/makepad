@@ -455,7 +455,6 @@ live_design!{
                         color: (THEME_COLOR_TEXT_VAL)
                         color_hover: (THEME_COLOR_TEXT_HOVER)
                         color_focus: (THEME_COLOR_TEXT_FOCUS)
-                        color_drag: (THEME_COLOR_TEXT_DOWN)
                         color_disabled: (THEME_COLOR_TEXT_DISABLED)
                         color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
                         color_empty_hover: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
