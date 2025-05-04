@@ -7,7 +7,7 @@ live_design! {
     
     pub ButtonBase = {{Button}} {}
     pub Button = <ButtonBase> {
-        text: "Button"
+        text: ""
         width: Fit, height: Fit,
         spacing: (THEME_SPACE_2),
         align: {x: 0.5, y: 0.5},

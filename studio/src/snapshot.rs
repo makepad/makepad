@@ -2,6 +2,7 @@
 use {
     crate::{
         app::{AppData},
+        file_system::file_system::SnapshotImageData,
         makepad_widgets::*,
     },
     std::{
@@ -103,9 +104,8 @@ pub struct Snapshot{
 impl Snapshot{
     fn draw_snapshots(&mut self, cx: &mut Cx2d, list:&mut PortalList, scope:&mut Scope, root_id:usize){
         let data = scope.data.get_mut::<AppData>().unwrap();
-        let file_system = &data.file_system;
+        let file_system = &mut data.file_system;
         let git_log = file_system.git_logs.get(root_id as usize).unwrap();
-                    
         list.set_item_range(cx, 0, git_log.commits.len());
         while let Some(item_id) = list.next_visible_item(cx) {
             let item = if let Some(commit) = git_log.commits.get(item_id){
@@ -114,9 +114,26 @@ impl Snapshot{
                 // lets construct a snapshot image filepath from the commit message
                 // check if we have a image path or not
                 let image = item.image(id!(image));
-                image.set_visible(cx, true);
                 
-                
+                let load = match file_system.snapshot_image_data.borrow().get(&commit.hash){
+                    Some(SnapshotImageData::Loading)=>{
+                        image.set_visible(cx, true);
+                        false
+                    }
+                    Some(SnapshotImageData::Error)=>{
+                        image.set_visible(cx, false);
+                        false
+                    }
+                    Some(SnapshotImageData::Loaded{data, path})=>{
+                        image.set_visible(cx, true);
+                        image.load_image_from_data_async(cx, &path, data.clone()).ok();
+                        false
+                    }
+                    None=>true
+                };
+                if load{ 
+                    file_system.file_client.load_snapshot_image(&git_log.root, &commit.hash);
+                }
                 item
             }
             else{
