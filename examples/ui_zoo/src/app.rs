@@ -186,11 +186,11 @@
                         show_bg: true,
 
                         draw_bg: {
-                            uniform color_dither: 1.0
-                            uniform border_radius: 0.
-                            uniform border_size: (THEME_BEVELING)
-                            uniform color_1: (THEME_COLOR_BG_APP * 0.9);
-                            uniform color_2: #282828;
+                            color_dither: 1.0
+                            border_radius: 0.
+                            border_size: (THEME_BEVELING)
+                            color_1: (THEME_COLOR_BG_APP * 0.9);
+                            color_2: #282828;
 
                             fn pixel(self) -> vec4 {
                                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
