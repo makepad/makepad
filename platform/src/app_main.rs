@@ -106,7 +106,7 @@ macro_rules!app_main {
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
                     if let Event::Startup = event {
-                        *app.borrow_mut() = Some($app::new_main(cx));
+                        *app.borrow_mut() = $app::new_main(cx);
                     }
                     if let Event::LiveEdit = event{
                         app.borrow_mut().update_main(cx);
@@ -134,7 +134,7 @@ macro_rules!app_main {
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
                 if let Event::Startup = event {
-                    *app.borrow_mut() = Some($app::new_main(cx));
+                    *app.borrow_mut() = $app::new_main(cx);
                 }
                 if let Event::LiveEdit = event{
                     app.borrow_mut().update_main(cx);
