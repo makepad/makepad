@@ -30,7 +30,7 @@ live_design! {
     pub THEME_MSPACE_V_3 = {top: (THEME_SPACE_3), right: 0., bottom: (THEME_SPACE_3), left: 0.}
 
     pub THEME_DATA_ITEM_HEIGHT = (7.75 * THEME_SPACE_1);
-    pub THEME_DATA_ICON_WIDTH = (2.7 * THEME_SPACE_2);
+    pub THEME_DATA_ICON_WIDTH = (2. * THEME_SPACE_2);
     pub THEME_DATA_ICON_HEIGHT = (3.6 * THEME_SPACE_2);
 
     pub THEME_CONTAINER_CORNER_RADIUS = (THEME_CORNER_RADIUS * 2.)
