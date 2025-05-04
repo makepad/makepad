@@ -61,7 +61,7 @@ live_design!{
                     active: true,
                     icon_walk: { width: 8. }
                 }
-                clear_button = <ButtonFlat> {
+                clear_button = <ButtonFlatter> {
                     text: "Clear"
                     icon_walk: { width: 12. }
                     
