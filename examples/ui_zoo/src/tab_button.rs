@@ -135,40 +135,41 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "Standard, fully customized"}
+            <H4> { text: "Styling Attributes Reference"}
             <UIZooRowH> {
                 <Button> {
-                    width: Fill
+                    width: Fit
                     text: "<Button>"
-                    padding: 10.,
-                    margin: { top: 0., left: 0., bottom:0., right: 0.}
-                    align: { x: 0.5, y: 0.5}
 
                     draw_text: {
-                        color: #4,
-                        color_hover: #8
-                        color_down: #2
-                        color_focus: #6
-                        color_disabled: #f
+                        color: (THEME_COLOR_LABEL_INNER)
+                        color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+                        color_down: (THEME_COLOR_LABEL_INNER_DOWN)
+                        color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+                        color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
 
                         text_style: {
-                            font_size: 8.,
-                            line_spacing: 1.4,
-                            font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
+                            font_size: (THEME_FONT_SIZE_P)
+                            font_family: {
+                                latin = font("crate://makepad_widgets/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
+                                chinese = font("crate://makepad_widgets/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
+                                emoji = font("crate://makepad_widgets/resources/NotoColorEmoji.ttf", 0.0, 0.0)
+                            },
+                            line_spacing: 1.2
                         }
                     }
 
                     icon_walk: {
-                        width: 20.
+                        width: (THEME_DATA_ICON_WIDTH),
                         height: Fit,
                     }
 
                     draw_icon: {
-                        color: #A00
-                        color_hover: #f00
-                        color_down: #800
-                        color_focus: #fff
-                        color_disabled: #000
+                        color: (THEME_COLOR_LABEL_INNER)
+                        color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+                        color_down: (THEME_COLOR_LABEL_INNER_DOWN)
+                        color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+                        color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
                     
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
@@ -176,16 +177,16 @@ live_design!{
                     draw_bg: {
                         color_dither: 1.0
 
-                        border_size: 1.
-                        border_radius: 6.
+                        border_size: (THEME_BEVELING)
+                        border_radius: (THEME_CORNER_RADIUS)
 
-                        color: #A
-                        color_hover: #C
-                        color_down: #9
-                        color_focus: #B
-                        color_disabled: #8
+                        color: (THEME_COLOR_OUTSET)
+                        color_hover: (THEME_COLOR_OUTSET_HOVER)
+                        color_down: (THEME_COLOR_OUTSET_DOWN)
+                        color_focus: (THEME_COLOR_OUTSET_FOCUS)
+                        color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
-                        border_color_1: #0
+                        border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
                         border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
                         border_color_1_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
                         border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
