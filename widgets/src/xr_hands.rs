@@ -17,13 +17,11 @@ live_design!{
 
         draw_bullet:{
             color: #0 
+            
             fn get_color(self, dp: float)->vec4{
                 let ambient = vec3(0.2,0.2,0.2) 
                 let color = self.color.xyz * dp * self.color.w + ambient;
-                vec4(Pal::iq5(self.life-self.time+self.index*0.1)*1.0,0.0)*sin(self.life);//mix(#f00,#4440,3*self.life);
-            }
-            fn get_size(self)->vec3{
-                return self.cube_size * self.data
+                return vec4(Pal::iq1(self.life-self.time+self.index*0.1)*1.0,0.0);//mix(#f00,#4440,3*self.life);
             }
             fn get_size(self)->vec3{
                 let size = pow(max(3.0-(self.life),0.0)/4.0,1.);
@@ -360,7 +358,7 @@ impl Widget for XrHands {
             
         draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &xr_state);
         
-        let dt = profile_start();
+        //let dt = profile_start();
         self.bullets.draw(cx, &mut self.draw_bullet, &xr_state, &Mat4::identity());
         
         for peer in &mut self.peers{
@@ -380,7 +378,7 @@ impl Widget for XrHands {
                 draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &peer_state)
             }
         }
-        profile_end!(dt);        
+        //profile_end!(dt);         
         self.draw_list.end(cx);
         DrawStep::done()
     }

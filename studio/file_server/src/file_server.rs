@@ -1,4 +1,5 @@
 use {
+    makepad_shell::*,
     crate::{
         makepad_file_protocol::{
             DirectoryEntry,
@@ -7,6 +8,8 @@ use {
             FileError,
             FileNotification,
             FileRequest,
+            GitCommit,
+            GitLog,
             FileResponse,
             SearchItem,
             SearchResult,
@@ -251,6 +254,7 @@ impl FileServerConnection {
                         // If this entry is a subdirectory, recursively create `DirectoryEntry`'s
                         // for its entries as well.
                         FileNodeData::Directory {
+                            git_log: None,
                             entries: get_directory_entries(&entry_path, with_data) ?,
                         }
                     } else if entry_path.is_file() {
@@ -292,14 +296,41 @@ impl FileServerConnection {
         let roots = self.shared.read().unwrap().roots.clone();
         let mut entries = Vec::new();
         for (root_name, root_path) in roots.roots{
+            let mut commits = Vec::new();
+            match shell_env_cap(&[], &root_path, "git", &["log", "--pretty=format:%T %s"]) {
+                Ok(stdout) => {
+                    for line in stdout.split("\n"){
+                        let mut parts = line.splitn(2," ");
+                        if let Some(hash) = parts.next(){
+                            if let Some(message) = parts.next(){
+                                if hash.len() == 40{
+                                    // we have something
+                                    commits.push(GitCommit{
+                                        hash: hash.to_string(),
+                                        message: message.to_string()
+                                    })
+                                }
+                            }
+                        }
+                    }
+                }
+                // we expect it on stderr
+                Err(_e) => {}
+            }
+            
             entries.push(DirectoryEntry{
-                name: root_name,
+                name: root_name.clone(),
                 node: FileNodeData::Directory {
+                    git_log: Some(GitLog{
+                        root: root_name,
+                        commits
+                    }),
                     entries: get_directory_entries(&root_path, with_data) ?,
                 }
             });
         }
         Ok(FileTreeData {root_path: "".into(), root:FileNodeData::Directory {
+            git_log: None,
             entries,
         }})
     }
@@ -450,6 +481,29 @@ pub struct FileSystemRoots{
 }
 
 impl FileSystemRoots{
+    pub fn map_path(&self, possible_root:&str, what:&str)->String{
+
+        let what_path = Path::new(what);
+        if what_path.is_absolute(){
+            for (root_name, root_path) in &self.roots{
+                if let Ok(end) = what_path.strip_prefix(root_path){
+                    if let Ok(end) = end.to_path_buf().into_os_string().into_string(){
+                        return format!("{root_name}/{end}");
+                    }
+                }
+            }
+            return what.to_string()
+        }
+        else{
+            if possible_root.len() == 0{
+                what.to_string()
+            }
+            else{
+                format!("{possible_root}/{}",  what)
+            }
+        }
+    }
+    
     pub fn find_root(&self, root:&str)->Option<PathBuf>{
         if let Some(p) = self.roots.iter().find(|v| v.0 == root){
             Some(p.1.clone())

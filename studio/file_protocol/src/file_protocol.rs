@@ -117,6 +117,19 @@ pub struct FileTreeData {
     pub root: FileNodeData,
 }
 
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct GitLog{
+    pub root: String,
+    pub commits: Vec<GitCommit>,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct GitCommit {
+    pub hash: String,
+    pub message: String,
+}
+
+
 /// A type for representing data about a node in a file tree.
 /// 
 /// Each node is either a directory a file. Directories form the internal nodes of the file tree.
@@ -124,7 +137,7 @@ pub struct FileTreeData {
 /// of the file tree, and do not contain any further nodes.
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum FileNodeData {
-    Directory { entries: Vec<DirectoryEntry> },
+    Directory { git_log: Option<GitLog>, entries: Vec<DirectoryEntry> },
     File { data: Option<Vec<u8>> },
 }
 
