@@ -8,6 +8,7 @@ use std::io::prelude::*;
 use std::fs::File;
 use std::path::{Path,PathBuf};
 use std::cell::RefCell;
+use std::sync::Arc;
 
 pub use makepad_zune_png::error::PngDecodeErrors;
 pub use zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
@@ -322,29 +323,34 @@ pub trait ImageCacheImpl {
         }
     }
     
+    fn image_size_by_data(data:&[u8], image_path:&Path)-> Result<(usize,usize), ImageError> {
+        if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
+            let mut decoder = JpegDecoder::new(&*data);
+            decoder.decode_headers().unwrap();
+            let image_info = decoder.info().unwrap();
+            return Ok((image_info.width as usize,image_info.height as usize))
+        } 
+        else if image_path.extension().map(|s| s == "png").unwrap_or(false) {
+            let mut decoder = PngDecoder::new(data);
+            decoder.decode_headers()?;
+            let (width,height) = decoder.get_dimensions().ok_or(
+                ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                    "Failed to get animated PNG image dimensions"
+                ))
+            )?;
+            return Ok((width,height))
+                                                            
+        } else {
+            return Err(ImageError::UnsupportedFormat)
+        }
+    }
+    
     fn image_size_by_path(image_path:&Path)-> Result<(usize,usize), ImageError> {
         if let Ok(mut f) = File::open(image_path){
             let mut data = vec![0u8;1024]; // yolo chunk size
             match f.read(&mut data) {
                 Ok(_len) => {
-                    if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
-                        let mut decoder = JpegDecoder::new(&*data);
-                        decoder.decode_headers().unwrap();
-                        let image_info = decoder.info().unwrap();
-                        return Ok((image_info.width as usize,image_info.height as usize))
-                    } else if image_path.extension().map(|s| s == "png").unwrap_or(false) {
-                        let mut decoder = PngDecoder::new(data);
-                        decoder.decode_headers()?;
-                        let (width,height) = decoder.get_dimensions().ok_or(
-                            ImageError::PngDecode(PngDecodeErrors::GenericStatic(
-                                "Failed to get animated PNG image dimensions"
-                            ))
-                        )?;
-                        return Ok((width,height))
-                                                
-                    } else {
-                        return Err(ImageError::UnsupportedFormat)
-                    }
+                    Self::image_size_by_data(&data, image_path)
                 }
                 Err(err) => {
                     error!("load_image_file_by_path: Resource not found {:?} {}", image_path, err);
@@ -378,6 +384,77 @@ pub trait ImageCacheImpl {
             }
         }
         false
+    }
+    
+    fn load_image_from_data_async_impl(
+        &mut self,
+        cx: &mut Cx,
+        image_path: &Path,
+        data: Arc<Vec<u8>>,
+        id: usize,
+    ) -> Result<AsyncLoadResult, ImageError> {
+        if let Some(texture) = cx.get_global::<ImageCache>().map.get(image_path){
+            match texture{
+                ImageCacheEntry::Loaded(texture)=>{
+                    let texture = texture.clone();
+                    // lets fetch the texture size
+                    //let (_w,_h) = texture.get_format(cx).vec_width_height().unwrap_or((100,100));
+                    self.set_texture(Some(texture), id);
+                    Ok(AsyncLoadResult::Loaded)
+                }
+                ImageCacheEntry::Loading(w,h)=>{
+                    Ok(AsyncLoadResult::Loading(*w, *h))
+                }
+            }
+        }
+        else{
+            if  cx.get_global::<ImageCache>().thread_pool.is_none(){
+                cx.get_global::<ImageCache>().thread_pool = Some(TagThreadPool::new(cx, cx.cpu_cores().max(3) - 2))
+            }
+            let (w,h) = Self::image_size_by_data(&*data, image_path)?;
+            // open image file and read the headers
+            cx.get_global::<ImageCache>().map.insert(image_path.into(), ImageCacheEntry::Loading(w,h));
+                        
+            cx.get_global::<ImageCache>().thread_pool.as_mut().unwrap().execute_rev(image_path.into(), move |image_path|{
+                if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
+                    match ImageBuffer::from_jpg(&*data){
+                        Ok(data)=>{
+                            Cx::post_action(AsyncImageLoad{
+                                image_path, 
+                                result: RefCell::new(Some(Ok(data)))
+                            });
+                        }
+                        Err(err)=>{
+                            Cx::post_action(AsyncImageLoad{
+                                image_path, 
+                                result: RefCell::new(Some(Err(err)))
+                            });
+                        }
+                    }
+                } else if image_path.extension().map(|s| s == "png").unwrap_or(false) {
+                    match ImageBuffer::from_png(&*data){
+                        Ok(data)=>{
+                            Cx::post_action(AsyncImageLoad{
+                                image_path, 
+                                result: RefCell::new(Some(Ok(data)))
+                            });
+                        }
+                        Err(err)=>{
+                            Cx::post_action(AsyncImageLoad{
+                                image_path, 
+                                result: RefCell::new(Some(Err(err)))
+                            });
+                        }
+                    }
+                } else {
+                    Cx::post_action(AsyncImageLoad{
+                        image_path, 
+                        result: RefCell::new(Some(Err(ImageError::UnsupportedFormat)))
+                    });
+                }
+            });
+            Ok(AsyncLoadResult::Loading(w, h))
+        }
     }
     
     fn load_image_file_by_path_async_impl(
@@ -429,8 +506,6 @@ pub trait ImageCacheImpl {
                                     }
                                 }
                             } else if image_path.extension().map(|s| s == "png").unwrap_or(false) {
-                                log!("LOADIN4");
-                                
                                 match ImageBuffer::from_png(&*data){
                                     Ok(data)=>{
                                         Cx::post_action(AsyncImageLoad{

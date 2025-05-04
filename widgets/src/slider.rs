@@ -1064,6 +1064,7 @@ live_design!{
     pub SliderRound = <SliderMinimal> {
         height: 18.,
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
+
         text_input: <TextInput> {
             width: Fit,
             padding: 0.,
@@ -1644,7 +1645,6 @@ live_design!{
 
             uniform gap: 90.
             uniform val_padding: 10.
-            uniform weight: 40.
 
             uniform border_size: (THEME_BEVELING)
             uniform val_size: 20.

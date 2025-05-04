@@ -129,136 +129,90 @@ live_design!{
             <TextInputGradientX> { empty_text: "Inline Label" }
 
             <Hr> {}
-            <H4> { text: "TextInputGradientX styled" }
-            <TextInputGradientX> {
-                draw_bg: {
-                    border_radius: 7.
-                    border_size: 1.5
-
-                    color_dither: 1.0
-
-                    color_1: #F
-                    color_1_hover: #F
-                    color_1_focus: #F
-
-                    color_2: #AA0
-                    color_2_hover: #FF0
-                    color_2_focus: #CC0
-
-                    border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2)
-                    border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2)
-
-                    border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-                    border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1)
-                    border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1)
-                }
-
-                draw_text: {
-                    color: #3
-                    color_hover: #484848
-                    color_focus: #0
-                    color_empty: #7
-                    color_empty_focus: #6
-
-                    wrap: Word,
-
-                    fn get_color(self) -> vec4 {
-                        return
-                        mix(
-                            mix(
-                                mix(self.color, self.color_hover, self.hover),
-                                self.color_focus,
-                                self.focus
-                            ),
-                            mix(self.color_empty, self.color_empty_focus, self.hover),
-                            self.empty
-                        )
-                    }
-                }
-
-                draw_selection: {
-                    color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
-                    color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
-                    color_1_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
-
-                    color_2: #0AA
-                    color_2_hover: #0FF
-                    color_2_focus: #0CC
-                }
-
-                draw_cursor: { color: #f00 }
-
-                empty_text: "Inline Label"
-            }
-
-            <Hr> {}
             <H4> { text: "TextInputGradientY" }
             <TextInputGradientY> { empty_text: "Inline Label" }
 
             <Hr> {}
-            <H4> { text: "TextInputGradientY styled"}
-            <TextInputGradientY> {
+            <H4> { text: "Styling Attributes Reference" }
+            <TextInput> {
+                width: Fill, height: Fit,
+                padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
+                margin: <THEME_MSPACE_V_1> {}
+                flow: RightWrap,
+                is_password: false,
+                is_read_only: false,
+                is_numeric_only: false
+
+                empty_text: "Inline Label"
+
                 draw_bg: {
-                    border_radius: 7.
-                    border_size: 1.5
+                    border_radius: (THEME_CORNER_RADIUS)
+                    border_size: (THEME_BEVELING)
 
                     color_dither: 1.0
 
-                    color_1: #F
-                    color_1_hover: #F
-                    color_1_focus: #F
-
-                    color_2: #AA0
-                    color_2_hover: #FF0
-                    color_2_focus: #CC0
+                    color: (THEME_COLOR_INSET)
+                    color_hover: (THEME_COLOR_INSET_HOVER)
+                    color_focus: (THEME_COLOR_INSET_FOCUS)
+                    color_down: (THEME_COLOR_INSET_DOWN)
+                    color_empty: (THEME_COLOR_INSET_EMPTY)
+                    color_disabled: (THEME_COLOR_INSET_DISABLED)
 
                     border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2)
-                    border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2)
+                    border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+                    border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+                    border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+                    border_color_1_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
+                    border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
                     border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-                    border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1)
-                    border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1)
+                    border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+                    border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+                    border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
+                    border_color_2_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
+                    border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
                 }
 
                 draw_text: {
-                    color: #3
-                    color_hover: #484848
-                    color_focus: #0
-                    color_empty: #7
-                    color_empty_focus: #6
+                    color: (THEME_COLOR_TEXT)
+                    color_hover: (THEME_COLOR_TEXT_HOVER)
+                    color_focus: (THEME_COLOR_TEXT_FOCUS)
+                    color_down: (THEME_COLOR_TEXT_DOWN)
+                    color_disabled: (THEME_COLOR_TEXT_DISABLED)
+                    color_empty: (THEME_COLOR_TEXT_PLACEHOLDER)
+                    color_empty_hover: (THEME_COLOR_TEXT_PLACEHOLDER_HOVER)
+                    color_empty_focus: (THEME_COLOR_TEXT_FOCUS)
 
-                    wrap: Word,
-
-                    fn get_color(self) -> vec4 {
-                        return
-                        mix(
-                            mix(
-                                mix(self.color, self.color_hover, self.hover),
-                                self.color_focus,
-                                self.focus
-                            ),
-                            mix(self.color_empty, self.color_empty_focus, self.hover),
-                            self.empty
-                        )
+                    text_style: {
+                        font_size: (THEME_FONT_SIZE_P)
+                        font_family: {
+                            latin = font("crate://makepad_widgets/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
+                            chinese = font("crate://makepad_widgets/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
+                            emoji = font("crate://makepad_widgets/resources/NotoColorEmoji.ttf", 0.0, 0.0)
+                        },
+                        line_spacing: 1.2
                     }
-                }
 
+                }
+                
                 draw_selection: {
-                    color_1: (THEME_COLOR_BG_HIGHLIGHT_INLINE)
-                    color_1_hover: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.4)
-                    color_1_focus: (THEME_COLOR_BG_HIGHLIGHT_INLINE * 1.2)
+                    border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
 
-                    color_2: #0AA
-                    color_2_hover: #0FF
-                    color_2_focus: #0CC
+                    color: (THEME_COLOR_SELECTION)
+                    color_hover: (THEME_COLOR_SELECTION_HOVER)
+                    color_focus: (THEME_COLOR_SELECTION_FOCUS)
+                    color_down: (THEME_COLOR_SELECTION_DOWN)
+                    color_empty: (THEME_COLOR_SELECTION_EMPTY)
+                    color_disabled: (THEME_COLOR_SELECTION_DISABLED)
                 }
 
-                draw_cursor: { color: #f00 }
+                draw_cursor: {
+                    border_radius: 0.5
+                    color: (THEME_COLOR_TEXT_CURSOR)
+                }
 
-                empty_text: "Inline Label"
             }
+
         }
     }
 }

@@ -99,90 +99,36 @@ live_design!{
                     label_align: { x: 0., y: 0. }
                     
                     draw_icon: {
-                        color_1: #800
-                        color_1_active: #f00
+                        color_1: #A00
+                        color_1_active: #F00
                         color_1_disabled: #4
 
                         color_2: #0
-                        color_2_active: #f00
+                        color_2_active: #F00
                         color_2_disabled: #4
                     }
 
-                    draw_text: {
-                        color: #0AA
-                        color_hover: #0CC
-                        color_down: #088
-                        color_active: #f
-                        color_focus: #0BB
-                        color_disabled: #4
-
-                        text_style: {
-                            font_size: 8.,
-                            line_spacing: 1.4,
-                            font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
-                        }
-                    }
-
                 }
-                radio2 = <RadioButton> {
+                radio2 = <RadioButtonCustom> {
                     text: "Option 2"
 
                     padding: { left: 20. }
                     align: { x: 0., y: 0.5}
+                    icon_walk: { width: 12.5, height: Fit, margin: { left: 0. } }
+                    draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg"), }
 
                     label_walk: { margin: { left: 5. } }
                     label_align: { x: 0., y: 0. }
+                    
+                    draw_icon: {
+                        color_1: #A00
+                        color_1_active: #F00
+                        color_1_disabled: #4
 
-                    draw_text: {
-                        color: #0AA
-                        color_hover: #0CC
-                        color_down: #088
-                        color_active: #f
-                        color_focus: #0BB
-                        color_disabled: #4
-
-                        text_style: {
-                            font_size: 8.,
-                            line_spacing: 1.4,
-                            font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
-                        }
+                        color_2: #0
+                        color_2_active: #F00
+                        color_2_disabled: #4
                     }
-
-                    draw_bg: {
-                        size: 15.0,
-
-                        border_size: (THEME_BEVELING)
-                        border_radius: (THEME_CORNER_RADIUS)
-
-                        color_dither: 1.0
-
-                        color: #A
-                        color_hover: #C
-                        color_down: #8
-                        color_active: #A
-                        color_focus: #B
-                        color_disabled: #4
-
-                        border_color_1: #A00
-                        border_color_1_hover: #C00
-                        border_color_1_down: #800
-                        border_color_1_active: #A00
-                        border_color_1_focus: #B00
-                        border_color_1_disabled: #400
-
-                        border_color_2: #0A0
-                        border_color_2_hover: #0C0
-                        border_color_2_down: #080
-                        border_color_2_active: #0A0
-                        border_color_2_focus: #0B0
-                        border_color_2_disabled: #040
-
-                        mark_color: #0000
-                        mark_color_active: #0
-                        mark_color_disabled: #0000
-
-                    }
-
                 }
             }
 
@@ -294,187 +240,6 @@ live_design!{
                 radio2 = <RadioButtonTabFlatter> { text: "Option 2" }
                 radio3 = <RadioButtonTabFlatter> { text: "Option 3" }
                 radio4 = <RadioButtonTabFlatter> { text: "Option 4" }
-            }
-
-            <Hr> {}
-            <H4> { text: "Button Group styled" }
-            radios_demo_14 = <ButtonGroup> {
-                radio1 = <RadioButtonTab> {
-                    text: "Option 1"
-
-                    icon_walk: {
-                        margin: { left: (THEME_SPACE_3 * 1.5) } 
-                        width: 12.5, height: Fit,
-                    }
-                    label_walk: {
-                        margin: { left: (THEME_SPACE_1), right: 0. }
-                    }
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/Icon_Favorite.svg")
-
-                        color_1: #0
-                        color_1_active: #BB0
-
-                        color_2: #0
-                        color_2_active: #B00
-                    }
-
-                    draw_text: {
-                        color: #0
-                        color_hover: #C
-                        color_active: #F
-                    }
-
-                    draw_bg: {
-                        border_size: 1.,
-                        border_radius: 4.,
-
-                        color_dither: 1.0
-                        color: #F00
-                        color_hover: #F44
-                        color_active: #300
-
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
-
-                        border_color_2: #0
-                        border_color_2_hover: #F
-                        border_color_2_active: #8
-                    }
-                }
-                radio2 = <RadioButtonTab> {
-                    text: "Option 2"
-
-                    icon_walk: {
-                        margin: { left: (THEME_SPACE_3 * 1.5) } 
-                        width: 12.5, height: Fit,
-                    }
-                    label_walk: {
-                        margin: { left: (THEME_SPACE_1), right: 0. }
-                    }
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/Icon_Favorite.svg")
-
-                        color_1: #0
-                        color_1_active: #BB0
-
-                        color_2: #0
-                        color_2_active: #B00
-                    }
-
-                    draw_text: {
-                        color: #0
-                        color_hover: #C
-                        color_active: #F
-                    }
-
-                    draw_bg: {
-                        border_size: 1.,
-                        border_radius: 4.,
-
-                        color_dither: 1.0
-                        color: #F00
-                        color_hover: #F44
-                        color_active: #300
-
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
-
-                        border_color_2: #0
-                        border_color_2_hover: #F
-                        border_color_2_active: #8
-                    }
-                }
-                radio3 = <RadioButtonTab> {
-                    text: "Option 3"
-
-                    icon_walk: {
-                        margin: { left: (THEME_SPACE_3 * 1.5) } 
-                        width: 12.5, height: Fit,
-                    }
-                    label_walk: {
-                        margin: { left: (THEME_SPACE_1), right: 0. }
-                    }
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/Icon_Favorite.svg")
-
-                        color_1: #0
-                        color_1_active: #BB0
-
-                        color_2: #0
-                        color_2_active: #B00
-                    }
-
-                    draw_text: {
-                        color: #0
-                        color_hover: #C
-                        color_active: #F
-                    }
-
-                    draw_bg: {
-                        border_size: 1.,
-                        border_radius: 4.,
-
-                        color_dither: 1.0
-                        color: #F00
-                        color_hover: #F44
-                        color_active: #300
-
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
-
-                        border_color_2: #0
-                        border_color_2_hover: #F
-                        border_color_2_active: #8
-                    }
-                } 
-                radio4 = <RadioButtonTab> {
-                    text: "Option 4"
-
-                    icon_walk: {
-                        margin: { left: (THEME_SPACE_3 * 1.5) } 
-                        width: 12.5, height: Fit,
-                    }
-                    label_walk: {
-                        margin: { left: (THEME_SPACE_1), right: 0. }
-                    }
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/Icon_Favorite.svg")
-
-                        color_1: #0
-                        color_1_active: #BB0
-
-                        color_2: #0
-                        color_2_active: #B00
-                    }
-
-                    draw_text: {
-                        color: #0
-                        color_hover: #C
-                        color_active: #F
-                    }
-
-                    draw_bg: {
-                        border_size: 1.,
-                        border_radius: 4.,
-
-                        color_dither: 1.0
-                        color: #F00
-                        color_hover: #F44
-                        color_active: #300
-
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
-
-                        border_color_2: #0
-                        border_color_2_hover: #F
-                        border_color_2_active: #8
-                    }
-                }
             }
 
             <Hr> {}
@@ -722,6 +487,105 @@ live_design!{
                         border_color_2: #0
                         border_color_2_hover: #F
                         border_color_2_active: #8
+                    }
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "Styling Attributes Reference" }
+            <UIZooRowH> {
+                radios_demo_14 = <View> {
+                    spacing: (THEME_SPACE_2)
+                    width: Fit, height: Fit,
+                    radio1 = <RadioButton> {
+                        text: "Option 1"
+
+                        width: Fit, height: Fit,
+                        align: { x: 0., y: 0. }
+                        padding: <THEME_MSPACE_V_2> { left: (THEME_SPACE_2)}
+                        
+                        icon_walk: { margin: { left: 20. } }
+                        
+                        label_walk: {
+                            width: Fit, height: Fit,
+                            margin: <THEME_MSPACE_H_1> { left: 13. }
+                        }
+                        label_align: { y: 0.0 }
+
+                        draw_bg: {
+                            size: 15.0,
+
+                            border_size: (THEME_BEVELING)
+                            border_radius: (THEME_CORNER_RADIUS)
+
+                            color_dither: 1.0
+
+                            color: (THEME_COLOR_INSET)
+                            color_hover: (THEME_COLOR_INSET_HOVER)
+                            color_down: (THEME_COLOR_INSET_DOWN)
+                            color_active: (THEME_COLOR_INSET_ACTIVE)
+                            color_focus: (THEME_COLOR_INSET_FOCUS)
+                            color_disabled: (THEME_COLOR_INSET_DISABLED)
+
+                            border_color_1: (THEME_COLOR_BEVEL_INSET_2)
+                            border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+                            border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+                            border_color_1_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+                            border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+                            border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+
+                            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+                            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+                            border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
+                            border_color_2_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
+                            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+                            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+
+                            mark_color: (THEME_COLOR_MARK_OFF)
+                            mark_color_active: (THEME_COLOR_MARK_ACTIVE)
+                            mark_color_disabled: (THEME_COLOR_MARK_DISABLED)
+                        }
+
+                        draw_text: {
+                            color: (THEME_COLOR_LABEL_OUTER)
+                            color_hover: (THEME_COLOR_LABEL_OUTER_HOVER)
+                            color_down: (THEME_COLOR_LABEL_OUTER_DOWN)
+                            color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
+                            color_focus: (THEME_COLOR_LABEL_OUTER_FOCUS)
+                            color_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
+
+                            text_style: {
+                                font_size: (THEME_FONT_SIZE_P)
+                                font_family: {
+                                    latin = font("crate://makepad_widgets/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
+                                    chinese = font("crate://makepad_widgets/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
+                                    emoji = font("crate://makepad_widgets/resources/NotoColorEmoji.ttf", 0.0, 0.0)
+                                },
+                                line_spacing: 1.2
+                            }
+                        }
+
+                        draw_icon: {
+                            color_dither: 1.0
+                            color_1: (THEME_COLOR_LABEL_OUTER)
+                            color_1_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
+                            color_1_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
+
+                            color_2: (THEME_COLOR_LABEL_OUTER)
+                            color_2_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
+                            color_2_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
+                        }
+                    
+                    }
+                    radio2 = <RadioButton> { text: "Option 2" }
+                    radio3 = <RadioButton> { text: "Option 3" }
+                    radio4 = <RadioButton> {
+                        text: "Option 4, disabled"
+                        animator: {
+                            disabled = {
+                                default: on
+                            }
+                        }
                     }
                 }
             }

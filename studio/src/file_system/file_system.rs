@@ -1,6 +1,8 @@
 use {
     std::collections::{HashMap, hash_map},
-    std::path::{Path},
+    std::path::{Path,PathBuf},
+    std::sync::Arc,
+    std::cell::RefCell,
     crate::{
         makepad_code_editor::{CodeDocument, decoration::{Decoration, DecorationSet}, CodeSession},
         makepad_platform::makepad_live_compiler::LiveFileChange,
@@ -35,10 +37,16 @@ pub struct FileSystem {
     pub tab_id_to_session: HashMap<LiveId, EditSession>,
     pub open_documents: HashMap<LiveId, OpenDocument>,
     pub git_logs: Vec<GitLog>,
+    pub snapshot_image_data: RefCell<HashMap<String, SnapshotImageData>>,
     pub search_results_id: u64,
     pub search_results: Vec<SearchResult>
 }
 
+pub enum SnapshotImageData{
+    Loading,
+    Error,
+    Loaded{data:Arc<Vec<u8>>, path:PathBuf}
+}
 
 
 pub enum EditSession {
@@ -78,6 +86,7 @@ pub enum FileSystemAction {
     RecompileNeeded,
     LiveReloadNeeded(LiveFileChange),
     FileChangedOnDisk(SaveFileResponse),
+    SnapshotImageLoaded,
     SearchResults,
     None
 }
@@ -104,8 +113,21 @@ impl FileSystem {
             _=>live_id!(edit_first),
         }
     }
+         
+            
+    pub fn load_file_tree(&self) {
+        self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
+    }
+            
+    pub fn load_snapshot_image(&self, root:&str, hash:&str) {
+        let mut image_data = self.snapshot_image_data.borrow_mut();
+        if image_data.get(hash).is_none(){
+            image_data.insert(root.to_string(), SnapshotImageData::Loading);
+            self.file_client.send_request(FileRequest::LoadSnapshotImage {root:root.to_string(), hash:hash.to_string()});
+        }
         
-    
+    }
+            
     pub fn get_editor_template_from_file_id(&self, file_id:LiveId)->Option<LiveId>{
         if let Some(path) = self.file_node_id_to_path(file_id){
             Some(Self::get_editor_template_from_path(path))
@@ -117,7 +139,7 @@ impl FileSystem {
     
     pub fn init(&mut self, cx: &mut Cx, roots:FileSystemRoots) {
         self.file_client.init(cx, roots);
-        self.reload_file_tree();
+        self.file_client.load_file_tree();
     }
     
     pub fn search_string(&mut self, _cx:&mut Cx, set:Vec<SearchItem>){
@@ -128,10 +150,6 @@ impl FileSystem {
             set
         });
         //cx.action( FileSystemAction::SearchResults );
-    }
-    
-    pub fn reload_file_tree(&mut self) {
-        self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
     }
     
     pub fn remove_tab(&mut self, tab_id: LiveId) {
@@ -202,8 +220,28 @@ impl FileSystem {
                     FileClientMessage::Response(response) => match response {
                         FileResponse::SearchInProgress(_)=>{
                         }
+                        FileResponse::SaveSnapshotImage(_)=>{
+                        }
+                        FileResponse::LoadSnapshotImage(response)=>{
+                            // lets store this in our snapshot cache
+                            match response{
+                                Ok(res)=>{
+                                    let path = Path::new(&res.hash).to_path_buf().with_extension(".png");
+                                    self.snapshot_image_data.borrow_mut().insert(res.hash, 
+                                        SnapshotImageData::Loaded{
+                                            data:Arc::new(res.data),
+                                            path
+                                        });
+                                    cx.action( FileSystemAction::SnapshotImageLoaded);
+                                }
+                                Err(res)=>{
+                                    self.snapshot_image_data.borrow_mut().insert(res.hash, SnapshotImageData::Error);
+                                    cx.action( FileSystemAction::SnapshotImageLoaded);
+                                }
+                            }
+                        }
                         FileResponse::LoadFileTree(response) => {
-                            self.load_file_tree(response.unwrap());
+                            self.process_load_file_tree(response.unwrap());
                             cx.action(FileSystemAction::TreeLoaded)
                             // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                         }
@@ -406,14 +444,18 @@ impl FileSystem {
             Some(_) | None=>DecorationSet::new()
         };
         
-        let template = self.get_editor_template_from_file_id(file_id).unwrap();
+        let template = self.get_editor_template_from_file_id(file_id);
         
         match template{
-            live_id!(CodeEditor)=>{
+            Some(live_id!(CodeEditor))=>{
                 self.open_documents.insert(file_id, OpenDocument::CodeLoading(dec));
             }
-            live_id!(AiChat)=>{
+            Some(live_id!(AiChat))=>{
                 self.open_documents.insert(file_id, OpenDocument::AiChatLoading);
+            }
+            None=>{
+                error!("File id {:?} does not have a template", file_id);
+                return
             }
             _=>panic!()
         }
@@ -651,7 +693,7 @@ impl FileSystem {
         
     }
     
-    pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
+    pub fn process_load_file_tree(&mut self, tree_data: FileTreeData) {
         fn create_file_node(
             file_node_id: Option<LiveId>,
             node_path: String,
