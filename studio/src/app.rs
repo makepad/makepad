@@ -176,17 +176,17 @@ impl MatchEvent for App{
                     let base = parts.next().expect("name:path expected");
                     let path = parts.next().expect("name:path expected");
                     let dir = current_dir.clone();
-                    roots.push((base.to_string(), dir.join(path)));
+                    roots.push((base.to_string(), dir.join(path).canonicalize().unwrap()));
                 }
             }
             else{
             }
         }
         if roots.is_empty(){
-            let dir1 = current_dir.join("./");
-            //roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake")));
+            let dir1 = current_dir.join("./").canonicalize().unwrap();
+            //roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake").canonicalize().unwrap()));
             roots.push(("makepad".to_string(),dir1));
-            //roots.push(("experiments".to_string(),current_dir.join("../experiments")));
+            //roots.push(("experiments".to_string(),current_dir.join("../experiments").canonicalize().unwrap()));
         }
         let roots = FileSystemRoots{roots};
         self.data.file_system.init(cx, roots.clone());
@@ -204,6 +204,7 @@ impl MatchEvent for App{
         let run_list = self.ui.view(id!(run_list_tab));
         let profiler = self.ui.view(id!(profiler));
         let search = self.ui.view(id!(search));
+        let snapshot = self.ui.view(id!(snapshot_tab));
         
         match action.cast(){
             AppAction::SwapSelection(ss)=>{
@@ -366,7 +367,7 @@ impl MatchEvent for App{
                 profiler.redraw(cx);
             }
             AppAction::ReloadFileTree=>{
-                self.data.file_system.reload_file_tree();
+                self.data.file_system.file_client.load_file_tree();
             }
             AppAction::RedrawProfiler=>{
                 profiler.redraw(cx);
@@ -503,6 +504,9 @@ impl MatchEvent for App{
                 self.load_state(cx, 0);
                 self.data.ai_chat_manager.init(&mut self.data.file_system);
                 //self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
+            }
+            FileSystemAction::SnapshotImageLoaded => {
+                snapshot.redraw(cx);
             }
             FileSystemAction::RecompileNeeded => {
                 self.data.build_manager.start_recompile_timer(cx);
