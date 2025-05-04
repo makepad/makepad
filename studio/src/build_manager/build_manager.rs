@@ -473,11 +473,12 @@ impl BuildManager {
                 for msg in msgs.0 {
                     match msg {
                         AppToStudio::LogItem(item) => {
+                            log!("GOT APP TO STUDIO {:?}", item);
                             let file_name = if let Some(build) = active.builds.get(&build_id){
-                                format!("{}/{}", build.root, item.file_name)
+                                self.roots.map_path(&build.root, &item.file_name)
                             }
                             else{
-                                item.file_name
+                                self.roots.map_path("", &item.file_name)
                             };
                             
                             let start = text::Position {
@@ -602,10 +603,10 @@ impl BuildManager {
                 match wrap.message {
                     BuildClientMessage::LogItem(LogItem::Location(mut loc)) => {
                         loc.file_name = if let Some(build) = active.builds.get(&wrap.cmd_id){
-                            format!("{}/{}", build.root, loc.file_name)
+                            self.roots.map_path(&build.root, &loc.file_name)
                         }
                         else{
-                            loc.file_name
+                            self.roots.map_path("", &loc.file_name)
                         };
                         if let Some(file_id) = file_system.path_to_file_node_id(&loc.file_name) {
                             match loc.level {

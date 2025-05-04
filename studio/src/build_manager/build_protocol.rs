@@ -167,7 +167,7 @@ pub struct LogItemBare {
     pub line: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LogItem {
     Bare(LogItemBare),
     Location(LogItemLocation),

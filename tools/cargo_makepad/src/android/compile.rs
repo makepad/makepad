@@ -365,14 +365,16 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
     // for the quest variant add the precompiled openXR loader
     if let AndroidVariant::Quest = variant{
         
+        let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        
         for (binary_path, src_lib) in [
-            ("lib/arm64-v8a/libopenxr_loader.so", "tools/cargo_makepad/quest/libopenxr_loader.so"),
+            ("lib/arm64-v8a/libopenxr_loader.so", "quest/libopenxr_loader.so"),
             //("lib/arm64-v8a/libktx.so", "tools/cargo_makepad/quest/libktx.so"),
             //("lib/arm64-v8a/libktx_read.so", "tools/cargo_makepad/quest/libktx_read.so"),
             //("lib/arm64-v8a/libobjUtil.a", "tools/cargo_makepad/quest/libobjUtil.a"),
         ]{
             //let binary_path = format!("lib/arm64-v8a/libopenxr_loader.so");
-            let src_lib = cwd.join(src_lib);
+            let src_lib = cargo_manifest_dir.join(src_lib);
             let dst_lib = build_paths.out_dir.join(binary_path);
             cp(&src_lib, &dst_lib, false) ?;
             shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir, urls).to_str().unwrap(), &[
