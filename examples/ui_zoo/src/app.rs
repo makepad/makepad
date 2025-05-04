@@ -221,7 +221,10 @@
                         }
                         <Slider> { text: "Tint Amount" }
                         <Vr> {}
-                        <Labelbold> { width: Fit, text: "Font"}
+                        <Pbold> {
+                            width: Fit,
+                            text: "Font"
+                        }
                         <Slider> { text: "Size" }
                         <Slider> { text: "Size Contrast" }
                         <Vr> {}
