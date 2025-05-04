@@ -200,7 +200,7 @@ live_design!{
 
                     }
 
-                    CheckType::Toggle => { }
+                    // CheckType::Toggle => { }
 
                     CheckType::None => {
                         sdf.fill(THEME_COLOR_D_HIDDEN);
@@ -597,7 +597,7 @@ live_design!{
 
                     }
 
-                    CheckType::Toggle => { }
+                    // CheckType::Toggle => { }
 
                     CheckType::None => {
                         sdf.fill(THEME_COLOR_D_HIDDEN);
@@ -1328,10 +1328,6 @@ live_design!{
         draw_bg: {
             uniform size: 15.;
 
-            mark_color: (THEME_COLOR_LABEL_OUTER_ACTIVE)
-            mark_color_hover: (THEME_COLOR_LABEL_OUTER_ACTIVE * 1.5)
-            mark_color_down: (THEME_COLOR_LABEL_OUTER_DOWN)
-
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -1393,8 +1389,36 @@ live_design!{
                     sz_px.y - self.border_size * 2.,
                     self.border_radius * self.size * 0.1
                 );
+
+                sdf.fill_keep(
+                    mix(
+                        mix(
+                            mix(
+                                mix(
+                                    mix(self.color_1, self.color_2, gradient_fill.x),
+                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
+                                    self.focus
+                                ),
+                                mix(
+                                    mix(self.color_1_active, self.color_2_active, gradient_fill.x),
+                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
+                                    self.focus
+                                ),
+                                self.active
+                            ),
+                            mix(
+                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.x),
+                                mix(self.color_1_down, self.color_2_down, gradient_fill.x),
+                                self.down
+                            ),
+                            self.hover
+                        ),
+                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.x),
+                        self.disabled
+                    )
+                )
  
-                sdf.stroke_keep(
+                sdf.stroke(
                     mix(
                         mix(
                             mix(
@@ -1422,33 +1446,6 @@ live_design!{
                     ), self.border_size
                 )
 
-                sdf.fill(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, gradient_fill.x),
-                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
-                                    self.focus
-                                ),
-                                mix(
-                                    mix(self.color_1_active, self.color_2_active, gradient_fill.x),
-                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
-                                    self.focus
-                                ),
-                                self.active
-                            ),
-                            mix(
-                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.x),
-                                mix(self.color_1_down, self.color_2_down, gradient_fill.x),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.x),
-                        self.disabled
-                    )
-                )
 
                 // Draw mark
                 let mark_padding = 1.5;
