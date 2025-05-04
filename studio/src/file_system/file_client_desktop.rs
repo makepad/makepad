@@ -34,7 +34,16 @@ impl FileClient {
         }
     }
     
-    pub fn send_request(&mut self, request: FileRequest) {
+        
+    pub fn load_file_tree(&mut self) {
+        self.send_request(FileRequest::LoadFileTree {with_data: false});
+    }
+        
+    pub fn load_snapshot_image(&mut self, root:&str, hash:&str) {
+        self.send_request(FileRequest::LoadSnapshotImage {root:root.to_string(), hash:hash.to_string()});
+    }
+        
+    pub fn send_request(&self, request: FileRequest) {
         self.inner.as_ref().unwrap().request_sender.send(request).unwrap();
     }
     
@@ -43,7 +52,7 @@ impl FileClient {
         move | request | request_sender.send(request).unwrap()
     }
     
-    pub fn poll_messages(&mut self)->Vec<FileClientMessage> {
+    pub fn poll_messages(&self)->Vec<FileClientMessage> {
         let mut messages = Vec::new();
         let inner = self.inner.as_ref().unwrap();
         loop {
