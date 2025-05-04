@@ -206,7 +206,6 @@ live_design!{
                     draw_bg: {
                         gap: 90.
                         val_padding: 10.
-                        weight: 40.
 
                         border_size: (THEME_BEVELING)
                         val_size: 20.
