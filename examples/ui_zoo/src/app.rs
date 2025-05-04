@@ -267,7 +267,6 @@
         #[live] dropdown_gradient_x_below: DropDownEnum,
         #[live] dropdown_gradient_y: DropDownEnum,
         #[live] dropdown_gradient_y_below: DropDownEnum,
-        #[live] dropdown_custom: DropDownEnum,
     }
     #[derive(Live, LiveHook)]
     pub struct App {
