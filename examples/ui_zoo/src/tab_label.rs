@@ -47,10 +47,10 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "Standard, fully customized" }
+            <H4> { text: "Styling Attributes Reference" }
             <Label> {
                 draw_text: {
-                    color: #0f0,
+                    color: #0ff,
 
                     text_style: {
                         font_size: 20.,

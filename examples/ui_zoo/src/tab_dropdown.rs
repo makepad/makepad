@@ -95,83 +95,35 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "DropDownGradientY Custom" }
-            dropdown_custom = <DropDownGradientY> {
-                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
-                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
-
-                
-                draw_text: {
-                    color: #f00
-                    color_hover: #0f0
-                    color_focus: #0ff
-                }
-
-            
-                draw_bg: {
-                    border_size: (THEME_BEVELING)
-                    border_radius: (THEME_CORNER_RADIUS)
-
-                    color_dither: 1.0
-
-                    color_1: (THEME_COLOR_OUTSET * 1.75)
-                    color_1_hover: #0
-                    color_1_focus: #2
-
-                    color_2: (THEME_COLOR_OUTSET)
-                    color_2_hover: #3
-                    color_2_focus: #4
-
-                    border_color_1: #8
-                    border_color_1_hover: #C
-                    border_color_1_focus: #A
-
-                    border_color_2: #8
-                    border_color_2_hover: #C
-                    border_color_2_focus: #A
-                }
-
-                popup_menu: <PopupMenuGradientY> {
-                    // menu_item: <PopupMenuItem> {}
-
-                    draw_bg: {
-                        color_dither: 1.0
-                        border_radius: 4.0
-                        border_size: (THEME_BEVELING)
-
-                        color_1: #4
-                        color_2: #2
-
-                        border_color_1: #C
-                        border_color_2: #C
-                    }
-                }
-            }
-
-            <Hr> {}
-            <H4> { text: "Standard, fully customized" }
+            <H4> { text: "Styling Attributes Reference" }
             dropdown_customized = <DropDown> {
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
                 values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
-
+                popup_menu: <PopupMenu> {}
+                selected_item: 0
                 popup_menu_position: BelowInput,
 
-                width: Fill, height: Fit,
-                align: { x: 0., y: .5 }
-                padding: 10.
-                margin: 10.
+                width: Fit, height: Fit,
+                align: {x: 0., y: 0.}
+
+                padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: 22.5 }
+                margin: <THEME_MSPACE_V_1> {}
             
                 draw_text: {
-                    color: #4
-                    color_hover: #6
-                    color_down: #0
-                    color_focus: #8
-                    color_disabled: #C
+                    color: (THEME_COLOR_LABEL_INNER)
+                    color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+                    color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+                    color_down: (THEME_COLOR_LABEL_INNER_DOWN)
+                    color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
 
                     text_style: {
-                        font_size: 8.,
-                        line_spacing: 1.4,
-                        font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
+                        font_size: (THEME_FONT_SIZE_P)
+                        font_family: {
+                            latin = font("crate://makepad_widgets/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
+                            chinese = font("crate://makepad_widgets/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
+                            emoji = font("crate://makepad_widgets/resources/NotoColorEmoji.ttf", 0.0, 0.0)
+                        },
+                        line_spacing: 1.2
                     }
                 }
 
@@ -181,22 +133,22 @@ live_design!{
 
                     color_dither: 1.0
 
-                    color: #A
-                    color_hover: #C
-                    color_down: #9
-                    color_focus: #B
-                    color_disabled: #8
+                    color: (THEME_COLOR_OUTSET)
+                    color_hover: (THEME_COLOR_OUTSET_HOVER)
+                    color_down: (THEME_COLOR_OUTSET_DOWN)
+                    color_focus: (THEME_COLOR_OUTSET_FOCUS)
+                    color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
-                    border_color_1: #0
+                    border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
                     border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
-                    border_color_1_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
                     border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
+                    border_color_1_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
                     border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
 
                     border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
                     border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
-                    border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
                     border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
+                    border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
                     border_color_2_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
 
                     arrow_color: (THEME_COLOR_LABEL_INNER)
@@ -206,9 +158,7 @@ live_design!{
                     arrow_color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
                 }
 
-
             }
-
 
         }
     }
