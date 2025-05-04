@@ -10,11 +10,11 @@
 
         use crate::tab_button::*;
         use crate::tab_checkbox::*;
-        use crate::tab_commandtextinput::*;
-        use crate::tab_desktopbutton::*;
+        // use crate::tab_commandtextinput::*;
+        // use crate::tab_desktopbutton::*;
         use crate::tab_dropdown::*;
         use crate::tab_filetree::*;
-        use crate::tab_foldbutton::*;
+        // use crate::tab_foldbutton::*;
         use crate::tab_html::*;
         use crate::tab_icon::*;
         use crate::tab_iconset::*;
@@ -87,11 +87,11 @@
                                 tLayoutDemos,
                                 tButton,
                                 tCheckBox,
-                                tCommandTextInput,
-                                tDesktopButton,
+                                // tCommandTextInput,
+                                // tDesktopButton,
                                 tDropDown,
                                 tFiletree,
-                                tFoldButton,
+                                // tFoldButton,
                                 tHTML,
                                 tIcon,
                                 tIconSet,
@@ -119,11 +119,11 @@
                         tLayoutDemos = Tab { name: "Layout Demos", template: PermanentTab, kind: TabLayoutDemos }
                         tButton = Tab { name: "Button", template: PermanentTab, kind: TabButton }
                         tCheckBox = Tab { name: "CheckBox", template: PermanentTab, kind: TabCheckBox }
-                        tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
-                        tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
+                        // tCommandTextInput = Tab { name: "CommandTextInput", template: PermanentTab, kind: TabCommandTextInput }
+                        // tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
                         tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
-                        tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
+                        // tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
                         tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
                         tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
                         tIconSet = Tab { name: "IconSet", template: PermanentTab, kind: TabIconSet }
@@ -147,11 +147,11 @@
                         TabLayoutDemos = <UIZooTab> { <DemoLayout> {} }
                         TabButton = <UIZooTab> { <DemoButton> {} }
                         TabCheckBox = <UIZooTab> { <DemoCheckBox> {} }
-                        TabCommandTextInput = <UIZooTab> { <DemoCommandTextInput> {} }
-                        TabDesktopButton = <UIZooTab> { <DemoDesktopButton> {} }
+                        // TabCommandTextInput = <UIZooTab> { <DemoCommandTextInput> {} }
+                        // TabDesktopButton = <UIZooTab> { <DemoDesktopButton> {} }
                         TabDropDown = <UIZooTab> { <DemoDropdown> {} }
                         TabFiletree = <UIZooTab> { <DemoFT> {} }
-                        TabFoldButton = <UIZooTab> { <DemoFoldButton> {} }
+                        // TabFoldButton = <UIZooTab> { <DemoFoldButton> {} }
                         TabHTML = <UIZooTab> { <DemoHtml> {} }
                         TabIcon = <UIZooTab> { <DemoIcon> {} }
                         TabIconSet = <UIZooTab> { <DemoIconSet> {} }
@@ -285,11 +285,11 @@ impl LiveRegister for App {
 
             crate::tab_button::live_design(cx);
             crate::tab_checkbox::live_design(cx);
-            crate::tab_commandtextinput::live_design(cx);
-            crate::tab_desktopbutton::live_design(cx);
+            // crate::tab_commandtextinput::live_design(cx);
+            // crate::tab_desktopbutton::live_design(cx);
             crate::tab_dropdown::live_design(cx);
             crate::tab_filetree::live_design(cx);
-            crate::tab_foldbutton::live_design(cx);
+            // crate::tab_foldbutton::live_design(cx);
             crate::tab_html::live_design(cx);
             crate::tab_icon::live_design(cx);
             crate::tab_iconset::live_design(cx);
