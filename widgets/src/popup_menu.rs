@@ -24,7 +24,7 @@ live_design!{
 
             uniform color: (THEME_COLOR_LABEL_INNER)
             uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
-            uniform color_active: (THEME_COLOR_LABEL_INNER_DOWN)
+            uniform color_active: (THEME_COLOR_LABEL_INNER_ACTIVE)
             uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
 
             text_style: <THEME_FONT_REGULAR> {
