@@ -118,7 +118,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        let path = std::env::args().nth(1).expect("missing path");
+        let path = "images";
         self.load_image_paths(path.as_ref());
     }
 }
