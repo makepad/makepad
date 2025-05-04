@@ -47,17 +47,7 @@ pub struct App {
  
 impl LiveRegister for App{
     fn live_register(cx: &mut Cx) {
-        crate::makepad_widgets::live_design(cx);
-        crate::makepad_code_editor::live_design(cx);
-        crate::run_list::live_design(cx);
-        crate::log_list::live_design(cx);
-        crate::profiler::live_design(cx);
-        crate::run_view::live_design(cx);
-        crate::studio_editor::live_design(cx);
-        crate::studio_file_tree::live_design(cx);
-        crate::app_ui::live_design(cx);
-        crate::ai_chat::ai_chat_view::live_design(cx);
-        crate::search::live_design(cx);
+        crate::live_design(cx);
         // for macos
         cx.start_stdin_service();
     }
@@ -67,7 +57,6 @@ app_main!(App);
 
 impl App {
      
-    
     pub fn open_code_file_by_path(&mut self, cx: &mut Cx, path: &str) {
         if let Some(file_id) = self.data.file_system.path_to_file_node_id(&path) {
             let dock = self.ui.dock(id!(dock));            
@@ -195,9 +184,9 @@ impl MatchEvent for App{
         }
         if roots.is_empty(){
             let dir1 = current_dir.join("./");
+            roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake")));
             roots.push(("makepad".to_string(),dir1));
             roots.push(("experiments".to_string(),current_dir.join("../experiments")));
-            roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake")));
         }
         let roots = FileSystemRoots{roots};
         self.data.file_system.init(cx, roots.clone());

@@ -19,6 +19,7 @@ use {
             FileNotification,
             FileNodeData,
             FileTreeData,
+            GitLog,
             SaveKind,
             SaveFileResponse
         },
@@ -28,16 +29,17 @@ use {
 #[derive(Default)]
 pub struct FileSystem {
     pub file_client: FileClient,
-    pub root_path: String,
     pub file_nodes: LiveIdMap<LiveId, FileNode>,
     pub path_to_file_node_id: HashMap<String, LiveId>,
     pub tab_id_to_file_node_id: HashMap<LiveId, LiveId>,
     pub tab_id_to_session: HashMap<LiveId, EditSession>,
     pub open_documents: HashMap<LiveId, OpenDocument>,
-    
+    pub git_logs: Vec<GitLog>,
     pub search_results_id: u64,
     pub search_results: Vec<SearchResult>
 }
+
+
 
 pub enum EditSession {
     Code(CodeSession),
@@ -557,7 +559,7 @@ impl FileSystem {
     }
     
     pub fn file_node_path(&self, file_node_id: LiveId) -> String {
-        let mut path = self.root_path.clone();
+        let mut path = String::new();
         let mut file_node = &self.file_nodes[file_node_id];
         while let Some(edge) = &file_node.parent_edge {
             path.insert_str(0, &edge.name);
@@ -657,6 +659,7 @@ impl FileSystem {
             file_nodes: &mut LiveIdMap<LiveId, FileNode>,
             parent_edge: Option<FileEdge>,
             node: FileNodeData,
+            git_logs: &mut Vec<GitLog>
         ) -> LiveId {
             let file_node_id = file_node_id.unwrap_or(LiveId::from_str(&node_path).into());
             let name = parent_edge.as_ref().map_or_else(
@@ -667,7 +670,10 @@ impl FileSystem {
                 parent_edge,
                 name,
                 child_edges: match node {
-                    FileNodeData::Directory {entries} => Some(
+                    FileNodeData::Directory {entries, git_log} => Some({
+                        if let Some(git_log) = git_log{
+                            git_logs.push(git_log);
+                        }
                         entries
                             .into_iter()
                             .map( | entry | FileEdge {
@@ -687,10 +693,11 @@ impl FileSystem {
                                     file_node_id,
                                 }),
                                 entry.node,
+                                git_logs,
                             ),
                         })
-                            .collect::<Vec<_ >> (),
-                    ),
+                            .collect::<Vec<_ >> ()
+                    }),
                     FileNodeData::File {..} => None,
                 },
             };
@@ -698,9 +705,6 @@ impl FileSystem {
             file_nodes.insert(file_node_id, node);
             file_node_id
         }
-        
-        self.root_path = tree_data.root_path;
-        
         
         self.file_nodes.clear();
         
@@ -711,6 +715,7 @@ impl FileSystem {
             &mut self.file_nodes,
             None,
             tree_data.root,
+            &mut self.git_logs
         );
     }
 }
