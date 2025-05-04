@@ -212,43 +212,25 @@
                             }
                         }
 
-                        <Slider> {
-                            text: "Contrast"
-                            draw_bg: { label_size: 55. }
-                        }
+                        <Slider> { text: "Contrast" }
                         <View> {
                             flow: Down
                             spacing: 0.
                             <Label> { margin: {top: (THEME_SPACE_1)}, padding: 0., width: Fit, text: "Tint Color"}
                             <TextInput> { empty_text: "Hex color", text: "#f00" }
                         }
-                        <Slider> {
-                            text: "Tint Amount"
-                            draw_bg: { label_size: 80. }
-                        }
+                        <Slider> { text: "Tint Amount" }
                         <Vr> {}
-                        <Labelbold> { width: Fit, text: "Font"}
-                        <Slider> {
-                            text: "Size"
-                            draw_bg: { label_size: 30. }
+                        <Pbold> {
+                            width: Fit,
+                            text: "Font"
                         }
-                        <Slider> {
-                            text: "Size Contrast"
-                            draw_bg: { label_size: 55. }
-                        }
+                        <Slider> { text: "Size" }
+                        <Slider> { text: "Size Contrast" }
                         <Vr> {}
-                        <Slider> {
-                            text: "Bevel"
-                            draw_bg: { label_size: 40. }
-                        }
-                        <Slider> {
-                            text: "Rounding"
-                            draw_bg: { label_size: 65. }
-                        }
-                        <Slider> {
-                            text: "Space"
-                            draw_bg: { label_size: 40. }
-                        }
+                        <Slider> { text: "Bevel" }
+                        <Slider> { text: "Rounding" }
+                        <Slider> { text: "Space" }
                     }
 
 
