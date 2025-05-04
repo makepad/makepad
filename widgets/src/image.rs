@@ -4,7 +4,7 @@ use crate::{
     makepad_draw::*,
     widget::*
 };
-
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 live_design!{
@@ -361,6 +361,23 @@ impl Image {
         }
         Ok(())
     }    
+    pub fn load_image_from_data_async(&mut self, cx: &mut Cx, image_path: &Path, data: Arc<Vec<u8>>) -> Result<(), ImageError> {
+        if let Ok(result) = self.load_image_from_data_async_impl(cx, image_path, data, 0){
+            match result{
+                AsyncLoadResult::Loading(w,h)=>{
+                    self.async_image_size = Some((w,h));
+                    self.async_image_path = Some(image_path.into());
+                    self.animator_play(cx, id!(async_load.on));
+                    self.redraw(cx);
+                }
+                AsyncLoadResult::Loaded=>{
+                    self.redraw(cx);
+                }
+            }
+            // lets set the w-h
+        }
+        Ok(())
+    }
 }
 
 pub enum AsyncLoad{
@@ -394,7 +411,14 @@ impl ImageRef {
         }
         Ok(())
     }    
-    
+            
+    /// Loads the image at the given `image_path` on disk into this `ImageRef`.
+    pub fn load_image_from_data_async(&self, cx: &mut Cx,  image_path: &Path, data:Arc<Vec<u8>>) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            return inner.load_image_from_data_async(cx, image_path, data)
+        }
+        Ok(())
+    }    
     
     /// Loads a JPEG into this `ImageRef` by decoding the given encoded JPEG `data`.
     pub fn load_jpg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {

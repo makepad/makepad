@@ -24,6 +24,7 @@ live_design!{
                 return (THEME_COLOR_D_1)
             }
         }
+        text:""
         icon_walk: {width: 250.0, height: Fit}
         draw_bg: {
             fn pixel(self) -> vec4 {
