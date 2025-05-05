@@ -541,7 +541,7 @@ impl AiChatFile{
         
 }
 
-const AI_PROMPT_FILE:&'static str = "studio/resources/ai/ai_markup.txt";
+const AI_PROMPT_FILE:&'static str = "makepad/studio/resources/ai/ai_markup.txt";
 
 impl AiChatManager{
     pub fn init(&mut self, fs:&mut FileSystem) {
