@@ -130,8 +130,6 @@ impl FileSystem {
     }
     
     pub fn save_snapshot_image(&self, root:&str, hash:&str, width:usize, height: usize, data:Vec<u8>) {
-        // lets compress this to a png
-        crate::log!("SAVE SNAPSHOT");
         let mut jpeg = Vec::new();
         let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 100);
         encoder.encode(&data, width as u16, height as u16, jpeg_encoder::ColorType::Bgra).unwrap();
