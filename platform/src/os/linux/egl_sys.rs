@@ -635,7 +635,11 @@ pub unsafe  fn create_egl_context(
 
     #[cfg(not(ohos_sim))]
     let ctx_attributes = vec![
-        EGL_CONTEXT_MAJOR_VERSION, 2, // version 1 and 3 also work
+        EGL_CONTEXT_MAJOR_VERSION, 
+        #[cfg(use_gles_3)]
+        3, // version 1 and 3 also work
+        #[cfg(not(use_gles_3))]
+        2, // version 1 and 3 also work
         EGL_CONTEXT_MINOR_VERSION_KHR , 0,
         EGL_NONE,
     ];
