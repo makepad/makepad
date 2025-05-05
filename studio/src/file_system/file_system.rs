@@ -129,20 +129,20 @@ impl FileSystem {
         
     }
     
-    pub fn save_snapshot_image(&self, root:&str, hash:&str, width:usize, height: usize, data:Arc<Vec<u8>>) {
+    pub fn save_snapshot_image(&self, root:&str, hash:&str, width:usize, height: usize, data:Vec<u8>) {
         // lets compress this to a png
-        
+        crate::log!("SAVE SNAPSHOT");
         let mut jpeg = Vec::new();
         let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 100);
-        encoder.encode(&data, width as u16, height as u16, jpeg_encoder::ColorType::Rgb).unwrap();
+        encoder.encode(&data, width as u16, height as u16, jpeg_encoder::ColorType::Bgra).unwrap();
         
         let mut image_data = self.snapshot_image_data.borrow_mut();
         if image_data.get(hash).is_none(){
+            self.file_client.send_request(FileRequest::SaveSnapshotImage {root:root.to_string(), hash:hash.to_string(), data:jpeg.clone()});
             image_data.insert(root.to_string(), SnapshotImageData::Loaded{
                 data: Arc::new(jpeg),
                 path: Path::new(hash).with_extension("jpg")
             });
-            self.file_client.send_request(FileRequest::SaveSnapshotImage {root:root.to_string(), hash:hash.to_string(), data:(*data).clone()});
         }   
     }
             
@@ -244,7 +244,7 @@ impl FileSystem {
                             // lets store this in our snapshot cache
                             match response{
                                 Ok(res)=>{
-                                    let path = Path::new(&res.hash).to_path_buf().with_extension(".png");
+                                    let path = Path::new(&res.hash).to_path_buf().with_extension("jpg");
                                     self.snapshot_image_data.borrow_mut().insert(res.hash, 
                                         SnapshotImageData::Loaded{
                                             data:Arc::new(res.data),

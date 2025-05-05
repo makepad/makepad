@@ -66,7 +66,7 @@ live_design!{
                 <View>{
                     spacing: 5
                     roots_dropdown = <DropDownFlat>{ width: Fit, popup_menu_position: BelowInput }
-                    <ButtonFlat>{text:"Snapshot"}
+                    snapshot_button = <ButtonFlat>{text:"Snapshot"}
                     <Filler> {}
                     <ToggleFlat>{text:"Auto"}
                 }
@@ -174,6 +174,7 @@ impl Widget for Snapshot {
                 let root_id = self.drop_down(id!(roots_dropdown)).selected_item();
                 let git_log = data.file_system.git_logs.get(root_id).unwrap();
                 // we should find all active build ids with the same root
+                
                 let mut iter = data.build_manager.active.builds_with_root(git_log.root.clone());
                 if let Some(item) = iter.next(){
                     data.build_manager.active_build_websockets.lock().unwrap().borrow_mut().send_studio_to_app(*item.0, StudioToApp::Screenshot(StudioScreenshotRequest{
