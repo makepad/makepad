@@ -33,10 +33,10 @@ live_design!{
                 <P> {
                     text: "One of Makepad’s standout features is live styling — a powerful system that reflects UI code changes instantly without recompilation or restarts. This tight feedback loop bridges the gap between developers and designers, streamlining collaboration and maximizing productivity."
                 }
-                <Pbolditalic> {
+                <P> {
                     text: "This example application provides an overview of the currently supported widgets and their variants."
                 }
-                <Pitalic> {
+                <P> {
                     text: "Its source code also provides useful example code to get you started."
                 }
 
