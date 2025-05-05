@@ -318,6 +318,8 @@ live_design!{
         draw_bg: {
             border_size: 0.
             color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_U_HIDDEN)
+            color_down: (THEME_COLOR_U_HIDDEN)
         }
         popup_menu: <PopupMenuFlatter> {}
     }

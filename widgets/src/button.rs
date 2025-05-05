@@ -503,6 +503,7 @@ live_design! {
     pub ButtonFlatter = <ButtonFlat> {
         draw_bg: {
             
+            color: (THEME_COLOR_U_HIDDEN)
             color_hover: (THEME_COLOR_U_HIDDEN)
             color_down: (THEME_COLOR_U_HIDDEN)
             color_disabled: (THEME_COLOR_OUTSET_DISABLED)
