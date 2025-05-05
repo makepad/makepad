@@ -5,6 +5,7 @@ use {
         file_system::file_system::SnapshotImageData,
         makepad_widgets::*,
     },
+    makepad_platform::studio::{StudioToApp,StudioScreenshotRequest},
     std::{
         env,
     },
@@ -45,7 +46,7 @@ live_design!{
                         mix(mix(#x0000, #x0006, self.hover), #xfff2, self.down),
                         1.0
                     )
-                                        
+                         
                     return sdf.result
                 }
             }
@@ -65,7 +66,7 @@ live_design!{
                 <View>{
                     spacing: 5
                     roots_dropdown = <DropDownFlat>{ width: Fit, popup_menu_position: BelowInput }
-                    <Button>{text:"Snapshot"}
+                    snapshot_button = <Button>{text:"Snapshot"}
                     <CheckBox>{text:"Auto"}
                 }
                 <TextInput>{empty_text:"Description"}
@@ -98,7 +99,8 @@ pub enum SnapshotAction {
 
 #[derive(Live, LiveHook, Widget)]
 pub struct Snapshot{
-    #[deref] view:View
+    #[deref] view:View,
+    #[rust] request_id: u64,
 }
 
 impl Snapshot{
@@ -165,8 +167,21 @@ impl Widget for Snapshot {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
         let _snapshots = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
-        let _data = scope.data.get_mut::<AppData>().unwrap();
+        let data = scope.data.get_mut::<AppData>().unwrap();
         if let Event::Actions(actions) = event{
+            if self.view.button(id!(snapshot_button)).clicked(actions){
+                let root_id = self.drop_down(id!(roots_dropdown)).selected_item();
+                let git_log = data.file_system.git_logs.get(root_id).unwrap();
+                // we should find all active build ids with the same root
+                let mut iter = data.build_manager.active.builds_with_root(git_log.root.clone());
+                if let Some(item) = iter.next(){
+                    data.build_manager.active_build_websockets.lock().unwrap().borrow_mut().send_studio_to_app(*item.0, StudioToApp::Screenshot(StudioScreenshotRequest{
+                        kind_id: 0,
+                        request_id:self.request_id
+                    }));
+                    self.request_id += 1;
+                }
+            }
             if let Some(_search) = self.view.text_input(id!(search_input)).changed(&actions){
             }
         }

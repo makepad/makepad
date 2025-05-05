@@ -5,6 +5,8 @@ pub use makepad_derive_widget;
 pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
 pub use makepad_platform::log;
+pub use makepad_zune_jpeg;
+pub use makepad_zune_png;
 
 pub mod button;
 pub mod cached_widget;

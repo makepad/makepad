@@ -254,6 +254,9 @@ impl Cx {
             }
             MacosEvent::Timer(te) => {
                 if te.timer_id == 0 {
+                    if self.screenshot_requests.len()>0{
+                        self.repaint_windows();
+                    }
                     if self.os.keep_alive_counter>0 {
                         self.os.keep_alive_counter -= 1;
                         self.repaint_windows();

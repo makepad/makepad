@@ -32,6 +32,7 @@ use {
             CxKeyboard,
             NextFrame,
         },
+        studio::StudioScreenshotRequest,
         action::ActionsBuf,
         cx_api::CxOsOp,
         area::Area,
@@ -124,7 +125,7 @@ pub struct Cx {
     pub(crate) studio_http: String,
     
     pub performance_stats: PerformanceStats,
-
+    pub(crate) screenshot_requests: Vec<StudioScreenshotRequest>,
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches
     /// on the next event loop cycle. This ensures all views process the cache clear
@@ -290,6 +291,8 @@ impl Cx {
             studio_web_socket: None,
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
+            
+            screenshot_requests: Default::default(),
             
             dependencies: Default::default(),
             
