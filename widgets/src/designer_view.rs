@@ -24,9 +24,9 @@ live_design!{
         width: 1200,
         height: 1200,
         flow: Overlay,
-        clip_x:false,
-        clip_y:false,
-        align:{x:1.0},
+        clip_x: false,
+        clip_y: false,
+        align: {x:1.0},
         animator: {
             select = {
                 default: off

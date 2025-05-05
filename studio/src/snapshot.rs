@@ -65,10 +65,11 @@ live_design!{
                 <View>{
                     spacing: 5
                     roots_dropdown = <DropDownFlat>{ width: Fit, popup_menu_position: BelowInput }
-                    <Button>{text:"Snapshot"}
-                    <CheckBox>{text:"Auto"}
+                    <ButtonFlat>{text:"Snapshot"}
+                    <Filler> {}
+                    <ToggleFlat>{text:"Auto"}
                 }
-                <TextInput>{empty_text:"Description"}
+                <TextInputFlat>{empty_text:"Description"}
             }
         }
         list = <PortalList> {

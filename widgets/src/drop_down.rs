@@ -292,7 +292,7 @@ live_design!{
     
     pub DropDownFlat = <DropDown> {
         draw_bg: {
-            color: (THEME_COLOR_U_HIDDEN)
+            color: (THEME_COLOR_OUTSET)
             color_hover: (THEME_COLOR_OUTSET_HOVER)
             color_focus: (THEME_COLOR_OUTSET_FOCUS)
             color_down: (THEME_COLOR_OUTSET_DOWN)
@@ -315,7 +315,12 @@ live_design!{
     }
 
     pub DropDownFlatter = <DropDownFlat> {
-        draw_bg: { border_size: 0. }
+        draw_bg: {
+            border_size: 0.
+            color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_U_HIDDEN)
+            color_down: (THEME_COLOR_U_HIDDEN)
+        }
         popup_menu: <PopupMenuFlatter> {}
     }
 
