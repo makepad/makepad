@@ -45,8 +45,9 @@ live_design!{
                             <View> {
                                 width: Fit
                                 flow: Right,
-                                spacing: (THEME_SPACE_2)
+                                spacing: (THEME_SPACE_1)
                                 <CheckBoxCustom> {
+                                    width: 25,
                                     margin: {left: (THEME_SPACE_1)}
                                     text: ""
                                     draw_bg: { check_type: None }
@@ -58,6 +59,7 @@ live_design!{
                                     }
                                 }
                                 <CheckBoxCustom> {
+                                    width: 25,
                                     text: ""
                                     draw_bg: { check_type: None }
                                     icon_walk: {width: 12.}
@@ -68,6 +70,7 @@ live_design!{
                                     }
                                 }
                                 <CheckBoxCustom> {
+                                    width: 25,
                                     text: ""
                                     draw_bg: { check_type: None }
                                     icon_walk: {width: 10.5}
@@ -78,6 +81,7 @@ live_design!{
                                     }
                                 }
                                 <CheckBoxCustom> {
+                                    width: 25,
                                     text:""
                                     draw_bg: { check_type: None }
                                     icon_walk: {width: 13.}
@@ -88,7 +92,7 @@ live_design!{
                                     }
                                 }
                             }
-                            <TextInput> {
+                            <TextInputFlat> {
                                 width: Fill,
                                 empty_text: "Filter",
                             }
