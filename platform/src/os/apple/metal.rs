@@ -23,7 +23,7 @@ use {
         draw_list::DrawListId,
         cx::Cx,
         pass::{PassClearColor, PassClearDepth, PassId},
-        studio::{AppToStudio, GPUSample},
+        studio::{AppToStudio, GPUSample, StudioScreenshotResponse},
         texture::{
             CxTexture,
             Texture,
@@ -472,9 +472,32 @@ impl Cx {
             DrawPassMode::Texture => {
                 self.commit_command_buffer(None, command_buffer, gpu_read_guards);
             }
-            DrawPassMode::StdinMain(stdin_frame) => {
-                
+            DrawPassMode::StdinMain(stdin_frame, kind_id) => {
+                                
                 self.commit_command_buffer(Some(stdin_frame), command_buffer, gpu_read_guards);
+                
+                
+                let mut request_ids = Vec::new();
+                self.screenshot_requests.retain(|v|{
+                    if v.kind_id == kind_id as u32{
+                        request_ids.push(v.request_id);
+                        false
+                    }
+                    else{
+                        true
+                    }
+                });
+                if request_ids.len() > 0{
+                    let main_texture = &self.passes[pass_id].color_textures[0];
+                    let tex = &self.textures[main_texture.texture.texture_id()];
+                    let image = tex.copy_to_system_ram(metal_cx);
+                    Self::send_studio_message(AppToStudio::Screenshot(StudioScreenshotResponse{
+                        request_ids,
+                        image,
+                        width: tex.alloc.as_ref().unwrap().width as _, 
+                        height: tex.alloc.as_ref().unwrap().height as _,
+                    }))
+                }
             }
             DrawPassMode::Drawable(drawable) => {
                 let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
@@ -579,7 +602,7 @@ impl Cx {
 pub enum DrawPassMode {
     Texture,
     MTKView(ObjcId),
-    StdinMain(PresentableDraw),
+    StdinMain(PresentableDraw, usize),
     Drawable(ObjcId),
     Resizing(ObjcId)
 }
@@ -588,7 +611,7 @@ impl DrawPassMode {
     fn is_drawable(&self) -> Option<ObjcId> {
         match self {
             Self::Drawable(obj) | Self::Resizing(obj) => Some(*obj),
-            Self::StdinMain(_) | Self::Texture | Self::MTKView(_) => None
+            Self::StdinMain(_,_) | Self::Texture | Self::MTKView(_) => None
         }
     }
 }
@@ -835,6 +858,33 @@ fn texture_pixel_to_mtl_pixel(pix:&TexturePixel)-> MTLPixelFormat {
      }   
 }
 impl CxTexture {
+    
+    pub fn copy_to_system_ram(
+        &self,
+        _metal_cx: &MetalCx
+    )->Option<Vec<u32>>{
+        if let Some(alloc) = &self.alloc{
+            if let Some(texture) = &self.os.texture{
+                let mut buf = Vec::new();
+                buf.resize(alloc.width * alloc.height, 0u32);
+                let region = MTLRegion {
+                    origin: MTLOrigin {x: 0, y: 0, z: 0},
+                    size: MTLSize {width: alloc.width as u64, height: alloc.height as u64, depth: 1}
+                };
+                let _:() = unsafe{msg_send![
+                    texture.as_id(), 
+                    getBytes: buf.as_ptr()
+                    bytesPerRow: alloc.width *4
+                    bytesPerImage: alloc.width * alloc.height * 4
+                    fromRegion: region
+                    mipmapLevel: 0
+                    slice: 0
+                ]};
+                return Some(buf);
+            }
+        }
+        None
+    }
     
     fn update_vec_texture(
         &mut self,

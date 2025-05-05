@@ -6,6 +6,7 @@ use {
     crate::{
         makepad_code_editor::{CodeDocument, decoration::{Decoration, DecorationSet}, CodeSession},
         makepad_platform::makepad_live_compiler::LiveFileChange,
+        
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
         file_system::FileClient,
@@ -126,6 +127,24 @@ impl FileSystem {
             self.file_client.send_request(FileRequest::LoadSnapshotImage {root:root.to_string(), hash:hash.to_string()});
         }
         
+    }
+    
+    pub fn save_snapshot_image(&self, root:&str, hash:&str, width:usize, height: usize, data:Arc<Vec<u8>>) {
+        // lets compress this to a png
+        
+        let mut jpeg = Vec::new();
+        let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 100);
+        encoder.encode(&data, width as u16, height as u16, jpeg_encoder::ColorType::Rgb).unwrap();
+        
+        let mut image_data = self.snapshot_image_data.borrow_mut();
+        if image_data.get(hash).is_none(){
+            image_data.insert(root.to_string(), SnapshotImageData::Loaded{
+                data: Arc::new(jpeg),
+                path: Path::new(hash).with_extension("jpg")
+            });
+            self.file_client.send_request(FileRequest::SaveSnapshotImage {root:root.to_string(), hash:hash.to_string(), data:(*data).clone()});
+        }
+                
     }
             
     pub fn get_editor_template_from_file_id(&self, file_id:LiveId)->Option<LiveId>{
@@ -703,6 +722,7 @@ impl FileSystem {
             node: FileNodeData,
             git_logs: &mut Vec<GitLog>
         ) -> LiveId {
+
             let file_node_id = file_node_id.unwrap_or(LiveId::from_str(&node_path).into());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),

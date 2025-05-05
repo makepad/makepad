@@ -17,4 +17,5 @@ makepad-file-protocol = {path="./file_protocol", version="0.5.0"}
 makepad-file-server = {path="./file_server", version="0.5.0"}
 makepad-shell = {path="../libs/shell" , version="0.4.0"}
 makepad-http = {path = "../libs/http", version = "0.4.0"}
+jpeg-encoder = {version = "0.6.0"}
 #makepad-stitch = {path = "../libs/stitch"}
