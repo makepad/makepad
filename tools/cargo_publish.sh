@@ -27,18 +27,18 @@ cargo publish $DRYRUN -p makepad-math
 #cargo publish $DRYRUN -p makepad-derive-wasm-bridge
 #echo "---- PUBLISHING makepad-wasm-bridge ----" 
 #cargo publish $DRYRUN -p makepad-wasm-bridge
-
+                
 #echo "---- PUBLISHING makepad-futures ----" 
 #cargo publish $DRYRUN -p makepad-futures
-
+            
 #echo "---- PUBLISHING makepad-futures-legacy ----" 
 #cargo publish $DRYRUN -p makepad-futures-legacy
-
-
+    
+    
 #echo "---- PUBLISHING makepad-platform ----" 
 #cargo publish $DRYRUN -p makepad-platform
-
-
+    
+    
 #echo "---- PUBLISHING makepad-vector ----" 
 #cargo publish $DRYRUN -p makepad-vector
 #echo "---- PUBLISHING makepad-draw ----" 
@@ -61,20 +61,20 @@ cargo publish $DRYRUN -p makepad-math
 #cargo publish $DRYRUN -p makepad-zune-jpeg
 #echo "---- PUBLISHING makepad-zune-png----" 
 #cargo publish $DRYRUN -p makepad-zune-png
-
+    
 #echo "---- PUBLISHING makepad-studio----" 
 #cargo publish $DRYRUN -p makepad-studio
 #echo "---- PUBLISHING makepad-file-protocol----" 
 #cargo publish $DRYRUN -p makepad-file-protocol
 #echo "---- PUBLISHING makepad-file-server----" 
 #cargo publish $DRYRUN -p makepad-file-server
-
+    
 #echo "---- PUBLISHING makepad-example-ironfish----" 
 #cargo publish $DRYRUN -p makepad-example-ironfish
-
+    
 #echo "---- PUBLISHING makepad-example-fractal-zoom----" 
 #cargo publish $DRYRUN -p makepad-example-fractal-zoom
-
+    
 #echo "---- PUBLISHING makepad-example-simple ----" 
 #cargo publish $DRYRUN -p makepad-example-simple
 #echo "---- PUBLISHING makepad-miniz----" 
