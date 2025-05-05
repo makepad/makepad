@@ -284,7 +284,7 @@ impl FileServerConnection {
         let mut entries = Vec::new();
         for (root_name, root_path) in roots.roots{
             let mut commits = Vec::new();
-            match shell_env_cap(&[], &root_path, "git", &["log", "--pretty=format:%T %s"]) {
+            match shell_env_cap(&[], &root_path, "git", &["log", "--pretty=format:%H %s"]) {
                 Ok(stdout) => {
                     for line in stdout.split("\n"){
                         let mut parts = line.splitn(2," ");
