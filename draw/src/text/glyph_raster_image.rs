@@ -105,10 +105,10 @@ impl<'a> GlyphRasterImage<'a> {
                             }
                         }
                     }
-                    _ => unimplemented!("unsupported bit depth"),
+                    _ => println!("WARNING: encountered rasterized glyph with unsupported bit depth"),
                 }
             }
-            _ => unimplemented!("unsupported color type"),
+            _ => println!("WARNING: encountered rasterized glyph with unsupported color type"),
         }
     }
 }
