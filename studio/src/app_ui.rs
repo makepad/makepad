@@ -553,8 +553,8 @@ live_design!{
                                 margin: 0.,
                                 padding: <THEME_MSPACE_1> {}
                             }
-                            <ToggleFlatter> { text: "Release", }
-                            <ToggleFlatter> { text: "Debug"}
+                            <ToggleFlat> { text: "Release", }
+                            <ToggleFlat> { text: "Debug"}
                         }
                     }
                     <RunList> {}
@@ -566,7 +566,7 @@ live_design!{
                     flow: Down,
                     <DockToolbar> {
                         content = {
-                            <TextInputFlatter> {
+                            <TextInputFlat> {
                                 width: Fill,
                                 empty_text: "Filter",
                             }
@@ -582,13 +582,10 @@ live_design!{
                             <View> {
                                 width: Fit
                                 flow: Right,
-                                spacing: (THEME_SPACE_1)
                                 <CheckBoxCustom> {
-                                    margin: {left: (THEME_SPACE_1)}
                                     text:"Error"
                                     align: { y: 0.5 }
                                     draw_bg: { check_type: None }
-                                    spacing: (THEME_SPACE_1),
                                     icon_walk: {width: 7.}
                                     draw_icon: {
                                         color: (THEME_COLOR_D_2),
@@ -600,7 +597,6 @@ live_design!{
                                     text:"Warning"
                                     align: { y: 0.5 }
                                     draw_bg: { check_type: None }
-                                    spacing: (THEME_SPACE_1),
                                     icon_walk: {width: 7.}
                                     draw_icon: {
                                         color: (THEME_COLOR_D_2),
@@ -612,7 +608,6 @@ live_design!{
                                     text:"Log"
                                     align: { y: 0.5 }
                                     draw_bg: { check_type: None }
-                                    spacing: (THEME_SPACE_1),
                                     icon_walk: {width: 7.}
                                     draw_icon: {
                                         color: (THEME_COLOR_D_2),
@@ -624,7 +619,6 @@ live_design!{
                                     text:"Wait"
                                     align: { y: 0.5 }
                                     draw_bg: { check_type: None }
-                                    spacing: (THEME_SPACE_1),
                                     icon_walk: {width: 7.}
                                     draw_icon: {
                                         color: (THEME_COLOR_D_2),
@@ -636,7 +630,6 @@ live_design!{
                                     text:"Panic"
                                     align: { y: 0.5 }
                                     draw_bg: { check_type: None }
-                                    spacing: (THEME_SPACE_1),
                                     icon_walk: {width: 7.}
                                     draw_icon: {
                                         color: (THEME_COLOR_D_2),
@@ -645,9 +638,8 @@ live_design!{
                                     }
                                 }
                             }
-                            // <Vr> {}
                             <Filler> {}
-                            <TextInputFlatter> {
+                            <TextInputFlat> {
                                 width: 200.
                                 empty_text: "Filter",
                             }
