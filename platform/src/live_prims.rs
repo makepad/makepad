@@ -706,17 +706,16 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Dependency(path) => {
-                match cx.take_dependency(path) {
+                match cx.get_dependency(path) {
                     Ok(bytes) => {
                         let string = String::from_utf8_lossy(&bytes);
                         self.push_str(&string);
-                        index + 1
                     }
                     Err(_) => {
                         cx.apply_error_resource_not_found(live_error_origin!(), index, nodes, path);
-                        nodes.skip_node(index)
                     }
                 }
+                index + 1
             }
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");
@@ -832,17 +831,16 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Dependency(path) => {
-                match cx.take_dependency(path) {
+                match cx.get_dependency(path) {
                     Ok(bytes) => {
                         let string = String::from_utf8_lossy(&bytes);
                         *self = ArcStringMut::String(string.to_string());
-                        index + 1
                     }
                     Err(_) => {
                         cx.apply_error_resource_not_found(live_error_origin!(), index, nodes, path);
-                        nodes.skip_node(index)
                     }
                 }
+                index + 1
             }
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");
