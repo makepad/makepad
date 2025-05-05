@@ -24,12 +24,17 @@ live_design!{
             content = {
                 align: { x: 0., y: 0. }
                 spacing: (THEME_SPACE_3)
-                <ButtonFlatter> {
-                    width: Fit
-                    text: ""
-                    icon_walk: { width: 11. }
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/icons/icon_typography.svg"),
+                <View> {
+                    height: Fill, width: Fit
+                    align: { x: 0.5, y: 0.5}
+                    <Icon> {
+                        text: ""
+                        margin: { left: 5.}
+                        icon_walk: { width: 11. }
+                        draw_icon: {
+                            color: #A
+                            svg_file: dep("crate://self/resources/icons/icon_typography.svg"),
+                        }
                     }
                 }
                 <Vr> {}
