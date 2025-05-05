@@ -210,7 +210,7 @@ impl RunList{
         for (binary_id, binary) in build_manager.binaries.iter().enumerate() { 
             let is_even = counter & 1 == 0;
                             
-            let item_id = LiveId::from_str(&binary.name).str_append(&binary.root);
+            let item_id = LiveId::from_str(&binary.name);
             let item = list.item(cx, item_id, live_id!(Binary)).unwrap().as_view();
             item.apply_over(cx, live!{
                 check = {text:(&binary.name)}
