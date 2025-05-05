@@ -647,7 +647,7 @@ live_design!{
                             }
                             // <Vr> {}
                             <Filler> {}
-                            <TextInput> {
+                            <TextInputFlatter> {
                                 width: 200.
                                 empty_text: "Filter",
                             }
