@@ -472,7 +472,7 @@ impl Cx {
                 let drawable:ObjcId = unsafe {msg_send![view, currentDrawable]};
                 let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
                 let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-                let screenshot = self.build_screenshot_struct(0, command_buffer, pass_width as usize, pass_height as usize, first_texture);
+                let screenshot = self.build_screenshot_struct(0, pass_width as usize, pass_height as usize, first_texture);
                 self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
             }
             DrawPassMode::Texture => {
@@ -482,7 +482,7 @@ impl Cx {
                 let main_texture = &self.passes[pass_id].color_textures[0];
                 let tex = &self.textures[main_texture.texture.texture_id()];
                 let screenshot = if let Some(texture) = &tex.os.texture{
-                    self.build_screenshot_struct(kind_id, command_buffer, pass_width as usize, pass_height as usize, texture.as_id())
+                    self.build_screenshot_struct(kind_id, pass_width as usize, pass_height as usize, texture.as_id())
                 }
                 else{
                     None
@@ -492,11 +492,13 @@ impl Cx {
             DrawPassMode::Drawable(drawable) => {
                 let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
                 let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-                let screenshot = self.build_screenshot_struct(0, command_buffer, pass_width as usize, pass_height as usize, first_texture);
+                let screenshot = self.build_screenshot_struct(0, pass_width as usize, pass_height as usize, first_texture);
                 self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
             }
             DrawPassMode::Resizing(drawable) => {
-                self.commit_command_buffer(None, None, command_buffer, gpu_read_guards);
+                let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
+                let screenshot = self.build_screenshot_struct(0, pass_width as usize, pass_height as usize, first_texture);
+                self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
                 let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
                 let () = unsafe {msg_send![drawable, present]};
             }
@@ -504,7 +506,7 @@ impl Cx {
         let () = unsafe {msg_send![pool, release]};
     }
     
-    fn build_screenshot_struct(&mut self, kind_id: usize, command_buffer:ObjcId, width: usize, height: usize, texture:ObjcId)->Option<ScreenshotInfo>{
+    fn build_screenshot_struct(&mut self, kind_id: usize, width: usize, height: usize, texture:ObjcId)->Option<ScreenshotInfo>{
         let mut request_ids = Vec::new();
         self.screenshot_requests.retain(|v|{
             if v.kind_id == kind_id as u32{
@@ -517,11 +519,11 @@ impl Cx {
         });
         
         if request_ids.len() > 0{
-            unsafe{
+            /*unsafe{
                 let blit_encoder: ObjcId = msg_send![command_buffer, blitCommandEncoder];
                 let () = msg_send![blit_encoder, synchronizeTexture: texture slice:0 level:0];
                 let () = msg_send![blit_encoder, endEncoding];
-            }; 
+            };*/ 
             return Some(ScreenshotInfo{
                 request_ids,
                 width: width as _, 
