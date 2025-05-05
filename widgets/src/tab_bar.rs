@@ -30,7 +30,7 @@ live_design!{
         draw_fill: {
             uniform color_dither: 1.0
             uniform border_radius: (THEME_CORNER_RADIUS)
-            color: (THEME_COLOR_BG_APP * 0.8);
+            color: (THEME_COLOR_BG_APP * 0.9);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -55,7 +55,7 @@ live_design!{
         draw_bg: {
             uniform color_dither: 1.0
             uniform border_radius: (THEME_CORNER_RADIUS)
-            color: (THEME_COLOR_BG_APP * 0.8);
+            color: (THEME_COLOR_BG_APP * 0.9);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
