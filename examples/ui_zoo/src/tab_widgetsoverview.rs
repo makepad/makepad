@@ -40,6 +40,7 @@ live_design!{
                     text: "Its source code also provides useful example code to get you started."
                 }
 
+                <TextBox> { draw_text: { color: (THEME_COLOR_MAKEPAD) }, height: Fit, text: "\n\nUI Zoo hosts an unusually large number of widgets, resulting in loading times that aren’t representative of typical Makepad applications."
             }
 
 
