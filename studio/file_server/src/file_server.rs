@@ -366,7 +366,7 @@ impl FileServerConnection {
         let root_path = self.shared.read().unwrap().roots.find_root(&root).map_err(|error|{
             LoadSnapshotImageError{error, root:root.clone(), hash:hash.clone()}
         })?;
-        let path = root_path.join("snapshots").join(&hash).with_extension("png");
+        let path = root_path.join("snapshots").join(&hash).with_extension("jpg");
         let bytes = fs::read(&path).map_err(
             | error | LoadSnapshotImageError{error:FileError::Unknown(error.to_string()), root:root.clone(), hash:hash.clone()}
         ) ?;
@@ -381,7 +381,7 @@ impl FileServerConnection {
     fn save_snapshot_image(&self, root: String, hash:String, data:Vec<u8>) -> Result<SaveSnapshotImageResponse, FileError> {
         // alright letrs find the root
         let root_path = self.shared.read().unwrap().roots.find_root(&root)?;
-        let path = root_path.join("snapshots").join(&hash).with_extension("png");
+        let path = root_path.join("snapshots").join(&hash).with_extension("jpg");
                 
         fs::write(&path, data).map_err(
             | error | FileError::Unknown(error.to_string())

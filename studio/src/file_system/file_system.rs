@@ -143,8 +143,7 @@ impl FileSystem {
                 path: Path::new(hash).with_extension("jpg")
             });
             self.file_client.send_request(FileRequest::SaveSnapshotImage {root:root.to_string(), hash:hash.to_string(), data:(*data).clone()});
-        }
-                
+        }   
     }
             
     pub fn get_editor_template_from_file_id(&self, file_id:LiveId)->Option<LiveId>{
