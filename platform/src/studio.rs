@@ -115,14 +115,30 @@ pub enum AppToStudio{
         file_name:String,
     },
     SwapSelection(SwapSelection),
+    Screenshot(StudioScreenshotResponse),
     FocusDesign
+}
+
+#[derive(SerBin, DeBin, Debug)]
+pub struct StudioScreenshotResponse{
+    pub request_ids: Vec<u64>,
+    pub image: Option<Vec<u32>>,
+    pub width: u32,
+    pub height: u32
 }
 
 #[derive(SerBin, DeBin)]
 pub struct AppToStudioVec(pub Vec<AppToStudio>);
 
+#[derive(Debug, Default, SerBin, DeBin)]
+pub struct StudioScreenshotRequest{
+   pub request_id: u64,
+   pub kind_id: u32
+}
+
 #[derive(Debug, DefaultNone, SerBin, DeBin)]
 pub enum StudioToApp{
+    Screenshot(StudioScreenshotRequest),
     LiveChange{
         file_name: String,
         content: String

@@ -95,6 +95,10 @@ pub struct ActiveBuilds {
 }
 
 impl ActiveBuilds {
+    pub fn builds_with_root(&self, root:String)->impl Iterator<Item = (&LiveId,&ActiveBuild)>{
+        self.builds.iter().filter(move |(_,b)| b.root == root)
+    }
+    
     pub fn item_id_active(&self, item_id: LiveId) -> bool {
         self.builds.get(&item_id).is_some()
     }
@@ -132,7 +136,21 @@ pub struct BuildManager {
     pub tick_timer: Timer,
     pub designer_state: DesignerState,
     //pub send_file_change: FromUISender<LiveFileChange>,
-    pub active_build_websockets: Arc<Mutex<RefCell<Vec<ActiveBuildSocket>>>>,
+    pub active_build_websockets: Arc<Mutex<RefCell<ActiveBuildWebSockets>>>,
+}
+
+#[derive(Default)]
+pub struct ActiveBuildWebSockets{
+    pub sockets: Vec<ActiveBuildSocket>
+}
+
+impl ActiveBuildWebSockets{
+    pub fn send_studio_to_app(&mut self, build_id: LiveId, msg:StudioToApp){
+        if let Some(socket) = self.sockets.iter_mut().find(|v| v.build_id == build_id){
+            let data = StudioToAppVec(vec![msg]).serialize_bin();
+            let _ = socket.sender.send(data.clone());
+        }
+    }
 }
 
 pub struct ActiveBuildSocket{
@@ -337,7 +355,7 @@ impl BuildManager {
             view.recompile_started(cx);
         }*/
     }
-
+    
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {
         // lets send this filechange to all our stdin stuff
         /*for item_id in self.active.builds.keys() {
@@ -357,7 +375,7 @@ impl BuildManager {
             // we send over the full path and the stripped path
             // if not makepad, we have to only send it to the right project
             
-            for socket in d.borrow_mut().iter_mut() {
+            for socket in d.borrow_mut().sockets.iter_mut() {
                 // alright so we have a file_name which includes a 'root'
                 // we also have this build_id which contains a root.
                 // if they are the same, we strip it
@@ -522,6 +540,10 @@ impl BuildManager {
                             ));
                             cx.action(AppAction::RedrawLog)
                         }
+                        AppToStudio::Screenshot(_screenshot)=>{
+                            // lets throw the screenshot to disk as jpg
+                            
+                        }
                         AppToStudio::EventSample(sample) => {
                             // ok lets push this profile sample into the profiles
                             let values = self.profile.entry(build_id).or_default();
@@ -578,7 +600,7 @@ impl BuildManager {
                                         },
                                     ]).serialize_bin();
                                     
-                                    for socket in d.borrow_mut().iter_mut() {
+                                    for socket in d.borrow_mut().sockets.iter_mut() {
                                         if socket.build_id == build_id{
                                             let _ = socket.sender.send(data.clone());
                                         }
@@ -763,7 +785,7 @@ impl BuildManager {
                                     .lock()
                                     .unwrap()
                                     .borrow_mut()
-                                    .push(ActiveBuildSocket{
+                                    .sockets.push(ActiveBuildSocket{
                                         web_socket_id, 
                                         build_id: LiveId(id), 
                                         sender: response_sender
@@ -777,7 +799,7 @@ impl BuildManager {
                             .lock()
                             .unwrap()
                             .borrow_mut()
-                            .retain(|v| v.web_socket_id != web_socket_id);
+                            .sockets.retain(|v| v.web_socket_id != web_socket_id);
                     }
                     HttpServerRequest::BinaryMessage {
                         web_socket_id,

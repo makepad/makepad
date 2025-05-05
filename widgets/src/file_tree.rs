@@ -720,6 +720,18 @@ impl FileTreeRef{
         None
     }
     
+        
+    pub fn set_folder_is_open(
+        &self,
+        cx: &mut Cx,
+        node_id: LiveId,
+        is_open: bool,
+        animate: Animate,
+    ) {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.set_folder_is_open(cx, node_id, is_open, animate);
+        }
+    }
     
     pub fn file_start_drag(&self, cx: &mut Cx, _file_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);

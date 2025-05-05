@@ -246,6 +246,9 @@ impl Cx {
                                         all_changes.retain(|v| v.file_name != file_name); 
                                         all_changes.push(LiveFileChange{file_name, content})
                                     }
+                                    StudioToApp::Screenshot(req)=>{
+                                        self.screenshot_requests.push(req);
+                                    }
                                     x=>{
                                         actions.push(x);
                                     }
