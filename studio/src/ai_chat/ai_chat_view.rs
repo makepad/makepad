@@ -233,6 +233,7 @@ live_design!{
 
                 history_left = <ButtonFlatter> {
                     width: Fit,
+                    draw_bg: { color_focus: #0000 }
                     padding: <THEME_MSPACE_1> {}
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_history_rew.svg"),
@@ -251,6 +252,7 @@ live_design!{
                 history_right = <ButtonFlatter> {
                     width: Fit,
                     padding: <THEME_MSPACE_1> {}
+                    draw_bg: { color_focus: #0000 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_history_ff.svg"),
                     }
@@ -260,6 +262,7 @@ live_design!{
                 history_delete = <ButtonFlatter> {
                     width: Fit,
                     text: ""
+                    draw_bg: { color_focus: #0000 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_del.svg"),
                     }
