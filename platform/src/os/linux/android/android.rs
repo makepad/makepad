@@ -480,7 +480,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_drawing(&mut self) {
-        if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() {
+        if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() || self.demo_time_repaint {
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(self.os.timers.time_now());
             }
