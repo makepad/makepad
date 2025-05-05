@@ -1171,7 +1171,10 @@ impl CodeEditor {
                                         self.draw_text.draw_abs(
                                             cx,
                                             DVec2 { x, y: origin_y + y } * self.cell_size
-                                                + self.viewport_rect.pos + self.cell_offset_y,
+                                                + dvec2(
+                                                    self.viewport_rect.pos.x,
+                                                    self.viewport_rect.pos.y + self.cell_offset_y
+                                                ),
                                             grapheme,
                                         );
                                         byte_index += grapheme.len();
