@@ -28,6 +28,7 @@ use {
             CxTexture,
             Texture,
             TexturePixel,
+            TextureAlloc,
             TextureFormat,
         },
     },
@@ -472,7 +473,7 @@ impl Cx {
                 let drawable:ObjcId = unsafe {msg_send![view, currentDrawable]};
                 let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
                 let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-                let screenshot = self.build_screenshot_struct(0, pass_width as usize, pass_height as usize, first_texture);
+                let screenshot = self.build_screenshot_struct(metal_cx, command_buffer, 0, pass_width as usize, pass_height as usize, first_texture, None);
                 self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
             }
             DrawPassMode::Texture => {
@@ -482,7 +483,7 @@ impl Cx {
                 let main_texture = &self.passes[pass_id].color_textures[0];
                 let tex = &self.textures[main_texture.texture.texture_id()];
                 let screenshot = if let Some(texture) = &tex.os.texture{
-                    self.build_screenshot_struct(kind_id, pass_width as usize, pass_height as usize, texture.as_id())
+                    self.build_screenshot_struct(metal_cx, command_buffer, kind_id, pass_width as usize, pass_height as usize, texture.as_id(), tex.alloc.clone())
                 }
                 else{
                     None
@@ -492,12 +493,12 @@ impl Cx {
             DrawPassMode::Drawable(drawable) => {
                 let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
                 let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-                let screenshot = self.build_screenshot_struct(0, pass_width as usize, pass_height as usize, first_texture);
+                let screenshot = self.build_screenshot_struct(metal_cx, command_buffer, 0, pass_width as usize, pass_height as usize, first_texture, None);
                 self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
             }
             DrawPassMode::Resizing(drawable) => {
                 let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
-                let screenshot = self.build_screenshot_struct(0, pass_width as usize, pass_height as usize, first_texture);
+                let screenshot = self.build_screenshot_struct(metal_cx, command_buffer, 0, pass_width as usize, pass_height as usize, first_texture, None);
                 self.commit_command_buffer(screenshot, None, command_buffer, gpu_read_guards);
                 let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
                 let () = unsafe {msg_send![drawable, present]};
@@ -506,7 +507,7 @@ impl Cx {
         let () = unsafe {msg_send![pool, release]};
     }
     
-    fn build_screenshot_struct(&mut self, kind_id: usize, width: usize, height: usize, texture:ObjcId)->Option<ScreenshotInfo>{
+    fn build_screenshot_struct(&mut self, metal_cx:&MetalCx, command_buffer:ObjcId, kind_id: usize, width: usize, height: usize, in_texture:ObjcId, alloc:Option<TextureAlloc>)->Option<ScreenshotInfo>{
         let mut request_ids = Vec::new();
         self.screenshot_requests.retain(|v|{
             if v.kind_id == kind_id as u32{
@@ -517,13 +518,29 @@ impl Cx {
                 true
             }
         });
-        
+        let (tex_width,tex_height) = if let Some(alloc) = alloc{
+            (alloc.width, alloc.height)
+        }else{
+            (width, height)
+        };
         if request_ids.len() > 0{
-            /*unsafe{
+            let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
+                msg_send![class!(MTLTextureDescriptor), new]
+            }).unwrap());
+            let _: () = unsafe {msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2]};
+            let _: () = unsafe {msg_send![descriptor.as_id(), setDepth: 1u64]};
+            let _: () = unsafe {msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared]};
+            let _: () = unsafe {msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead]};
+            let _: () = unsafe {msg_send![descriptor.as_id(), setWidth: tex_width as u64]};
+            let _: () = unsafe {msg_send![descriptor.as_id(), setHeight: tex_height as u64]};
+            let _: () = unsafe{msg_send![descriptor.as_id(), setPixelFormat: MTLPixelFormat::BGRA8Unorm]};
+            let texture:ObjcId = unsafe{msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]};
+            unsafe{
                 let blit_encoder: ObjcId = msg_send![command_buffer, blitCommandEncoder];
+                let () = msg_send![blit_encoder, copyFromTexture: in_texture toTexture:texture];
                 let () = msg_send![blit_encoder, synchronizeTexture: texture slice:0 level:0];
                 let () = msg_send![blit_encoder, endEncoding];
-            };*/ 
+            };
             return Some(ScreenshotInfo{
                 request_ids,
                 width: width as _, 
@@ -560,7 +577,7 @@ impl Cx {
                         mipmapLevel: 0
                         slice: 0
                     ]};
-                    
+                    let () = msg_send![sf.texture, release];
                     Self::send_studio_message(AppToStudio::Screenshot(StudioScreenshotResponse{
                         request_ids: sf.request_ids.clone(),
                         image: Some(buf),
