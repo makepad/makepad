@@ -158,9 +158,10 @@ live_design!{
                 align: { x: 0.5, y: 0. }
                 padding: { top: 5., bottom: 2. }
                 <ButtonFlatter> {
+                    draw_bg: { color_focus: #fff0 }
                     icon_walk: {
-                        width: 10.5
-                        margin: { left: 5. }
+                        width: 9.5
+                        margin: { left: 6. }
                     }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
@@ -175,6 +176,7 @@ live_design!{
                 align: { x: 0.5, y: 0. }
                 padding: { bottom: 3. }
                 <ButtonFlatter> {
+                    draw_bg: { color_focus: #fff0 }
                     icon_walk: {
                         width: 14
                         margin: { left: 5. }
@@ -192,8 +194,9 @@ live_design!{
                 align: { x: 0.5, y: 0. }
                 padding: { bottom: 2. }
                 <ButtonFlatter> {
+                    draw_bg: { color_focus: #fff0 }
                     icon_walk: {
-                        width: 13
+                        width: 12
                         margin: { left: 5. }
                     }
                     align: { x: 0.5, y: 0.5 }
@@ -209,6 +212,7 @@ live_design!{
                 align: { x: 0.5, y: 0. }
                 padding: { bottom: 3. }
                 <ButtonFlatter> {
+                    draw_bg: { color_focus: #fff0 }
                     icon_walk: {
                         width: 14
                         margin: { left: 5. }
@@ -225,8 +229,9 @@ live_design!{
                 width: Fit, height: Fit,
                 align: { x: 0.5, y: 0. }
                 <ButtonFlatter> {
+                    draw_bg: { color_focus: #fff0 }
                     icon_walk: {
-                        width: 15
+                        width: 14
                         margin: { left: 5. }
                     }
                     align: { x: 0.5, y: 0.5 }
@@ -242,8 +247,9 @@ live_design!{
                 align: { x: 0.5, y: 0. }
                 padding: { bottom: 5.}
                 <ButtonFlatter> {
+                    draw_bg: { color_focus: #fff0 }
                     icon_walk: {
-                        width: 15.5
+                        width: 14
                         margin: { left: 5. }
                     }
                     align: { x: 0.5, y: 0.5 }
