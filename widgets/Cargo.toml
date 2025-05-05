@@ -13,7 +13,7 @@ metadata.makepad-auto-version = "iGO4NcqKmI5RiuSC_d8LHCBQUqI="
 makepad-draw = { path = "../draw", version = "0.6.0" }
 makepad-derive-widget = {path = "./derive_widget", version="0.4.0"}
 
-zune-jpeg ={ version = "0.4.13" }
+makepad-zune-jpeg ={ version = "0.3.17 ",  path = "../libs/zune-jpeg" }
 makepad-zune-png ={ version = "0.4.10", path = "../libs/zune-png"  }
 
 makepad-html ={ path = "../libs/html", version = "0.4.0" }

@@ -1,7 +1,7 @@
 use crate::makepad_draw::*;
 use std::collections::HashMap;
 use std::error::Error;
-use zune_jpeg::JpegDecoder;
+use makepad_zune_jpeg::JpegDecoder;
 use makepad_zune_png::{post_process_image, PngDecoder};
 use std::fmt;
 use std::io::prelude::*;
@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 pub use makepad_zune_png::error::PngDecodeErrors;
-pub use zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
+pub use makepad_zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 
 #[derive(Live, LiveHook, Clone, Copy)]
 #[live_ignore]

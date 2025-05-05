@@ -12,6 +12,7 @@ use crate::{
     file_system::file_system::*,
     studio_editor::*,
     run_view::*,
+    studio_file_tree::*,
     makepad_platform::studio::{JumpToFile,EditFile, SelectInFile, PatchFile, SwapSelection},
     log_list::*,
     makepad_code_editor::{CodeSession,text::{Position}},
@@ -184,9 +185,9 @@ impl MatchEvent for App{
         }
         if roots.is_empty(){
             let dir1 = current_dir.join("./").canonicalize().unwrap();
-            //roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake").canonicalize().unwrap()));
+            roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake").canonicalize().unwrap()));
             roots.push(("makepad".to_string(),dir1));
-            //roots.push(("experiments".to_string(),current_dir.join("../experiments").canonicalize().unwrap()));
+            roots.push(("experiments".to_string(),current_dir.join("../experiments").canonicalize().unwrap()));
         }
         let roots = FileSystemRoots{roots};
         self.data.file_system.init(cx, roots.clone());
@@ -199,7 +200,7 @@ impl MatchEvent for App{
     
     fn handle_action(&mut self, cx:&mut Cx, action:&Action){
         let dock = self.ui.dock(id!(dock));
-        let file_tree = self.ui.view(id!(file_tree));
+        let file_tree = self.ui.studio_file_tree(id!(file_tree));
         let log_list = self.ui.log_list(id!(log_list));
         let run_list = self.ui.view(id!(run_list_tab));
         let profiler = self.ui.view(id!(profiler));
@@ -503,7 +504,6 @@ impl MatchEvent for App{
                 file_tree.redraw(cx);
                 self.load_state(cx, 0);
                 self.data.ai_chat_manager.init(&mut self.data.file_system);
-                //self.open_code_file_by_path(cx, "examples/slides/src/app.rs");
             }
             FileSystemAction::SnapshotImageLoaded => {
                 snapshot.redraw(cx);

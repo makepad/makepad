@@ -82,7 +82,8 @@ impl Cx {
                                 clear_color: PassClearColor::ClearWith(pass.clear_color),
                                 texture: texture.clone(),
                             }];
-    
+                                
+                            let kind_id = window.kind_id;
                             let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
                             let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
                             
@@ -93,7 +94,8 @@ impl Cx {
                                 height: (pass_rect.size.y * dpi_factor) as u32,
                             }; 
                             // render to swapchain
-                            self.draw_pass(pass_id, metal_cx, DrawPassMode::StdinMain(future_presentable_draw));
+                            self.draw_pass(pass_id, metal_cx, DrawPassMode::StdinMain(future_presentable_draw, kind_id));
+                            
                             // and then wait for GPU, which calls stdin_send_draw_complete when its done
                         }
                     }
