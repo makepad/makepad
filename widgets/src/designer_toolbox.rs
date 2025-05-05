@@ -197,7 +197,7 @@ live_design!{
                 align: { x: 0.5, y: 0.5}
                 <ButtonFlatter> {
                     flow: Down,
-                    icon_walk: { width: 9. }
+                    icon_walk: { margin: {top: 25.}, width: 9. }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_select.svg"),
                     }
@@ -210,7 +210,7 @@ live_design!{
                 align: { x: 0.5, y: 0.5}
                 <ButtonFlatter> {
                     flow: Down,
-                    icon_walk: { width: 14.5 }
+                    icon_walk: { margin: {top: 20.}, width: 14.5 }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_draw.svg"),
@@ -225,7 +225,7 @@ live_design!{
                 align: { x: 0.5, y: 0.5}
                 <ButtonFlatter> {
                     flow: Down,
-                    icon_walk: { width: 12. }
+                    icon_walk: { margin: {top: 20.}, width: 12. }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_text.svg"),
@@ -239,7 +239,7 @@ live_design!{
                 align: { x: 0.5, y: 0.5}
                 <ButtonFlatter> {
                     flow: Down,
-                    icon_walk: { width: 13.5 }
+                    icon_walk: { margin: {top: 18.}, width: 13.5 }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
@@ -254,7 +254,7 @@ live_design!{
                 <ButtonFlatter> {
                     flow: Down,
                     flow: Down,
-                    icon_walk: { width: 15.5 }
+                    icon_walk: { margin: {top: 20.}, width: 15.5 }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_widget.svg"),
@@ -268,7 +268,7 @@ live_design!{
                 align: { x: 0.5, y: 0.5}
                 <ButtonFlatter> {
                     flow: Down,
-                    icon_walk: { width: 15.5 }
+                    icon_walk: { margin: {top: 17.}, width: 15.5 }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_image.svg"),
