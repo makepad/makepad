@@ -97,24 +97,24 @@ mod tests {
         let file = File::create("/Users/ejpbruel/Desktop/grayscale.png").unwrap();
         let writer = BufWriter::new(file);
         let rasterizer = layouter.rasterizer().borrow();
-        let size = rasterizer.grayscale_atlas_size();
+        let size = rasterizer.grayscale_atlas().size();
         let mut encoder = png::Encoder::new(writer, size.width as u32, size.height as u32);
         encoder.set_color(png::ColorType::Grayscale);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
-        let pixels = rasterizer.grayscale_atlas_image().as_pixels();
+        let pixels = rasterizer.grayscale_atlas().image().as_pixels();
         let data =
             unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len()) };
         writer.write_image_data(&data).unwrap();
 
         let file = File::create("/Users/ejpbruel/Desktop/color.png").unwrap();
         let writer = BufWriter::new(file);
-        let size = rasterizer.color_atlas_size();
+        let size = rasterizer.color_atlas().size();
         let mut encoder = png::Encoder::new(writer, size.width as u32, size.height as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
-        let pixels = rasterizer.color_atlas_image().as_pixels();
+        let pixels = rasterizer.color_atlas().image().as_pixels();
         let data =
             unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
         writer.write_image_data(&data).unwrap();
