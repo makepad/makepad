@@ -92,7 +92,7 @@ live_design!{
                                     }
                                 }
                             }
-                            <TextInputFlatter> {
+                            <TextInputFlat> {
                                 width: Fill,
                                 empty_text: "Filter",
                             }

@@ -110,7 +110,7 @@ live_design!{
             content = {
                 spacing: (THEME_SPACE_2)
                 align: { y: 0.5 }
-                search_input = <TextInputFlatter> {
+                search_input = <TextInputFlat> {
                     width: Fill,
                     empty_text: "Search",
                 }
