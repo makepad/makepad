@@ -122,11 +122,12 @@ live_design!{
         caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad"}} 
         <View>{
             width: Fit,
-            padding:{top:0,right:7}
-            preset_1 = <Button>{text:"A"}
-            preset_2 = <Button>{text:"C"}
-            preset_3 = <Button>{text:"D"}
-            preset_4 = <Button>{text:"P"}
+            spacing: (THEME_SPACE_2)
+            padding: <THEME_MSPACE_1> { right: (THEME_SPACE_2)  }
+            preset_1 = <ButtonFlatter> { text: "A" }
+            preset_2 = <ButtonFlatter> { text: "C" }
+            preset_3 = <ButtonFlatter> { text: "D" }
+            preset_4 = <ButtonFlatter> { text: "P" }
             }
         },
         window: { inner_size: vec2(1600, 900), /*dpi_override:3.0 */},
@@ -552,8 +553,8 @@ live_design!{
                                 margin: 0.,
                                 padding: <THEME_MSPACE_1> {}
                             }
-                            <Toggle> { text: "Release", }
-                            <Toggle> { text: "Debug"}
+                            <ToggleFlatter> { text: "Release", }
+                            <ToggleFlatter> { text: "Debug"}
                         }
                     }
                     <RunList> {}
@@ -565,7 +566,7 @@ live_design!{
                     flow: Down,
                     <DockToolbar> {
                         content = {
-                            <TextInput> {
+                            <TextInputFlatter> {
                                 width: Fill,
                                 empty_text: "Filter",
                             }
