@@ -457,7 +457,11 @@ pub unsafe fn create_egl_context(
     if !exact_cfg_found {
         config = available_cfgs[0];
     }
+    #[cfg(use_gles_3)]
     let ctx_attributes = vec![EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE];
+    #[cfg(not(use_gles_3))]
+    let ctx_attributes = vec![EGL_CONTEXT_MAJOR_VERSION, 2, EGL_NONE];
+        
     let context = (egl.eglCreateContext.unwrap())(
         display,
         config,

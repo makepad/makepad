@@ -634,7 +634,7 @@ impl Cx {
             }).expect("Cant load openGL functions");
             
             // SAFETY: This creates an EGL surface. It's safe as long as we have valid EGL display, config, and window.
-            libgl.enable_debugging();
+            //libgl.enable_debugging();
             
             let surface = unsafe {(libegl.eglCreateWindowSurface.unwrap())(
                 egl_display,

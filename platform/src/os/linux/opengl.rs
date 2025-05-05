@@ -31,7 +31,7 @@ impl Cx {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
         
-        #[cfg(not(no_opengl_uniform_buffers))]
+        #[cfg(use_gles_3)]
         {
             let draw_list = &mut self.draw_lists[draw_list_id];
             draw_list.os.draw_list_uniforms.update_uniform_buffer(self.os.gl(), draw_list.draw_list_uniforms.as_slice());
@@ -89,6 +89,7 @@ impl Cx {
                 draw_call.draw_call_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
                 
+                #[cfg(use_gles_3)]
                 draw_item.os.draw_call_uniforms.update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
                 
                 let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
@@ -113,7 +114,7 @@ impl Cx {
                 
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
-                    #[cfg(not(no_opengl_uniform_buffers))]
+                    #[cfg(use_gles_3)]
                     if draw_call.user_uniforms.len() != 0 {
                         draw_item.os.user_uniforms.update_uniform_buffer(gl, &mut draw_call.user_uniforms);
                     }
@@ -161,7 +162,6 @@ impl Cx {
                             if let Some(loc) = attr.loc{
                                 (gl.glVertexAttribPointer)(loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
                                 (gl.glEnableVertexAttribArray)(loc);
-                                crate::gl_log_error!(gl);
                             }
                         }
                         (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, vao.inst_vb.unwrap());
@@ -181,12 +181,11 @@ impl Cx {
                     }
                 }
                 unsafe {
-                    crate::gl_log_error!(gl);
                     (gl.glUseProgram)(shgl.program);
                     (gl.glBindVertexArray)(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
                     let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
                     // bind all uniform buffers
-                    #[cfg(not(no_opengl_uniform_buffers))]{
+                    #[cfg(use_gles_3)]{
                         shgl.uniforms.pass_uniforms_binding.bind_buffer(gl, &self.passes[pass_id].os.pass_uniforms);
                         shgl.uniforms.draw_list_uniforms_binding.bind_buffer(gl, &draw_list.os.draw_list_uniforms);
                         shgl.uniforms.draw_call_uniforms_binding.bind_buffer(gl, &draw_item.os.draw_call_uniforms);
@@ -195,7 +194,7 @@ impl Cx {
                         }
                         shgl.uniforms.live_uniforms_binding.bind_buffer(gl, &shgl.uniforms.live_uniforms);
                     }
-                    #[cfg(no_opengl_uniform_buffers)]{
+                    #[cfg(not(use_gles_3))]{
                         let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                         let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
                         let draw_call_uniforms = draw_call.draw_call_uniforms.as_slice();
@@ -302,6 +301,7 @@ impl Cx {
         pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
         pass.set_dpi_factor(dpi_factor);
         
+        #[cfg(use_gles_3)]
         pass.os.pass_uniforms.update_uniform_buffer(self.os.gl(), pass.pass_uniforms.as_slice());
         
         Some((pass_rect.size, dpi_factor))
@@ -476,15 +476,20 @@ impl Cx {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
                 let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
+                
+                #[cfg(use_gles_3)]
                 let glsl_options = generate_glsl::GlslOptions{
                     use_ovr_multiview: self.os_type.has_xr_mode(),
-                    #[cfg(no_opengl_uniform_buffers)]
-                    use_uniform_buffers: false,
-                    #[cfg(not(no_opengl_uniform_buffers))]
                     use_uniform_buffers: true,
                     use_inout: true,
                 };
-                
+                #[cfg(not(use_gles_3))]
+                let glsl_options = generate_glsl::GlslOptions{
+                    use_ovr_multiview: false,
+                    use_uniform_buffers: false,
+                    use_inout: false,
+                };
+                                
                 let vertex = generate_glsl::generate_vertex_shader(
                     draw_shader_def.as_ref().unwrap(),
                     &cx_shader.mapping.const_table,
@@ -537,7 +542,7 @@ pub struct CxOsDrawShader {
     pub live_uniforms: OpenglBuffer
 }
 
-#[cfg(no_opengl_uniform_buffers)]
+#[cfg(not(use_gles_3))]
 pub struct GlShaderUniforms{
     pub pass_uniforms: OpenglUniform,
     pub draw_list_uniforms: OpenglUniform,
@@ -546,7 +551,7 @@ pub struct GlShaderUniforms{
     pub live_uniforms: OpenglUniform,
     pub const_table_uniform: OpenglUniform,
 }
-#[cfg(no_opengl_uniform_buffers)]
+#[cfg(not(use_gles_3))]
 impl GlShaderUniforms{
     fn new(gl:&LibGl, program:u32, _mapping:&CxDrawShaderMapping)->Self{
         Self{
@@ -560,7 +565,7 @@ impl GlShaderUniforms{
     }
 }
 
-#[cfg(not(no_opengl_uniform_buffers))]
+#[cfg(use_gles_3)]
 pub struct GlShaderUniforms{
     pub pass_uniforms_binding: OpenglUniformBlockBinding,
     pub draw_list_uniforms_binding: OpenglUniformBlockBinding,
@@ -570,7 +575,7 @@ pub struct GlShaderUniforms{
     pub const_table_uniform: OpenglUniform,
     pub live_uniforms: OpenglBuffer,
 }
-#[cfg(not(no_opengl_uniform_buffers))]
+#[cfg(use_gles_3)]
 impl GlShaderUniforms{
     fn new(gl:&LibGl, program:u32, mapping:&CxDrawShaderMapping)->Self{
         let mut live_uniforms = OpenglBuffer::default();
@@ -748,12 +753,12 @@ impl GlShader{
             
             let uniforms = GlShaderUniforms::new(gl, program, mapping);
             
-            #[cfg(not(no_opengl_uniform_buffers))]
+            #[cfg(use_gles_3)]
             uniforms.live_uniforms_binding.bind_buffer(gl, &uniforms.live_uniforms);
             
-            #[cfg(no_opengl_uniform_buffers)]
+            #[cfg(not(use_gles_3))]
             GlShader::set_uniform_array(gl, &uniforms.live_uniforms, &mapping.live_uniforms_buf);
-            
+
             let ct = &mapping.const_table.table;
             if ct.len()>0 {
                 GlShader::set_uniform_array(gl, &uniforms.const_table_uniform, ct);
@@ -982,9 +987,14 @@ impl CxOsDrawShader {
                 return vec4(0.0,0.0,0.0,0.0);
             }
         ";
+        #[cfg(use_gles_3)]
         let nop_depth_clip="
             vec4 depth_clip(vec4 w, vec4 c, float clip){return c;}
         ";
+        #[cfg(not(use_gles_3))]
+        let nop_depth_clip="";
+                
+        #[cfg(use_gles_3)]
         let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) = if os_type.has_xr_mode(){(
             "#version 300 es",
             // Vertex shader
@@ -1018,6 +1028,21 @@ impl CxOsDrawShader {
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}} 
             " 
         )};
+        
+        #[cfg(not(use_gles_3))]
+        let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) = (
+            "#version 100",
+            "",
+            "",
+            "",
+            "",
+            "
+            vec4 depth_clip(vec4 w, vec4 c, float clip){return c;}
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}} 
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0 - pos.y));}} 
+            " 
+        );
+        
         /*
         let transpose_impl = "
         mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
@@ -1025,8 +1050,7 @@ impl CxOsDrawShader {
         mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
         ";
         */
-        let vertex = format!("
-            {version}
+        let vertex = format!("{version}
             {vertex_exts}
             {tex_ext_import}
             precision highp float;
@@ -1037,8 +1061,7 @@ impl CxOsDrawShader {
             {vertex}\0",
         );
         //crate::log!("{}", vertex.replace("int mvo = 0;","int mvo = gl_ViewID_OVR==0?0:16;"));
-        let pixel = format!("
-            {version}
+        let pixel = format!("{version}
             {pixel_exts}
             {tex_ext_import}
             #extension GL_OES_standard_derivatives : enable
@@ -1051,7 +1074,6 @@ impl CxOsDrawShader {
             {nop_depth_clip}
             \0",
         );
-
         // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
             vertex: [
@@ -1112,6 +1134,7 @@ pub struct OpenglUniformBlockBinding {
 }
 
 impl OpenglUniformBlockBinding{
+    #[allow(unused)]
     fn bind_buffer(&self, gl: &LibGl, buf: &OpenglBuffer,){
         if let Some(gl_buf) = buf.gl_buffer{
             if let Some(index) = self.index{
@@ -1144,6 +1167,7 @@ pub struct OpenglTextureSlot {
 */
 #[derive(Clone, Default)]
 pub struct CxOsDrawList {
+    #[allow(unused)]
     draw_list_uniforms: OpenglBuffer,
 }
 
@@ -1288,8 +1312,7 @@ impl CxTexture {
                             0,
                             format,
                             data_type,
-                            data,
-                            // 0 as *const _
+                            0 as *const _
                         );
                     }
 
