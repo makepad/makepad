@@ -25,6 +25,7 @@ live_design!{
                 align: { x: 0., y: 0. }
                 spacing: (THEME_SPACE_3)
                 <View> {
+
                     height: Fill, width: Fit
                     align: { x: 0.5, y: 0.5}
                     <Icon> {
@@ -41,14 +42,14 @@ live_design!{
                 <View> {
                     align: { x: 0., y: 0. }
                     flow: Right, width: Fit,
-                    spacing: (THEME_SPACE_1)
+                    spacing: 0.
                     <Labelbold> { text: "Font" }
                     <Label> { text: "Noto Sans" }
                 }
                 <View> {
                     align: { x: 0., y: 0. }
                     flow: Right, width: Fit,
-                    spacing: (THEME_SPACE_1)
+                    spacing: 0.
                     <Labelbold> { text: "Weight" }
                     <Label> { text: "bold"
                     }
@@ -56,14 +57,14 @@ live_design!{
                 <View> {
                     align: { x: 0., y: 0. }
                     flow: Right, width: Fit,
-                    spacing: (THEME_SPACE_1)
+                    spacing: 0.
                     <Labelbold> { text: "Size" }
                     <Label> { text: "11 pt" }
                 } 
                 <View> {
                     align: { x: 0., y: 0. }
                     flow: Right, width: Fit,
-                    spacing: (THEME_SPACE_1)
+                    spacing: 0.
                     <Labelbold> { text: "Line height" }
                     <Label> { text: "1.2" }
                 } 
@@ -71,7 +72,7 @@ live_design!{
                 <View> {
                     align: { x: 0., y: 0. }
                     flow: Right, width: Fit,
-                    spacing: (THEME_SPACE_1)
+                    spacing: 0.
                     <ButtonFlatter> {
                         width: 25.
                         text: ""
