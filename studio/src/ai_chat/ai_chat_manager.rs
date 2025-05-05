@@ -690,7 +690,7 @@ impl AiChatManager{
         if let Some(OpenDocument::AiChat(doc)) = fs.open_documents.get(&chat_id){
             let messages = &doc.file.history[history_slot];
             let ast = messages.messages.iter().nth(item_id);
-            //let ast = messages.messages.iter().nth(item_id+1);
+            let usr = messages.messages.iter().nth(item_id.saturating_sub(1));
                         
             if let Some(AiChatMessage::Assistant(ast)) = ast.cloned(){
                 if let Some(project) = self.projects.iter().find(|v| v.name == messages.project){
@@ -701,6 +701,10 @@ impl AiChatManager{
                         if let Some(new_data) = ast.strip_prefix("```rust"){
                             if let Some(new_data) = new_data.strip_suffix("```"){
                                 // alright depending
+                                // go set the snapshot textbox
+                                if let Some(AiChatMessage::User(usr)) = usr.cloned(){
+                                    cx.action(AppAction::SetSnapshotMessage{message:usr.message.clone()});
+                                }
                                 if let Some(ctx) = self.contexts.iter().find(|v| v.name == messages.base_context){
                                     match ctx.apply{
                                         AiApply::PatchDSL=>{

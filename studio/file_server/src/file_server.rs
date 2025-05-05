@@ -79,7 +79,10 @@ impl FileServerConnection {
             FileRequest::OpenFile{path,id} => FileResponse::OpenFile(self.open_file(path, id)),
             FileRequest::SaveFile{path, data, id, patch} => FileResponse::SaveFile(self.save_file(path, data, id, patch)),
             FileRequest::LoadSnapshotImage{root, hash}=>FileResponse::LoadSnapshotImage(self.load_snapshot_image(root, hash)),
-            FileRequest::SaveSnapshotImage{root, hash, data}=>FileResponse::SaveSnapshotImage(self.save_snapshot_image(root, hash, data))
+            FileRequest::SaveSnapshotImage{root, hash, data}=>FileResponse::SaveSnapshotImage(self.save_snapshot_image(root, hash, data)),
+            FileRequest::CreateSnapshot{root, message}=>FileResponse::CreateSnapshot(self.create_snapshot(root, message)),
+            FileRequest::LoadSnapshot{root, hash}=>FileResponse::LoadSnapshot(self.load_snapshot(root, hash)),
+                                    
         }
     }
     
@@ -206,6 +209,52 @@ impl FileServerConnection {
         });
     }
     
+    fn create_snapshot(&self, root:String, message:String) -> Result<CreateSnapshotResponse, CreateSnapshotError> {
+        let root_path = self.shared.read().unwrap().roots.find_root(&root).map_err(|error|{
+            CreateSnapshotError{error:format!("{:?}",error), root:root.clone()}
+        })?;
+        
+        match shell_env_cap(&[], &root_path, "git", &["commit", "-a",&format!("-m {message}")]) {
+            Ok(_) => {
+                match shell_env_cap(&[], &root_path, "git", &["log", "--pretty=format:%H","--max-count=1"]) {
+                    Ok(stdout) => {
+                        // ok we have the last commit hash, return that
+                        Ok(CreateSnapshotResponse{
+                            root,
+                            hash: stdout.trim().to_string()
+                        })
+                    }
+                    // we expect it on stderr
+                    Err(e) => {
+                        Err(CreateSnapshotError{root, error:e})
+                    }
+                }
+            }
+            // we expect it on stderr
+            Err(e) => {
+                Err(CreateSnapshotError{root, error:e})
+            }
+        }
+    }
+    
+        
+    fn load_snapshot(&self, root:String, hash:String) -> Result<LoadSnapshotResponse, LoadSnapshotError> {
+        
+        let root_path = self.shared.read().unwrap().roots.find_root(&root).map_err(|error|{
+            LoadSnapshotError{error:format!("{:?}",error), root:root.clone()}
+        })?;
+                
+        match shell_env_cap(&[], &root_path, "git", &["checkout", &hash]) {
+            Ok(_) => {
+                Ok(LoadSnapshotResponse{root, hash})
+            }
+            // we expect it on stderr
+            Err(e) => {
+                Err(LoadSnapshotError{root, error:e})
+            }
+        }
+    }
+
     // Handles a `LoadFileTree` request.
     fn load_file_tree(&self, with_data: bool) -> Result<FileTreeData, FileError> {
         // A recursive helper function for traversing the entries of a directory and creating the

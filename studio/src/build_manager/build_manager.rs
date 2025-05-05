@@ -546,7 +546,7 @@ impl BuildManager {
                             // alright lets save it for fun
                             if let Some(build) = active.builds.get(&build_id){
                                 if let Some(image) = screenshot.image{
-                                    file_system.save_snapshot_image(&build.root,"qtest",screenshot.width as _, screenshot.height as _, image)
+                                    file_system.save_snapshot_image(cx, &build.root,"qtest",screenshot.width as _, screenshot.height as _, image)
                                 }
                             }
                         }
