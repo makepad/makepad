@@ -473,7 +473,6 @@ impl BuildManager {
                 for msg in msgs.0 {
                     match msg {
                         AppToStudio::LogItem(item) => {
-                            log!("GOT APP TO STUDIO {:?}", item);
                             let file_name = if let Some(build) = active.builds.get(&build_id){
                                 self.roots.map_path(&build.root, &item.file_name)
                             }
