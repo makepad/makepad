@@ -15,7 +15,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines, use_gles_3, linux_direct,quest,no_android_choreographer,ohos_sim,use_unstable_unix_socket_ancillary_data_2021)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
-     println!("cargo:rustc-cfg=use_gles_3"); 
+    
     if let Ok(configs) = env::var("MAKEPAD"){
         for config in configs.split(['+', ',']){
             match config{
