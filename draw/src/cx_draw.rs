@@ -21,7 +21,7 @@ use {
         nav::CxNavTreeRc,
         icon_atlas::CxIconAtlasRc,
         draw_list_2d::DrawList2d,
-        text::{fonts::Fonts, layouter},
+        text::{loader::FontFamilyDefinition, fonts::Fonts, layouter},
     },
     makepad_rustybuzz::UnicodeBuffer,
 };
@@ -86,10 +86,13 @@ impl<'a> CxDraw<'a>{
         if cx.has_global::<Rc<RefCell<Fonts>>>() {
             return false;
         }
-        let fonts = Fonts::new(
+        let mut fonts = Fonts::new(
             cx,
             layouter::Settings::default(),
         );
+        fonts.define_font_family(0.into(), FontFamilyDefinition {
+            font_ids: vec![]
+        });
         cx.set_global(Rc::new(RefCell::new(fonts)));
         true
     }   

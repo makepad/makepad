@@ -48,13 +48,17 @@ impl Shaper {
 
     fn shape(&mut self, params: ShapeParams) -> ShapedText {
         let mut glyphs = Vec::new();
-        self.shape_recursive(
-            &params.text,
-            &params.fonts,
-            0,
-            params.text.len(),
-            &mut glyphs,
-        );
+        if params.fonts.is_empty() {
+            println!("WARNING: encountered empty font family");
+        } else {
+            self.shape_recursive(
+                &params.text,
+                &params.fonts,
+                0,
+                params.text.len(),
+                &mut glyphs,
+            );
+        }
         ShapedText {
             text: params.text,
             width_in_ems: glyphs.iter().map(|glyph| glyph.advance_in_ems).sum(),

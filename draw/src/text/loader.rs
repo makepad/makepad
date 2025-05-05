@@ -88,7 +88,7 @@ impl Loader {
         let definition = self
             .font_family_definitions
             .remove(&id)
-            .expect("font family is not defined");
+            .unwrap_or_else(|| panic!("font family {:?} is not defined", id));
         FontFamily::new(
             id,
             self.shaper.clone(),

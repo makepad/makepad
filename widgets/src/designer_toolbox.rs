@@ -15,23 +15,6 @@ live_design!{
     pub DesignerToolboxBase = {{DesignerToolbox}}{
     }
     
-    Vr = <View> {
-        width: Fit, height: Fill,
-        flow: Right,
-        spacing: 0.,
-        margin: <THEME_MSPACE_V_2> {}
-        <View> {
-            width: (THEME_BEVELING * 2.0), height: Fill
-            show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_OUTSET_2) }
-        }
-        <View> {
-            width: (THEME_BEVELING), height: Fill,
-            show_bg: true,
-            draw_bg: { color: (THEME_COLOR_BEVEL_OUTSET_1) }
-        }
-    }
-    
     pub DesignerToolbox = <DesignerToolboxBase>{
         width: Fill,
         height: Fill
@@ -41,80 +24,54 @@ live_design!{
             content = {
                 align: { x: 0., y: 0. }
                 spacing: (THEME_SPACE_3)
-                <ButtonFlatter> {
-                    width: Fit
-                    text: ""
-                    icon_walk: { width: 11., margin: { left: 3., right: -3.} }
-                    draw_icon: {
-                        svg_file: dep("crate://self/resources/icons/icon_typography.svg"),
+                <View> {
+
+                    height: Fill, width: Fit
+                    align: { x: 0.5, y: 0.5}
+                    <Icon> {
+                        margin: { left: 5.}
+                        icon_walk: { width: 11. }
+                        draw_icon: {
+                            color: #A
+                            svg_file: dep("crate://self/resources/icons/icon_typography.svg"),
+                        }
                     }
                 }
                 <Vr> {}
                 <View> {
-                    width: Fit,
-                    flow: Right,
-                    spacing: (THEME_SPACE_1)
-                    <Labelbold> {
-                        width: Fit,
-                        text: "Font",
-                        padding: <THEME_MSPACE_V_1> {}
-                    }
-                    <Label> {
-                        width: Fit,
-                        text: "Noto Sans",
-                        padding: <THEME_MSPACE_V_1> {}
+                    align: { x: 0., y: 0. }
+                    flow: Right, width: Fit,
+                    spacing: 0.
+                    <Labelbold> { text: "Font" }
+                    <Label> { text: "Noto Sans" }
+                }
+                <View> {
+                    align: { x: 0., y: 0. }
+                    flow: Right, width: Fit,
+                    spacing: 0.
+                    <Labelbold> { text: "Weight" }
+                    <Label> { text: "bold"
                     }
                 }
                 <View> {
-                    width: Fit,
-                    spacing: (THEME_SPACE_1)
-                    flow: Right,
-                    <Labelbold> {
-                        width: Fit,
-                        text: "Weight",
-                        padding: <THEME_MSPACE_V_1> {}
-                    }
-                    <Label> {
-                        width: Fit,
-                        text: "bold",
-                        padding: <THEME_MSPACE_V_1> {}
-                    }
-                }
-                <View> {
-                    width: Fit,
-                    spacing: (THEME_SPACE_1)
-                    flow: Right,
-                    <Labelbold> {
-                        width: Fit,
-                        text: "Size",
-                        padding: <THEME_MSPACE_V_1> {}
-                    }
-                    <Label> {
-                        width: Fit,
-                        text: "11 pt",
-                        padding: <THEME_MSPACE_V_1> {}
-                    }
+                    align: { x: 0., y: 0. }
+                    flow: Right, width: Fit,
+                    spacing: 0.
+                    <Labelbold> { text: "Size" }
+                    <Label> { text: "11 pt" }
                 } 
                 <View> {
-                    width: Fit,
-                    spacing: (THEME_SPACE_1)
-                    flow: Right,
-                    <Labelbold> {
-                        width: Fit,
-                        text: "Line height",
-                        padding: <THEME_MSPACE_V_1> {}
-                    }
-                    <Label> {
-                        width: Fit,
-                        text: "1.2",
-                        padding: <THEME_MSPACE_V_1> {}
-                    }
+                    align: { x: 0., y: 0. }
+                    flow: Right, width: Fit,
+                    spacing: 0.
+                    <Labelbold> { text: "Line height" }
+                    <Label> { text: "1.2" }
                 } 
                 <Vr> {}
                 <View> {
-                    width: Fit,
-                    flow: Right,
-                    spacing: 0,
+                    align: { x: 0., y: 0. }
+                    flow: Right, width: Fit,
+                    spacing: 0.
                     <ButtonFlatter> {
                         width: 25.
                         text: ""
@@ -143,31 +100,41 @@ live_design!{
                     }
                 }
                 <Vr> {}
-                <Label> { width: Fit, text: "Stroke" }
-                <RoundedView> {
-                    width: 15., height: 15.,
-                    draw_bg: {
-                        color: (STUDIO_PALETTE_5),
-                        border_radius: 5.0
+                <Label> { text: "Stroke" }
+                <View> {
+                    height: Fill, width: 15.,
+                    align: { x: 0.5, y: 0.5}
+                    <RoundedView> {
+                        width: 15., height: 15.,
+                        draw_bg: {
+                            color: (STUDIO_PALETTE_5),
+                            border_radius: 5.0
+                        }
                     }
                 }
-                <Label> { width: Fit, text: "Fill" }
-                <RoundedView> {
-                    width: 15., height: 15.,
-                    draw_bg: {
-                        color: (STUDIO_PALETTE_2),
-                        border_radius: 5.0
+                <Label> { text: "Fill" }
+                <View> {
+                    height: Fill, width: 15.,
+                    align: { x: 0.5, y: 0.5}
+                    <RoundedView> {
+                        width: 15., height: 15.,
+                        draw_bg: {
+                            color: (STUDIO_PALETTE_2),
+                            border_radius: 5.0
+                        }
                     }
                 }
                 <Filler> {}
-                <Vr> {}
-                <Label> { width: Fit, text: "Canvas" }
-                <RoundedView> {
-                    margin: { right: (THEME_SPACE_2)}
-                    width: 15., height: 15.,
-                    draw_bg: {
-                        color: (THEME_COLOR_D_3),
-                        border_radius: 5.0
+                <Label> { text: "Canvas" }
+                <View> {
+                    height: Fill, width: 15.,
+                    align: { x: 0.5, y: 0.5}
+                    <RoundedView> {
+                        width: 15., height: 15.,
+                        draw_bg: {
+                            color: (THEME_COLOR_D_3),
+                            border_radius: 5.0
+                        }
                     }
                 }
             }
@@ -175,7 +142,6 @@ live_design!{
         
         <RoundedShadowView>{
             abs_pos: vec2(25., 65.)
-            padding: 0.
             width: 36., height: Fit,
             spacing: 0.,
             align: { x: 0.5, y: 0.0 }
@@ -185,32 +151,41 @@ live_design!{
             draw_bg: {
                 border_size: 1.0
                 border_color: (THEME_COLOR_BEVEL_OUTSET_1)
-                shadow_color: (THEME_COLOR_D_4)
-                shadow_radius: 10.0,
-                shadow_offset: vec2(0.0, 5.0)
-                border_radius: 2.5
-                color: (THEME_COLOR_FG_APP),
+                shadow_color: (THEME_COLOR_BEVEL_OUTSET_2)
+                shadow_radius: 7.5
+                border_radius: (THEME_CORNER_RADIUS)
+                shadow_offset: vec2(0.0, 0.0)
+                color: (THEME_COLOR_FG_APP)
             }
             
             <View> {
-                width: Fit, height: 36.,
-                align: { x: 0.5, y: 0.5}
+                width: Fit, height: Fit,
+                align: { x: 0.5, y: 0. }
+                padding: { top: 5., bottom: 2. }
                 <ButtonFlatter> {
-                    flow: Down,
-                    icon_walk: { margin: {top: 25.}, width: 9. }
+                    draw_bg: { color_focus: #fff0 }
+                    icon_walk: {
+                        width: 9.5
+                        margin: { left: 6. }
+                    }
+                    align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_select.svg"),
                     }
                     text: ""
                 }
             }
-            <Hr> { margin: 0., height: 10.}
+            <Hr> { height: 10. }
             <View> {
-                width: Fit, height: 36.,
-                align: { x: 0.5, y: 0.5}
+                width: Fit, height: Fit,
+                align: { x: 0.5, y: 0. }
+                padding: { bottom: 3. }
                 <ButtonFlatter> {
-                    flow: Down,
-                    icon_walk: { margin: {top: 20.}, width: 14.5 }
+                    draw_bg: { color_focus: #fff0 }
+                    icon_walk: {
+                        width: 14
+                        margin: { left: 5. }
+                    }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_draw.svg"),
@@ -218,14 +193,17 @@ live_design!{
                     text: ""
                 }
             }
-            <Hr> { margin: 0., height: 10.}
+            <Hr> { height: 10. }
             <View> {
-                width: Fit, height: 36.,
-                
-                align: { x: 0.5, y: 0.5}
+                width: Fit, height: Fit,
+                align: { x: 0.5, y: 0. }
+                padding: { bottom: 2. }
                 <ButtonFlatter> {
-                    flow: Down,
-                    icon_walk: { margin: {top: 20.}, width: 12. }
+                    draw_bg: { color_focus: #fff0 }
+                    icon_walk: {
+                        width: 12
+                        margin: { left: 5. }
+                    }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_text.svg"),
@@ -233,13 +211,17 @@ live_design!{
                     text: ""
                 }
             }
-            <Hr> { margin: 0., height: 10. }
+            <Hr> { height: 10. }
             <View> {
-                width: Fit, height: 36.,
-                align: { x: 0.5, y: 0.5}
+                width: Fit, height: Fit,
+                align: { x: 0.5, y: 0. }
+                padding: { bottom: 3. }
                 <ButtonFlatter> {
-                    flow: Down,
-                    icon_walk: { margin: {top: 18.}, width: 13.5 }
+                    draw_bg: { color_focus: #fff0 }
+                    icon_walk: {
+                        width: 14
+                        margin: { left: 5. }
+                    }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_layout.svg"),
@@ -247,14 +229,16 @@ live_design!{
                     text: ""
                 }
             }
-            <Hr> { margin: 0., height: 10. }
+            <Hr> { height: 10. }
             <View> {
-                width: Fit, height: 36.,
-                align: { x: 0.5, y: 0.5}
+                width: Fit, height: Fit,
+                align: { x: 0.5, y: 0. }
                 <ButtonFlatter> {
-                    flow: Down,
-                    flow: Down,
-                    icon_walk: { margin: {top: 20.}, width: 15.5 }
+                    draw_bg: { color_focus: #fff0 }
+                    icon_walk: {
+                        width: 14
+                        margin: { left: 5. }
+                    }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_widget.svg"),
@@ -262,13 +246,17 @@ live_design!{
                     text: ""
                 }
             }
-            <Hr> { margin: 0., height: 10. }
+            <Hr> { height: 10. }
             <View> {
-                width: Fit, height: 36.,
-                align: { x: 0.5, y: 0.5}
+                width: Fit, height: Fit,
+                align: { x: 0.5, y: 0. }
+                padding: { bottom: 5.}
                 <ButtonFlatter> {
-                    flow: Down,
-                    icon_walk: { margin: {top: 17.}, width: 15.5 }
+                    draw_bg: { color_focus: #fff0 }
+                    icon_walk: {
+                        width: 14
+                        margin: { left: 5. }
+                    }
                     align: { x: 0.5, y: 0.5 }
                     draw_icon: {
                         svg_file: dep("crate://self/resources/icons/icon_image.svg"),

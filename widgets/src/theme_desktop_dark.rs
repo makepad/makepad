@@ -30,7 +30,7 @@ live_design! {
     pub THEME_MSPACE_V_3 = {top: (THEME_SPACE_3), right: 0., bottom: (THEME_SPACE_3), left: 0.}
 
     pub THEME_DATA_ITEM_HEIGHT = (7.75 * THEME_SPACE_1);
-    pub THEME_DATA_ICON_WIDTH = (2. * THEME_SPACE_2);
+    pub THEME_DATA_ICON_WIDTH = (2.6 * THEME_SPACE_2);
     pub THEME_DATA_ICON_HEIGHT = (3.6 * THEME_SPACE_2);
 
     pub THEME_CONTAINER_CORNER_RADIUS = (THEME_CORNER_RADIUS * 2.)
@@ -58,6 +58,7 @@ live_design! {
     pub THEME_COLOR_U_4_OPAQUE = #6; // TODO: REPLACE
     pub THEME_COLOR_U_3 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.75, THEME_COLOR_CONTRAST)))
     pub THEME_COLOR_U_2 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.85, THEME_COLOR_CONTRAST)))
+    pub THEME_COLOR_U_15 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.9, THEME_COLOR_CONTRAST)))
     pub THEME_COLOR_U_2_OPAQUE = #9; // TODO: REPLACE
     pub THEME_COLOR_U_1 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.95, THEME_COLOR_CONTRAST)))
     pub THEME_COLOR_U_HIDDEN = (THEME_COLOR_W_H)
@@ -100,6 +101,9 @@ live_design! {
     pub THEME_COLOR_SHADOW = (THEME_COLOR_OPAQUE_D_4)
     pub THEME_COLOR_SHADOW_FOCUS = (THEME_COLOR_D_5)
     pub THEME_COLOR_SHADOW_DISABLED = (THEME_COLOR_OPAQUE_D_2)
+    pub THEME_COLOR_SHADOW_FLAT = (THEME_COLOR_D_HIDDEN)
+    pub THEME_COLOR_FLAT_FOCUS = (THEME_COLOR_U_2)
+    pub THEME_COLOR_SHADOW_FLAT_DISABLED = (THEME_COLOR_OPAQUE_D_2)
     pub THEME_COLOR_LIGHT = (THEME_COLOR_OPAQUE_U_1)
     pub THEME_COLOR_LIGHT_HOVER = (THEME_COLOR_OPAQUE_U_3)
     pub THEME_COLOR_LIGHT_FOCUS = (THEME_COLOR_OPAQUE_U_3)
@@ -160,14 +164,14 @@ live_design! {
     pub THEME_COLOR_BG_EVEN = (THEME_COLOR_BG_CONTAINER * 0.875)
     pub THEME_COLOR_BG_ODD = (THEME_COLOR_BG_CONTAINER * 1.125)
 
-    pub THEME_COLOR_BEVEL = (THEME_COLOR_SHADOW)
-    pub THEME_COLOR_BEVEL_HOVER = (THEME_COLOR_BEVEL)
-    pub THEME_COLOR_BEVEL_FOCUS = (THEME_COLOR_SHADOW_FOCUS)
+    pub THEME_COLOR_BEVEL = (THEME_COLOR_SHADOW_FLAT)
+    pub THEME_COLOR_BEVEL_HOVER = (THEME_COLOR_FLAT_FOCUS)
+    pub THEME_COLOR_BEVEL_FOCUS = (THEME_COLOR_FLAT_FOCUS)
     pub THEME_COLOR_BEVEL_ACTIVE = (THEME_COLOR_BEVEL)
     pub THEME_COLOR_BEVEL_EMPTY = (THEME_COLOR_BEVEL)
-    pub THEME_COLOR_BEVEL_DOWN = (THEME_COLOR_BEVEL)
+    pub THEME_COLOR_BEVEL_DOWN = (THEME_COLOR_FLAT_FOCUS)
     pub THEME_COLOR_BEVEL_DRAG = (THEME_COLOR_BEVEL)
-    pub THEME_COLOR_BEVEL_DISABLED = (THEME_COLOR_SHADOW_DISABLED)
+    pub THEME_COLOR_BEVEL_DISABLED = (THEME_COLOR_SHADOW_FLAT_DISABLED)
 
     pub THEME_COLOR_BEVEL_INSET_1 = (THEME_COLOR_LIGHT)
     pub THEME_COLOR_BEVEL_INSET_1_HOVER = (THEME_COLOR_BEVEL_INSET_1)
@@ -206,7 +210,7 @@ live_design! {
     // Background of textinputs, radios, checkboxes etc.
     pub THEME_COLOR_INSET = (THEME_COLOR_D_2)
     pub THEME_COLOR_INSET_HOVER = (THEME_COLOR_INSET)
-    pub THEME_COLOR_INSET_FOCUS = (THEME_COLOR_D_2)
+    pub THEME_COLOR_INSET_FOCUS = (THEME_COLOR_INSET)
     pub THEME_COLOR_INSET_ACTIVE = (THEME_COLOR_INSET)
     pub THEME_COLOR_INSET_EMPTY = (THEME_COLOR_INSET)
     pub THEME_COLOR_INSET_DOWN = (THEME_COLOR_INSET)
@@ -232,7 +236,7 @@ live_design! {
     pub THEME_COLOR_INSET_2_DISABLED = (THEME_COLOR_INSET_2)
 
     // WIDGET COLORS
-    pub THEME_COLOR_OUTSET = (THEME_COLOR_U_1)
+    pub THEME_COLOR_OUTSET = (THEME_COLOR_U_15)
     pub THEME_COLOR_OUTSET_DOWN = (THEME_COLOR_D_1)
     pub THEME_COLOR_OUTSET_HOVER = (THEME_COLOR_U_2)
     pub THEME_COLOR_OUTSET_ACTIVE = (THEME_COLOR_U_2)
@@ -339,7 +343,7 @@ live_design! {
 
     pub THEME_FONT_LABEL = {
         font_family:{
-            latin = font("crate://self/resources/IBMPlexSans-Text.ttf", 0.0, 0.0),
+            latin = font("crate://self/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
             chinese = font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
             emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
@@ -355,7 +359,7 @@ live_design! {
     }
     pub THEME_FONT_BOLD = {
         font_family:{
-            latin = font("crate://self/resources/IBMPlexSans-SemiBold.ttf", 0.0, 0.0)
+            latin = font("crate://self/resources/IBMPlexSans-SemiBold.ttf", -0.1, 0.0),
             chinese = font("crate://self/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
             emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
@@ -363,14 +367,14 @@ live_design! {
     }
     pub THEME_FONT_ITALIC = {
         font_family:{
-            latin = font("crate://self/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0)
+            latin = font("crate://self/resources/IBMPlexSans-Italic.ttf", -0.1, 0.0),
             chinese =  font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0),
         },
         line_spacing: 1.2
     }
     pub THEME_FONT_BOLD_ITALIC = {
         font_family:{
-            latin = font("crate://self/resources/IBMPlexSans-BoldItalic.ttf", 0.0, 0.0)
+            latin = font("crate://self/resources/IBMPlexSans-BoldItalic.ttf", -0.1, 0.0),
             chinese = font("crate://self/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
         },
         line_spacing: 1.2
