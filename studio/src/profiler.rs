@@ -56,12 +56,12 @@ live_design!{
         height: Fill, width: Fill
         <DockToolbar> {
             content = {
-                running_button = <CheckBox> {
+                running_button = <ToggleFlat> {
                     text: "Running",
                     active: true,
                     icon_walk: { width: 8. }
                 }
-                clear_button = <ButtonFlatter> {
+                clear_button = <ButtonFlat> {
                     text: "Clear"
                     icon_walk: { width: 12. }
                     
