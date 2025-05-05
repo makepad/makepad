@@ -280,14 +280,14 @@ impl<'a> LayoutContext<'a> {
         use {super::num::Zero, std::mem};
 
         let glyphs = mem::take(&mut self.glyphs);
-        let fallback_font = &fallback_font_family.fonts()[0];
+        let fallback_font = fallback_font_family.fonts().get(0);
         let fallback_font_size_in_lpxs = fallback_style.font_size_in_lpxs();
         let fallback_ascender_in_lpxs =
-            fallback_font.ascender_in_ems() * fallback_font_size_in_lpxs;
+            fallback_font.map_or(0.0, |font| font.ascender_in_ems()) * fallback_font_size_in_lpxs;
         let fallback_descender_in_lpxs =
-            fallback_font.descender_in_ems() * fallback_font_size_in_lpxs;
+            fallback_font.map_or(0.0, |font| font.descender_in_ems()) * fallback_font_size_in_lpxs;
         let fallback_line_gap_in_lpxs =
-            fallback_font.line_gap_in_ems() * fallback_font_size_in_lpxs;
+            fallback_font.map_or(0.0, |font| font.line_gap_in_ems()) * fallback_font_size_in_lpxs;
 
         let text = self
             .text

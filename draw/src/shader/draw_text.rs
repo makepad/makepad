@@ -2,7 +2,6 @@ use {
     crate::{
         cx_2d::Cx2d,
         cx_draw::CxDraw,
-        draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
         makepad_platform::*,
         text::{
@@ -332,8 +331,9 @@ impl DrawText {
 
     fn draw_text(&mut self, cx: &mut Cx2d, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
         self.update_draw_vars(cx);
-        let mut instances: ManyInstances =
-            cx.begin_many_aligned_instances(&self.draw_vars).unwrap();
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return;
+        };
         self.glyph_depth = self.draw_depth;
         for row in &text.rows {
             self.draw_row(
