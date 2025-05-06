@@ -1,0 +1,9 @@
+[workspace]
+[package]
+name = "brotli_check"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+brotli = "5.0"
+deflate = "1.0"

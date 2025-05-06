@@ -1,0 +1,23 @@
+[package]
+name = "makepad-vector"
+version = "0.4.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad vector api"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "DB7HhhdiYtBivuq_IBnVPCc32tU="
+
+[dependencies]
+resvg = { version = "0.42.0", default-features = false }
+
+[dependencies.ttf-parser]
+path = "../../libs/ttf-parser"
+default-features = false
+# NOTE(eddyb) this is the minimal set of features that could enable shaping,
+# (`apple-layout` being the other notable shaping-related feature), and it's
+# enabled to estimate build time impacts, even if it's not in use yet.
+features = [
+    "opentype-layout"
+]

@@ -1,0 +1,23 @@
+[package]
+name = "makepad-easy-esp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+resolver = "2"
+
+#[profile.release]
+#lto = "off"
+#opt-level = 3
+#[profile.dev]
+#lto = "off"
+
+[dependencies]
+hal = { package = "esp32c3-hal", version = "0.15.0", features = ["embassy-time-timg0", "embassy-executor-thread"] }
+esp-backtrace   = { version = "0.10.0", features = ["esp32c3", "panic-handler", "exception-handler", "print-uart"] }
+esp-println     = { version = "0.8.0", features = ["esp32c3", "log", ] }
+esp-wifi        = { version = "0.3.0", features = ["esp32c3", "wifi-default"] }
+smoltcp = { version = "0.11.0", default-features=false, features = ["proto-igmp", "proto-ipv4", "socket-tcp", "socket-icmp", "socket-udp", "proto-dhcpv4", "socket-raw", "socket-dhcpv4"] }
+embedded-svc = { version = "0.27.0", default-features = false, features = [] }
+embedded-io = "0.6.1"
+heapless = { version = "0.8", default-features = false, features = ["portable-atomic"] }
+fugit = {version = "0.3.7"}

@@ -1,0 +1,36 @@
+use proc_macro::{TokenStream};
+
+use makepad_micro_proc_macro::{
+    TokenBuilder,
+    TokenParser,
+};
+
+pub fn derive_from_live_id_impl(input: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new();
+    let mut parser = TokenParser::new(input);
+    let _main_attribs = parser.eat_attributes();
+    parser.eat_ident("pub");
+    if parser.eat_ident("struct") {
+        if let Some(struct_name) = parser.eat_any_ident() {
+            tb.add("impl");
+            tb.add("From<LiveId> for").ident(&struct_name).add("{");
+            tb.add("    fn from(live_id:LiveId)->").ident(&struct_name).add("{").ident(&struct_name).add("(live_id)}");
+            tb.add("}");
+            
+            tb.add("impl");
+            tb.add("From<&[LiveId;1]> for").ident(&struct_name).add("{");
+            tb.add("    fn from(live_id:&[LiveId;1])->").ident(&struct_name).add("{").ident(&struct_name).add("(live_id[0])}");
+            tb.add("}");
+
+            tb.add("impl");
+            tb.add("From<u64> for").ident(&struct_name).add("{");
+            tb.add("    fn from(live_id:u64)->").ident(&struct_name).add("{").ident(&struct_name).add("(LiveId(live_id))}");
+            tb.add("}");
+
+
+            return tb.end();
+        }
+    }
+    parser.unexpected()
+}
+

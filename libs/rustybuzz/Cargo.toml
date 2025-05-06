@@ -1,0 +1,41 @@
+[package]
+name = "makepad-rustybuzz"
+version = "0.8.0"
+authors = ["Evgeniy Reizner <razrfalcon@gmail.com>"]
+edition = "2018"
+description = "A complete harfbuzz shaping algorithm port to Rust."
+documentation = "https://docs.rs/rustybuzz/"
+readme = "README.md"
+repository = "https://github.com/RazrFalcon/rustybuzz"
+license = "MIT"
+keywords = ["text", "shaping", "opentype", "truetype"]
+categories = ["text-processing"]
+exclude = ["benches/", "tests/"]
+
+[dependencies]
+bitflags = "1.2"
+bytemuck = { version = "1.5", features = ["extern_crate_alloc"] }
+smallvec = "1.6"
+unicode-bidi-mirroring = "0.1"
+unicode-ccc = "0.1.2"
+unicode-properties = { version = "0.1.0", default-features = false, features = ["general-category"] }
+unicode-script = "0.5.2"
+libm = { version = "0.2.2", optional = true }
+
+[dependencies.ttf-parser]
+path = "../ttf-parser"
+default-features = false
+features = [
+    "opentype-layout",
+    "apple-layout",
+    "variable-fonts",
+    "glyph-names",
+]
+
+[features]
+default = ["std"]
+std = []
+
+[dev-dependencies]
+pico-args = { version = "0.5", features = ["eq-separator"] }
+libc = "0.2"

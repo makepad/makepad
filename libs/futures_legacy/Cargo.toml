@@ -1,0 +1,10 @@
+[package]
+name = "makepad-futures-legacy"
+version = "0.7.0"  
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad futures legacy"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "o_hf05MjN7NCQHw-dv5TopolJAk=="
