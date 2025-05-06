@@ -1,0 +1,16 @@
+[package]
+edition = "2015"
+name = "makepad-objc-sys"
+version = "0.4.0"
+authors = ["Makepad <info@makepad.nl>", "Steven Sheldon"]
+description = "Makepad fork of SSheldon/rust-objc without libc dep."
+keywords = ["objective-c", "osx", "ios", "cocoa", "uikit"]
+license = "MIT"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "ubho2TrEjwOTbAybGfyLhvLKwnE="
+
+[features]
+cargo-clippy=[]
+exception=[]
+verify_message=[]

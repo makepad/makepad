@@ -1,0 +1,30 @@
+language = "C"
+include_guard = "TTFP_H"
+braces = "SameLine"
+tab_width = 4
+documentation_style = "doxy"
+header = "/**\n * @file ttfparser.h\n *\n * A C API for the Rust's ttf-parser library.\n */"
+cpp_compat = true
+
+[defines]
+"feature = variable-fonts" = "TTFP_VARIABLE_FONTS"
+
+[fn]
+sort_by = "None"
+
+[enum]
+rename_variants = "ScreamingSnakeCase"
+prefix_with_name = true
+
+[parse]
+parse_deps = true
+
+[export.rename]
+"GlyphId" = "uint16_t"
+"LineMetrics" = "ttfp_line_metrics"
+"NormalizedCoord" = "int16_t"
+"ScriptMetrics" = "ttfp_script_metrics"
+"TableName" = "ttfp_table_name"
+"Tag" = "ttfp_tag"
+"Rect" = "ttfp_rect"
+"VariationAxis" = "ttfp_variation_axis"

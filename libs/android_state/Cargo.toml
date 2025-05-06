@@ -1,0 +1,16 @@
+[package]
+name = "makepad-android-state"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>", "Kevin Boos <kevinaboos@gmail.com>"]
+edition = "2021"
+keywords = ["makepad", "android", "context", "activity", "state"]
+categories = ["gui"]
+description = "Exposes access to Makepad's context states on Android"
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
+
+[dependencies]
+makepad-jni-sys = "0.4.0"
