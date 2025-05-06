@@ -1,1 +1,2 @@
-Kanariepiet? Nee, Piet ken Arie niet!
+## Html
+A widget that renders HTML content.

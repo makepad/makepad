@@ -19,8 +19,8 @@ live_design!{
             width: 350., height: Fill,
             show_bg: true,
             draw_bg: { color: (THEME_COLOR_D_1) }
-            padding: <THEME_MSPACE_3> {}
-            margin: <THEME_MSPACE_V_2> {}
+            padding: <THEME_MSPACE_3> { top: 0., right: (THEME_SPACE_2) }
+            margin: <THEME_MSPACE_V_2> { }
 
             flow: Down,
             spacing: (THEME_SPACE_2)

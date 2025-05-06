@@ -1,1 +1,5 @@
-Kanariepiet? Nee, Piet ken Arie niet!
+## ImageBlend
+This widget allows blending between multiple images.
+
+### Styling Attributes
+\-
