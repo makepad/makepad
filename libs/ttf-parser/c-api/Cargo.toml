@@ -1,0 +1,31 @@
+[package]
+name = "ttf-parser-capi"
+version = "0.20.0"
+authors = ["Yevhenii Reizner <razrfalcon@gmail.com>"]
+license = "MIT"
+edition = "2018"
+
+[lib]
+name = "ttfparser"
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+ttf-parser = { path = "../", default-features = false, features = ["std", "glyph-names"] }
+
+[features]
+default = ["variable-fonts"]
+# Enables variable fonts support. Adds about 50KiB.
+variable-fonts = ["ttf-parser/variable-fonts"]
+# Enables heap allocations during gvar table parsing used by Apple's variable fonts.
+# Due to the way gvar table is structured, we cannot avoid allocations.
+# By default, only up to 32 variable tuples will be allocated on the stack,
+# while the spec allows up to 4095. Most variable fonts use 10-20 tuples,
+# so our limit is suitable for most of the cases. But if you need full support, you have to
+# enable this feature.
+gvar-alloc = ["ttf-parser/gvar-alloc"]
+# opentype-layout is not supported.
+# apple-layout is not supported.
+
+[profile.release]
+lto = true

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 286 286" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <rect id="Icon_Redo" x="0.42" y="0.575" width="284.734" height="284.734" style="fill:none;"/>
+    <g id="Icon_Redo1" serif:id="Icon_Redo">
+        <path d="M171.031,173.595L189.113,184.035C178.795,199.858 160.939,210.326 140.657,210.326C108.753,210.326 82.851,184.424 82.851,152.52C82.851,120.616 108.753,94.714 140.657,94.714L159.242,94.714L136.155,73.46L150.265,58.133L193.622,98.047C195.788,100.041 197.009,102.859 196.983,105.804C196.956,108.748 195.685,111.544 193.484,113.499L150.002,152.116L136.168,136.539L159.804,115.548L140.657,115.548C120.251,115.548 103.685,132.114 103.685,152.52C103.685,172.926 120.251,189.492 140.657,189.492C153.233,189.492 164.35,183.2 171.031,173.595Z"/>
+    </g>
+</svg>
