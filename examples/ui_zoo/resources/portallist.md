@@ -1,1 +1,2 @@
-Kanariepiet? Nee, Piet ken Arie niet!
+## PortalList
+The PortalList widget efficiently handles large lists of items by only rendering the items currently visible in the viewport. It supports features like scrolling, flick scrolling, and alignment of items within the list. This is especially useful for implementing lists with a large number of items without compromising performance.
