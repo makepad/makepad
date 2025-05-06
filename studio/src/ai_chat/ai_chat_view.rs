@@ -86,6 +86,24 @@ live_design!{
             color: (THEME_COLOR_D_2)
         }
         flow: Down
+        busy = <View>{
+            width: 70, height: 10,
+            margin: {top:10.,bottom:0}
+            padding: 0.,
+            show_bg: true,
+            draw_bg:{
+                fn pixel(self)->vec4{
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    let x = 0.;
+                    for i in 0..5{
+                        x = x + 8.;
+                        sdf.circle(x,5.,2.5);
+                        sdf.fill((THEME_COLOR_MAKEPAD));
+                    }
+                    return sdf.result
+                }
+            }
+        }
         md = <Markdown>{
             code_block = <View>{
                 
@@ -138,24 +156,7 @@ live_design!{
             use_code_block_widget: true,
             body:""
         }
-        busy = <View>{
-            width: 50, height: 10,
-            margin: 0.,
-            padding: 0.,
-            show_bg: true,
-            draw_bg:{
-                fn pixel(self)->vec4{
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    let x = 0.;
-                    for i in 0..3{
-                        x = x + 8.;
-                        sdf.circle(x,5.,2.5);
-                        sdf.fill((THEME_COLOR_MAKEPAD));
-                    }
-                    return sdf.result
-                }
-            }
-        }
+        
     }
     
     pub AiChatView = {{AiChatView}}{
