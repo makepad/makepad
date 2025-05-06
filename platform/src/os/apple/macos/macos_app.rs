@@ -577,9 +577,10 @@ impl MacosApp {
                             MacosApp::process_ns_event(ns_event);
                         }
                         
-                        if ns_event == nil || event_wait {
-                            MacosApp::do_callback(MacosEvent::Paint);
-                        }
+                        //if ns_event == nil || event_wait {
+                        //    MacosApp::do_callback(MacosEvent::Paint);
+                        //    with_macos_app(|app| app.event_flow = EventFlow::Wait);
+                        //}
                         //self.current_ns_event = None;
                         
                         let () = msg_send![pool, release];

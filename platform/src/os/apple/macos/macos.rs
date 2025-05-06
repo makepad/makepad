@@ -275,6 +275,7 @@ impl Cx {
                         self.redraw_all();
                     }
                     self.handle_networking_events();
+                    self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
                     // block till the next timer
                     return EventFlow::Wait;
                 }
