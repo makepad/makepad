@@ -1877,8 +1877,6 @@ impl TextInputRef {
             TextInputState {
                 text: inner.text.clone(),
                 password_text: inner.password_text.clone(),
-                laidout_text: inner.laidout_text.clone(),
-                text_area: inner.text_area,
                 selection: inner.selection.clone(),
                 history: inner.history.clone(),
             }
@@ -1894,8 +1892,6 @@ impl TextInputRef {
             // Don't use `set_text()` here, as it has other side effects.
             inner.text = state.text;
             inner.password_text = state.password_text;
-            inner.laidout_text = state.laidout_text;
-            inner.text_area = state.text_area;
             inner.selection = state.selection;
             inner.history = state.history;
         }
@@ -1907,8 +1903,6 @@ impl TextInputRef {
 pub struct TextInputState {
     text: String,
     password_text: String,
-    laidout_text: Option<Rc<LaidoutText>>,
-    text_area: Area,
     selection: Selection,
     history: History,
 }
