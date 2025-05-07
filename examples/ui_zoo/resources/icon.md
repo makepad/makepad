@@ -7,6 +7,7 @@ A widget for displaying monochromatic single-path SVG vectors. Supports both inl
 
 #### draw_icon
 - color (Color)
+- color_1 (Color), color_2 (Color)
 
 #### icon_walk
 - width (Size)
