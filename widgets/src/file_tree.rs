@@ -27,7 +27,7 @@ live_design!{
     
     pub FileTreeNode = <FileTreeNodeBase> {
         align: { y: 0.5 }
-        padding: { left: (THEME_SPACE_1) },
+        padding: { left: (THEME_SPACE_2) },
         is_folder: false,
         indent_width: (THEME_SPACE_2)
         min_drag_distance: 10.0
