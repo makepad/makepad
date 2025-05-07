@@ -2,8 +2,6 @@
 A round slider.
 
 ### Attributes
-- label_size (f32)
-- slide_pos (f32)
 - min (float)
 - max (float)
 - step (float)
@@ -13,6 +11,9 @@ A round slider.
 - height (Size)
 - hover_actions_enabled (bool)
 - text_input (TextInput)
+- axis (DragAxis)
+- text (String)
+- bind (String)
 
 ### Styling Attributes
 #### draw_bg
