@@ -2,14 +2,13 @@
 The dropdown menu widget.
 
 ### Attributes
-- popup_menu (PopupMenu)
 - bind (String)
 - bind_enum (String)
-- popup_menu (Option<LivePtr>)
-- labels (Vec<String>)
-- values (Vec<LiveValue>)
+- labels (String)
+- popup_menu (PopupMenu)
 - popup_menu_position (PopupMenuPosition)
 - selected_item (int)
+- values (String)
 
 ### Styling Attributes
 #### draw_bg
@@ -56,7 +55,7 @@ The dropdown menu widget.
 A popup menu component that displays a list of selectable items.
 
 ### Attributes
-- indent_width (f32)
+- indent_width (float)
 - icon_walk (Walk)
 
 ### Styling Attributes
