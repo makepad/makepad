@@ -2,10 +2,6 @@
 The standard text input form element.
 
 ### Attributes
-- draw_bg (DrawColor)
-- draw_text (DrawText)
-- draw_selection (DrawQuad)
-- draw_cursor (DrawQuad)
 - label_align (Align)
 - is_password (bool)
 - is_read_only (bool)

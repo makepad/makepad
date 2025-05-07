@@ -56,14 +56,8 @@ The dropdown menu widget.
 A popup menu component that displays a list of selectable items.
 
 ### Attributes
-- indent_width (float)
--draw_bg (DrawQuad)
--draw_text (DrawText)
--indent_width (f32)
--icon_walk (Walk)
--opened (f32)
--hover (f32)
--active (f32)
+- indent_width (f32)
+- icon_walk (Walk)
 
 ### Styling Attributes
 #### draw_bg
