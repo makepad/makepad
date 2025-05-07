@@ -40,6 +40,18 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "ButtonIcon"}
+            <UIZooRowH> {
+                <ButtonIcon> {
+                    draw_icon: {
+                        color: #f00,
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                    }
+                    text: ""
+                }
+            }
+
+            <Hr> {}
             <H4> { text: "GradientX"}
             <UIZooRowH> {
                 <ButtonGradientX> { text: "<ButtonGradientX>" }
