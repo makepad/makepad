@@ -89,6 +89,7 @@ live_design!{
     }
     
     pub TabBarFlat = <TabBar> {
+        height: (THEME_TAB_FLAT_HEIGHT)
         CloseableTab = <TabFlat> {closeable: true}
         PermanentTab = <TabFlat> {closeable: false}
     }

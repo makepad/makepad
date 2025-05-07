@@ -189,7 +189,7 @@ live_design!{
                         spacing: (THEME_SPACE_2)
                         icon_walk: {
                             width: 10.
-                            margin: { top: 5., left: 5. }
+                            margin: { top: 3., left: 5. }
                         }
                         draw_icon: {
                             color: (STUDIO_PALETTE_1)
@@ -200,7 +200,7 @@ live_design!{
                         spacing: (THEME_SPACE_2)
                         icon_walk: {
                             width: 5.
-                            margin: { top: 5., left: 5. }
+                            margin: { top: 3., left: 5. }
                         }
                         draw_icon: {
                             color: (STUDIO_PALETTE_6)
@@ -211,7 +211,7 @@ live_design!{
                         spacing: (THEME_SPACE_2)
                         icon_walk: {
                             width: 8.
-                            margin: { top: 5.5, left: 5. }
+                            margin: { top: 3.5, left: 5. }
                         }
                         draw_icon: {
                             color: (STUDIO_PALETTE_6)
@@ -222,7 +222,7 @@ live_design!{
                         spacing: (THEME_SPACE_2)
                         icon_walk: {
                             width: 11.
-                            margin: { top: 4., left: 5. }
+                            margin: { top: 3., left: 5. }
                         }
                         draw_icon: {
                             color: (STUDIO_PALETTE_3)
@@ -266,7 +266,7 @@ live_design!{
                         spacing: (THEME_SPACE_2)
                         icon_walk: {
                             width: 7.
-                            margin: { top: 5. }
+                            margin: { top: 4. }
                         }
                         draw_icon: {
                             color: (STUDIO_PALETTE_5)
