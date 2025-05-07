@@ -2,21 +2,22 @@
 A widget that displays a file tree, providing access to the file system.
 
 ### Attributes
-
-- scroll_bars (ScrollBars)
-- scroll_bars (ScrollBars)
-- node_height (float)
 - clip_x (bool)
 - clip_y (bool)
-- file_node (FileTreeNode)
-- folder_node (FileTreeNode)
-
+- file_node (Option<LivePtr>)
+- filler (DrawBgQuad)
+- folder_node (Option<LivePtr>)
+- node_height (f64)
+- scroll_bars (ScrollBars)
+- draw_scroll_shadow (DrawScrollShadow)
 
 ## FileTreeNode
 ### Attributes
+- check_box (CheckBox)
+- indent_width (f64)
+- indent_shift (f64)
 - is_folder (bool)
-- indent_width (float)
-- min_drag_distance (float)
+- min_drag_distance (f64)
 
 ### Styling Attributes
 #### draw_bg

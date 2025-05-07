@@ -1,6 +1,10 @@
 ## LinkLabel
 A clickable label widget that opens a URL when clicked.
 
+### Attributes
+- url (String)
+- open_in_place (bool)
+
 ### Styling Attributes
 #### draw_bg
 - color (Color)

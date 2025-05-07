@@ -1,6 +1,16 @@
 ## Image
 Displays pixel images.
 
+### Attributes
+- draw_bg (DrawImage)
+- min_width (float)
+- min_height (float)
+- width_scale (float)
+- animation (ImageAnimation)
+- visible (bool)
+- fit (ImageFit)
+- source (LiveDependency)
+
 ### Styling Attributes
 - fit (ImageFit)
     - Size: Original size

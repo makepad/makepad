@@ -2,15 +2,14 @@
 The ScrollBar widget allows users to navigate through content that overflows the visible area, either horizontally or vertically.
 
 ### Attributes
-- bar_size (float)
-- bar_side_margin (float)
-- min_handle_size (float)
+- bar_size (f64)
+- min_handle_size (f64)
+- bar_side_margin (f64)
+- axis (ScrollAxis)
+- use_vertical_finger_scroll (bool)
+- smoothing (Option)
 
 ### Styling Attributes
-- bar_size (float)
-- bar_side_margin (float)
-- min_handle_size (float)
-
 #### draw_bg
 - size (float)
 - border_size (float)

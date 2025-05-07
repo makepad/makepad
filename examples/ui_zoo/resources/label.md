@@ -1,6 +1,14 @@
 ## Label
 The standard text widget.
 
+### Attributes
+- draw_text (DrawText)
+- align (Align)
+- flow (Flow)
+- padding (Padding)
+- text (String)
+- hover_actions_enabled (bool)
+
 ### Styling Attributes
 #### draw_text
 - color (Color)

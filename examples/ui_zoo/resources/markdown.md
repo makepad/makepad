@@ -1,6 +1,12 @@
 ## Markdown
 A widget that renders Markdown-formatted text.
 
+### Attributes
+- body (ArcStringMut)
+- paragraph_spacing (f64)
+- pre_code_spacing (f64)
+- use_code_block_widget (bool)
+
 ### Styling Attributes
 - font_size (float),
 - font_color (Color),
