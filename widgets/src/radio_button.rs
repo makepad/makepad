@@ -64,6 +64,7 @@ live_design!{
             uniform mark_color: (THEME_COLOR_MARK_OFF)
             uniform mark_color_active: (THEME_COLOR_MARK_ACTIVE)
             uniform mark_color_disabled: (THEME_COLOR_MARK_DISABLED)
+            uniform mark_offset: -0.5
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -183,7 +184,7 @@ live_design!{
                         // Draw mark
                         sdf.circle(
                             center_px.x,
-                            center_px.y,
+                            center_px.y + self.mark_offset,
                             radius_px * 0.5 - self.border_size * 0.75
                         );
 
@@ -479,7 +480,8 @@ live_design!{
             uniform mark_color: (THEME_COLOR_MARK_OFF)
             uniform mark_color_active: (THEME_COLOR_MARK_ACTIVE)
             uniform mark_color_disabled: (THEME_COLOR_MARK_DISABLED)
-            
+            uniform mark_offset: -0.5
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -598,7 +600,7 @@ live_design!{
                         // Draw mark
                         sdf.circle(
                             center_px.x,
-                            center_px.y,
+                            center_px.y + self.mark_offset,
                             radius_px * 0.5 - self.border_size * 0.75
                         );
 
@@ -820,7 +822,7 @@ live_design!{
                         // Draw mark
                         sdf.circle(
                             center_px.x,
-                            center_px.y,
+                            center_px.y + self.mark_offset,
                             radius_px * 0.5 - self.border_size * 0.75
                         );
 
@@ -945,7 +947,8 @@ live_design!{
             border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
             border_color_2_disabled: (THEME_COLOR_BEVEL_DISABLED)
 
-            uniform mark_color_active: (THEME_COLOR_MARK_ACTIVE)
+            mark_offset: 0.
+            mark_color_active: (THEME_COLOR_MARK_ACTIVE)
         }
 
     }
