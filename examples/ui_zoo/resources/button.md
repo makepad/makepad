@@ -1,6 +1,12 @@
 ## Button
 The basic button control.
 
+### Attributes
+- grab_key_focus (bool)
+- enable_long_press (bool)
+- reset_hover_on_click (bool)
+- text (String)
+
 ### Styling Attributes
 #### draw_bg
 - border_size (float)
