@@ -2,8 +2,8 @@
 A clickable label widget that opens a URL when clicked.
 
 ### Attributes
-- url (String)
 - open_in_place (bool)
+- url (String)
 
 ### Styling Attributes
 #### draw_bg
@@ -14,9 +14,9 @@ A clickable label widget that opens a URL when clicked.
 - color_disabled (Color)
 
 #### draw_text
-- color (Color),
-- color_hover (Color),
-- color_down (Color),
+- color (Color)
+- color_hover (Color)
+- color_down (Color)
 - color_focus (Color)
 - color_disabled (Color)
 - color_1 (Color), color_2 (Color)

@@ -4,20 +4,20 @@ A widget that displays a file tree, providing access to the file system.
 ### Attributes
 - clip_x (bool)
 - clip_y (bool)
-- file_node (Option<LivePtr>)
-- filler (DrawBgQuad)
-- folder_node (Option<LivePtr>)
-- node_height (f64)
-- scroll_bars (ScrollBars)
 - draw_scroll_shadow (DrawScrollShadow)
+- file_node (FileTreeNode)
+- filler (DrawBgQuad)
+- folder_node (FileTreeNode)
+- node_height (float)
+- scroll_bars (ScrollBars)
 
 ## FileTreeNode
 ### Attributes
 - check_box (CheckBox)
-- indent_width (f64)
-- indent_shift (f64)
+- indent_width (float)
+- indent_shift (float)
 - is_folder (bool)
-- min_drag_distance (f64)
+- min_drag_distance (float)
 
 ### Styling Attributes
 #### draw_bg

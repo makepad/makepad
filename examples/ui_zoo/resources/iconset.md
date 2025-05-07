@@ -2,12 +2,12 @@
 FontAwesome IconSet.
 
 ### Attributes
-- draw_text (DrawText)
 - align (Align)
+- draw_text (DrawText)
 - flow (Flow)
+- hover_actions_enabled (bool)
 - padding (Padding)
 - text (String)
-- hover_actions_enabled (bool)
 
 ### Styling Attributes
 #### draw_text
