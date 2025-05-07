@@ -49,6 +49,9 @@ The dropdown menu widget.
 ## PopupMenu
 A popup menu component that displays a list of selectable items.
 
+### Attributes
+- indent_width (float)
+
 ### Styling Attributes
 #### draw_bg
 - border_size (float)

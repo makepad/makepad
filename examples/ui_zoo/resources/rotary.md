@@ -1,6 +1,17 @@
 ## Rotary
 A round slider.
 
+### Attributes
+- min (float)
+- max (float)
+- step (float)
+- label_align (Align)
+- margin (Margin)
+- precision (float)
+- height (Size)
+- hover_actions_enabled (bool)
+- text_input (TextInput)
+
 ### Styling Attributes
 #### draw_bg
 - border_size (float)
@@ -51,6 +62,3 @@ A round slider.
 - width (Size)
 - height (Size)
 - margin (Margin)
-
-#### text_input
-See TextInput attributes
