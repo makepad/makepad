@@ -4,8 +4,6 @@ The CheckBox widget provides a control for user input in the form of a checkbox.
 ### Styling Attributes
 #### draw_bg
 - size (float)
-- border_size (float)
-- border_radius (float)
 - color_dither (float)
 - color (Color)
 - color_hover (Color)
@@ -19,6 +17,8 @@ The CheckBox widget provides a control for user input in the form of a checkbox.
 - color_1_active (Color), color_2_active (Color)
 - color_1_focus (Color), color_2_focus (Color)
 - color_1_disabled (Color), color_2_disabled (Color)
+- border_size (float)
+- border_radius (float)
 - border_color_1 (Color)
 - border_color_1_hover (Color)
 - border_color_1_down (Color)

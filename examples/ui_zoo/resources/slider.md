@@ -2,19 +2,18 @@
 Graphical numeric value control.
 
 ### Attributes
-- min (float)
-- max (float)
-- step (float)
-- label_align (Align)
-- margin (Margin)
-- precision (float)
+- axis (DragAxis)
+- bind (String)
 - height (Size)
 - hover_actions_enabled (bool)
-- text_input (TextInput)
-- axis (DragAxis)
+- label_align (Align)
+- max (float)
+- min (float)
+- margin (Margin)
+- precision (float)
+- step (float)
 - text (String)
-- bind (String)
-
+- text_input (TextInput)
 
 ### Styling Attributes
 #### draw_bg

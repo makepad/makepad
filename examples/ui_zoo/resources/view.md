@@ -2,19 +2,19 @@
 The most basic layout container-element.
 
 ### Styling Attributes
-- show_bg (bool)
-- use_cache (bool)
-- dpi_factor (float)
-- optimize (ViewOptimize)
-- debug (ViewDebug)
-- event_order (EventOrder)
-- visible (bool)
-- grab_key_focus (bool)
-- block_signal_event (bool)
-- cursor (MouseCursor)
 - capture_overload (bool)
-- scroll_bars (LivePtr)
+- cursor (MouseCursor)
+- block_signal_event (bool)
 - design_mode (bool)
+- debug (ViewDebug)
+- dpi_factor (float)
+- event_order (EventOrder)
+- grab_key_focus (bool)
+- show_bg (bool)
+- optimize (ViewOptimize)
+- scroll_bars (ScrollBars)
+- use_cache (bool)
+- visible (bool)
 
 #### draw_bg
 - color (Color)

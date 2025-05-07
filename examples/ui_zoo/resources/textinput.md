@@ -2,13 +2,13 @@
 The standard text input form element.
 
 ### Attributes
-- label_align (Align)
+- blink_speed (float)
+- empty_text (String)
 - is_password (bool)
 - is_read_only (bool)
 - is_numeric_only (bool)
-- empty_text (String)
+- label_align (Align)
 - text (String)
-- blink_speed (f64)
 
 ### Styling Attributes
 #### draw_bg

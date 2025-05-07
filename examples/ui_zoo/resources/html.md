@@ -2,35 +2,35 @@
 A widget that renders HTML content.
 
 ### Attributes
-- body (ArcStringMut)
-- ul_markers (Vec<String>)
-- ol_markers (Vec<OrderedListType>)
-- ol_separator (String)
+- a (HtmlLink)
+- body (String)
 - font_size: (float)
 - font_color: (Color)
 - inline_code_padding (Padding)
 - inline_code_margin (Margin)
-- a (HtmlLink)
+- ul_markers (String)
+- ol_markers (OrderedListType)
+- ol_separator (String)
 
 #### draw_normal
-- text_style (TextStyle)
 - color (Color)
+- text_style (TextStyle)
 
 #### draw_italic
-- text_style (TextStyle)
 - color (Color)
+- text_style (TextStyle)
 
 #### draw_bold
-- text_style (TextStyle)
 - color (Color)
+- text_style (TextStyle)
 
 #### draw_bold_italic
-- text_style (TextStyle)
 - color (Color)
+- text_style (TextStyle)
 
 #### draw_fixed
-- text_style (TextStyle)
 - color (Color)
+- text_style (TextStyle)
 
 #### code_layout
 - align (Align)
@@ -38,7 +38,7 @@ A widget that renders HTML content.
 - clip_y (bool)
 - flow (Flow)
 - padding (Padding)
-- scroll (DVec2)
+- scroll (Vec2)
 - spacing (float)
 
 #### code_walk
@@ -52,7 +52,7 @@ A widget that renders HTML content.
 - clip_y (bool)
 - flow (Flow)
 - padding (Padding)
-- scroll (DVec2)
+- scroll (Vec2)
 - spacing (float)
 
 #### quote_walk
@@ -66,7 +66,7 @@ A widget that renders HTML content.
 - clip_y (bool)
 - flow (Flow)
 - padding (Padding)
-- scroll (DVec2)
+- scroll (Vec2)
 - spacing (float)
 
 #### list_item_walk
@@ -80,13 +80,13 @@ A widget that renders HTML content.
 - margin (Margin)
 
 #### draw_block
+- code_color (Color)
 - line_color (Color)
-- sep_color (Color)
 - quote_bg_color (Color)
 - quote_fg_color (Color)
-- code_color (Color)
+- sep_color (Color)
 
 ## HtmlLink
-- color: #x0000EE,
-- hover_color: #x00EE00,
-- pressed_color: #xEE0000,
+- color (Color)
+- hover_color (Color)
+- pressed_color (Color)
