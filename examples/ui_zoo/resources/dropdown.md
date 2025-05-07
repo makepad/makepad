@@ -1,6 +1,10 @@
 ## DropDown
 The dropdown menu widget.
 
+### Attributes
+- popup_menu (PopupMenu)
+- selected_item (int)
+
 ### Styling Attributes
 #### draw_bg
 - border_size (float)
