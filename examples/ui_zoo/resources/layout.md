@@ -6,28 +6,26 @@ Controls the placement of child-elements.
 ### clip_x (bool = true)
 Boolean flag for horizontal clipping.
 ### clip_y (bool = true)
-Boolean flag for  clipping.
+Boolean flag for vertical clipping.
 ### flow ([Flow](Flow.md))
-Determines how child elements are laid out (i.e. vertically or horizontally)
+Determines how children are laid out (i.e. vertically or horizontally)
 ### height ([Size](Size.md))
 Determines the height of elements.
 **Options**
-- float
-- Fill
-- Fit
-### line_spacing (f64)
-Spacing between text lines.
+- Absolute float(f64) dimensions
+- Fill: spans the element to the full width of its parent container.
+- Fit: shrinks the element to the width of its child elements.
 ### margin (margin)
-Sets the margin area on all four sides of an element.
+Sets the margin outside the element.
 ### padding ([Padding](ft_padding.md))
-Padding around the content.
+Sets the padding inside the element.
 ### scroll (Dvec2)
 The scroll position.
 ### spacing (f64)
-Spacing between elements.
+The amount of spacing between stacked elements.
 ### width ([Size](Size.md))
 Determines the width of elements.
-#### Options
-- Absolute float values
+**Options**
+- Absolute float(f64) dimensions
 - Fill: spans the element to the full width of its parent container.
 - Fit: shrinks the element to the width of its child elements.
