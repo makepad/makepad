@@ -24,6 +24,7 @@ pub type aaudio_stream_state_t = i32;
 pub type aaudio_data_callback_result_t = i32;
 pub type aaudio_performance_mode_t = i32;
 
+#[allow(non_snake_case)]
 pub type AAudioStream_dataCallback = ::std::option::Option<
 unsafe extern "C" fn(
     stream: *mut AAudioStream,
@@ -33,6 +34,7 @@ unsafe extern "C" fn(
 ) -> aaudio_data_callback_result_t,
 >;
 
+#[allow(non_snake_case)]
 pub type AAudioStream_errorCallback = ::std::option::Option<
 unsafe extern "C" fn(
     stream: *mut AAudioStream,

@@ -540,9 +540,15 @@ impl BuildManager {
                             ));
                             cx.action(AppAction::RedrawLog)
                         }
-                        AppToStudio::Screenshot(_screenshot)=>{
+                        AppToStudio::Screenshot(screenshot)=>{
+                                                        
                             // lets throw the screenshot to disk as jpg
-                            
+                            // alright lets save it for fun
+                            if let Some(build) = active.builds.get(&build_id){
+                                if let Some(image) = screenshot.image{
+                                    file_system.save_snapshot_image(cx, &build.root,"qtest",screenshot.width as _, screenshot.height as _, image)
+                                }
+                            }
                         }
                         AppToStudio::EventSample(sample) => {
                             // ok lets push this profile sample into the profiles

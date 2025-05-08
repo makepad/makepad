@@ -558,7 +558,6 @@ impl MacosApp {
                     EventFlow::Poll | EventFlow::Wait => {
                         let event_wait = if let EventFlow::Wait = with_macos_app(|app| app.event_flow) {true}else {false};
                         let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-                        
                         let ns_until: ObjcId = if event_wait {
                             msg_send![class!(NSDate), distantFuture]
                         }else {
@@ -576,10 +575,13 @@ impl MacosApp {
                         if ns_event != nil {
                             MacosApp::process_ns_event(ns_event);
                         }
+
+                        //let event_wait = if let EventFlow::Wait = with_macos_app(|app| app.event_flow) {true}else {false};
                         
-                        if ns_event == nil || event_wait {
-                            MacosApp::do_callback(MacosEvent::Paint);
-                        }
+                        //if ns_event == nil || event_wait {
+                        //if event_wait{
+                        //    with_macos_app(|app| app.event_flow = EventFlow::Wait);
+                        //}
                         //self.current_ns_event = None;
                         
                         let () = msg_send![pool, release];

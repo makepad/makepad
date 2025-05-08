@@ -276,6 +276,10 @@ live_design! {
         }
     }
     
+    pub ButtonIcon = <Button> {
+        spacing: 0.
+    }
+
     pub ButtonGradientX = <Button> {
         draw_bg: {
             instance hover: 0.0

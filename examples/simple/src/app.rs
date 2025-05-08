@@ -42,12 +42,12 @@ live_design!{
                         flow: RightWrap,
                         text: "Lorem ipsum"
                         draw_text:{color:#fff, text_style:{font_size:18}}
-                    }
+                    }/*
                     button_2 = <Button> {
                         text: "Click me 345 1234"
                         draw_text:{color:#fff, text_style:{font_size:18}}
-                    }
-                
+                    }*/
+                /*
 
                     <SliderRound> {
                         text: "Short label",
@@ -67,7 +67,7 @@ live_design!{
                             handle_color_focus: #000C
                             handle_color_drag: #000F
                         }
-                    }
+                    }*/
                 }
             }
         }

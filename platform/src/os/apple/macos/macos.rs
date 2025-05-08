@@ -239,9 +239,7 @@ impl Cx {
             self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit
         }
-        
         // send a mouse up when dragging starts
-        
         match &event {
             MacosEvent::MouseDown(_) |
             MacosEvent::MouseMove(_) |
@@ -275,6 +273,8 @@ impl Cx {
                         self.redraw_all();
                     }
                     self.handle_networking_events();
+                    self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
+
                     // block till the next timer
                     return EventFlow::Wait;
                 }
@@ -426,7 +426,8 @@ impl Cx {
                 self.call_event_handler(&Event::TextCut(e))
             }
             MacosEvent::Timer(e) => {
-                self.call_event_handler(&Event::Timer(e))
+                self.call_event_handler(&Event::Timer(e));
+                return EventFlow::Wait;
             }
             MacosEvent::MacosMenuCommand(e) => {
                 self.call_event_handler(&Event::MacosMenuCommand(e))

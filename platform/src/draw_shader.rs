@@ -188,9 +188,9 @@ pub struct DrawShaderInput {
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSLTight;
 
 
-#[cfg(all(any(target_os = "android", target_os = "linux"),not(no_opengl_uniform_buffers)))]
+#[cfg(all(any(target_os = "android", target_os = "linux"),use_gles_3))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL140;
-#[cfg(all(any(target_os = "android", target_os = "linux"),no_opengl_uniform_buffers))]
+#[cfg(all(any(target_os = "android", target_os = "linux"),not(use_gles_3)))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSLTight;
 
 
