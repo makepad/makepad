@@ -232,7 +232,8 @@
                         <Slider> { text: "Rounding" }
                         <Slider> { text: "Space" }
                         <ButtonFlatterIcon> {
-                            height: Fill, width: 40.
+                            height: Fill, width: Fit,
+                            margin: { right: (THEME_SPACE_1) }
                             icon_walk: { width: 12.5, height: Fit, }
                             draw_icon: {
                                 color: (THEME_COLOR_MAKEPAD),
