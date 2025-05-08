@@ -157,9 +157,13 @@ impl<'a> LayoutContext<'a> {
     }
 
     fn remaining_width_in_lpxs(&self) -> Option<f32> {
-        self.options
-            .wrap_width_in_lpxs
-            .map(|wrap_width_in_lpxs| wrap_width_in_lpxs - self.current_point_in_lpxs.x)
+        if self.options.wrap {
+            self.options
+                .max_width_in_lpxs
+                .map(|max_width_in_lpxs| max_width_in_lpxs - self.current_point_in_lpxs.x)
+        } else {
+            None
+        }
     }
 
     fn layout(mut self, spans: &[Span]) -> LaidoutText {
@@ -335,8 +339,8 @@ impl<'a> LayoutContext<'a> {
         self.current_point_in_lpxs.y += self.rows.last().map_or(row.ascender_in_lpxs, |prev_row| {
             prev_row.line_spacing_in_lpxs(&row)
         });
-        let wrap_width_in_lpxs = self.options.wrap_width_in_lpxs.unwrap_or(row.width_in_lpxs);
-        let remaining_width_in_lpxs = wrap_width_in_lpxs - row.width_in_lpxs;
+        let max_width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(row.width_in_lpxs);
+        let remaining_width_in_lpxs = max_width_in_lpxs - row.width_in_lpxs;
         row.origin_in_lpxs.x = self.options.align * remaining_width_in_lpxs;
         row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
         self.current_row_start = self.current_row_end;
@@ -616,7 +620,8 @@ impl PartialEq for Style {
 pub struct LayoutOptions {
     pub first_row_indent_in_lpxs: f32,
     pub first_row_min_line_spacing_below_in_lpxs: f32,
-    pub wrap_width_in_lpxs: Option<f32>,
+    pub max_width_in_lpxs: Option<f32>,
+    pub wrap: bool,
     pub align: f32,
     pub line_spacing_scale: f32,
 }
@@ -626,7 +631,8 @@ impl Default for LayoutOptions {
         Self {
             first_row_indent_in_lpxs: 0.0,
             first_row_min_line_spacing_below_in_lpxs: 0.0,
-            wrap_width_in_lpxs: None,
+            max_width_in_lpxs: None,
+            wrap: false,
             align: 0.0,
             line_spacing_scale: 1.0,
         }
@@ -644,7 +650,7 @@ impl Hash for LayoutOptions {
         self.first_row_min_line_spacing_below_in_lpxs
             .to_bits()
             .hash(hasher);
-        self.wrap_width_in_lpxs.map(f32::to_bits).hash(hasher);
+        self.max_width_in_lpxs.map(f32::to_bits).hash(hasher);
         self.align.to_bits().hash(hasher);
         self.line_spacing_scale.to_bits().hash(hasher);
     }
@@ -660,7 +666,7 @@ impl PartialEq for LayoutOptions {
         {
             return false;
         }
-        if self.wrap_width_in_lpxs.map(f32::to_bits) != other.wrap_width_in_lpxs.map(f32::to_bits) {
+        if self.max_width_in_lpxs.map(f32::to_bits) != other.max_width_in_lpxs.map(f32::to_bits) {
             return false;
         }
         if self.align != other.align {
