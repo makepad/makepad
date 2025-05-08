@@ -46,7 +46,7 @@ mod tests {
             }]
             .into(),
             options: LayoutOptions {
-                wrap_width_in_lpxs: Some(1018.0),
+                max_width_in_lpxs: Some(1018.0),
                 ..LayoutOptions::default()
             },
         });
@@ -84,7 +84,7 @@ mod tests {
             ]
             .into(),
             options: LayoutOptions {
-                wrap_width_in_lpxs: Some(256.0),
+                max_width_in_lpxs: Some(256.0),
                 ..LayoutOptions::default()
             },
         });

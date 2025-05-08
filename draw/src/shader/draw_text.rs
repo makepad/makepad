@@ -141,7 +141,7 @@ impl LiveHook for DrawText {
 
 impl DrawText {
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, text: &str) {
-        let text = self.layout(cx, 0.0, 0.0, None, Align::default(), text);
+        let text = self.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
         self.draw_text(cx, Point::new(pos.x as f32, pos.y as f32), &text);
     }
 
@@ -158,21 +158,16 @@ impl DrawText {
         } else {
             None
         };
-        let wrap_width_in_lpxs = if cx.turtle().layout().flow == Flow::RightWrap {
-            max_width_in_lpxs
-        } else {
-            None
-        };
+        let wrap = cx.turtle().layout().flow == Flow::RightWrap;
 
-        let text = self.layout(cx, 0.0, 0.0, wrap_width_in_lpxs, align, text);
-        self.draw_walk_laidout(cx, walk, align, &text)
+        let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
+        self.draw_walk_laidout(cx, walk, &text)
     }
 
     pub fn draw_walk_laidout(
         &mut self,
         cx: &mut Cx2d,
         walk: Walk,
-        align: Align,
         laidout_text: &LaidoutText,
     ) -> makepad_platform::Rect {
         use crate::text::geom::{Point, Size};
@@ -200,10 +195,9 @@ impl DrawText {
             cx.cx.debug.area(area, vec4(1.0, 1.0, 1.0, 1.0));
         }
 
-        let remaining_size_in_lpxs = max_size_in_lpxs - size_in_lpxs;
         let origin_in_lpxs = Point::new(
-            turtle_rect.pos.x as f32 + align.x as f32 * remaining_size_in_lpxs.width,
-            turtle_rect.pos.y as f32 + align.y as f32 * remaining_size_in_lpxs.height,
+            turtle_rect.pos.x as f32,
+            turtle_rect.pos.y as f32,
         );
         self.draw_text(cx, origin_in_lpxs, &laidout_text);
 
@@ -242,6 +236,7 @@ impl DrawText {
             first_row_indent_in_lpxs,
             row_height as f32,
             wrap_width_in_lpxs,
+            false,
             Align::default(),
             text,
         );
@@ -300,7 +295,8 @@ impl DrawText {
         cx: &mut Cx,
         first_row_indent_in_lpxs: f32,
         first_row_min_line_spacing_below_in_lpxs: f32,
-        wrap_width_in_lpxs: Option<f32>,
+        max_width_in_lpxs: Option<f32>,
+        wrap: bool,
         align: Align,
         text: &str,
     ) -> Rc<LaidoutText> {
@@ -320,9 +316,10 @@ impl DrawText {
                 len: text_len,
             }],
             options: LayoutOptions {
-                wrap_width_in_lpxs,
                 first_row_indent_in_lpxs,
                 first_row_min_line_spacing_below_in_lpxs,
+                max_width_in_lpxs,
+                wrap,
                 align: align.x as f32,
                 line_spacing_scale: self.text_style.line_spacing as f32,
             },
