@@ -15,6 +15,7 @@ pub mod image;
 pub mod image_blend;
 pub mod icon;
 pub mod link_label;
+pub mod list;
 pub mod drop_down;
 pub mod popup_menu;
 pub mod check_box;
@@ -190,6 +191,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::theme_mobile_dark::live_design(cx);
     crate::theme_mobile_light::live_design(cx);
     crate::slider::live_design(cx);
+    crate::list::live_design(cx);
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
@@ -246,7 +248,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::loading_spinner::live_design(cx);
     crate::web_view::live_design(cx);
     crate::xr_hands::live_design(cx);
-        
+
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
     crate::designer_dummy::live_design(cx);
