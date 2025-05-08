@@ -11,6 +11,7 @@ pub use makepad_zune_png;
 pub mod button;
 pub mod cached_widget;
 pub mod label;
+pub mod list;
 pub mod image;
 pub mod image_blend;
 pub mod icon;
@@ -191,6 +192,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::theme_mobile_light::live_design(cx);
     crate::slider::live_design(cx);
     crate::label::live_design(cx);
+    crate::list::live_design(cx);
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
     crate::multi_image::live_design(cx);
@@ -246,7 +248,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::loading_spinner::live_design(cx);
     crate::web_view::live_design(cx);
     crate::xr_hands::live_design(cx);
-        
+
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
     crate::designer_dummy::live_design(cx);
