@@ -111,6 +111,7 @@ pub use crate::{
     image::*,
     image_blend::*,
     icon::*,
+    list::*,
     label::*,
     slider::*,
     root::*,

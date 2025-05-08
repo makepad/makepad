@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{list::ListWidgetExt, *};
 use makepad_draw::text::selection::Cursor;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -7,12 +7,6 @@ live_design! {
     use link::widgets::*;
     use link::theme::*;
     use link::shaders::*;
-
-    List = {{List}} {
-        flow: Down,
-        width: Fill,
-        height: Fill,
-    }
 
     pub CommandTextInput = {{CommandTextInput}} {
         flow: Down,
@@ -248,12 +242,12 @@ impl Widget for CommandTextInput {
                             // Clear mouse hover when using up/down keys
                             self.pointer_hover_index = None;
                             self.on_keyboard_move(cx, 1);
-                        },
+                        }
                         KeyCode::ArrowUp => {
                             // Clear mouse hover when using up/down keys
                             self.pointer_hover_index = None;
                             self.on_keyboard_move(cx, -1);
-                        },
+                        }
                         KeyCode::ReturnKey => {
                             self.on_keyboard_controller_input_submit(cx, scope);
                         }
@@ -467,11 +461,14 @@ impl CommandTextInput {
         };
 
         // Rebuild the string
-        let new_text = text_graphemes[..start_grapheme_idx].join("") +
-                        &text_graphemes[end_grapheme_idx..].join("");
+        let new_text = text_graphemes[..start_grapheme_idx].join("")
+            + &text_graphemes[end_grapheme_idx..].join("");
 
         // Calculate the new cursor position (grapheme)
-        let new_cursor_pos = text_graphemes[..start_grapheme_idx].join("").graphemes(true).count();
+        let new_cursor_pos = text_graphemes[..start_grapheme_idx]
+            .join("")
+            .graphemes(true)
+            .count();
 
         self.text_input_ref().set_cursor(
             cx,
@@ -479,7 +476,7 @@ impl CommandTextInput {
                 index: new_cursor_pos,
                 prefer_next_row: false,
             },
-            false
+            false,
         );
         self.set_text(cx, &new_text);
     }
@@ -514,7 +511,7 @@ impl CommandTextInput {
                 index: 0,
                 prefer_next_row: false,
             },
-            false
+            false,
         );
         self.clear_items();
     }
@@ -615,14 +612,19 @@ impl CommandTextInput {
                             // Check length limit
                             let length = h_idx - t_idx;
                             if length > MAX_SEARCH_TEXT_LENGTH {
-                                log!("Warning: Search text length({}) exceeds maximum limit({})", length, MAX_SEARCH_TEXT_LENGTH);
+                                log!(
+                                    "Warning: Search text length({}) exceeds maximum limit({})",
+                                    length,
+                                    MAX_SEARCH_TEXT_LENGTH
+                                );
                                 // Still return text but truncated to the maximum length
-                                return text_graphemes[t_idx..t_idx + MAX_SEARCH_TEXT_LENGTH].join("");
+                                return text_graphemes[t_idx..t_idx + MAX_SEARCH_TEXT_LENGTH]
+                                    .join("");
                             }
 
                             // Optimized string building with pre-allocated capacity
                             let mut result = String::with_capacity(
-                                text_graphemes[t_idx..h_idx].iter().map(|g| g.len()).sum()
+                                text_graphemes[t_idx..h_idx].iter().map(|g| g.len()).sum(),
                             );
                             for g in &text_graphemes[t_idx..h_idx] {
                                 result.push_str(g);
@@ -867,66 +869,4 @@ fn get_head(text_input: &TextInputRef) -> usize {
 
 fn is_whitespace(grapheme: &str) -> bool {
     grapheme.chars().all(char::is_whitespace)
-}
-
-/// Reduced and adapted copy of the `List` widget from Moly.
-#[derive(Live, Widget, LiveHook)]
-struct List {
-    #[walk]
-    walk: Walk,
-
-    #[layout]
-    layout: Layout,
-
-    #[redraw]
-    #[rust]
-    area: Area,
-
-    #[rust]
-    items: Vec<WidgetRef>,
-}
-
-impl Widget for List {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.items.iter().for_each(|item| {
-            item.handle_event(cx, event, scope);
-        });
-    }
-
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        cx.begin_turtle(walk, self.layout);
-        self.items.iter().for_each(|item| {
-            item.draw_all(cx, scope);
-        });
-        cx.end_turtle_with_area(&mut self.area);
-        DrawStep::done()
-    }
-}
-
-impl List {
-    fn clear(&mut self) {
-        self.items.clear();
-    }
-
-    fn add(&mut self, widget: WidgetRef) {
-        self.items.push(widget);
-    }
-}
-
-impl ListRef {
-    fn clear(&self) {
-        let Some(mut inner) = self.borrow_mut() else {
-            return;
-        };
-
-        inner.clear();
-    }
-
-    fn add(&self, widget: WidgetRef) {
-        let Some(mut inner) = self.borrow_mut() else {
-            return;
-        };
-
-        inner.add(widget);
-    }
 }

@@ -1,9 +1,4 @@
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    widget::*,
-    scroll_bar::*,
-};
+use crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bar::*, widget::*};
 
 const GAP_BETWEEN_ITEM_AND_BAR: f64 = 6.;
 
@@ -23,37 +18,47 @@ live_design! {
 #[live_ignore]
 enum Orientation {
     Horizontal,
-    #[pick] Vertical
+    #[pick]
+    Vertical,
 }
 
-
 #[derive(Live, Widget, LiveHook)]
-struct List {
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
-    #[redraw] #[rust] area: Area,
+pub struct List {
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[rust]
+    area: Area,
 
-    #[live] orientation: Orientation,
-    #[live] scroll_bar: ScrollBar,
+    #[live]
+    orientation: Orientation,
+    #[live]
+    scroll_bar: ScrollBar,
 
-    #[rust] items: Vec<WidgetRef>,
-    #[rust(0.)] scroll_pos: f64,
+    #[rust]
+    items: Vec<WidgetRef>,
+    #[rust(0.)]
+    scroll_pos: f64,
 }
 
 impl Widget for List {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.scroll_bar.handle_event_with(cx, event, &mut |cx, action| {
-            if let ScrollBarAction::Scroll { scroll_pos, .. } = action {
-                self.scroll_pos = scroll_pos;
-                cx.redraw_all();
-            }
-        });
+        self.scroll_bar
+            .handle_event_with(cx, event, &mut |cx, action| {
+                if let ScrollBarAction::Scroll { scroll_pos, .. } = action {
+                    self.scroll_pos = scroll_pos;
+                    cx.redraw_all();
+                }
+            });
 
         if let Event::Scroll(e) = event {
             if self.area.rect(cx).contains(e.abs) {
                 self.scroll_pos += e.scroll.y * 4.;
                 // Clamping is handled in draw_walk, update scroll bar here
-                self.scroll_bar.set_scroll_pos_no_action(cx, self.scroll_pos);
+                self.scroll_bar
+                    .set_scroll_pos_no_action(cx, self.scroll_pos);
                 cx.redraw_all();
             }
         }
@@ -69,9 +74,12 @@ impl Widget for List {
 
         let (scroll_axis, scrollbar_view_rect, scrollbar_view_total) = match self.orientation {
             Orientation::Horizontal => {
-                let (item_widths, cumulative_widths, max_item_height) = self.compute_the_values_for_horizontal(cx);
+                let (item_widths, cumulative_widths, max_item_height) =
+                    self.compute_the_values_for_horizontal(cx);
                 let total_width = *cumulative_widths.last().unwrap();
-                self.scroll_pos = self.scroll_pos.clamp(0., (total_width - viewport.size.x).max(0.));
+                self.scroll_pos = self
+                    .scroll_pos
+                    .clamp(0., (total_width - viewport.size.x).max(0.));
                 // Draw visible items
                 let mut i = 0;
                 while i < self.items.len() && cumulative_widths[i] < self.scroll_pos {
@@ -88,12 +96,15 @@ impl Widget for List {
 
                     if item_x + item_width > 0.0 && item_x < viewport.size.x {
                         let item_walk = item.walk(cx);
-                        cx.begin_turtle(Walk {
-                            abs_pos: Some(dvec2(viewport.pos.x + item_x, viewport.pos.y)),
-                            margin: Default::default(),
-                            width: Size::Fixed(item_width),
-                            height: item_walk.height,
-                        }, Layout::default());
+                        cx.begin_turtle(
+                            Walk {
+                                abs_pos: Some(dvec2(viewport.pos.x + item_x, viewport.pos.y)),
+                                margin: Default::default(),
+                                width: Size::Fixed(item_width),
+                                height: item_walk.height,
+                            },
+                            Layout::default(),
+                        );
                         item.draw_all(cx, scope);
                         cx.end_turtle();
                     }
@@ -105,7 +116,10 @@ impl Widget for List {
                 (
                     ScrollAxis::Horizontal,
                     Rect {
-                        pos: dvec2(viewport.pos.x, viewport.pos.y + viewport.size.y - bar_height),
+                        pos: dvec2(
+                            viewport.pos.x,
+                            viewport.pos.y + viewport.size.y - bar_height,
+                        ),
                         size: dvec2(viewport.size.x, bar_height),
                     },
                     DVec2 {
@@ -115,9 +129,12 @@ impl Widget for List {
                 )
             }
             Orientation::Vertical => {
-                let (item_heights, cumulative_heights, max_item_width) = self.compute_the_values_for_vertical(cx);
+                let (item_heights, cumulative_heights, max_item_width) =
+                    self.compute_the_values_for_vertical(cx);
                 let total_height = *cumulative_heights.last().unwrap();
-                self.scroll_pos = self.scroll_pos.clamp(0., (total_height - viewport.size.y).max(0.));
+                self.scroll_pos = self
+                    .scroll_pos
+                    .clamp(0., (total_height - viewport.size.y).max(0.));
                 // Draw visible items
                 let mut i = 0;
                 while i < self.items.len() && cumulative_heights[i] < self.scroll_pos {
@@ -134,12 +151,15 @@ impl Widget for List {
 
                     if item_y + item_height > 0.0 && item_y < viewport.size.y {
                         let item_walk = item.walk(cx);
-                        cx.begin_turtle(Walk {
-                            abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + item_y)),
-                            margin: Default::default(),
-                            width: item_walk.width,
-                            height: Size::Fixed(item_height),
-                        }, Layout::default());
+                        cx.begin_turtle(
+                            Walk {
+                                abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + item_y)),
+                                margin: Default::default(),
+                                width: item_walk.width,
+                                height: Size::Fixed(item_height),
+                            },
+                            Layout::default(),
+                        );
                         item.draw_all(cx, scope);
                         cx.end_turtle();
                     }
@@ -161,8 +181,10 @@ impl Widget for List {
                 )
             }
         };
-        self.scroll_bar.set_scroll_pos_no_action(cx, self.scroll_pos);
-        self.scroll_bar.draw_scroll_bar(cx, scroll_axis, scrollbar_view_rect, scrollbar_view_total);
+        self.scroll_bar
+            .set_scroll_pos_no_action(cx, self.scroll_pos);
+        self.scroll_bar
+            .draw_scroll_bar(cx, scroll_axis, scrollbar_view_rect, scrollbar_view_total);
 
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
@@ -175,7 +197,7 @@ impl List {
         let mut cumulative_heights = vec![0.];
         let mut max_item_width = 0.;
 
-        self.items.iter().for_each(|wr|{
+        self.items.iter().for_each(|wr| {
             let walk = wr.walk(cx);
             if let Size::Fixed(height) = walk.height {
                 item_heights.push(height);
@@ -193,7 +215,7 @@ impl List {
         let mut cumulative_widths = vec![0.];
         let mut max_item_height = 0.;
 
-        self.items.iter().for_each(|wr|{
+        self.items.iter().for_each(|wr| {
             let walk = wr.walk(cx);
             if let Size::Fixed(width) = walk.width {
                 item_widths.push(width);
