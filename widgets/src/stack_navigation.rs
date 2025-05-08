@@ -319,7 +319,17 @@ impl LiveHook for StackNavigation {
 
 impl Widget for StackNavigation {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        for widget_ref in self.get_active_views(cx).iter() {
+        // If the event requires visibility, only forward it to the visible views.
+        // If the event does not require visibility, forward it to all views,
+        // ensuring that we don't forward it to the root view twice.
+        let mut visible_views = self.get_visible_views(cx);
+        if !event.requires_visibility() {
+            let root_view = self.view.widget(id!(root_view));
+            if !visible_views.contains(&root_view) {
+                visible_views.insert(0, root_view);
+            }
+        }
+        for widget_ref in visible_views {
             widget_ref.handle_event(cx, event, scope);
         }
 
@@ -330,7 +340,7 @@ impl Widget for StackNavigation {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep  {
-        for widget_ref in self.get_active_views(cx.cx).iter() {
+        for widget_ref in self.get_visible_views(cx.cx).iter() {
             widget_ref.draw_walk(cx, scope, walk) ?;
         }
         DrawStep::done()
@@ -344,7 +354,7 @@ impl WidgetNode for StackNavigation {
     fn area(&self)->Area{self.view.area()}
     
     fn redraw(&mut self, cx: &mut Cx) {
-        for widget_ref in self.get_active_views(cx).iter() {
+        for widget_ref in self.get_visible_views(cx).iter() {
             widget_ref.redraw(cx);
         }
     }
@@ -399,7 +409,13 @@ impl StackNavigation {
         }
     }
 
-    fn get_active_views(&mut self, cx: &mut Cx) -> Vec<WidgetRef> {
+    /// Returns the views that are currently visible.
+    ///
+    /// This includes up to two views, in this order:
+    /// 1. The root_view, if it is animating and partially showing,
+    /// 2. The active stack view, if it exists and is partially or fully showing.
+    ///   or if there is no active stack view at all.
+    fn get_visible_views(&mut self, cx: &mut Cx) -> Vec<WidgetRef> {
         match self.active_stack_view {
             ActiveStackView::None => {
                 vec![self.view.widget(id!(root_view))]
