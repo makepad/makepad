@@ -543,6 +543,7 @@ live_design! {
     }
     
     pub ButtonFlatterIcon = <ButtonFlatter> {
+        draw_bg: { color_focus: (THEME_COLOR_U_HIDDEN)}        
         spacing: 0.
         text: ""
     }
