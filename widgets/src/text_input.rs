@@ -1026,16 +1026,13 @@ impl TextInput {
         } else {
             None
         };
-        let wrap_width_in_lpxs = if cx.turtle().layout().flow == Flow::RightWrap {
-            max_width_in_lpxs
-        } else {
-            None
-        };
+        let wrap = cx.turtle().layout().flow == Flow::RightWrap;
         self.laidout_text = Some(self.draw_text.layout(
             cx,
             0.0,
             0.0,
-            wrap_width_in_lpxs,
+            max_width_in_lpxs,
+            wrap,
             self.label_align, 
             text
         ));
@@ -1055,7 +1052,6 @@ impl TextInput {
             self.draw_text.draw_walk_laidout(
                 cx,
                 inner_walk,
-                self.label_align,
                 laidout_text,
             )
         };
