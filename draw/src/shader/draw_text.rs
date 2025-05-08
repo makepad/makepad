@@ -225,18 +225,14 @@ impl DrawText {
         } else {
             None
         };
-        let wrap_width_in_lpxs = if cx.turtle().layout().flow == Flow::RightWrap {
-            max_width_in_lpxs
-        } else {
-            None
-        };
+        let wrap = cx.turtle().layout().flow == Flow::RightWrap;
 
         let text = self.layout(
             cx,
             first_row_indent_in_lpxs,
             row_height as f32,
-            wrap_width_in_lpxs,
-            false,
+            max_width_in_lpxs,
+            wrap,
             Align::default(),
             text,
         );
