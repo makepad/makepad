@@ -276,10 +276,6 @@ live_design! {
         }
     }
     
-    pub ButtonIcon = <Button> {
-        spacing: 0.
-    }
-
     pub ButtonGradientX = <Button> {
         draw_bg: {
             instance hover: 0.0
@@ -526,6 +522,30 @@ live_design! {
         }
     }
     
+    pub ButtonIcon = <Button> {
+        spacing: 0.
+        text: ""
+    }
+    
+    pub ButtonGradientXIcon = <ButtonGradientX> {
+        spacing: 0.
+        text: ""
+    }
+    
+    pub ButtonGradientYIcon = <ButtonGradientY> {
+        spacing: 0.
+        text: ""
+    }
+    
+    pub ButtonFlatIcon = <ButtonFlat> {
+        spacing: 0.
+        text: ""
+    }
+    
+    pub ButtonFlatterIcon = <ButtonFlatter> {
+        spacing: 0.
+        text: ""
+    }
     
 }
 
