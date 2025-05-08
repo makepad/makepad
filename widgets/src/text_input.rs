@@ -1868,13 +1868,12 @@ impl TextInputRef {
 
     /// Restores the internal state of this text input widget
     /// from the given `TextInputState` object.
-    pub fn restore_state(&self, state: TextInputState) {
+    pub fn restore_state(&self, cx: &mut Cx, state: TextInputState) {
         if let Some(mut inner) = self.borrow_mut() {
-            // Don't use `set_text()` here, as it has other side effects.
-            inner.text = state.text;
+            inner.set_text(cx, &state.text);
             inner.password_text = state.password_text;
-            inner.selection = state.selection;
             inner.history = state.history;
+            inner.set_selection(cx, state.selection);
         }
     }
 }
