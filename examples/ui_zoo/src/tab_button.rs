@@ -83,6 +83,18 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "ButtonGradientXIcon"}
+            <UIZooRowH> {
+                <ButtonGradientXIcon> {
+                    draw_icon: {
+                        color: #f00,
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                    }
+                }
+            }
+
+
+            <Hr> {}
             <H4> { text: "GradientY"}
             <UIZooRowH> {
                 <ButtonGradientY> { text: "<ButtonGradientY>" }
@@ -114,6 +126,17 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "ButtonGradientYIcon"}
+            <UIZooRowH> {
+                <ButtonGradientYIcon> {
+                    draw_icon: {
+                        color: #f00,
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                    }
+                }
+            }
+
+            <Hr> {}
             <H4> { text: "Flat"}
             <UIZooRowH> {
                 <ButtonFlat> {
@@ -135,6 +158,17 @@ live_design!{
             }
 
             <Hr> {}
+            <H4> { text: "ButtonFlatIcon"}
+            <UIZooRowH> {
+                <ButtonFlatIcon> {
+                    draw_icon: {
+                        color: #f00,
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                    }
+                }
+            }
+
+            <Hr> {}
             <H4> { text: "Flatter"}
             <UIZooRowH> {
                 <ButtonFlatter> {
@@ -143,6 +177,17 @@ live_design!{
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
                     text: "<ButtonFlatter>"
+                }
+            }
+
+            <Hr> {}
+            <H4> { text: "ButtonFlatterIcon"}
+            <UIZooRowH> {
+                <ButtonFlatIcon> {
+                    draw_icon: {
+                        color: #f00,
+                        svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                    }
                 }
             }
 
