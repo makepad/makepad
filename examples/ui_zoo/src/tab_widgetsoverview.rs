@@ -25,16 +25,16 @@ live_design!{
 
                 <H4> { text: "Makepad is an open-source, cross-platform UI framework written in and for Rust. It runs natively and on the web, supporting all major platforms: Windows, Linux, macOS, iOS, and Android." } 
                 <P> {
-                    text: "Built on a shader-based architecture, Makepad delivers high performance, making it suitable for complex applications like Photoshop or even 3D/VR/AR experiences.\nBuilt on a shader-based architecture, Makepad delivers high performance, making it suitable for complex applications like Photoshop or even 3D/VR/AR experiences."
+                    text: "Built on a shader-based architecture, Makepad delivers high performance, making it suitable for complex applications like Photoshop or even 3D/VR/AR experiences."
                 }
                 <P> {
                     text: "One of Makepad’s standout features is live styling — a powerful system that reflects UI code changes instantly without recompilation or restarts. This tight feedback loop bridges the gap between developers and designers, streamlining collaboration and maximizing productivity."
                 }
                 <P> {
-                    text: "This example application provides an overview of the currently supported widgets and their variants.\nBuilt on a shader-based architecture, Makepad delivers high performance, making it suitable for complex applications like Photoshop or even 3D/VR/AR experiences."
+                    text: "This example application provides an overview of the currently supported widgets."
                 }
 
-                <TextBox> { height: Fit, text: "UI Zoo hosts a high number of widgets & variants, resulting in loading times that aren’t representative of typical Makepad applications." }
+                <TextBox> { height: Fit, text: "UI Zoo hosts a high number of widgets and variants, resulting in loading times not representative of typical Makepad applications." }
             }
 
 
