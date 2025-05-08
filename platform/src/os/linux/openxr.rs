@@ -130,8 +130,8 @@ impl Cx{
         pass.pass_uniforms.depth_view = frame.eyes[0].depth_view_mat;
         pass.pass_uniforms.depth_projection_r = frame.eyes[1].depth_proj_mat;
         pass.pass_uniforms.depth_view_r = frame.eyes[1].depth_view_mat;
-                
-                        
+        
+        #[cfg(use_gles_3)]
         pass.os.pass_uniforms.update_uniform_buffer(self.os.gl(), pass.pass_uniforms.as_slice());
                 
         // lets bind the framebuffers

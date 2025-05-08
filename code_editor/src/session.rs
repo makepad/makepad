@@ -1059,7 +1059,7 @@ impl CodeSession {
             }
                     
             let last_line_index = lines.len() - 1;
-            let last_line_byte_index = lines[last_line_index].len();
+            let last_line_byte_index = 0;//lines[last_line_index].len();
                     
             let position = Position {
                 line_index: last_line_index,

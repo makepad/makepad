@@ -12,6 +12,7 @@ use crate::{
     file_system::file_system::*,
     studio_editor::*,
     run_view::*,
+    snapshot::*,
     studio_file_tree::*,
     makepad_platform::studio::{JumpToFile,EditFile, SelectInFile, PatchFile, SwapSelection},
     log_list::*,
@@ -155,7 +156,9 @@ pub enum AppAction{
     StartRecompile,
     ReloadFileTree,
     RecompileStarted,
+    RedrawSnapshots,
     ClearLog, 
+    SetSnapshotMessage{message:String},
     SendAiChatToBackend{chat_id:LiveId, history_slot:usize},
     CancelAiGeneration{chat_id:LiveId},
     SaveAiChat{chat_id:LiveId},
@@ -185,9 +188,9 @@ impl MatchEvent for App{
         }
         if roots.is_empty(){
             let dir1 = current_dir.join("./").canonicalize().unwrap();
-            roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake").canonicalize().unwrap()));
+            //roots.push(("ai_snake".to_string(),current_dir.join("../snapshots/ai_snake").canonicalize().unwrap()));
             roots.push(("makepad".to_string(),dir1));
-            roots.push(("experiments".to_string(),current_dir.join("../experiments").canonicalize().unwrap()));
+            //roots.push(("experiments".to_string(),current_dir.join("../experiments").canonicalize().unwrap()));
         }
         let roots = FileSystemRoots{roots};
         self.data.file_system.init(cx, roots.clone());
@@ -205,7 +208,7 @@ impl MatchEvent for App{
         let run_list = self.ui.view(id!(run_list_tab));
         let profiler = self.ui.view(id!(profiler));
         let search = self.ui.view(id!(search));
-        let snapshot = self.ui.view(id!(snapshot_tab));
+        let snapshot = self.ui.snapshot(id!(snapshot_tab));
         
         match action.cast(){
             AppAction::SwapSelection(ss)=>{
@@ -430,6 +433,12 @@ impl MatchEvent for App{
                 dock.close_tab(cx, run_view_id.add(2));
                 dock.redraw(cx);
                 log_list.redraw(cx);
+            }
+            AppAction::SetSnapshotMessage{message}=>{
+                snapshot.set_message(cx, message);
+            }
+            AppAction::RedrawSnapshots=>{
+                snapshot.redraw(cx);
             }
         }
                 

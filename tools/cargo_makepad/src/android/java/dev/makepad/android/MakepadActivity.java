@@ -311,6 +311,11 @@ public class MakepadActivity
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        
+        HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
+        webSocketsThreadHandler.start();
+        mWebSocketsHandler = new Handler(webSocketsThreadHandler.getLooper());
+        
         super.onCreate(savedInstanceState);
         
         this.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -328,9 +333,7 @@ public class MakepadActivity
         mVideoPlaybackHandler = new Handler(decoderThreadHandler.getLooper());
         mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
-        HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
-        webSocketsThreadHandler.start();
-        mWebSocketsHandler = new Handler(webSocketsThreadHandler.getLooper());
+
 
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
@@ -500,6 +503,7 @@ public class MakepadActivity
     }
 
     public void openWebSocket(long id, String url, long callback) {
+        
         MakepadWebSocket webSocket = new MakepadWebSocket(id, url, callback);
         mActiveWebsockets.put(id, webSocket);
         webSocket.connect();
@@ -512,7 +516,7 @@ public class MakepadActivity
     }
 
     public void sendWebSocketMessage(long id, byte[] message) {
-
+      
         MakepadWebSocket webSocket = mActiveWebsockets.get(id);
         if (webSocket != null) {
             webSocket.sendMessage(message);
@@ -520,6 +524,7 @@ public class MakepadActivity
     }
 
     public void closeWebSocket(long id) {
+        
         MakepadWebSocket socket = mActiveWebsockets.get(id);
         if (socket != null) {
             socket.closeSocketAndClearCallback();

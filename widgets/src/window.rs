@@ -63,7 +63,6 @@ live_design!{
         }
         body = <KeyboardView> {
             width: Fill, height: Fill,
-            padding:5
             keyboard_min_shift: 30,
         }
         
@@ -482,7 +481,7 @@ impl Widget for Window {
         
         self.main_draw_list.begin_always(cx);
         
-        let size = dvec2(15.0,12.0);
+        let size = dvec2(1500.0,1200.0);
         cx.begin_sized_turtle(size, Layout::flow_down());
                 
         self.overlay.begin(cx);
