@@ -183,7 +183,7 @@ live_design!{
             <Hr> {}
             <H4> { text: "ButtonFlatterIcon"}
             <UIZooRowH> {
-                <ButtonFlatIcon> {
+                <ButtonFlatterIcon> {
                     draw_icon: {
                         color: #f00,
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
