@@ -31,7 +31,7 @@ live_design!{
             width: Fill, height: Fill,
             flow: Down,
             spacing: (THEME_SPACE_2)
-            padding: <THEME_MSPACE_3> {}
+            padding: <THEME_MSPACE_3> { right: (THEME_SPACE_2 * 3) }
             margin: <THEME_MSPACE_V_2> {}
             scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
         }

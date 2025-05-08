@@ -231,6 +231,16 @@
                         <Slider> { text: "Bevel" }
                         <Slider> { text: "Rounding" }
                         <Slider> { text: "Space" }
+                        <ButtonFlatterIcon> {
+                            height: Fill, width: 40.
+                            icon_walk: { width: 12.5, height: Fit, }
+                            draw_icon: {
+                                color: (THEME_COLOR_MAKEPAD),
+                                color_hover: (THEME_COLOR_LABEL_INNER_HOVER),
+                                color_down: (THEME_COLOR_LABEL_INNER_DOWN),
+                                svg_file: dep("crate://self/resources/Icon_Reload.svg"),
+                            }
+                        }
                     }
 
 
