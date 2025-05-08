@@ -1528,14 +1528,21 @@ impl Widget for TextInput {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
-                modifiers: KeyModifiers {
+                modifiers: mods @ KeyModifiers {
                     shift: false,
                     ..
                 },
                 ..
             }) => {
                 cx.hide_text_ime();
-                cx.widget_action(uid, &scope.path, TextInputAction::Returned(self.text.clone()));
+                cx.widget_action(
+                    uid,
+                    &scope.path,
+                    TextInputAction::Returned(
+                        self.text.clone(),
+                        mods,
+                    ),
+                );
             },
 
             Hit::KeyDown(KeyEvent {
@@ -1808,10 +1815,10 @@ impl TextInputRef {
         }
     }
 
-    pub fn returned(&self, actions: &Actions) -> Option<String> {
+    pub fn returned(&self, actions: &Actions) -> Option<(String, KeyModifiers)> {
         for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()){
-            if let TextInputAction::Returned(text) = action{
-                return Some(text);
+            if let TextInputAction::Returned(text, modifiers) = action {
+                return Some((text, modifiers));
             }
         }
         None
@@ -1886,7 +1893,7 @@ pub enum TextInputAction {
     None,
     KeyFocus,
     KeyFocusLost,
-    Returned(String),
+    Returned(String, KeyModifiers),
     Escaped,
     Changed(String),
     KeyDownUnhandled(KeyEvent),
