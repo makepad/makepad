@@ -480,7 +480,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_drawing(&mut self) {
-        if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() {
+        if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() || self.demo_time_repaint {
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(self.os.timers.time_now());
             }
@@ -634,7 +634,7 @@ impl Cx {
             }).expect("Cant load openGL functions");
             
             // SAFETY: This creates an EGL surface. It's safe as long as we have valid EGL display, config, and window.
-            libgl.enable_debugging();
+            //libgl.enable_debugging();
             
             let surface = unsafe {(libegl.eglCreateWindowSurface.unwrap())(
                 egl_display,

@@ -6,7 +6,7 @@ use {
     crate::{
         makepad_code_editor::{CodeDocument, decoration::{Decoration, DecorationSet}, CodeSession},
         makepad_platform::makepad_live_compiler::LiveFileChange,
-        
+        app::AppAction,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
         file_system::FileClient,
@@ -23,6 +23,7 @@ use {
             FileNodeData,
             FileTreeData,
             GitLog,
+            GitCommit,
             SaveKind,
             SaveFileResponse
         },
@@ -40,7 +41,52 @@ pub struct FileSystem {
     pub git_logs: Vec<GitLog>,
     pub snapshot_image_data: RefCell<HashMap<String, SnapshotImageData>>,
     pub search_results_id: u64,
-    pub search_results: Vec<SearchResult>
+    pub search_results: Vec<SearchResult>,
+    pub snapshot_creation: SnapshotCreation
+}
+
+pub enum SnapshotCreation{
+    Idle,
+    Started{message:String},
+    ReceivedImage{root:String, message:String, data:Option<Vec<u8>>},
+    ReceivedHash{hash: String, message:String}
+}
+impl Default for SnapshotCreation{
+    fn default()->Self{SnapshotCreation::Idle}
+}
+impl SnapshotCreation{
+    fn handle_image(&mut self, cx:&mut Cx, file_client:&mut FileClient, git_logs:&mut Vec<GitLog>, root:String, data:Vec<u8> ){
+        if let Self::ReceivedHash{hash, message} = self{
+            file_client.send_request(FileRequest::SaveSnapshotImage {root:root.to_string(), hash:hash.clone(), data});
+            if let Some(git_log) = git_logs.iter_mut().find(|v| v.root == root){
+                git_log.commits.insert(0, GitCommit{
+                    hash: hash.clone(),
+                    message:message.clone()
+                });
+                cx.action(AppAction::RedrawSnapshots);
+            }
+            *self = Self::Idle
+        }
+        else if let Self::Started{message} = self{
+            *self = Self::ReceivedImage{root, data:Some(data), message:message.clone()}
+        }
+    }
+    fn handle_hash(&mut self, cx:&mut Cx, file_client:&mut FileClient, git_logs:&mut Vec<GitLog>, hash:String){
+        if let Self::ReceivedImage{root, data, message} = self{
+            file_client.send_request(FileRequest::SaveSnapshotImage {root:root.clone(),  hash: hash.clone(), data: data.take().unwrap()});
+            if let Some(git_log) = git_logs.iter_mut().find(|v| v.root == *root){
+                git_log.commits.insert(0, GitCommit{
+                    hash: hash,
+                    message:message.clone()
+                });
+                cx.action(AppAction::RedrawSnapshots);
+            }
+            *self = Self::Idle
+        }
+        else if let Self::Started{message} = self{
+            *self = Self::ReceivedHash{hash, message:message.clone()}
+        }
+    }
 }
 
 pub enum SnapshotImageData{
@@ -119,6 +165,15 @@ impl FileSystem {
     pub fn load_file_tree(&self) {
         self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
     }
+        
+    pub fn load_snapshot(&mut self, root:String, hash:String) {
+        self.file_client.send_request(FileRequest::LoadSnapshot {root:root, hash});                
+    }
+    
+    pub fn create_snapshot(&mut self, root:String, message:String) {
+        self.snapshot_creation = SnapshotCreation::Started{message: message.clone()};
+        self.file_client.send_request(FileRequest::CreateSnapshot {root:root, message});                
+    }
             
     pub fn load_snapshot_image(&self, root:&str, hash:&str) {
         let mut image_data = self.snapshot_image_data.borrow_mut();
@@ -129,22 +184,21 @@ impl FileSystem {
         
     }
     
-    pub fn save_snapshot_image(&self, root:&str, hash:&str, width:usize, height: usize, data:Arc<Vec<u8>>) {
-        // lets compress this to a png
-        
+    pub fn save_snapshot_image(&mut self, cx:&mut Cx, root:&str, hash:&str, width:usize, height: usize, data:Vec<u8>) {
         let mut jpeg = Vec::new();
         let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 100);
-        encoder.encode(&data, width as u16, height as u16, jpeg_encoder::ColorType::Rgb).unwrap();
+        encoder.encode(&data, width as u16, height as u16, jpeg_encoder::ColorType::Bgra).unwrap();
         
         let mut image_data = self.snapshot_image_data.borrow_mut();
         if image_data.get(hash).is_none(){
+            
+            self.snapshot_creation.handle_image(cx, &mut self.file_client, &mut self.git_logs, root.to_string(), jpeg.clone());
+            
             image_data.insert(root.to_string(), SnapshotImageData::Loaded{
                 data: Arc::new(jpeg),
                 path: Path::new(hash).with_extension("jpg")
             });
-            self.file_client.send_request(FileRequest::SaveSnapshotImage {root:root.to_string(), hash:hash.to_string(), data:(*data).clone()});
-        }
-                
+        }   
     }
             
     pub fn get_editor_template_from_file_id(&self, file_id:LiveId)->Option<LiveId>{
@@ -237,15 +291,30 @@ impl FileSystem {
             while let Ok(message) = self.file_client.inner.as_mut().unwrap().message_receiver.try_recv() {
                 match message {
                     FileClientMessage::Response(response) => match response {
+                        FileResponse::CreateSnapshot(response)=>{
+                            match response{
+                                Ok(res)=>{
+                                    self.snapshot_creation.handle_hash(cx, &mut self.file_client,  &mut self.git_logs, res.hash);
+                                }
+                                Err(res)=>{
+                                    crate::log!("ERROR {:?}", res);
+                                }
+                            }
+                        }
                         FileResponse::SearchInProgress(_)=>{
                         }
                         FileResponse::SaveSnapshotImage(_)=>{
+                        }
+                        FileResponse::LoadSnapshot(res)=>{
+                            if let Err(e) = res{
+                                crate::log!("Error loading snapshot {:?}", e);
+                            }
                         }
                         FileResponse::LoadSnapshotImage(response)=>{
                             // lets store this in our snapshot cache
                             match response{
                                 Ok(res)=>{
-                                    let path = Path::new(&res.hash).to_path_buf().with_extension(".png");
+                                    let path = Path::new(&res.hash).to_path_buf().with_extension("jpg");
                                     self.snapshot_image_data.borrow_mut().insert(res.hash, 
                                         SnapshotImageData::Loaded{
                                             data:Arc::new(res.data),
@@ -769,7 +838,7 @@ impl FileSystem {
         }
         
         self.file_nodes.clear();
-        
+        self.git_logs.clear();
         create_file_node(
             Some(live_id!(root).into()),
             "".to_string(),

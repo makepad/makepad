@@ -86,6 +86,24 @@ live_design!{
             color: (THEME_COLOR_D_2)
         }
         flow: Down
+        busy = <View>{
+            width: 70, height: 10,
+            margin: {top:10.,bottom:0}
+            padding: 0.,
+            show_bg: true,
+            draw_bg:{
+                fn pixel(self)->vec4{
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    let x = 0.;
+                    for i in 0..5{
+                        x = x + 8.;
+                        sdf.circle(x,5.,2.5);
+                        sdf.fill((THEME_COLOR_MAKEPAD));
+                    }
+                    return sdf.result
+                }
+            }
+        }
         md = <Markdown>{
             code_block = <View>{
                 
@@ -138,24 +156,7 @@ live_design!{
             use_code_block_widget: true,
             body:""
         }
-        busy = <View>{
-            width: 50, height: 10,
-            margin: 0.,
-            padding: 0.,
-            show_bg: true,
-            draw_bg:{
-                fn pixel(self)->vec4{
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    let x = 0.;
-                    for i in 0..3{
-                        x = x + 8.;
-                        sdf.circle(x,5.,2.5);
-                        sdf.fill((THEME_COLOR_MAKEPAD));
-                    }
-                    return sdf.result
-                }
-            }
-        }
+        
     }
     
     pub AiChatView = {{AiChatView}}{
@@ -316,8 +317,9 @@ impl AiChatView{
                 
                 // items with actions
                 let chat_list = self.view.portal_list(id!(list));
+                let items_len = doc.file.history[self.history_slot].messages.len();
                 for (item_id, _item) in chat_list.items_with_actions(&actions) {
-                    
+                    let item_id = items_len - item_id - 1;
                     if let Some(wa) = actions.widget_action(id!(copy_button)){
                         if wa.widget().as_button().pressed(actions){
                             //let code_view = wa.widget_nth(2).widget(id!(code_view));
@@ -363,7 +365,9 @@ impl AiChatView{
                 }
                                 
                 let list = self.view.portal_list(id!(list));
+                let items_len = doc.file.history[self.history_slot].messages.len();
                 for (item_id,item) in list.items_with_actions(actions){
+                    let item_id = items_len - item_id - 1;
                     let message_input = item.text_input(id!(message_input));
                     if let Some(text) = message_input.changed(actions){
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, text);
@@ -479,12 +483,13 @@ impl Widget for AiChatView {
                     
                     if let Some(mut list) = item.as_portal_list().borrow_mut() {
                         doc.file.clamp_slot(&mut self.history_slot);
-                        list.set_item_range(cx, 0,doc.file.history[self.history_slot].messages.len());
+                        let items_len = doc.file.history[self.history_slot].messages.len();
+                        list.set_item_range(cx, 0, items_len);
                         
                         while let Some(item_id) = list.next_visible_item(cx) {
-                            match doc.file.history[self.history_slot].messages.get(item_id){
+                            match doc.file.history[self.history_slot].messages.get(items_len-item_id-1){
                                 Some(AiChatMessage::Assistant(val))=>{
-                                    let busy = item_id + 1 == doc.file.history[self.history_slot].messages.len() && 
+                                    let busy = item_id == 0 && 
                                     doc.in_flight.is_some();
                                     let item = list.item(cx, item_id, live_id!(Assistant));
                                     // alright we got the assistant. lets set the markdown stuff

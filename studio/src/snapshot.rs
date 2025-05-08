@@ -19,14 +19,33 @@ live_design!{
     
     SnapshotItem = <RoundedView> {
         height: Fit, width: Fill
-        draw_bg:{color:#5}
+        draw_bg:{color:#2}
         flow:Down
-        message = <Label>{text:"test"}
+        align:{x:0.5},
+        
+        message = <Label>{text:"test", width:Fill, height:Fit}
+        run_button = <ButtonFlat> {
+            width: Fit,
+            height: Fit,
+            padding: <THEME_MSPACE_2> {}
+            margin: 0.
+            icon_walk: {
+                width: 12, height: Fit,
+                margin: { left: 10 }
+            }
+                                                                        
+            draw_icon: {
+                color: (THEME_COLOR_U_4),
+                svg_file: dep("crate://self/resources/icons/icon_run.svg"),
+            }
+            icon_walk: { width: 9. }
+        }
         image = <Image> {
-            width: Fill,
-            height: 300
-            min_width: 1920,
-            min_height: 1080,
+            width: 200,
+            height: 100
+            margin:{top:10,bottom:10}
+            //min_width: 1920,
+            //min_height: 1080,
             fit: Horizontal,
             draw_bg: {
                 instance hover: 0.0
@@ -58,19 +77,21 @@ live_design!{
         //draw_bg: {color: (THEME_COLOR_BG_CONTAINER)}
         flow: Down,
         <DockToolbar> {
-            height: 72
+            height: Fit
             content = {
+                height: Fit
                 padding:{top:1}
                 spacing: (THEME_SPACE_2)
                 flow: Down
                 <View>{
+                    height: Fit
                     spacing: 5
                     roots_dropdown = <DropDownFlat>{ width: Fit, popup_menu_position: BelowInput }
-                    <ButtonFlat>{text:"Snapshot"}
+                    snapshot_button = <ButtonFlat>{text:"Snapshot"}
                     <Filler> {}
                     <ToggleFlat>{text:"Auto"}
                 }
-                <TextInputFlat>{empty_text:"Description"}
+                message_input = <TextInputFlat>{empty_text:"Description"}
             }
         }
         list = <PortalList> {
@@ -145,6 +166,35 @@ impl Snapshot{
             item.draw_all(cx, &mut Scope::empty());
         }
     }
+    
+    fn load_snapshot(&mut self, _cx:&mut Cx, data:&mut AppData, item_id:usize){
+        let root_id = self.drop_down(id!(roots_dropdown)).selected_item();
+        let git_log = data.file_system.git_logs.get(root_id).unwrap();
+        if let Some(commit) = git_log.commits.get(item_id){
+            data.file_system.load_snapshot(git_log.root.clone(), commit.hash.clone());
+        }
+    }
+    
+    fn make_snapshot(&mut self, _cx:&mut Cx, data:&mut AppData){
+        let root_id = self.drop_down(id!(roots_dropdown)).selected_item();
+        let git_log = data.file_system.git_logs.get(root_id).unwrap();
+        // we should find all active build ids with the same root
+                        
+        let mut iter = data.build_manager.active.builds_with_root(git_log.root.clone());
+        if let Some(item) = iter.next(){
+            // we should do a shell git commit at the right path
+            let message = self.view(id!(message_input)).text();
+            if message.len() == 0{
+                return
+            }
+            data.file_system.create_snapshot(git_log.root.clone(), message);
+            data.build_manager.active_build_websockets.lock().unwrap().borrow_mut().send_studio_to_app(*item.0, StudioToApp::Screenshot(StudioScreenshotRequest{
+                kind_id: 0,
+                request_id:self.request_id
+            }));
+            self.request_id += 1;
+        }
+    }
 }
 
 impl Widget for Snapshot {
@@ -166,25 +216,30 @@ impl Widget for Snapshot {
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
-        let _snapshots = self.view.portal_list(id!(list));
+        let snapshots = self.view.portal_list(id!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get_mut::<AppData>().unwrap();
         if let Event::Actions(actions) = event{
             if self.view.button(id!(snapshot_button)).clicked(actions){
-                let root_id = self.drop_down(id!(roots_dropdown)).selected_item();
-                let git_log = data.file_system.git_logs.get(root_id).unwrap();
-                // we should find all active build ids with the same root
-                let mut iter = data.build_manager.active.builds_with_root(git_log.root.clone());
-                if let Some(item) = iter.next(){
-                    data.build_manager.active_build_websockets.lock().unwrap().borrow_mut().send_studio_to_app(*item.0, StudioToApp::Screenshot(StudioScreenshotRequest{
-                        kind_id: 0,
-                        request_id:self.request_id
-                    }));
-                    self.request_id += 1;
-                }
+                self.make_snapshot(cx, data);
             }
             if let Some(_search) = self.view.text_input(id!(search_input)).changed(&actions){
             }
+            for (item_id, _item) in snapshots.items_with_actions(&actions) {
+                if let Some(wa) = actions.widget_action(id!(run_button)){
+                    if wa.widget().as_button().pressed(actions){
+                        self.load_snapshot(cx, data, item_id);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl SnapshotRef{
+    pub fn set_message(&self, cx:&mut Cx, message:String){
+        if let Some(inner) = self.borrow_mut(){
+            inner.view(id!(message_input)).set_text(cx, &message);
         }
     }
 }

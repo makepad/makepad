@@ -69,6 +69,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
+            self.passes[*pass_id].set_time(with_ios_app(|app| app.time_now() as f32));
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Xr => {}
                 CxPassParent::Window(_window_id) => {
@@ -175,6 +176,7 @@ impl Cx {
                 }
                 // ok here we send out to all our childprocesses
                 self.handle_repaint(metal_cx);
+                
             }
             IosEvent::TouchUpdate(e)=>{
                 self.fingers.process_touch_update_start(e.time, &e.touches);
@@ -231,7 +233,7 @@ impl Cx {
             }
         }
 
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty|| self.demo_time_repaint{
             EventFlow::Poll
         } else {
             EventFlow::Wait

@@ -122,7 +122,7 @@ pub enum AppToStudio{
 #[derive(SerBin, DeBin, Debug)]
 pub struct StudioScreenshotResponse{
     pub request_ids: Vec<u64>,
-    pub image: Option<Vec<u32>>,
+    pub image: Option<Vec<u8>>,
     pub width: u32,
     pub height: u32
 }

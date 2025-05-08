@@ -39,7 +39,15 @@ pub enum FileRequest {
         path: String, 
         id: u64
     },
+    CreateSnapshot{
+        root: String,
+        message: String,
+    },
     LoadSnapshotImage{
+        root: String,
+        hash: String,
+    },
+    LoadSnapshot{
         root: String,
         hash: String,
     },
@@ -123,6 +131,32 @@ pub struct SaveSnapshotImageResponse{
     pub hash: String,
 }
 
+
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct CreateSnapshotResponse{
+    pub root: String,
+    pub hash: String,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct LoadSnapshotResponse{
+    pub root: String,
+    pub hash: String,
+}
+
+
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct CreateSnapshotError{
+    pub root: String,
+    pub error:String,
+}
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct LoadSnapshotError{
+    pub root: String,
+    pub error:String,
+}
+
+
 /// Each `Response` corresponds to the `Request` with the same name.
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum FileResponse {
@@ -137,7 +171,9 @@ pub enum FileResponse {
     
     LoadSnapshotImage(Result<LoadSnapshotImageResponse, LoadSnapshotImageError>),
     SaveSnapshotImage(Result<SaveSnapshotImageResponse, FileError>),
-            
+                
+    CreateSnapshot(Result<CreateSnapshotResponse, CreateSnapshotError>),
+    LoadSnapshot(Result<LoadSnapshotResponse, LoadSnapshotError>),
     // Existing variants...
     SearchInProgress(u64)
 }
