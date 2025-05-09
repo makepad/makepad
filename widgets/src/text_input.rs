@@ -811,7 +811,7 @@ pub struct TextInput {
     #[live] is_read_only: bool,
     #[live] is_numeric_only: bool,
     #[live] empty_text: String,
-    #[live] text: String,
+    #[rust] text: String,
     #[live(0.5)] blink_speed: f64,
 
     #[rust] password_text: String,
@@ -822,11 +822,22 @@ pub struct TextInput {
     #[rust] blink_timer: Timer,
 }
 
-// impl LiveHook for TextInput{
-//     fn after_update_from_doc(&mut self, _cx:&mut Cx){
-//         self.selection = Selection::default();
-//     }
-// }
+ impl LiveHook for TextInput{
+     fn apply_value_unknown(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        if nodes[index].id == live_id!(text){
+            if !apply.from.is_update_from_doc(){
+                return self.text.apply(cx, apply, index, nodes)
+            }
+        }
+        else{
+            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+        }
+        nodes.skip_node(index)
+     }
+     fn after_new_from_doc(&mut self, cx:&mut Cx){
+         self.check_text_is_empty(cx);
+     }
+ }
 
 impl TextInput {
     pub fn is_password(&self) -> bool {
@@ -1314,12 +1325,6 @@ impl TextInput {
             cx.stop_timer(self.blink_timer);
             self.blink_timer = cx.start_timeout(self.blink_speed)
         }
-    }
-}
-
-impl LiveHook for TextInput {
-    fn after_new_from_doc(&mut self, cx:&mut Cx){
-        self.check_text_is_empty(cx);
     }
 }
 

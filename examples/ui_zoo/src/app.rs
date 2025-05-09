@@ -212,7 +212,7 @@
                             }
                         }
 
-                        theme_contrast = <Slider> { text: "Contrast", default: 1.0, min:0.8 max: 1.0 }
+                        theme_contrast = <Slider> { text: "Contrast", default: 1.0, min:0.8 max: 2.0 }
                         <View> {
                             flow: Down
                             spacing: 0.
