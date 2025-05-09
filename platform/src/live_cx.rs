@@ -244,11 +244,8 @@ impl Cx {
         let file = live_registry.file_id_to_file_mut(file_id);
         // lets find the child
         if let Some(index) = file.original.nodes.child_by_name(0, LiveProp::instance(node)){
-            crate::log!("SETTING VALUE");
             file.original.nodes[index].value = value;
         }
-        
-        
     }
     
     pub fn handle_live_edit(&mut self)->bool{
@@ -323,6 +320,7 @@ impl Cx {
         }
         else if reload_dsl{
             live_registry.re_expand_all_files();
+            self.draw_shaders.reset_for_live_reload();
             true
         }
         else{
