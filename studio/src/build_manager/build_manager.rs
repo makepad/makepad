@@ -860,6 +860,8 @@ impl BuildManager {
                             "image/jpg"
                         } else if path.ends_with(".svg") {
                             "image/svg+xml"
+                        } else if path.ends_with(".md") {
+                            "text/markdown"
                         } else {
                             continue;
                         };

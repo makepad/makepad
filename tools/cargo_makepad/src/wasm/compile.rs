@@ -278,6 +278,7 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
     println!("*.png => image/png");
     println!("*.jpg => image/jpg");
     println!("*.svg => image/svg+xml");
+    println!("*.md => text/markdown");
     Ok(WasmBuildResult{
         app_dir
     })
@@ -335,6 +336,7 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
                     else if path.ends_with(".png") {"image/png"}
                     else if path.ends_with(".jpg") {"image/jpg"}
                     else if path.ends_with(".svg") {"image/svg+xml"}
+                    else if path.ends_with(".md") {"text/markdown"}
                     else {continue};
                                             
                     if path.contains("..") || path.contains('\\') {

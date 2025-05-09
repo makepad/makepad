@@ -381,7 +381,6 @@ impl LiveRegister for App {
             use makepad_platform::makepad_live_tokenizer::colorhex::hex_bytes_to_u32;
             
             if let Some(txt) = self.ui.text_input(id!(theme_tint_color)).changed(&actions){
-                log!("{}", txt);
                 cx.set_dsl_value(
                     live_id!(makepad_widgets),
                     live_id!(theme_desktop_dark),
