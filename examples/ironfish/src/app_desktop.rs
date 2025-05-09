@@ -143,14 +143,14 @@ live_design! {
         height: Fit,
         align: { x: 0.0, y: 0.5 }
         margin: {bottom: (SSPACING_2), top: (SSPACING_2)}
-        padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_1)}
+        padding: <SPACING_0> {}
     }
 
     FishSubTitle = <View> {
         width: Fit,
         height: Fit,
         margin: {top: 1}
-        padding: {top: (SSPACING_2), right: (SSPACING_1), bottom: (SSPACING_2), left: (SSPACING_1)}
+        padding: <SPACING_0> {}
 
         label = <Label> {
             draw_text: {
@@ -213,7 +213,7 @@ live_design! {
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
     }
 
-    FishDropDown = <DropDownFlat> {
+    FishDropDown = <DropDownFlatter> {
         width: Fit
         // padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}
 
@@ -491,6 +491,7 @@ live_design! {
         align: {y: 0.5}
         padding: <SPACING_0> {},
         flow: Right
+        width: Fill,
         dropdown = <FishDropDown> {
             margin: {left: (SSPACING_1), right: (SSPACING_1)}
         }
@@ -565,7 +566,7 @@ live_design! {
             height: Fit,
             width: Fill,
             margin: <SPACING_0> {}
-            padding: <SPACING_2> {}
+            padding: <SPACING_0> {}
         }
         menu = <View> {
             flow: Right
@@ -1010,7 +1011,7 @@ live_design! {
 
             scaletype = <InstrumentDropdown> {
                 height: Fit,
-                width: Fit
+                width: Fill,
                 dropdown = {
                     labels: ["Minor", "Major", "Dorian", "Pentatonic"]
                     values: [Minor, Major, Dorian, Pentatonic]
@@ -1021,9 +1022,22 @@ live_design! {
                 width: Fill
             }
 
-            clear_grid = <IconButton> {draw_icon: {svg_file: (ICO_SEQ_SWEEP)} icon_walk: {width: 15.0, height: Fit}}
-            grid_up = <IconButton> {draw_icon: {svg_file: (ICO_UP)} icon_walk: {width: 10.0, height: Fit}}
-            grid_down = <IconButton> {draw_icon: {svg_file: (ICO_DOWN)} icon_walk: {width: 10.0, height: Fit}}
+            clear_grid = <IconButton> {
+                width: Fit,
+                draw_icon: {svg_file: (ICO_SEQ_SWEEP)}
+                icon_walk: {
+                    width: 15.0,
+                    height: Fit
+                }
+            }
+            grid_up = <IconButton> {
+                draw_icon: {svg_file: (ICO_UP)},
+                icon_walk: {width: 10.0, height: Fit}
+            }
+            grid_down = <IconButton> {
+                draw_icon: {svg_file: (ICO_DOWN)}
+                icon_walk: {width: 10.0, height: Fit}
+            }
         }
     }
 
@@ -1197,8 +1211,14 @@ live_design! {
                     // playpause = <PlayPause> {}
 
                     playpause = <CheckBox> {
-                        draw_bg: {check_type: None}
-                        draw_icon: {svg_file: (ICO_PLAY)}
+                        draw_bg: {
+                            check_type: None
+                        }
+                        draw_icon: {
+                            svg_file: (ICO_PLAY)
+                            color: #0,
+                            color_active: #FFFFAA,
+                        }
                         icon_walk: {
                             width: 25.0,
                             height: Fit,
@@ -1995,47 +2015,42 @@ live_design! {
             flow: Down,
             align: {x: 0.0, y: 0.0}
             spacing: 0,
-            padding: <SPACING_2> {}
-            height: 135,
+            padding: 0.
+            height: 150,
             width: Fill,
-            margin: <SPACING_2> {}
+            margin: { }
 
             <View> {
                 width: Fill
                 flow: Right,
+                padding: <SPACING_3> {}
                 align: {x: 0.0, y: 0.0}
 
                 <View> {
-                    flow: Down,
-                    align: {x: 0.0, y: 0.0}
+                    flow: Right,
+                    align: {x: 0.0, y: 1.0}
+                    // margin: { top: 20. }
                     <Label> {
-                        margin: {bottom: (SSPACING_1), right:10}
+                        align: {x: 0.0, y: 1.0}
                         draw_text: {
                             text_style: <H2_TEXT_BOLD> {},
-                            color: (COLOR_UP_5)
+                            color: (COLOR_UP_6)
                         }
                         text: "Preset"
                     }
                     <View>{
-                        preset_1 = <Button>{text:"1"}
-                        preset_2 = <Button>{text:"2"}
-                        preset_3 = <Button>{text:"3"}
-                        preset_4 = <Button>{text:"4"}
-                        preset_5 = <Button>{text:"5"}
-                        preset_6 = <Button>{text:"6"}
-                        preset_7 = <Button>{text:"7"}
-                        preset_8 = <Button>{text:"8"}
+                        height: Fit
+                        align: {x: 0.0, y: 1.0}
+                        spacing: (SSPACING_1)
+                        preset_1 = <ButtonFlatter>{text:"1"}
+                        preset_2 = <ButtonFlatter>{text:"2"}
+                        preset_3 = <ButtonFlatter>{text:"3"}
+                        preset_4 = <ButtonFlatter>{text:"4"}
+                        preset_5 = <ButtonFlatter>{text:"5"}
+                        preset_6 = <ButtonFlatter>{text:"6"}
+                        preset_7 = <ButtonFlatter>{text:"7"}
+                        preset_8 = <ButtonFlatter>{text:"8"}
                     }
-                        
-                    
-                    /*
-                    <Label> {
-                        draw_text: {
-                            text_style: <H2_TEXT_REGULAR> {font_size: 18},
-                            color: (COLOR_UP_6)
-                        }
-                        text: "Ironfish "
-                    }*/
                 }
                 <View> {
                     width: Fill,
@@ -2053,32 +2068,32 @@ live_design! {
 
             }
 
-            <FillerV> {}
+            // <FillerV> {}
 
-            <View> {
-                width: Fill,
-                height: 35
-                spacing: (SSPACING_1)
+            // <View> {
+            //     width: Fill,
+            //     height: 35
+            //     spacing: (SSPACING_1)
 
 
-                prev = <IconButton> {draw_icon: {svg_file: (ICO_PREV)} icon_walk: {width: Fit, height: 11.0}, margin: {top: 3.25, right: -10.0, bottom: 0.0, left: 0.0}}
-                presets = <IconButton> {draw_icon: {svg_file: (ICO_PRESET)} icon_walk: {width: Fit, height: 17.5}, margin: 0.0}
-                next = <IconButton> {draw_icon: {svg_file: (ICO_NEXT)}, icon_walk: {width: Fit, height: 11.0}, margin: {top: 3.25, right: 0.0, bottom: 0.0, left: -10.0}}
+            //     prev = <IconButton> {draw_icon: {svg_file: (ICO_PREV)} icon_walk: {width: Fit, height: 11.0}, margin: {top: 3.25, right: -10.0, bottom: 0.0, left: 0.0}}
+            //     presets = <IconButton> {draw_icon: {svg_file: (ICO_PRESET)} icon_walk: {width: Fit, height: 17.5}, margin: 0.0}
+            //     next = <IconButton> {draw_icon: {svg_file: (ICO_NEXT)}, icon_walk: {width: Fit, height: 11.0}, margin: {top: 3.25, right: 0.0, bottom: 0.0, left: -10.0}}
 
-                panic = <IconButton> {draw_icon: {svg_file: (ICO_PANIC)} icon_walk: {width: Fit, height: 17.0}, margin: {left: 5.0, right: -10.0}}
-                platformtoggle = <IconButton> {draw_icon: {svg_file: (ICO_PLAT_MOBILE)} icon_walk: {width: Fit, height: 18.5}}
+            //     panic = <IconButton> {draw_icon: {svg_file: (ICO_PANIC)} icon_walk: {width: Fit, height: 17.0}, margin: {left: 5.0, right: -10.0}}
+            //     platformtoggle = <IconButton> {draw_icon: {svg_file: (ICO_PLAT_MOBILE)} icon_walk: {width: Fit, height: 18.5}}
 
-                gitlink = <Label> {
-                    draw_text: {text_style: <H2_TEXT_REGULAR> {}, color: (COLOR_UP_5)}
-                    text: "Made with Makepad\ngithub.com/makepad/makepad"
-                    margin: {top: 7.5, left: 5.0}
-                }
+            //     gitlink = <Label> {
+            //         draw_text: {text_style: <H2_TEXT_REGULAR> {}, color: (COLOR_UP_5)}
+            //         text: "Made with Makepad\ngithub.com/makepad/makepad"
+            //         margin: {top: 7.5, left: 5.0}
+            //     }
 
-                <FillerH> {}
+            //     <FillerH> {}
 
-                undo = <IconButton> {draw_icon: {svg_file: (ICO_UNDO)} icon_walk: {width: Fit, height: 15.0}, margin: {top: 3.25, right: -5.0, bottom: 0.0, left: 0.0}}
-                redo = <IconButton> {draw_icon: {svg_file: (ICO_REDO)} icon_walk: {width: Fit, height: 15.0}, margin: {top: 3.25, right: 0.0, bottom: 0.0, left: -5.0}}
-            }
+            //     undo = <IconButton> {draw_icon: {svg_file: (ICO_UNDO)} icon_walk: {width: Fit, height: 15.0}, margin: {top: 3.25, right: -5.0, bottom: 0.0, left: 0.0}}
+            //     redo = <IconButton> {draw_icon: {svg_file: (ICO_REDO)} icon_walk: {width: Fit, height: 15.0}, margin: {top: 3.25, right: 0.0, bottom: 0.0, left: -5.0}}
+            // }
 
         }
 
