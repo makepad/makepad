@@ -212,26 +212,27 @@
                             }
                         }
 
-                        <Slider> { text: "Contrast" }
+                        theme_contrast = <Slider> { text: "Contrast", default: 1.0, min:0.8 max: 1.0 }
                         <View> {
                             flow: Down
                             spacing: 0.
                             <Label> { margin: {top: (THEME_SPACE_1)}, padding: 0., width: Fit, text: "Tint Color"}
-                            <TextInput> { empty_text: "Hex color", text: "#f00" }
+                            theme_tint_color = <TextInput> { empty_text: "Hex color", text: "f00" }
                         }
-                        <Slider> { text: "Tint Amount" }
+                        theme_tint_amount = <Slider> { text: "Tint Amount", default: 0.0, min:0.0 max: 1.0  }
                         <Vr> {}
                         <Pbold> {
                             width: Fit,
                             text: "Font"
                         }
-                        <Slider> { text: "Size" }
-                        <Slider> { text: "Size Contrast" }
+                        theme_font_size = <Slider> { text: "Size", default: 7.5, min:3.0 max: 12.0  }
+                        theme_font_size_contrast = <Slider> { text: "Size Contrast", default: 2.5, min:1.0 max: 5.0  }
                         <Vr> {}
-                        <Slider> { text: "Bevel" }
-                        <Slider> { text: "Rounding" }
-                        <Slider> { text: "Space" }
-                        <ButtonFlatterIcon> {
+                        theme_bevel = <Slider> { text: "Bevel", default: 0.75, min:0.0 max: 1.0   }
+                        theme_rounding = <Slider> { text: "Rounding", default: 2.5, min:1.0 max: 5.0   }
+                        theme_space = <Slider> { text: "Space", default: 6.0, min:1.0 max: 10.0   }
+                        /*
+                        reload_button = <ButtonFlatterIcon> {
                             height: Fill, width: Fit,
                             margin: { right: (THEME_SPACE_1) }
                             icon_walk: { width: 12.5, height: Fit, }
@@ -241,7 +242,7 @@
                                 color_down: (THEME_COLOR_LABEL_INNER_DOWN),
                                 svg_file: dep("crate://self/resources/Icon_Reload.svg"),
                             }
-                        }
+                        }*/
                     }
 
 
@@ -355,6 +356,39 @@ impl LiveRegister for App {
                 self.counter += 1;
                 let lbl = self.ui.label(id!(simpletextinput_outputbox));
                 lbl.set_text(cx,&format!("{} {}" , self.counter, txt));
+            }
+            
+            for slider in [
+                (id!(theme_contrast), live_id!(THEME_COLOR_CONTRAST)),
+                (id!(theme_tint_amount), live_id!(THEME_COLOR_TINT_AMOUNT)),
+                (id!(theme_font_size), live_id!(THEME_FONT_SIZE_BASE)),
+                (id!(theme_font_size_contrast), live_id!(THEME_FONT_SIZE_CONTRAST)),
+                (id!(theme_bevel), live_id!(THEME_BEVELING)),
+                (id!(theme_rounding), live_id!(THEME_CORNER_RADIUS)),
+                (id!(theme_space), live_id!(THEME_SPACE_FACTOR)),
+            ]{
+                if let Some(value) = self.ui.slider(slider.0).end_slide(&actions){
+                    cx.set_dsl_value(
+                        live_id!(makepad_widgets),
+                        live_id!(theme_desktop_dark),
+                        slider.1,
+                        LiveValue::Float64(value)
+                    );
+                    cx.reload_ui_dsl(); 
+                }
+            }
+            
+            use makepad_platform::makepad_live_tokenizer::colorhex::hex_bytes_to_u32;
+            
+            if let Some(txt) = self.ui.text_input(id!(theme_tint_color)).changed(&actions){
+                log!("{}", txt);
+                cx.set_dsl_value(
+                    live_id!(makepad_widgets),
+                    live_id!(theme_desktop_dark),
+                    live_id!(THEME_COLOR_TINT),
+                    LiveValue::Color(hex_bytes_to_u32(&txt.into_bytes()).unwrap_or(0x777777ff))
+                );
+                cx.reload_ui_dsl(); 
             }
 
             if self.ui.button(id!(basicbutton)).clicked(&actions) {

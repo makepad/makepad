@@ -2630,7 +2630,7 @@ pub enum SliderAction {
     StartSlide,
     TextSlide(f64),
     Slide(f64),
-    EndSlide,
+    EndSlide(f64),
     LabelHoverIn(Rect),
     LabelHoverOut,
     None
@@ -2814,7 +2814,7 @@ impl Widget for Slider {
                     self.animator_play(cx, id!(hover.off));
                 }
                 self.dragging = None;
-                cx.widget_action(uid, &scope.path, SliderAction::EndSlide);
+                cx.widget_action(uid, &scope.path, SliderAction::EndSlide(self.to_external()));
                 cx.set_cursor(MouseCursor::Grab);
             }
             Hit::FingerMove(fe) => {
@@ -2902,6 +2902,19 @@ impl SliderRef{
         }
         None
     }
+    
+    pub fn end_slide(&self, actions:&Actions)->Option<f64>{
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            match item.cast(){
+                SliderAction::EndSlide(v) | SliderAction::TextSlide(v) => {
+                    return Some(v)
+                }
+                _=>()
+            }
+        }
+        None
+    }
+    
 
     pub fn label_hover_in(&self, actions:&Actions)->Option<Rect>{
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
