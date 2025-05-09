@@ -13,7 +13,7 @@ live_design! {
     pub View = <ViewBase> {}
     
     pub Hr = <View> {
-        width: Fill, height: (THEME_SPACE_2 * THEME_BEVELING * 7.5),
+        width: Fill, height: (THEME_SPACE_2 * 7.5),
         flow: Down,
         margin: 0.
 
@@ -50,7 +50,7 @@ live_design! {
     }
     
     pub Vr = <View> {
-        width: (THEME_SPACE_2 * THEME_BEVELING * 2.), height: Fill,
+        width: (THEME_SPACE_2 * 2.), height: Fill,
         flow: Right,
 
         show_bg: true, 
