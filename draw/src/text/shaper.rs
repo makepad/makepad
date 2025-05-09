@@ -1,6 +1,7 @@
 use {
     super::{
         font::{Font, GlyphId},
+        slice::SliceExt,
         substr::Substr,
     },
     makepad_rustybuzz as rustybuzz,
@@ -8,8 +9,10 @@ use {
     std::{
         collections::{HashMap, VecDeque},
         hash::Hash,
+        mem,
         rc::Rc,
     },
+    unicode_segmentation::UnicodeSegmentation,
 };
 
 #[derive(Debug)]
@@ -74,8 +77,6 @@ impl Shaper {
         end: usize,
         out_glyphs: &mut Vec<ShapedGlyph>,
     ) {
-        use super::slice::SliceExt;
-
         let (font, fonts) = fonts.split_first().unwrap();
         let mut glyphs = self.reusable_glyphs.pop().unwrap_or(Vec::new());
         self.shape_step(text, font, start, end, &mut glyphs);
@@ -111,8 +112,6 @@ impl Shaper {
         end: usize,
         out_glyphs: &mut Vec<ShapedGlyph>,
     ) {
-        use {std::mem, unicode_segmentation::UnicodeSegmentation};
-
         let mut unicode_buffer = mem::take(&mut self.reusable_unicode_buffer);
         for (index, grapheme) in text[start..end].grapheme_indices(true) {
             let cluster = start + index;
@@ -120,7 +119,8 @@ impl Shaper {
                 unicode_buffer.add(char, cluster as u32);
             }
         }
-        let glyph_buffer = rustybuzz::shape(font.rustybuzz_face(), &[], unicode_buffer);
+        let mut glyph_buffer = rustybuzz::shape(font.rustybuzz_face(), &[], unicode_buffer);
+        let out_glyph_start = out_glyphs.len();
         out_glyphs.extend(
             glyph_buffer
                 .glyph_infos()
@@ -134,6 +134,41 @@ impl Shaper {
                     offset_in_ems: glyph_position.x_offset as f32 / font.units_per_em(),
                 }),
         );
+
+        // HACK: We don't support right-to-left scripts yet. When such scripts are used, cluster
+        // values may be monotonically decreasing instead of increasing, as we assume. This should
+        // be fixed by properly handling bidirectional text (by further breaking up spans into
+        // spans with a single direction), but for now we just check if the cluster values are
+        // monotonically increasing. If they are not, we re-shape the text by replacing each
+        // grapheme with a single character. This is not ideal, but it works for now.
+        if out_glyphs[out_glyph_start..]
+            .windows(2)
+            .any(|glyphs| {
+                glyphs[0].cluster > glyphs[1].cluster
+            })
+        {
+            out_glyphs.truncate(out_glyph_start);
+            let mut unicode_buffer = glyph_buffer.clear();
+            for (index, _) in text[start..end].grapheme_indices(true) {
+                let cluster = start + index;
+                unicode_buffer.add('□', cluster as u32);
+            }
+            glyph_buffer = rustybuzz::shape(font.rustybuzz_face(), &[], unicode_buffer);
+            out_glyphs.extend(
+                glyph_buffer
+                    .glyph_infos()
+                    .iter()
+                    .zip(glyph_buffer.glyph_positions())
+                    .map(|(glyph_info, glyph_position)| ShapedGlyph {
+                        font: font.clone(),
+                        id: glyph_info.glyph_id as u16,
+                        cluster: glyph_info.cluster as usize,
+                        advance_in_ems: glyph_position.x_advance as f32 / font.units_per_em(),
+                        offset_in_ems: glyph_position.x_offset as f32 / font.units_per_em(),
+                    }),
+            );
+        }
+
         self.reusable_unicode_buffer = glyph_buffer.clear();
     }
 }
