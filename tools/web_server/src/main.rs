@@ -81,6 +81,7 @@ fn main() {
 		              else if path.ends_with(".woff2"){"font/woff2"}
                 else if path.ends_with(".jpg") {"image/jpg"}
                 else if path.ends_with(".svg") {"image/svg+xml"}
+                else if path.ends_with(".md") {"text/markdown"}
                 else {continue};
 
                 if path.contains("..") || path.contains('\\'){
