@@ -263,15 +263,45 @@ impl Widget for DemoFileTree {
                     });
                     Ok(entries)
                 }
-    
-            let root_path: PathBuf  = PathBuf::from(".");
-                let root = FileNodeData::Directory {
-                    entries: get_directory_entries(&root_path, false).unwrap(),
-                };
-                let file_tree_data=  FileTreeData { root_path: "".into(), root:root  };
-
-                 self.load_file_tree(file_tree_data);
+                
+                
+                #[cfg(target_arch="wasm32")]{
+                    let file_tree_data=  FileTreeData { root_path: "".into(), root:FileNodeData::Directory{
+                        entries:vec![DirectoryEntry{
+                            name: "empty".to_string(),
+                            node: FileNodeData::Directory{entries:vec![]}
+                        },
+                        DirectoryEntry{
+                            name: "on".to_string(),
+                            node: FileNodeData::Directory{entries:vec![DirectoryEntry{
+                                name: "empty".to_string(),
+                                node: FileNodeData::Directory{entries:vec![]}
+                            },
+                            DirectoryEntry{
+                                name: "on".to_string(),
+                                node: FileNodeData::Directory{entries:vec![]}
+                            },
+                            DirectoryEntry{
+                                name: "web".to_string(),
+                                node: FileNodeData::Directory{entries:vec![]}
+                            }]}
+                        },
+                        DirectoryEntry{
+                            name: "web".to_string(),
+                            node: FileNodeData::Directory{entries:vec![]}
+                        }]
+                    }};
+                    self.load_file_tree(file_tree_data);
                 }
+                #[cfg(not(target_arch="wasm32"))]{
+                    let root_path: PathBuf  = PathBuf::from(".");
+                    let root = FileNodeData::Directory {
+                        entries: get_directory_entries(&root_path, false).unwrap(),
+                    };
+                    let file_tree_data=  FileTreeData { root_path: "".into(), root:root  };
+                    self.load_file_tree(file_tree_data);
+                }
+            }
             _ => {}
         }
 
