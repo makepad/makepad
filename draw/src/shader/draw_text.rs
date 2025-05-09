@@ -104,7 +104,10 @@ pub struct DrawText {
     pub draw_depth: f32,
     #[live]
     pub debug: bool,
-
+    
+    #[live]
+    pub temp_y_shift: f32,
+    
     #[deref]
     pub draw_vars: DrawVars,
     #[calc]
@@ -259,7 +262,15 @@ impl DrawText {
                 used_size_in_lpxs.height as f64,
             ),
         });
-
+        
+        let shift = if let Some(row) = text.rows.get(0){
+            if let Some(glyph) = row.glyphs.get(0){
+                glyph.font_size_in_lpxs * self.temp_y_shift
+            }
+            else{0.0}
+        }
+        else{0.0};
+                
         for rect_in_lpxs in text.selection_rects_in_lpxs(Selection {
             anchor: Cursor {
                 index: 0,
@@ -278,7 +289,7 @@ impl DrawText {
                 cx,
                 makepad_platform::rect(
                     rect_in_lpxs.origin.x as f64,
-                    rect_in_lpxs.origin.y as f64,
+                    rect_in_lpxs.origin.y as f64 + shift as f64,
                     rect_in_lpxs.size.width as f64,
                     rect_in_lpxs.size.height as f64,
                 ),
@@ -479,7 +490,7 @@ impl DrawText {
                 .translate(origin_in_lpxs.x, origin_in_lpxs.y),
         );
 
-        self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y);
+        self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y) + vec2(0.0,self.temp_y_shift* font_size_in_lpxs);
         self.rect_size = vec2(bounds_in_lpxs.size.width, bounds_in_lpxs.size.height);
         if let Some(color) = color {
             self.color = vec4(
