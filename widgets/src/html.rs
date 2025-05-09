@@ -116,6 +116,7 @@ live_design!{
         }
         
         draw_fixed: {
+            temp_y_shift: 0.24
             text_style: <THEME_FONT_CODE> {
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -124,7 +125,7 @@ live_design!{
         
         code_layout: {
             flow: RightWrap,
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+            padding: <THEME_MSPACE_2> {left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
         }
         code_walk: { width: Fill, height: Fit }
         
