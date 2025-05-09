@@ -217,7 +217,7 @@
                             flow: Down
                             spacing: 0.
                             <Label> { margin: {top: (THEME_SPACE_1)}, padding: 0., width: Fit, text: "Tint Color"}
-                            theme_tint_color = <TextInput> { empty_text: "Hex color", text: "f00" }
+                            <TextInput> { empty_text: "Hex color", text: "#ff0000" }
                         }
                         theme_tint_amount = <Slider> { text: "Tint Amount", default: 0.0, min:0.0 max: 1.0  }
                         <Vr> {}
