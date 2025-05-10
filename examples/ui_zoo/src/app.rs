@@ -212,7 +212,7 @@
                             }
                         }
 
-                        theme_contrast = <Slider> { text: "Contrast", default: 1.0, min:0.8 max: 2.0 }
+                        theme_contrast = <Slider> { text: "Contrast", default: 1.0, min: 0.5 max: 2.0 }
                         <View> {
                             flow: Down
                             spacing: 0.
@@ -225,10 +225,10 @@
                             width: Fit,
                             text: "Font"
                         }
-                        theme_font_size = <Slider> { text: "Size", default: 7.5, min:3.0 max: 12.0  }
+                        theme_font_size = <Slider> { text: "Size", default: 10.0, min: 3.0 max: 12.0  }
                         theme_font_size_contrast = <Slider> { text: "Size Contrast", default: 2.5, min:1.0 max: 5.0  }
                         <Vr> {}
-                        theme_bevel = <Slider> { text: "Bevel", default: 0.75, min:0.0 max: 1.0   }
+                        theme_bevel = <Slider> { text: "Bevel", default: 0.75, min:0.0 max: 1.5   }
                         theme_rounding = <Slider> { text: "Rounding", default: 2.5, min:1.0 max: 5.0   }
                         theme_space = <Slider> { text: "Space", default: 6.0, min:1.0 max: 10.0   }
                         /*
