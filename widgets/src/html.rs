@@ -321,7 +321,7 @@ impl Html {
             some_id!(p) => {
                 // there's probably a better way to do this by setting margins...
                 tf.new_line_collapsed(cx);
-                tf.new_line_collapsed(cx);
+                //tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(code) => {
