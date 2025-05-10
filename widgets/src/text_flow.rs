@@ -669,6 +669,12 @@ impl TextFlow{
             if (text == " " || text == "") && self.first_thing_on_a_line{
                 return
             }
+            let text = if self.first_thing_on_a_line{
+                text.trim_start()
+            }
+            else{
+                text
+            };
             self.first_thing_on_a_line = false;
             
             let dt = if self.fixed.value() > 0{
