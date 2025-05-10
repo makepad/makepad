@@ -318,7 +318,7 @@ impl<'a> LayoutContext<'a> {
             (-descender_in_lpxs + line_gap_in_lpxs) * line_spacing_scale;
         let line_spacing_below_in_lpxs =
             line_spacing_below_in_lpxs.max(if self.current_row_is_first() {
-                self.options.first_row_min_line_spacing_below_in_lpxs
+                self.options.first_row_min_line_spacing_below_in_lpxs - line_spacing_above_in_lpxs
             } else {
                 0.0
             });

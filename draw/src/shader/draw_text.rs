@@ -215,7 +215,7 @@ impl DrawText {
     pub fn draw_walk_resumable_with(
         &mut self,
         cx: &mut Cx2d,
-        text: &str,
+        text_str: &str,
         mut f: impl FnMut(&mut Cx2d, makepad_platform::Rect),
     ) {
         let turtle_pos = cx.turtle().pos();
@@ -223,6 +223,25 @@ impl DrawText {
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
         let row_height = cx.turtle().row_height();
+        
+        // lets draw a debug rect
+        /*
+        if text_str.starts_with("markdownedited"){
+            let mut area = Area::Empty;
+            cx.add_aligned_rect_area(
+                &mut area,
+                makepad_platform::rect(
+                    origin_in_lpxs.x as f64,
+                    origin_in_lpxs.y as f64,
+                    100.0 as f64,
+                    row_height as f64,
+                ),
+            );
+            cx.cx
+            .debug
+            .area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
+        }*/
+        
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
@@ -237,7 +256,7 @@ impl DrawText {
             max_width_in_lpxs,
             wrap,
             Align::default(),
-            text,
+            text_str,
         );
         self.draw_text(cx, origin_in_lpxs, &text);
 
@@ -249,12 +268,13 @@ impl DrawText {
             ) * self.font_scale;
         let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
         let new_turtle_pos = dvec2(new_turtle_pos.x as f64, new_turtle_pos.y as f64);
-        cx.turtle_mut().set_pos(new_turtle_pos);
-        cx.turtle_mut()
-            .update_width_max(origin_in_lpxs.x as f64, used_size_in_lpxs.width as f64);
-        cx.turtle_mut()
-            .update_height_max(origin_in_lpxs.y as f64, used_size_in_lpxs.height as f64);
-
+        let turtle = cx.turtle_mut();
+        
+        turtle.set_pos(new_turtle_pos);
+        turtle.update_width_max(origin_in_lpxs.x as f64, used_size_in_lpxs.width as f64);
+        turtle.update_height_max(origin_in_lpxs.y as f64, used_size_in_lpxs.height as f64);
+        turtle.set_wrap_spacing(( last_row.line_spacing_below_in_lpxs - last_row.line_gap_in_lpxs ) as f64);
+        
         cx.emit_turtle_walk(makepad_platform::Rect {
             pos: new_turtle_pos,
             size: dvec2(
