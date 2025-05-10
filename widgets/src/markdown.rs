@@ -172,6 +172,7 @@ live_design!{
         }
         
         draw_fixed: {
+            temp_y_shift: 0.25
             text_style: <THEME_FONT_CODE> {
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -180,7 +181,7 @@ live_design!{
         
         code_layout: {
             flow: RightWrap,
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3), bottom:10 }
         }
         code_walk: { width: Fill, height: Fit }
         
@@ -456,6 +457,7 @@ impl Markdown {
                         self.in_code_block = false;
                         let entry_id = tf.new_counted_id();
                         let cbs = &self.code_block_string;
+                        
                         tf.item_with(cx, entry_id, live_id!(code_block), |cx, item, _tf|{
                             item.widget(id!(code_view)).set_text(cx, cbs);
                             item.draw_all_unscoped(cx);
@@ -484,7 +486,7 @@ impl Markdown {
                     if self.in_code_block {
                         self.code_block_string.push_str(&text);
                     } else {
-                        tf.draw_text(cx, &text);
+                        tf.draw_text(cx, &text.trim_end_matches("\n"));
                     }
                 }
                 MdEvent::SoftBreak => {
