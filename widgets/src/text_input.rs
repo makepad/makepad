@@ -1855,6 +1855,41 @@ impl TextInputRef {
         }
         None
     }
+
+    /// Saves the internal state of this text input widget
+    /// to a new `TextInputState` object.
+    pub fn save_state(&self) -> TextInputState {
+        if let Some(inner) = self.borrow() {
+            TextInputState {
+                text: inner.text.clone(),
+                password_text: inner.password_text.clone(),
+                selection: inner.selection.clone(),
+                history: inner.history.clone(),
+            }
+        } else {
+            TextInputState::default()
+        }
+    }
+
+    /// Restores the internal state of this text input widget
+    /// from the given `TextInputState` object.
+    pub fn restore_state(&self, cx: &mut Cx, state: TextInputState) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_text(cx, &state.text);
+            inner.password_text = state.password_text;
+            inner.history = state.history;
+            inner.set_selection(cx, state.selection);
+        }
+    }
+}
+
+/// The saved (checkpointed) state of a text input widget.
+#[derive(Clone, Debug, Default)]
+pub struct TextInputState {
+    text: String,
+    password_text: String,
+    selection: Selection,
+    history: History,
 }
 
 #[derive(Clone, Debug, DefaultNone)]
