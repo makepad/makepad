@@ -6,7 +6,7 @@ live_design! {
     
     // GLOBAL PARAMETERS
     pub THEME_COLOR_CONTRAST = 1.0
-    pub THEME_COLOR_TINT = #ff0000
+    pub THEME_COLOR_TINT = #0000ff
     pub THEME_COLOR_TINT_AMOUNT = 0.0
     pub THEME_SPACE_FACTOR = 6. // Increase for a less dense layout
     pub THEME_CORNER_RADIUS = 2.5
