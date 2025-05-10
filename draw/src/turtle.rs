@@ -652,16 +652,17 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
     }
     
+    
     pub fn turtle_new_line(&mut self){
         let turtle = self.turtles.last_mut().unwrap();
         turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
         let next_y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing;
-        if turtle.pos.y == next_y{
+        /*if turtle.pos.y == next_y{
             turtle.pos.y += turtle.wrap_spacing;
         }
-        else{
+        else{*/
             turtle.pos.y = next_y;
-        }
+        /*}*/
     }
 
     pub fn turtle_new_line_with_spacing(&mut self, spacing: f64){
@@ -878,6 +879,16 @@ impl Turtle {
         self.update_height_max(0.0);
     }
     */
+         
+    pub fn jump_and_reset_wrap_spacing(&mut self){
+        self.pos.y += self.wrap_spacing;
+        self.wrap_spacing = 0.0;
+    }
+        
+    pub fn set_wrap_spacing(&mut self, value: f64){
+        self.wrap_spacing = value;
+    }
+    
     pub fn set_pos(&mut self, pos: DVec2) {
         self.pos = pos
     }

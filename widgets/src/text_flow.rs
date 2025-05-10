@@ -501,6 +501,8 @@ impl TextFlow{
         let fc = self.font_colors.last().unwrap_or(&self.font_color);
         self.draw_normal.color = *fc;
         let pad = self.draw_normal.text_style.font_size as f64 * pad;
+        // we should add the line spacing of the turlte
+        
         cx.begin_turtle(self.list_item_walk, Layout{
             padding:Padding{
                 left: self.list_item_layout.padding.left + pad,
@@ -669,6 +671,12 @@ impl TextFlow{
             if (text == " " || text == "") && self.first_thing_on_a_line{
                 return
             }
+            let text = if self.first_thing_on_a_line{
+                text.trim_start()
+            }
+            else{
+                text
+            };
             self.first_thing_on_a_line = false;
             
             let dt = if self.fixed.value() > 0{
