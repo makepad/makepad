@@ -502,11 +502,14 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementSelfClose
                  }
                  else if c == '>'{
+                     
+                     let begin = nodes.iter().rev().find_map(|v| if let HtmlNode::OpenTag{lc,nc:_} = v{Some(*lc)}else{None});
+                     
                      State::Text{
                          start:i+1, 
                          dec_start:decoded.len(), 
                          last_non_whitespace: decoded.len(),
-                         collapse_ws: true
+                         collapse_ws: if let Some(lc) = begin{lc != live_id!(pre) && lc != live_id!(code)}else{true}
                      }
                  }
                  else if !c.is_whitespace(){
@@ -678,7 +681,7 @@ impl<'a> HtmlWalker<'a>{
              }
          }
      }
-     if let State::Text{start, dec_start, last_non_whitespace, collapse_ws} = state{
+     if let State::Text{start:_, dec_start, last_non_whitespace, collapse_ws:_} = state{
         nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len(), all_ws:dec_start == last_non_whitespace});
      }
      else{ // if we didnt end in text state something is wrong
