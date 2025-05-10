@@ -805,7 +805,7 @@ impl Dock {
                     }
                     return true
                 }
-                // insert the ta
+                // insert the tab
                 DropPart::Tab => {
                     if is_move {
                         if pos.id == item {
@@ -866,11 +866,11 @@ impl Dock {
     }
 
     fn create_and_select_tab(&mut self, cx: &mut Cx, parent: LiveId, item: LiveId, kind: LiveId, name: String, template:LiveId, insert_after:Option<usize>)->Option<WidgetRef> {
-        if self.items.get(&item).is_some(){
+        if let Some(widgetref) = self.items.get(&item).map(|(_, w)| w.clone()) {
             self.select_tab(cx, item);
-            Some(self.items.get(&item).unwrap().1.clone())
+            Some(widgetref)
         }
-        else{
+        else {
             let ret =self.create_tab(cx, parent, item, kind, name, template, insert_after);
             self.select_tab(cx, item);
             ret
@@ -894,6 +894,77 @@ impl Dock {
             self.item_or_create(cx, item, kind)
         }
         else{
+            None
+        }
+    }
+
+    /// Performs an in-place replacement of the inner widget (within an existing tab)
+    /// with a completely new widget of a different kind.
+    /// The type of the tab itself is not changed, but the widget inside of it is.
+    ///
+    /// Optionally, you can give the tab a new name and select it.
+    ///
+    /// ## Arguments
+    /// * `cx`: A mutable reference to the Cx context.
+    /// * `tab_item_id`: The ID of the tab to be replaced.
+    /// * `new_kind`: The new widget that should be shown inside of the tab.
+    /// * `new_name`: An optional new name for the tab.
+    /// * `select`: A boolean indicating whether to select the new tab after replacement.
+    ///   If `false`, the tab will be not be explicitly selected, but of course
+    ///   if it was already selected, it will remain selected.
+    ///
+    /// ## Return
+    /// * Returns `None` if the `tab_item_id` does not exist in the dock
+    ///   or if the `new_kind` template was not listed in the Dock's live DSL.
+    /// * Returns `Some((new_widget, true))` if the existing tab's inner widget
+    ///   was successfully replaced with the new one.
+    ///   * Returns `Some((existing_widget, false))`` if the `new_kind` is the same
+    ///     as existing tab's inner widget kind, meaning that no replacement occurred.
+    fn replace_tab(
+        &mut self,
+        cx: &mut Cx,
+        tab_item_id: LiveId,
+        new_kind: LiveId,
+        new_name: Option<String>,
+        select: bool,
+    ) -> Option<(WidgetRef, bool)> {
+        // Check that the tab item ID already exists in the dock items.
+        let Some(DockItem::Tab { name, template: _, kind }) = self.dock_items.get_mut(&tab_item_id) else {
+            return None;
+        };
+        // Before modifying the existing tab, ensure that the `new_kind` template exists
+        // and that we can instantiate a new widget from it.
+        if let Some(ptr) = self.templates.get(&new_kind) {
+            let Some((existing_kind, existing_widgetref)) = self.items.get_mut(&tab_item_id) else {
+                return None;
+            };
+            // If the existing tab had the same inner widget kind,
+            // then no changes are needed and we can just reuse it.
+            let (new_widgetref, was_replaced) = if *existing_kind == new_kind {
+                (existing_widgetref.clone(), false)
+            } else {
+                // If the existing tab had a different inner widget kind,
+                // we need to replace it with the new one
+                // and update both the `items` and `dock_items` entries.
+                *existing_kind = new_kind;
+                *existing_widgetref = WidgetRef::new_from_ptr(cx, Some(*ptr));
+                *kind = new_kind;
+                (existing_widgetref.clone(), true)
+            };
+
+            // Optionally update the tab's name and select it.
+            if let Some(new_name) = new_name {
+                *name = new_name;
+            }
+            if select {
+                self.select_tab(cx, tab_item_id);
+            }
+            self.needs_save = true;
+            self.redraw_tab(cx, tab_item_id);
+            Some((new_widgetref, was_replaced))
+        }
+        else {
+            warning!("Template not found: {new_kind}. Did you add it to the <Dock> instance in `live_design!{{}}`?");
             None
         }
     }
@@ -1213,6 +1284,19 @@ impl DockRef {
         else{
             None
         }
+    }
+
+    /// See [`Dock::replace_tab()`].
+    pub fn replace_tab(
+        &self,
+        cx: &mut Cx,
+        tab_item_id: LiveId,
+        new_kind: LiveId,
+        new_name: Option<String>,
+        select: bool,
+    ) -> Option<(WidgetRef, bool)> {
+        let Some(mut dock) = self.borrow_mut() else { return None };
+        dock.replace_tab(cx, tab_item_id, new_kind, new_name, select)
     }
 
     pub fn set_tab_title(&self, cx: &mut Cx, tab:LiveId, title:String) {
