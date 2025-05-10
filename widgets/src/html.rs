@@ -307,7 +307,7 @@ impl Html {
             *trim = TrimWhitespaceInText::Trim;
             tf.bold.push();
             tf.push_size_abs_scale(scale);
-            cx.turtle_new_line();
+            tf.new_line_collapsed(cx);
         }
 
         match node.open_tag_lc() {
@@ -320,8 +320,8 @@ impl Html {
 
             some_id!(p) => {
                 // there's probably a better way to do this by setting margins...
-                cx.turtle_new_line();
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
+                tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(code) => {
@@ -333,28 +333,28 @@ impl Html {
                 tf.inline_code.push();
             }
             some_id!(pre) => {
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
                 tf.fixed.push();
                 tf.ignore_newlines.push(false);
                 tf.combine_spaces.push(false);
                 tf.begin_code(cx);
             }
             some_id!(blockquote) => {
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
                 tf.ignore_newlines.push(false);
                 tf.combine_spaces.push(false);
                 tf.begin_quote(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(br) => {
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(hr)
             | some_id!(sep) => {
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
                 tf.sep(cx);
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(u) => tf.underline.push(),
@@ -451,7 +451,8 @@ impl Html {
                 
                 // Now, actually emit the list item.
                 // log!("marker: {marker}, pad: {pad}");
-                cx.turtle_new_line();
+                // ok so what if we only have drawn whitespace here
+                tf.new_line_collapsed(cx);
                 tf.begin_list_item(cx, marker, pad);
             }
             Some(x) => return (Some(x), trim_whitespace_in_text),
@@ -475,15 +476,15 @@ impl Html {
             | some_id!(h6) => {
                 tf.font_sizes.pop();
                 tf.bold.pop();
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
             }
             some_id!(b)
             | some_id!(strong) => tf.bold.pop(),
             some_id!(i)
             | some_id!(em) => tf.italic.pop(),
             some_id!(p) => {
-                cx.turtle_new_line();
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
+                tf.new_line_collapsed(cx);
             }
             some_id!(blockquote) => {
                 tf.ignore_newlines.pop();
