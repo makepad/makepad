@@ -666,9 +666,7 @@ impl TextFlow{
     pub fn draw_text(&mut self, cx:&mut Cx2d, text:&str){
         if let Some(DrawState::Drawing) = self.draw_state.get(){
             
-            println!("#{:?}# {}", text, self.first_thing_on_a_line);
             if (text == " " || text == "") && self.first_thing_on_a_line{
-                println!("RETURNING");
                 return
             }
             self.first_thing_on_a_line = false;
