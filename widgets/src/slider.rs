@@ -2742,7 +2742,7 @@ impl Widget for Slider {
                 TextInputAction::KeyFocusLost => {
                     self.animator_play(cx, id!(focus.off));
                 }
-                TextInputAction::Returned(value) => {
+                TextInputAction::Returned(value, _modifiers) => {
                     if let Ok(v) = value.parse::<f64>() {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
