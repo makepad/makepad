@@ -310,6 +310,7 @@ pub struct TextFlow {
     #[rust] pub inline_code: StackCounter,
         
     #[rust] pub item_counter: u64,
+    #[rust] pub first_thing_on_a_line: bool,
     
     #[rust] pub areas_tracker: RectAreasTracker,
     
@@ -457,6 +458,7 @@ impl TextFlow{
         //self.top_drop.clear();
         self.combine_spaces.clear();
         self.ignore_newlines.clear();
+        self.first_thing_on_a_line = true;
     }
     
         
@@ -528,6 +530,13 @@ impl TextFlow{
     
     pub fn end_list_item(&mut self, cx:&mut Cx2d){
         cx.end_turtle();
+        self.first_thing_on_a_line = true;
+    }
+    
+    pub fn new_line_collapsed(&mut self, cx:&mut Cx2d){
+        // if all we emitted is a single whitespace
+        cx.turtle_new_line();
+        self.first_thing_on_a_line = true;
     }
     
     pub fn sep(&mut self, cx:&mut Cx2d){
@@ -656,6 +665,13 @@ impl TextFlow{
      
     pub fn draw_text(&mut self, cx:&mut Cx2d, text:&str){
         if let Some(DrawState::Drawing) = self.draw_state.get(){
+            
+            println!("#{:?}# {}", text, self.first_thing_on_a_line);
+            if (text == " " || text == "") && self.first_thing_on_a_line{
+                println!("RETURNING");
+                return
+            }
+            self.first_thing_on_a_line = false;
             
             let dt = if self.fixed.value() > 0{
                 &mut self.draw_fixed
