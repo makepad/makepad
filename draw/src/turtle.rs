@@ -657,12 +657,8 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle = self.turtles.last_mut().unwrap();
         turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
         let next_y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing;
-        /*if turtle.pos.y == next_y{
-            turtle.pos.y += turtle.wrap_spacing;
-        }
-        else{*/
-            turtle.pos.y = next_y;
-        /*}*/
+        turtle.pos.y = next_y;
+        turtle.wrap_spacing = 0.0;
     }
 
     pub fn turtle_new_line_with_spacing(&mut self, spacing: f64){
