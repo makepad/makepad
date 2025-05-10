@@ -137,7 +137,7 @@ live_design!{
         
         list_item_layout: {
             flow: RightWrap,
-            //padding: <THEME_MSPACE_1> {}
+            padding: <THEME_MSPACE_1> {}
         }
         list_item_walk: {
             height: Fit, width: Fill,
