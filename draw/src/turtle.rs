@@ -658,6 +658,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
         let next_y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing;
         turtle.pos.y = turtle.pos.y.max(next_y);
+        turtle.height_used = turtle.pos.y - turtle.origin.y;
         turtle.wrap_spacing = 0.0;
     }
 
@@ -666,6 +667,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
         let next_y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing + spacing;
         turtle.pos.y = turtle.pos.y.max(next_y);
+        turtle.height_used = turtle.pos.y - turtle.origin.y;
         turtle.wrap_spacing = 0.0;
     }
     
