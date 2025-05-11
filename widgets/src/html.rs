@@ -308,7 +308,8 @@ impl Html {
             *trim = TrimWhitespaceInText::Trim;
             tf.bold.push();
             tf.push_size_abs_scale(scale);
-            tf.new_line_collapsed(cx);
+            let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
+            tf.new_line_collapsed_with_spacing(cx, fs * tf.heading_margin.top);
         }
 
         match node.open_tag_lc() {
