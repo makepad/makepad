@@ -11,4 +11,4 @@ metadata.makepad-auto-version = "yK9xdn_D0D3EdqleI-WHLtjk4rk="
 
 [dependencies]
 makepad-micro-serde-derive = { path = "derive", version = "0.9.0" }
-makepad-live-id = {path = "../live_id"}
+makepad-live-id = {path = "../live_id", version = "0.9.0" }
