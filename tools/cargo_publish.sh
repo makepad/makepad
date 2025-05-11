@@ -11,12 +11,10 @@ DRYRUN=${1:---dry-run}
 #cargo publish $DRYRUN -p makepad-live-id
 
 #echo "---- PUBLISHING makepad-micro-serde ----"
-cargo publish $DRYRUN -p makepad-micro-serde
+#cargo publish $DRYRUN -p makepad-micro-serde
 
 #echo "---- PUBLISHING makepad-math ----"
 #cargo publish $DRYRUN -p makepad-math
-#echo "---- PUBLISHING makepad-error-log ----"
-#cargo publish $DRYRUN -p makepad-error-log
 #echo "---- PUBLISHING makepad-live-tokenizer ----"
 #cargo publish $DRYRUN -p makepad-live-tokenizer
 #echo "---- PUBLISHING makepad-derive-live ----"
@@ -28,7 +26,7 @@ cargo publish $DRYRUN -p makepad-micro-serde
 #echo "---- PUBLISHING makepad-objc-sys ----" 
 #cargo publish $DRYRUN -p makepad-objc-sys
 #echo "---- PUBLISHING makepad-derive-wasm-bridge ----" 
-#cargo publish $DRYRUN -p makepad-derive-wasm-bridge
+cargo publish $DRYRUN -p makepad-derive-wasm-bridge
 #echo "---- PUBLISHING makepad-wasm-bridge ----" 
 #cargo publish $DRYRUN -p makepad-wasm-bridge
                 
