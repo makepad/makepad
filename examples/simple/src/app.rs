@@ -92,8 +92,9 @@ impl MatchEvent for App{
     fn handle_startup(&mut self, _cx:&mut Cx){
     }
         
-    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button_1)).clicked(&actions) {
+            self.ui.button(id!(button_1)).set_text(cx, "😀");
             log!("hi");
             self.counter += 1;
         }

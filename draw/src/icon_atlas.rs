@@ -271,7 +271,6 @@ impl CxIconAtlas {
         if let Some(entry) = self.entries.get(&entry_hash) {
             return entry.slot
         }
-        
         let (slot,pos) = self.alloc.alloc_icon_slot(args.size.x as f64, args.size.y as f64);
         self.entries.insert(
             entry_hash,
