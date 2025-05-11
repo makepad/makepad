@@ -66,7 +66,7 @@ live_design!{
             
             // basic hardcoded mipmapping so it stops 'swimming' in VR
             // mipmaps are stored in red/green/blue channel
-            let s = sample2d(self.tex, self.tex_coord1.xy).x;
+            let s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
             s = pow(s, self.u_curve);
             let col = self.get_color(); //color!(white);//get_color();
             return vec4(s * col.rgb * self.u_brightness * col.a, s * col.a);
