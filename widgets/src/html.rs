@@ -483,8 +483,7 @@ impl Html {
             some_id!(i)
             | some_id!(em) => tf.italic.pop(),
             some_id!(p) => {
-                tf.new_line_collapsed(cx);
-                tf.new_line_collapsed(cx);
+                //tf.new_line_collapsed(cx);
             }
             some_id!(blockquote) => {
                 tf.ignore_newlines.pop();

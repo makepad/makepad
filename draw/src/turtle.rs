@@ -876,10 +876,6 @@ impl Turtle {
     }
     */
          
-    pub fn jump_and_reset_wrap_spacing(&mut self){
-        self.pos.y += self.wrap_spacing;
-        self.wrap_spacing = 0.0;
-    }
         
     pub fn set_wrap_spacing(&mut self, value: f64){
         self.wrap_spacing = value;
