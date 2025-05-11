@@ -389,6 +389,22 @@ impl TomlParser {
                 self.next(i);
                 Ok(TomlTokWithSpan {tok: TomlTok::Str(val), span: TomlSpan {start, len: self.pos - start}})
             },
+            '\'' => {
+                let mut val = String::new();
+                self.next(i);
+                while self.cur != '\'' {
+                    if self.cur == '\\' {
+                        self.next(i);
+                    }
+                    if self.cur == '\0' {
+                        return Err(self.err_parse("string"));
+                    }
+                    val.push(self.cur);
+                    self.next(i);
+                }
+                self.next(i);
+                Ok(TomlTokWithSpan {tok: TomlTok::Str(val), span: TomlSpan {start, len: self.pos - start}})
+            },
             _ => {
                 Err(self.err_parse("tokenizer"))
             }

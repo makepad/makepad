@@ -562,7 +562,7 @@ impl AiChatManager{
                     fs.request_open_file(LiveId(0), file_id);
                 }
                 else{
-                    println!("Cant find {} in context {}",file.path,prj.name);
+                   // println!("Cant find {} in context {}",file.path,prj.name);
                 }
             }
         }
