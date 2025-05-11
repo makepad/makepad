@@ -1,13 +1,13 @@
 [package]
 name = "makepad-code-editor"
-version = "0.6.0"
+version = "0.9.0"
 edition = "2021"
 authors = ["Makepad <info@makepad.nl>"]
 description = "Makepad studio"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "SHA4Uv1hWtqxiCyIvjmsYJTRo34="
+metadata.makepad-auto-version = "B5GwTEaMIZlein6K-VyZDRiCKek="
 
 [dependencies]
-makepad-widgets = { path = "../widgets", version="0.6.0"}
+makepad-widgets = { path = "../widgets", version="0.9.0"}
