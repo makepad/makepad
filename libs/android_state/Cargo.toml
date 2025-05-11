@@ -1,6 +1,6 @@
 [package]
 name = "makepad-android-state"
-version = "0.1.0"
+version = "0.9.0"
 authors = ["Makepad <info@makepad.nl>", "Kevin Boos <kevinaboos@gmail.com>"]
 edition = "2021"
 keywords = ["makepad", "android", "context", "activity", "state"]
@@ -10,7 +10,7 @@ license = "MIT"
 readme = "README.md"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
+metadata.makepad-auto-version = "Xn0xvOdZChZbltM8tMBk0zLdOBc="
 
 [dependencies]
-makepad-jni-sys = "0.4.0"
+makepad-jni-sys = {version = "0.9.0", path = "../jni-sys"}

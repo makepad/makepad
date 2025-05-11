@@ -11,11 +11,11 @@ metadata.makepad-auto-version = "3q9p7hJP7S16AZ2sa6ONkcZPa0w="
 metadata.makepad-check-platform = "desktop"
 
 [dependencies]
-makepad-miniz = { path = "../../libs/miniz", version = "0.4.0" }
-makepad-toml-parser = {path = "../../libs/toml_parser", version = "0.4.0"}
-makepad-shell = { path = "../../libs/shell", version = "0.4.0" }
-makepad-http = { path = "../../libs/http", version = "0.4.0" } 
-makepad-wasm-strip = { path = "../../libs/wasm_strip", version = "0.4.0"}
+makepad-miniz = { path = "../../libs/miniz", version = "0.9.0" }
+makepad-toml-parser = {path = "../../libs/toml_parser", version = "0.9.0"}
+makepad-shell = { path = "../../libs/shell", version = "0.9.0" }
+makepad-http = { path = "../../libs/http", version = "0.9.0" } 
+makepad-wasm-strip = { path = "../../libs/wasm_strip", version = "0.9.0"}
 brotli = "5.0"
 
 #espflash = {version = "3.0.0", default-features = false}
