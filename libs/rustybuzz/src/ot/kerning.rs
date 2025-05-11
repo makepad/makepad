@@ -1,4 +1,4 @@
-use ttf_parser::{apple_layout, kern, GlyphId};
+use crate::ttf_parser::{apple_layout, kern, GlyphId};
 
 use crate::{Face, Mask};
 use crate::buffer::{Buffer, BufferScratchFlags};

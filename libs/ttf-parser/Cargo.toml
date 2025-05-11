@@ -1,5 +1,5 @@
 [package]
-name = "ttf-parser"
+name = "makepad-ttf-parser"
 version = "0.21.1"
 authors = ["Yevhenii Reizner <razrfalcon@gmail.com>"]
 keywords = ["ttf", "truetype", "opentype"]

@@ -88,7 +88,13 @@ fn main() {
     for c in crates {
         let cargo_str = fs::read_to_string(&c.cargo).unwrap();
         
-        let toml = makepad_toml_parser::parse_toml(&cargo_str).unwrap();
+        let toml = match makepad_toml_parser::parse_toml(&cargo_str){
+            Ok(toml)=>toml,
+            Err(e)=>{
+                println!("Error in toml {:?} {:?}", c.cargo, e);
+                continue;
+            }
+        };
 
         let old_sha1 = if let Some(Toml::Str(ver, _)) = toml.get("package.metadata.makepad-auto-version") {
             ver.to_string()
