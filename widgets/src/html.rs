@@ -83,7 +83,7 @@ live_design!{
         width:Fill,
         height:Fit,
         padding: <THEME_MSPACE_1> {}
-        
+        heading_margin: 1.0
         font_size: (THEME_FONT_SIZE_P),
         font_color: (THEME_COLOR_LABEL_OUTER),
         
@@ -262,7 +262,7 @@ pub struct Html {
     #[deref] pub text_flow: TextFlow,
     #[live] pub body: ArcStringMut,
     #[rust] pub doc: HtmlDoc,
-
+    
     /// Markers used for unordered lists, indexed by the list's nesting level.
     /// The marker can be an arbitrary string, such as a bullet point or a custom icon.
     #[live] ul_markers: Vec<String>,
@@ -474,9 +474,11 @@ impl Html {
             | some_id!(h4)
             | some_id!(h5)
             | some_id!(h6) => {
-                tf.font_sizes.pop();
+                let size = tf.font_sizes.pop();
                 tf.bold.pop();
-                tf.new_line_collapsed(cx);
+                tf.new_line_collapsed_with_spacing(cx, size.unwrap_or(0.0) as f64 * tf.heading_margin);
+                // we wanna add extra spacing here
+                
             }
             some_id!(b)
             | some_id!(strong) => tf.bold.pop(),
