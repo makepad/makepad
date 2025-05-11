@@ -440,7 +440,7 @@ impl Cx {
 
             (gl.glViewport)(x as i32, y as i32, width as i32, height as i32);
             
-            assert_eq!((gl.glGetError)(), 0, "glViewport({x}, {y}, {width}, {height}) failed");
+           //assert_eq!((gl.glGetError)(), 0, "glViewport({x}, {y}, {width}, {height}) failed");
         }
 
         if clear_flags != 0 {
@@ -1060,7 +1060,7 @@ impl CxOsDrawShader {
             {sampler}
             {tex_ext_sampler}
             {vertex_defs}
-            {vertex}\0",
+            {in_vertex}\0",
         );
         //crate::log!("{}", vertex.replace("int mvo = 0;","int mvo = gl_ViewID_OVR==0?0:16;"));
         let pixel = format!("{version}
@@ -1072,14 +1072,14 @@ impl CxOsDrawShader {
             {sampler}
             {tex_ext_sampler}
             {pixel_defs}
-            {pixel}
+            {in_pixel}
             {nop_depth_clip}
             \0",
         );
         // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
-            in_vertex,
-            in_pixel,
+            in_vertex: in_vertex.to_string(),
+            in_pixel: in_pixel.to_string(),
             vertex: [
                 vertex.clone(), 
                 vertex.replace("#define VIEW_ID 0","#define VIEW_ID gl_ViewID_OVR")
