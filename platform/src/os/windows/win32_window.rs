@@ -271,7 +271,7 @@ use {
                 Win32App,
                 encode_wide,
                 FALSE,
-                get_win32_app_global,
+                with_win32_app,
             },
             win32_event::*,
             droptarget::*,
@@ -338,7 +338,7 @@ impl Win32Window {
 
         let hwnd = unsafe { CreateWindowExW(
             style_ex,
-            PCWSTR(get_win32_app_global().window_class_name.as_ptr()),
+            PCWSTR(with_win32_app(|app| app.window_class_name.as_ptr())),
             PCWSTR(title.as_ptr()),
             style,
             x,
@@ -374,8 +374,8 @@ impl Win32Window {
 
         unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, self as *const _ as isize) };
 
-        get_win32_app_global().dpi_functions.enable_non_client_dpi_scaling(self.hwnd);
-        get_win32_app_global().all_windows.push(self.hwnd);
+        with_win32_app(|app| app.dpi_functions.enable_non_client_dpi_scaling(self.hwnd));
+        with_win32_app(|app| app.all_windows.push(self.hwnd));
 
         self.set_outer_size(size);
     }
@@ -426,34 +426,34 @@ impl Win32Window {
                 }; 
                 if abs.x < rect.pos.x + EDGE {
                     if abs.y < rect.pos.y  + EDGE {
-                        get_win32_app_global().set_mouse_cursor(MouseCursor::NwseResize);
+                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NwseResize));
                         return LRESULT(HTTOPLEFT as isize);
                     }
                     if abs.y > rect.pos.y + rect.size.y - EDGE {
-                        get_win32_app_global().set_mouse_cursor(MouseCursor::NeswResize);
+                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NeswResize));
                         return LRESULT(HTBOTTOMLEFT as isize);
                     }
-                    get_win32_app_global().set_mouse_cursor(MouseCursor::EwResize);
+                    with_win32_app(|app| app.set_mouse_cursor(MouseCursor::EwResize));
                     return LRESULT(HTLEFT as isize);
                 }
                 if abs.x > rect.pos.x+rect.size.x - EDGE {
                     if abs.y < rect.pos.y  + EDGE {
-                        get_win32_app_global().set_mouse_cursor(MouseCursor::NeswResize);
+                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NeswResize));
                         return LRESULT(HTTOPRIGHT as isize);
                     }
                     if abs.y > rect.pos.y + rect.size.y - EDGE {
-                        get_win32_app_global().set_mouse_cursor(MouseCursor::NwseResize);
+                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NwseResize));
                         return LRESULT(HTBOTTOMRIGHT as isize);
                     }
-                    get_win32_app_global().set_mouse_cursor(MouseCursor::EwResize);
+                    with_win32_app(|app| app.set_mouse_cursor(MouseCursor::EwResize));
                     return LRESULT(HTRIGHT as isize);
                 }
                 if abs.y < rect.pos.y + EDGE {
-                    get_win32_app_global().set_mouse_cursor(MouseCursor::NsResize);
+                    with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NsResize));
                     return LRESULT(HTTOP as isize);
                 }
                 if abs.y > rect.pos.y+rect.size.y - EDGE {
-                    get_win32_app_global().set_mouse_cursor(MouseCursor::NsResize);
+                    with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NsResize));
                     return LRESULT(HTBOTTOM as isize);
                 }
                 let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
@@ -469,11 +469,11 @@ impl Win32Window {
                         return LRESULT(HTCLIENT as isize);
                     }
                     WindowDragQueryResponse::Caption => {
-                        get_win32_app_global().set_mouse_cursor(MouseCursor::Default);
+                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::Default));
                         return LRESULT(HTCAPTION as isize);
                     },
                     WindowDragQueryResponse::SysMenu => {
-                        get_win32_app_global().set_mouse_cursor(MouseCursor::Default);
+                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::Default));
                         return LRESULT(HTSYSMENU as isize);
                     }
                     _ => ()
@@ -484,7 +484,7 @@ impl Win32Window {
                 return LRESULT(1)
             },
             WM_MOUSEMOVE => {
-                if get_win32_app_global().start_dragging_items.is_some(){
+                if with_win32_app(|app| app.start_dragging_items.is_some()){
                     return LRESULT(0)
                 }
                 if !window.track_mouse_event {
@@ -503,7 +503,7 @@ impl Win32Window {
                 )
             },
             WM_MOUSELEAVE => {
-                if get_win32_app_global().start_dragging_items.is_some() {
+                if with_win32_app(|app| app.start_dragging_items.is_some()) {
                     return LRESULT(0)
                 }
                 window.track_mouse_event = false;
@@ -511,7 +511,7 @@ impl Win32Window {
                     window.last_mouse_pos,
                     Self::get_key_modifiers()
                 );
-                get_win32_app_global().current_cursor = Some(MouseCursor::Hidden);
+                with_win32_app(|app| app.current_cursor = Some(MouseCursor::Hidden));
             },
             WM_MOUSEWHEEL => {
                 let delta = (wparam.0 >> 16) as u16 as i16 as f64;
@@ -519,7 +519,7 @@ impl Win32Window {
             },
             WM_LBUTTONDOWN => {
                 // hack for drag/drop: save which window was last clicked on in win32_app
-                get_win32_app_global().currently_clicked_window_id = Some(window.window_id);
+                with_win32_app(|app| app.currently_clicked_window_id = Some(window.window_id));
                 window.send_mouse_down(MouseButton::PRIMARY, Self::get_key_modifiers());
             },
             WM_LBUTTONUP => window.send_mouse_up(MouseButton::PRIMARY, Self::get_key_modifiers()),
@@ -639,11 +639,11 @@ impl Win32Window {
                 }
             },
             WM_ENTERSIZEMOVE => {
-                get_win32_app_global().start_resize();
+                with_win32_app(|app| app.start_resize());
                 window.do_callback(Win32Event::WindowResizeLoopStart(window.window_id));
             }
             WM_EXITSIZEMOVE => {
-                get_win32_app_global().stop_resize();
+                with_win32_app(|app| app.stop_resize());
                 window.do_callback(Win32Event::WindowResizeLoopStop(window.window_id));
             },
             WM_SIZE | WM_DPICHANGED => {
@@ -676,7 +676,7 @@ impl Win32Window {
                 match *message {
 
                     DropTargetMessage::Leave => {
-                        if get_win32_app_global().is_dragging_internal.get() {
+                        if with_win32_app(|app| app.is_dragging_internal.get()) {
                             // TODO: cancel DoDragDrop somehow
                             window.do_callback(Win32Event::DragEnd);
                         }
@@ -896,7 +896,7 @@ impl Win32Window {
     }
     
     pub fn time_now(&self) -> f64 {
-        get_win32_app_global().time_now()
+        with_win32_app(|app| app.time_now())
     }
     
     pub fn set_ime_spot(&mut self, spot: DVec2) {
@@ -982,7 +982,7 @@ impl Win32Window {
     }
     
     pub fn get_dpi_factor(&self) -> f64 {
-        get_win32_app_global().dpi_functions.hwnd_dpi_factor(self.hwnd) as f64
+        with_win32_app(|app| app.dpi_functions.hwnd_dpi_factor(self.hwnd) as f64)
     }
     
     pub fn do_callback(&mut self, event: Win32Event) {
