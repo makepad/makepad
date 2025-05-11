@@ -672,10 +672,10 @@ impl TextFlow{
                 return
             }
             let text = if self.first_thing_on_a_line{
-                text.trim_start()
+                text.trim_start().trim_end_matches("\n")
             }
             else{
-                text
+                text.trim_end_matches("\n")
             };
             self.first_thing_on_a_line = false;
             
