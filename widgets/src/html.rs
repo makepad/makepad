@@ -83,8 +83,8 @@ live_design!{
         width:Fill,
         height:Fit,
         padding: <THEME_MSPACE_1> {}
-        heading_margin: {top:0.5, bottom:0.5}
-        paragraph_margin: {top: 0.5, bottom:0.5}
+        heading_margin: {top:1.0, bottom:0.1}
+        paragraph_margin: {top: 0.33, bottom:0.33}
         font_size: (THEME_FONT_SIZE_P),
         font_color: (THEME_COLOR_LABEL_OUTER),
         
