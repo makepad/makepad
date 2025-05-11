@@ -196,6 +196,9 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
         if config.small_fonts{
             rename.insert("GoNotoKurrent-Bold.ttf".into(), "IBMPlexSans-SemiBold.ttf".into());
             rename.insert("GoNotoKurrent-Regular.ttf".into(), "IBMPlexSans-Text.ttf".into());
+            rename.insert("LXGWWenKaiBold.ttf".into(), "IBMPlexSans-Text.ttf".into());
+            rename.insert("LXGWWenKaiRegular.ttf".into(), "IBMPlexSans-Text.ttf".into());
+            rename.insert("NotoColorEmoji.ttf".into(), "IBMPlexSans-Text.ttf".into());
         }
         
         if resources_path.is_dir(){
