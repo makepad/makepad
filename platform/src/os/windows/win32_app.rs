@@ -148,11 +148,10 @@ P1: IntoParam<IDropSource>,
 }*/
 
 pub struct Win32App {
-    pub time_start: i64,
-    pub time_freq: i64,
     event_callback: Option<Box<dyn FnMut(Win32Event) -> EventFlow >>,
     pub window_class_name: Vec<u16>,
     pub all_windows: Vec<HWND>,
+    pub time: Win32Time,
     pub timers: Vec<Win32Timer>,
     pub was_signal_poll: bool,
     pub event_flow: EventFlow,
@@ -170,6 +169,33 @@ pub enum Win32Timer {
     Resize {win32_id: usize},
     DragDrop {win32_id: usize},
     SignalPoll {win32_id: usize},
+}
+
+pub struct Win32Time{
+    pub time_start: i64,
+    pub time_freq: i64,
+}
+
+impl Win32Time{
+    pub fn new()->Self{
+        let mut time_start = 0i64;
+        unsafe {QueryPerformanceCounter(&mut time_start).unwrap()};
+                
+        let mut time_freq = 0i64;
+        unsafe {QueryPerformanceFrequency(&mut time_freq).unwrap()};
+        Self{
+            time_start,
+            time_freq,
+        }
+    }
+    
+    pub fn time_now(&self)->f64{
+        unsafe {
+            let mut time_now = 0i64;
+            QueryPerformanceCounter(&mut time_now).unwrap();
+            (time_now - self.time_start) as f64 / self.time_freq as f64
+        }
+    }
 }
 
 impl Win32App {
@@ -204,18 +230,12 @@ impl Win32App {
             OleInitialize(None).unwrap();
         }
         
-        let mut time_start = 0i64;
-        unsafe {QueryPerformanceCounter(&mut time_start).unwrap()};
-        
-        let mut time_freq = 0i64;
-        unsafe {QueryPerformanceFrequency(&mut time_freq).unwrap()};
         
         let win32_app = Win32App {
             start_dragging_items: None,
             window_class_name,
             was_signal_poll: false,
-            time_start,
-            time_freq,
+            time: Win32Time::new(),
             event_callback: Some(event_callback),
             event_flow: EventFlow::Poll,
             all_windows: Vec::new(),
@@ -470,11 +490,7 @@ impl Win32App {
     }
     
     pub fn time_now(&self) -> f64 {
-        unsafe {
-            let mut time_now = 0i64;
-            QueryPerformanceCounter(&mut time_now).unwrap();
-            (time_now - self.time_start) as f64 / self.time_freq as f64
-        }
+        self.time.time_now()
     }
     
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
