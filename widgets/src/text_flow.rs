@@ -325,7 +325,9 @@ pub struct TextFlow {
     #[live] list_item_walk: Walk,
     #[live] pub inline_code_padding: Padding,
     #[live] pub inline_code_margin: Margin,
-        
+    #[live(1.0)] pub heading_margin: f64,
+    
+    
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust(Some(Default::default()))] items: Option<ComponentMap<LiveId,(WidgetRef, LiveId)>>,
@@ -538,6 +540,12 @@ impl TextFlow{
     pub fn new_line_collapsed(&mut self, cx:&mut Cx2d){
         // if all we emitted is a single whitespace
         cx.turtle_new_line();
+        self.first_thing_on_a_line = true;
+    }
+    
+    pub fn new_line_collapsed_with_spacing(&mut self, cx:&mut Cx2d, spacing: f64){
+        // if all we emitted is a single whitespace
+        cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
     }
     
