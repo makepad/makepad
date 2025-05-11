@@ -1,20 +1,22 @@
 DRYRUN=${1:---dry-run}
 
+#echo "---- PUBLISHING makepad-micro-proc-macro  ----"
+#cargo publish $DRYRUN -p makepad-micro-proc-macro 
 #echo "---- PUBLISHING makepad-micro-serde-derive ----"
-cargo publish $DRYRUN -p makepad-micro-serde-derive
+#cargo publish $DRYRUN -p makepad-micro-serde-derive
+
+#echo "---- PUBLISHING makepad-live-id-macros ----"
+#cargo publish $DRYRUN -p makepad-live-id-macros
+#echo "---- PUBLISHING makepad-live-id ----"
+#cargo publish $DRYRUN -p makepad-live-id
+
 #echo "---- PUBLISHING makepad-micro-serde ----"
-#cargo publish $DRYRUN -p makepad-micro-serde
+cargo publish $DRYRUN -p makepad-micro-serde
 
 #echo "---- PUBLISHING makepad-math ----"
 #cargo publish $DRYRUN -p makepad-math
 #echo "---- PUBLISHING makepad-error-log ----"
 #cargo publish $DRYRUN -p makepad-error-log
-#echo "---- PUBLISHING makepad-micro-proc-macro  ----"
-#cargo publish $DRYRUN -p makepad-micro-proc-macro 
-#echo "---- PUBLISHING makepad-live-id-macros ----"
-#cargo publish $DRYRUN -p makepad-live-id-macros
-#echo "---- PUBLISHING makepad-live-id ----"
-#cargo publish $DRYRUN -p makepad-live-id
 #echo "---- PUBLISHING makepad-live-tokenizer ----"
 #cargo publish $DRYRUN -p makepad-live-tokenizer
 #echo "---- PUBLISHING makepad-derive-live ----"
