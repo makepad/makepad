@@ -22,7 +22,8 @@ unicode-properties = { version = "0.1.0", default-features = false, features = [
 unicode-script = "0.5.2"
 libm = { version = "0.2.2", optional = true }
 
-[dependencies.ttf-parser]
+[dependencies.makepad-ttf-parser]
+version = "0.21.1"
 path = "../ttf-parser"
 default-features = false
 features = [

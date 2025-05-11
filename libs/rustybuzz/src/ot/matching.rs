@@ -1,6 +1,6 @@
 //! Matching of glyph patterns.
 
-use ttf_parser::GlyphId;
+use crate::ttf_parser::GlyphId;
 
 use crate::Mask;
 use crate::buffer::GlyphInfo;

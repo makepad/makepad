@@ -1,7 +1,7 @@
 use core::convert::TryFrom;
 
-use ttf_parser::GlyphId;
-use ttf_parser::gsub::*;
+use crate::ttf_parser::GlyphId;
+use crate::ttf_parser::gsub::*;
 
 use crate::Face;
 use crate::buffer::{Buffer, GlyphPropsFlags};
@@ -13,7 +13,7 @@ use super::apply::{Apply, ApplyContext, WouldApply, WouldApplyContext};
 use super::matching::{
     match_backtrack, match_glyph, match_input, match_lookahead, Matched,
 };
-use ttf_parser::opentype_layout::LookupIndex;
+use crate::ttf_parser::opentype_layout::LookupIndex;
 
 /// Called before substitution lookups are performed, to ensure that glyph
 /// class and other properties are set on the glyphs in the buffer.

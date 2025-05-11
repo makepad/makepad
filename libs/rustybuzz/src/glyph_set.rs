@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 use core::cmp::{self, Ordering};
 use core::ops::RangeInclusive;
 
-use ttf_parser::GlyphId;
+use crate::ttf_parser::GlyphId;
 
 /// A set of glyphs.
 ///

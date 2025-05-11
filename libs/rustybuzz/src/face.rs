@@ -1,6 +1,6 @@
-use ttf_parser::GlyphId;
-use ttf_parser::gdef::GlyphClass;
-use ttf_parser::opentype_layout::LayoutTable;
+use crate::ttf_parser::GlyphId;
+use crate::ttf_parser::gdef::GlyphClass;
+use crate::ttf_parser::opentype_layout::LayoutTable;
 
 use crate::Variation;
 use crate::ot::{TableIndex, PositioningTable, SubstitutionTable};
@@ -25,7 +25,7 @@ const UNICODE_FULL_ENCODING: u16 = 6;
 /// A font face handle.
 #[derive(Clone)]
 pub struct Face<'a> {
-    pub(crate) ttfp_face: ttf_parser::Face<'a>,
+    pub(crate) ttfp_face: crate::ttf_parser::Face<'a>,
     pub(crate) units_per_em: u16,
     pixels_per_em: Option<(u16, u16)>,
     pub(crate) points_per_em: Option<f32>,
@@ -34,22 +34,22 @@ pub struct Face<'a> {
     pub(crate) gpos: Option<PositioningTable<'a>>,
 }
 
-impl<'a> AsRef<ttf_parser::Face<'a>> for Face<'a> {
+impl<'a> AsRef<crate::ttf_parser::Face<'a>> for Face<'a> {
     #[inline]
-    fn as_ref(&self) -> &ttf_parser::Face<'a> {
+    fn as_ref(&self) -> &crate::ttf_parser::Face<'a> {
         &self.ttfp_face
     }
 }
 
-impl<'a> AsMut<ttf_parser::Face<'a>> for Face<'a> {
+impl<'a> AsMut<crate::ttf_parser::Face<'a>> for Face<'a> {
     #[inline]
-    fn as_mut(&mut self) -> &mut ttf_parser::Face<'a> {
+    fn as_mut(&mut self) -> &mut crate::ttf_parser::Face<'a> {
         &mut self.ttfp_face
     }
 }
 
 impl<'a> core::ops::Deref for Face<'a> {
-    type Target = ttf_parser::Face<'a>;
+    type Target = crate::ttf_parser::Face<'a>;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -69,14 +69,14 @@ impl<'a> Face<'a> {
     ///
     /// Data will be referenced, not owned.
     pub fn from_slice(data: &'a [u8], face_index: u32) -> Option<Self> {
-        let face = ttf_parser::Face::parse(data, face_index).ok()?;
+        let face = crate::ttf_parser::Face::parse(data, face_index).ok()?;
         Some(Self::from_face(face))
     }
 
     /// Creates a new [`Face`] from [`ttf_parser::Face`].
     ///
     /// Data will be referenced, not owned.
-    pub fn from_face(face: ttf_parser::Face<'a>) -> Self {
+    pub fn from_face(face: crate::ttf_parser::Face<'a>) -> Self {
         Face {
             units_per_em: face.units_per_em(),
             pixels_per_em: None,
@@ -139,7 +139,7 @@ impl<'a> Face<'a> {
             None => {
                 // Special case for Windows Symbol fonts.
                 // TODO: add tests
-                if  subtable.platform_id == ttf_parser::PlatformId::Windows &&
+                if  subtable.platform_id == crate::ttf_parser::PlatformId::Windows &&
                     subtable.encoding_id == WINDOWS_SYMBOL_ENCODING
                 {
                     if c <= 0x00FF {
@@ -232,7 +232,7 @@ impl<'a> Face<'a> {
 
         if let Some(img) = self.ttfp_face.glyph_raster_image(glyph, pixels_per_em) {
             // HarfBuzz also supports only PNG.
-            if img.format == ttf_parser::RasterImageFormat::PNG {
+            if img.format == crate::ttf_parser::RasterImageFormat::PNG {
                 let scale = self.units_per_em as f32 / img.pixels_per_em as f32;
                 return Some(GlyphExtents {
                     x_bearing: crate::round(f32::from(img.x) * scale) as i32,
@@ -293,8 +293,8 @@ pub struct GlyphExtents {
     pub height: i32,
 }
 
-fn find_best_cmap_subtable(face: &ttf_parser::Face) -> Option<u16> {
-    use ttf_parser::PlatformId;
+fn find_best_cmap_subtable(face: &crate::ttf_parser::Face) -> Option<u16> {
+    use crate::ttf_parser::PlatformId;
 
     // Symbol subtable.
     // Prefer symbol if available.
@@ -313,8 +313,8 @@ fn find_best_cmap_subtable(face: &ttf_parser::Face) -> Option<u16> {
 }
 
 fn find_cmap_subtable(
-    face: &ttf_parser::Face,
-    platform_id: ttf_parser::PlatformId,
+    face: &crate::ttf_parser::Face,
+    platform_id: crate::ttf_parser::PlatformId,
     encoding_id: u16,
 ) -> Option<u16> {
     for (i, subtable) in face.tables().cmap?.subtables.into_iter().enumerate() {

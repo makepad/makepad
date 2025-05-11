@@ -1,6 +1,6 @@
-use ttf_parser::GlyphId;
-use ttf_parser::opentype_layout::LookupIndex;
-use ttf_parser::gpos::*;
+use crate::ttf_parser::GlyphId;
+use crate::ttf_parser::opentype_layout::LookupIndex;
+use crate::ttf_parser::gpos::*;
 
 use crate::{Direction, Face};
 use crate::buffer::{Buffer, BufferScratchFlags, GlyphPosition};

@@ -46,7 +46,7 @@ trait TrackTableExt {
     fn ver_tracking(&self, ptem: f32) -> Option<i32>;
 }
 
-impl TrackTableExt for ttf_parser::trak::Table<'_> {
+impl TrackTableExt for crate::ttf_parser::trak::Table<'_> {
     fn hor_tracking(&self, ptem: f32) -> Option<i32> {
         self.horizontal.tracking(ptem)
     }
@@ -58,10 +58,10 @@ impl TrackTableExt for ttf_parser::trak::Table<'_> {
 
 trait TrackTableDataExt {
     fn tracking(&self, ptem: f32) -> Option<i32>;
-    fn interpolate_at(&self, idx: u16, target_size: f32, track: &ttf_parser::trak::Track) -> Option<f32>;
+    fn interpolate_at(&self, idx: u16, target_size: f32, track: &crate::ttf_parser::trak::Track) -> Option<f32>;
 }
 
-impl TrackTableDataExt for ttf_parser::trak::TrackData<'_> {
+impl TrackTableDataExt for crate::ttf_parser::trak::TrackData<'_> {
     fn tracking(&self, ptem: f32) -> Option<i32> {
         // Choose track.
         let track = self.tracks.into_iter().find(|t| t.value == 0.0)?;
@@ -85,7 +85,7 @@ impl TrackTableDataExt for ttf_parser::trak::TrackData<'_> {
         &self,
         idx: u16,
         target_size: f32,
-        track: &ttf_parser::trak::Track,
+        track: &crate::ttf_parser::trak::Track,
     ) -> Option<f32> {
         debug_assert!(idx < self.sizes.len() - 1);
 

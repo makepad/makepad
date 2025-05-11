@@ -3,7 +3,7 @@ use core::cmp;
 use core::convert::TryFrom;
 use core::ops::Range;
 
-use ttf_parser::GlyphId;
+use crate::ttf_parser::GlyphId;
 
 use crate::{ Mask,  GlyphInfo};
 use crate::buffer::{ BufferFlags};
