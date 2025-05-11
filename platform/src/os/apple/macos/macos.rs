@@ -184,6 +184,7 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
+        let time_now = with_macos_app(|app| app.time_now() as f32);
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Xr => {}
@@ -195,7 +196,7 @@ impl Cx {
                         if drawable == nil {
                             return
                         }
-                        self.passes[*pass_id].set_time(with_macos_app(|app| app.time_now() as f32));
+                        self.passes[*pass_id].set_time(time_now);
                         if metal_window.is_resizing {
                             self.draw_pass(*pass_id, metal_cx, DrawPassMode::Resizing(drawable));
                         }
