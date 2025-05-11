@@ -13,7 +13,7 @@ metadata.makepad-auto-version = "DYOM2we0dqGZ0yXmWo2Gw1GmMok="
 proc-macro = true
 
 [dependencies]
-makepad-micro-proc-macro = { path = "../../micro_proc_macro", version = "0.4.0" }
+makepad-micro-proc-macro = { path = "../../micro_proc_macro", version = "0.9.0" }
 
 [features]
 default = ["nightly"]
