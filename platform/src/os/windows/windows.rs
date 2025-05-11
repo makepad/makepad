@@ -53,7 +53,6 @@ impl Cx {
         init_win32_app_global(Box::new({
             let cx = cx.clone();
             move | event | {
-                get_win32_app_global();
                 let mut cx = cx.borrow_mut();
                 let mut d3d11_cx = d3d11_cx.borrow_mut();
                 let mut d3d11_windows = d3d11_windows.borrow_mut();
@@ -61,10 +60,10 @@ impl Cx {
             }
         }));
         // the signal poll timer
-        get_win32_app_global().start_timer(0, 0.008, true);
+        with_win32_app(|app| app.start_timer(0, 0.008, true));
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
-        get_win32_app_global().start_signal_poll();
+        with_win32_app(|app| app.start_signal_poll());
         Win32App::event_loop();
     }
     
@@ -147,7 +146,7 @@ impl Cx {
             }
             Win32Event::Paint => {
                 if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(get_win32_app_global().time_now());
+                    self.call_next_frame_event(with_win32_app(|app| app.time_now()));
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
@@ -268,7 +267,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(get_win32_app_global().time_now() as f32);
+            self.passes[*pass_id].set_time(with_win32_app(|app| app.time_now() as f32));
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Xr => {}
                 CxPassParent::Window(window_id) => {
@@ -379,16 +378,16 @@ impl Cx {
                     }
                 },
                 CxOsOp::SetCursor(cursor) => {
-                    get_win32_app_global().set_mouse_cursor(cursor);
+                    with_win32_app(|app| app.set_mouse_cursor(cursor));
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                    get_win32_app_global().start_timer(timer_id, interval, repeats);
+                    with_win32_app(|app| app.start_timer(timer_id, interval, repeats));
                 },
                 CxOsOp::StopTimer(timer_id) => {
-                    get_win32_app_global().stop_timer(timer_id);
+                    with_win32_app(|app| app.stop_timer(timer_id));
                 },
                 CxOsOp::StartDragging(dragged_item) => {
-                    get_win32_app_global().start_dragging(dragged_item);
+                    with_win32_app(|app| app.start_dragging(dragged_item));
                 },
                 CxOsOp::HttpRequest {request_id, request} => {
                     use crate::os::windows::http::WindowsHttpSocket;
