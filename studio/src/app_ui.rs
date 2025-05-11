@@ -119,7 +119,7 @@ live_design!{
 
     pub AppUI =  <Window> {
         margin: 5.
-        caption_bar = { margin: {top: 2,left: 0}, visible: true, caption_label = {label = {text: "Makepad"}} 
+        caption_bar = { margin: {top: 2,left: -190}, visible: true, caption_label = {label = {text: "Makepad"}} 
        /* <View>{
             width: Fit,
             spacing: (THEME_SPACE_2)
