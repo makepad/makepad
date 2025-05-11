@@ -901,7 +901,6 @@ impl TextInput {
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
         self.selection = selection;
         self.history.force_new_edit_group();
-        self.reset_blink_timer(cx);
         self.draw_bg.redraw(cx);
     }
 
@@ -1316,16 +1315,6 @@ impl TextInput {
         }
     }
     
-    fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
-        if self.is_read_only{
-            self.animator_cut(cx, id!(blink.off));
-        }
-        else{
-            self.animator_cut(cx, id!(blink.off));
-            cx.stop_timer(self.blink_timer);
-            self.blink_timer = cx.start_timeout(self.blink_speed)
-        }
-    }
 }
 
 impl Widget for TextInput {
@@ -1405,7 +1394,7 @@ impl Widget for TextInput {
             }
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, id!(focus.on));
-                self.reset_cursor_blinker(cx);
+                self.reset_blink_timer(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
             Hit::KeyFocusLost(_) => {
@@ -1424,7 +1413,10 @@ impl Widget for TextInput {
                     control: false
                 },
                 ..
-            }) => self.move_cursor_left(cx, keep_selection),
+            }) => {
+                self.reset_blink_timer(cx);
+                self.move_cursor_left(cx, keep_selection);
+            }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
                 modifiers: KeyModifiers {
@@ -1434,7 +1426,10 @@ impl Widget for TextInput {
                     control: false
                 },
                 ..
-            }) => self.move_cursor_right(cx, keep_selection),
+            }) => {
+                self.reset_blink_timer(cx);
+                self.move_cursor_right(cx, keep_selection);
+            }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
                 modifiers: KeyModifiers {
@@ -1445,6 +1440,7 @@ impl Widget for TextInput {
                 },
                 ..
             }) => {
+                self.reset_blink_timer(cx);
                 if self.move_cursor_up(cx, keep_selection).is_err() {
                     warning!("can't move cursor because layout was invalidated by earlier event");
                 }
@@ -1459,6 +1455,7 @@ impl Widget for TextInput {
                 },
                 ..
             }) => {
+                self.reset_blink_timer(cx);
                 if self.move_cursor_down(cx, keep_selection).is_err() {
                     warning!("can't move cursor because layout was invalidated by earlier event");
                 }
@@ -1474,6 +1471,7 @@ impl Widget for TextInput {
                 device,
                 ..
             }) if device.is_primary_hit() => {
+                self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
                 let Ok(cursor) = self.point_in_lpxs_to_cursor(
@@ -1512,6 +1510,7 @@ impl Widget for TextInput {
                 device,
                 ..
             }) if device.is_primary_hit() => {
+                self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
                 let Ok(cursor) = self.point_in_lpxs_to_cursor(
@@ -1564,6 +1563,7 @@ impl Widget for TextInput {
                 },
                 ..
             }) if !self.is_read_only => {
+                self.reset_blink_timer(cx);
                 self.create_or_extend_edit_group(EditKind::Other);
                 self.apply_edit(
                     cx,
@@ -1580,6 +1580,7 @@ impl Widget for TextInput {
                 key_code: KeyCode::Backspace,
                 ..
             }) if !self.is_read_only => {
+                self.reset_blink_timer(cx);
                 let mut start = self.selection.start().index;
                 let end = self.selection.end().index;
                 if start == end {
@@ -1601,6 +1602,7 @@ impl Widget for TextInput {
                 key_code: KeyCode::Delete,
                 ..
             }) if !self.is_read_only => {
+                self.reset_blink_timer(cx);
                 let start = self.selection.start().index;
                 let mut end = self.selection.end().index;
                 if start == end {
