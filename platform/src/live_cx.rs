@@ -21,7 +21,6 @@ use {
         web_socket::WebSocketMessage,
         makepad_live_compiler::LiveTypeInfo,
         /*makepad_math::*,*/
-        event::Event,
         cx::Cx,
         cx::CxDependency,
     },
