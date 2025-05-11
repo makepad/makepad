@@ -245,6 +245,9 @@ impl Cx {
                     self.redraw_all();
                 }
                 self.handle_networking_events();
+                
+                self.cocoa_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows);
+                
                 return EventFlow::Wait;
             }
         }
