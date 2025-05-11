@@ -325,7 +325,9 @@ pub struct TextFlow {
     #[live] list_item_walk: Walk,
     #[live] pub inline_code_padding: Padding,
     #[live] pub inline_code_margin: Margin,
-    #[live(1.0)] pub heading_margin: f64,
+    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub heading_margin: Margin,
+    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub paragraph_margin: Margin,
+        
     
     
     #[redraw] #[rust] area:Area,

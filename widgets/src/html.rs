@@ -83,7 +83,8 @@ live_design!{
         width:Fill,
         height:Fit,
         padding: <THEME_MSPACE_1> {}
-        heading_margin: 1.0
+        heading_margin: {top:0.5, bottom:0.5}
+        paragraph_margin: {top: 0.5, bottom:0.5}
         font_size: (THEME_FONT_SIZE_P),
         font_color: (THEME_COLOR_LABEL_OUTER),
         
@@ -320,7 +321,9 @@ impl Html {
 
             some_id!(p) => {
                 // there's probably a better way to do this by setting margins...
-                tf.new_line_collapsed(cx);
+                let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
+                
+                tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.top);
                 //tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
@@ -476,7 +479,7 @@ impl Html {
             | some_id!(h6) => {
                 let size = tf.font_sizes.pop();
                 tf.bold.pop();
-                tf.new_line_collapsed_with_spacing(cx, size.unwrap_or(0.0) as f64 * tf.heading_margin);
+                tf.new_line_collapsed_with_spacing(cx, size.unwrap_or(0.0) as f64 * tf.heading_margin.bottom);
                 // we wanna add extra spacing here
                 
             }
@@ -485,6 +488,8 @@ impl Html {
             some_id!(i)
             | some_id!(em) => tf.italic.pop(),
             some_id!(p) => {
+                let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
+                 tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.bottom);
                 //tf.new_line_collapsed(cx);
             }
             some_id!(blockquote) => {
