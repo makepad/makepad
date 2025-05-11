@@ -125,9 +125,9 @@ export class WasmWebBrowser extends WasmBridge {
                 return
             }
         }
-        
         var timer = {timer_id, repeats: args.repeats};
-        if (args.repeats !== 0) {
+        if (args.repeats === true) {
+            
             timer.sys_id = window.setInterval(e => {
                 this.to_wasm.ToWasmTimerFired({timer_id});
                 this.do_wasm_pump();
