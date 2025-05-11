@@ -2,8 +2,8 @@
 
 use core::ops::{Index, IndexMut};
 
-use ttf_parser::GlyphId;
-use ttf_parser::opentype_layout::{FeatureIndex, LanguageIndex, LookupIndex, ScriptIndex};
+use crate::ttf_parser::GlyphId;
+use crate::ttf_parser::opentype_layout::{FeatureIndex, LanguageIndex, LookupIndex, ScriptIndex};
 
 use crate::{Face, Tag};
 use crate::buffer::Buffer;
@@ -83,7 +83,7 @@ pub trait LayoutTableExt {
     ) -> Option<FeatureIndex>;
 }
 
-impl LayoutTableExt for ttf_parser::opentype_layout::LayoutTable<'_> {
+impl LayoutTableExt for crate::ttf_parser::opentype_layout::LayoutTable<'_> {
     /// Returns true + index and tag of the first found script tag in the given GSUB or GPOS table
     /// or false + index and tag if falling back to a default script.
     fn select_script(&self, script_tags: &[Tag]) -> Option<(bool, ScriptIndex, Tag)> {

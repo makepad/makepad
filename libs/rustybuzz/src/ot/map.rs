@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use ttf_parser::opentype_layout::{FeatureIndex, LanguageIndex, LookupIndex, VariationIndex, ScriptIndex};
+use crate::ttf_parser::opentype_layout::{FeatureIndex, LanguageIndex, LookupIndex, VariationIndex, ScriptIndex};
 
 use crate::{tag, Face, Language, Mask, Tag, Script};
 use crate::buffer::{glyph_flag, Buffer};

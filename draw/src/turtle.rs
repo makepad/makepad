@@ -657,20 +657,18 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle = self.turtles.last_mut().unwrap();
         turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
         let next_y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing;
-        turtle.pos.y = next_y;
+        turtle.pos.y = turtle.pos.y.max(next_y);
+        turtle.height_used = turtle.pos.y - turtle.origin.y;
         turtle.wrap_spacing = 0.0;
     }
 
     pub fn turtle_new_line_with_spacing(&mut self, spacing: f64){
         let turtle = self.turtles.last_mut().unwrap();
         turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
-        let next_y = turtle.height_used + turtle.origin.y + spacing;
-        if turtle.pos.y == next_y{
-            turtle.pos.y += spacing;
-        }
-        else{
-            turtle.pos.y = next_y;
-        }
+        let next_y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing + spacing;
+        turtle.pos.y = turtle.pos.y.max(next_y);
+        turtle.height_used = turtle.pos.y - turtle.origin.y;
+        turtle.wrap_spacing = 0.0;
     }
     
     fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize, shift_clip: bool, turtle_shift:DVec2) {
@@ -823,10 +821,7 @@ pub struct TurtleAlignRange{
 
 impl Turtle {
     pub fn row_height(&self)->f64{
-        // relative y pos
-        // bounding box from origin
-        // pos from origin
-        self.height_used - (self.pos.y - self.origin.y)
+        self.height_used - (self.pos.y - self.origin.y) + self.wrap_spacing
     }
     
     pub fn update_width_max(&mut self, pos:f64, dx: f64) {
@@ -876,13 +871,9 @@ impl Turtle {
     }
     */
          
-    pub fn jump_and_reset_wrap_spacing(&mut self){
-        self.pos.y += self.wrap_spacing;
-        self.wrap_spacing = 0.0;
-    }
         
     pub fn set_wrap_spacing(&mut self, value: f64){
-        self.wrap_spacing = value;
+        self.wrap_spacing = self.wrap_spacing.max(value);
     }
     
     pub fn set_pos(&mut self, pos: DVec2) {

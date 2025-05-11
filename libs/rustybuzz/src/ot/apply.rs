@@ -1,5 +1,5 @@
-use ttf_parser::GlyphId;
-use ttf_parser::opentype_layout::LookupIndex;
+use crate::ttf_parser::GlyphId;
+use crate::ttf_parser::opentype_layout::LookupIndex;
 
 use crate::{Face, Mask};
 use crate::buffer::{Buffer, GlyphInfo, GlyphPropsFlags};

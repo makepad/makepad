@@ -119,8 +119,8 @@ live_design!{
 
     pub AppUI =  <Window> {
         margin: 5.
-        caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad"}} 
-        <View>{
+        caption_bar = { margin: {top: 2,left: -190}, visible: true, caption_label = {label = {text: "Makepad"}} 
+       /* <View>{
             width: Fit,
             spacing: (THEME_SPACE_2)
             padding: <THEME_MSPACE_1> { right: (THEME_SPACE_2)  }
@@ -128,7 +128,7 @@ live_design!{
             preset_2 = <ButtonFlatter> { text: "C" }
             preset_3 = <ButtonFlatter> { text: "D" }
             preset_4 = <ButtonFlatter> { text: "P" }
-            }
+            }*/
         },
         window: { inner_size: vec2(1600, 900), /*dpi_override:3.0 */},
         show_bg: true,

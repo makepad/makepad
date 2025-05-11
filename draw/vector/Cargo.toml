@@ -1,19 +1,20 @@
 [package]
 name = "makepad-vector"
-version = "0.4.0"
+version = "0.9.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad vector api"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "DB7HhhdiYtBivuq_IBnVPCc32tU="
+metadata.makepad-auto-version = "VCnrfUSpEwyn1bu8CcIyrVSZthw="
 
 [dependencies]
 resvg = { version = "0.42.0", default-features = false }
 
-[dependencies.ttf-parser]
+[dependencies.makepad-ttf-parser]
 path = "../../libs/ttf-parser"
+version = "0.21.1"
 default-features = false
 # NOTE(eddyb) this is the minimal set of features that could enable shaping,
 # (`apple-layout` being the other notable shaping-related feature), and it's

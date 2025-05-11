@@ -1,4 +1,4 @@
-use ttf_parser::GlyphId;
+use crate::ttf_parser::GlyphId;
 
 use crate::{Direction, Face};
 use crate::face::GlyphExtents;

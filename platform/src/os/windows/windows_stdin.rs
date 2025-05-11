@@ -15,6 +15,7 @@ use {
         texture::{Texture,  TextureFormat},
         thread::SignalToUI,
         os::{
+            win32_app::{Win32Time},
             d3d11::D3d11Cx,
             cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         },
@@ -39,11 +40,14 @@ impl Cx {
         &mut self,
         d3d11_cx: &mut D3d11Cx,
         windows: &mut Vec<StdinWindow>,
+        time: &Win32Time,
     ) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
+        let time_now = time.time_now();
         for &pass_id in &passes_todo {
+            self.passes[pass_id].set_time(time_now as f32);
             match self.passes[pass_id].parent.clone() {
                 CxPassParent::Xr => {}
                 CxPassParent::Window(window_id) => {
@@ -120,6 +124,7 @@ impl Cx {
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
         
         let mut stdin_windows:Vec<StdinWindow> = Vec::new();
+        let time = Win32Time::new();
          
         self.call_event_handler(&Event::Startup);
 
@@ -243,7 +248,7 @@ impl Cx {
                     }
 
                     // repaint
-                    self.stdin_handle_repaint(d3d11_cx, &mut stdin_windows);
+                    self.stdin_handle_repaint(d3d11_cx, &mut stdin_windows, &time);
 
                     // only allow rendering if it didn't take too much time last time
                     //if allow_rendering {

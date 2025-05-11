@@ -325,7 +325,11 @@ pub struct TextFlow {
     #[live] list_item_walk: Walk,
     #[live] pub inline_code_padding: Padding,
     #[live] pub inline_code_margin: Margin,
+    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub heading_margin: Margin,
+    #[live(Margin{top:0.5,bottom:0.5,left:0.0,right:0.0})] pub paragraph_margin: Margin,
         
+    
+    
     #[redraw] #[rust] area:Area,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust(Some(Default::default()))] items: Option<ComponentMap<LiveId,(WidgetRef, LiveId)>>,
@@ -485,7 +489,7 @@ impl TextFlow{
         self.draw_block.block_type = FlowBlockType::Code;
         self.draw_block.begin(cx, self.code_walk, self.code_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
-        
+        self.first_thing_on_a_line = true;
     }
     
     pub fn end_code(&mut self, cx:&mut Cx2d){
@@ -538,6 +542,12 @@ impl TextFlow{
     pub fn new_line_collapsed(&mut self, cx:&mut Cx2d){
         // if all we emitted is a single whitespace
         cx.turtle_new_line();
+        self.first_thing_on_a_line = true;
+    }
+    
+    pub fn new_line_collapsed_with_spacing(&mut self, cx:&mut Cx2d, spacing: f64){
+        // if all we emitted is a single whitespace
+        cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
     }
     
@@ -672,12 +682,11 @@ impl TextFlow{
                 return
             }
             let text = if self.first_thing_on_a_line{
-                text.trim_start()
+                text.trim_start().trim_end_matches("\n")
             }
             else{
-                text
+                text.trim_end_matches("\n")
             };
-            self.first_thing_on_a_line = false;
             
             let dt = if self.fixed.value() > 0{
                 &mut self.draw_fixed
@@ -710,8 +719,10 @@ impl TextFlow{
             if self.inline_code.value() > 0{
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::InlineCode;
-                let rect = TextFlow::walk_margin(cx, self.inline_code_margin.left);
-                areas_tracker.track_rect(cx, rect);
+                if !self.first_thing_on_a_line{
+                    let rect = TextFlow::walk_margin(cx, self.inline_code_margin.left);
+                    areas_tracker.track_rect(cx, rect);
+                }
                 dt.draw_walk_resumable_with(cx, text, |cx, mut rect|{
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
@@ -745,6 +756,8 @@ impl TextFlow{
                 });
             }
         }
+        self.first_thing_on_a_line = false;
+        
     }
     
     pub fn walk_margin(cx:&mut Cx2d, margin:f64)->Rect{
