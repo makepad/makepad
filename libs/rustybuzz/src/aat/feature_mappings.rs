@@ -1,4 +1,4 @@
-use ttf_parser::Tag;
+use crate::ttf_parser::Tag;
 
 use crate::aat::FeatureType;
 use crate::aat::feature_selector::*;

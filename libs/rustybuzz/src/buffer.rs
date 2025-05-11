@@ -1,7 +1,7 @@
 use alloc::{string::String, vec::Vec};
 use core::convert::TryFrom;
 
-use ttf_parser::GlyphId;
+use crate::ttf_parser::GlyphId;
 
 use crate::{script, Direction, Face, Language, Mask, Script};
 use crate::unicode::{CharExt, GeneralCategory, GeneralCategoryExt, Space};

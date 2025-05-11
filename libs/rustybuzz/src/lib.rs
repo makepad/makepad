@@ -30,10 +30,9 @@ mod unicode;
 mod unicode_norm;
 mod complex;
 mod ot;
+pub use makepad_ttf_parser as ttf_parser;
 
-pub use ttf_parser;
-
-pub use ttf_parser::Tag;
+pub use crate::ttf_parser::Tag;
 
 pub use crate::buffer::{
     GlyphPosition, GlyphInfo, BufferClusterLevel,

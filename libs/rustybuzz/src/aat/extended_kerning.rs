@@ -1,6 +1,5 @@
 use core::convert::TryFrom;
-
-use ttf_parser::{apple_layout, ankr, kerx, GlyphId, FromData};
+use crate::ttf_parser::{apple_layout, ankr, kerx, GlyphId, FromData};
 
 use crate::Face;
 use crate::buffer::{BufferScratchFlags, Buffer};

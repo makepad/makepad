@@ -1,7 +1,7 @@
 use alloc::string::String;
 use core::ops::{Bound, RangeBounds};
 
-use ttf_parser::Tag;
+use crate::ttf_parser::Tag;
 
 use crate::text_parser::TextParser;
 

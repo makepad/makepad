@@ -1,4 +1,4 @@
-use ttf_parser::{apple_layout, morx, GlyphId, FromData, LazyArray32};
+use crate::ttf_parser::{apple_layout, morx, GlyphId, FromData, LazyArray32};
 
 use crate::{Face, GlyphInfo};
 use crate::buffer::Buffer;

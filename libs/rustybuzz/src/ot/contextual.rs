@@ -1,5 +1,5 @@
-use ttf_parser::{GlyphId, LazyArray16};
-use ttf_parser::opentype_layout::*;
+use crate::ttf_parser::{GlyphId, LazyArray16};
+use crate::ttf_parser::opentype_layout::*;
 
 use super::MAX_CONTEXT_LENGTH;
 use super::apply::{Apply, ApplyContext, WouldApply, WouldApplyContext};
