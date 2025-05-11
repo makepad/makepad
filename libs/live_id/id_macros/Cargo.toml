@@ -1,11 +1,11 @@
 [package]
 name = "makepad-live-id-macros"
-version = "0.4.0"
+version = "0.9.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad live id macros"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "odvPk_PZii4j0QHCMCHF68an-yc="
+metadata.makepad-auto-version = "lDtmHNCpwGDsVSuDhZxGSPFB0_0="
 
 [lib]
 proc-macro = true

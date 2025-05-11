@@ -1,13 +1,13 @@
 [package]
 name = "makepad-miniz"
-version = "0.4.0"
+version = "0.9.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad fork of miniz-oxide with no deps"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "DD8beuXQT2OYg1L2G2zXXT12OsA="
+metadata.makepad-auto-version = "TYvPumK-lSla1hgJk1ITeTgI898="
 
 [features] 
 with-alloc = []
