@@ -15,6 +15,7 @@ use {
         texture::{Texture,  TextureFormat},
         thread::SignalToUI,
         os::{
+            win32_app::with_win32_app,
             d3d11::D3d11Cx,
             cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         },
@@ -44,7 +45,7 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for &pass_id in &passes_todo {
-            self.passes[pass_id].set_time(get_win32_app_global().time_now() as f32);
+            self.passes[pass_id].set_time(with_win32_app(|app| app.time_now() as f32));
             match self.passes[pass_id].parent.clone() {
                 CxPassParent::Xr => {}
                 CxPassParent::Window(window_id) => {
