@@ -246,7 +246,7 @@ impl Cx {
                 }
                 self.handle_networking_events();
                 
-                self.cocoa_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows);
+                self.win32_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows);
                 
                 return EventFlow::Wait;
             }
