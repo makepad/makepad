@@ -93,10 +93,15 @@ impl OsWebSocket{
         let _reader_thread = std::thread::spawn(move || {
             let mut web_socket = ServerWebSocket::new();
             let mut done = false;
+            let mut first = true;
             while !done {
                 let mut buffer = [0u8; 65535];
                 match input_stream.read(&mut buffer) {
                     Ok(bytes_read) => {
+                        if first{
+                            first = false;
+                            continue;
+                        }
                         web_socket.parse(&buffer[0..bytes_read], | result | {
                             match result {
                                 Ok(ServerWebSocketMessage::Ping(_)) => {
