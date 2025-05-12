@@ -174,6 +174,7 @@ impl Cx{
                         // lets send it
                         if let Some(socket) = sockets.get_mut(&0){
                             if socket.send_message(WebSocketMessage::Binary(app_to_studio.serialize_bin())).is_err(){
+                                println!("Studio websocket disconnected!");
                                 // studio disconnected, just stop the threadloop
                                 break;
                             };
