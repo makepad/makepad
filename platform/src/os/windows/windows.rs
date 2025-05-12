@@ -395,6 +395,12 @@ impl Cx {
 
                     //todo!("HttpRequest not implemented yet on windows, we'll get there");
                 },
+                CxOsOp::ShowTextIME{..}=>{
+                    
+                }
+                CxOsOp::HideTextIME=>{
+                                        
+                }
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }

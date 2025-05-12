@@ -112,7 +112,9 @@ DRYRUN=${1:---dry-run}
 #cargo publish $DRYRUN --allow-dirty -p makepad-example-ironfish
 
 #echo "---- PUBLISHING makepad-example-fractal-zoom----" 
-cargo publish $DRYRUN -p makepad-example-fractal-zoom
+#cargo publish $DRYRUN -p makepad-example-fractal-zoom
+
+cargo publish $DRYRUN -p makepad-example-ui-zoo
 
 #echo "---- PUBLISHING makepad-http----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-http
