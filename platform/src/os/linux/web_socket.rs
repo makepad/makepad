@@ -134,6 +134,8 @@ impl OsWebSocket{
                     }
                     Err(e) => {
                         eprintln!("Failed to receive data: {}", e);
+                        let _ = rx_sender.send(WebSocketMessage::Closed);
+                        done = true;
                     }
                 }
             }
