@@ -19,4 +19,10 @@ makepad-zune-png ={ version = "0.4.10", path = "../libs/zune-png"  }
 makepad-html ={ path = "../libs/html", version = "0.9.0" }
 unicode-segmentation = "1.11.0"
 pulldown-cmark = { version = "0.12.2", default-features = false, features = ["simd"] }
+
 makepad-fonts-emoji = {path = "./fonts/emoji", version = "0.9.0"}
+makepad-fonts-chinese-regular = {path = "./fonts/chinese_regular", version = "0.9.0"}
+makepad-fonts-chinese-regular-2 = {path = "./fonts/chinese_regular_2", version = "0.9.0"}
+makepad-fonts-chinese-bold = {path = "./fonts/chinese_bold", version = "0.9.0"}
+makepad-fonts-chinese-bold-2 = {path = "./fonts/chinese_bold_2", version = "0.9.0"}
+

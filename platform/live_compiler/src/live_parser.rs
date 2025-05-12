@@ -87,6 +87,16 @@ impl<'a> LiveParser<'a> {
         }
     }
     
+    fn accept_string(&mut self) -> Option<Arc<String>> {
+        if let LiveToken::String(id) = self.peek_token() {
+            self.skip_token();
+            Some(id)
+        }
+        else{
+            None
+        }
+    }
+    
     fn accept_token(&mut self, token: LiveToken) -> bool {
         if self.peek_token() != token {
             return false;
@@ -94,6 +104,8 @@ impl<'a> LiveParser<'a> {
         self.skip_token();
         true
     }
+    
+    
     
     fn expect_ident(&mut self) -> Result<LiveId, LiveError> {
         match self.peek_token() {
@@ -680,23 +692,25 @@ impl<'a> LiveParser<'a> {
             LiveToken::Ident(live_id!(font)) => {
                 self.skip_token();
                 if self.accept_token(LiveToken::Open(Delim::Paren)) {
-                    let path = self.expect_string() ?;
+                    let mut paths = vec![self.expect_string() ?];
                     
-                    let mut ascender_fudge = 0.0;
-                    let mut descender_fudge = 0.0;
-                    // optionally we accept 2 floats as fudges
-                    if self.accept_token(LiveToken::Punct(live_id!(,))){
-                        ascender_fudge = self.expect_float() ?  as f32;
+                    self.expect_token(LiveToken::Punct(live_id!(,))) ?;
+                                        
+                    if let Some(part) = self.accept_string(){
+                        paths.push(part);
                         self.expect_token(LiveToken::Punct(live_id!(,))) ?;
-                        descender_fudge = self.expect_float() ? as f32;
                     }
+                    let ascender_fudge = self.expect_float() ?  as f32;
+                    self.expect_token(LiveToken::Punct(live_id!(,))) ?;
+                    let descender_fudge = self.expect_float() ? as f32;
+                    
                     self.expect_token(LiveToken::Close(Delim::Paren)) ?;
                     
                     self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Font(LiveFont{
-                            path,
+                            paths: Arc::new(paths),
                             ascender_fudge,
                             descender_fudge
                         })

@@ -34,7 +34,7 @@ live_design!{
                         text:"hi"
                     }
                     button_1 = <Button> {
-                        text: "Click me 😊"
+                        text: "Click 福 me 😊"
                         draw_text:{color:#fff, text_style:{font_size:18}}
                     }
                     text_input = <TextInput> {

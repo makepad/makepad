@@ -296,9 +296,15 @@ impl<'a> LiveExpander<'a> {
                 },
                 LiveValue::Font(font) => {
                     let file_id = in_node.origin.token_id().unwrap().file_id().unwrap();
-                    if let Some(final_path) = self.resolve_path(file_id, &font.path){
+                    let mut paths = Vec::new();
+                    for path in &*font.paths{
+                        if let Some(final_path) = self.resolve_path(file_id, &path){
+                            paths.push(final_path);
+                        }
+                    }
+                    if paths.len()>0{
                         out_doc.nodes[out_index].value = LiveValue::Font(LiveFont{
-                            path:final_path,
+                            paths: Arc::new(paths),
                             ..*font
                         });
                     }
