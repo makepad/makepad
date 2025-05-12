@@ -91,7 +91,6 @@ live_design!{
                         text_style: {
                             font_size: 20.,
                             line_spacing: 1.4,
-                            font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
                         }
                         wrap: Word
                     }
