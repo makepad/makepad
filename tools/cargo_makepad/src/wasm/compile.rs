@@ -336,6 +336,7 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
                     else if path.ends_with(".css") {"text/css"}
                     else if path.ends_with(".js") {"text/javascript"}
                     else if path.ends_with(".ttf") {"application/ttf"}
+                    else if path.ends_with(".ttf.2") {"application/ttf"}
                     else if path.ends_with(".png") {"image/png"}
                     else if path.ends_with(".jpg") {"image/jpg"}
                     else if path.ends_with(".svg") {"image/svg+xml"}

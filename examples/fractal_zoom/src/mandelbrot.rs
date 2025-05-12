@@ -35,7 +35,7 @@ live_design!{
     }
     
     pub Mandelbrot = {{Mandelbrot}} {
-        max_iter: 2560,
+        max_iter: 256,
     }
 }
 
@@ -502,12 +502,14 @@ impl Widget for Mandelbrot {
                 else{
                     self.zoom_factor = (self.zoom_factor * 1.0005).min(1.00);
                     if (self.zoom_factor-1.00).abs()>0.001{
+                        log!("ZOOM AROUND");
                         self.space.zoom_around(self.zoom_factor, finger_abs);
                     }
                 }
             }
             // this kickstarts the tile cache generation when zooming, only happens once per zoom
             if self.tile_cache.generate_completed() && (self.zoom_factor-1.00).abs()>0.00001 {
+                log!("COMPLETED");
                 let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
                 if let Some(finger_abs) = self.finger_abs{
                     self.generate_tiles_around_finger(cx, zoom, finger_abs);
