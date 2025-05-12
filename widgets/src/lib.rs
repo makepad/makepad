@@ -179,6 +179,10 @@ pub fn live_design(cx: &mut Cx) {
         cx.link(live_id!(designer), live_id!(designer_dummy));
     }
     makepad_fonts_emoji::live_design(cx);
+    makepad_fonts_chinese_regular::live_design(cx);
+    makepad_fonts_chinese_regular_2::live_design(cx);
+    makepad_fonts_chinese_bold::live_design(cx);
+    makepad_fonts_chinese_bold_2::live_design(cx);
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
