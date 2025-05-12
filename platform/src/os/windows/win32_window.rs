@@ -580,7 +580,7 @@ impl Win32Window {
                         KeyCode::KeyC => {
                             let response = Rc::new(RefCell::new(None));
                             window.do_callback(
-                                Win32Event::TextCut(TextClipboardEvent {
+                                Win32Event::TextCopy(TextClipboardEvent {
                                     response: response.clone()
                                 })
                             );
