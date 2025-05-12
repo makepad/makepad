@@ -173,7 +173,10 @@ impl Cx{
                     if Instant::now().duration_since(first_time) >= collect_time{
                         // lets send it
                         if let Some(socket) = sockets.get_mut(&0){
-                            socket.send_message(WebSocketMessage::Binary(app_to_studio.serialize_bin())).unwrap();
+                            if socket.send_message(WebSocketMessage::Binary(app_to_studio.serialize_bin())).is_err(){
+                                // studio disconnected, just stop the threadloop
+                                break;
+                            };
                         }
                         app_to_studio.0.clear();
                         first_message = None;
