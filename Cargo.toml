@@ -21,7 +21,6 @@ workspace.members = [
 workspace.exclude = [
     "code_editor",
     "libs/stitch",
-    "libs/futures",
     "libs/wasm_bridge/test",
     "tools/windows_strip",
     "tools/web_server",

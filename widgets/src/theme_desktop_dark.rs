@@ -345,38 +345,38 @@ live_design! {
     pub THEME_FONT_LABEL = {
         font_family:{
             latin = font("crate://self/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-            chinese = font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
-            emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
+          //  chinese = font("crate://makepad_fonts/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
+            emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
         line_spacing: 1.2
     } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
     pub THEME_FONT_REGULAR = {
         font_family: {
             latin = font("crate://self/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-            chinese = font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
-            emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
+          //  chinese = font("crate:/makepad_fonts_chinese_regular_$SPLIT2$/self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
+            emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
         line_spacing: 1.2
     }
     pub THEME_FONT_BOLD = {
         font_family:{
             latin = font("crate://self/resources/IBMPlexSans-SemiBold.ttf", -0.1, 0.0),
-            chinese = font("crate://self/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
-            emoji = font("crate://self/resources/NotoColorEmoji.ttf", 0.0, 0.0)
+          //  chinese = font("crate://makepad_fonts/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
+            emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
         line_spacing: 1.2
     }
     pub THEME_FONT_ITALIC = {
         font_family:{
             latin = font("crate://self/resources/IBMPlexSans-Italic.ttf", -0.1, 0.0),
-            chinese =  font("crate://self/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0),
+          //  chinese =  font("crate://makepad_fonts/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0),
         },
         line_spacing: 1.2
     }
     pub THEME_FONT_BOLD_ITALIC = {
         font_family:{
             latin = font("crate://self/resources/IBMPlexSans-BoldItalic.ttf", -0.1, 0.0),
-            chinese = font("crate://self/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
+           // chinese = font("crate://makepad_fonts_chinese_bold_$SPLIT2$/resources/LXGWWenKaiBold.ttf", 0.0, 0.0),
         },
         line_spacing: 1.2
     }

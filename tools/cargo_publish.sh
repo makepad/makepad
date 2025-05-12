@@ -26,7 +26,7 @@ DRYRUN=${1:---dry-run}
 #echo "---- PUBLISHING makepad-objc-sys ----" 
 #cargo publish $DRYRUN -p makepad-objc-sys
 #echo "---- PUBLISHING makepad-derive-wasm-bridge ----" 
-cargo publish $DRYRUN -p makepad-derive-wasm-bridge
+#cargo publish $DRYRUN -p makepad-derive-wasm-bridge
 #echo "---- PUBLISHING makepad-wasm-bridge ----" 
 #cargo publish $DRYRUN -p makepad-wasm-bridge
                 
@@ -35,24 +35,36 @@ cargo publish $DRYRUN -p makepad-derive-wasm-bridge
             
 #echo "---- PUBLISHING makepad-futures-legacy ----" 
 #cargo publish $DRYRUN -p makepad-futures-legacy
+
+#echo "---- PUBLISHING makepad-http ----" 
+#cargo publish $DRYRUN -p makepad-http
+
+#echo "---- PUBLISHING makepad-jni-sys ----" 
+#cargo publish $DRYRUN -p makepad-jni-sys
+
+#echo "---- PUBLISHING makepad-android-state ----" 
+#cargo publish $DRYRUN -p makepad-android-state
     
 #echo "---- PUBLISHING makepad-platform ----" 
 #cargo publish $DRYRUN -p makepad-platform
+
+#echo "---- PUBLISHING makepad-ttf-parser ----" 
+#cargo publish $DRYRUN -p makepad-ttf-parser
     
 #echo "---- PUBLISHING makepad-vector ----" 
 #cargo publish $DRYRUN -p makepad-vector
+
+#echo "---- PUBLISHING makepad-html ----" 
+#cargo publish $DRYRUN -p makepad-html
+
+#echo "---- PUBLISHING makepad-rustybuzz ----" 
+#cargo publish $DRYRUN -p makepad-rustybuzz
+
 #echo "---- PUBLISHING makepad-draw ----" 
 #cargo publish $DRYRUN -p makepad-draw
 #echo "---- PUBLISHING makepad-derive-widget ----" 
 #cargo publish $DRYRUN -p makepad-derive-widget
-#echo "---- PUBLISHING makepad-widgets ----" 
-#cargo publish $DRYRUN -p makepad-widgets
-#echo "---- PUBLISHING makepad-http----" 
-#cargo publish $DRYRUN -p makepad-http
-#echo "---- PUBLISHING makepad-shell----" 
-#cargo publish $DRYRUN -p makepad-shell
-#echo "---- PUBLISHING makepad-windows----" 
-#cargo publish $DRYRUN -p makepad-windows
+
 #echo "---- PUBLISHING makepad-zune-core----" 
 #cargo publish $DRYRUN -p makepad-zune-core
 #echo "---- PUBLISHING makepad-zune-inflate----" 
@@ -61,6 +73,19 @@ cargo publish $DRYRUN -p makepad-derive-wasm-bridge
 #cargo publish $DRYRUN -p makepad-zune-jpeg
 #echo "---- PUBLISHING makepad-zune-png----" 
 #cargo publish $DRYRUN -p makepad-zune-png
+
+
+#echo "---- PUBLISHING makepad-fonts-emoji ----" 
+#cargo publish $DRYRUN -p makepad-fonts-emoji
+
+#echo "---- PUBLISHING makepad-widgets ----" 
+cargo publish $DRYRUN -p makepad-widgets
+
+
+#echo "---- PUBLISHING makepad-http----" 
+#cargo publish $DRYRUN -p makepad-http
+#echo "---- PUBLISHING makepad-shell----" 
+#cargo publish $DRYRUN -p makepad-shell
     
 #echo "---- PUBLISHING makepad-studio----" 
 #cargo publish $DRYRUN -p makepad-studio
