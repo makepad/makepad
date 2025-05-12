@@ -587,8 +587,13 @@ impl LiveHook for FontFamily {
                     if !fonts.is_font_known(font_id) {
                         // alright so if we have a multipart font we have to combine it here
                         let data = if font.paths.len()>1{
-                            cx.get_dependency(font.paths[0].as_str()).unwrap().into()
-                            //Rc::new(Vec::new())
+                            // combine them. TODO do this better.
+                            let mut data = Vec::new();
+                            for path in &*font.paths{
+                                let dep = cx.get_dependency(path).unwrap();
+                                data.extend(&*dep);
+                            }
+                            Rc::new(data)
                         }
                         else{
                             cx.get_dependency(font.paths[0].as_str()).unwrap().into()
