@@ -90,6 +90,7 @@ DRYRUN=${1:---dry-run}
 #echo "---- PUBLISHING makepad-widgets ----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-widgets
 
+<<<<<<< Updated upstream
 #echo "---- PUBLISHING makepad-example-ironfish----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-example-simple
 
