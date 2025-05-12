@@ -1,0 +1,13 @@
+[package]
+name = "makepad-fonts-chinese"
+version = "0.9.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad chinese fonts"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "N0YGjn7dnhc4DEHmww9lwuYwMVI="
+
+[dependencies]
+makepad-platform = { path = "../../../platform", version = "0.9.0" }
