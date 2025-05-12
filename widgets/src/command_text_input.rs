@@ -8,12 +8,6 @@ live_design! {
     use link::theme::*;
     use link::shaders::*;
 
-    List = {{List}} {
-        flow: Down,
-        width: Fill,
-        height: Fill,
-    }
-
     pub CommandTextInput = {{CommandTextInput}} {
         flow: Down,
         height: Fit,
@@ -867,66 +861,4 @@ fn get_head(text_input: &TextInputRef) -> usize {
 
 fn is_whitespace(grapheme: &str) -> bool {
     grapheme.chars().all(char::is_whitespace)
-}
-
-/// Reduced and adapted copy of the `List` widget from Moly.
-#[derive(Live, Widget, LiveHook)]
-struct List {
-    #[walk]
-    walk: Walk,
-
-    #[layout]
-    layout: Layout,
-
-    #[redraw]
-    #[rust]
-    area: Area,
-
-    #[rust]
-    items: Vec<WidgetRef>,
-}
-
-impl Widget for List {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.items.iter().for_each(|item| {
-            item.handle_event(cx, event, scope);
-        });
-    }
-
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        cx.begin_turtle(walk, self.layout);
-        self.items.iter().for_each(|item| {
-            item.draw_all(cx, scope);
-        });
-        cx.end_turtle_with_area(&mut self.area);
-        DrawStep::done()
-    }
-}
-
-impl List {
-    fn clear(&mut self) {
-        self.items.clear();
-    }
-
-    fn add(&mut self, widget: WidgetRef) {
-        self.items.push(widget);
-    }
-}
-
-impl ListRef {
-    fn clear(&self) {
-        let Some(mut inner) = self.borrow_mut() else {
-            return;
-        };
-
-        inner.clear();
-    }
-
-    fn add(&self, widget: WidgetRef) {
-        let Some(mut inner) = self.borrow_mut() else {
-            return;
-        };
-
-        inner.add(widget);
-    }
 }
