@@ -178,7 +178,7 @@ pub fn live_design(cx: &mut Cx) {
     else{
         cx.link(live_id!(designer), live_id!(designer_dummy));
     }
-
+    makepad_fonts_emoji::live_design(cx);
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
