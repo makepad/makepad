@@ -585,10 +585,18 @@ impl LiveHook for FontFamily {
                 if let LiveValue::Font(font) = &nodes[child_index].value {
                     let font_id: FontId = (font.to_live_id().0).into();
                     if !fonts.is_font_known(font_id) {
+                        // alright so if we have a multipart font we have to combine it here
+                        let data = if font.paths.len()>1{
+                            cx.get_dependency(font.paths[0].as_str()).unwrap().into()
+                            //Rc::new(Vec::new())
+                        }
+                        else{
+                            cx.get_dependency(font.paths[0].as_str()).unwrap().into()
+                        };
                         fonts.define_font(
                             font_id,
                             FontDefinition {
-                                data: cx.get_dependency(font.path.as_str()).unwrap().into(),
+                                data,
                                 index: 0,
                                 ascender_fudge_in_ems: font.ascender_fudge,
                                 descender_fudge_in_ems: font.descender_fudge,

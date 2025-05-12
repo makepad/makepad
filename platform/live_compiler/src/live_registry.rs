@@ -310,7 +310,7 @@ impl LiveRegistry {
                 Some(v.as_str().to_string())
             }
             LiveValue::Font (v) => {
-                Some(v.path.as_str().to_string())
+                Some(v.paths[0].as_str().to_string())
             }
             _ => None
         }
