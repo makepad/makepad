@@ -10,7 +10,7 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "N0YGjn7dnhc4DEHmww9lwuYwMVI="
 
 [dependencies]
-makepad-draw = { path = "../draw", version = "0.9.0" }
+makepad-draw = { path = "../draw", version = "0.9.1" }
 makepad-derive-widget = {path = "./derive_widget", version="0.9.0"}
 
 makepad-zune-jpeg ={ version = "0.3.17 ",  path = "../libs/zune-jpeg" }
