@@ -20,7 +20,10 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
+        
+        let time_now = self.os.stdin_timers.time_now();
         for &pass_id in &passes_todo {
+            self.passes[pass_id].set_time(time_now as f32);
             match self.passes[pass_id].parent.clone() {
                 CxPassParent::Xr => {}
                 CxPassParent::Window(window_id) => {
