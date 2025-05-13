@@ -139,6 +139,7 @@ pub struct StudioScreenshotRequest{
 #[derive(Debug, DefaultNone, SerBin, DeBin)]
 pub enum StudioToApp{
     Screenshot(StudioScreenshotRequest),
+    KeepAlive,
     LiveChange{
         file_name: String,
         content: String
