@@ -673,7 +673,7 @@ impl GlShader{
                     // crate::debug!("File was not in shader cache: {filename}");
                 }
             } else {
-                crate::warning!("No cache directory available for shader cache");
+                //crate::warning!("No cache directory available for shader cache");
             }
             None
         }
