@@ -139,7 +139,10 @@ impl Cx{
                         }
                         WebSocketThreadMsg::SendMessage{socket_id, message}=>{
                             if let Some(socket) = sockets.get_mut(&socket_id){
-                                socket.send_message(message).unwrap();
+                                if socket.send_message(message).is_err(){
+                                    crate::log!("Websocket sender closed unexpectedly");
+                                    return
+                                }
                             }
                         }
                         WebSocketThreadMsg::AppToStudio{message}=>{
