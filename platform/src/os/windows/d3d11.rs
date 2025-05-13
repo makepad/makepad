@@ -189,13 +189,13 @@ impl Cx {
                 draw_call.draw_call_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
                 
-                draw_item.os.draw_call_uniforms.update_with_f32_constant_data(d3d11_cx, draw_call.draw_call_uniforms.as_slice());
-                
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
-                    if draw_call.user_uniforms.len() != 0 {
-                        draw_item.os.user_uniforms.update_with_f32_constant_data(d3d11_cx, &mut draw_call.user_uniforms);
-                    }
+                    draw_item.os.draw_call_uniforms.update_with_f32_constant_data(d3d11_cx, draw_call.draw_call_uniforms.as_slice());
+                    
+                }
+                if draw_call.user_uniforms.len() != 0 {
+                    draw_item.os.user_uniforms.update_with_f32_constant_data(d3d11_cx, &mut draw_call.user_uniforms);
                 }
                 
                 let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
