@@ -26,11 +26,10 @@ live_design!{
                     x: 0.5,
                     y: 0.5
                 },
-                button1 = <Button> {
-                    text: "Hello world 13241234312434214321234112343412412312343421"
-                    draw_text:{color:#f00}
-                }
                 input1 = <TextInput> {
+                    text: "Hello world1"
+                }
+                button1 = <Button> {
                     width: 100, height: 30
                     text: "Click to count"
                 }
