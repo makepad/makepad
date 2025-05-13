@@ -265,6 +265,7 @@ impl Cx {
                                     StudioToApp::Screenshot(req)=>{
                                         self.screenshot_requests.push(req);
                                     }
+                                    StudioToApp::KeepAlive=>{}
                                     x=>{
                                         actions.push(x);
                                     }
