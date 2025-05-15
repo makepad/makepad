@@ -9,7 +9,7 @@ use {
         //makepad_live_id::*,
         os::{
             apple::apple_sys::*,
-            apple::apple_util::{nsstring_to_string,str_to_nsstring},
+            apple::apple_util::{str_to_nsstring},
             cx_native::EventFlow,
             apple::{
                 tvos::{

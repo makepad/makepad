@@ -1,6 +1,6 @@
 [package]
 name = "makepad-micro-serde"
-version = "0.9.0"
+version = "1.0.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad micro replacement for serde"
@@ -10,5 +10,5 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "yK9xdn_D0D3EdqleI-WHLtjk4rk="
 
 [dependencies]
-makepad-micro-serde-derive = { path = "derive", version = "0.9.0" }
-makepad-live-id = {path = "../live_id", version = "0.9.0" }
+makepad-micro-serde-derive = { path = "derive", version = "1.0.0" }
+makepad-live-id = {path = "../live_id", version = "1.0.0" }
