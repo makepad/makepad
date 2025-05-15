@@ -97,6 +97,9 @@ impl MatchEvent for App{
             self.ui.button(id!(button_1)).set_text(cx, "😀");
             log!("hi");
             self.counter += 1;
+            self.ui.window(id!(main_window)).reposition(cx, DVec2 {x: 300.0, y: 300.0});
+            let a = self.ui.window(id!(main_window)).get_position(cx);
+            println!("window position: {:?}", a);
         }
     }
 }
