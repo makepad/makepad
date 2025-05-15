@@ -156,7 +156,7 @@ impl Cx {
                 if vao.inst_vb_id != draw_item.os.inst_vb_id
                     || vao.geom_vb_id != geometry.os.vb_id
                     || vao.geom_ib_id != geometry.os.ib_id
-                    || vao.shader_id != Some(draw_call.draw_shader.draw_shader_id) {
+                    || vao.shader_id != sh.os_shader_id {
                     
                     vao.shader_id = sh.os_shader_id.clone();
                     vao.inst_vb_id = draw_item.os.inst_vb_id;
