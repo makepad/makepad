@@ -1,6 +1,6 @@
 [package]
 name = "makepad-audio-graph" 
-version = "0.9.1"
+version = "1.0.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad audio graph"
@@ -10,4 +10,4 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "PqUzhus2hR193QIXbeO1Eyz3qGo="
 
 [dependencies]
-makepad-platform = { path = "../platform", version = "0.9.1" }
+makepad-platform = { path = "../platform", version = "1.0.0" }
