@@ -9,3 +9,4 @@ git merge rik2 --ff-only
 git push 
 git checkout rik2 
 git stash apply
+git stash drop

@@ -1,6 +1,6 @@
 [package]
 name = "makepad-math"
-version = "0.9.0"
+version = "1.0.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad math functions"
@@ -11,4 +11,4 @@ metadata.makepad-auto-version = "C4VIsC4byWBjPFWeuGD2ZHHSRRs="
 
 [features] 
 [dependencies]
-makepad-micro-serde = { path = "../../libs/micro_serde", version = "0.9.0" }
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }

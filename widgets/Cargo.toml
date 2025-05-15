@@ -1,6 +1,6 @@
 [package]
 name = "makepad-widgets"
-version = "0.9.1"
+version = "1.0.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad widgets"
@@ -10,19 +10,19 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "N0YGjn7dnhc4DEHmww9lwuYwMVI="
 
 [dependencies]
-makepad-draw = { path = "../draw", version = "0.9.1" }
-makepad-derive-widget = {path = "./derive_widget", version="0.9.0"}
+makepad-draw = { path = "../draw", version = "1.0.0" }
+makepad-derive-widget = {path = "./derive_widget", version="1.0.0"}
 
 makepad-zune-jpeg ={ version = "0.3.17 ",  path = "../libs/zune-jpeg" }
 makepad-zune-png ={ version = "0.4.10", path = "../libs/zune-png"  }
 
-makepad-html ={ path = "../libs/html", version = "0.9.0" }
+makepad-html ={ path = "../libs/html", version = "1.0.0" }
 unicode-segmentation = "1.11.0"
 pulldown-cmark = { version = "0.12.2", default-features = false, features = ["simd"] }
 
-makepad-fonts-emoji = {path = "./fonts/emoji", version = "0.9.1"}
-makepad-fonts-chinese-regular = {path = "./fonts/chinese_regular", version = "0.9.1"}
-makepad-fonts-chinese-regular-2 = {path = "./fonts/chinese_regular_2", version = "0.9.1"}
-makepad-fonts-chinese-bold = {path = "./fonts/chinese_bold", version = "0.9.1"}
-makepad-fonts-chinese-bold-2 = {path = "./fonts/chinese_bold_2", version = "0.9.1"}
+makepad-fonts-emoji = {path = "./fonts/emoji", version = "1.0.0"}
+makepad-fonts-chinese-regular = {path = "./fonts/chinese_regular", version = "1.0.1"}
+makepad-fonts-chinese-regular-2 = {path = "./fonts/chinese_regular_2", version = "1.0.1"}
+makepad-fonts-chinese-bold = {path = "./fonts/chinese_bold", version = "1.0.1"}
+makepad-fonts-chinese-bold-2 = {path = "./fonts/chinese_bold_2", version = "1.0.1"}
 

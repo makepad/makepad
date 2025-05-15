@@ -74,7 +74,6 @@ DRYRUN=${1:---dry-run}
 #echo "---- PUBLISHING makepad-zune-png----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-zune-png
 
-
 #echo "---- PUBLISHING makepad-fonts-emoji ----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-fonts-emoji
 
@@ -112,31 +111,24 @@ DRYRUN=${1:---dry-run}
 #cargo publish $DRYRUN --allow-dirty -p makepad-example-ironfish
 
 #echo "---- PUBLISHING makepad-example-fractal-zoom----" 
-#cargo publish $DRYRUN -p makepad-example-fractal-zoom
+#cargo publish $DRYRUN --allow-dirty -p makepad-example-fractal-zoom
 
-#cargo publish $DRYRUN -p makepad-example-ui-zoo
+#cargo publish $DRYRUN --allow-dirty -p makepad-example-ui-zoo
 
-#echo "---- PUBLISHING makepad-http----" 
-#cargo publish $DRYRUN --allow-dirty -p makepad-http
 #echo "---- PUBLISHING makepad-shell----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-shell
-    
-#echo "---- PUBLISHING makepad-studio----" 
-#cargo publish $DRYRUN --allow-dirty -p makepad-studio
+
 #echo "---- PUBLISHING makepad-file-protocol----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-file-protocol
+
+#echo "---- PUBLISHING makepad-rabin-karp----" 
+#cargo publish $DRYRUN --allow-dirty -p makepad-rabin-karp
+
 #echo "---- PUBLISHING makepad-file-server----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-file-server
-    
-#echo "---- PUBLISHING makepad-example-ironfish----" 
-#cargo publish $DRYRUN -p makepad-example-ironfish
-    
-#echo "---- PUBLISHING makepad-example-fractal-zoom----" 
-#cargo publish $DRYRUN -p makepad-example-fractal-zoom
-    
-#echo "---- PUBLISHING makepad-example-simple ----" 
-#cargo publish $DRYRUN -p makepad-example-simple
-#echo "---- PUBLISHING makepad-miniz----" 
-#cargo publish $DRYRUN -p makepad-miniz
-#echo "---- PUBLISHING makepad-base64----" 
-#cargo publish $DRYRUN -p makepad-base64
+
+#echo "---- PUBLISHING makepad-code-editor----" 
+cargo publish $DRYRUN --allow-dirty -p makepad-code-editor
+
+#echo "---- PUBLISHING makepad-studio----" 
+cargo publish $DRYRUN --allow-dirty -p makepad-studio
