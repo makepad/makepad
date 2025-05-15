@@ -1,6 +1,6 @@
 [package]
 name = "makepad-xr-net"
-version = "0.9.0"
+version = "1.0.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad xr-net multiplayer physical object system"
@@ -11,4 +11,4 @@ metadata.makepad-auto-version = "TT3O8pndmc_WX2mqVyMHSog8H14="
 
 [features] 
 [dependencies]
-makepad-platform = { path = "../../platform", version = "0.9.0" }
+makepad-platform = { path = "../../platform", version = "1.0.0" }
