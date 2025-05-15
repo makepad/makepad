@@ -448,14 +448,17 @@ impl MacosApp {
                     // lets check if we have marked text
                     if KeyCode::Backspace == key_code {
                         // we have to check if we dont have any marked text in our windows
-                        with_macos_app(|app| {
+                        if with_macos_app(|app| {
                             for (_,view) in &app.cocoa_windows {
                                 let marked = unsafe{msg_send![*view, hasMarkedText]};
                                 if marked{
-                                    return
+                                    return true
                                 }
                             }
-                        });
+                            false
+                        }){
+                            return
+                        }
                     }
                     MacosApp::do_callback(
                         MacosEvent::KeyDown(KeyEvent {
