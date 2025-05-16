@@ -387,7 +387,7 @@ impl XlibWindow {
             // x11_sys::XFlush(display);
         }
         // Update the cached position in last_window_geom
-        self.last_window_geom.position = pos;
+        // self.last_window_geom.position = pos;
     }
     
     pub fn set_outer_size(&self, _size: DVec2) {
