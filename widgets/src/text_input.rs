@@ -1252,7 +1252,7 @@ impl TextInput {
 
     fn filter_input(&self, input: &str, is_set_text: bool) -> String {
         // strip out escape sequences and tabs sometimes sent from the IME
-        if input == "\u{1d}" || input == "\u{8}"{
+        if input == "\u{1d}" || input == "\u{8}" || input == "\u{1c}"{
             return String::new();
         }
         if self.is_numeric_only {
