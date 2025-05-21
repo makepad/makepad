@@ -1,9 +1,22 @@
-use {
-    crate::{
-        makepad_live_id::{LiveId, FromLiveId},
-    }
-};
+use crate::makepad_live_id::{LiveId, FromLiveId};
+use std::rc::Rc;
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum AudioSource {
+    None,
+    Url(String),
+    File(String),
+    LiveDependency { module_id: LiveId, id: LiveId },
+    // Consider adding Data(Rc<Vec<u8>>) if direct data passing is needed later
+}
+
+impl Default for AudioSource {
+    fn default() -> Self {
+        AudioSource::None
+    }
+}
+
+// Existing content of platform/src/audio.rs starts here
 pub const MAX_AUDIO_DEVICE_INDEX: usize = 32;
 
 pub type AudioOutputFn = Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >;
@@ -298,4 +311,3 @@ impl AudioBuffer {
         }
     }
 }
-

@@ -6,6 +6,7 @@ pub mod xr;
 pub mod drag_drop;
 pub mod network;
 pub mod video_playback;
+pub mod audio_playback; // Add this line
 pub mod designer;
 
 pub use event::*;
@@ -17,3 +18,4 @@ pub use xr::*;
 pub use drag_drop::*;
 pub use network::*;
 pub use video_playback::*;
+pub use audio_playback::*; // Add this line

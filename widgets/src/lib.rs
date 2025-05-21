@@ -100,6 +100,7 @@ pub mod designer_toolbox;
 pub mod defer_with_redraw;
 
 pub mod xr_hands;
+pub mod audio_player;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
@@ -166,7 +167,8 @@ pub use crate::{
         WidgetFactory,
         WidgetSetIterator,
         DrawStateWrap,
-    }
+    },
+    audio_player::{AudioPlayer} // Add AudioPlayerAction, AudioPlayerEvent later if defined
 };
 
 
@@ -250,6 +252,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::loading_spinner::live_design(cx);
     crate::web_view::live_design(cx);
     crate::xr_hands::live_design(cx);
+    crate::audio_player::live_design(cx);
         
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
