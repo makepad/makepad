@@ -46,4 +46,15 @@ public class MakepadNative {
     public static native void onVideoPlaybackCompleted(long videoId);
     public static native void onVideoPlayerReleased(long videoId);
     public static native void onVideoDecodingError(long videoId, String error);
+
+    // Audio Playback Callbacks
+    public static native void onAudioPlaybackPrepared(long playerId, int durationMs, boolean canSeek, boolean canPause, boolean canSetVolume);
+    public static native void onAudioPlaybackStarted(long playerId);
+    public static native void onAudioPlaybackCompleted(long playerId);
+    public static native void onAudioPlaybackError(long playerId, String error);
+    public static native void onAudioPlaybackPaused(long playerId);
+    public static native void onAudioPlaybackStopped(long playerId);
+    public static native void onAudioPlaybackReleased(long playerId);
+    // Potentially: onAudioPlaybackSeeked(long playerId, int timeMs);
+    // Potentially: onAudioVolumeChanged(long playerId, float leftVolume, float rightVolume);
 }

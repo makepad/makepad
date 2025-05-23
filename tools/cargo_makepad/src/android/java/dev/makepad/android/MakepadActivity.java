@@ -300,6 +300,11 @@ public class MakepadActivity
     Handler mVideoPlaybackHandler;
     HashMap<Long, VideoPlayerRunnable> mVideoPlayerRunnables;
 
+    // audio playback
+    HandlerThread mAudioPlayerThread;
+    Handler mAudioPlayerHandler;
+    HashMap<Long, AudioPlayerRunnable> mAudioPlayerRunnables;
+
     // networking, make these static because of activity switching
     static Handler mWebSocketsHandler;
     static HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
@@ -328,10 +333,15 @@ public class MakepadActivity
 
         MakepadNative.activityOnCreate(this);
 
-        HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
-        decoderThreadHandler.start(); // TODO: only start this if its needed.
-        mVideoPlaybackHandler = new Handler(decoderThreadHandler.getLooper());
+        HandlerThread videoPlayerThreadHandler = new HandlerThread("VideoPlayerThread");
+        videoPlayerThreadHandler.start(); // TODO: only start this if its needed.
+        mVideoPlaybackHandler = new Handler(videoPlayerThreadHandler.getLooper());
         mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
+
+        mAudioPlayerThread = new HandlerThread("AudioPlayerThread");
+        mAudioPlayerThread.start();
+        mAudioPlayerHandler = new Handler(mAudioPlayerThread.getLooper());
+        mAudioPlayerRunnables = new HashMap<Long, AudioPlayerRunnable>();
 
 
 
@@ -681,11 +691,76 @@ public class MakepadActivity
     public void cleanupVideoPlaybackResources(long videoId) {
         VideoPlayerRunnable runnable = mVideoPlayerRunnables.remove(videoId);
         if(runnable != null) {
-            runnable.cleanupVideoPlaybackResources();
-            runnable = null;
+            // Assuming VideoPlayerRunnable has a method to post its cleanup to its own handler or is safe to call directly.
+            // For consistency with AudioPlayerRunnable, posting to its handler would be best if it manages a Looper.
+            runnable.cleanupVideoPlaybackResources(); 
+        }
+    }
+
+    // Audio Playback JNI Methods
+    public void jniPrepareAudioPlayback(long playerId, String audioUrlOrPath, boolean isNetwork, boolean autoPlay, boolean loopAudio) {
+        AudioPlayer audioPlayer = new AudioPlayer(this, playerId);
+        // Pass all necessary parameters to AudioPlayerRunnable constructor
+        AudioPlayerRunnable runnable = new AudioPlayerRunnable(audioPlayer, audioUrlOrPath, isNetwork, autoPlay, loopAudio);
+        mAudioPlayerRunnables.put(playerId, runnable);
+        mAudioPlayerHandler.post(runnable); // This will call runnable.run() on the mAudioPlayerThread
+    }
+
+    public void jniBeginAudioPlayback(long playerId) {
+        AudioPlayerRunnable runnable = mAudioPlayerRunnables.get(playerId);
+        if (runnable != null) {
+            mAudioPlayerHandler.post(() -> runnable.beginPlayback());
+        }
+    }
+
+    public void jniPauseAudioPlayback(long playerId) {
+        AudioPlayerRunnable runnable = mAudioPlayerRunnables.get(playerId);
+        if (runnable != null) {
+             mAudioPlayerHandler.post(() -> runnable.pausePlayback());
         }
     }
     
+    public void jniStopAudioPlayback(long playerId) {
+        AudioPlayerRunnable runnable = mAudioPlayerRunnables.get(playerId);
+        if (runnable != null) {
+            mAudioPlayerHandler.post(() -> runnable.stopPlayback());
+        }
+    }
+
+    public void jniResumeAudioPlayback(long playerId) {
+        AudioPlayerRunnable runnable = mAudioPlayerRunnables.get(playerId);
+        if (runnable != null) {
+            mAudioPlayerHandler.post(() -> runnable.resumePlayback());
+        }
+    }
+
+    public void jniSeekAudioPlayback(long playerId, int timeMs) {
+        AudioPlayerRunnable runnable = mAudioPlayerRunnables.get(playerId);
+        if (runnable != null) {
+            mAudioPlayerHandler.post(() -> runnable.seekPlayback(timeMs));
+        }
+    }
+
+    public void jniSetAudioVolume(long playerId, float leftVolume, float rightVolume) {
+        AudioPlayerRunnable runnable = mAudioPlayerRunnables.get(playerId);
+        if (runnable != null) {
+            mAudioPlayerHandler.post(() -> runnable.setVolume(leftVolume, rightVolume));
+        }
+    }
+    
+    public void jniSetAudioLoop(long playerId, boolean loopAudio) {
+        AudioPlayerRunnable runnable = mAudioPlayerRunnables.get(playerId);
+        if (runnable != null) {
+            mAudioPlayerHandler.post(() -> runnable.setLooping(loopAudio));
+        }
+    }
+
+    public void jniCleanupAudioPlaybackResources(long playerId) {
+        AudioPlayerRunnable runnable = mAudioPlayerRunnables.remove(playerId);
+        if (runnable != null) {
+            mAudioPlayerHandler.post(() -> runnable.release());
+        }
+    }
                 
     public boolean isEmulator() {
         // hints that the app is running on emulator

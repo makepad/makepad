@@ -19,6 +19,7 @@ use {
             designer::*,
             network::*,
             video_playback::*,
+            audio_playback::*, // Added for new audio events
         },
         action::ActionsBuf,
         animator::Ease,
@@ -222,6 +223,16 @@ pub enum Event {
     ToWasmMsg(ToWasmMsgEvent),
     
     DesignerPick(DesignerPickEvent),
+
+    // Audio Playback Events
+    AudioPlaybackPrepared(AudioPlaybackPreparedEvent),
+    AudioPlaybackStarted(AudioPlaybackStartedEvent),
+    AudioPlaybackPaused(AudioPlaybackPausedEvent),
+    AudioPlaybackStopped(AudioPlaybackStoppedEvent),
+    AudioPlaybackCompleted(AudioPlaybackCompletedEvent),
+    AudioPlaybackError(AudioPlaybackErrorEvent),
+    AudioPlaybackReleased(AudioPlaybackReleasedEvent),
+    AudioPlaybackTimeUpdate(AudioPlaybackTimeUpdateEvent), // If JNI path is used
 }
 
 impl Event{
@@ -298,6 +309,14 @@ impl Event{
             
             53=>"DesignerPick",
             54=>"XrLocal",
+            55=>"AudioPlaybackPrepared",
+            56=>"AudioPlaybackStarted",
+            57=>"AudioPlaybackPaused",
+            58=>"AudioPlaybackStopped",
+            59=>"AudioPlaybackCompleted",
+            60=>"AudioPlaybackError",
+            61=>"AudioPlaybackReleased",
+            62=>"AudioPlaybackTimeUpdate",
             _=>panic!()
         }
     }
@@ -370,7 +389,16 @@ impl Event{
             Self::ToWasmMsg(_)=>52,
             
             Self::DesignerPick(_) =>53,
-            Self::XrLocal(_)=>54
+            Self::XrLocal(_)=>54,
+            
+            Self::AudioPlaybackPrepared(_)=>55,
+            Self::AudioPlaybackStarted(_)=>56,
+            Self::AudioPlaybackPaused(_)=>57,
+            Self::AudioPlaybackStopped(_)=>58,
+            Self::AudioPlaybackCompleted(_)=>59,
+            Self::AudioPlaybackError(_)=>60,
+            Self::AudioPlaybackReleased(_)=>61,
+            Self::AudioPlaybackTimeUpdate(_)=>62,
         }
     }
 

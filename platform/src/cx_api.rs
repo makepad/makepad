@@ -7,6 +7,10 @@ use {
         cx::{Cx, CxRef, OsType, XrCapabilities},
         draw_list::DrawListId,
         event::{DragItem, HttpRequest, NextFrame, Timer, Trigger, VideoSource},
+        // TODO: We need to make sure AudioSource is correctly referenced/imported
+        // If platform/src/audio.rs is the final location for AudioSource, this import is correct.
+        // Otherwise, adjust as necessary.
+        audio::AudioSource,
         gpu_info::GpuInfo,
         macos_menu::MacosMenu,
         makepad_futures::executor::Spawner,
@@ -128,7 +132,18 @@ pub enum CxOsOp {
     XrAdvertiseAnchor(XrAnchor),
     XrDiscoverAnchor(u8),
     XrStopPresenting,
-    
+
+    // Audio Playback Ops
+    PrepareAudioPlayback(LiveId, AudioSource, bool /*autoplay*/, bool /*loop_audio*/),
+    BeginAudioPlayback(LiveId),
+    PauseAudioPlayback(LiveId),
+    ResumeAudioPlayback(LiveId), // Can potentially be merged with BeginAudioPlayback
+    StopAudioPlayback(LiveId), // Stops playback, but doesn't necessarily release all resources like Cleanup
+    SeekAudioPlayback(LiveId, f64 /*time_seconds*/),
+    SetAudioVolume(LiveId, f64 /*volume*/),
+    MuteAudioPlayback(LiveId),
+    UnmuteAudioPlayback(LiveId),
+    CleanupAudioPlaybackResources(LiveId),
 }
 
 impl std::fmt::Debug for CxOsOp {
@@ -184,6 +199,18 @@ impl std::fmt::Debug for CxOsOp {
             Self::XrAdvertiseAnchor(_)=>write!(f, "XrAdvertiseAnchor"),
             Self::XrSetLocalAnchor(_)=>write!(f, "XrSetLocalAnchor"),
             Self::XrDiscoverAnchor(_)=>write!(f, "XrDiscoverAnchor"),
+
+            // Audio Playback Ops
+            Self::PrepareAudioPlayback(..)=>write!(f, "PrepareAudioPlayback"),
+            Self::BeginAudioPlayback(..)=>write!(f, "BeginAudioPlayback"),
+            Self::PauseAudioPlayback(..)=>write!(f, "PauseAudioPlayback"),
+            Self::ResumeAudioPlayback(..)=>write!(f, "ResumeAudioPlayback"),
+            Self::StopAudioPlayback(..)=>write!(f, "StopAudioPlayback"),
+            Self::SeekAudioPlayback(..)=>write!(f, "SeekAudioPlayback"),
+            Self::SetAudioVolume(..)=>write!(f, "SetAudioVolume"),
+            Self::MuteAudioPlayback(..)=>write!(f, "MuteAudioPlayback"),
+            Self::UnmuteAudioPlayback(..)=>write!(f, "UnmuteAudioPlayback"),
+            Self::CleanupAudioPlaybackResources(..)=>write!(f, "CleanupAudioPlaybackResources"),
         }
     }
 }

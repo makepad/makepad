@@ -109,6 +109,37 @@ pub enum FromJavaMessage {
         video_id: u64,
         error: String,
     },
+
+    // Audio Playback Messages
+    AudioPlaybackPrepared {
+        player_id: u64,
+        duration_ms: i32,
+        can_seek: bool,
+        can_pause: bool,
+        can_set_volume: bool,
+    },
+    AudioPlaybackStarted {
+        player_id: u64,
+    },
+    AudioPlaybackCompleted {
+        player_id: u64,
+    },
+    AudioPlaybackError {
+        player_id: u64,
+        error: String,
+    },
+    AudioPlaybackPaused { // Added based on AudioPlayerEvent
+        player_id: u64,
+    },
+    AudioPlaybackStopped { // Added based on AudioPlayerEvent
+        player_id: u64,
+    },
+    AudioPlaybackReleased {
+        player_id: u64,
+    },
+    // AudioPlaybackTimeUpdate might be too frequent for mpsc, consider direct event or other mechanism if needed.
+    // For now, assuming TimeUpdate is handled by the widget polling or a different event path if critical.
+
     Pause,
     Resume,
     Start,
@@ -275,6 +306,96 @@ fn init_simple_render_loop(device_refresh_rate: f32) {
                 std::thread::sleep(target_frame_time - elapsed);
             }
         }
+    });
+}
+
+// JNI Functions for Audio Playback Callbacks from MakepadNative.java
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAudioPlaybackPrepared(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    player_id: jni_sys::jlong,
+    duration_ms: jni_sys::jint,
+    can_seek: jni_sys::jboolean,
+    can_pause: jni_sys::jboolean,
+    can_set_volume: jni_sys::jboolean,
+) {
+    send_from_java_message(FromJavaMessage::AudioPlaybackPrepared {
+        player_id: player_id as u64,
+        duration_ms: duration_ms as i32,
+        can_seek: can_seek != 0,
+        can_pause: can_pause != 0,
+        can_set_volume: can_set_volume != 0,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAudioPlaybackStarted(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    player_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::AudioPlaybackStarted {
+        player_id: player_id as u64,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAudioPlaybackCompleted(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    player_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::AudioPlaybackCompleted {
+        player_id: player_id as u64,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAudioPlaybackError(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    player_id: jni_sys::jlong,
+    error: jni_sys::jstring,
+) {
+    let error_string = jstring_to_string(env, error);
+    send_from_java_message(FromJavaMessage::AudioPlaybackError {
+        player_id: player_id as u64,
+        error: error_string,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAudioPlaybackPaused(
+     _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    player_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::AudioPlaybackPaused {
+        player_id: player_id as u64,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAudioPlaybackStopped(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    player_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::AudioPlaybackStopped {
+        player_id: player_id as u64,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAudioPlaybackReleased(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    player_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::AudioPlaybackReleased {
+        player_id: player_id as u64,
     });
 }
 

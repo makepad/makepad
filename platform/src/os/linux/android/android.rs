@@ -437,6 +437,51 @@ impl Cx {
                 );
                 self.call_event_handler(&e);
             },
+
+            // Audio Playback Event Handling
+            FromJavaMessage::AudioPlaybackPrepared { player_id, duration_ms, can_seek, can_pause, can_set_volume } => {
+                self.call_event_handler(&Event::AudioPlaybackPrepared(AudioPlaybackPreparedEvent {
+                    player_id: LiveId(player_id),
+                    duration_ms,
+                    can_seek,
+                    can_pause,
+                    can_set_volume,
+                }));
+            },
+            FromJavaMessage::AudioPlaybackStarted { player_id } => {
+                self.call_event_handler(&Event::AudioPlaybackStarted(AudioPlaybackStartedEvent {
+                    player_id: LiveId(player_id),
+                }));
+            },
+            FromJavaMessage::AudioPlaybackCompleted { player_id } => {
+                self.call_event_handler(&Event::AudioPlaybackCompleted(AudioPlaybackCompletedEvent {
+                    player_id: LiveId(player_id),
+                }));
+            },
+            FromJavaMessage::AudioPlaybackError { player_id, error } => {
+                self.call_event_handler(&Event::AudioPlaybackError(AudioPlaybackErrorEvent {
+                    player_id: LiveId(player_id),
+                    error,
+                }));
+            },
+            FromJavaMessage::AudioPlaybackPaused { player_id } => {
+                self.call_event_handler(&Event::AudioPlaybackPaused(AudioPlaybackPausedEvent {
+                    player_id: LiveId(player_id),
+                }));
+            },
+            FromJavaMessage::AudioPlaybackStopped { player_id } => {
+                self.call_event_handler(&Event::AudioPlaybackStopped(AudioPlaybackStoppedEvent {
+                    player_id: LiveId(player_id),
+                }));
+            },
+            FromJavaMessage::AudioPlaybackReleased { player_id } => {
+                self.call_event_handler(&Event::AudioPlaybackReleased(AudioPlaybackReleasedEvent {
+                    player_id: LiveId(player_id),
+                }));
+            },
+            // Note: AudioPlaybackTimeUpdate is not currently sent via FromJavaMessage due to frequency concerns.
+            // It would be handled here if it were.
+
             FromJavaMessage::Pause => {
                 self.call_event_handler(&Event::Pause);
             }
@@ -973,6 +1018,107 @@ impl Cx {
                 }
                 CxOsOp::SetCursor(_)=>{
                     // no need
+                },
+                // Audio CxOsOps handling
+                CxOsOp::PrepareAudioPlayback(player_id, source, auto_play, loop_audio) => {
+                    // This is where you'd make the JNI call to MakepadActivity.jniPrepareAudioPlayback
+                    // Example (actual JNI call might differ slightly):
+                    unsafe {
+                        let env = attach_jni_env();
+                        // Convert AudioSource to parameters Java understands (e.g., URL string, isNetwork boolean)
+                        let (path_or_url, is_network_source) = match source {
+                            AudioSource::Url(url) => (url, true),
+                            AudioSource::File(path) => (path, false),
+                            // AudioSource::LiveDependency would need to be resolved to a path/URL first
+                            // Or, if passing raw data, that would be a different JNI signature.
+                            _ => ("".to_string(), false) // Or handle error
+                        };
+                        if !path_or_url.is_empty() {
+                             let audio_url_or_path_jstring =ndetail::to_java_string(env, &path_or_url);
+                            // Assuming a helper `to_java_jni_prepare_audio_playback` or direct JNI call
+                            // android_jni::to_java_jni_prepare_audio_playback(env, player_id, audio_url_or_path_jstring, is_network_source, auto_play, loop_audio);
+                            ndk_utils::call_void_method!(
+                                env,
+                                get_activity(),
+                                "jniPrepareAudioPlayback",
+                                "(JLjava/lang/String;ZZZ)V",
+                                player_id.get_value() as jni_sys::jlong,
+                                audio_url_or_path_jstring,
+                                is_network_source as jni_sys::jboolean,
+                                auto_play as jni_sys::jboolean,
+                                loop_audio as jni_sys::jboolean
+                            );
+                            (**env).DeleteLocalRef.unwrap()(env, audio_url_or_path_jstring);
+                        }
+                    }
+                },
+                CxOsOp::BeginAudioPlayback(player_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        // android_jni::to_java_jni_begin_audio_playback(env, player_id);
+                         ndk_utils::call_void_method!(env, get_activity(), "jniBeginAudioPlayback", "(J)V", player_id.get_value() as jni_sys::jlong);
+                    }
+                },
+                CxOsOp::PauseAudioPlayback(player_id) => {
+                     unsafe {
+                        let env = attach_jni_env();
+                        // android_jni::to_java_jni_pause_audio_playback(env, player_id);
+                        ndk_utils::call_void_method!(env, get_activity(), "jniPauseAudioPlayback", "(J)V", player_id.get_value() as jni_sys::jlong);
+                    }
+                },
+                CxOsOp::ResumeAudioPlayback(player_id) => {
+                     unsafe {
+                        let env = attach_jni_env();
+                        // android_jni::to_java_jni_resume_audio_playback(env, player_id);
+                        ndk_utils::call_void_method!(env, get_activity(), "jniResumeAudioPlayback", "(J)V", player_id.get_value() as jni_sys::jlong);
+                    }
+                },
+                CxOsOp::StopAudioPlayback(player_id) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        // android_jni::to_java_jni_stop_audio_playback(env, player_id);
+                        ndk_utils::call_void_method!(env, get_activity(), "jniStopAudioPlayback", "(J)V", player_id.get_value() as jni_sys::jlong);
+                    }
+                },
+                CxOsOp::SeekAudioPlayback(player_id, time_ms) => {
+                     unsafe {
+                        let env = attach_jni_env();
+                        // android_jni::to_java_jni_seek_audio_playback(env, player_id, time_ms as i32);
+                        ndk_utils::call_void_method!(env, get_activity(), "jniSeekAudioPlayback", "(JI)V", player_id.get_value() as jni_sys::jlong, time_ms as jni_sys::jint);
+                    }
+                },
+                CxOsOp::SetAudioVolume(player_id, volume) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        // android_jni::to_java_jni_set_audio_volume(env, player_id, volume as f32, volume as f32); // Assuming stereo volume
+                        ndk_utils::call_void_method!(env, get_activity(), "jniSetAudioVolume", "(JFF)V", player_id.get_value() as jni_sys::jlong, volume as jni_sys::jfloat, volume as jni_sys::jfloat);
+                    }
+                },
+                CxOsOp::MuteAudioPlayback(player_id) => { // Assuming jniSetAudioLoop(playerId, true) for mute via setLoop(true) is a placeholder
+                    // This should ideally call a specific mute JNI function. For now, let's assume it's part of SetAudioVolume or a dedicated mute call.
+                    // Or, if using setLoop as a placeholder for mute:
+                    // unsafe {
+                    //    let env = attach_jni_env();
+                    //    ndk_utils::call_void_method!(env, get_activity(), "jniSetAudioLoop", "(JZ)V", player_id.get_value() as jni_sys::jlong, true as jni_sys::jboolean);
+                    // }
+                    // Correct approach: Need a jniMuteAudioPlayback or similar
+                    // For now, this will be a no-op until a proper JNI method is confirmed/added to MakepadActivity.java
+                    crate::log!("MuteAudioPlayback CxOsOp needs a corresponding JNI call in MakepadActivity.java");
+                },
+                CxOsOp::UnmuteAudioPlayback(player_id) => {
+                    // Similar to MuteAudioPlayback, needs a proper JNI call.
+                    // unsafe {
+                    //    let env = attach_jni_env();
+                    //    ndk_utils::call_void_method!(env, get_activity(), "jniSetAudioLoop", "(JZ)V", player_id.get_value() as jni_sys::jlong, false as jni_sys::jboolean);
+                    // }
+                    crate::log!("UnmuteAudioPlayback CxOsOp needs a corresponding JNI call in MakepadActivity.java");
+                },
+                CxOsOp::CleanupAudioPlaybackResources(player_id) => {
+                     unsafe {
+                        let env = attach_jni_env();
+                        // android_jni::to_java_jni_cleanup_audio_playback_resources(env, player_id);
+                        ndk_utils::call_void_method!(env, get_activity(), "jniCleanupAudioPlaybackResources", "(J)V", player_id.get_value() as jni_sys::jlong);
+                    }
                 },
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
