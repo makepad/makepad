@@ -131,7 +131,7 @@ live_design!{
             uniform border_radius: 0.
             uniform border_size: (THEME_BEVELING)
             uniform color_1: (THEME_COLOR_BG_APP * 0.9);
-            uniform color_2: #282828;
+            uniform color_2: (THEME_COLOR_D_3);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
