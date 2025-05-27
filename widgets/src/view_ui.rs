@@ -31,7 +31,7 @@ live_design! {
                     0.,
                     self.rect_size.y * 0.5 - sz * 2,
                     self.rect_size.x,
-                    sz + 1
+                    sz + 1.
                 )
 
                 sdf.fill(self.color_1);
