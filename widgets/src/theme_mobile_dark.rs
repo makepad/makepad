@@ -178,11 +178,11 @@ live_design! {
 
     pub THEME_FONT_LABEL = {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") },
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+        // font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
     } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
     pub THEME_FONT_REGULAR = {
         font: { path: dep("crate://self/resources/IBMPlexSans-Text.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+        // font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
     }
     pub THEME_FONT_BOLD = {
         font: { path: dep("crate://self/resources/IBMPlexSans-SemiBold.ttf") }
@@ -190,7 +190,7 @@ live_design! {
     }
     pub THEME_FONT_ITALIC = {
         font: { path: dep("crate://self/resources/IBMPlexSans-Italic.ttf") }
-        font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
+        // font2: { path: dep("crate://self/resources/LXGWWenKaiRegular.ttf") },
     }
     pub THEME_FONT_BOLD_ITALIC = {
         font: { path: dep("crate://self/resources/IBMPlexSans-BoldItalic.ttf") },

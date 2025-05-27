@@ -345,11 +345,11 @@ live_design! {
     pub THEME_FONT_LABEL = {
         font_family:{
             latin = font("crate://self/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-            chinese = font(
-                "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
-                "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
-                0.0, 
-                0.0)
+            // chinese = font(
+            //     "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
+            //     "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
+            //     0.0,
+            //     0.0)
             emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
         line_spacing: 1.2
@@ -357,11 +357,11 @@ live_design! {
     pub THEME_FONT_REGULAR = {
         font_family: {
             latin = font("crate://self/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-            chinese = font(
-                "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
-                "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
-                0.0, 
-                0.0)
+            // chinese = font(
+            //     "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
+            //     "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
+            //     0.0,
+            //     0.0)
             emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
         },
         line_spacing: 1.2
@@ -381,11 +381,11 @@ live_design! {
     pub THEME_FONT_ITALIC = {
         font_family:{
             latin = font("crate://self/resources/IBMPlexSans-Italic.ttf", -0.1, 0.0),
-            chinese = font(
-                "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
-                "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
-                0.0, 
-                0.0)
+            // chinese = font(
+            //     "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
+            //     "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
+            //     0.0,
+            //     0.0)
         },
         line_spacing: 1.2
     }
