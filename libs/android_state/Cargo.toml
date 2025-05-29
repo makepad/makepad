@@ -13,4 +13,6 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "Xn0xvOdZChZbltM8tMBk0zLdOBc="
 
 [dependencies]
-makepad-jni-sys = {version = "0.4.0", path = "../jni-sys"}
+## Note: we must not use local 'path' dependencies on `makepad-jni-sys`
+## in order to guarantee that only one instance of each crate exists in the app binary.
+makepad-jni-sys = {version = "0.4.0"}
