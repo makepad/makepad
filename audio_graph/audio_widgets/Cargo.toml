@@ -1,6 +1,6 @@
 [package]
 name = "makepad-audio-widgets" 
-version = "0.9.0"
+version = "1.0.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad audio widgets"
@@ -10,4 +10,4 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "kUclORbZoqUxFucqVigeEBAgfk4="
  
 [dependencies] 
-makepad-widgets = { path = "../../widgets", version = "0.9.0" }
+makepad-widgets = { path = "../../widgets", version = "1.0.0" }

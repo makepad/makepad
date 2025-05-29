@@ -12,7 +12,7 @@ metadata.makepad-auto-version = "3q9p7hJP7S16AZ2sa6ONkcZPa0w="
 [workspace]
 
 [dependencies]
-makepad-http = { path = "../../libs/http", version = "0.4.0" }
+makepad-http = { path = "../../libs/http", version = "1.0.0" }
 #makepad-file-server = {path = "../../studio/file_server", version = "0.3.0"}
  
 [features]
