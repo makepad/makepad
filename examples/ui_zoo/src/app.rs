@@ -290,7 +290,7 @@
 impl LiveRegister for App {
         fn live_register(cx: &mut Cx) { 
             crate::makepad_widgets::live_design(cx);
-            cx.link(live_id!(theme), live_id!(theme_desktop_dark));
+            cx.link(live_id!(theme), live_id!(theme_desktop_light));
 
             crate::layout_templates::live_design(cx);
             crate::demofiletree::live_design(cx);
@@ -370,7 +370,7 @@ impl LiveRegister for App {
                 if let Some(value) = self.ui.slider(slider.0).end_slide(&actions){
                     cx.set_dsl_value(
                         live_id!(makepad_widgets),
-                        live_id!(theme_desktop_dark),
+                        live_id!(theme_desktop_light),
                         slider.1,
                         LiveValue::Float64(value)
                     );
@@ -383,7 +383,7 @@ impl LiveRegister for App {
             if let Some(txt) = self.ui.text_input(id!(theme_tint_color)).changed(&actions){
                 cx.set_dsl_value(
                     live_id!(makepad_widgets),
-                    live_id!(theme_desktop_dark),
+                    live_id!(theme_desktop_light),
                     live_id!(THEME_COLOR_TINT),
                     LiveValue::Color(hex_bytes_to_u32(&txt.into_bytes()).unwrap_or(0x777777ff))
                 );
