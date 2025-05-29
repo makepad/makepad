@@ -29,14 +29,14 @@ live_design!{
                     width: Fit, height: Fit, 
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
-                    draw_bg: { color: #0 }
+                    draw_bg: { color: (THEME_COLOR_INSET) }
                     <Label> { text: "<SolidView>" }
                 }
 
                 <Vr> {
                     draw_bg: {
                         color_1: #000,
-                        color_2: #000,
+                        color_2: #fff,
                     }
                 }
 
@@ -44,7 +44,7 @@ live_design!{
                     width: 25.,
                     draw_bg: {
                         color_1: #0,
-                        color_2: #5,
+                        color_2: #f,
                     }
                 }
 
@@ -54,7 +54,7 @@ live_design!{
                     padding: <THEME_MSPACE_2> {},
                     align: { x: 0.5, y: 0.5 }
                     draw_bg: {
-                        color: #000,
+                        color: (THEME_COLOR_INSET),
                         border_size: 2.,
                         border_color: #8,
                         border_inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -68,7 +68,7 @@ live_design!{
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
-                        color: #000,
+                        color: (THEME_COLOR_INSET),
                         border_size: 2.0
                         border_color: #8
                         shadow_color: #0007
@@ -85,7 +85,7 @@ live_design!{
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
-                        color: #000,
+                        color: (THEME_COLOR_INSET),
                         border_radius: 5.,
                         border_color: #8
                         border_size: 2.0
@@ -103,7 +103,7 @@ live_design!{
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
-                        color: #000,
+                        color: (THEME_COLOR_INSET),
                         border_radius: 5.,
                         border_size: 2.0
                         border_color: #8
@@ -119,7 +119,7 @@ live_design!{
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
-                        color: #000,
+                        color: (THEME_COLOR_INSET),
                         border_radius: vec2(1.0, 5.0),
                         border_size: 2.0
                         border_color: #8
@@ -135,7 +135,7 @@ live_design!{
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
-                        color: #000,
+                        color: (THEME_COLOR_INSET),
                         border_size: 2.0
                         border_color: #8
                         border_radius: vec2(1.0, 5.0),
@@ -151,7 +151,7 @@ live_design!{
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
-                        color: #000,
+                        color: (THEME_COLOR_INSET),
                         border_size: 2.0
                         border_color: #8
                         border_radius: vec4(1.0, 5.0, 2.0, 3.0),
@@ -200,7 +200,7 @@ live_design!{
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
-                        color: #0,
+                        color: (THEME_COLOR_INSET),
                         border_size: 2.0
                         border_color: #8
                         border_radius: 30.,
@@ -216,7 +216,7 @@ live_design!{
                     align: { x: 0.5, y: 0.5 }
 
                     draw_bg: {
-                        color: #0,
+                        color: (THEME_COLOR_INSET),
                         border_size: 2.0
                         border_color: #8
                         border_inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -240,7 +240,7 @@ live_design!{
                     <View> {
                         width: Fit, height: Fit,
                         show_bg: true, 
-                        draw_bg: { color: #0 }
+                        draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<CachedView>" }
                     }
@@ -262,7 +262,7 @@ live_design!{
                         width: Fit, height: Fit,
                         padding: <THEME_MSPACE_2> {},
                         show_bg: true, 
-                        draw_bg: { color: #0 }
+                        draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<CachedRoundedView>" }
                     }
@@ -278,7 +278,7 @@ live_design!{
                         width: 400., height: 400.,
                         flow: Down,
                         show_bg: true, 
-                        draw_bg: { color: #0 }
+                        draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
                         <Label> { text: "<CachedScrollXY> <CachedScrollXY> <CachedScrollXY>" }
@@ -305,7 +305,7 @@ live_design!{
                         width: 400., height: 400.,
                         flow: Down,
                         show_bg: true, 
-                        draw_bg: { color: #0 }
+                        draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
                         <Label> { text: "<CachedScrollX> <CachedScrollX> <CachedScrollX>" }
@@ -332,7 +332,7 @@ live_design!{
                         width: 400., height: 400.,
                         flow: Down,
                         show_bg: true, 
-                        draw_bg: { color: #0 }
+                        draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
                         <Label> { text: "<CachedScrollY> <CachedScrollY> <CachedScrollY>" }
@@ -363,7 +363,7 @@ live_design!{
                         width: 400., height: 400.,
                         flow: Down,
                         show_bg: true, 
-                        draw_bg: { color: #0 }
+                        draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
                         <Label> { text: "<ScrollXYView> <ScrollXYView> <ScrollXYView>" }
@@ -394,7 +394,7 @@ live_design!{
                         width: 400., height: 400.,
                         flow: Down,
                         show_bg: true, 
-                        draw_bg: { color: #0 }
+                        draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
                         <Label> { text: "<ScrollXView> <ScrollXView> <ScrollXView>" }
@@ -425,7 +425,7 @@ live_design!{
                         width: 400., height: 400.,
                         flow: Down,
                         show_bg: true, 
-                        draw_bg: { color: #0 }
+                        draw_bg: { color: (THEME_COLOR_INSET) }
 
                         <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
                         <Label> { text: "<ScrollYView> <ScrollYView> <ScrollYView>" }
