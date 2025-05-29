@@ -226,19 +226,20 @@ live_design!{
         
         filler: {
             fn pixel(self) -> vec4 {
-                return mix(
-                    mix(
-                        THEME_COLOR_BG_EVEN,
-                        THEME_COLOR_BG_ODD,
-                        self.is_even
-                    ),
-                    mix(
-                        THEME_COLOR_OUTSET_INACTIVE,
-                        THEME_COLOR_OUTSET_ACTIVE,
-                        self.focussed
-                    ),
-                    self.active
-                );
+                return (THEME_COLOR_BG_APP)
+                // return mix(
+                //     mix(
+                //         THEME_COLOR_BG_EVEN,
+                //         THEME_COLOR_BG_ODD,
+                //         self.is_even
+                //     ),
+                //     mix(
+                //         THEME_COLOR_OUTSET_INACTIVE,
+                //         THEME_COLOR_OUTSET_ACTIVE,
+                //         self.focussed
+                //     ),
+                //     self.active
+                // );
             }
         }
     }
