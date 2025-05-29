@@ -548,7 +548,7 @@ live_design!{
                 let offset_sides = self.border_size + 6.;
                 sdf.rect(
                     self.border_size + offset_sides,
-                    offset_px.y + (self.rect_size.y - offset_px.y) * 0.5 - self.border_size - 1,
+                    offset_px.y + (self.rect_size.y - offset_px.y) * 0.5 - self.border_size - 0.5,
                     self.rect_size.x - 2 * offset_sides - self.border_size * 2.,
                     self.border_size * 2. + 1. 
                 );
@@ -576,7 +576,7 @@ live_design!{
                 sdf.rect(
                     self.border_size + offset_sides,
                     offset_px.y + (self.rect_size.y - offset_px.y) * 0.5,
-                    self.rect_size.x - 2 * offset_sides - self.border_size * 2. - 1,
+                    self.rect_size.x - 2 * offset_sides - self.border_size * 2. + 0.5,
                     self.border_size * 2.
                 );
 
@@ -604,7 +604,7 @@ live_design!{
                 let track_length = self.rect_size.x - offset_sides * 4.;
                 let val_x = self.slide_pos * track_length + offset_sides * 2.;
                 
-                let offset_top = self.rect_size.y - (self.rect_size.y - offset_px.y) * 0.5
+                let offset_top = self.rect_size.y - (self.rect_size.y - offset_px.y) * 0.5 + 0.5
                 sdf.move_to(
                     mix(
                         offset_sides,
