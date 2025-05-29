@@ -162,7 +162,7 @@ class MakepadSurface
             return false;
         }
 
-        // Here: a valid long click did occur, and we sholud send that event to makepad.
+        // Here: a valid long click did occur, and we should send that event to makepad.
 
         // Use the latest touch coordinates if they're the same pointer ID as the initial down touch.
         if (latestTouchPointerId == latestDownTouchPointerId) {
