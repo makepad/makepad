@@ -33,6 +33,17 @@ live_design!{
                     <Rotary>{
                         text:"Slide"
                     }
+                    md = <Markdown> {
+                        body: "
+                        ## This character 是 does not break in headings
+                        but it does on regular text 是
+                         - and in lists 是
+                         also inline code blocks `是`
+                         ```
+                         // and full code blocks 是
+                         ```
+                        "
+                    }
                     button_1 = <Button> {
                         text: "Click 福 me 😊"
                         draw_text:{text_style:{font_size:18}}
