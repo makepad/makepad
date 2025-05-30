@@ -38,7 +38,9 @@ impl GlyphOutline {
         let output_size = output.bounds().size;
         let mut rasterizer = Rasterizer::new(output_size.width, output_size.height);
         let origin = self.bounds.origin;
-        let transform = Transform::from_translate(-origin.x, -origin.y)
+        // NOT A FIX, BUT DOES MAKE A BROKEN SDF WORK NOW, WE NEED TO DIFF THE
+        // ALGO CODEFLOW
+        let transform = Transform::from_translate(0.000002-origin.x, -origin.y)
             .scale_uniform(dpxs_per_em / self.units_per_em);
         let mut last = Point::ZERO;
         let mut last_move = None;
