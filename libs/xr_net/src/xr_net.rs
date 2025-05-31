@@ -1,8 +1,8 @@
-
 // ok so everyone sends interaction events to the system
 // and the system has physics 'state' as output. 
 // so how do we do this
 use{
+    std::io,
     std::net::{UdpSocket,IpAddr,Ipv4Addr},
     std::sync::mpsc,
     std::time::{Duration, Instant},
@@ -70,11 +70,22 @@ pub struct XrNetNode{
 impl Drop for XrNetNode{
     fn drop(&mut self){
         self.thread_loop.store(false, Ordering::Relaxed);
-        self.outgoing_sender.send(XrNetOutgoing::Break).ok();
-        self.discovery_write_thread.take().map(|v| v.join());
-        self.discovery_read_thread.take().map(|v| v.join());
-        self.state_read_thread.take().map(|v| v.join());
-        self.state_write_thread.take().map(|v| v.join());
+        // Attempt to send Break, but don't panic if channel is closed
+        let _ = self.outgoing_sender.send(XrNetOutgoing::Break);
+        
+        // Join threads, ignoring errors from join (e.g. if a thread panicked)
+        if let Some(handle) = self.discovery_write_thread.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.discovery_read_thread.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.state_read_thread.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.state_write_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -96,114 +107,187 @@ impl XrNetNode{
     }
     
     pub fn new(_cx:&mut Cx)->Self{
-        // the UDP broadcast socket
-        let discovery_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), DISCOVERY_PORT);
-        
-        let discovery_send = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)), DISCOVERY_PORT);
-        
-        let read_discovery_socket = UdpSocket::bind(discovery_bind).unwrap();
-        read_discovery_socket.set_read_timeout(Some(Duration::from_secs_f64(0.25))).unwrap();
-        read_discovery_socket.set_broadcast(true).unwrap();
-        let discovery_socket = read_discovery_socket.try_clone().unwrap();
+        let discovery_bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), DISCOVERY_PORT);
+        let discovery_send_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)), DISCOVERY_PORT);
+        let state_bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), STATE_PORT);
         
         let my_client_uid = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0;
         
-        // write thread
-        let write_discovery_socket = discovery_socket.try_clone().unwrap();
         let thread_loop = Arc::new(AtomicBool::new(true));
-        let thread_loop_2 = thread_loop.clone();
+        let (outgoing_sender, outgoing_receiver) = mpsc::channel();
+        let (incoming_sender, incoming_receiver_val) = mpsc::channel(); // Renamed to avoid conflict
+
+        // Discovery Write Thread
+        let tl_dw = thread_loop.clone();
+        let mc_uid_dw = my_client_uid;
+        let ds_addr_dw = discovery_send_addr;
         let discovery_write_thread = std::thread::spawn(move || {
-            while thread_loop_2.load(Ordering::Relaxed){
-                write_discovery_socket.send_to(&my_client_uid.to_be_bytes(), discovery_send).ok();
+            let mut socket: Option<UdpSocket> = None;
+            loop {
+                if !tl_dw.load(Ordering::Relaxed) { break; }
+
+                if socket.is_none() {
+                    match UdpSocket::bind("0.0.0.0:0") {
+                        Ok(s) => {
+                            if let Err(e) = s.set_broadcast(true) {
+                                eprintln!("DW: Failed to set broadcast: {:?}. Retrying socket creation.", e);
+                                socket = None; 
+                                thread::sleep(Duration::from_secs(1));
+                                continue;
+                            }
+                            socket = Some(s);
+                        }
+                        Err(e) => {
+                            eprintln!("DW: Failed to bind discovery write socket: {:?}. Retrying in 1s.", e);
+                            thread::sleep(Duration::from_secs(1));
+                            continue;
+                        }
+                    }
+                }
+
+                if let Some(s) = &socket {
+                    match s.send_to(&mc_uid_dw.to_be_bytes(), ds_addr_dw) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("DW: Send error: {:?}. Re-creating socket.", e);
+                            socket = None; 
+                            thread::sleep(Duration::from_millis(100)); 
+                            continue; 
+                        }
+                    }
+                }
                 std::thread::sleep(Duration::from_secs_f64(0.1));
             }
         });
 
-        let (outgoing_sender, outgoing_receiver) = mpsc::channel();
-        let outgoing_sender2 = outgoing_sender.clone();
-        let thread_loop_2 = thread_loop.clone();
+        // Discovery Read Thread
+        let tl_dr = thread_loop.clone();
+        let mc_uid_dr = my_client_uid;
+        let db_addr_dr = discovery_bind_addr;
+        let os_dr = outgoing_sender.clone();
         let discovery_read_thread = std::thread::spawn(move || {
+            let mut socket: Option<UdpSocket> = None;
             let mut read_buf = [0u8; 4096];
-            // if we havent heard from a headset in 1 second we remove it from peers
-            while thread_loop_2.load(Ordering::Relaxed){
-                if let Ok((len, mut addr)) = read_discovery_socket.recv_from(&mut read_buf) {
-                    addr.set_port(STATE_PORT);
-                    let compare = my_client_uid.to_be_bytes();
-                    if len == compare.len() && read_buf[0..compare.len()] != compare{
-                        let peer = XrNetPeer{
-                            addr,
-                        };
-                        outgoing_sender2.send(XrNetOutgoing::Discovered(peer)).ok();
+            loop {
+                if !tl_dr.load(Ordering::Relaxed) { break; }
+
+                if socket.is_none() {
+                    match UdpSocket::bind(db_addr_dr) {
+                        Ok(s) => {
+                            if let Err(e) = s.set_read_timeout(Some(Duration::from_secs_f64(0.25))) {
+                                eprintln!("DR: Failed to set read timeout: {:?}. Retrying socket creation.", e);
+                                socket = None; thread::sleep(Duration::from_secs(1)); continue;
+                            }
+                             if let Err(e) = s.set_broadcast(true) { 
+                                eprintln!("DR: Failed to set broadcast: {:?}. Retrying socket creation.", e);
+                                socket = None; thread::sleep(Duration::from_secs(1)); continue;
+                            }
+                            socket = Some(s);
+                        }
+                        Err(e) => {
+                            eprintln!("DR: Failed to bind discovery read socket: {:?}. Retrying in 1s.", e);
+                            thread::sleep(Duration::from_secs(1));
+                            continue;
+                        }
                     }
+                }
+
+                if let Some(s) = &socket {
+                    match s.recv_from(&mut read_buf) {
+                        Ok((len, mut peer_addr)) => {
+                            if len == std::mem::size_of::<u64>() {
+                                let received_uid_bytes: [u8; 8] = read_buf[0..8].try_into().expect("Slice size known to be 8");
+                                let received_uid = u64::from_be_bytes(received_uid_bytes);
+                                if received_uid != mc_uid_dr {
+                                    peer_addr.set_port(STATE_PORT);
+                                    let peer = XrNetPeer { addr: peer_addr };
+                                    os_dr.send(XrNetOutgoing::Discovered(peer)).ok();
+                                }
+                            }
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => { /* Expected, continue */ }
+                        Err(e) => {
+                            eprintln!("DR: Recv error: {:?}. Re-creating socket.", e);
+                            socket = None; 
+                        }
+                    }
+                } else {
+                     thread::sleep(Duration::from_millis(100)); // Socket is None, brief pause before retry
                 }
             }
         });
         
-        
-        let (incoming_sender, incoming_receiver) = mpsc::channel();
-                
-        // the xr state socket
-        let state_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), STATE_PORT);
-        let read_state_socket = UdpSocket::bind(state_bind).unwrap();
-        read_state_socket.set_read_timeout(Some(Duration::from_secs_f64(0.25))).unwrap();
-        let write_state_socket = read_state_socket.try_clone().unwrap();
-        // xr state receiver thread
-        let outgoing_sender2 = outgoing_sender.clone();
-        let thread_loop_2 = thread_loop.clone();
+        // State Read Thread
+        let tl_sr = thread_loop.clone();
+        let sb_addr_sr = state_bind_addr;
+        let is_sr = incoming_sender; // Move original incoming_sender here
+        let os_sr_leave = outgoing_sender.clone(); 
         let state_read_thread = std::thread::spawn(move || {
-            // here we receive the XrState packets
+            let mut socket: Option<UdpSocket> = None;
             let mut read_buf = [0u8; 4096];
-            pub struct Peer{
-                addr: SocketAddr,
-                last_seen: Instant,
-            }
-            let mut peers:Vec<Peer> = Vec::new();
-            while thread_loop_2.load(Ordering::Relaxed){
-                while let Ok((len, addr)) = read_state_socket.recv_from(&mut read_buf) {
-                    // parse buffer
-                    if let Ok(state) = XrState::deserialize_bin(&read_buf[0..len]){
-                        // we got an xr state message, chuck it on the incoming stream
-                        if let Some(peer) = peers.iter_mut().find(|v| v.addr == addr){
-                            peer.last_seen = Instant::now();
-                            incoming_sender.send(
-                                XrNetIncoming::Update{
-                                    peer: XrNetPeer{addr},
-                                    state
-                                }
-                            ).ok();
+            struct ActivePeer { addr: SocketAddr, last_seen: Instant }
+            let mut active_peers: Vec<ActivePeer> = Vec::new();
+
+            loop {
+                if !tl_sr.load(Ordering::Relaxed) { break; }
+
+                if socket.is_none() {
+                    match UdpSocket::bind(sb_addr_sr) {
+                        Ok(s) => {
+                             if let Err(e) = s.set_read_timeout(Some(Duration::from_secs_f64(0.25))) {
+                                eprintln!("SR: Failed to set read timeout: {:?}. Retrying socket creation.", e);
+                                socket = None; thread::sleep(Duration::from_secs(1)); continue;
+                            }
+                            socket = Some(s);
                         }
-                        else{
-                            peers.push(Peer{addr, last_seen:Instant::now()});
-                            incoming_sender.send(
-                                XrNetIncoming::Join{
-                                    peer: XrNetPeer{addr},
-                                    state
-                                }
-                            ).ok();
+                        Err(e) => {
+                            eprintln!("SR: Failed to bind state read socket: {:?}. Retrying in 1s.", e);
+                            thread::sleep(Duration::from_secs(1));
+                            continue;
                         }
                     }
-                    let mut i = 0;
-                    while i < peers.len(){
-                        if peers[i].last_seen.elapsed().as_secs_f64()>PEER_LEAVE_TIMEOUT{
-                            let peer = XrNetPeer{addr:peers.remove(i).addr};
-                            incoming_sender.send(
-                                XrNetIncoming::Leave{
-                                    peer
+                }
+                
+                if let Some(s) = &socket {
+                     match s.recv_from(&mut read_buf) {
+                        Ok((len, addr)) => {
+                            if let Ok(state) = XrState::deserialize_bin(&read_buf[0..len]) {
+                                if let Some(p) = active_peers.iter_mut().find(|v| v.addr == addr) {
+                                    p.last_seen = Instant::now();
+                                    is_sr.send(XrNetIncoming::Update { peer: XrNetPeer { addr }, state }).ok();
+                                } else {
+                                    active_peers.push(ActivePeer { addr, last_seen: Instant::now() });
+                                    is_sr.send(XrNetIncoming::Join { peer: XrNetPeer { addr }, state }).ok();
                                 }
-                            ).ok();
-                            outgoing_sender2.send(XrNetOutgoing::Leave(peer)).ok();
+                            }
                         }
-                        else{
-                            i+=1;
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => { /* Expected */ }
+                        Err(e) => {
+                            eprintln!("SR: Recv error: {:?}. Re-creating socket.", e);
+                            socket = None; 
+                            continue; 
                         }
+                    }
+                } else {
+                     thread::sleep(Duration::from_millis(100)); // Socket is None, brief pause
+                }
+
+                let mut i = 0;
+                while i < active_peers.len() {
+                    if active_peers[i].last_seen.elapsed().as_secs_f64() > PEER_LEAVE_TIMEOUT {
+                        let removed_peer_addr = active_peers.remove(i).addr;
+                        let peer = XrNetPeer { addr: removed_peer_addr };
+                        is_sr.send(XrNetIncoming::Leave { peer }).ok();
+                        os_sr_leave.send(XrNetOutgoing::Leave(peer)).ok();
+                    } else {
+                        i += 1;
                     }
                 }
             }
         });
         
-        // xr state output thread
         let state_write_thread = std::thread::spawn(move || {
-            // here we receive the XrState packets
+            let mut socket: Option<UdpSocket> = None;
             let mut peers: Vec<XrNetPeer> = Default::default();
             while let Ok(msg) = outgoing_receiver.recv() {
                 match msg{
@@ -215,10 +299,32 @@ impl XrNetNode{
                     XrNetOutgoing::Leave(peer)=>{
                         peers.retain(|v| v.addr != peer.addr);
                     }
-                    XrNetOutgoing::State(state)=>{ // send to all peers
-                        let buf = state.serialize_bin();
-                        for peer in &peers{
-                            write_state_socket.send_to(&buf, peer.addr).unwrap();
+                    XrNetOutgoing::State(state)=>{ 
+                        if socket.is_none() {
+                            match UdpSocket::bind("0.0.0.0:0") {
+                                Ok(s) => {
+                                    socket = Some(s);
+                                }
+                                Err(e) => {
+                                    eprintln!("SW: Failed to bind state write socket: {:?}. Send skipped, retrying later.", e);
+                                    thread::sleep(Duration::from_secs(1)); 
+                                    continue; 
+                                }
+                            }
+                        }
+
+                        if let Some(s) = &socket {
+                            let buf = state.serialize_bin(); // Assuming this returns Vec<u8> directly
+                            for peer_target in &peers{ // Renamed to avoid conflict with XrNetPeer struct
+                                if let Err(e) = s.send_to(&buf, peer_target.addr){ // Use peer_target.addr
+                                    eprintln!("SW: Send error to {:?}: {:?}.", peer_target.addr, e);
+                                     // Check if error is non-recoverable for the socket itself
+                                    if e.kind() != io::ErrorKind::WouldBlock && e.kind() != io::ErrorKind::TimedOut {
+                                        socket = None; // Force re-creation on next State message
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                     XrNetOutgoing::Break=>{
@@ -234,7 +340,7 @@ impl XrNetNode{
             discovery_read_thread: Some(discovery_read_thread),
             state_read_thread: Some(state_read_thread),
             state_write_thread: Some(state_write_thread),
-            incoming_receiver,
+            incoming_receiver: incoming_receiver_val, // Use the renamed variable
             outgoing_sender,
         }
     }
