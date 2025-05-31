@@ -9,8 +9,8 @@
 use crate::{Bitmap, Image2d, Unorm8};
 
 // HACK(eddyb) only exists to allow toggling precision for testing purposes.
-#[cfg(sdfer_use_f64_instead_of_f32)]
-type f32 = f64;
+//#[cfg(sdfer_use_f64_instead_of_f32)]
+//type f32 = f64;
 
 pub fn sdf(bitmap: &Bitmap, sdf_size: usize, spread: usize) -> Image2d<Unorm8> {
     let (w, h) = (bitmap.width(), bitmap.height());
