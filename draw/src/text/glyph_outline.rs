@@ -40,7 +40,7 @@ impl GlyphOutline {
         let origin = self.bounds.origin;
         // NOT A FIX, BUT DOES MAKE A BROKEN SDF WORK NOW, WE NEED TO DIFF THE
         // ALGO CODEFLOW
-        let transform = Transform::from_translate(0.000002-origin.x, -origin.y)
+        let transform = Transform::from_translate(-origin.x, -origin.y)
             .scale_uniform(dpxs_per_em / self.units_per_em);
         let mut last = Point::ZERO;
         let mut last_move = None;

@@ -18,8 +18,8 @@ makepad-html ={ path = "../libs/html", version = "1.0.0" }
 # ends up being published in a release (only affects build times, not behavior).
 makepad-rustybuzz = { version = "0.8.0", path = "../libs/rustybuzz" }
 unicode-bidi = "0.3"
-ab_glyph_rasterizer = "0.1.8"
-sdfer = "0.2.1"
+ab_glyph_rasterizer = { version = "0.1.8", path = "../libs/ab_glyph_rasterizer"}
+sdfer = { path = "../libs/sdfer", version = "0.2.1" }
 fxhash = "0.2.1"
 unicode-linebreak = "0.1.5"
 unicode-segmentation = "1.11.0"
