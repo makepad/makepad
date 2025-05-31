@@ -42,7 +42,16 @@ live_design!{
                         flow: RightWrap,
                         text: "Lorem ipsum"
                         draw_text:{text_style:{font_size:18}}
-                    }/*
+                    }
+                    /*
+                    md = <Markdown> {
+                        font_size:10
+                        draw_normal:{
+                            font_scale: 20.0
+                        }
+                        body: "是"
+                    }*/
+                    /*
                     button_2 = <Button> {
                         text: "Click me 345 1234"
                         draw_text:{color:#fff, text_style:{font_size:18}}
