@@ -30,7 +30,7 @@ live_design!{
         }
         draw_head:{
             color:#fff
-            cube_size: vec3(0.2,0.1,0.05)
+            cube_size: vec3(0.0,0.0,0.00)
         }
         draw_grip:{
             color: #777,
