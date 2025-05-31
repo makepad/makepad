@@ -27,7 +27,7 @@ live_design!{
                 let size = (sin(self.time*3 + self.life*.03)+1.2)*.30;//pow(max(3.0-(self.life),0.0)/4.0,1.);
                 return self.cube_size * size*vec3(1);
             }
-            let size = pow(max(5.0-(self.life),0.0)/6.0,1.)*clamp((1.0-self.angle/2),0.0,1.0) ;
+            let size = pow(max(5.0-(self.life),0.0)/6.0,1.)*clamp((1.0-self.angle/2),0.0,1.0)*0.9 ;
             return self.cube_size * size*vec3(0.1,0.5,10.0);//(6-self.index+1)*1.0);
         }
         fn get_pos(self)->vec3{
@@ -35,7 +35,7 @@ live_design!{
                 let travel =(sin(self.life*1+self.time)+1.2)*0.3;
                 return vec3(0.0, 0.0, -travel)
             }
-            let travel = self.life * 0.4 * (self.angle_velo*8.0+ 0.5) ;
+            let travel = self.life * 0.4 * abs(self.angle_velo*8.0+ 0.5) ;
             return vec3(0.0, 0.0, -travel-0.08 + clamp((self.angle/2),0.0,1.0)*0.05)
         }
         
@@ -123,7 +123,7 @@ impl Bullets{
         if xr_state.time < self.last_fired{ // we rejoined
             self.last_fired = xr_state.time;
         }
-        if xr_state.time - self.last_fired > 0.005 {
+        if xr_state.time - self.last_fired > 0.01 {
             for hand in xr_state.hands(){
                 if !hand.in_view(){
                     continue
@@ -157,7 +157,7 @@ impl Bullets{
                         index: i,
                         pose:**pose
                     });
-                    if self.bullets.len()>4500{
+                    if self.bullets.len()>3500{
                         self.bullets.remove(0);
                     }
                 }
@@ -184,7 +184,7 @@ pub struct XrLasers {
     #[area] #[live] draw_bullet: DrawBullet,
     #[rust] peers: Vec<XrPeer>,
     #[rust] bullets: Bullets,
-    #[rust] tap_count: f32,
+    #[rust(1.0)] tap_count: f32,
 }
 
 impl XrLasers{

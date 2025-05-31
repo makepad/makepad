@@ -150,6 +150,9 @@ impl CxOpenXrSession{
         // alright lets set the local anchor
         let left_pose = Pose{orientation: Quat::default(), position: anchor.left};
         let right_pose = Pose{orientation: Quat::default(), position: anchor.right};
+        if let AsyncAnchorState::GetLocalAnchor{..} = &self.anchor.async_state{
+            self.anchor.async_state = AsyncAnchorState::Idle;
+        }
         if !self.anchor.async_state.idle(){
             return crate::log!("set_local_anchor - async state not idle {:?}", self.anchor.async_state);
         }
