@@ -13,6 +13,7 @@ workspace.members = [
     "examples/websocket_image",
     "examples/snake",
     "examples/slides",
+    "examples/xr_net",
     "studio",
     "tools/cargo_makepad",
 ]
