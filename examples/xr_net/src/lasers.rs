@@ -17,17 +17,35 @@ live_design!{
         fn get_color(self, dp: float)->vec4{
             let ambient = vec3(0.2,0.2,0.2) 
             let color = self.color.xyz * dp * self.color.w + ambient;
-            return vec4(Pal::iq1(self.life-self.time+self.index*0.1)*1.0,0.0);//mix(#f00,#4440,3*self.life);
+            if mod(self.tap_count,2.0)<0.5{
+                return vec4(Pal::iq2(self.life-self.index*0.1)*(1.0-self.life),0.0)
+            }
+            return vec4(Pal::iq1(self.life-self.time+self.index*0.1),0.0);//mix(#f00,#4440,3*self.life);
         }
         fn get_size(self)->vec3{
-            let size = pow(max(3.0-(self.life),0.0)/4.0,1.);
-            return self.cube_size * size*vec3(0.1,1.2*sin(self.life),(6-self.index+1)*1.0);
+            if mod(self.tap_count,2.0)<0.5{
+                let size = (sin(self.time*3 + self.life*.03)+1.2)*.30;//pow(max(3.0-(self.life),0.0)/4.0,1.);
+                return self.cube_size * size*vec3(1);
+            }
+            let size = pow(max(5.0-(self.life),0.0)/6.0,1.)*clamp((1.0-self.angle/2),0.0,1.0) ;
+            return self.cube_size * size*vec3(0.1,0.5,10.0);//(6-self.index+1)*1.0);
         }
         fn get_pos(self)->vec3{
-            let travel = self.life * 0.4;
-            return vec3(0.0, 0.0, -travel)
+            if mod(self.tap_count,2.0)<0.5{
+                let travel =(sin(self.life*1+self.time)+1.2)*0.3;
+                return vec3(0.0, 0.0, -travel)
+            }
+            let travel = self.life * 0.4 * (self.angle_velo*8.0+ 0.5) ;
+            return vec3(0.0, 0.0, -travel-0.08 + clamp((self.angle/2),0.0,1.0)*0.05)
         }
-        cube_size:vec3(0.01,0.01,0.015);
+        
+        fn fragment(self)->vec4{
+            if mod(self.tap_count,2.0)<0.5{
+                return self.pixel();
+            }
+            return depth_clip(self.world, self.pixel(), self.depth_clip);
+        }
+        cube_size:vec3(0.01,0.01,-0.015);
     }
     
     
@@ -42,19 +60,35 @@ pub struct DrawBullet {
     #[deref] pub draw_super: DrawCube,
     #[live(0.0)] pub life: f32,
     #[live(0.0)] pub index: f32,
+    #[live(0.0)] pub angle: f32,
+    #[live(0.0)] pub angle_velo: f32,
+    #[live(0.0)] pub pos_velo: f32,
+    #[live(0.0)] pub tap_count:f32,
 }
 
 
 struct Bullet{
     shot_at: f64,
     index: usize,
+    angle: f32,
+    angle_velo: f32,
+    pos_velo: f32,
     pose: Pose,
+}
+
+#[derive(Default)]
+struct AngleVel{
+    angle: f32,
+    angle_velo: f32,
+    pos: Vec3,
+    pos_velo: f32,
 }
 
 #[derive(Default)]
 struct Bullets{
     last_fired: f64,
     bullets: Vec<Bullet>,
+    last_angles: Vec<[AngleVel;5]>
 }
 
 pub struct XrPeer{
@@ -81,7 +115,11 @@ impl XrPeer{
 }
 
 impl Bullets{
-    fn draw(&mut self, cx:&mut Cx3d, cube:&mut DrawBullet, xr_state:&XrState, anchor_map:&Mat4){
+    fn draw(&mut self, cx:&mut Cx3d, cube:&mut DrawBullet, xr_state:&XrState, anchor_map:&Mat4, idx:usize,tc:f32){
+        while self.last_angles.len() < idx + 1{
+            self.last_angles.push(Default::default());
+        }
+        let last_angles = &mut self.last_angles[idx];
         if xr_state.time < self.last_fired{ // we rejoined
             self.last_fired = xr_state.time;
         }
@@ -91,10 +129,30 @@ impl Bullets{
                     continue
                 }
                 for (i,pose) in hand.end_knuckles().iter().enumerate(){
-                    if !hand.tip_active(i){continue;}
+                    //if !hand.tip_active(i){continue;}
+                    let base = hand.base_knuckles()[i];
                     
                     self.last_fired = xr_state.time;
+                    
+                    // lets make 2 vecs pointing forward and
+                    let v1 = pose.orientation.rotate_vec3(&vec3(0.0,0.0,1.0));
+                    let v2 = base.orientation.rotate_vec3(&vec3(0.0,0.0,1.0));
+                    let angle = v1.dot(v2).acos();
+                    let la = &mut last_angles[i];
+                    
+                    let pos_velo = (la.pos - base.position).length();
+                    la.pos = pose.position;
+                    
+                    let angle_velo = la.angle - angle;
+                    la.angle = angle;
+                    la.angle_velo = 0.7*la.angle_velo + 0.3*angle_velo;
+                    la.pos_velo = 0.7*la.pos_velo + 0.3 *pos_velo;
+                    
+                    
                     self.bullets.push(Bullet{
+                        angle:v1.dot(v2).acos(),
+                        angle_velo: la.angle_velo,
+                        pos_velo: la.pos_velo,
                         shot_at: xr_state.time,
                         index: i,
                         pose:**pose
@@ -111,6 +169,10 @@ impl Bullets{
             cube.life = (xr_state.time - bullet.shot_at) as f32;
             cube.transform = mat;
             cube.depth_clip = 1.0;
+            cube.angle = bullet.angle;
+            cube.angle_velo = bullet.angle_velo;
+            cube.pos_velo = bullet.pos_velo;
+            cube.tap_count = tc;
             cube.draw(cx);
         }
     }
@@ -122,6 +184,7 @@ pub struct XrLasers {
     #[area] #[live] draw_bullet: DrawBullet,
     #[rust] peers: Vec<XrPeer>,
     #[rust] bullets: Bullets,
+    #[rust] tap_count: f32,
 }
 
 impl XrLasers{
@@ -155,7 +218,10 @@ impl XrLasers{
 
 impl Widget for XrLasers {
     fn handle_event(&mut self, cx: &mut Cx,event:&Event, _scope:&mut Scope){
-        if let Event::XrUpdate(_) = event{
+        if let Event::XrUpdate(e) = event{
+            if e.menu_pressed(){
+                 self.tap_count += 1.0;
+            }
             self.redraw(cx);
         }
     }
@@ -166,15 +232,17 @@ impl Widget for XrLasers {
         let xr_state = cx.draw_event.xr_state.as_ref().unwrap();
         
         //let dt = profile_start();
-        self.bullets.draw(cx, &mut self.draw_bullet, &xr_state, &Mat4::identity());
-        
+        let mut idx = 0;
+        self.bullets.draw(cx, &mut self.draw_bullet, &xr_state, &Mat4::identity(), idx, self.tap_count);
+        idx += 1;
         for peer in &mut self.peers{
             let peer_state = peer.tween(xr_state.time);
             if let Some(other_anchor) = &peer_state.anchor{
                 if let Some(my_anchor) = &xr_state.anchor{
                     // alright we need a mapping mat4 from 2 anchors
                     let anchor_map = other_anchor.mapping_to(my_anchor);
-                    peer.bullets.draw(cx, &mut self.draw_bullet, &peer_state, &anchor_map)
+                    peer.bullets.draw(cx, &mut self.draw_bullet, &peer_state, &anchor_map, idx, self.tap_count);
+                    idx += 1;
                 }
             }
         }
