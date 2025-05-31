@@ -38,6 +38,8 @@ impl Sdfer {
         }
         let mut coverage =
             Image2d::from_storage(coverage.size().width, coverage.size().height, pixels);
+            
+               
         let (sdf, reusable_buffers) = esdt::glyph_to_sdf(
             &mut coverage,
             Params {
@@ -48,6 +50,7 @@ impl Sdfer {
             },
             self.reusable_buffers.take(),
         );
+        
         self.reusable_buffers = Some(reusable_buffers);
         for y in 0..sdf.height() {
             for x in 0..sdf.width() {
