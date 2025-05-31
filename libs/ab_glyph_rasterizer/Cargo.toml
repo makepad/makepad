@@ -1,0 +1,22 @@
+[package]
+name = "ab_glyph_rasterizer"
+version = "0.1.8"
+authors = ["Alex Butler <alexheretic@gmail.com>"]
+edition = "2021"
+description = "Coverage rasterization for lines, quadratic & cubic beziers"
+repository = "https://github.com/alexheretic/ab-glyph"
+keywords = ["text", "ttf", "otf", "font"]
+license = "Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+# no_std float stuff
+libm = { version = "0.2.1", optional = true }
+
+[dev-dependencies]
+# don't add any, instead use ./dev
+
+[features]
+default = ["std"]
+# Activates usage of std.
+std = []
