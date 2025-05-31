@@ -23,6 +23,9 @@ live_design!{
                     },
                     show_bg: true,
                     draw_bg:{
+                        fn vertex(self)->vec4{
+                            return vec4(0.0)
+                        }
                         fn pixel(self) -> vec4 {
                             let center = vec2(0.5, 0.5);
                             let uv = self.pos - center;
