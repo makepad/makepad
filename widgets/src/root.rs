@@ -16,7 +16,6 @@ live_design!{
     pub RootBase = {{Root}} {}
     pub Root = <RootBase> {
         design_window = <Designer> {}
-        xr_hands = <XrHands>{}
     }
 }
 
