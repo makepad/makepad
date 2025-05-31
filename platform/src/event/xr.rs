@@ -156,6 +156,16 @@ impl XrHand{
         Self::RING_KNUCKLE3, 
         Self::LITTLE_KNUCKLE3
     ];
+    
+    pub fn base_knuckles(&self)->[&Pose;5]{
+        [
+            &self.joints[XrHand::THUMB_BASE],
+            &self.joints[XrHand::INDEX_BASE],
+            &self.joints[XrHand::MIDDLE_BASE],
+            &self.joints[XrHand::RING_BASE],
+            &self.joints[XrHand::LITTLE_BASE],
+        ]
+    }
 
     pub fn end_knuckles(&self)->[&Pose;5]{
         [
