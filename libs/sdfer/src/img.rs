@@ -5,8 +5,8 @@ use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
 // HACK(eddyb) only exists to allow toggling precision for testing purposes.
-#[cfg(sdfer_use_f64_instead_of_f32)]
-type f32 = f64;
+//#[cfg(sdfer_use_f64_instead_of_f32)]
+//type f32 = f64;
 
 /// `[0, 1]` represented by uniformly spaced `u8` values (`0..=255`),
 /// i.e. `Unorm8(byte)` corresponds to the `f32` value `byte as f32 / 255.0`.
