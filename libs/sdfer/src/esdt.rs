@@ -7,8 +7,8 @@
 use crate::img::{Bitmap, Image2d, NDCursor, NDCursorExt as _, Unorm8};
 
 // HACK(eddyb) only exists to allow toggling precision for testing purposes.
-#[cfg(sdfer_use_f64_instead_of_f32)]
-type f32 = f64;
+//#[cfg(sdfer_use_f64_instead_of_f32)]
+//type f32 = f64;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Params {

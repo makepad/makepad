@@ -2,11 +2,11 @@ use super::{
     font::{Font, GlyphId},
     font_atlas::{ColorAtlas, GlyphImage, GlyphImageKey, GrayscaleAtlas},
     geom::{Point, Rect, Size},
-    image::{Image,R},
+    image::{Image},
     sdfer,
     sdfer::Sdfer,
 };
-use std::{fs::File, io::BufWriter, path::Path, slice};
+//use std::{fs::File, io::BufWriter, path::Path, slice};
 
 
 #[derive(Debug)]
