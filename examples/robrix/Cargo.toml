@@ -1,0 +1,20 @@
+[package]
+name = "robrix"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+makepad-widgets = { path = "../../../widgets", version = "0.8.0" } # Assuming widgets is at the root
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "robrix"
+
+[[bin]]
+name = "robrix"
+path = "src/main.rs"
+
+[features]
+default = []
+nightly = ["makepad-widgets/nightly"]
