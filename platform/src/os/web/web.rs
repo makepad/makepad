@@ -1,4 +1,3 @@
-
 use {
     std::panic,
     std::rc::Rc,
@@ -398,12 +397,27 @@ impl Cx {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
-                    let window = &mut self.windows[window_id];
-                    self.os.from_wasm(FromWasmSetDocumentTitle {
-                        title: window.create_title.clone()
-                    });
-                    window.window_geom = self.os.window_geom.clone();
-                    window.is_created = true;
+                    let title = {
+                        let window = &mut self.windows[window_id];
+                        window.create_title.clone()
+                    };
+                    
+                    self.os.from_wasm(FromWasmSetDocumentTitle { title });
+                    
+                    {
+                        let window = &mut self.windows[window_id];
+                        window.window_geom = self.os.window_geom.clone();
+                    }
+
+                    self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                        window_id,
+                        old_geom: self.os.window_geom.clone(),
+                        new_geom: self.os.window_geom.clone()
+                    }));
+
+                    self.windows[window_id].is_created = true;
+                    self.redraw_all();
+
                 },
                 CxOsOp::FullscreenWindow(_window_id) => {
                     self.os.from_wasm(FromWasmFullScreen {});
