@@ -113,6 +113,7 @@ pub struct Cx {
     pub (crate) self_ref: Option<Rc<RefCell<Cx>>>,
     pub (crate) in_draw_event: bool,
 
+    /// Display context for the main window, used by AdaptiveView
     pub display_context: DisplayContext,
     
     pub debug: Debug,
