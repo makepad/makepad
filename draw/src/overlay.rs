@@ -73,10 +73,22 @@ impl Overlay {
         // this means it didn't 
         for i in 0..cx.draw_lists[self.draw_list.id()].draw_items.len(){
             if let Some(sub_id) = cx.draw_lists[self.draw_list.id()].draw_items[i].sub_list(){
-                if let Some(cfp) = cx.draw_lists[sub_id].codeflow_parent_id{
-                    if cx.draw_lists[cfp].redraw_id != cx.draw_lists[sub_id].redraw_id{
-                        cx.draw_lists[self.draw_list.id()].clear_sub_list(sub_id);
+                // Use checked_index to safely access draw lists that might have been recycled
+                if let Some(sub_draw_list) = cx.draw_lists.checked_index(sub_id) {
+                    if let Some(cfp) = sub_draw_list.codeflow_parent_id {
+                        // Also check the parent draw list safely
+                        if let Some(parent_draw_list) = cx.draw_lists.checked_index(cfp) {
+                            if parent_draw_list.redraw_id != sub_draw_list.redraw_id {
+                                cx.draw_lists[self.draw_list.id()].clear_sub_list(sub_id);
+                            }
+                        } else {
+                            // Parent draw list was recycled, clear this sub list
+                            cx.draw_lists[self.draw_list.id()].clear_sub_list(sub_id);
+                        }
                     }
+                } else {
+                    // Sub draw list was recycled, clear it from our list
+                    cx.draw_lists[self.draw_list.id()].clear_sub_list(sub_id);
                 }
             }
         }
