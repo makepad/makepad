@@ -265,6 +265,7 @@ impl Cx {
                                     StudioToApp::Screenshot(req)=>{
                                         self.screenshot_requests.push(req);
                                     }
+                                    StudioToApp::KeepAlive=>{}
                                     x=>{
                                         actions.push(x);
                                     }
@@ -378,9 +379,11 @@ impl Cx {
                             });
                         }, 
                         LiveValue::Font(font)=>{
-                            self.dependencies.insert(font.path.as_str().to_string(), CxDependency {
-                                data: None
-                            });
+                            for path in &*font.paths{
+                                self.dependencies.insert(path.as_str().to_string(), CxDependency {
+                                    data: None
+                                });
+                            }
                         }
                         _ => {
                         }

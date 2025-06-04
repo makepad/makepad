@@ -31,18 +31,27 @@ live_design!{
                         }
                     }
                     <Rotary>{
-                        text:"hi"
+                        text:"Slide"
                     }
                     button_1 = <Button> {
-                        text: "Click me 😊"
-                        draw_text:{color:#fff, text_style:{font_size:18}}
+                        text: "Click 福 me 😊"
+                        draw_text:{text_style:{font_size:18}}
                     }
                     text_input = <TextInput> {
                         width: 100,
                         flow: RightWrap,
                         text: "Lorem ipsum"
-                        draw_text:{color:#fff, text_style:{font_size:18}}
-                    }/*
+                        draw_text:{text_style:{font_size:18}}
+                    }
+                    /*
+                    md = <Markdown> {
+                        font_size:10
+                        draw_normal:{
+                            font_scale: 20.0
+                        }
+                        body: "是"
+                    }*/
+                    /*
                     button_2 = <Button> {
                         text: "Click me 345 1234"
                         draw_text:{color:#fff, text_style:{font_size:18}}
@@ -94,7 +103,7 @@ impl MatchEvent for App{
         
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button_1)).clicked(&actions) {
-            self.ui.button(id!(button_1)).set_text(cx, "😀");
+            self.ui.button(id!(button_1)).set_text(cx, "Clicked 😀");
             log!("hi");
             self.counter += 1;
         }

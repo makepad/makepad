@@ -1,8 +1,6 @@
 use {
     crate::{
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*,
+        makepad_widgets::*,
     },
 };
 
@@ -14,25 +12,6 @@ live_design!{
     use link::shaders::*;
     
     pub XrHands = {{XrHands}} {
-
-        draw_bullet:{
-            color: #0 
-            
-            fn get_color(self, dp: float)->vec4{
-                let ambient = vec3(0.2,0.2,0.2) 
-                let color = self.color.xyz * dp * self.color.w + ambient;
-                return vec4(Pal::iq1(self.life-self.time+self.index*0.1)*1.0,0.0);//mix(#f00,#4440,3*self.life);
-            }
-            fn get_size(self)->vec3{
-                let size = pow(max(3.0-(self.life),0.0)/4.0,1.);
-                return self.cube_size * size*vec3(0.1,1.2*sin(self.life),(6-self.index+1)*1.0);
-            }
-            fn get_pos(self)->vec3{
-                let travel = self.life * 0.4;
-                return vec3(0.0, 0.0, -travel)
-            }
-            cube_size:vec3(0.01,0.01,0.015);
-        }
         draw_knuckle:{
             color: #fff;
             cube_size:vec3(0.01,0.01,0.015);
@@ -51,7 +30,7 @@ live_design!{
         }
         draw_head:{
             color:#fff
-            cube_size: vec3(0.2,0.1,0.05)
+            cube_size: vec3(0.0,0.0,0.00)
         }
         draw_grip:{
             color: #777,
@@ -65,23 +44,11 @@ live_design!{
     }
 }
 
-struct Bullet{
-    shot_at: f64,
-    index: usize,
-    pose: Pose,
-}
-#[derive(Default)]
-struct Bullets{
-    last_fired: f64,
-    bullets: Vec<Bullet>,
-}
-
 pub struct XrPeer{
     id: LiveId,
     ahead: bool,
     min_lag: f64,
     states: Vec<XrState>,
-    bullets: Bullets
 }
 
 impl XrPeer{
@@ -99,42 +66,6 @@ impl XrPeer{
     }
 }
 
-impl Bullets{
-    fn draw(&mut self, cx:&mut Cx3d, cube:&mut DrawCube, xr_state:&XrState, anchor_map:&Mat4){
-        if xr_state.time < self.last_fired{ // we rejoined
-            self.last_fired = xr_state.time;
-        }
-        if xr_state.time - self.last_fired > 0.005 {
-            for hand in xr_state.hands(){
-                if !hand.in_view(){
-                    continue
-                }
-                for (i,pose) in hand.end_knuckles().iter().enumerate(){
-                    if !hand.tip_active(i){continue;}
-                    
-                    self.last_fired = xr_state.time;
-                    self.bullets.push(Bullet{
-                        shot_at: xr_state.time,
-                        index: i,
-                        pose:**pose
-                    });
-                    if self.bullets.len()>4500{
-                        self.bullets.remove(0);
-                    }
-                }
-            }
-        }
-        for bullet in &self.bullets{
-            let mat = Mat4::mul(&bullet.pose.to_mat4(), anchor_map);
-            cube.index = bullet.index as f32;
-            cube.life = (xr_state.time - bullet.shot_at) as f32;
-            cube.transform = mat;
-            cube.depth_clip = 1.0;
-            cube.draw(cx);
-        }
-    }
-}
-
 const ALIGN_MODE: f64 = 0.4;
 struct AlignMode{
     anchor: XrAnchor,
@@ -148,7 +79,6 @@ pub struct XrHands {
     #[live] draw_head: DrawCube,
     #[area] #[live] draw_knuckle: DrawCube,
     #[live] draw_controller: DrawCube,
-    #[live] draw_bullet: DrawCube,
     #[live] draw_grip: DrawCube,
     #[live] draw_aim: DrawCube,
     #[live] draw_tip: DrawCube,
@@ -157,7 +87,6 @@ pub struct XrHands {
     #[rust] peers: Vec<XrPeer>,
     #[rust] align_last_click: f64,
     #[rust] align_mode: Option<AlignMode>,
-    #[rust] bullets: Bullets,
 }
 
 impl XrHands{
@@ -183,7 +112,6 @@ impl XrHands{
                 ahead: false,
                 min_lag: 1.0,
                 states: vec![state], 
-                bullets:Bullets::default()
             });
         }
     }
@@ -358,9 +286,6 @@ impl Widget for XrHands {
             
         draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &xr_state);
         
-        //let dt = profile_start();
-        self.bullets.draw(cx, &mut self.draw_bullet, &xr_state, &Mat4::identity());
-        
         for peer in &mut self.peers{
             let peer_state = peer.tween(xr_state.time);
             if let Some(other_anchor) = &peer_state.anchor{
@@ -370,8 +295,6 @@ impl Widget for XrHands {
                     draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &anchor_map, &peer_state);
                     
                     draw_head(cx, &mut self.draw_head, &anchor_map, &peer_state);
-                                        
-                    peer.bullets.draw(cx, &mut self.draw_bullet, &peer_state, &anchor_map)
                 }
             }
             else{

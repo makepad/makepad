@@ -369,6 +369,11 @@ impl Widget for Window {
                         }
                         _ => ()
                     }
+
+                    // Update the display context if the screen size has changed
+                    cx.display_context.screen_size = ev.new_geom.inner_size;
+                    cx.display_context.updated_on_event_id = cx.event_id();
+
                     cx.widget_action(uid, &scope.path, WindowAction::WindowGeomChange(ev.clone()));
                     return
                 }

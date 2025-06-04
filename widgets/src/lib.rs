@@ -100,8 +100,6 @@ pub mod designer_toolbox;
 
 pub mod defer_with_redraw;
 
-pub mod xr_hands;
-
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
@@ -180,7 +178,11 @@ pub fn live_design(cx: &mut Cx) {
     else{
         cx.link(live_id!(designer), live_id!(designer_dummy));
     }
-
+    makepad_fonts_emoji::live_design(cx);
+    makepad_fonts_chinese_regular::live_design(cx);
+    makepad_fonts_chinese_regular_2::live_design(cx);
+    makepad_fonts_chinese_bold::live_design(cx);
+    makepad_fonts_chinese_bold_2::live_design(cx);
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
@@ -248,7 +250,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::command_text_input::live_design(cx);
     crate::loading_spinner::live_design(cx);
     crate::web_view::live_design(cx);
-    crate::xr_hands::live_design(cx);
 
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);

@@ -2,10 +2,12 @@ use super::{
     font::{Font, GlyphId},
     font_atlas::{ColorAtlas, GlyphImage, GlyphImageKey, GrayscaleAtlas},
     geom::{Point, Rect, Size},
-    image::Image,
+    image::{Image},
     sdfer,
     sdfer::Sdfer,
 };
+//use std::{fs::File, io::BufWriter, path::Path, slice};
+
 
 #[derive(Debug)]
 pub struct Rasterizer {
@@ -59,7 +61,20 @@ impl Rasterizer {
         }
         None
     }
-
+    /*
+    pub fn save_to_png(item:&Image<R>, path: impl AsRef<Path>) {
+        let file = File::create(path).unwrap();
+        let writer = BufWriter::new(file);
+        let size = item.size();
+        let mut encoder = png::Encoder::new(writer, size.width as u32, size.height as u32);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        let pixels = item.as_pixels();
+        let data = unsafe { slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len()) };
+        writer.write_image_data(&data).unwrap();
+    }
+    */
     fn rasterize_glyph_outline(
         &mut self,
         font: &Font,
@@ -88,6 +103,9 @@ impl Rasterizer {
                         dpxs_per_em,
                         &mut coverage.subimage_mut(atlas_image_size.into()),
                     );
+                    // lets plunk this thing to disk
+                    /*Self::save_to_png(&coverage, "./test.png");*/
+                    
                     self.sdfer
                         .coverage_to_sdf(&coverage.subimage(atlas_image_size.into()), &mut sdf);
                     sdf.bounds()

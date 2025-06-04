@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, widget::*, widget_match_event::WidgetMatchEvent,
-    WindowAction,
+    makepad_derive_widget::*, makepad_draw::*, widget::*,
 };
 
 live_design! {
@@ -207,7 +206,6 @@ impl LiveHook for AdaptiveView {
 
 impl Widget for AdaptiveView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.widget_match_event(cx, event, scope);
         if let Some(active_widget) = self.active_widget.as_mut() {
             active_widget.widget_ref.handle_event(cx, event, scope);
         }
@@ -224,29 +222,6 @@ impl Widget for AdaptiveView {
         }
 
         DrawStep::done()
-    }
-}
-
-impl WidgetMatchEvent for AdaptiveView {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
-        for action in actions {
-            // Handle window geom change events, this is triggered at startup and on window resize.
-            if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
-                let event_id = cx.event_id();
-
-                // Skip if the display context was already updated on this event
-                if cx.display_context.updated_on_event_id == event_id { return }
-                // Update the current context if the screen size has changed
-                if cx.display_context.screen_size != ce.new_geom.inner_size {
-                    cx.display_context.updated_on_event_id = event_id;
-                    cx.display_context.screen_size = ce.new_geom.inner_size;
-
-                    self.should_reapply_selector = true;
-                }
-
-                cx.redraw_all();
-            }
-        }
     }
 }
 
@@ -314,9 +289,10 @@ impl AdaptiveView {
     }
 
     pub fn set_default_variant_selector(&mut self) {
-        // TODO(Julian): setup a more comprehensive default
+        // TODO(Julian): setup a more comprehensive default, currently defaults to Desktop even if the screen size is unknown
+        // (happens on startup for macOS due to a regression, first few WindowGeomChange events report size 0)
         self.set_variant_selector(|cx, _parent_size| {
-            if cx.display_context.is_desktop() {
+            if cx.display_context.is_desktop() || !cx.display_context.is_screen_size_known() {
                 live_id!(Desktop)
             } else {
                 live_id!(Mobile)
