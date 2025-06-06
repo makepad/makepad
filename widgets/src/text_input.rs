@@ -1121,7 +1121,11 @@ impl TextInput {
         self.draw_selection.end_many_instances(cx);
     }
 
-    pub fn move_cursor_left(&mut self, cx: &mut Cx, keep_selection: bool) {
+    /// Moves the cursor one column to the left.
+    ///
+    /// Returns `true` if the cursor/selection actually changed.
+    pub fn move_cursor_left(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
         self.set_cursor(
             cx,
             Cursor {
@@ -1130,9 +1134,14 @@ impl TextInput {
             },
             keep_selection
         );
+        !initial.index_eq(self.selection)
     }
 
-    pub fn move_cursor_right(&mut self, cx: &mut Cx, keep_selection: bool) {
+    /// Moves the cursor one column to the right.
+    ///
+    /// Returns `true` if the cursor/selection actually changed.
+    pub fn move_cursor_right(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
         self.set_cursor(
             cx,
             Cursor {
@@ -1141,9 +1150,17 @@ impl TextInput {
             },
             keep_selection,
         );
+        !initial.index_eq(self.selection)
     }
 
-    pub fn move_cursor_up(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<(), ()> {
+    /// Moves the cursor one line (row) up.
+    ///
+    /// * Returns Ok(`true`) if the cursor/selection actually changed.
+    /// * Returns Ok(`false`) if the cursor/selection movement was properly handled but did not change,
+    ///   e.g., if the cursor was already at the top-most row.
+    /// * Returns `Err` if the cursor/selection failed to be calculated due to a prior layout invalidation.
+    pub fn move_cursor_up(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<bool, ()> {
+        let initial = self.selection;
         let position = self.cursor_to_position(self.selection.cursor)?;
         self.set_cursor(
             cx,
@@ -1157,10 +1174,17 @@ impl TextInput {
             })?,
             keep_selection
         );
-        Ok(())
+        Ok(!initial.index_eq(self.selection))
     }
 
-    pub fn move_cursor_down(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<(), ()> {
+    /// Moves the cursor one line (row) down.
+    ///
+    /// * Returns Ok(`true`) if the cursor/selection actually changed.
+    /// * Returns Ok(`false`) if the cursor/selection movement was properly handled but did not change,
+    ///   e.g., if the cursor was already at the bottom-most row.
+    /// * Returns Err(`()`) if the cursor/selection failed to be calculated due to a prior layout invalidation.
+    pub fn move_cursor_down(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<bool, ()> {
+        let initial = self.selection;
         let laidout_text = self.laidout_text.as_ref().unwrap();
         let position = self.cursor_to_position(self.selection.cursor)?;
         self.set_cursor(
@@ -1175,7 +1199,7 @@ impl TextInput {
             })?,
             keep_selection
         );
-        Ok(())
+        Ok(!initial.index_eq(self.selection))
     }
 
     pub fn select_all(&mut self, cx: &mut Cx) {
@@ -1408,7 +1432,7 @@ impl Widget for TextInput {
                 cx.hide_text_ime();
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocusLost);
             }
-            Hit::KeyDown(KeyEvent {
+            Hit::KeyDown(kev @ KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers: KeyModifiers {
                     shift: keep_selection,
@@ -1419,9 +1443,12 @@ impl Widget for TextInput {
                 ..
             }) => {
                 self.reset_blink_timer(cx);
-                self.move_cursor_left(cx, keep_selection);
+                let did_move = self.move_cursor_left(cx, keep_selection);
+                if !did_move {
+                    cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev));
+                }
             }
-            Hit::KeyDown(KeyEvent {
+            Hit::KeyDown(kev @ KeyEvent {
                 key_code: KeyCode::ArrowRight,
                 modifiers: KeyModifiers {
                     shift: keep_selection,
@@ -1432,9 +1459,12 @@ impl Widget for TextInput {
                 ..
             }) => {
                 self.reset_blink_timer(cx);
-                self.move_cursor_right(cx, keep_selection);
+                let did_move = self.move_cursor_right(cx, keep_selection);
+                if !did_move {
+                    cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev));
+                }
             }
-            Hit::KeyDown(KeyEvent {
+            Hit::KeyDown(kev @ KeyEvent {
                 key_code: KeyCode::ArrowUp,
                 modifiers: KeyModifiers {
                     shift: keep_selection,
@@ -1445,11 +1475,13 @@ impl Widget for TextInput {
                 ..
             }) => {
                 self.reset_blink_timer(cx);
-                if self.move_cursor_up(cx, keep_selection).is_err() {
-                    warning!("can't move cursor because layout was invalidated by earlier event");
+                match self.move_cursor_up(cx, keep_selection) {
+                    Ok(true) => { }
+                    Ok(false) => cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev)),
+                    Err(_) => warning!("can't move cursor up because layout was invalidated by earlier event"),
                 }
             },
-            Hit::KeyDown(KeyEvent {
+            Hit::KeyDown(kev @ KeyEvent {
                 key_code: KeyCode::ArrowDown,
                 modifiers: KeyModifiers {
                     shift: keep_selection,
@@ -1460,8 +1492,10 @@ impl Widget for TextInput {
                 ..
             }) => {
                 self.reset_blink_timer(cx);
-                if self.move_cursor_down(cx, keep_selection).is_err() {
-                    warning!("can't move cursor because layout was invalidated by earlier event");
+                match self.move_cursor_down(cx, keep_selection) {
+                    Ok(true) => { }
+                    Ok(false) => cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev)),
+                    Err(_) => warning!("can't move cursor down because layout was invalidated by earlier event"),
                 }
             }
             Hit::KeyDown(KeyEvent {
