@@ -351,8 +351,8 @@ pub trait ImageCacheImpl {
 
     fn image_size_by_path(image_path:&Path)-> Result<(usize,usize), ImageError> {
         if let Ok(mut f) = File::open(image_path){
-            let mut data = vec![0u8;1024]; // yolo chunk size
-            match f.read(&mut data) {
+            let mut data = Vec::new(); // yolo chunk size
+            match f.read_to_end(&mut data) {
                 Ok(_len) => {
                     Self::image_size_by_data(&data, image_path)
                 }
