@@ -336,6 +336,7 @@ public class MakepadActivity
 
 
         String cache_path = this.getCacheDir().getAbsolutePath();
+        String data_path = this.getFilesDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
         boolean isEmulator = this.isEmulator();
         String androidVersion = Build.VERSION.RELEASE;
@@ -343,7 +344,7 @@ public class MakepadActivity
         String kernelVersion = this.getKernelVersion();
         int sdkVersion = Build.VERSION.SDK_INT;
 
-        MakepadNative.onAndroidParams(cache_path, density, isEmulator, androidVersion, buildNumber, kernelVersion);
+        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, kernelVersion);
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
