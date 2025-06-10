@@ -21,7 +21,13 @@ pub enum ImageFit {
     Vertical,
     Smallest,
     Biggest,
-    Size
+    Size,
+    /// `Size` if image's true size (both width & height) are inside the turtle size, otherwise `Smallest`.
+    AutoFit,
+    /// `Size` if image's true width is inside the turtle size, otherwise `Smallest`.
+    AutoFitWidth,
+    /// `Size` if image's true height is inside the turtle size, otherwise `Smallest`.
+    AutoFitHeight,
 }
 
 impl Default for ImageFit {
