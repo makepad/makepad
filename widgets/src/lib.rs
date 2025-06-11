@@ -80,6 +80,7 @@ pub mod touch_gesture;
 #[macro_use]
 pub mod data_binding;
 
+pub mod theme_desktop_skeleton;
 pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
 pub mod theme_mobile_dark;
@@ -187,6 +188,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::performance_view::live_design(cx);
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
+    crate::theme_desktop_skeleton::live_design(cx);
     crate::theme_desktop_dark::live_design(cx);
     crate::theme_desktop_light::live_design(cx);
     crate::theme_mobile_dark::live_design(cx);
