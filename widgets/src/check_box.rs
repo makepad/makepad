@@ -140,11 +140,7 @@ live_design!{
                                         ),
                                         self.active
                                     ),
-                                    mix(
-                                        mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
-                                        mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                        self.down
-                                    ),
+                                    mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
                                     self.hover
                                 ),
                                 mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
