@@ -33,7 +33,7 @@ live_design!{
 
             <Hr> {}
             <H4> { text: "CheckBoxFlatter"}
-            <CheckBoxFlatter> { text:"<CheckBoxFlat>" }
+            <CheckBoxFlatter> { text:"<CheckBoxFlatter>" }
 
             <Hr> {}
             <H4> { text: "CheckBoxGradientX"}

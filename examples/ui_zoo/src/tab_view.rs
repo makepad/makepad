@@ -56,7 +56,7 @@ live_design!{
                     draw_bg: {
                         color: (THEME_COLOR_INSET),
                         border_size: 2.,
-                        border_color: #8,
+                        border_color: #F,
                         border_inset: vec4(0.0, 0.0, 0.0, 0.0)
                     }
                     <Label> { text: "<RectView>" }
@@ -70,7 +70,7 @@ live_design!{
                     draw_bg: {
                         color: (THEME_COLOR_INSET),
                         border_size: 2.0
-                        border_color: #8
+                        border_color: #F
                         shadow_color: #0007
                         shadow_offset: vec2(5.0,5.0)
                         shadow_radius: 10.0
@@ -87,7 +87,7 @@ live_design!{
                     draw_bg: {
                         color: (THEME_COLOR_INSET),
                         border_radius: 5.,
-                        border_color: #8
+                        border_color: #F
                         border_size: 2.0
                         shadow_color: #0007
                         shadow_radius: 10.0
@@ -106,7 +106,7 @@ live_design!{
                         color: (THEME_COLOR_INSET),
                         border_radius: 5.,
                         border_size: 2.0
-                        border_color: #8
+                        border_color: #F
                         border_inset: vec4(0.0, 0.0, 0.0, 0.0)
                     }
 
@@ -122,7 +122,7 @@ live_design!{
                         color: (THEME_COLOR_INSET),
                         border_radius: vec2(1.0, 5.0),
                         border_size: 2.0
-                        border_color: #8
+                        border_color: #F
                         border_inset: vec4(0.0, 0.0, 0.0, 0.0)
                     }
 
@@ -137,7 +137,7 @@ live_design!{
                     draw_bg: {
                         color: (THEME_COLOR_INSET),
                         border_size: 2.0
-                        border_color: #8
+                        border_color: #F
                         border_radius: vec2(1.0, 5.0),
                         border_inset: vec4(0.0, 0.0, 0.0, 0.0)
                     }
@@ -153,7 +153,7 @@ live_design!{
                     draw_bg: {
                         color: (THEME_COLOR_INSET),
                         border_size: 2.0
-                        border_color: #8
+                        border_color: #F
                         border_radius: vec4(1.0, 5.0, 2.0, 3.0),
                         border_inset: vec4(0.0, 0.0, 0.0, 0.0)
                     }
@@ -202,7 +202,7 @@ live_design!{
                     draw_bg: {
                         color: (THEME_COLOR_INSET),
                         border_size: 2.0
-                        border_color: #8
+                        border_color: #F
                         border_radius: 30.,
                         border_inset: vec4(0.0, 0.0, 0.0, 0.0)
                     }
@@ -218,7 +218,7 @@ live_design!{
                     draw_bg: {
                         color: (THEME_COLOR_INSET),
                         border_size: 2.0
-                        border_color: #8
+                        border_color: #F
                         border_inset: vec4(0.0, 0.0, 0.0, 0.0)
                         border_radius: vec2(0.0, 0.0)
         
@@ -253,7 +253,7 @@ live_design!{
                     align: { x: 0.5, y: 0.5 }
                     draw_bg: {
                         border_size: 2.0
-                        border_color: #8
+                        border_color: #F
                         border_inset: vec4(0., 0., 0., 0.)
                         border_radius: 2.5
                     }
@@ -356,7 +356,7 @@ live_design!{
                     align: { x: 0., y: 0. }
                     show_bg: true,
                     draw_bg: {
-                        color: #8
+                        color: (THEME_COLOR_INSET)
                     }
 
                     <View> {
@@ -387,7 +387,7 @@ live_design!{
                     align: { x: 0., y: 0. }
                     show_bg: true,
                     draw_bg: {
-                        color: #8
+                        color: (THEME_COLOR_INSET)
                     }
 
                     <View> {
@@ -418,7 +418,7 @@ live_design!{
                     align: { x: 0., y: 0. }
                     show_bg: true,
                     draw_bg: {
-                        color: #8
+                        color: (THEME_COLOR_INSET)
                     }
 
                     <View> {
