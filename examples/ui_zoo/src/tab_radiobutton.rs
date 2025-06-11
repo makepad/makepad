@@ -379,7 +379,7 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "Button Group GradientX" }
+            <H4> { text: "Button Group GradientX Styled" }
             radios_demo_18 = <ButtonGroup> {
                 radio1 = <RadioButtonTabGradientX> {
                     text: "Option 1"
