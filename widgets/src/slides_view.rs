@@ -23,7 +23,7 @@ live_design!{
         align: { x: 0.0, y: 0.5 }
         padding: 50.
         draw_bg: {
-            color: (THEME_COLOR_D_4),
+            color: (THEME_COLOR_D_05),
             border_radius: (THEME_CONTAINER_CORNER_RADIUS)
         }
         title = <H1> {
