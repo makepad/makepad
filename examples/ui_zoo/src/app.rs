@@ -229,8 +229,8 @@
                         theme_font_size_contrast = <Slider> { text: "Size Contrast", default: 2.5, min:1.0 max: 5.0  }
                         <Vr> {}
                         theme_bevel = <Slider> { text: "Bevel", default: 0.75, min:0.0 max: 1.5   }
-                        theme_rounding = <Slider> { text: "Rounding", default: 2.5, min:1.0 max: 5.0   }
-                        theme_space = <Slider> { text: "Space", default: 6.0, min:1.0 max: 10.0   }
+                        theme_rounding = <Slider> { text: "Rounding", default: 2.5, min: 1.0 max: 2.5   }
+                        theme_space = <Slider> { text: "Space", default: 6.0, min: 1.0 max: 10.0   }
                         /*
                         reload_button = <ButtonFlatterIcon> {
                             height: Fill, width: Fit,
