@@ -5,7 +5,6 @@ live_design! {
     use link::shaders::*;
     
     // GLOBAL PARAMETERS
-
     pub THEME_SPACE_FACTOR = 10. // Increase for a less dense layout
     pub THEME_CORNER_RADIUS = 2.5
     pub THEME_BEVELING = 0.75
