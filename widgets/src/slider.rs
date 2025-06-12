@@ -1058,7 +1058,7 @@ live_design!{
 
 
     pub SLIDER_ALT1_HANDLE_SIZE = 4.0;
-    pub SLIDER_ALT1_DATA_FONT_TOPMARGIN = 3.0;
+    pub SLIDER_ALT1_DATA_FONT_TOPMARGIN = 1.0;
     pub SLIDER_ALT1_VAL_PADDING = 2.5;
 
     pub SliderRound = <SliderMinimal> {
