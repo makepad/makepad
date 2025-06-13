@@ -453,8 +453,6 @@ live_design! {
         }
     }
 
-    pub TextInputFlatter = <TextInputFlat> { draw_bg: { border_size: 0. } }
-
     pub TextInputGradientX = <TextInput> {
         draw_bg: {
             instance hover: 0.0

@@ -381,25 +381,6 @@ live_design!{
 
     }
 
-    pub CheckBoxFlatter = <CheckBoxFlat> {
-        draw_bg: {
-            border_color_1: (THEME_COLOR_U_HIDDEN)
-            border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_1_down: (THEME_COLOR_U_HIDDEN)
-            border_color_1_active: (THEME_COLOR_U_HIDDEN)
-            border_color_1_focus: (THEME_COLOR_U_HIDDEN)
-            border_color_1_disabled: (THEME_COLOR_U_HIDDEN)
-
-            border_color_2: (THEME_COLOR_U_HIDDEN)
-            border_color_2_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_2_down: (THEME_COLOR_U_HIDDEN)
-            border_color_2_active: (THEME_COLOR_U_HIDDEN)
-            border_color_2_focus: (THEME_COLOR_U_HIDDEN)
-            border_color_2_disabled: (THEME_COLOR_U_HIDDEN)
-        }
-
-    }
-
     pub CheckBoxGradientY = <CheckBox> {
         width: Fit, height: Fit,
         padding: <THEME_MSPACE_2> {}
@@ -1302,24 +1283,6 @@ live_design!{
         }
     }
         
-    pub ToggleFlatter = <ToggleFlat> {
-        draw_bg: {
-            border_color_1: (THEME_COLOR_U_HIDDEN)
-            border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_1_down: (THEME_COLOR_U_HIDDEN)
-            border_color_1_active: (THEME_COLOR_U_HIDDEN)
-            border_color_1_focus: (THEME_COLOR_U_HIDDEN)
-            border_color_1_disabled: (THEME_COLOR_U_HIDDEN)
-
-            border_color_2: (THEME_COLOR_U_HIDDEN)
-            border_color_2_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_2_down: (THEME_COLOR_U_HIDDEN)
-            border_color_2_active: (THEME_COLOR_U_HIDDEN)
-            border_color_2_focus: (THEME_COLOR_U_HIDDEN)
-            border_color_2_disabled: (THEME_COLOR_U_HIDDEN)
-        }
-    }
-
     pub ToggleGradientX = <ToggleGradientY> {
         draw_bg: {
             uniform size: 15.;
