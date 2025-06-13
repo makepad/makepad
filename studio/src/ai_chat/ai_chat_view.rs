@@ -22,7 +22,7 @@ live_design!{
         flow: Down,
         margin: <THEME_MSPACE_3> {}
         padding: <THEME_MSPACE_2> { top: (THEME_SPACE_1+4), bottom: (THEME_SPACE_2) } 
-        draw_bg: { color: (THEME_COLOR_U_1) }
+        draw_bg: { color: (THEME_COLOR_BG_HIGHLIGHT) }
 
         <View> {
             height: Fit, width: Fill,
