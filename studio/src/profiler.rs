@@ -84,14 +84,14 @@ live_design!{
                         text: "Last ",
                         margin: 0.,
                         padding: <THEME_MSPACE_V_1> {}
-                        draw_text: { color: (THEME_COLOR_D_4) }
+                        // draw_text: { color: (THEME_COLOR_LABEL_OUTER) }
                     }
                     <P> {
                         width: Fit,
                         text: "500 ms",
                         margin: 0.,
                         padding: <THEME_MSPACE_V_1> {}
-                        draw_text: { color: (THEME_COLOR_D_4) }
+                        // draw_text: { color: (THEME_COLOR_LABEL_OUTER) }
                     }
                 }
             }

@@ -54,8 +54,8 @@ live_design!{
             uniform color_dither: 1.
 
             uniform color: (THEME_COLOR_D_HIDDEN)
-            uniform color_hover: (THEME_COLOR_D_2)
-            uniform color_active: (THEME_COLOR_BG_APP)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
 
             uniform border_color_1: (THEME_COLOR_U_HIDDEN)
             uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
@@ -214,11 +214,11 @@ live_design!{
             color_dither: 1.
 
             uniform color_1: (THEME_COLOR_D_HIDDEN)
-            uniform color_1_hover: (THEME_COLOR_D_2)
+            uniform color_1_hover: (THEME_COLOR_OUTSET_1_HOVER)
             uniform color_1_active: (THEME_COLOR_BG_APP)
 
             uniform color_2: (THEME_COLOR_D_HIDDEN)
-            uniform color_2_hover: (THEME_COLOR_D_2)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
             uniform color_2_active: (THEME_COLOR_BG_APP)
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
