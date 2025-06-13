@@ -8,7 +8,7 @@ use {
         nav::*,
         cx_2d::{Cx2d},
         cx_draw::CxDraw,
-        turtle::{Walk,AlignEntry}
+        turtle::{Walk,AlignInfo}
     }
 };
 
@@ -332,8 +332,8 @@ impl<'a,'b> Cx2d<'a,'b> {
         if li.is_none() {
             return None;
         }
-        li.as_mut().unwrap().aligned = Some(self.align_list.len());
-        self.align_list.push(AlignEntry::Unset);
+        li.as_mut().unwrap().aligned = Some(self.align_infos.len());
+        self.align_infos.push(AlignInfo::Unset);
         li
     }
     
@@ -347,7 +347,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         std::mem::swap(&mut instances, &mut draw_item.instances);
         ia.instance_count = (draw_item.instances.as_ref().unwrap().len() - ia.instance_offset) / draw_call.total_instance_slots;
         if let Some(aligned) = many_instances.aligned {
-            self.align_list[aligned] = AlignEntry::Area(ia.clone().into());
+            self.align_infos[aligned] = AlignInfo::Area(ia.clone().into());
         }
         ia.into()
     }
@@ -376,7 +376,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             redraw_id: draw_item.redraw_id
         }).into();
         draw_item.instances.as_mut().unwrap().extend_from_slice(data);
-        self.align_list.push(AlignEntry::Area(ia.clone()));
+        self.align_infos.push(AlignInfo::Area(ia.clone()));
         ia
     }
     
@@ -395,7 +395,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             redraw_id: self.redraw_id,
             rect_id
         });
-        self.align_list.push(AlignEntry::Area(new_area));
+        self.align_infos.push(AlignInfo::Area(new_area));
         self.update_area_refs(*area, new_area);
         *area = new_area;
     }

@@ -10,7 +10,7 @@ use {
             DrawListId,
         },
         draw_list_2d::DrawList2d,
-        turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
+        turtle::{Turtle, TurtleWalk, Walk, AlignInfo},
     },
 };
 
@@ -22,7 +22,7 @@ pub struct Cx2d<'a, 'b> {
     pub (crate) turtles: Vec<Turtle>,
     pub (crate) turtle_walks: Vec<TurtleWalk>,
     pub (crate) turtle_clips: Vec<(DVec2, DVec2)>,
-    pub (crate) align_list: Vec<AlignEntry>,
+    pub (crate) align_infos: Vec<AlignInfo>,
 }
 
 impl<'a, 'b> Deref for Cx2d<'a,'b> {type Target = CxDraw<'a>; fn deref(&self) -> &Self::Target {self.cx}}
@@ -36,7 +36,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             turtle_clips: Vec::with_capacity(1024),
             turtle_walks: Vec::with_capacity(1024),
             turtles: Vec::with_capacity(64),
-            align_list: Vec::with_capacity(4096),
+            align_infos: Vec::with_capacity(4096),
         }
     }
     
