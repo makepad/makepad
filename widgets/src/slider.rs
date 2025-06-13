@@ -1047,16 +1047,6 @@ live_design!{
 
     }
 
-    pub SliderFlatter = <SliderFlat> {
-        draw_bg: {
-            instance disabled: 0.0,
-
-            handle_size: 0.
-            border_size: 0.
-        }
-    }
-
-
     pub SLIDER_ALT1_HANDLE_SIZE = 4.0;
     pub SLIDER_ALT1_DATA_FONT_TOPMARGIN = 1.0;
     pub SLIDER_ALT1_VAL_PADDING = 2.5;
@@ -1617,12 +1607,6 @@ live_design!{
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
             uniform border_color_2_disabled: (THEME_COLOR_BEVEL_DISABLED)
             uniform border_color_2_drag: (THEME_COLOR_BEVEL_DRAG)
-        }
-    }
-
-    pub SliderRoundFlatter = <SliderRoundFlat> {
-        draw_bg: {
-            border_size: 0.
         }
     }
 
@@ -2553,12 +2537,6 @@ live_design!{
                 
                 return sdf.result
             }
-        }
-    }
-
-    pub RotaryFlatter = <RotaryFlat> {
-        draw_bg: {
-            border_size: 0.,
         }
     }
 

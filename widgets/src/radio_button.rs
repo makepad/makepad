@@ -953,13 +953,6 @@ live_design!{
 
     }
 
-    pub RadioButtonFlatter = <RadioButtonFlat> {
-        draw_bg: {
-            border_size: 0.
-        }
-
-    }
-         
     pub RadioButtonCustom = <RadioButton> {
         draw_bg: {
             fn pixel(self) -> vec4 {
@@ -982,7 +975,7 @@ live_design!{
         label_walk: { margin: { left: (THEME_SPACE_2) } }
     }
         
-    pub RadioButtonTextual = <RadioButton> {
+    pub RadioButtonFlatter = <RadioButton> {
         draw_text: {
             color: (THEME_COLOR_LABEL_OUTER_OFF)
             color_hover: (THEME_COLOR_LABEL_OUTER_HOVER)
@@ -1064,9 +1057,6 @@ live_design!{
             border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
             border_color_2_disabled: (THEME_COLOR_BEVEL_DISABLED)
         }
-    }
-
-    pub RadioButtonTabFlatter = <RadioButtonTabFlat> { draw_bg: { border_size: 0.  }
     }
 
     pub RadioButtonTabGradientX = <RadioButtonTab> {
