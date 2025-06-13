@@ -279,7 +279,9 @@ impl Window {
     pub fn set_fullscreen(&mut self, cx: &mut Cx) {
         self.window.fullscreen(cx);
     }
-    
+    pub fn create_window(&mut self, cx: &mut Cx, inner_size: DVec2, position: DVec2, fullscreen: bool, title: String) {
+        self.window.create_window(cx, inner_size, position, fullscreen, title);
+    }
 }
 
 impl WindowRef{
@@ -320,6 +322,11 @@ impl WindowRef{
         }
     }
 
+    pub fn create_window(&self, cx: &mut Cx, inner_size: DVec2, position: DVec2, fullscreen: bool, title: String) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.create_window(cx, inner_size, position, fullscreen, title);
+        }
+    }
 }
 
 impl Widget for Window {
