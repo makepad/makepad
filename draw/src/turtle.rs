@@ -149,113 +149,102 @@ pub struct Turtle {
     shift: DVec2,
     pos: DVec2,
     origin: DVec2,
-    /// The width of the bounding box of this turtle.
+    /// The width of the bounding box.
     width: f64,
-    /// The height of the bounding box of this turtle.
+    /// The height of the bounding box.
     height: f64,
-    /// The used width in the bounding box of this turtle.
+    /// The used width in the bounding box.
     used_width: f64,
-    /// The used height in the bounding box of this turtle.
+    /// The used height in the bounding box.
     used_height: f64,
     guard_area: Area
 }
 
 impl Turtle {
-    /// Returns the width of the inner bounding box of this turtle.
+    /// Returns the width of the inner bounding box.
     /// 
     /// This is the width of the bounding box minus the padding width.
     /// 
-    /// The width of the inner bounding box should never be negative. Since the padding width may be
-    /// larger than the width of the bounding box, we first clamp it to the latter.
+    /// This value should never be negative. Since the padding width may be larger than the width
+    /// of the bounding box, so we need to clamp it to the latter to ensure this.
     /// 
-    /// If the width of the bounding box of this turtle could not be computed up front, this will
-    /// return `f64::NAN`.
+    /// If the width of the inner bounding box could not be computed (because the width of the
+    /// bounding box is not known), this will return `f64::NAN`.
     pub fn inner_width(&self) -> f64 {
         self.width - self.layout.padding.width().min(self.width)
     }
 
-    /// Returns the height of the inner bounding box of this turtle.
+    /// Returns the height of the inner bounding box.
     /// 
     /// This is the height of the bounding box minus the vertical padding.
     /// 
-    /// The height of the inner bounding box should never be negative. Since the padding height may
-    /// be larger than the height of the bounding box, we first clamp it to the latter.
-    /// 
-    /// If the height of the bounding box of this turtle could not be computed up front, this will
-    /// return `f64::NAN`.
+    /// If the height of the inner bounding box could not be computed up (because the height of the
+    /// bounding box is not known), this will return `f64::NAN`.
     pub fn inner_height(&self) -> f64 {
         self.height - self.layout.padding.height().min(self.height)
     }
 
-    /// Returns the used width in the inner bounding box of this this turtle.
+    /// Returns the used width in the inner bounding box.
     /// 
-    /// This is the amount of used width in the bounding box minus the left padding.
+    /// This is the used width in the bounding box minus the left padding.
     pub fn used_inner_width(&self) -> f64 {
+        debug_assert!(self.used_width >= self.layout.padding.left);
         self.used_width - self.layout.padding.left
     }
 
-    /// Returns the used height in the inner bounding box of this turtle.
+    /// Returns the used height in the inner bounding box.
     /// 
-    /// This is the amount of used height in the bounding box minus the top padding.
+    /// This is the used height in the bounding box minus the top padding.
     pub fn used_inner_height(&self) -> f64 {
+        debug_assert!(self.used_height >= self.layout.padding.left);
         self.used_height - self.layout.padding.top
     }
 
-    /// Returns the unused width in the inner bounding box of this turtle.
+    /// Returns the unused width in the inner bounding box.
     /// 
     /// This is the width of the inner bounding box minus the used width in the inner bounding box.
     /// 
-    /// The unused width in the inner bounding box should never be negative. Since the used width in
-    /// the inner bounding box may be larger than the width of the inner bounding box, we first
-    /// clamp it to the latter.
-    /// 
-    /// If the width of the bounding box of this turtle could not be computed up front, this will
-    /// return `f64::NAN`.
+    /// If the unused width of the inner bounding box could not be computed up front (because the
+    /// width of the bounding box is unknown), this will return `f64::NAN`.
     pub fn unused_inner_width(&self) -> f64 {
         self.inner_width() - self.used_inner_width().min(self.inner_width())
     }
 
-    /// Returns the unused height in the inner bounding box of this turtle.
+    /// Returns the unused height in the inner bounding box.
     /// 
-    /// This is the height of the inner bounding box minus the used height in the bounding box.
+    /// This is the height of the inner bounding box minus the used height in the inner bounding
+    /// box.
     /// 
-    /// The unused height in the inner bounding box should never be negative. Since the used height
-    /// in the inner bounding box may be larger than the height of the inner bounding box, we first
-    /// clamp it to the latter.
-    /// 
-    /// If the height of the bounding box of this turtle could not be computed up front, this will
-    /// return `f64::NAN`.
+    /// If the height of the bounding box of this turtle could not be computed up front (because the
+    /// height of the bounding box is unknown), this will return `f64::NAN`.
     pub fn unused_inner_height(&self) -> f64 {
         self.inner_height() - self.used_inner_height().min(self.inner_height())
     }
 
-    /// Computes the width of the bounding box of a child turtle.
+    /// Computes the width of a child bounding box.
     /// 
-    /// If the width of the bounding box of the child turtle cannot be computed up front, this will
-    /// return `f64::NAN`.
-    pub fn compute_width(&self, width: Size, margin: Margin) -> f64 {
+    /// If the width of the child bounding box cannot be computed up front, this will return
+    /// `f64::NAN`.
+    pub fn compute_child_width(&self, width: Size, margin: Margin) -> f64 {
         match width {
-            // If the `width` is `Fill`, the width of the bounding box of the child turtle depends
-            // on the direction in which this turtle flows.
+            // If the `width` is `Fill`, the width of the child bounding box depends on the
+            // direction in which this turtle flows.
             Size::Fill => {
                 match self.layout.flow {
-                    // If this turtle flows to the right and does not wrap, the width of the
-                    // bounding box of the child turtle is the unused width in the inner bounding
-                    // box of this turtle minus the margin width.
+                    // If this turtle flows to the right and does not wrap, the width of the child
+                    // bounding box is the unused width in the inner bounding box minus the margin
+                    // width.
                     Flow::Right => {
-                        // The width of the bounding box of a child turtle should never be negative.
-                        // Since the margin width may be larger than the unused width in the inner
-                        // bounding box, we first clamp it to the latter.
                         self.unused_inner_width() - margin.width().min(self.unused_inner_width())
                     },
 
                     // If this turtle flows to the right and wraps, we perform the same computation
-                    // as above, except that the used width in the bounding box of this turtle is
-                    // computed differently.
+                    // as above, except that the used width in the bounding box is computed
+                    // differently.
                     //
                     // The reason for this is that the the field `used_width` keeps track of the
                     // maximum amount of used width in the bounding box for all rows, but when
-                    // wrapping we only want the amount of used width for the current row.
+                    // wrapping we only want the amount of used width for the *current* row.
                     Flow::RightWrap => {
                         let used_width = self.pos.x - self.origin.x;
                         let used_inner_width = used_width - self.layout.padding.right.min(used_width);
@@ -263,80 +252,64 @@ impl Turtle {
                         unused_inner_width - margin.width().min(unused_inner_width)
                     }
 
-                    // If this turtle flows down or overlays, the width of the bounding box of the
-                    // child turtle is the width of the inner bounding box of this turtle minus the
-                    // margin width.
+                    // If this turtle flows down or overlays, the width of the child bounding box
+                    // is the width of the inner bounding box minus the margin width.
                     Flow::Down | Flow::Overlay => {
                         let content_width = if self.inner_width().is_nan() {
                             self.used_inner_width()
                         } else {
                             self.inner_width()
                         };
-                        
-                        // The width of the bounding box of a child turtle should never be negative.
-                        // Since the margin width may be larger than the width of the inner bounding
-                        // box, we first clamp it to the latter.
                         content_width - margin.width().min(content_width)
                     }
                 }
             },
 
-            // If the `width` is `Fixed`, the width of the bounding box of the child turtle is
-            // simply the fixed width, clamped to be non-negative.
+            // If the `width` is `Fixed`, the width of the child bounding box is simply the fixed
+            // width, clamped to be non-negative.
             Size::Fixed(width) => width.max(0.0),
 
-            // If the `width` is `Fit`, the width of the bounding box of the child turtle cannot be
-            // computed up front (since it depends on its content). Return `f64::NAN` to indicate
-            // that fact.
+            // If the `width` is `Fit`, the width of the child bounding box cannot be computed up
+            // front (since it depends on its content). Return `f64::NAN` to indicate that fact.
             Size::Fit => f64::NAN,
         }
     }
 
-    /// Computes the height of the bounding box of a child turtle.
+    /// Computes the height of a child bounding box.
     ///
-    /// If the height of the bounding box of the child turtle cannot be computed up front, this will
-    /// return `f64::NAN`.
-    pub fn compute_padding_box_height(&self, height: Size, margin: Margin) -> f64 {
+    /// If the height of the child bounding box cannot be computed up front, this will return
+    /// `f64::NAN`.
+    pub fn compute_child_height(&self, height: Size, margin: Margin) -> f64 {
         return match height {
-            // If the `height` is `Fill`, the height of the bounding box of the child turtle depends
-            // on the direction in which this turtle flows.
+            // If the `height` is `Fill`, the height of the child bounding box depends on the
+            // direction in which this turtle flows.
             Size::Fill => {
                 match self.layout.flow {
-                    // If this turtle flows right or overlays, the width of the bounding box of the
-                    // child turtle is the width of the inner bounding box of this turtle minus the
-                    // margin width.
+                    // If this turtle flows right or overlays, the width of the child bounding box
+                    // is the width of the inner bounding box of this turtle minus the margin width.
                     Flow::Right | Flow::RightWrap | Flow::Overlay => {
                         let content_height = if self.inner_height().is_nan() {
                             self.used_inner_height()
                         } else {
                             self.inner_height()
                         };
-
-                        // The width of the bounding box of a child turtle should never be negative.
-                        // Since the margin width may be larger than the width of the inner bounding
-                        // box, we first clamp it to the latter.
                         content_height - margin.height().min(content_height)
                     }
 
-                    // If this turtle flows down, the height of the bounding box of the child turtle
-                    // is the unused height in the inner bounding box of this turtle minus the
-                    // margin height.         
-                    Flow::Down => {         
-                        // The height of the bounding box of a child turtle should never be negative.
-                        // Since the margin width may be larger than the unused width in the inner
-                        // bounding box of this turtle, we first clamp it to the latter.  
+                    // If this turtle flows down, the height of the child bounding box of the is the
+                    // unused height in the inner bounding box minus the margin height.         
+                    Flow::Down => {
                         self.unused_inner_height() - margin.height().min(self.unused_inner_height())
                     }
                 }
             }
 
-            // If the `height` is `Fixed`, the height of the bounding box of the child turtle is
-            // simply the fixed height, clamped to be non-negative.
+            // If the `height` is `Fixed`, the height of the child bounding box is simply the fixed
+            // height, clamped to be non-negative.
             Size::Fixed(height) => height.max(0.0),
 
-            // If the `height` is `Fit`, the height of the bounding box of the child turtle cannot be
-            // computed up front (since it depends on its content). Return `f64::NAN` to indicate
-            // that fact.
+            // If the `height` is `Fit`, the height of the child bounding box cannot be computed up
+            // front (since it depends on its content). Return `f64::NAN` to indicate that fact.
             Size::Fit => f64::NAN,
         }
     }
@@ -358,13 +331,30 @@ impl<'a,'b> Cx2d<'a,'b> {
     }
 
     pub fn begin_turtle_with_guard(&mut self, walk: Walk, layout: Layout, guard_area: Area) {
-        let width = if let Some(parent) = self.turtles.last() {
-            parent.compute_width(walk.width, walk.margin)
+        /*
+        let origin = if let Some(parent) = self.turtles.last() {
+            if let Some(pos) = walk.abs_pos {
+                pos
+            } else {
+                parent.pos
+            }
         } else {
-            walk.width.fixed_or_nan()
+            dvec2(walk.margin.left, walk.margin.top)
         };
+        */
+
+        // Computes the width of the bounding box.
+        let width = self
+            .turtles
+            .last()
+            .map_or(
+                walk.width.fixed_or_nan(),
+                |parent| parent.compute_child_width(walk.width, walk.margin)
+            );
+
+        // Computes the height of the bounding box.
         let height = if let Some(parent) = self.turtles.last() {
-            parent.compute_padding_box_height(walk.height, walk.margin)
+            parent.compute_child_height(walk.height, walk.margin)
         } else {
             walk.height.fixed_or_nan()
         };
@@ -433,8 +423,8 @@ impl<'a,'b> Cx2d<'a,'b> {
         let defer_index = turtle.defer_count;
         let pos = turtle.pos;
         let size = dvec2(
-            turtle.compute_width(walk.width, walk.margin),
-            turtle.compute_padding_box_height(walk.height, walk.margin)
+            turtle.compute_child_width(walk.width, walk.margin),
+            turtle.compute_child_height(walk.height, walk.margin)
         );
         let margin_size = walk.margin.size();
         match turtle.layout.flow {
@@ -739,8 +729,8 @@ impl<'a,'b> Cx2d<'a,'b> {
         
         let turtle = self.turtles.last_mut().unwrap();
         let size = dvec2(
-            turtle.compute_width(walk.width, walk.margin),
-            turtle.compute_padding_box_height(walk.height, walk.margin)
+            turtle.compute_child_width(walk.width, walk.margin),
+            turtle.compute_child_height(walk.height, walk.margin)
         );
         
         if let Some(pos) = walk.abs_pos {
@@ -850,8 +840,8 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
         let turtle = self.turtles.last().unwrap();
         let size = dvec2(
-            turtle.compute_width(walk.width, walk.margin),
-            turtle.compute_padding_box_height(walk.height, walk.margin)
+            turtle.compute_child_width(walk.width, walk.margin),
+            turtle.compute_child_height(walk.height, walk.margin)
         );
         
         if let Some(pos) = walk.abs_pos {
@@ -1150,14 +1140,14 @@ impl Turtle {
         if walk.width.is_fit() {
             return None;
         }
-        Some(self.compute_width(walk.width, walk.margin) as f64)
+        Some(self.compute_child_width(walk.width, walk.margin) as f64)
     }
 
     pub fn max_height(&self, walk: Walk) -> Option<f64> {
         if walk.height.is_fit() {
             return None
         }
-        Some(self.compute_width(walk.height, walk.margin) as f64)
+        Some(self.compute_child_width(walk.height, walk.margin) as f64)
     }
     
     pub fn rect(&self) -> Rect {
