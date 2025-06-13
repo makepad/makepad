@@ -133,82 +133,6 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "Textual"}
-            <UIZooRowH> {
-                radios_demo_9 = <View> {
-                    width: Fit, height: Fit,
-                    flow: Right,
-                    spacing: (THEME_SPACE_2)
-                    radio1 = <RadioButtonTextual> { text: "Option 1" }
-                    radio2 = <RadioButtonTextual> { text: "Option 2" }
-                    radio3 = <RadioButtonTextual> { text: "Option 3" }
-                    radio4 = <RadioButtonTextual> { text: "Option 4" }
-                }
-            }
-
-            <Hr> {}
-            <H4> { text: "Textual Customized"}
-            <UIZooRowH> {
-                 radios_demo_10 = <View> {
-                    width: Fit, height: Fit,
-                    flow: Right,
-                    spacing: (THEME_SPACE_2)
-                    radio1 = <RadioButtonTextual> { 
-                        text: "Option 1"
-
-                        draw_text: {
-                            color: #C80,
-                            color_hover: #FC0,
-                            color_active: #FF4,
-                                
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-                    }
-                    radio2 = <RadioButtonTextual> { 
-                        text: "Option 2"
-
-                        draw_text: {
-                            color: #C80,
-                            color_hover: #FC0,
-                            color_active: #FF4,
-                                
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-                    }
-                    radio3 = <RadioButtonTextual> { 
-                        text: "Option 3"
-
-                        draw_text: {
-                            color: #C80,
-                            color_hover: #FC0,
-                            color_active: #FF4,
-                                
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-                    }
-                    radio4 = <RadioButtonTextual> { 
-                        text: "Option 4"
-
-                        draw_text: {
-                            color: #C80,
-                            color_hover: #FC0,
-                            color_active: #FF4,
-                                
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-                    }
-                }
-            }
-
-            <Hr> {}
             <H4> { text: "Button Group"}
             radios_demo_11 = <ButtonGroup> {
                 radio1 = <RadioButtonTab> { text: "Option 1" }
@@ -231,15 +155,6 @@ live_design!{
                 radio2 = <RadioButtonTabFlat> { text: "Option 2" }
                 radio3 = <RadioButtonTabFlat> { text: "Option 3" }
                 radio4 = <RadioButtonTabFlat> { text: "Option 4" }
-            }
-
-            <Hr> {}
-            <H4> { text: "Button Group Flatter"}
-            radios_demo_13 = <ButtonGroup> {
-                radio1 = <RadioButtonTabFlatter> { text: "Option 1" }
-                radio2 = <RadioButtonTabFlatter> { text: "Option 2" }
-                radio3 = <RadioButtonTabFlatter> { text: "Option 3" }
-                radio4 = <RadioButtonTabFlatter> { text: "Option 4" }
             }
 
             <Hr> {}
