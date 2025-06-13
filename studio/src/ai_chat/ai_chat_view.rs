@@ -83,7 +83,7 @@ live_design!{
         padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) }
 
         draw_bg: {
-            color: (THEME_COLOR_D_2)
+            color: (THEME_COLOR_INSET)
         }
         flow: Down
         busy = <View>{
@@ -183,7 +183,7 @@ live_design!{
                     padding: <THEME_MSPACE_V_2> {}
                     icon_walk: { width: 10. }
                     draw_icon: {
-                        color: (THEME_COLOR_D_4),
+                        color: (THEME_COLOR_LABEL_OUTER),
                         //color_active: (STUDIO_PALETTE_6),
                         svg_file: dep("crate://self/resources/icons/icon_auto.svg"),
                     }
