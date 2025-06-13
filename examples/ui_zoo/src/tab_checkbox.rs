@@ -32,10 +32,6 @@ live_design!{
             <CheckBoxFlat> { text:"<CheckBoxFlat>" }
 
             <Hr> {}
-            <H4> { text: "CheckBoxFlatter"}
-            <CheckBoxFlatter> { text:"<CheckBoxFlatter>" }
-
-            <Hr> {}
             <H4> { text: "CheckBoxGradientX"}
             <CheckBoxGradientX> { text:"<CheckBoxGradientX>" }
 
@@ -54,12 +50,6 @@ live_design!{
             <H4> { text: "ToggleFlat"}
             <UIZooRowH> {
                 <ToggleFlat> {text:"<ToggleFlat>" }
-            }
-
-            <Hr> {}
-            <H4> { text: "ToggleFlatter"}
-            <UIZooRowH> {
-                <ToggleFlatter> {text:"<ToggleFlatter>" }
             }
 
             <Hr> {}

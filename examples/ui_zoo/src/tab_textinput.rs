@@ -121,10 +121,6 @@ live_design!{
             <TextInputFlat> { empty_text: "Inline Label" }
 
             <Hr> {}
-            <H4> { text: "TextInputFlatter" }
-            <TextInputFlatter> { empty_text: "Inline Label" }
-
-            <Hr> {}
             <H4> { text: "TextInputGradientX" }
             <TextInputGradientX> { empty_text: "Inline Label" }
 
