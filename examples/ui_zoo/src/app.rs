@@ -203,7 +203,7 @@
                                     self.rect_size.y + 30.
                                 )
 
-                                sdf.fill_keep((THEME_COLOR_U_1));
+                                sdf.fill_keep((THEME_COLOR_BG_HIGHLIGHT));
 
                                 sdf.stroke(
                                     mix((THEME_COLOR_BEVEL_OUTSET_1), #fff0, pow(self.pos.y, 0.1)), self.border_size
@@ -290,7 +290,7 @@
 impl LiveRegister for App {
         fn live_register(cx: &mut Cx) { 
             crate::makepad_widgets::live_design(cx);
-            cx.link(live_id!(theme), live_id!(theme_desktop_light));
+            cx.link(live_id!(theme), live_id!(theme_desktop_skeleton));
 
             crate::layout_templates::live_design(cx);
             crate::demofiletree::live_design(cx);
@@ -370,7 +370,7 @@ impl LiveRegister for App {
                 if let Some(value) = self.ui.slider(slider.0).end_slide(&actions){
                     cx.set_dsl_value(
                         live_id!(makepad_widgets),
-                        live_id!(theme_desktop_light),
+                        live_id!(theme_desktop_skeleton),
                         slider.1,
                         LiveValue::Float64(value)
                     );
@@ -383,7 +383,7 @@ impl LiveRegister for App {
             if let Some(txt) = self.ui.text_input(id!(theme_tint_color)).changed(&actions){
                 cx.set_dsl_value(
                     live_id!(makepad_widgets),
-                    live_id!(theme_desktop_light),
+                    live_id!(theme_desktop_skeleton),
                     live_id!(THEME_COLOR_TINT),
                     LiveValue::Color(hex_bytes_to_u32(&txt.into_bytes()).unwrap_or(0x777777ff))
                 );
@@ -461,7 +461,6 @@ impl AppMain for App {
 
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
-        db.bind(id!(dropdown), ids!(dropdown));
         db.bind(id!(dropdown_disabled), ids!(dropdown_disabled));
         db.bind(id!(dropdown_demo), ids!(dropdown_demo));
         db.bind(id!(dropdown_flat), ids!(dropdown_flat));
