@@ -73,8 +73,14 @@ live_design!{
                         gap: 180.,
                     }
                 }
+
                 <RotaryGradientY> {
                     text: "Label",
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
                     draw_bg: {
                         val_size: 30.
                     }
@@ -112,6 +118,11 @@ live_design!{
                 }
                 <RotaryFlat> {
                     text: "Label",
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
                     draw_bg: {
                         val_size: 30.
                     }
