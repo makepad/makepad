@@ -181,16 +181,12 @@ impl WindowHandle {
         cx.windows[self.window_id()].main_pass_id = Some(pass.pass_id());
         cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());
     }
-    pub fn create_window(&mut self, cx: &mut Cx, inner_size: DVec2, position: DVec2, is_fullscreen: bool, title: String) {
-        let window = &cx.windows[self.window_id()];
+    pub fn configure_window(&mut self, cx: &mut Cx, inner_size: DVec2, position: DVec2, is_fullscreen: bool, title: String) {
+        let window = &mut cx.windows[self.window_id()];
         window.create_title = title;
         window.create_position = Some(position);
         window.create_inner_size = Some(inner_size);
-        window.is_created = true;
-        cx.push_unique_platform_op(CxOsOp::CreateWindow(self.window_id()));
-        if is_fullscreen && self.can_fullscreen(cx){
-            self.fullscreen(cx);
-        }
+        window.is_fullscreen = is_fullscreen;
     }
     pub fn get_inner_size(&self, cx: &Cx) -> DVec2 {
         cx.windows[self.window_id()].get_inner_size()
@@ -268,6 +264,7 @@ pub struct CxWindow {
     pub is_created: bool,
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<PassId>,
+    pub is_fullscreen: bool,
 }
 
 impl CxWindow {
