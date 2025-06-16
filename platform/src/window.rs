@@ -182,10 +182,11 @@ impl WindowHandle {
         cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());
     }
     pub fn create_window(&mut self, cx: &mut Cx, inner_size: DVec2, position: DVec2, is_fullscreen: bool, title: String) {
-        cx.windows[self.window_id()].create_title = title;
-        cx.windows[self.window_id()].create_position = Some(position);
-        cx.windows[self.window_id()].create_inner_size = Some(inner_size);
-        cx.windows[self.window_id()].is_created = true;
+        let window = &cx.windows[self.window_id()];
+        window.create_title = title;
+        window.create_position = Some(position);
+        window.create_inner_size = Some(inner_size);
+        window.is_created = true;
         cx.push_unique_platform_op(CxOsOp::CreateWindow(self.window_id()));
         if is_fullscreen && self.can_fullscreen(cx){
             self.fullscreen(cx);
