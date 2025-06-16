@@ -238,7 +238,7 @@ live_design!{
             instance active: 0.0
             instance disabled: 0.0
 
-            uniform color: (THEME_COLOR_ICON)
+            uniform color: (THEME_COLOR_ICON_INACTIVE)
             uniform color_active: (THEME_COLOR_ICON_ACTIVE)
             uniform color_disabled: (THEME_COLOR_ICON_DISABLED)
 
@@ -1438,7 +1438,6 @@ live_design!{
     }
 
     pub CheckBoxCustom = <CheckBox> {
-        draw_bg: { check_type: None }
         width: Fit, height: Fit,
 
         padding: <THEME_MSPACE_2> {}
@@ -1446,6 +1445,14 @@ live_design!{
 
         label_walk: {
             margin: <THEME_MSPACE_H_2> {}
+        }
+
+        draw_icon: {
+            // color: #0
+            // color_active: #f00
+            // color_disabled: #8
+        
+            svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
         }
 
         draw_bg: {
