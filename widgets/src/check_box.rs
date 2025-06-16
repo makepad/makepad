@@ -112,96 +112,85 @@ live_design!{
                     (self.pos.y - offset_uv.y) * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
 
-                match self.check_type {
-                    CheckType::Check => {
+                // Draw background
+                sdf.box(
+                    offset_px.x + self.border_size,
+                    offset_px.y + self.border_size,
+                    sz_px - self.border_size * 2.,
+                    sz_px - self.border_size * 2.,
+                    self.border_radius * 0.5
+                );
 
-                        // Draw background
-                        sdf.box(
-                            offset_px.x + self.border_size,
-                            offset_px.y + self.border_size,
-                            sz_px - self.border_size * 2.,
-                            sz_px - self.border_size * 2.,
-                            self.border_radius * 0.5
-                        );
-
-                        sdf.stroke_keep(
+                sdf.stroke_keep(
+                    mix(
+                        mix(
                             mix(
                                 mix(
-                                    mix(
-                                        mix(
-                                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                            mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                            self.focus
-                                        ),
-                                        mix(
-                                            mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                                            mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                            self.focus
-                                        ),
-                                        self.active
-                                    ),
-                                    mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                    self.hover
+                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    self.focus
                                 ),
-                                mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                                self.disabled
-                            ), self.border_size
-                        )
+                                mix(
+                                    mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
+                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    self.focus
+                                ),
+                                self.active
+                            ),
+                            mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        self.disabled
+                    ), self.border_size
+                )
 
-                        sdf.fill(
+                sdf.fill(
+                    mix(
+                        mix(
                             mix(
                                 mix(
-                                    mix(
-                                        mix(
-                                            self.color,
-                                            self.color_focus,
-                                            self.focus
-                                        ),
-                                        mix(
-                                            self.color_active,
-                                            self.color_focus,
-                                            self.focus
-                                        ),
-                                        self.active
-                                    ),
-                                    mix(
-                                        self.color_hover,
-                                        self.color_down,
-                                        self.down
-                                    ),
-                                    self.hover
+                                    self.color,
+                                    self.color_focus,
+                                    self.focus
                                 ),
-                                self.color_disabled,
-                                self.disabled
-                            )
-                        )
-
-                        // Draw mark
-                        let mark_padding = 0.275 * self.size
-                        sdf.move_to(mark_padding, center_px.y);
-                        sdf.line_to(center_px.x, center_px.y + sz_px * 0.5 - mark_padding);
-                        sdf.line_to(sz_px - mark_padding, offset_px.y + mark_padding);
-
-                        sdf.stroke(
-                            mix(
                                 mix(
-                                    mix(self.mark_color, self.mark_color_hover, self.hover),
-                                    mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
-                                    self.active
+                                    self.color_active,
+                                    self.color_focus,
+                                    self.focus
                                 ),
-                                self.mark_color_disabled,
-                                self.disabled
-                            ), self.size * 0.09
-                        );
+                                self.active
+                            ),
+                            mix(
+                                self.color_hover,
+                                self.color_down,
+                                self.down
+                            ),
+                            self.hover
+                        ),
+                        self.color_disabled,
+                        self.disabled
+                    )
+                )
 
-                    }
+                // Draw mark
+                let mark_padding = 0.275 * self.size
+                sdf.move_to(mark_padding, center_px.y);
+                sdf.line_to(center_px.x, center_px.y + sz_px * 0.5 - mark_padding);
+                sdf.line_to(sz_px - mark_padding, offset_px.y + mark_padding);
 
-                    // CheckType::Toggle => { }
+                sdf.stroke(
+                    mix(
+                        mix(
+                            mix(self.mark_color, self.mark_color_hover, self.hover),
+                            mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                            self.active
+                        ),
+                        self.mark_color_disabled,
+                        self.disabled
+                    ), self.size * 0.09
+                );
 
-                    CheckType::None => {
-                        sdf.fill(THEME_COLOR_D_HIDDEN);
-                    }
-                }
                 return sdf.result
             }
         }
@@ -1458,6 +1447,15 @@ live_design!{
         label_walk: {
             margin: <THEME_MSPACE_H_2> {}
         }
+
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.fill(THEME_COLOR_D_HIDDEN);
+                return sdf.result
+            }
+        }
+
     }
 }
 
