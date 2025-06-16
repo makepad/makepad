@@ -329,6 +329,7 @@ impl Cx {
                         d3d11_windows[index].win32_window.close_window();
                         d3d11_windows.remove(index);
                         if d3d11_windows.len() == 0 {
+                            self.call_event_handler(&Event::Shutdown);
                             ret = EventFlow::Exit
                         }
                     }
