@@ -4,34 +4,6 @@ use {
     }
 };
 
-#[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
-#[live_ignore]
-pub struct Layout {
-    #[live] pub scroll: DVec2,
-    #[live(true)] pub clip_x: bool,
-    #[live(true)] pub clip_y: bool,
-    #[live] pub padding: Padding,
-    #[live] pub align: Align,
-    #[live] pub flow: Flow,
-    #[live] pub spacing: f64,
-    //#[live] pub line_spacing: f64
-}
-
-impl Default for Layout{
-    fn default()->Self{
-        Self{
-            scroll: dvec2(0.0,0.0),
-            clip_x: true,
-            clip_y: true,
-            padding: Padding::default(),
-            align: Align{x:0.0,y:0.0},
-            flow: Flow::Right,
-            spacing: 0.0,
-            //line_spacing: 0.0
-        }
-    }
-}
-
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Walk {
@@ -46,28 +18,6 @@ pub struct Walk {
 pub struct Align {
     #[live] pub x: f64,
     #[live] pub y: f64
-}
-
-#[derive(Clone, Copy, Default, Debug, Live, LiveRegister)]
-#[live_ignore]
-pub struct Padding {
-    #[live] pub left: f64,
-    #[live] pub top: f64,
-    #[live] pub right: f64,
-    #[live] pub bottom: f64
-}
-
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
-#[live_ignore]
-pub enum Axis2 {
-    #[pick] Horizontal,
-    Vertical
-}
-
-impl Default for Axis2 {
-    fn default() -> Self {
-        Axis2::Horizontal
-    }
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook, PartialEq)]
@@ -110,9 +60,76 @@ pub enum AlignInfo{
 
 #[derive(Clone, Default, Debug)]
 pub struct TurtleWalk {
-    align_start: usize,
+    align_info_start: usize,
     defer_index: usize,
     rect: Rect,
+}
+
+#[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
+#[live_ignore]
+pub struct Layout {
+    #[live] pub scroll: DVec2,
+    #[live(true)] pub clip_x: bool,
+    #[live(true)] pub clip_y: bool,
+    #[live] pub padding: Padding,
+    #[live] pub align: Align,
+    #[live] pub flow: Flow,
+    #[live] pub spacing: f64,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self{
+            scroll: dvec2(0.0,0.0),
+            clip_x: true,
+            clip_y: true,
+            padding: Padding::default(),
+            align: Align{x:0.0,y:0.0},
+            flow: Flow::Right,
+            spacing: 0.0,
+        }
+    }
+}
+
+/// Specifies the amount of spacing between the bounding box and the inner bounding box.
+#[derive(Clone, Copy, Default, Debug, Live, LiveRegister)]
+#[live_ignore]
+pub struct Padding {
+    /// The amount of padding on the left.
+    #[live] pub left: f64,
+    /// The amount of padding on the top.
+    #[live] pub top: f64,
+    /// The amount of padding on the right.
+    #[live] pub right: f64,
+    /// The amount of padding on the bottom.
+    #[live] pub bottom: f64
+}
+
+impl Padding {
+    /// Returns a vector containing both the left and top padding.
+    pub fn left_top(&self) -> DVec2 {
+        dvec2(self.left, self.top)
+    }
+
+    /// Returns a vector containing both the right and bottom padding.
+    pub fn right_bottom(&self) -> DVec2 {
+        dvec2(self.right, self.bottom)
+    }
+
+    /// Returns the amount of horizontal padding.
+    pub fn width(&self) -> f64 {
+        self.left + self.right
+    }
+
+    /// Returns the amount of vertical padding.
+    pub fn height(&self) -> f64 {
+        self.top + self.bottom
+    }
+
+    /// Returns a vector containing both the horizontal and vertical padding.
+    pub fn size(&self) -> DVec2 {
+        dvec2(self.left + self.right, self.top + self.bottom)
+    }
 }
 
 /// The turtle box model:
@@ -141,27 +158,44 @@ pub struct TurtleWalk {
 #[derive(Clone, Default, Debug)]
 pub struct Turtle {
     walk: Walk,
+    /// The layout with which this turtle was created.
     layout: Layout,
     wrap_spacing: f64,
     align_info_start: usize,
     turtle_walks_start: usize,
     defer_count: usize,
     shift: DVec2,
-    pos: DVec2,
+    /// The origin of the bounding box.
     origin: DVec2,
     /// The width of the bounding box.
     width: f64,
     /// The height of the bounding box.
     height: f64,
-    /// The used width in the bounding box.
+    /// The amount of used width in the bounding box.
     used_width: f64,
-    /// The used height in the bounding box.
+    /// The amount of used height in the bounding box.
     used_height: f64,
+    pos: DVec2,
     guard: Area
 }
 
 impl Turtle {
-    /// Returns the width of the inner bounding box.
+    /// Returns a reference to the layout with which this turtle was created.
+    pub fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    /// Returns a mutable reference to the layout with which this turtle was created.
+    pub fn layout_mut(&mut self)-> &mut Layout {
+        &mut self.layout
+    }
+
+    /// Returns the origin of the bounding box of this turtle.
+    pub fn origin(&self) -> DVec2 {
+        self.origin
+    }
+
+    /// Returns the width of the inner bounding box for this turtle.
     /// 
     /// This is the width of the bounding box minus the padding width.
     /// 
@@ -174,7 +208,7 @@ impl Turtle {
         self.width - self.layout.padding.width().min(self.width)
     }
 
-    /// Returns the height of the inner bounding box.
+    /// Returns the height of the inner bounding box for this turtle.
     /// 
     /// This is the height of the bounding box minus the vertical padding.
     /// 
@@ -184,25 +218,26 @@ impl Turtle {
         self.height - self.layout.padding.height().min(self.height)
     }
 
-    /// Returns the used width in the inner bounding box.
+    /// Returns the amount of used width in the inner bounding box for this turtle.
     /// 
-    /// This is the used width in the bounding box minus the left padding.
+    /// This is the amount of used width in the bounding box minus the left padding.
     pub fn used_inner_width(&self) -> f64 {
         debug_assert!(self.used_width >= self.layout.padding.left);
         self.used_width - self.layout.padding.left
     }
 
-    /// Returns the used height in the inner bounding box.
+    /// Returns the amount of used height in the inner bounding box for this turtle.
     /// 
-    /// This is the used height in the bounding box minus the top padding.
+    /// This is the amount of used height in the bounding box minus the top padding.
     pub fn used_inner_height(&self) -> f64 {
         debug_assert!(self.used_height >= self.layout.padding.left);
         self.used_height - self.layout.padding.top
     }
 
-    /// Returns the unused width in the inner bounding box.
+    /// Returns the amount of unused width in the inner bounding box for this turtle.
     /// 
-    /// This is the width of the inner bounding box minus the used width in the inner bounding box.
+    /// This is the width of the inner bounding box minus the amount of used width in the inner
+    /// bounding box.
     /// 
     /// If the unused width of the inner bounding box could not be computed up front (because the
     /// width of the bounding box is unknown), this will return `f64::NAN`.
@@ -210,15 +245,48 @@ impl Turtle {
         self.inner_width() - self.used_inner_width().min(self.inner_width())
     }
 
-    /// Returns the unused height in the inner bounding box.
+    /// Returns the unused height in the inner bounding box for this turtle.
     /// 
-    /// This is the height of the inner bounding box minus the used height in the inner bounding
-    /// box.
+    /// This is the height of the inner bounding box minus the amount of used height in the inner
+    /// bounding box.
     /// 
     /// If the height of the bounding box of this turtle could not be computed up front (because the
     /// height of the bounding box is unknown), this will return `f64::NAN`.
     pub fn unused_inner_height(&self) -> f64 {
         self.inner_height() - self.used_inner_height().min(self.inner_height())
+    }
+
+    pub fn padded_width_or_used(&self) -> f64 {
+        let r = clamp_non_negative(self.width - self.layout.padding.width());
+        if r.is_nan() {
+            self.used_width - self.layout.padding.right
+        }
+        else {
+            r
+        }
+    }
+
+    pub fn padded_height_or_used(&self) -> f64 {
+        let r = clamp_non_negative(self.height - self.layout.padding.height());
+        if r.is_nan() {
+            self.used_height - self.layout.padding.bottom
+        }
+        else {
+            r
+        }
+    }
+
+    /// Returns the absolute position of this turtle.
+    pub fn pos(&self) -> DVec2 {
+        self.pos
+    }
+
+    /// Returns the position of this turtle relative to the origin of its bounding box.
+    pub fn rel_pos(&self) -> DVec2 {
+        DVec2 {
+            x: self.pos.x - self.origin.x,
+            y: self.pos.y - self.origin.y
+        }
     }
 
     /// Computes the width of a child bounding box.
@@ -232,15 +300,15 @@ impl Turtle {
             Size::Fill => {
                 match self.layout.flow {
                     // If this turtle flows to the right and does not wrap, the width of the child
-                    // bounding box is the unused width in the inner bounding box minus the margin
-                    // width.
+                    // bounding box is the amount of unused width in the inner bounding box minus
+                    // the margin width.
                     Flow::Right => {
                         self.unused_inner_width() - margin.width().min(self.unused_inner_width())
                     },
 
                     // If this turtle flows to the right and wraps, we perform the same computation
-                    // as above, except that the used width in the bounding box is computed
-                    // differently.
+                    // as above, except that the amount of used width in the bounding box is
+                    // computed differently.
                     //
                     // The reason for this is that the the field `used_width` keeps track of the
                     // maximum amount of used width in the bounding box for all rows, but when
@@ -297,7 +365,7 @@ impl Turtle {
                     }
 
                     // If this turtle flows down, the height of the child bounding box of the is the
-                    // unused height in the inner bounding box minus the margin height.         
+                    // amount of unused height in the inner bounding box minus the margin height.
                     Flow::Down => {
                         self.unused_inner_height() - margin.height().min(self.unused_inner_height())
                     }
@@ -464,61 +532,91 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle_walks_start = turtle.turtle_walks_start;
         let turtle_shift = turtle.shift;
 
-        // computed width / height
-        let w = if turtle.width.is_nan() {
-            let w = turtle.used_width + turtle.layout.padding.right - turtle.layout.scroll.x;
-            // we should update the clip pos
-            if let AlignInfo::BeginTurtle(p1,p2) = &mut self.align_infos[turtle_align_start]{
-                p2.x = p1.x + w;
+        // Compute the final width of the bounding box.
+        //
+        // If the width of the bounding box is already known, use that value. Otherwise, use the
+        // smallest value large enough to contain all content and padding to the right of the
+        // scrollbar origin.
+        let width = if turtle.width.is_nan() {
+            let width = turtle.used_width + turtle.layout.padding.right - turtle.layout.scroll.x;
+
+            // When the current turle was started, we computed its clip rectangle, and stored this in
+            // an align info entry. If the width of the bounding box could not be computed up front,
+            // the right side of the clip rectangle would have been set to `f64::NAN`. Now that we
+            // know the final width of the bounding box, we should update the right side of the clip
+            // rectangle to reflect that.
+            let first_align_info = &mut self.align_infos[turtle.align_info_start];
+            if let AlignInfo::BeginTurtle(clip_min, clip_max) = first_align_info {
+                clip_max.x = clip_min.x + width;
             }
-            Size::Fixed(w)
-        }
-        else {
-            Size::Fixed(turtle.width)
+
+            width
+        } else {
+            turtle.width
         };
         
-        let h = if turtle.height.is_nan() {
-            let h =  turtle.used_height + turtle.layout.padding.bottom - turtle.layout.scroll.y;
-            // we should update the clip pos
-            if let AlignInfo::BeginTurtle(p1,p2) = &mut self.align_infos[turtle_align_start]{
-                p2.y = p1.y + h;
+        // Compute the final height of the bounding box.
+        //
+        // If the height of the bounding box is already known, use that value. Otherwise, use the
+        // smallest value large enough to contain all content and padding below the scrollbar
+        // origin.
+        let height = if turtle.height.is_nan() {
+            let height = turtle.used_height + turtle.layout.padding.bottom - turtle.layout.scroll.y;
+
+            // When the current turtle was started, we computed its clip rectangle, and stored this in
+            // an align info entry. If the height of the bounding box could not be computed up front,
+            // the bottom side of the clip rectangle would have been set to `f64::NAN`. Now that we
+            // know the final height of the bounding box, we should update the bottom side of the clip
+            // rectangle to reflect that.
+            let first_align_info = &mut self.align_infos[turtle.align_info_start];
+            if let AlignInfo::BeginTurtle(clip_min, clip_max) = first_align_info {
+                clip_max.y = clip_min.y + height;
             }
-            Size::Fixed(h)
+
+            height
         }
         else {
-            Size::Fixed(turtle.height)
+            turtle.height
         };
-                
+
+        let align_x = turtle.layout.align.x;
+        let align_y = turtle.layout.align.y;
         match turtle.layout.flow {
             Flow::Right => {
-                if turtle.defer_count > 0 {
-                    let left = turtle.unused_inner_width();
-                    let part = left / turtle.defer_count as f64;
-                    let align_y = turtle.layout.align.y;
-                    let padded_height_or_used = turtle.padded_height_or_used();
-                    for i in turtle_walks_start..self.turtle_walks.len() {
-                        let walk = &self.turtle_walks[i];
-                        let shift_x = walk.defer_index as f64 * part;
-                        let shift_y = align_y * (padded_height_or_used - walk.rect.size.y);
-                        let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
-                    }
-                }
-                else {
-                    let align_x = turtle.layout.align.x;
-                    let align_y = turtle.layout.align.y;
-                    let width_left = turtle.unused_inner_width();
-                    let padded_height_or_used = turtle.padded_height_or_used();
-                    if align_x != 0.0 || align_y != 0.0{
-                        for i in turtle_walks_start..self.turtle_walks.len() {
-                            let walk = &self.turtle_walks[i];
-                            let shift_x = align_x * width_left;
-                            let shift_y = align_y * (padded_height_or_used - walk.rect.size.y);
-                            let align_start = walk.align_start;
-                            let align_end = self.get_turtle_walk_align_end(i);
-                            self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                if turtle.defer_count == 0 {
+                    let unused_inner_width = turtle.unused_inner_width();
+                    let inner_height = turtle.padded_height_or_used();
+                    
+                    if align_x != 0.0 || align_y != 0.0 {
+                        for index in turtle_walks_start..self.turtle_walks.len() {
+                            let turtle_walk = &self.turtle_walks[index];
+                            
+                            let unused_inner_height = inner_height - turtle_walk.rect.size.y;
+
+                            let shift_x = align_x * unused_inner_width;
+                            let shift_y = align_y * unused_inner_height;
+
+                            let align_info_start = turtle_walk.align_info_start;
+                            let align_info_end = self.get_turtle_walk_align_info_end(index);
+                            self.move_align_list(shift_x, shift_y, align_info_start, align_info_end, false, turtle_shift);
                         }
+                    }
+                } else {
+                    let unused_inner_width = turtle.unused_inner_width();
+                    let part = unused_inner_width / turtle.defer_count as f64;
+                    let inner_height = turtle.padded_height_or_used();
+
+                    for i in turtle_walks_start..self.turtle_walks.len() {
+                        let turtle_walk = &self.turtle_walks[i];
+
+                        let unused_inner_height = inner_height - turtle_walk.rect.size.y;
+
+                        let shift_x = turtle_walk.defer_index as f64 * part;
+                        let shift_y = align_y * unused_inner_height;
+
+                        let align_start = turtle_walk.align_info_start;
+                        let align_end = self.get_turtle_walk_align_info_end(i);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
                     }
                 }
             },
@@ -536,14 +634,12 @@ impl<'a,'b> Cx2d<'a,'b> {
                         let walk = &self.turtle_walks[i];
                         let shift_x = align_x * (padded_width_or_used- walk.rect.size.x);
                         let shift_y = walk.defer_index as f64 * part;
-                        let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
+                        let align_start = walk.align_info_start;
+                        let align_end = self.get_turtle_walk_align_info_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
                     }
                 }
                 else {
-                    let align_x = turtle.layout.align.x;
-                    let align_y = turtle.layout.align.y;
                     let padded_width_or_used = turtle.padded_width_or_used();
                     let height_left = turtle.unused_inner_height();
                     if align_x != 0.0 || align_y != 0.0{
@@ -551,16 +647,14 @@ impl<'a,'b> Cx2d<'a,'b> {
                             let walk = &self.turtle_walks[i];
                             let shift_x = align_x * (padded_width_or_used - walk.rect.size.x);
                             let shift_y = align_y * height_left;
-                            let align_start = walk.align_start;
-                            let align_end = self.get_turtle_walk_align_end(i);
+                            let align_start = walk.align_info_start;
+                            let align_end = self.get_turtle_walk_align_info_end(i);
                             self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
                         }
                     }
                 }
             },
             Flow::Overlay => {
-                let align_x = turtle.layout.align.x;
-                let align_y = turtle.layout.align.y;
                 if align_x != 0.0 || align_y != 0.0{
                     let padded_width_or_used = turtle.padded_width_or_used();
                     let padded_height_or_used = turtle.padded_height_or_used();
@@ -568,8 +662,8 @@ impl<'a,'b> Cx2d<'a,'b> {
                         let walk = &self.turtle_walks[i];
                         let shift_x = align_x * (padded_width_or_used - walk.rect.size.x);
                         let shift_y = align_y * (padded_height_or_used - walk.rect.size.y);
-                        let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
+                        let align_start = walk.align_info_start;
+                        let align_end = self.get_turtle_walk_align_info_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
                     }
                 }
@@ -581,10 +675,10 @@ impl<'a,'b> Cx2d<'a,'b> {
         if self.turtles.len() == 0 {
             return Rect {
                 pos: dvec2(0.0, 0.0),
-                size: dvec2(w.fixed_or_zero(), h.fixed_or_zero())
+                size: dvec2(width, height)
             }
         }
-        let rect = self.walk_turtle_move(Walk {width: w, height: h, abs_pos:turtle_abs_pos, margin:turtle_margin}, turtle_align_start);
+        let rect = self.walk_turtle_move(Walk {width: Size::Fixed(width), height: Size::Fixed(height), abs_pos:turtle_abs_pos, margin:turtle_margin}, turtle_align_start);
         rect
     }
 
@@ -737,10 +831,12 @@ impl<'a,'b> Cx2d<'a,'b> {
             turtle.compute_child_width(walk.width, walk.margin),
             turtle.compute_child_height(walk.height, walk.margin)
         );
+        assert!(size.x >= 0.0);
+        assert!(size.y >= 0.0);
         
         if let Some(pos) = walk.abs_pos {
             self.turtle_walks.push(TurtleWalk {
-                align_start,
+                align_info_start: align_start,
                 defer_index: 0,
                 rect: Rect {pos, size: size + walk.margin.size()}
             });
@@ -822,7 +918,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             };
             
             self.turtle_walks.push(TurtleWalk {
-                align_start,
+                align_info_start: align_start,
                 defer_index,
                 rect: Rect {pos, size: size + margin_size}
             });
@@ -833,7 +929,7 @@ impl<'a,'b> Cx2d<'a,'b> {
     pub fn emit_turtle_walk(&mut self, rect:Rect){
         let turtle = self.turtles.last().unwrap();
         self.turtle_walks.push(TurtleWalk {
-            align_start: self.align_infos.len(),
+            align_info_start: self.align_infos.len(),
             defer_index: turtle.defer_count,
             rect
         });
@@ -995,9 +1091,9 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
     }
     
-    fn get_turtle_walk_align_end(&self, i: usize) -> usize {
+    fn get_turtle_walk_align_info_end(&self, i: usize) -> usize {
         if i < self.turtle_walks.len() - 1 {
-            self.turtle_walks[i + 1].align_start
+            self.turtle_walks[i + 1].align_info_start
         }
         else {
             self.align_infos.len()
@@ -1049,14 +1145,6 @@ impl Turtle {
     
     pub fn set_shift(&mut self, shift: DVec2) {
         self.shift = shift;
-    }
-    
-    pub fn layout(&self)->&Layout{
-        &self.layout
-    }
-
-    pub fn layout_mut(&mut self)-> &mut Layout {
-        &mut self.layout
     }
     
     pub fn used(&self) -> DVec2 {
@@ -1113,29 +1201,6 @@ impl Turtle {
         let view = Rect {pos: self.origin + self.layout.scroll, size: dvec2(self.width, self.height)};
         return view.intersects(geom)
     }
-    
-    
-    pub fn origin(&self) -> DVec2 {
-        self.origin
-    }
-    
-    pub fn rel_pos(&self) -> DVec2 {
-        DVec2 {
-            x: self.pos.x - self.origin.x,
-            y: self.pos.y - self.origin.y
-        }
-    }
-    
-    pub fn rel_pos_padded(&self) -> DVec2 {
-        DVec2 {
-            x: self.pos.x - self.origin.x - self.layout.padding.left,
-            y: self.pos.y - self.origin.y - self.layout.padding.right
-        }
-    }
-    
-    pub fn pos(&self) -> DVec2 {
-        self.pos
-    }
 
     pub fn scroll(&self) -> DVec2 {
         self.layout.scroll
@@ -1185,26 +1250,6 @@ impl Turtle {
     
     pub fn size(&self) -> DVec2 {
         dvec2(self.width, self.height)
-    }
-    
-    pub fn padded_height_or_used(&self) -> f64 {
-        let r = clamp_non_negative(self.height - self.layout.padding.height());
-        if r.is_nan() {
-            self.used_height - self.layout.padding.bottom
-        }
-        else {
-            r
-        }
-    }
-    
-    pub fn padded_width_or_used(&self) -> f64 {
-        let r = clamp_non_negative(self.width - self.layout.padding.width());
-        if r.is_nan() {
-            self.used_width - self.layout.padding.right
-        }
-        else {
-            r
-        }
     }
 }
 
@@ -1439,23 +1484,6 @@ impl Walk {
     }
 }
 
-impl Padding {
-    pub fn left_top(&self) -> DVec2 {
-        dvec2(self.left, self.top)
-    }
-    pub fn right_bottom(&self) -> DVec2 {
-        dvec2(self.right, self.bottom)
-    }
-    pub fn size(&self) -> DVec2 {
-        dvec2(self.left + self.right, self.top + self.bottom)
-    }
-    pub fn width(&self) -> f64 {
-        self.left + self.right
-    }
-    pub fn height(&self) -> f64 {
-        self.top + self.bottom
-    }
-}
 
 impl LiveHook for Padding {
     fn skip_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
