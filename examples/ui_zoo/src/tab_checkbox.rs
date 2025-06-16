@@ -91,9 +91,9 @@ live_design!{
                     // draw_bg: { check_type: None }  
 
                     draw_icon: {
-                        color: #0
-                        color_active: #f00
-                        color_disabled: #8
+                        // color: #0
+                        // color_active: #f00
+                        // color_disabled: #8
                     
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
