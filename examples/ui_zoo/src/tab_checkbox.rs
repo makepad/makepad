@@ -77,8 +77,8 @@ live_design!{
             <Hr> {}
             <H4> { text: "Custom Checkbox"}
             <UIZooRowH> {
-                <CheckBox> {
-                    text:"<CheckBox>"
+                <CheckBoxCustom> {
+                    text:"<CheckBoxCustom>"
                     align: { x: 0., y: .5}
                     padding: { top: 0., left: 0., bottom: 0., right: 0.}
                     margin: { top: 0., left: 0., bottom: 0., right: 0.}
@@ -88,7 +88,7 @@ live_design!{
                         margin: <THEME_MSPACE_H_1> { left: 5.5 }
                     }
 
-                    draw_bg: { check_type: None }  
+                    // draw_bg: { check_type: None }  
 
                     draw_icon: {
                         color: #0
