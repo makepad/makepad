@@ -326,6 +326,17 @@ impl WindowRef{
             inner.set_fullscreen(cx);
         }
     }
+    /// Configure the window's size and position, and whether it's fullscreen or not.
+    ///
+    /// If `fullscreen` is `true`, the window will be set to the monitor's size and the
+    /// `inner_size` and `position` arguments will be ignored.
+    ///
+    /// If `fullscreen` is `false`, the window will be set to the specified `inner_size`
+    /// and positioned at `position` on the screen.
+    ///
+    /// The `title` argument sets the window's title bar text.
+    /// 
+    /// This only works in app startup. 
     pub fn configure_window(&self, cx: &mut Cx, inner_size: DVec2, position: DVec2, fullscreen: bool, title: String) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.configure_window(cx, inner_size, position, fullscreen, title);
