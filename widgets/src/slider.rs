@@ -395,6 +395,7 @@ live_design!{
         
     pub Slider = <SliderMinimal> {
         height: 36;
+
         draw_bg: {
             instance disabled: 0.0,
 
@@ -639,7 +640,7 @@ live_design!{
                         ),
                         self.val_color_disabled,
                         self.disabled
-                    ) , self.val_size
+                    ), self.val_size
                 )
                     
                 let ctrl_height = self.rect_size.y - offset_px.y;
