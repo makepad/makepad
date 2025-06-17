@@ -441,7 +441,7 @@ live_design!{
             uniform val_color_disabled: (THEME_COLOR_VAL_DISABLED)
             uniform val_color_drag: (THEME_COLOR_VAL_DRAG)
 
-            uniform handle_size: 20.
+            uniform handle_size: 15.
             uniform bipolar: 0.0,
 
             fn pixel(self) -> vec4 {
