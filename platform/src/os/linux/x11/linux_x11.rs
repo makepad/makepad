@@ -269,6 +269,7 @@ impl Cx {
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
                         &window.create_title,
+                        window.is_fullscreen
                     );
                     window.window_geom = opengl_window.window_geom.clone();
                     opengl_windows.push(opengl_window);
