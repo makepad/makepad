@@ -378,10 +378,10 @@ impl Win32Window {
 
         with_win32_app(|app| app.dpi_functions.enable_non_client_dpi_scaling(self.hwnd));
         with_win32_app(|app| app.all_windows.push(self.hwnd));
+        self.set_outer_size(size);
         if self.is_fullscreen {
             self.maximize();
         }
-        self.set_outer_size(size);
     }
     
     pub unsafe extern "system" fn window_class_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,) -> LRESULT {
