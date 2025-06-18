@@ -447,172 +447,87 @@ live_design!{
                     (self.pos.y - offset_uv.y - border_sz_uv.y * 2.) * scale_factor_fill.y + dither
                 )
 
-                match self.radio_type {
-                    RadioType::Round => {
+                // Draw background
+                sdf.circle(
+                    center_px.x,
+                    center_px.y,
+                    radius_px - self.border_size
+                );
 
-                        // Draw background
-                        sdf.circle(
-                            center_px.x,
-                            center_px.y,
-                            radius_px - self.border_size
-                        );
-
-                        sdf.fill_keep(
+                sdf.fill_keep(
+                    mix(
+                        mix(
                             mix(
                                 mix(
-                                    mix(
-                                        mix(
-                                            mix(self.color_1, self.color_2, gradient_fill.y),
-                                            mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
-                                            self.focus
-                                        ),
-                                        mix(
-                                            mix(self.color_1_active, self.color_2_active, gradient_fill.y),
-                                            mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
-                                            self.focus
-                                        ),
-                                        self.active
-                                    ),
-                                    mix(
-                                        mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
-                                        mix(self.color_1_down, self.color_2_down, gradient_fill.y),
-                                        self.down
-                                    ),
-                                    self.hover
+                                    mix(self.color_1, self.color_2, gradient_fill.y),
+                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
+                                    self.focus
                                 ),
-                                mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
-                                self.disabled
-                            )
-                        )
+                                mix(
+                                    mix(self.color_1_active, self.color_2_active, gradient_fill.y),
+                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
+                                    self.focus
+                                ),
+                                self.active
+                            ),
+                            mix(
+                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
+                                mix(self.color_1_down, self.color_2_down, gradient_fill.y),
+                                self.down
+                            ),
+                            self.hover
+                        ),
+                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
+                        self.disabled
+                    )
+                )
 
-                        sdf.stroke(
+                sdf.stroke(
+                    mix(
+                        mix(
                             mix(
                                 mix(
-                                    mix(
-                                        mix(
-                                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                            mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                            self.focus
-                                        ),
-                                        mix(
-                                            mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                                            mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                            self.focus
-                                        ),
-                                        self.active
-                                    ),
-                                    mix(
-                                        mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                        mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
-                                        self.down
-                                    ),
-                                    self.hover
+                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    self.focus
                                 ),
-                                mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                                self.disabled
-                            ), self.border_size
-                        )
-
-                        // Draw mark
-                        sdf.circle(
-                            center_px.x,
-                            center_px.y + self.mark_offset,
-                            radius_px * 0.5 - self.border_size * 0.75
-                        );
-
-                        sdf.fill(
-                            mix(
                                 mix(
-                                    self.mark_color,
-                                    self.mark_color_active,
-                                    self.active
+                                    mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
+                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    self.focus
                                 ),
-                                self.mark_color_disabled,
-                                self.disabled
-                            )
-                        );
-                    }
-                    // RadioType::Tab => {
-                    //     let border_sz_uv = vec2(
-                    //         self.border_size / self.rect_size.x,
-                    //         self.border_size / self.rect_size.y
-                    //     )
+                                self.active
+                            ),
+                            mix(
+                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
+                                mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
+                                self.down
+                            ),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        self.disabled
+                    ), self.border_size
+                )
 
-                    //     let scale_factor_border = vec2(
-                    //         self.rect_size.x / self.rect_size.x,
-                    //         self.rect_size.y / self.rect_size.y
-                    //     );
+                // Draw mark
+                sdf.circle(
+                    center_px.x,
+                    center_px.y + self.mark_offset,
+                    radius_px * 0.5 - self.border_size * 0.75
+                );
 
-                    //     let gradient_border = vec2(
-                    //         self.pos.x * scale_factor_border.x + dither,
-                    //         self.pos.y * scale_factor_border.y + dither
-                    //     )
-
-                    //     let sz_inner_px = vec2(
-                    //         self.rect_size.x - self.border_size * 2.,
-                    //         self.rect_size.y - self.border_size * 2.
-                    //     );
-
-                    //     let scale_factor_fill = vec2(
-                    //         self.rect_size.x / sz_inner_px.x,
-                    //         self.rect_size.y / sz_inner_px.y
-                    //     );
-
-                    //     let gradient_fill = vec2(
-                    //         self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    //         self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
-                    //     )
-
-                    //     sdf.box(
-                    //         self.border_size,
-                    //         self.border_size,
-                    //         self.rect_size.x - self.border_size * 2.,
-                    //         self.rect_size.y - self.border_size * 2.,
-                    //         self.border_radius
-                    //     )
-
-                    //     sdf.fill_keep(
-                    //         mix(
-                    //             mix(
-                    //                 mix(self.color_1, self.color_2, gradient_fill.y),
-                    //                 mix(self.color_1_active, self.color_2_active, gradient_fill.y),
-                    //                 self.active
-                    //             ),
-                    //             mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
-                    //             self.disabled
-                    //         )
-                    //     )
-
-                    //     sdf.stroke(
-                    //         mix(
-                    //             mix(
-                    //                 mix(
-                    //                     mix(
-                    //                         mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                    //                         mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                    //                         self.focus
-                    //                     ),
-                    //                     mix(
-                    //                         mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                    //                         mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                    //                         self.focus
-                    //                     ),
-                    //                     self.active
-                    //                 ),
-                    //                 mix(
-                    //                     mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                    //                     mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
-                    //                     self.down
-                    //                 ),
-                    //                 self.hover
-                    //             ),
-                    //             mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                    //             self.disabled
-                    //         ), self.border_size
-                    //     )
-                            
-                    // }
-                }
+                sdf.fill(
+                    mix(
+                        mix(
+                            self.mark_color,
+                            self.mark_color_active,
+                            self.active
+                        ),
+                        self.mark_color_disabled,
+                        self.disabled
+                    )
+                );
                 return sdf.result
             }
         }
@@ -669,92 +584,87 @@ live_design!{
                     (self.pos.y - offset_uv.y - border_sz_uv.y * 2.) * scale_factor_fill.y + dither
                 )
 
-                match self.radio_type {
-                    RadioType::Round => {
+                // Draw background
+                sdf.circle(
+                    center_px.x,
+                    center_px.y,
+                    radius_px - self.border_size
+                );
 
-                        // Draw background
-                        sdf.circle(
-                            center_px.x,
-                            center_px.y,
-                            radius_px - self.border_size
-                        );
-
-                        sdf.fill_keep(
+                sdf.fill_keep(
+                    mix(
+                        mix(
                             mix(
                                 mix(
-                                    mix(
-                                        mix(
-                                            mix(self.color_1, self.color_2, gradient_fill.x),
-                                            mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
-                                            self.focus
-                                        ),
-                                        mix(
-                                            mix(self.color_1_active, self.color_2_active, gradient_fill.x),
-                                            mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
-                                            self.focus
-                                        ),
-                                        self.active
-                                    ),
-                                    mix(
-                                        mix(self.color_1_hover, self.color_2_hover, gradient_fill.x),
-                                        mix(self.color_1_down, self.color_2_down, gradient_fill.x),
-                                        self.down
-                                    ),
-                                    self.hover
+                                    mix(self.color_1, self.color_2, gradient_fill.x),
+                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
+                                    self.focus
                                 ),
-                                mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.x),
-                                self.disabled
-                            )
-                        )
+                                mix(
+                                    mix(self.color_1_active, self.color_2_active, gradient_fill.x),
+                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
+                                    self.focus
+                                ),
+                                self.active
+                            ),
+                            mix(
+                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.x),
+                                mix(self.color_1_down, self.color_2_down, gradient_fill.x),
+                                self.down
+                            ),
+                            self.hover
+                        ),
+                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.x),
+                        self.disabled
+                    )
+                )
 
-                        sdf.stroke(
+                sdf.stroke(
+                    mix(
+                        mix(
                             mix(
                                 mix(
-                                    mix(
-                                        mix(
-                                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                            mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                            self.focus
-                                        ),
-                                        mix(
-                                            mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                                            mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                            self.focus
-                                        ),
-                                        self.active
-                                    ),
-                                    mix(
-                                        mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                        mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
-                                        self.down
-                                    ),
-                                    self.hover
+                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    self.focus
                                 ),
-                                mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                                self.disabled
-                            ), self.border_size
-                        )
-
-                        // Draw mark
-                        sdf.circle(
-                            center_px.x,
-                            center_px.y + self.mark_offset,
-                            radius_px * 0.5 - self.border_size * 0.75
-                        );
-
-                        sdf.fill(
-                            mix(
                                 mix(
-                                    self.mark_color,
-                                    self.mark_color_active,
-                                    self.active
+                                    mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
+                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    self.focus
                                 ),
-                                self.mark_color_disabled,
-                                self.disabled
-                            )
-                        );
-                    }
-                }
+                                self.active
+                            ),
+                            mix(
+                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
+                                mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
+                                self.down
+                            ),
+                            self.hover
+                        ),
+                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        self.disabled
+                    ), self.border_size
+                )
+
+                // Draw mark
+                sdf.circle(
+                    center_px.x,
+                    center_px.y + self.mark_offset,
+                    radius_px * 0.5 - self.border_size * 0.75
+                );
+
+                sdf.fill(
+                    mix(
+                        mix(
+                            self.mark_color,
+                            self.mark_color_active,
+                            self.active
+                        ),
+                        self.mark_color_disabled,
+                        self.disabled
+                    )
+                );
                 return sdf.result
             }
         }
