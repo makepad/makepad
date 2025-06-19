@@ -135,7 +135,9 @@ impl Rasterizer {
                     continue; // oob index
                 }
                 self.a[linestart_x0i as usize] += d - d * xmf;
-                self.a[linestart_x0i as usize + 1] += d * xmf;
+                if x0i < self.width as i32 {
+                    self.a[linestart_x0i as usize + 1] += d * xmf;
+                }
             } else {
                 let s = (x1 - x0).recip();
                 let x0f = x0 - x0floor;
@@ -147,16 +149,18 @@ impl Rasterizer {
                     continue; // oob index
                 }
                 self.a[linestart_x0i as usize] += d * a0;
-                if x1i == x0i + 2 {
-                    self.a[linestart_x0i as usize + 1] += d * (1.0 - a0 - am);
-                } else {
-                    let a1 = s * (1.5 - x0f);
-                    self.a[linestart_x0i as usize + 1] += d * (a1 - a0);
-                    for xi in x0i + 2..x1i - 1 {
-                        self.a[linestart + xi as usize] += d * s;
+                if x0i < self.width as i32 {
+                    if x1i == x0i + 2 {
+                        self.a[linestart_x0i as usize + 1] += d * (1.0 - a0 - am);
+                    } else {
+                        let a1 = s * (1.5 - x0f);
+                        self.a[linestart_x0i as usize + 1] += d * (a1 - a0);
+                        for xi in x0i + 2..x1i - 1 {
+                            self.a[linestart + xi as usize] += d * s;
+                        }
+                        let a2 = a1 + (x1i - x0i - 3) as f32 * s;
+                        self.a[linestart + (x1i - 1) as usize] += d * (1.0 - a2 - am);
                     }
-                    let a2 = a1 + (x1i - x0i - 3) as f32 * s;
-                    self.a[linestart + (x1i - 1) as usize] += d * (1.0 - a2 - am);
                 }
                 self.a[linestart + x1i as usize] += d * am;
             }
