@@ -203,7 +203,7 @@
                                     self.rect_size.y + 30.
                                 )
 
-                                sdf.fill_keep((THEME_COLOR_U_1));
+                                sdf.fill_keep((THEME_COLOR_BG_HIGHLIGHT));
 
                                 sdf.stroke(
                                     mix((THEME_COLOR_BEVEL_OUTSET_1), #fff0, pow(self.pos.y, 0.1)), self.border_size
@@ -229,8 +229,8 @@
                         theme_font_size_contrast = <Slider> { text: "Size Contrast", default: 2.5, min:1.0 max: 5.0  }
                         <Vr> {}
                         theme_bevel = <Slider> { text: "Bevel", default: 0.75, min:0.0 max: 1.5   }
-                        theme_rounding = <Slider> { text: "Rounding", default: 2.5, min:1.0 max: 5.0   }
-                        theme_space = <Slider> { text: "Space", default: 6.0, min:1.0 max: 10.0   }
+                        theme_rounding = <Slider> { text: "Rounding", default: 2.5, min: 1.0 max: 2.5   }
+                        theme_space = <Slider> { text: "Space", default: 6.0, min: 1.0 max: 10.0   }
                         /*
                         reload_button = <ButtonFlatterIcon> {
                             height: Fill, width: Fit,
@@ -461,7 +461,6 @@ impl AppMain for App {
 
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
-        db.bind(id!(dropdown), ids!(dropdown));
         db.bind(id!(dropdown_disabled), ids!(dropdown_disabled));
         db.bind(id!(dropdown_demo), ids!(dropdown_demo));
         db.bind(id!(dropdown_flat), ids!(dropdown_flat));

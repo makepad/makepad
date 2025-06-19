@@ -73,8 +73,14 @@ live_design!{
                         gap: 180.,
                     }
                 }
+
                 <RotaryGradientY> {
                     text: "Label",
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
                     draw_bg: {
                         val_size: 30.
                     }
@@ -112,6 +118,11 @@ live_design!{
                 }
                 <RotaryFlat> {
                     text: "Label",
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
                     draw_bg: {
                         val_size: 30.
                     }
@@ -127,41 +138,6 @@ live_design!{
                 }
             }
 
-            <Hr> {}
-            <H4> { text: "RotaryFlatter" }
-            <UIZooRowH> {
-                align: { x: 0. , y: 0.}
-                <RotaryFlatter> {
-                    text: "Label",
-                }
-                <RotaryFlatter> {
-                    text: "Label",
-                    draw_bg: {
-                        gap: 0.,
-                    }
-                }
-                <RotaryFlatter> {
-                    text: "Label",
-                    draw_bg: {
-                        gap: 180.,
-                    }
-                }
-                <RotaryFlatter> {
-                    text: "Label",
-                    draw_bg: {
-                        val_size: 30.
-                    }
-                }
-                <RotaryFlatter> {
-                    width: Fill,
-                    height: 150
-                    text: "Label",
-                    draw_bg: {
-                        val_size: 30.
-                        val_padding: 20.,
-                    }
-                }
-            }
 
             <Hr> {}
             <H4> { text: "Styling Attributes Reference" }

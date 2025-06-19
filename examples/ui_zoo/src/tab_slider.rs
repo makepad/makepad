@@ -32,6 +32,14 @@ live_design!{
                 <Hr> {}
                 <H4> { text: "SliderGradientY"}
                 <SliderGradientY> { text: "Default" }
+                <SliderGradientY> {
+                    text: "disabled"
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
+                }
                 <SliderGradientY> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                 <SliderGradientY> { text: "min/max", min: 0., max: 100. }
                 <SliderGradientY> { text: "precision", precision: 20 }
@@ -40,18 +48,19 @@ live_design!{
                 <Hr> {}
                 <H4> { text: "SliderFlat"}
                 <SliderFlat> { text: "Default" }
+                <SliderFlat> {
+                    text: "disabled"
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
+                }
                 <SliderFlat> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                 <SliderFlat> { text: "min/max", min: 0., max: 100. }
                 <SliderFlat> { text: "precision", precision: 20 }
                 <SliderFlat> { text: "stepped", step: 0.1 }
 
-                <Hr> {}
-                <H4> { text: "SliderFlatter"}
-                <SliderFlatter> { text: "Default" }
-                <SliderFlatter> { text: "label_align", label_align: { x: 0.5, y: 0. } }
-                <SliderFlatter> { text: "min/max", min: 0., max: 100. }
-                <SliderFlatter> { text: "precision", precision: 20 }
-                <SliderFlatter> { text: "stepped", step: 0.1 }
 
                 <Hr> {}
                 <H4> { text: "SliderMinimal"}
@@ -64,7 +73,6 @@ live_design!{
                         }
                     }
                 }
-
                 <SliderMinimal> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                 <SliderMinimal> { text: "min/max", min: 0., max: 100. }
                 <SliderMinimal> { text: "precision", precision: 20 }
@@ -73,6 +81,14 @@ live_design!{
                 <Hr> {}
                 <H4> { text: "SliderMinimalFlat"}
                 <SliderMinimalFlat> { text: "Default" }
+                <SliderMinimalFlat> {
+                    text: "disabled"
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
+                }
                 <SliderMinimalFlat> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                 <SliderMinimalFlat> { text: "min/max", min: 0., max: 100. }
                 <SliderMinimalFlat> { text: "precision", precision: 20 }
@@ -130,21 +146,31 @@ live_design!{
                 <Hr> {}
                 <H4> { text: "SliderRoundGradientY"}
                 <SliderRoundGradientY> { text: "min/max", min: 0., max: 100. }
+                <SliderRoundGradientY> {
+                    text: "min/max"
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
+                }
                 <SliderRoundGradientY> { text: "precision", precision: 20 }
                 <SliderRoundGradientY> { text: "stepped", step: 0.1 }
 
                 <Hr> {}
                 <H4> { text: "SliderRoundFlat"}
                 <SliderRoundFlat> { text: "min/max", min: 0., max: 100. }
+                <SliderRoundGradientY> {
+                    text: "disabled"
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
+                }
                 <SliderRoundFlat> { text: "precision", precision: 20 }
                 <SliderRoundFlat> { text: "stepped", step: 0.1 }
 
-                <Hr> {}
-                <H4> { text: "SliderRoundFlatter"}
-                <SliderRoundFlatter> { text: "min/max", min: 0., max: 100. }
-                <SliderRoundFlatter> { text: "precision", precision: 20 }
-                <SliderRoundFlatter> { text: "stepped", step: 0.1 }
-            
             <Hr> {}
             <H4> { text: "Styling Attributes Reference" }
             <Slider> {

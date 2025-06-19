@@ -395,6 +395,7 @@ live_design!{
         
     pub Slider = <SliderMinimal> {
         height: 36;
+
         draw_bg: {
             instance disabled: 0.0,
 
@@ -441,7 +442,7 @@ live_design!{
             uniform val_color_disabled: (THEME_COLOR_VAL_DISABLED)
             uniform val_color_drag: (THEME_COLOR_VAL_DRAG)
 
-            uniform handle_size: 20.
+            uniform handle_size: 15.
             uniform bipolar: 0.0,
 
             fn pixel(self) -> vec4 {
@@ -548,7 +549,7 @@ live_design!{
                 let offset_sides = self.border_size + 6.;
                 sdf.rect(
                     self.border_size + offset_sides,
-                    offset_px.y + (self.rect_size.y - offset_px.y) * 0.5 - self.border_size - 1,
+                    offset_px.y + (self.rect_size.y - offset_px.y) * 0.5 - self.border_size - 0.5,
                     self.rect_size.x - 2 * offset_sides - self.border_size * 2.,
                     self.border_size * 2. + 1. 
                 );
@@ -576,7 +577,7 @@ live_design!{
                 sdf.rect(
                     self.border_size + offset_sides,
                     offset_px.y + (self.rect_size.y - offset_px.y) * 0.5,
-                    self.rect_size.x - 2 * offset_sides - self.border_size * 2. - 1,
+                    self.rect_size.x - 2 * offset_sides - self.border_size * 2. + 0.5,
                     self.border_size * 2.
                 );
 
@@ -604,7 +605,7 @@ live_design!{
                 let track_length = self.rect_size.x - offset_sides * 4.;
                 let val_x = self.slide_pos * track_length + offset_sides * 2.;
                 
-                let offset_top = self.rect_size.y - (self.rect_size.y - offset_px.y) * 0.5
+                let offset_top = self.rect_size.y - (self.rect_size.y - offset_px.y) * 0.5 + 0.5
                 sdf.move_to(
                     mix(
                         offset_sides,
@@ -639,7 +640,7 @@ live_design!{
                         ),
                         self.val_color_disabled,
                         self.disabled
-                    ) , self.val_size
+                    ), self.val_size
                 )
                     
                 let ctrl_height = self.rect_size.y - offset_px.y;
@@ -1047,18 +1048,8 @@ live_design!{
 
     }
 
-    pub SliderFlatter = <SliderFlat> {
-        draw_bg: {
-            instance disabled: 0.0,
-
-            handle_size: 0.
-            border_size: 0.
-        }
-    }
-
-
     pub SLIDER_ALT1_HANDLE_SIZE = 4.0;
-    pub SLIDER_ALT1_DATA_FONT_TOPMARGIN = 3.0;
+    pub SLIDER_ALT1_DATA_FONT_TOPMARGIN = 1.0;
     pub SLIDER_ALT1_VAL_PADDING = 2.5;
 
     pub SliderRound = <SliderMinimal> {
@@ -1617,12 +1608,6 @@ live_design!{
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
             uniform border_color_2_disabled: (THEME_COLOR_BEVEL_DISABLED)
             uniform border_color_2_drag: (THEME_COLOR_BEVEL_DRAG)
-        }
-    }
-
-    pub SliderRoundFlatter = <SliderRoundFlat> {
-        draw_bg: {
-            border_size: 0.
         }
     }
 
@@ -2553,12 +2538,6 @@ live_design!{
                 
                 return sdf.result
             }
-        }
-    }
-
-    pub RotaryFlatter = <RotaryFlat> {
-        draw_bg: {
-            border_size: 0.,
         }
     }
 

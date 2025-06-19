@@ -130,8 +130,8 @@ live_design!{
             uniform color_dither: 1.0
             uniform border_radius: 0.
             uniform border_size: (THEME_BEVELING)
-            uniform color_1: (THEME_COLOR_BG_APP * 0.9);
-            uniform color_2: #282828;
+            uniform color_1: (THEME_COLOR_BG_APP * 0.95);
+            uniform color_2: (THEME_COLOR_SHADOW);
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -144,7 +144,7 @@ live_design!{
                     self.rect_size.y - 1.5
                 )
 
-                sdf.fill_keep(mix(self.color_1, self.color_2, pow(self.pos.y, 7.5) + dither));
+                sdf.fill_keep(mix(self.color_1, self.color_2, pow(self.pos.y, 17.5) + dither));
 
                 sdf.stroke(
                     mix(#fff0, (THEME_COLOR_BEVEL_OUTSET_1), pow(self.pos.y, 80.)), self.border_size
