@@ -1,16 +1,24 @@
 use {
+    std::{
+        cell::{Cell,RefCell},
+        time::Instant,
+    },
     crate::{
-        area::Area, event::{
-            KeyCode, KeyEvent, KeyModifiers, LongPressEvent, TextInputEvent, TimerEvent, TouchPoint, TouchState, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom, WindowGeomChangeEvent
-        }, makepad_math::*, os::{
-            apple::{apple_sys::*, apple_util::str_to_nsstring}, cx_native::EventFlow, ios::{
+        event::*,
+        os::{
+            apple::{
+                apple_sys::*,
+                apple_util::*,
+            },
+            cx_native::EventFlow,
+            ios::{
                 ios_delegates::*,
                 ios_event::*,
             }
-        }, window::CxWindowPool
-    }, std::{
-        cell::{Cell,RefCell},
-        time::Instant,
+        },
+        area::Area,
+        window::CxWindowPool,
+        makepad_math::*,
     }
 };
 
@@ -434,6 +442,24 @@ impl IosApp {
             let nsstring = str_to_nsstring(content);
             let pasteboard: ObjcId = self.pasteboard;
             let _: () = msg_send![pasteboard, setString: nsstring];
+        }
+    }
+
+    pub fn get_ios_directory_paths() -> String {
+        unsafe {
+            let file_manager: ObjcId = msg_send![class!(NSFileManager), defaultManager];
+            
+            // Get application support directory
+            let app_support_dir: ObjcId = msg_send![
+                file_manager,
+                URLsForDirectory: NSApplicationSupportDirectory
+                inDomains: NSUserDomainMask
+            ];
+            let app_support_url: ObjcId = msg_send![app_support_dir, firstObject];
+            let app_support_path: ObjcId = msg_send![app_support_url, path];
+            let data_path = nsstring_to_string(app_support_path);
+        
+            data_path
         }
     }
 }
