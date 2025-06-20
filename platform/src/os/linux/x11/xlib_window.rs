@@ -144,8 +144,19 @@ impl XlibWindow {
             get_xlib_app_global().dnd.enable_for_window(window);
             
             // The title should be set prior to mapping the window.
-            let title_bytes = format!("{}\0", title);
-            x11_sys::XStoreName(display, window, title_bytes.as_bytes().as_ptr() as *const c_char);
+            let title_bytes = format!("{}\0", title);  
+            let title_ptr = title_bytes.as_ptr() as *mut c_char;  
+            x11_sys::Xutf8SetWMProperties(  
+                display,  
+                window,  
+                title_ptr,    
+                title_ptr,   
+                ptr::null_mut(),   
+                0,    
+                ptr::null_mut(),    
+                ptr::null_mut(),    
+                ptr::null_mut()  
+            );
 
             // Set the WM_CLASS before mapping the window.
             // Based on <https://www.x.org/releases/X11R7.5/doc/man/man3/XSetWMProperties.3.html>
