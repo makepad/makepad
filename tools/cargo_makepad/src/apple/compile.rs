@@ -271,6 +271,8 @@ impl PlistValues{
                     <string>UIInterfaceOrientationLandscapeLeft</string>
                     <string>UIInterfaceOrientationLandscapeRight</string>
                 </array>
+                <key>NSFaceIDUsageDescription</key>
+                <string>For biometric authentication</string>
             </dict>
             </plist>"#,
             self.identifier,
