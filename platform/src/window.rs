@@ -181,7 +181,13 @@ impl WindowHandle {
         cx.windows[self.window_id()].main_pass_id = Some(pass.pass_id());
         cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());
     }
-    
+    pub fn configure_window(&mut self, cx: &mut Cx, inner_size: DVec2, position: DVec2, is_fullscreen: bool, title: String) {
+        let window = &mut cx.windows[self.window_id()];
+        window.create_title = title;
+        window.create_position = Some(position);
+        window.create_inner_size = Some(inner_size);
+        window.is_fullscreen = is_fullscreen;
+    }
     pub fn get_inner_size(&self, cx: &Cx) -> DVec2 {
         cx.windows[self.window_id()].get_inner_size()
     }
@@ -258,6 +264,7 @@ pub struct CxWindow {
     pub is_created: bool,
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<PassId>,
+    pub is_fullscreen: bool,
 }
 
 impl CxWindow {
@@ -271,24 +278,13 @@ impl CxWindow {
     }
     
     pub fn get_inner_size(&self) -> DVec2 {
-        if !self.is_created {
-            Default::default()
-            //panic!();
-        }
-        else {
-            self.window_geom.inner_size
-        }
+        self.window_geom.inner_size
     }
     
     pub fn get_position(&self) -> DVec2 {
-        if !self.is_created {
-            Default::default()
-            //panic!();
-        }
-        else {
-            self.window_geom.position
-        }
+        self.window_geom.position
     }
+
     /*
     pub fn get_dpi_factor(&mut self) -> Option<f32> {
         if self.is_created {

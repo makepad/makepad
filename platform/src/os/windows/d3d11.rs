@@ -523,11 +523,11 @@ pub struct D3d11Window {
 }
 
 impl D3d11Window {
-    pub fn new(window_id: WindowId, d3d11_cx: &D3d11Cx, inner_size: DVec2, position: Option<DVec2>, title: &str) -> D3d11Window {
+    pub fn new(window_id: WindowId, d3d11_cx: &D3d11Cx, inner_size: DVec2, position: Option<DVec2>, title: &str, is_fullscreen: bool) -> D3d11Window {
 
         // create window, and then initialize it; this is needed because
         // GWLP_USERDATA needs to reference a stable and existing window
-        let mut win32_window = Box::new(Win32Window::new(window_id, title, position));
+        let mut win32_window = Box::new(Win32Window::new(window_id, title, position, is_fullscreen));
         win32_window.init(inner_size);
         
         let wg = win32_window.get_window_geom();

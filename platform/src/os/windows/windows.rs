@@ -310,7 +310,8 @@ impl Cx {
                         &d3d11_cx,
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
-                        &window.create_title
+                        &window.create_title,
+                        window.is_fullscreen
                     );
                     
                     window.window_geom = d3d11_window.window_geom.clone();
@@ -329,6 +330,7 @@ impl Cx {
                         d3d11_windows[index].win32_window.close_window();
                         d3d11_windows.remove(index);
                         if d3d11_windows.len() == 0 {
+                            self.call_event_handler(&Event::Shutdown);
                             ret = EventFlow::Exit
                         }
                     }
