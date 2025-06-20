@@ -146,12 +146,20 @@ pub struct CxDependency {
 #[derive(Clone, Debug)]
 pub struct AndroidParams {
     pub cache_path: String,
+    pub data_path: String,
     pub density: f64,
     pub is_emulator: bool,
     pub has_xr_mode: bool,
     pub android_version: String,
     pub build_number: String,
     pub kernel_version: String
+}
+
+#[derive(Clone, Debug)]
+pub struct IosParams {
+    pub data_path: String,
+    pub device_model: String,
+    pub system_version: String,
 }
 
 #[derive(Clone, Debug)]
@@ -184,7 +192,7 @@ pub enum OsType {
     Unknown,
     Windows,
     Macos,
-    Ios,
+    Ios(IosParams),
     Android(AndroidParams),
     OpenHarmony(OpenHarmonyParams),
     LinuxWindow (LinuxWindowParams),
@@ -202,7 +210,7 @@ impl OsType {
     pub fn is_single_window(&self)->bool{
         match self{
             OsType::Web(_) => true,
-            OsType::Ios=>true,
+            OsType::Ios(_)=>true,
             OsType::Android(_) => true,
             OsType::LinuxDirect=> true,
             _=> false
@@ -228,6 +236,21 @@ impl OsType {
         }
         else if let OsType::OpenHarmony(params) = self {
             Some(params.cache_dir.clone())
+        }
+        else {
+            None
+        }
+    }
+    
+    pub fn get_data_dir(&self)->Option<String>{
+        if let OsType::Android(params) = self {
+            Some(params.data_path.clone())
+        }
+        else if let OsType::Ios(params) = self {
+            Some(params.data_path.clone())
+        }
+        else if let OsType::OpenHarmony(params) = self {
+            Some(params.files_dir.clone())
         }
         else {
             None

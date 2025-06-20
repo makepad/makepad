@@ -357,6 +357,11 @@ pub const NSTrackingCursorUpdate: u64 = 0x04;
 
 pub const UTF8_ENCODING: usize = 4;
 
+// NSSearchPathDirectory constants for iOS
+pub const NSApplicationSupportDirectory: u64 = 14;
+pub const NSCachesDirectory: u64 = 13;
+pub const NSUserDomainMask: u64 = 1;
+
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NSWindowTitleVisibility {

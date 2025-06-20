@@ -10,6 +10,8 @@ use {
         os::{
             cx_native::EventFlow,
             apple::{
+                apple_sys::*,
+                apple_util::*,
                 ios::{
                     ios_event::IosEvent,
                     ios_app::{IosApp, init_ios_app_global,with_ios_app}
@@ -28,15 +30,35 @@ use {
             NetworkResponseChannel
         },
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        cx::{Cx, OsType},
+        cx::{Cx, OsType, IosParams},
     }
 };
 
 impl Cx {
 
     pub fn event_loop(cx:Rc<RefCell<Cx>>) {
+        let data_path = IosApp::get_ios_directory_paths();
+        
+        // Get device info
+        let device_model = unsafe {
+            let device: ObjcId = msg_send![class!(UIDevice), currentDevice];
+            let model: ObjcId = msg_send![device, model];
+            nsstring_to_string(model)
+        };
+        
+        let system_version = unsafe {
+            let device: ObjcId = msg_send![class!(UIDevice), currentDevice];
+            let version: ObjcId = msg_send![device, systemVersion];
+            nsstring_to_string(version)
+        };
+        
         cx.borrow_mut().self_ref = Some(cx.clone());
-        cx.borrow_mut().os_type = OsType::Ios;
+        cx.borrow_mut().os_type = OsType::Ios(IosParams {
+            data_path,
+            device_model,
+            system_version,
+        });
+        
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
         //let cx = Rc::new(RefCell::new(self));
         //crate::log!("Makepad iOS application started.");
