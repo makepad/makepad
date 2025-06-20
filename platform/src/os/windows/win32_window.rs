@@ -306,6 +306,7 @@ pub struct Win32Window {
     pub ignore_wmsize: usize,
     pub hwnd: HWND,
     pub track_mouse_event: bool,
+    pub is_fullscreen: bool,
 }
 
 impl Win32Window {
@@ -313,7 +314,7 @@ impl Win32Window {
     // 2-stage initialization (new and init) to connect GWLP_USERDATA 
 
     // create window structure and register drag/drop
-    pub fn new(window_id: WindowId,title: &str, position: Option<DVec2>) -> Win32Window {
+    pub fn new(window_id: WindowId,title: &str, position: Option<DVec2>, is_fullscreen: bool) -> Win32Window {
 
         let title = encode_wide(title);
         
@@ -366,6 +367,7 @@ impl Win32Window {
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
+            is_fullscreen
         }
     }
 
@@ -376,8 +378,10 @@ impl Win32Window {
 
         with_win32_app(|app| app.dpi_functions.enable_non_client_dpi_scaling(self.hwnd));
         with_win32_app(|app| app.all_windows.push(self.hwnd));
-
         self.set_outer_size(size);
+        if self.is_fullscreen {
+            self.maximize();
+        }
     }
     
     pub unsafe extern "system" fn window_class_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,) -> LRESULT {

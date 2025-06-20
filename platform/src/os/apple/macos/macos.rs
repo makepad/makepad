@@ -66,14 +66,15 @@ impl MetalWindow {
         metal_cx: &MetalCx,
         inner_size: DVec2,
         position: Option<DVec2>,
-        title: &str
+        title: &str,
+        is_fullscreen: bool,
     ) -> MetalWindow {
         
         let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
         
         let mut cocoa_window = Box::new(MacosWindow::new(window_id));
         
-        cocoa_window.init(title, inner_size, position);
+        cocoa_window.init(title, inner_size, position, is_fullscreen);
         unsafe {
             let () = msg_send![ca_layer, setDevice: metal_cx.device];
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
@@ -457,7 +458,8 @@ impl Cx {
                         &metal_cx,
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
-                        &window.create_title
+                        &window.create_title,
+                        window.is_fullscreen
                     );
                     window.window_geom = metal_window.window_geom.clone();
                     metal_windows.push(metal_window);

@@ -75,7 +75,7 @@ impl MacosWindow {
     }
     
     // complete window initialization with pointers to self
-    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>) {
+    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>, is_fullscreen: bool) {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
@@ -147,11 +147,11 @@ impl MacosWindow {
             
             let input_context: ObjcId = msg_send![self.view, inputContext];
             let () = msg_send![input_context, invalidateCharacterCoordinates];
-            
+            if is_fullscreen {
+                self.maximize();
+            }
             // lets add an mtk_view object to our view
-            
-            
-            
+
             let () = msg_send![pool, drain];
         }
     }
