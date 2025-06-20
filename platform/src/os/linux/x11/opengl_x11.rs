@@ -424,7 +424,8 @@ impl OpenglWindow {
         opengl_cx: &OpenglCx,
         inner_size: DVec2,
         position: Option<DVec2>,
-        title: &str
+        title: &str,
+        is_fullscreen: bool,
     ) -> OpenglWindow {
         // Checked "downcast" of the EGL platform display to a X11 display.
         assert_eq!(opengl_cx.egl_platform, egl_sys::EGL_PLATFORM_X11_EXT);
@@ -466,7 +467,7 @@ impl OpenglWindow {
         };
 
         let custom_window_chrome = false;
-        xlib_window.init(title, inner_size, position, visual_info, custom_window_chrome);
+        xlib_window.init(title, inner_size, position, is_fullscreen, visual_info, custom_window_chrome);
 
         let egl_surface = unsafe {
             (opengl_cx.libegl.eglCreateWindowSurface.unwrap())(

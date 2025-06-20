@@ -67,7 +67,7 @@ impl XlibWindow {
         }
     }
     
-    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>, visual_info: x11_sys::XVisualInfo, custom_window_chrome: bool) {
+    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>, is_fullscreen: bool, visual_info: x11_sys::XVisualInfo, custom_window_chrome: bool) {
         unsafe {
             let display = get_xlib_app_global().display;
             
@@ -213,6 +213,9 @@ impl XlibWindow {
                     new_geom: new_geom
                 })
             );
+            if is_fullscreen {
+                self.maximize();
+            }
         }
     }
     
