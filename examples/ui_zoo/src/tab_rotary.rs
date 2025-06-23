@@ -22,8 +22,8 @@ live_design!{
                 <Rotary> {
                     text: "Label",
                     draw_bg: {
-                        val_size: 20.,
-                        val_padding: 10.,
+                        val_size: 10.,
+                        val_padding: 2.,
                         gap: 0.,
                     }
                 }
@@ -57,7 +57,7 @@ live_design!{
                     text: "Label",
                     draw_bg: {
                         val_size: 10.
-                        val_padding: 10.,
+                        val_padding: 5.,
                     }
                 }
 
@@ -91,7 +91,7 @@ live_design!{
                         }
                     }
                     draw_bg: {
-                        val_size: 30.
+                        val_size: 20.
                     }
                 }
                 <RotaryGradientY> {
@@ -100,7 +100,7 @@ live_design!{
                     text: "Label",
                     draw_bg: {
                         val_size: 10.,
-                        val_padding: 10.,
+                        val_padding: 5.,
                     }
                 }
             }
@@ -133,7 +133,7 @@ live_design!{
                         }
                     }
                     draw_bg: {
-                        val_size: 30.
+                        val_size: 10.
                     }
                 }
                 <RotaryFlat> {
