@@ -22,6 +22,8 @@ live_design!{
                 <Rotary> {
                     text: "Label",
                     draw_bg: {
+                        val_size: 20.,
+                        val_padding: 10.,
                         gap: 0.,
                     }
                 }
@@ -29,12 +31,19 @@ live_design!{
                 <Rotary> {
                     text: "Label",
                     draw_bg: {
+                        val_size: 5.,
+                        val_padding: 2.5,
                         gap: 180.,
                     }
                 }
 
                 <Rotary> {
                     text: "Label"
+                    draw_bg: {
+                        val_size: 5.,
+                        val_padding: 0.,
+                        gap: 180.,
+                    }
                     animator: {
                         disabled = {
                             default: on
@@ -47,8 +56,8 @@ live_design!{
                     height: 150
                     text: "Label",
                     draw_bg: {
-                        val_size: 30.
-                        val_padding: 20.,
+                        val_size: 10.
+                        val_padding: 10.,
                     }
                 }
 
@@ -90,8 +99,8 @@ live_design!{
                     height: 150
                     text: "Label",
                     draw_bg: {
-                        val_size: 30.
-                        val_padding: 20.,
+                        val_size: 10.,
+                        val_padding: 10.,
                     }
                 }
             }
@@ -132,8 +141,8 @@ live_design!{
                     height: 150
                     text: "Label",
                     draw_bg: {
-                        val_size: 30.
-                        val_padding: 20.,
+                        val_size: 10.
+                        val_padding: 8.,
                     }
                 }
             }

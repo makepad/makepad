@@ -1629,10 +1629,10 @@ live_design!{
             instance drag: float
 
             uniform gap: 90.
-            uniform val_padding: 10.
-
             uniform border_size: (THEME_BEVELING)
-            uniform val_size: 20.
+
+            uniform val_size: 10.
+            uniform val_padding: 5.
 
             uniform color_dither: 1.,
             
@@ -1686,10 +1686,11 @@ live_design!{
 
                 let label_offset_px = 20.;
                 let label_offset_uv = self.rect_size.y;
-                let scale_px = min(self.rect_size.x, self.rect_size.y)
-                let scale_factor = scale_px * 0.02
-                let resize = scale_factor * 0.2; // factor that works for all elements
-                let outer_width = 10. * scale_factor
+                let scale_px = min(self.rect_size.x, self.rect_size.y);
+
+                let scale_factor = scale_px * 0.02;
+
+                let outer_width = self.val_size * scale_factor;
                 let radius_px = (scale_px - outer_width) * 0.5;
 
                 let center_px = vec2(
@@ -1762,7 +1763,7 @@ live_design!{
                     )
                 )
 
-                let border_sz = self.border_size * 5. * resize;
+                let border_sz = self.border_size * scale_factor;
                 let gradient_down = pow(gradient_border.y, 2.)
                 let gradient_up = pow(gradient_border.y, 0.5)
 
@@ -1866,7 +1867,7 @@ live_design!{
                     )
                 );
 
-                let inner_width = outer_width - (self.val_padding * resize);
+                let inner_width = outer_width - self.val_padding * scale_factor;
 
                 // // Value
                 sdf.arc_round_caps(
@@ -2041,9 +2042,10 @@ live_design!{
                 let label_offset_px = 20.;
                 let label_offset_uv = self.rect_size.y;
                 let scale_px = min(self.rect_size.x, self.rect_size.y)
+
                 let scale_factor = scale_px * 0.02
-                let resize = scale_factor * 0.2; // factor that works for all elements
-                let outer_width = 10. * scale_factor
+
+                let outer_width = self.val_size * scale_factor;
                 let radius_px = (scale_px - outer_width) * 0.5;
 
                 let center_px = vec2(
@@ -2116,7 +2118,7 @@ live_design!{
                     )
                 )
 
-                let border_sz = self.border_size * 5. * resize;
+                let border_sz = self.border_size * scale_factor;
                 let gradient_down = pow(gradient_border.y, 2.)
                 let gradient_up = pow(gradient_border.y, 0.5)
 
@@ -2220,7 +2222,7 @@ live_design!{
                     )
                 );
 
-                let inner_width = outer_width - (self.val_padding * resize);
+                let inner_width = outer_width - self.val_padding * scale_factor;
 
                 // // Value
                 sdf.arc_round_caps(
