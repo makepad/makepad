@@ -24,8 +24,8 @@ live_design!{
         step: 0.0,
         label_align: { x: 0., y: 0. }
         margin: <THEME_MSPACE_1> { top: (THEME_SPACE_2) }
-        precision: 2,
-        height: Fit,
+        precision: 2.,
+        height: 25,
         hover_actions_enabled: false,
         
         draw_bg: {
@@ -60,6 +60,9 @@ live_design!{
             uniform border_color_2_drag: (THEME_COLOR_BEVEL_OUTSET_2)
             uniform border_color_2_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
 
+            uniform offset_y: 20.;
+            uniform handle_size: 20.;
+
             uniform val_color: (THEME_COLOR_VAL)
             uniform val_color_hover: (THEME_COLOR_VAL_HOVER)
             uniform val_color_focus: (THEME_COLOR_VAL_FOCUS)
@@ -73,18 +76,20 @@ live_design!{
             uniform handle_color_disabled: (THEME_COLOR_HANDLE_DISABLED)
 
             fn pixel(self) -> vec4 {
-                let slider_height = self.border_size * 2.5;
-                let handle_size = mix(3, 5, self.hover);
-                let handle_bg_size = mix(0, 10, self.hover)
+                let slider_height = self.rect_size.y - self.offset_y;
 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
  
+                let track_height = self.rect_size.y - self.offset_y;
+
+                let handle_sz = mix(0., self.handle_size, self.hover); 
+
                 // Track shadow
                 sdf.rect(
                     0.,
-                    self.rect_size.y - slider_height * 2,
+                    self.offset_y,
                     self.rect_size.x,
-                    slider_height + 1
+                    track_height * 0.5 + 1
                 )
 
                 sdf.fill(
@@ -110,9 +115,9 @@ live_design!{
                 // Track highlight
                 sdf.rect(
                     0,
-                    self.rect_size.y - slider_height,
+                    self.offset_y + track_height * 0.5,
                     self.rect_size.x,
-                    slider_height
+                    track_height * 0.5
                 )
 
                 sdf.fill(
@@ -135,12 +140,12 @@ live_design!{
                     )
                 );
                     
-                // // Amount
+                // Amount
                 sdf.rect(
                     0,
-                    self.rect_size.y - slider_height * 2.,
-                    self.slide_pos * (self.rect_size.x) + handle_size,
-                    slider_height * 2. + 1.
+                    self.offset_y,
+                    self.slide_pos * self.rect_size.x,
+                    slider_height
                 )
                 sdf.fill(
                     mix(
@@ -163,16 +168,17 @@ live_design!{
                 );
                     
                 // Handle
-                let handle_bg_x = self.slide_pos * (self.rect_size.x - handle_size) - handle_bg_size * 0.5 + 0.5 * handle_size;
+                let handle_bg_size = mix(0, 10, self.hover)
+                let handle_bg_x = self.slide_pos * self.rect_size.x;
 
                 sdf.rect(
-                    handle_bg_x,
-                    self.rect_size.y - slider_height * 2.,
-                    handle_bg_size,
+                    handle_bg_x - handle_sz * 0.5,
+                    self.offset_y,
+                    handle_sz,
                     slider_height * 2.
                 )
 
-                sdf.fill(
+                sdf.fill_keep(
                     mix(
                         mix(
                             mix(
