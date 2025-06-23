@@ -297,7 +297,7 @@ live_design!{
                     border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
                     border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
 
-                    val_size: 3.
+                    val_padding: 3.
 
                     val_color: (THEME_COLOR_VAL)
                     val_color_hover: (THEME_COLOR_VAL_HOVER)
