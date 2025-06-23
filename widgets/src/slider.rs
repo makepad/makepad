@@ -434,7 +434,7 @@ live_design!{
             uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
             uniform border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
 
-            uniform val_size: 3.
+            uniform val_padding: 5.
 
             uniform val_color: (THEME_COLOR_VAL)
             uniform val_color_hover: (THEME_COLOR_VAL_HOVER)
@@ -442,7 +442,7 @@ live_design!{
             uniform val_color_disabled: (THEME_COLOR_VAL_DISABLED)
             uniform val_color_drag: (THEME_COLOR_VAL_DRAG)
 
-            uniform handle_size: 15.
+            uniform handle_size: 20.
             uniform bipolar: 0.0,
 
             fn pixel(self) -> vec4 {
@@ -493,11 +493,16 @@ live_design!{
                     (self.pos.y - offset_uv.y) * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
                     
+                let slider_top = offset_px.y + self.border_size;
+                let slider_width = self.rect_size.x - self.border_size * 2.;
+                let slider_bottom = self.rect_size.y - offset_px.y - self.border_size * 2.;
+                let slider_height = (self.rect_size.y - offset_px.y) * 0.5 - self.val_padding;
+
                 sdf.box(
                     self.border_size,
-                    offset_px.y + self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - offset_px.y - self.border_size * 2.,
+                    slider_top,
+                    slider_width,
+                    slider_bottom,
                     self.border_radius
                 );
 
@@ -640,7 +645,8 @@ live_design!{
                         ),
                         self.val_color_disabled,
                         self.disabled
-                    ), self.val_size
+                    ), slider_height
+                    // ), self.val_size
                 )
                     
                 let ctrl_height = self.rect_size.y - offset_px.y;
@@ -1132,6 +1138,7 @@ live_design!{
             label_size: 75.
 
             uniform val_heat: 10.
+
 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS * 2.)
