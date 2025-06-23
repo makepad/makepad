@@ -187,7 +187,7 @@ live_design!{
                             ),
                             self.hover
                         ),
-                        self.handle_color_disabled
+                        self.handle_color_disabled,
                         self.disabled
                     )
                 );
