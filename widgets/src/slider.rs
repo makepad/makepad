@@ -187,7 +187,7 @@ live_design!{
                             ),
                             self.hover
                         ),
-                        self.handle_color_disabled,
+                        self.handle_color_disabled
                         self.disabled
                     )
                 );
@@ -1663,13 +1663,13 @@ live_design!{
             uniform val_color_1: (THEME_COLOR_VAL_1);
             uniform val_color_1_hover: (THEME_COLOR_VAL_1);
             uniform val_color_1_focus: (THEME_COLOR_VAL_1);
-            uniform val_color_1_disabled: (THEME_COLOR_VAL_1);
+            uniform val_color_1_disabled: (THEME_COLOR_VAL_1_DISABLED);
             uniform val_color_1_drag: (THEME_COLOR_VAL_1_DRAG);
 
             uniform val_color_2: (THEME_COLOR_VAL_2);
             uniform val_color_2_hover: (THEME_COLOR_VAL_2);
             uniform val_color_2_focus: (THEME_COLOR_VAL_2);
-            uniform val_color_2_disabled: (THEME_COLOR_VAL_2);
+            uniform val_color_2_disabled: (THEME_COLOR_VAL_2_DISABLED);
             uniform val_color_2_drag: (THEME_COLOR_VAL_2_DRAG);
 
             fn pixel(self) -> vec4 {
@@ -2384,35 +2384,44 @@ live_design!{
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                let label_offset = 20.;
                 let one_deg = PI / 180;
                 let threesixty_deg = 2. * PI;
                 let gap_size = self.gap * one_deg;
                 let val_length = threesixty_deg - (one_deg * self.gap);
                 let start = gap_size * 0.5;
-                let bg_end = start + val_length;
+                let outer_end = start + val_length;
                 let val_end = start + val_length * self.slide_pos;
-                let effective_height = self.rect_size.y - label_offset;
-                let radius_scaled = min(
-                        (self.rect_size.x - self.border_size) * 0.5,
-                        (self.rect_size.y - label_offset - self.border_size) * 0.5
-                    );
-                let radius_width_compensation = self.val_size * 0.5;
-                let width_fix = 0.008;
-                let bg_width_scaled = min(self.rect_size.x, effective_height) * self.val_size * width_fix;
+
+                let label_offset_px = 20.;
+                let scale_px = min(self.rect_size.x, self.rect_size.y)
+
+                let scale_factor = scale_px * 0.02
+
+                let outer_width = self.val_size * scale_factor;
+                let radius_px = (scale_px - outer_width) * 0.5;
+
+                let center_px = vec2(
+                    self.rect_size.x * 0.5,
+                    radius_px + outer_width * 0.5 + label_offset_px
+                )
+
+                let gap_deg = self.gap * 0.25;
+                let gap_rad = gap_deg * PI / 180;
+                let arc_height_n = cos(gap_rad);
+                let diam_px = radius_px * 2.;
+                let arc_height_px = diam_px * arc_height_n
 
                 // Background
                 sdf.arc_round_caps(
-                    self.rect_size.x / 2.,
-                    radius_scaled + label_offset,
-                    radius_scaled - radius_width_compensation,
+                    center_px.x,
+                    center_px.y,
+                    radius_px,
                     start,
-                    bg_end, 
-                    bg_width_scaled
+                    outer_end,
+                    outer_width
                 );
-
-                let label_offset_uv = label_offset / self.rect_size.y;
 
                 sdf.fill_keep(
                     mix(
@@ -2437,6 +2446,7 @@ live_design!{
                         self.disabled
                     )
                 )
+
                 sdf.stroke(
                     mix(
                         mix(
@@ -2460,61 +2470,58 @@ live_design!{
                         self.disabled
                     ), self.border_size);
 
-                let val_size = (self.val_size - self.val_padding) * width_fix;
-                let val_size_scaled = min(
-                        self.rect_size.x * val_size,
-                        effective_height * val_size
-                    );
+                let border_sz = self.border_size * scale_factor;
+                let inner_width = outer_width - self.val_padding * scale_factor;
 
                 // Value
                 sdf.arc_round_caps(
-                    self.rect_size.x / 2.,
-                    radius_scaled + label_offset,
-                    radius_scaled - radius_width_compensation,
+                    center_px.x,
+                    center_px.y,
+                    radius_px,
                     start,
                     val_end, 
-                    val_size_scaled - self.border_size
+                    inner_width
                 );
 
                 sdf.fill(
                     mix(
                         mix(
                             mix(
-                                mix(self.val_color_1, self.val_color_2, self.slide_pos),
-                                mix(self.val_color_1_hover, self.val_color_2_hover, self.slide_pos),
+                                self.val_color,
+                                self.val_color_hover,
                                 self.hover
                             ),
                             mix(
-                                mix(self.val_color_1_focus, self.val_color_2_focus, self.slide_pos),
+                                self.val_color_focus,
                                 mix(
-                                    mix(self.val_color_1_hover, self.val_color_2_hover, self.slide_pos),
-                                    mix(self.val_color_1_drag, self.val_color_2_drag, self.slide_pos),
+                                    self.val_color_focus,
+                                    self.val_color_drag,
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.val_color_1_disabled, self.val_color_2_disabled, self.slide_pos),
+                        self.val_color_disabled,
                         self.disabled
                     )
                 )
 
                 // Handle
                 sdf.arc_round_caps(
-                    self.rect_size.x / 2.,
-                    radius_scaled + label_offset,
-                    radius_scaled - radius_width_compensation,
+                    center_px.x,
+                    center_px.y,
+                    radius_px,
                     val_end, 
                     val_end, 
                     mix(
-                        mix(0., val_size_scaled, self.focus),
-                        val_size_scaled,
+                        mix(0., inner_width, self.focus),
+                        inner_width,
                         self.hover
                     )
                 );
 
-                sdf.fill_keep(
+                sdf.fill(
                     mix(
                         mix(
                             mix(
@@ -2538,6 +2545,7 @@ live_design!{
                     )
                 )
                 
+
                 return sdf.result
             }
         }
