@@ -91,6 +91,17 @@ live_design!{
                 }
                 <SliderMinimalFlat> { text: "label_align", label_align: { x: 0.5, y: 0. } }
                 <SliderMinimalFlat> { text: "min/max", min: 0., max: 100. }
+                <SliderMinimalFlat> {
+                    padding: 5.
+                    height: 100.
+                    draw_bg: {
+                       offset_y: 0.,
+                       handle_size: 10.,
+                    }
+                    text: "Big",
+                    min: 0.,
+                    max: 100.
+                }
                 <SliderMinimalFlat> { text: "precision", precision: 20 }
                 <SliderMinimalFlat> { text: "stepped", step: 0.1 }
 
