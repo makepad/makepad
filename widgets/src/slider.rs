@@ -1151,7 +1151,6 @@ live_design!{
 
             uniform val_heat: 10.
 
-
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS * 2.)
 
@@ -1175,6 +1174,8 @@ live_design!{
             uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
             uniform border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
 
+            uniform val_padding: (SLIDER_ALT1_VAL_PADDING)
+            
             uniform val_color_1: (THEME_COLOR_VAL_1)
             uniform val_color_1_hover: (THEME_COLOR_VAL_1_HOVER)
             uniform val_color_1_focus: (THEME_COLOR_VAL_1_FOCUS)
@@ -1226,7 +1227,7 @@ live_design!{
 
 
                 let handle_size = (SLIDER_ALT1_HANDLE_SIZE);
-                let padding = (SLIDER_ALT1_VAL_PADDING);
+                let padding = self.val_padding
 
                 let track_length_bg = self.rect_size.x - self.label_size;
                 let padding_full = padding * 2.;
@@ -1413,6 +1414,8 @@ live_design!{
             uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
             uniform border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
 
+            uniform val_padding: (SLIDER_ALT1_VAL_PADDING)
+
             uniform val_color_1: (THEME_COLOR_VAL_1)
             uniform val_color_1_hover: (THEME_COLOR_VAL_1_HOVER)
             uniform val_color_1_focus: (THEME_COLOR_VAL_1_FOCUS)
@@ -1464,7 +1467,7 @@ live_design!{
 
 
                 let handle_size = (SLIDER_ALT1_HANDLE_SIZE);
-                let padding = (SLIDER_ALT1_VAL_PADDING);
+                let padding = self.val_padding;
 
                 let track_length_bg = self.rect_size.x - self.label_size;
                 let padding_full = padding * 2.;
@@ -1615,6 +1618,8 @@ live_design!{
             color_focus: (THEME_COLOR_INSET_FOCUS)
             color_disabled: (THEME_COLOR_INSET_DISABLED)
             color_drag: (THEME_COLOR_INSET_DRAG)
+
+            val_padding: (SLIDER_ALT1_VAL_PADDING)
 
             uniform border_color_1: (THEME_COLOR_BEVEL)
             uniform border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
