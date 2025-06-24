@@ -88,7 +88,7 @@ pub enum Size {
     #[pick] Fill,
     #[live(200.0)] Fixed(f64),
     Fit,
-    All
+    All,
 }
 
 #[derive(Clone, Debug)]
@@ -119,10 +119,27 @@ pub struct TurtleWalk {
     rect: Rect,
 }
 
+/// +-----------------+
+/// |     Margin      |
+/// | +-------------+ |
+/// | |   Padding   | |
+/// | | +---------+ | |
+/// | | | Content | | |
+/// | | +---------+ | |
+/// | +-------------+ |
+/// +-----------------+
+/// 
+/// Inner rectangle = content
+/// Rectangle       = content + padding
+/// Outer rectangle = content + padding + margin
 #[derive(Clone, Default, Debug)]
 pub struct Turtle {
     walk: Walk,
     layout: Layout,
+    width: f64,
+    height: f64,
+    used_width: f64,
+    used_height: f64,
     wrap_spacing: f64,
     align_start: usize,
     turtle_walks_start: usize,
@@ -130,11 +147,236 @@ pub struct Turtle {
     shift: DVec2,
     pos: DVec2,
     origin: DVec2,
-    width: f64,
-    height: f64,
-    width_used: f64,
-    height_used: f64,
     guard_area: Area
+}
+
+impl Turtle {
+    /// Returns a reference to this turtle's padding.
+    pub fn padding(&self) -> Padding {
+        self.layout.padding
+    }
+
+    /// Return a reference to this turtle's margin.
+    pub fn margin(&self) -> &Margin {
+        &self.walk.margin
+    }
+
+    /// Returns the width of this turtle's inner rectangle.
+    /// 
+    /// If the inner width is unknown, then NaN is returned.
+    pub fn inner_width(&self) -> f64 {
+        self.width() - self.padding().width().min(self.width())
+    }
+
+    /// Returns the height of this turtle's inner rectangle.
+    /// 
+    /// If the inner height is unknown, then NaN is returned.
+    pub fn inner_height(&self) -> f64 {
+        self.height() - self.padding().height().min(self.height())
+    }
+
+    /// Returns the used width of this turtle's inner rectangle.
+    pub fn inner_used_width(&self) -> f64 {
+        self.used_width() - self.padding().left.min(self.used_width())
+    }
+
+    /// Returns the used width of this turtle's inner rectangle on the current row.
+    pub fn inner_used_width_current_row(&self) -> f64 {
+        self.used_width_current_row() - self.padding().left.min(self.used_width_current_row())
+    }
+
+    /// Returns the used height of this turtle's inner rectangle.
+    pub fn inner_used_height(&self) -> f64 {
+        self.used_height() - self.padding().top.min(self.used_height())
+    }
+
+    /// Returns the unused width of this turtle's inner rectangle.
+    /// 
+    /// If the inner unused width is unknown, then NaN is returned.
+    pub fn inner_unused_width(&self) -> f64 {
+        self.inner_width() - self.inner_used_width().min(self.inner_width())
+    }
+
+    /// Returns the unused width of this turtle's inner rectangle on the current row.
+    /// 
+    /// If the inner unused width on the current row is unknown, then NaN is returned.
+    pub fn inner_unused_width_current_row(&self) -> f64 {
+        self.inner_width() - self.inner_used_width_current_row().min(self.inner_width())
+    }
+
+    /// Returns the unused height of this turtle's inner rectangle.
+    /// 
+    /// If the inner unused height is unknown, then NaN is returned.
+    pub fn inner_unused_height(&self) -> f64 {
+        self.inner_height() - self.inner_used_height().min(self.inner_height())
+    }
+
+    /// Returns the effective width of this turtle's inner rectangle.
+    /// 
+    /// This is either the inner width, or the inner used width if the inner width is unknown.
+    pub fn inner_effective_width(&self) -> f64 {
+        if !self.inner_width().is_nan() {
+            self.inner_width()
+        } else {
+            self.inner_used_width()
+        }
+    }
+
+    /// Returns the effective height of this turtle's inner rectangle.
+    /// 
+    /// This is either the inner height, or the inner used height if the inner height is unknown.
+    pub fn inner_effective_height(&self) -> f64 {
+        if !self.inner_height().is_nan() {
+            self.inner_height()
+        } else {
+            self.inner_used_height()
+        }
+    }
+
+    /// Returns the width of this turtle's rectangle.
+    /// 
+    /// If the width is unknown, then NaN is returned.
+    pub fn width(&self) -> f64 {
+        self.width
+    }
+
+    /// Returns the height of this turtle's rectangle.
+    /// 
+    /// If the height is unknown, then NaN is returned.
+    pub fn height(&self) -> f64 {
+        self.height
+    }
+
+    /// Returns the used width of this turtle's rectangle.
+    pub fn used_width(&self) -> f64 {
+        self.used_width
+    }
+
+    /// Returns the used width of this turtle's rectangle on the current row.
+    pub fn used_width_current_row(&self) -> f64 {
+        self.pos.x - self.origin.x
+    }
+
+    /// Returns the used height of this turtle's rectangle.
+    pub fn used_height(&self) -> f64 {
+        self.used_height
+    }
+
+    /// Returns the unused width of this turtle's rectangle.
+    /// 
+    /// If the unused width is unknown, then NaN is returned.
+    pub fn unused_width(&self) -> f64 {
+        self.width() - self.used_width().min(self.width())
+    }
+
+    /// Returns the unused width of this turtle's rectangle on the current row.
+    /// 
+    /// If the unused width on the current row is unknown, then NaN is returned.
+    pub fn unused_width_current_row(&self) -> f64 {
+        self.width() - self.used_width_current_row().min(self.width())
+    }
+
+    /// Returns the unused height of this turtle's rectangle.
+    /// 
+    /// If the unused height is unknown, then NaN is returned.
+    pub fn unused_height(&self) -> f64 {
+        self.height() - self.used_height().min(self.height())
+    }
+
+    /// Returns the effective width of this turtle's rectangle.
+    /// 
+    /// This is either the width, or the used width if the width is unknown.
+    pub fn effective_width(&self) -> f64 {
+        if !self.width().is_nan() {
+            self.width()
+        } else {
+            self.used_width()
+        }
+    }
+
+    /// Returns the effective height of this turtle's rectangle.
+    /// 
+    /// This is either the height, or the used height if the height is unknown.
+    pub fn effective_height(&self) -> f64 {
+        if !self.height().is_nan() {
+            self.height()
+        } else {
+            self.used_height()
+        }
+    }
+
+    /// Returns the width of this turtle's outer rectangle.
+    /// 
+    /// If the outer width is unknown, then NaN is returned.
+    pub fn outer_width(&self) -> f64 {
+        self.width() + self.margin().width()
+    }
+
+    /// Returns the width of this turtle's outer rectangle.
+    /// 
+    /// If the outer height is unknown, then NaN is returned.
+    pub fn outer_height(&self) -> f64 {
+        self.height() + self.margin().height()
+    }
+
+    /// Returns the used width of this turtle's outer rectangle.
+    /// 
+    pub fn outer_used_width(&self) -> f64 {
+        self.used_width() + self.margin().left
+    }
+
+    /// Returns the used width of this turtle's outer rectangle on the current row.
+    pub fn outer_used_width_current_row(&self) -> f64 {
+        self.used_width_current_row() + self.margin().left
+    }
+
+    /// Returns the used height of this turtle's outer rectangle.
+    pub fn outer_used_height(&self) -> f64 {
+        self.used_height() + self.margin().top
+    }
+
+    /// Returns the unused width of this turtle's outer rectangle.
+    /// 
+    /// If the outer unused width is unknown, then NaN is returned.
+    pub fn outer_unused_width(&self) -> f64 {
+        self.outer_width() - self.outer_used_width().min(self.outer_width())
+    }
+
+    /// Returns the unused width of this turtle's outer rectangle on the current row.
+    /// 
+    /// If the outer unused width on the current row is unknown, then NaN is returned.
+    pub fn outer_unused_width_current_row(&self) -> f64 {
+        self.outer_width() - self.outer_used_width_current_row().min(self.outer_width())
+    }
+
+    /// Returns the unused height of this turtle's outer rectangle.
+    /// 
+    /// If the outer unused height is unknown, then NaN is returned.
+    pub fn outer_unused_height(&self) -> f64 {
+        self.outer_height() - self.outer_used_height().min(self.outer_height())
+    }
+
+    /// Returns the effective width of this turtle's outer rectangle.
+    ///
+    /// This is either the outer width, or the outer used width if the outer width is unknown.
+    pub fn outer_effective_width(&self) -> f64 {
+        if !self.outer_width().is_nan() {
+            self.outer_width()
+        } else {
+            self.outer_used_width()
+        }
+    }
+
+    /// Returns the effective height of this turtle's outer rectangle.
+    ///
+    /// This is either the outer height, or the outer used height if the outer height is unknown.
+    pub fn outer_effective_height(&self) -> f64 {
+        if !self.outer_height().is_nan() {
+            self.outer_height()
+        } else {
+            self.outer_used_height()
+        }
+    }
 }
 
 impl<'a,'b> Cx2d<'a,'b> {
@@ -159,7 +401,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         let pos = turtle.pos;
         let size = dvec2(
             turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
-            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
+            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow),
         );
         let margin_size = walk.margin.size();
         match turtle.layout.flow {
@@ -231,8 +473,8 @@ impl<'a,'b> Cx2d<'a,'b> {
             width: size.x,
             height: size.y,
             shift: dvec2(0.0, 0.0),
-            width_used: layout.padding.left,
-            height_used: layout.padding.top,
+            used_width: layout.padding.left,
+            used_height: layout.padding.top,
             guard_area: Area::Empty,
         };
         self.turtles.push(turtle);
@@ -328,8 +570,8 @@ impl<'a,'b> Cx2d<'a,'b> {
             width,
             height,
             shift: dvec2(0.0,0.0),
-            width_used: layout.padding.left,
-            height_used: layout.padding.top,
+            used_width: layout.padding.left,
+            used_height: layout.padding.top,
             guard_area,
         };
         
@@ -364,7 +606,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                 
         // computed width / height
         let w = if turtle.width.is_nan() {
-            let w = turtle.width_used + turtle.layout.padding.right - turtle.layout.scroll.x;
+            let w = turtle.used_width + turtle.layout.padding.right - turtle.layout.scroll.x;
             // we should update the clip pos
             if let AlignEntry::BeginTurtle(p1,p2) = &mut self.align_list[turtle_align_start]{
                 p2.x = p1.x + w;
@@ -376,7 +618,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         };
         
         let h = if turtle.height.is_nan() {
-            let h =  turtle.height_used + turtle.layout.padding.bottom - turtle.layout.scroll.y;
+            let h =  turtle.used_height + turtle.layout.padding.bottom - turtle.layout.scroll.y;
             // we should update the clip pos
             if let AlignEntry::BeginTurtle(p1,p2) = &mut self.align_list[turtle_align_start]{
                 p2.y = p1.y + h;
@@ -528,7 +770,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle = self.turtles.last_mut().unwrap();
         let size = dvec2(
             turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
-            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
+            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow),
         );
         
         if let Some(pos) = walk.abs_pos {
@@ -575,7 +817,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                         let dx = pos.x - turtle.pos.x;
                         turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
                         
-                        pos.y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing + spacing.x;//turtle.layout.line_spacing;
+                        pos.y = turtle.used_height + turtle.origin.y + turtle.wrap_spacing + spacing.x;//turtle.layout.line_spacing;
                         let dy = pos.y - turtle.pos.y;
                         turtle.pos.y = pos.y;
                         
@@ -639,7 +881,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle = self.turtles.last().unwrap();
         let size = dvec2(
             turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
-            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
+            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow),
         );
         
         if let Some(pos) = walk.abs_pos {
@@ -656,18 +898,18 @@ impl<'a,'b> Cx2d<'a,'b> {
     pub fn turtle_new_line(&mut self){
         let turtle = self.turtles.last_mut().unwrap();
         turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
-        let next_y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing;
+        let next_y = turtle.used_height + turtle.origin.y + turtle.wrap_spacing;
         turtle.pos.y = turtle.pos.y.max(next_y);
-        turtle.height_used = turtle.pos.y - turtle.origin.y;
+        turtle.used_height = turtle.pos.y - turtle.origin.y;
         turtle.wrap_spacing = 0.0;
     }
 
     pub fn turtle_new_line_with_spacing(&mut self, spacing: f64){
         let turtle = self.turtles.last_mut().unwrap();
         turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
-        let next_y = turtle.height_used + turtle.origin.y + turtle.wrap_spacing + spacing;
+        let next_y = turtle.used_height + turtle.origin.y + turtle.wrap_spacing + spacing;
         turtle.pos.y = turtle.pos.y.max(next_y);
-        turtle.height_used = turtle.pos.y - turtle.origin.y;
+        turtle.used_height = turtle.pos.y - turtle.origin.y;
         turtle.wrap_spacing = 0.0;
     }
     
@@ -821,23 +1063,23 @@ pub struct TurtleAlignRange{
 
 impl Turtle {
     pub fn row_height(&self)->f64{
-        self.height_used - (self.pos.y - self.origin.y) + self.wrap_spacing
+        self.used_height - (self.pos.y - self.origin.y) + self.wrap_spacing
     }
     
     pub fn update_width_max(&mut self, pos:f64, dx: f64) {
-        self.width_used = self.width_used.max((pos + dx) - self.origin.x);
+        self.used_width = self.used_width.max((pos + dx) - self.origin.x);
     }
     
     pub fn update_height_max(&mut self, pos:f64, dy: f64) {
-        self.height_used = self.height_used.max((pos + dy) - self.origin.y);
+        self.used_height = self.used_height.max((pos + dy) - self.origin.y);
     }
     
     pub fn update_width_min(&mut self, pos:f64, dx: f64) {
-        self.width_used = self.width_used.min((pos + dx) - self.origin.x);
+        self.used_width = self.used_width.min((pos + dx) - self.origin.x);
     }
     
     pub fn update_height_min(&mut self, pos:f64, dy: f64) {
-        self.height_used = self.height_used.min((pos + dy) - self.origin.y);
+        self.used_height = self.used_height.min((pos + dy) - self.origin.y);
     }
     
     pub fn set_shift(&mut self, shift: DVec2) {
@@ -853,12 +1095,12 @@ impl Turtle {
     }
     
     pub fn used(&self) -> DVec2 {
-        dvec2(self.width_used, self.height_used)
+        dvec2(self.used_width, self.used_height)
     }
     
     pub fn set_used(&mut self, width_used: f64, height_used: f64) {
-        self.width_used = width_used;
-        self.height_used = height_used;
+        self.used_width = width_used;
+        self.used_height = height_used;
     }
     
     
@@ -938,14 +1180,14 @@ impl Turtle {
         if walk.width.is_fit() {
             return None;
         }
-        Some(self.eval_width(walk.width, walk.margin, self.layout().flow) as f64)
+        Some(self.eval_width(walk.width, walk.margin, self.layout.flow) as f64)
     }
 
     pub fn max_height(&self, walk: Walk) -> Option<f64> {
         if walk.height.is_fit() {
             return None
         }
-        Some(self.eval_width(walk.height, walk.margin, self.layout().flow) as f64)
+        Some(self.eval_width(walk.height, walk.margin, self.layout.flow) as f64)
     }
     
     pub fn eval_width(&self, width: Size, margin: Margin, flow: Flow) -> f64 {
@@ -963,7 +1205,7 @@ impl Turtle {
                     Flow::Down | Flow::Overlay => {
                         let r = max_zero_keep_nan(self.width - self.layout.padding.width() - margin.width());
                         if r.is_nan() {
-                            return self.width_used - margin.width() - self.layout.padding.right
+                            return self.used_width - margin.width() - self.layout.padding.right
                         }
                         return r
                     }
@@ -982,7 +1224,7 @@ impl Turtle {
                     Flow::RightWrap | Flow::Right | Flow::Overlay => {
                         let r = max_zero_keep_nan(self.height - self.layout.padding.height() - margin.height());
                         if r.is_nan() {
-                            return self.height_used - margin.height() - self.layout.padding.bottom
+                            return self.used_height - margin.height() - self.layout.padding.bottom
                         }
                         return r
                     }
@@ -1034,17 +1276,17 @@ impl Turtle {
     }
     
     pub fn width_left(&self) -> f64 {
-        return max_zero_keep_nan(self.width - self.width_used - self.layout.padding.right);
+        return max_zero_keep_nan(self.width - self.used_width - self.layout.padding.right);
     }
     
     pub fn height_left(&self) -> f64 {
-        return max_zero_keep_nan(self.height - self.height_used - self.layout.padding.bottom);
+        return max_zero_keep_nan(self.height - self.used_height - self.layout.padding.bottom);
     }
     
     pub fn padded_height_or_used(&self) -> f64 {
         let r = max_zero_keep_nan(self.height - self.layout.padding.height());
         if r.is_nan() {
-            self.height_used - self.layout.padding.bottom
+            self.used_height - self.layout.padding.bottom
         }
         else {
             r
@@ -1054,7 +1296,7 @@ impl Turtle {
     pub fn padded_width_or_used(&self) -> f64 {
         let r = max_zero_keep_nan(self.width - self.layout.padding.width());
         if r.is_nan() {
-            self.width_used - self.layout.padding.right
+            self.used_width - self.layout.padding.right
         }
         else {
             r
