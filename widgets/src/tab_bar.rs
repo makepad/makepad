@@ -19,7 +19,8 @@ live_design!{
         CloseableTab = <Tab> {closeable: true}
         PermanentTab = <Tab> {closeable: false}
 
-        width: Fill, height: (THEME_TAB_HEIGHT)
+        width: Fill,
+        height: (max(THEME_TAB_HEIGHT, 25.))
         margin: 0.
 
         draw_drag: {
@@ -89,7 +90,8 @@ live_design!{
     }
     
     pub TabBarFlat = <TabBar> {
-        height: (THEME_TAB_FLAT_HEIGHT)
+        height: (max(THEME_TAB_FLAT_HEIGHT, 25.))
+
         CloseableTab = <TabFlat> {closeable: true}
         PermanentTab = <TabFlat> {closeable: false}
     }
