@@ -1710,7 +1710,7 @@ live_design!{
 
                 let label_offset_px = 20.;
                 let label_offset_uv = self.rect_size.y;
-                let scale_px = min(self.rect_size.x, self.rect_size.y - 2.);
+                let scale_px = min(self.rect_size.x, self.rect_size.y - 2. - (THEME_BEVELING));
 
                 let scale_factor = scale_px * 0.02;
 
@@ -2065,7 +2065,7 @@ live_design!{
 
                 let label_offset_px = 20.;
                 let label_offset_uv = self.rect_size.y;
-                let scale_px = min(self.rect_size.x, self.rect_size.y - 2.)
+                let scale_px = min(self.rect_size.x, self.rect_size.y - 2. - (THEME_BEVELING));
 
                 let scale_factor = scale_px * 0.02
 
@@ -2419,7 +2419,7 @@ live_design!{
                 let val_end = start + val_length * self.slide_pos;
 
                 let label_offset_px = 20.;
-                let scale_px = min(self.rect_size.x, self.rect_size.y - 2.)
+                let scale_px = min(self.rect_size.x, self.rect_size.y - 2. - (THEME_BEVELING));
 
                 let scale_factor = scale_px * 0.02
 
