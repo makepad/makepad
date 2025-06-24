@@ -197,11 +197,11 @@ live_design!{
 
             border_color_1: (THEME_COLOR_U_HIDDEN)
             border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_1_active: (THEME_COLOR_U_HIDDEN)
+            border_color_1_active: (THEME_COLOR_FG_APP)
 
             border_color_2: (THEME_COLOR_D_HIDDEN)
             border_color_2_hover: (THEME_COLOR_D_HIDDEN)
-            border_color_2_active: (THEME_COLOR_D_HIDDEN)
+            border_color_2_active: (THEME_COLOR_FG_APP)
             
             overlap_fix: 0.
         }
