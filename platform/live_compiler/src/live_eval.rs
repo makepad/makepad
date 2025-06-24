@@ -162,6 +162,44 @@ pub fn live_eval_value(live_registry: &LiveRegistry, index: &mut usize, nodes: &
                         }
                     }
                 }
+                live_id!(min) if *args == 2 => {
+                    let a = live_eval_value(live_registry, index, nodes, scope_nodes)?;
+                    let b = live_eval_value(live_registry, index, nodes, scope_nodes)?;
+                    
+                    match (a, b) {
+                        (LiveValue::Float64(va), LiveValue::Float64(vb)) => {
+                            return Ok(LiveValue::Float64(va.min(vb)));
+                        },
+                        (LiveValue::Vec4(va), LiveValue::Vec4(vb)) => {
+                            return Ok(LiveValue::Vec4(vec4(
+                                va.x.min(vb.x),
+                                va.y.min(vb.y),
+                                va.z.min(vb.z),
+                                va.w.min(vb.w)
+                            )));
+                        },
+                        _ => {}
+                    }
+                },
+                live_id!(max) if *args == 2 => {
+                    let a = live_eval_value(live_registry, index, nodes, scope_nodes)?;
+                    let b = live_eval_value(live_registry, index, nodes, scope_nodes)?;
+                    
+                    match (a, b) {
+                        (LiveValue::Float64(va), LiveValue::Float64(vb)) => {
+                            return Ok(LiveValue::Float64(va.max(vb)));
+                        },
+                        (LiveValue::Vec4(va), LiveValue::Vec4(vb)) => {
+                            return Ok(LiveValue::Vec4(vec4(
+                                va.x.max(vb.x),
+                                va.y.max(vb.y),
+                                va.z.max(vb.z),
+                                va.w.max(vb.w)
+                            )));
+                        },
+                        _ => {}
+                    }
+                },
                 live_id!(mix) if *args == 3 => {
                     let a = live_eval_value(live_registry, index, nodes, scope_nodes)?;
                     let b = live_eval_value(live_registry, index, nodes, scope_nodes)?;
