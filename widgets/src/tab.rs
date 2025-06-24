@@ -17,7 +17,7 @@ live_design!{
         
         align: {x: 0.0, y: 0.5}
         padding: <THEME_MSPACE_3> { top: (THEME_SPACE_2 * 1.2) }
-        margin: {right: (THEME_SPACE_1), top: (THEME_SPACE_FACTOR)}
+        margin: {right: (THEME_SPACE_1), top: (THEME_SPACE_1)}
         
         close_button: <TabCloseButton> {}
 

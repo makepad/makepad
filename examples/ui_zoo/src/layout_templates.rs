@@ -18,7 +18,7 @@ live_design!{
             width: 350., height: Fill,
             show_bg: true,
             draw_bg: {
-                color: (THEME_COLOR_INSET_1)
+                color: (THEME_COLOR_INSET)
                 border_radius: (THEME_CORNER_RADIUS)
             }
             padding: <THEME_MSPACE_3> { top: 0., right: (THEME_SPACE_2) }
