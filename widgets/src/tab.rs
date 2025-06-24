@@ -269,7 +269,7 @@ live_design!{
                     self.rect_size.x - self.border_size * 2.,
                     self.rect_size.y,
                     self.border_radius,
-                    self.border_size * 0.5
+                    max(self.border_size * 0.5, 0.5)
                 )
 
                 sdf.fill_keep(
@@ -363,9 +363,8 @@ live_design!{
                     self.rect_size.x - self.border_size * 2.,
                     self.rect_size.y,
                     self.border_radius,
-                    self.border_size * 0.5
+                    max(self.border_size * 0.5, 0.5)
                 )
-
                 sdf.fill_keep(
                     mix(
                         mix(
