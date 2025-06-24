@@ -13,7 +13,7 @@ live_design!{
     
     pub TabBase = {{Tab}} {}
     pub Tab = <TabBase> {
-        width: Fit, height: Fit, //Fixed((THEME_TAB_HEIGHT)),
+        width: Fit, height: (max(THEME_TAB_HEIGHT, 23.)),
         
         align: {x: 0.0, y: 0.5}
         padding: <THEME_MSPACE_3> { top: (THEME_SPACE_2 * 1.2) }
