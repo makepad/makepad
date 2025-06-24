@@ -15,7 +15,7 @@ live_design!{
         demos = {
             <H4> { text: "Standard"}
             <UIZooRowH> {
-                basicbutton = <Button> { text: "<Button>" }
+                basicbutton = <Button> { }
 
                 iconbutton = <Button> {
                     draw_icon: {
