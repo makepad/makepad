@@ -130,7 +130,7 @@ live_design!{
             uniform color_dither: 1.0
             uniform border_radius: 0.
             uniform border_size: (THEME_BEVELING)
-            uniform color_1: (THEME_COLOR_BG_APP * 0.95);
+            uniform color_1: (THEME_COLOR_BG_APP * 0.875);
             uniform color_2: (THEME_COLOR_SHADOW);
 
             fn pixel(self) -> vec4 {
