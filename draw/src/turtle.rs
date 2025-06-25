@@ -160,6 +160,37 @@ impl Turtle {
         &self.walk.margin
     }
 
+    /// Returns the inner rectangle of this turtle.
+    pub fn inner_rect(&self) -> Rect {
+        Rect {
+            pos: self.inner_origin(),
+            size: self.inner_size(),
+        }
+    }
+
+    /// Returns the inner rectangle of this turtle, without scrolling applied.
+    pub fn inner_rect_unscrolled(&self) -> Rect {
+        Rect {
+            pos: self.inner_origin_unscrolled(),
+            size: self.inner_size(),
+        }
+    }
+
+    /// Returns the origin of this turtle's inner rectangle.
+    pub fn inner_origin(&self) -> DVec2 {
+        self.origin + self.padding().left_top()
+    }
+
+    /// Returns the origin of this turtle's inner rectangle, without scrolling applied.
+    pub fn inner_origin_unscrolled(&self) -> DVec2 {
+        self.origin + self.scroll()
+    }
+
+    /// Returns the size of this turtle's inner rectangle.
+    pub fn inner_size(&self) -> DVec2 {
+        dvec2(self.inner_width(), self.inner_height())
+    }
+
     /// Returns the width of this turtle's inner rectangle.
     /// 
     /// If the inner width is unknown, then NaN is returned.
@@ -232,6 +263,37 @@ impl Turtle {
         }
     }
 
+    /// Returns this turtle's rectangle.
+    pub fn rect(&self) -> Rect {
+        Rect {
+            pos: self.origin(),
+            size: self.size(),
+        }
+    }
+
+    /// Returns this turtle's rectangle, without scrolling applied.
+    pub fn rect_unscrolled(&self) -> Rect {
+        Rect {
+            pos: self.origin_unscrolled(),
+            size: self.size(),
+        }
+    }
+
+    /// Returns the origin of this turtle's rectangle.
+    pub fn origin(&self) -> DVec2 {
+        self.origin
+    }
+
+    /// Returns the origin of this turtle's rectangle, without scrolling applied.
+    pub fn origin_unscrolled(&self) -> DVec2 {
+        self.origin + self.layout.scroll
+    }
+
+    /// Returns the size of this turtle's rectangle.
+    pub fn size(&self) -> DVec2 {
+        dvec2(self.width(), self.height())
+    }
+
     /// Returns the width of this turtle's rectangle.
     /// 
     /// If the width is unknown, then NaN is returned.
@@ -302,6 +364,37 @@ impl Turtle {
         } else {
             self.used_height()
         }
+    }
+
+    /// Returns the outer rectangle of this turtle.
+    pub fn outer_rect(&self) -> Rect {
+        Rect {
+            pos: self.outer_origin(),
+            size: self.outer_size(),
+        }
+    }
+
+    /// Returns the outer rectangle of this turtle, without scrolling applied.
+    pub fn outer_rect_unscrolled(&self) -> Rect {
+        Rect {
+            pos: self.outer_origin_unscrolled(),
+            size: self.outer_size(),
+        }
+    }
+
+    /// Returns the origin of this turtle's outer rectangle.
+    pub fn outer_origin(&self) -> DVec2 {
+        self.origin() - self.margin().left_top()
+    }
+
+    /// Returns the origin of this turtle's outer rectangle, without scrolling applied.
+    pub fn outer_origin_unscrolled(&self) -> DVec2 {
+        self.origin_unscrolled() - self.margin().left_top()
+    }
+
+    /// Returns the size of this turtle's outer rectangle.
+    pub fn outer_size(&self) -> DVec2 {
+        dvec2(self.outer_width(), self.outer_height())
     }
 
     /// Returns the width of this turtle's outer rectangle.
@@ -1184,11 +1277,6 @@ impl Turtle {
         return view.intersects(geom)
     }
     
-    
-    pub fn origin(&self) -> DVec2 {
-        self.origin
-    }
-    
     pub fn rel_pos(&self) -> DVec2 {
         DVec2 {
             x: self.pos.x - self.origin.x,
@@ -1225,14 +1313,6 @@ impl Turtle {
         Some(self.eval_width(walk.height, walk.margin) as f64)
     }
     
-    
-    pub fn rect(&self) -> Rect {
-        Rect {
-            pos: self.origin,
-            size: dvec2(self.width, self.height)
-        }
-    }
-    
    pub fn unscrolled_rect(&self) -> Rect {
         Rect {
             pos: self.origin + self.layout.scroll,
@@ -1258,10 +1338,6 @@ impl Turtle {
             pos: self.origin + self.layout.padding.left_top(),
             size: dvec2(self.width, self.height) - self.layout.padding.size()
         }
-    }
-    
-    pub fn size(&self) -> DVec2 {
-        dvec2(self.width, self.height)
     }
     
     pub fn width_left(&self) -> f64 {
