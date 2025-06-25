@@ -1028,7 +1028,7 @@ impl TextInput {
         } else {
             &self.text
         };
-        let turtle_rect = cx.turtle().padded_rect();
+        let turtle_rect = cx.turtle().inner_rect();
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
