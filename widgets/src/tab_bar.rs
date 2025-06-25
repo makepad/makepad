@@ -324,7 +324,7 @@ impl TabBar {
         //    self.active_tab_id = None
         // }
         self.scroll_bars.begin(cx, walk, Layout::flow_right());
-        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+        self.draw_bg.draw_abs(cx, cx.turtle().rect_unscrolled());
         self.tab_order.clear();
     }
     

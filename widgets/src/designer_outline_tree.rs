@@ -507,7 +507,7 @@ impl DesignerOutlineTree {
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         // lets fill the space left with blanks
-        let height_left = cx.turtle().height_left();
+        let height_left = cx.turtle().inner_unused_height();
         let mut walk = 0.0;
         while walk < height_left {
             self.count += 1;

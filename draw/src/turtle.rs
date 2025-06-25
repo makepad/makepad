@@ -760,10 +760,10 @@ impl<'a,'b> Cx2d<'a,'b> {
         match turtle.layout.flow {
             Flow::Right => {
                 if turtle.defer_count > 0 {
-                    let left = turtle.width_left();
+                    let left = turtle.inner_unused_width();
                     let part = left / turtle.defer_count as f64;
                     let align_y = turtle.layout.align.y;
-                    let padded_height_or_used = turtle.padded_height_or_used();
+                    let padded_height_or_used = turtle.inner_effective_height();
                     for i in turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_x = walk.defer_index as f64 * part;
@@ -776,8 +776,8 @@ impl<'a,'b> Cx2d<'a,'b> {
                 else {
                     let align_x = turtle.layout.align.x;
                     let align_y = turtle.layout.align.y;
-                    let width_left = turtle.width_left();
-                    let padded_height_or_used = turtle.padded_height_or_used();
+                    let width_left = turtle.inner_unused_width();
+                    let padded_height_or_used = turtle.inner_effective_height();
                     if align_x != 0.0 || align_y != 0.0{
                         for i in turtle_walks_start..self.turtle_walks.len() {
                             let walk = &self.turtle_walks[i];
@@ -796,9 +796,9 @@ impl<'a,'b> Cx2d<'a,'b> {
             }
             Flow::Down => {
                 if turtle.defer_count > 0 {
-                    let left = turtle.height_left();
+                    let left = turtle.inner_unused_height();
                     let part = left / turtle.defer_count as f64;
-                    let padded_width_or_used = turtle.padded_width_or_used();
+                    let padded_width_or_used = turtle.inner_effective_width();
                     let align_x = turtle.layout.align.x;
                     for i in turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
@@ -812,8 +812,8 @@ impl<'a,'b> Cx2d<'a,'b> {
                 else {
                     let align_x = turtle.layout.align.x;
                     let align_y = turtle.layout.align.y;
-                    let padded_width_or_used = turtle.padded_width_or_used();
-                    let height_left = turtle.height_left();
+                    let padded_width_or_used = turtle.inner_effective_width();
+                    let height_left = turtle.inner_unused_height();
                     if align_x != 0.0 || align_y != 0.0{
                         for i in turtle_walks_start..self.turtle_walks.len() {
                             let walk = &self.turtle_walks[i];
@@ -830,8 +830,8 @@ impl<'a,'b> Cx2d<'a,'b> {
                 let align_x = turtle.layout.align.x;
                 let align_y = turtle.layout.align.y;
                 if align_x != 0.0 || align_y != 0.0{
-                    let padded_width_or_used = turtle.padded_width_or_used();
-                    let padded_height_or_used = turtle.padded_height_or_used();
+                    let padded_width_or_used = turtle.inner_effective_width();
+                    let padded_height_or_used = turtle.inner_effective_height();
                     for i in turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_x = align_x * (padded_width_or_used - walk.rect.size.x);
@@ -1217,10 +1217,6 @@ impl Turtle {
     pub fn layout(&self)->&Layout{
         &self.layout
     }
-
-    pub fn layout_mut(&mut self)-> &mut Layout {
-        &mut self.layout
-    }
     
     pub fn used(&self) -> DVec2 {
         dvec2(self.used_width, self.used_height)
@@ -1230,17 +1226,6 @@ impl Turtle {
         self.used_width = width_used;
         self.used_height = height_used;
     }
-    
-    
-    /*
-    pub fn move_pos(&mut self, dx: f64, dy: f64) {
-        self.pos.x += dx;
-        self.pos.y += dy;
-        self.update_width_max(0.0);
-        self.update_height_max(0.0);
-    }
-    */
-         
         
     pub fn set_wrap_spacing(&mut self, value: f64){
         self.wrap_spacing = self.wrap_spacing.max(value);
@@ -1312,61 +1297,6 @@ impl Turtle {
         }
         Some(self.eval_width(walk.height, walk.margin) as f64)
     }
-    
-   pub fn unscrolled_rect(&self) -> Rect {
-        Rect {
-            pos: self.origin + self.layout.scroll,
-            size: dvec2(self.width, self.height)
-        }
-    }
-    
-    pub fn padded_rect_used(&self) -> Rect {
-        Rect {
-            pos: self.origin + self.layout.padding.left_top(),
-            size: self.used() - self.layout.padding.left_top()
-        }
-    }
-    pub fn rect_left(&self) -> Rect {
-        Rect {
-            pos: self.pos,
-            size: dvec2(self.width_left(), self.height_left())
-        }
-    }
-    
-    pub fn padded_rect(&self) -> Rect {
-        Rect {
-            pos: self.origin + self.layout.padding.left_top(),
-            size: dvec2(self.width, self.height) - self.layout.padding.size()
-        }
-    }
-    
-    pub fn width_left(&self) -> f64 {
-        return max_zero_keep_nan(self.width - self.used_width - self.layout.padding.right);
-    }
-    
-    pub fn height_left(&self) -> f64 {
-        return max_zero_keep_nan(self.height - self.used_height - self.layout.padding.bottom);
-    }
-    
-    pub fn padded_height_or_used(&self) -> f64 {
-        let r = max_zero_keep_nan(self.height - self.layout.padding.height());
-        if r.is_nan() {
-            self.used_height - self.layout.padding.bottom
-        }
-        else {
-            r
-        }
-    }
-    
-    pub fn padded_width_or_used(&self) -> f64 {
-        let r = max_zero_keep_nan(self.width - self.layout.padding.width());
-        if r.is_nan() {
-            self.used_width - self.layout.padding.right
-        }
-        else {
-            r
-        }
-    }
 }
 
 impl DeferWalk {
@@ -1378,7 +1308,7 @@ impl DeferWalk {
                 let turtle = cx.turtles.last().unwrap();
                 let walk = match turtle.layout.flow {
                     Flow::Right => {
-                        let left = turtle.width_left();
+                        let left = turtle.inner_unused_width();
                         let part = left / turtle.defer_count as f64;
                         Walk {
                             abs_pos: Some(*pos + dvec2(part * *defer_index as f64, 0.)),
@@ -1391,7 +1321,7 @@ impl DeferWalk {
                         panic!()
                     }
                     Flow::Down => { 
-                        let left = turtle.height_left();
+                        let left = turtle.inner_unused_height();
                         let part = left / turtle.defer_count as f64;
                         Walk {
                             abs_pos: Some(*pos + dvec2(0., part * *defer_index as f64)),

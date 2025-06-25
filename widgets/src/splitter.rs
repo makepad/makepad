@@ -296,7 +296,7 @@ impl Splitter {
             }
         }
         
-        self.rect = cx.turtle().padded_rect();
+        self.rect = cx.turtle().inner_rect();
         self.position = self.align.to_position(self.axis, self.rect);
         
         let walk = match self.axis {

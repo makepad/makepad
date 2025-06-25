@@ -362,7 +362,7 @@ impl PortalList {
                         );
                     }
 
-                    let viewport = cx.turtle().padded_rect();
+                    let viewport = cx.turtle().inner_rect();
                     self.draw_state.set(ListDrawState::Down {
                         index: self.first_id,
                         pos: self.first_scroll,

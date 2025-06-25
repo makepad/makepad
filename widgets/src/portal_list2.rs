@@ -161,7 +161,7 @@ impl PortalList2 {
         
         if let Some(state) = self.draw_state.begin_state(cx){
             cx.begin_turtle(walk, self.layout);
-            let viewport = cx.turtle().padded_rect();
+            let viewport = cx.turtle().inner_rect();
             *state = Some(ListDrawState::BeginItem{
                 min: self.first_id,
                 max: self.first_id,
@@ -195,7 +195,7 @@ impl PortalList2 {
         } else { 
             Layout::flow_right()
         };
-        let size =  cx.turtle().padded_rect().size.index(vi);
+        let size =  cx.turtle().inner_rect().size.index(vi);
         
         // alright lets look the items drawlist up
         let dl = if let Some(dl) = self.draw_lists.get_mut(&id){
