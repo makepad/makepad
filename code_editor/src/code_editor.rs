@@ -353,7 +353,7 @@ impl CodeEditor {
     
     pub fn draw_empty_editor(&mut self, cx: &mut Cx2d, walk:Walk) {
         self.scroll_bars.begin(cx, walk, Layout::default());
-        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+        self.draw_bg.draw_abs(cx, cx.turtle().rect_unscrolled());
         self.scroll_bars.end(cx);
     }
         
@@ -518,7 +518,7 @@ impl CodeEditor {
         self.line_end = session.layout().find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
-        self.unscrolled_rect = cx.turtle().unscrolled_rect();
+        self.unscrolled_rect = cx.turtle().rect_unscrolled();
 
         let bg_rect = Rect {
             pos: self.unscrolled_rect.pos,

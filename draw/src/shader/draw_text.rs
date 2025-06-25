@@ -155,7 +155,7 @@ impl DrawText {
         align: Align,
         text: &str,
     ) -> makepad_platform::Rect {
-        let turtle_rect = cx.turtle().padded_rect();
+        let turtle_rect = cx.turtle().inner_rect();
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
@@ -219,7 +219,7 @@ impl DrawText {
         mut f: impl FnMut(&mut Cx2d, makepad_platform::Rect),
     ) {
         let turtle_pos = cx.turtle().pos();
-        let turtle_rect = cx.turtle().padded_rect();
+        let turtle_rect = cx.turtle().inner_rect();
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
         let row_height = cx.turtle().row_height();
