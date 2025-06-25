@@ -88,7 +88,6 @@ pub enum Size {
     #[pick] Fill,
     #[live(200.0)] Fixed(f64),
     Fit,
-    All,
 }
 
 #[derive(Clone, Debug)]
@@ -377,6 +376,42 @@ impl Turtle {
             self.outer_used_height()
         }
     }
+
+    pub fn eval_size(&self, width: Size, height: Size, margin: Margin) -> DVec2 {
+        dvec2(
+            self.eval_width(width, margin),
+            self.eval_height(height, margin),
+        )
+    }
+
+    pub fn eval_width(&self, width: Size, margin: Margin) -> f64 {
+        match width {
+            Size::Fill => {
+                let outer_width = match self.layout.flow {
+                    Flow::Right => self.inner_unused_width(),
+                    Flow::RightWrap => self.inner_unused_width_current_row(),
+                    Flow::Down | Flow::Overlay => self.inner_effective_width(),
+                };
+                outer_width - margin.width()
+            },
+            Size::Fixed(width) => width.max(0.0),
+            Size::Fit => f64::NAN,
+        }
+    }
+    
+    pub fn eval_height(&self, height: Size, margin: Margin) -> f64 {
+        match height {
+            Size::Fill => {
+                let outer_height = match self.layout.flow {
+                    Flow::RightWrap | Flow::Right | Flow::Overlay => self.inner_effective_height(),
+                    Flow::Down => self.inner_unused_height()
+                };
+                outer_height - margin.height()
+            }
+            Size::Fixed(height) => height.max(0.0),
+            Size::Fit => f64::NAN,
+        }
+    }
 }
 
 impl<'a,'b> Cx2d<'a,'b> {
@@ -400,8 +435,8 @@ impl<'a,'b> Cx2d<'a,'b> {
         let defer_index = turtle.defer_count;
         let pos = turtle.pos;
         let size = dvec2(
-            turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
-            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow),
+            turtle.eval_width(walk.width, walk.margin),
+            turtle.eval_height(walk.height, walk.margin),
         );
         let margin_size = walk.margin.size();
         match turtle.layout.flow {
@@ -522,8 +557,8 @@ impl<'a,'b> Cx2d<'a,'b> {
                 parent.pos + parent.child_spacing(self.turtle_walks.len())
             };
             
-            let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow);
-            let h = parent.eval_height(walk.height, walk.margin, parent.layout.flow);
+            let w = parent.eval_width(walk.width, walk.margin);
+            let h = parent.eval_height(walk.height, walk.margin);
             
             // figure out new clipping rect
             let (x0, x1) = if layout.clip_x {
@@ -769,8 +804,8 @@ impl<'a,'b> Cx2d<'a,'b> {
         
         let turtle = self.turtles.last_mut().unwrap();
         let size = dvec2(
-            turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
-            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow),
+            turtle.eval_width(walk.width, walk.margin),
+            turtle.eval_height(walk.height, walk.margin),
         );
         
         if let Some(pos) = walk.abs_pos {
@@ -880,8 +915,8 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
         let turtle = self.turtles.last().unwrap();
         let size = dvec2(
-            turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
-            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow),
+            turtle.eval_width(walk.width, walk.margin),
+            turtle.eval_height(walk.height, walk.margin),
         );
         
         if let Some(pos) = walk.abs_pos {
@@ -1180,62 +1215,16 @@ impl Turtle {
         if walk.width.is_fit() {
             return None;
         }
-        Some(self.eval_width(walk.width, walk.margin, self.layout.flow) as f64)
+        Some(self.eval_width(walk.width, walk.margin) as f64)
     }
 
     pub fn max_height(&self, walk: Walk) -> Option<f64> {
         if walk.height.is_fit() {
             return None
         }
-        Some(self.eval_width(walk.height, walk.margin, self.layout.flow) as f64)
+        Some(self.eval_width(walk.height, walk.margin) as f64)
     }
     
-    pub fn eval_width(&self, width: Size, margin: Margin, flow: Flow) -> f64 {
-        return match width {
-            Size::Fit => std::f64::NAN,
-            Size::Fixed(v) => max_zero_keep_nan(v),
-            Size::Fill => {
-                match flow {
-                    Flow::RightWrap=> {
-                        max_zero_keep_nan(self.width - (self.pos.x - self.origin.x) - margin.width() -self.layout.padding.right)
-                    }
-                    Flow::Right => {
-                        max_zero_keep_nan(self.width_left() - margin.width())
-                    },
-                    Flow::Down | Flow::Overlay => {
-                        let r = max_zero_keep_nan(self.width - self.layout.padding.width() - margin.width());
-                        if r.is_nan() {
-                            return self.used_width - margin.width() - self.layout.padding.right
-                        }
-                        return r
-                    }
-                }
-            },
-            Size::All=>self.width
-        }
-    }
-    
-    pub fn eval_height(&self, height: Size, margin: Margin, flow: Flow) -> f64 {
-        return match height {
-            Size::Fit => std::f64::NAN,
-            Size::Fixed(v) => max_zero_keep_nan(v),
-            Size::Fill => {
-                match flow {
-                    Flow::RightWrap | Flow::Right | Flow::Overlay => {
-                        let r = max_zero_keep_nan(self.height - self.layout.padding.height() - margin.height());
-                        if r.is_nan() {
-                            return self.used_height - margin.height() - self.layout.padding.bottom
-                        }
-                        return r
-                    }
-                    Flow::Down => {
-                        max_zero_keep_nan(self.height_left() - margin.height())
-                    }
-                }
-            }
-            Size::All=>self.height
-        }
-    }
     
     pub fn rect(&self) -> Rect {
         Rect {
