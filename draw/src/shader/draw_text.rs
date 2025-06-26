@@ -270,10 +270,11 @@ impl DrawText {
         let new_turtle_pos = dvec2(new_turtle_pos.x as f64, new_turtle_pos.y as f64);
         let turtle = cx.turtle_mut();
         
+        turtle.set_pos(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
+        turtle.allocate_width(used_size_in_lpxs.width as f64);
+        turtle.allocate_height(used_size_in_lpxs.height as f64);
         turtle.set_pos(new_turtle_pos);
-        turtle.update_width_max(origin_in_lpxs.x as f64, used_size_in_lpxs.width as f64);
-        turtle.update_height_max(origin_in_lpxs.y as f64, used_size_in_lpxs.height as f64);
-        
+
         turtle.set_wrap_spacing((
            last_row.line_spacing_above_in_lpxs - last_row.ascender_in_lpxs
         )as f64);
