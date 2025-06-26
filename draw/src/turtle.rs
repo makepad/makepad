@@ -511,6 +511,26 @@ impl Turtle {
         }
     }
 
+    /// Sets this turtle's position.
+    pub fn set_pos(&mut self, pos: DVec2) {
+        self.pos = pos
+    }
+
+    /// Moves this turtle right and down by the given amount.
+    pub fn move_right_down(&mut self, amount: DVec2) {
+        self.set_pos(self.pos() + amount);
+    }
+
+    /// Moves this turtle right by the given amount.
+    pub fn move_right(&mut self, amount: f64) {
+        self.move_right_down(dvec2(amount, 0.0))
+    }
+
+    /// Moves this turtle down by the given amount.
+    pub fn move_down(&mut self, amount: f64) {
+        self.move_right_down(dvec2(0.0, amount))
+    }
+
     /// Allocates additional size to the right of and below this turtle's position.
     pub fn allocate_size(&mut self, additional: DVec2) {
         self.allocate_width(additional.x);
@@ -1243,10 +1263,6 @@ impl Turtle {
         
     pub fn set_wrap_spacing(&mut self, value: f64){
         self.wrap_spacing = self.wrap_spacing.max(value);
-    }
-
-    pub fn set_pos(&mut self, pos: DVec2) {
-        self.pos = pos
     }
 
     pub fn rect_is_visible(&self,  geom: Rect) -> bool {
