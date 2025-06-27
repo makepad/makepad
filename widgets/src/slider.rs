@@ -2655,7 +2655,7 @@ impl Slider {
         
         if let Flow::Right = self.layout.flow{
             
-            if let Some(mut dw) = cx.defer_walk(self.label_walk) {
+            if let Some(mut dw) = cx.defer_walk_turtle(self.label_walk) {
                 //, (self.value*100.0) as usize);
                 let walk = self.text_input.walk(cx);
                 let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), walk);
