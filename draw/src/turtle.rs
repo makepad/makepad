@@ -86,6 +86,7 @@ pub enum Flow {
 #[live_ignore]
 pub enum Size {
     #[pick] Fill,
+    #[live(100.0)] WeightedFill(f64),
     #[live(200.0)] Fixed(f64),
     Fit,
 }
@@ -171,7 +172,8 @@ pub struct Turtle {
     wrap_spacing: f64,
     align_start: usize,
     finished_walks_start: usize,
-    deferred_walk_count: usize,
+    deferred_walk_weights: Vec<f64>,
+    deferred_walk_weight_sum: f64,
     shift: DVec2,
     pos: DVec2,
     origin: DVec2,
@@ -513,7 +515,7 @@ impl Turtle {
 
     pub fn eval_width(&self, width: Size, margin: Margin) -> f64 {
         match width {
-            Size::Fill => {
+            Size::Fill | Size::WeightedFill(_) => {
                 let outer_width = match self.layout.flow {
                     Flow::Right => self.inner_unused_width(),
                     Flow::RightWrap => self.inner_unused_width_current_row(),
@@ -528,7 +530,7 @@ impl Turtle {
     
     pub fn eval_height(&self, height: Size, margin: Margin) -> f64 {
         match height {
-            Size::Fill => {
+            Size::Fill | Size::WeightedFill(_) => {
                 let outer_height = match self.layout.flow {
                     Flow::RightWrap | Flow::Right | Flow::Overlay => self.inner_effective_height(),
                     Flow::Down => self.inner_unused_height()
@@ -580,7 +582,11 @@ impl Turtle {
     /// 
     /// This is true if the turtle has any finished or deferred walks.
     fn has_previous_walk(&self, finished_walks_end: usize) -> bool {
-        self.finished_walks_start != finished_walks_end || self.deferred_walk_count > 0
+        self.finished_walks_start != finished_walks_end || self.deferred_walk_count() > 0
+    }
+
+    fn deferred_walk_count(&self) -> usize {
+        self.deferred_walk_weights.len()
     }
 
     /// Returns the spacing for the next walk.
@@ -599,8 +605,8 @@ impl Turtle {
         }
     }
 
-    fn deferred_width_at(&self, _index: usize) -> f64 {
-        self.inner_unused_width() / self.deferred_walk_count as f64
+    fn deferred_width_at(&self, index: usize) -> f64 {
+        self.inner_unused_width() * self.deferred_walk_weights[index] / self.deferred_walk_weight_sum
     }
 
     fn deferred_width_up_to(&self, end: usize) -> f64 {
@@ -611,8 +617,8 @@ impl Turtle {
         deferred_width
     }
 
-    fn deferred_height_at(&self, _index: usize) -> f64 {
-        self.inner_unused_height() / self.deferred_walk_count as f64
+    fn deferred_height_at(&self, index: usize) -> f64 {
+        self.inner_unused_height() * self.deferred_walk_weights[index] / self.deferred_walk_weight_sum
     }
 
     fn deferred_height_up_to(&self, end: usize) -> f64 {
@@ -621,6 +627,11 @@ impl Turtle {
             deferred_height += self.deferred_height_at(index);
         }
         deferred_height
+    }
+
+    fn push_deferred_walk(&mut self, weight: f64) {
+        self.deferred_walk_weights.push(weight);
+        self.deferred_walk_weight_sum += weight;
     }
 }
 
@@ -703,7 +714,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                 Flow::Overlay => turtle.allocate_size(outer_size),
             };
             
-            let defer_index = self.turtle().deferred_walk_count;
+            let defer_index = self.turtle().deferred_walk_count();
             self.finished_walks.push(FinishedWalk {
                 align_start,
                 deferred_count_before: defer_index,
@@ -726,7 +737,11 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle = self.turtles.last_mut().unwrap();
         
         match turtle.layout.flow {
-            Flow::Right if walk.width.is_fill() => {
+            Flow::Right => {
+                let Some(weight) = walk.width.fill() else {
+                    return None
+                };
+
                 let old_pos = turtle.pos();
 
                 let spacing = turtle.spacing_for_next_walk(self.finished_walks.len());
@@ -737,8 +752,8 @@ impl<'a,'b> Cx2d<'a,'b> {
                 turtle.allocate_size(outer_size);
                 turtle.move_right(outer_size.x);
 
-                let index = turtle.deferred_walk_count;
-                turtle.deferred_walk_count += 1;
+                let index = turtle.deferred_walk_count();
+                turtle.push_deferred_walk(weight);
 
                 Some(DeferredWalk::Unresolved{
                     index,
@@ -747,11 +762,11 @@ impl<'a,'b> Cx2d<'a,'b> {
                     other_axis: walk.height,
                 })
             },
-            Flow::RightWrap if walk.width.is_fill() => {
-                error!("flow: RightWrap does not support width: Fill");
-                None
-            },
-            Flow::Down if walk.height.is_fill() => {
+            Flow::Down => {
+                let Some(weight) = walk.height.fill() else {
+                    return None
+                };
+
                 let old_pos = turtle.pos();
 
                 let spacing = turtle.spacing_for_next_walk(self.finished_walks.len());
@@ -762,8 +777,8 @@ impl<'a,'b> Cx2d<'a,'b> {
                 turtle.allocate_size(outer_size);
                 turtle.move_down(outer_size.y);
 
-                let index = turtle.deferred_walk_count;
-                turtle.deferred_walk_count += 1;
+                let index = turtle.deferred_walk_count();
+                turtle.push_deferred_walk(weight);
 
                 Some(DeferredWalk::Unresolved {
                     index,
@@ -771,6 +786,10 @@ impl<'a,'b> Cx2d<'a,'b> {
                     other_axis: walk.width,
                     pos: old_pos + spacing
                 })
+            },
+            Flow::RightWrap if walk.width.is_fill() => {
+                error!("flow: RightWrap does not support width: Fill");
+                None
             },
             _ => None,
         }
@@ -802,7 +821,8 @@ impl<'a,'b> Cx2d<'a,'b> {
             layout,
             align_start: self.align_list.len() - 1,
             finished_walks_start: self.finished_walks.len(),
-            deferred_walk_count: 0,
+            deferred_walk_weights: Vec::new(),
+            deferred_walk_weight_sum: 0.0,
             pos: DVec2 {
                 x: layout.padding.left,
                 y: layout.padding.top
@@ -899,7 +919,8 @@ impl<'a,'b> Cx2d<'a,'b> {
             layout,
             align_start: self.align_list.len()-1,
             finished_walks_start: self.finished_walks.len(),
-            deferred_walk_count: 0,
+            deferred_walk_weights: Vec::new(),
+            deferred_walk_weight_sum: 0.0,
             wrap_spacing: 0.0,
             pos: DVec2 {
                 x: origin.x + layout.padding.left,
@@ -970,7 +991,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                 
         match turtle.layout.flow {
             Flow::Right => {
-                if turtle.deferred_walk_count > 0 {
+                if turtle.deferred_walk_count() > 0 {
                     let align_y = turtle.layout.align.y;
                     let padded_height_or_used = turtle.inner_effective_height();
                     for i in turtle_walks_start..self.finished_walks.len() {
@@ -1001,11 +1022,11 @@ impl<'a,'b> Cx2d<'a,'b> {
                 }
             },
             Flow::RightWrap=>{
-                if turtle.deferred_walk_count > 0{panic!()}
+                if turtle.deferred_walk_count() > 0{panic!()}
                 // for now we only support align:0,0
             }
             Flow::Down => {
-                if turtle.deferred_walk_count > 0 {
+                if turtle.deferred_walk_count() > 0 {
                     let padded_width_or_used = turtle.inner_effective_width();
                     let align_x = turtle.layout.align.x;
                     for i in turtle_walks_start..self.finished_walks.len() {
@@ -1102,7 +1123,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle = self.turtles.last().unwrap();
         self.finished_walks.push(FinishedWalk {
             align_start: self.align_list.len(),
-            deferred_count_before: turtle.deferred_walk_count,
+            deferred_count_before: turtle.deferred_walk_count(),
             outer_size: rect.size,
         });
     }
@@ -1678,8 +1699,16 @@ impl Size {
     
     pub fn is_fill(&self) -> bool {
         match self {
-            Self::Fill => true,
+            Self::Fill | Self::WeightedFill(_) => true,
             _ => false
+        }
+    }
+
+    pub fn fill(self) -> Option<f64> {
+        match self {
+            Self::Fill => Some(100.0),
+            Self::WeightedFill(weight) => Some(weight),
+            _ => None,
         }
     }
 }
