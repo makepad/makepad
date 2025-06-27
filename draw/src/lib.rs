@@ -25,7 +25,7 @@ pub use crate::{
         Flow,
         Size,
         TurtleAlignRange,
-        DeferWalk
+        DeferredWalk
     },
     overlay::Overlay,
     nav::{

@@ -175,7 +175,7 @@ pub struct View {
     #[rust]
     texture_cache: Option<ViewTextureCache>,
     #[rust]
-    defer_walks: SmallVec<[(LiveId, DeferWalk);1]>,
+    defer_walks: SmallVec<[(LiveId, DeferredWalk);1]>,
     #[rust]
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
@@ -859,7 +859,7 @@ impl Widget for View {
                         let walk = child.walk(cx);
                         if resume {
                             scope.with_id(*id, |scope| child.draw_walk(cx, scope, walk))?;
-                        } else if let Some(fw) = cx.defer_walk(walk) {
+                        } else if let Some(fw) = cx.defer_walk_turtle(walk) {
                             self.defer_walks.push((*id, fw));
                         } else {
                             self.draw_state.set(DrawState::Drawing(step, true));

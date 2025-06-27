@@ -91,14 +91,43 @@ pub enum Size {
 }
 
 #[derive(Clone, Debug)]
-pub enum DeferWalk{
-    Unresolved{
-        defer_index: usize,
+pub enum DeferredWalk {
+    Unresolved {
+        index: usize,
+        pos: DVec2,
         margin: Margin,
         other_axis: Size,
-        pos: DVec2
     },
     Resolved(Walk)
+}
+
+impl DeferredWalk {
+    pub fn resolve(&mut self, cx: &Cx2d) -> Walk {
+        match *self {
+            Self::Unresolved{index, pos, margin, other_axis}=>{
+                let turtle = cx.turtles.last().unwrap();
+
+                let walk = match turtle.layout.flow {
+                    Flow::Right => Walk {
+                        abs_pos: Some(pos + dvec2(turtle.deferred_width_up_to(index), 0.0)),
+                        margin,
+                        width: Size::Fixed(turtle.deferred_width_at(index)),
+                        height: other_axis
+                    },
+                    Flow::Down => Walk {
+                        abs_pos: Some(pos + dvec2(0.0, turtle.deferred_height_up_to(index))),
+                        margin: margin,
+                        height: Size::Fixed(turtle.deferred_height_at(index)),
+                        width: other_axis
+                    },
+                    _ => panic!()
+                };
+                *self = DeferredWalk::Resolved(walk);
+                walk
+            }
+            Self::Resolved(walk) => walk,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -142,7 +171,7 @@ pub struct Turtle {
     wrap_spacing: f64,
     align_start: usize,
     finished_walks_start: usize,
-    defer_count: usize,
+    deferred_walk_count: usize,
     shift: DVec2,
     pos: DVec2,
     origin: DVec2,
@@ -551,7 +580,7 @@ impl Turtle {
     /// 
     /// This is true if the turtle has any finished or deferred walks.
     fn has_previous_walk(&self, finished_walks_end: usize) -> bool {
-        self.finished_walks_start != finished_walks_end || self.defer_count > 0
+        self.finished_walks_start != finished_walks_end || self.deferred_walk_count > 0
     }
 
     /// Returns the spacing for the next walk.
@@ -568,6 +597,30 @@ impl Turtle {
         } else {
             dvec2(0.0, 0.0)
         }
+    }
+
+    fn deferred_width_at(&self, _index: usize) -> f64 {
+        self.inner_unused_width() / self.deferred_walk_count as f64
+    }
+
+    fn deferred_width_up_to(&self, end: usize) -> f64 {
+        let mut deferred_width = 0.0;
+        for index in 0..end {
+            deferred_width += self.deferred_width_at(index);
+        }
+        deferred_width
+    }
+
+    fn deferred_height_at(&self, _index: usize) -> f64 {
+        self.inner_unused_height() / self.deferred_walk_count as f64
+    }
+
+    fn deferred_height_up_to(&self, end: usize) -> f64 {
+        let mut deferred_height = 0.0;
+        for index in 0..end {
+            deferred_height += self.deferred_height_at(index);
+        }
+        deferred_height
     }
 }
 
@@ -590,10 +643,11 @@ impl<'a,'b> Cx2d<'a,'b> {
     fn walk_turtle_internal(&mut self, walk: Walk, align_start: usize) -> Rect {
         let turtle = self.turtles.last_mut().unwrap();
 
+        let old_pos = turtle.pos();
+        
         let size = turtle.eval_size(walk.width, walk.height, walk.margin);
         let outer_size = size + walk.margin.size();
         
-        let old_pos = turtle.pos();
         if let Some(pos) = walk.abs_pos {
             turtle.set_pos(pos);
 
@@ -649,7 +703,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                 Flow::Overlay => turtle.allocate_size(outer_size),
             };
             
-            let defer_index = self.turtle().defer_count;
+            let defer_index = self.turtle().deferred_walk_count;
             self.finished_walks.push(FinishedWalk {
                 align_start,
                 defer_index,
@@ -663,57 +717,67 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
     }
     
-    pub fn begin_turtle(&mut self, walk: Walk, layout: Layout) {
-        self.begin_turtle_with_guard(walk, layout, Area::Empty)
-    }
-    
-    pub fn defer_walk(&mut self, walk: Walk) -> Option<DeferWalk> {
-        if walk.abs_pos.is_some(){
+    /// Defers walking the turtle with the given `Walk`.
+    pub fn defer_walk_turtle(&mut self, walk: Walk) -> Option<DeferredWalk> {
+        if walk.abs_pos.is_some() {
             return None
         }
+        
         let turtle = self.turtles.last_mut().unwrap();
-        let defer_index = turtle.defer_count;
-        let pos = turtle.pos;
-        let size = dvec2(
-            turtle.eval_width(walk.width, walk.margin),
-            turtle.eval_height(walk.height, walk.margin),
-        );
-        let margin_size = walk.margin.size();
+        
         match turtle.layout.flow {
             Flow::Right if walk.width.is_fill() => {
+                let old_pos = turtle.pos();
+
                 let spacing = turtle.spacing_for_next_walk(self.finished_walks.len());
-                turtle.pos.x += margin_size.x + spacing.x;
-                turtle.allocate_width(0.0);
-                turtle.allocate_height(size.y + margin_size.y);
-                turtle.defer_count += 1;
-                Some(DeferWalk::Unresolved{
-                    defer_index,
+                let size = dvec2(0.0, turtle.eval_height(walk.height, walk.margin));
+                let outer_size = size + walk.margin.size();
+                
+                turtle.move_right(spacing.x);
+                turtle.allocate_size(outer_size);
+                turtle.move_right(outer_size.x);
+
+                let index = turtle.deferred_walk_count;
+                turtle.deferred_walk_count += 1;
+
+                Some(DeferredWalk::Unresolved{
+                    index,
+                    pos: old_pos + spacing,
                     margin: walk.margin,
                     other_axis: walk.height,
-                    pos: pos + spacing
-                })
-            },
-            Flow::Down if walk.height.is_fill() => {
-                let spacing = turtle.spacing_for_next_walk(self.finished_walks.len());
-                turtle.pos.y += margin_size.y + spacing.y;
-                turtle.allocate_width(size.x + margin_size.x);
-                turtle.allocate_height(0.0);
-                turtle.defer_count += 1;
-                Some(DeferWalk::Unresolved {
-                    defer_index,
-                    margin: walk.margin,
-                    other_axis: walk.width,
-                    pos: pos + spacing
                 })
             },
             Flow::RightWrap if walk.width.is_fill() => {
-                error!("flow RightWrap does not support fill childnodes");
+                error!("flow: RightWrap does not support width: Fill");
                 None
             },
-            _ => {
-                None
-            }
+            Flow::Down if walk.height.is_fill() => {
+                let old_pos = turtle.pos();
+
+                let spacing = turtle.spacing_for_next_walk(self.finished_walks.len());
+                let size = dvec2(turtle.eval_width(walk.width, walk.margin), 0.0);
+                let outer_size = size + walk.margin.size();
+
+                turtle.move_down(spacing.y);
+                turtle.allocate_size(outer_size);
+                turtle.move_down(outer_size.y);
+
+                let index = turtle.deferred_walk_count;
+                turtle.deferred_walk_count += 1;
+
+                Some(DeferredWalk::Unresolved {
+                    index,
+                    margin: walk.margin,
+                    other_axis: walk.width,
+                    pos: old_pos + spacing
+                })
+            },
+            _ => None,
         }
+    }
+    
+    pub fn begin_turtle(&mut self, walk: Walk, layout: Layout) {
+        self.begin_turtle_with_guard(walk, layout, Area::Empty)
     }
     
     pub fn begin_pass_sized_turtle_no_clip(&mut self, layout: Layout) {
@@ -738,7 +802,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             layout,
             align_start: self.align_list.len() - 1,
             finished_walks_start: self.finished_walks.len(),
-            defer_count: 0,
+            deferred_walk_count: 0,
             pos: DVec2 {
                 x: layout.padding.left,
                 y: layout.padding.top
@@ -835,7 +899,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             layout,
             align_start: self.align_list.len()-1,
             finished_walks_start: self.finished_walks.len(),
-            defer_count: 0,
+            deferred_walk_count: 0,
             wrap_spacing: 0.0,
             pos: DVec2 {
                 x: origin.x + layout.padding.left,
@@ -906,9 +970,9 @@ impl<'a,'b> Cx2d<'a,'b> {
                 
         match turtle.layout.flow {
             Flow::Right => {
-                if turtle.defer_count > 0 {
+                if turtle.deferred_walk_count > 0 {
                     let left = turtle.inner_unused_width();
-                    let part = left / turtle.defer_count as f64;
+                    let part = left / turtle.deferred_walk_count as f64;
                     let align_y = turtle.layout.align.y;
                     let padded_height_or_used = turtle.inner_effective_height();
                     for i in turtle_walks_start..self.finished_walks.len() {
@@ -938,13 +1002,13 @@ impl<'a,'b> Cx2d<'a,'b> {
                 }
             },
             Flow::RightWrap=>{
-                if turtle.defer_count > 0{panic!()}
+                if turtle.deferred_walk_count > 0{panic!()}
                 // for now we only support align:0,0
             }
             Flow::Down => {
-                if turtle.defer_count > 0 {
+                if turtle.deferred_walk_count > 0 {
                     let left = turtle.inner_unused_height();
-                    let part = left / turtle.defer_count as f64;
+                    let part = left / turtle.deferred_walk_count as f64;
                     let padded_width_or_used = turtle.inner_effective_width();
                     let align_x = turtle.layout.align.x;
                     for i in turtle_walks_start..self.finished_walks.len() {
@@ -1040,7 +1104,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle = self.turtles.last().unwrap();
         self.finished_walks.push(FinishedWalk {
             align_start: self.align_list.len(),
-            defer_index: turtle.defer_count,
+            defer_index: turtle.deferred_walk_count,
             outer_size: rect.size,
         });
     }
@@ -1298,47 +1362,6 @@ impl Turtle {
         }
         Some(self.eval_width(walk.height, walk.margin) as f64)
     }
-}
-
-impl DeferWalk {
-    
-    pub fn resolve(&mut self, cx: &Cx2d) -> Walk {
-        match self{
-            Self::Resolved(walk)=>{*walk},
-            Self::Unresolved{pos, defer_index, margin, other_axis}=>{
-                let turtle = cx.turtles.last().unwrap();
-                let walk = match turtle.layout.flow {
-                    Flow::Right => {
-                        let left = turtle.inner_unused_width();
-                        let part = left / turtle.defer_count as f64;
-                        Walk {
-                            abs_pos: Some(*pos + dvec2(part * *defer_index as f64, 0.)),
-                            margin: *margin,
-                            width: Size::Fixed(part),
-                            height: *other_axis
-                        }
-                    },
-                    Flow::RightWrap => {
-                        panic!()
-                    }
-                    Flow::Down => { 
-                        let left = turtle.inner_unused_height();
-                        let part = left / turtle.defer_count as f64;
-                        Walk {
-                            abs_pos: Some(*pos + dvec2(0., part * *defer_index as f64)),
-                            margin: *margin,
-                            height: Size::Fixed(part),
-                            width: *other_axis
-                        }
-                    }
-                    Flow::Overlay => panic!()
-                };
-                *self = DeferWalk::Resolved(walk);
-                walk
-            }
-        }
-    }
-    
 }
 
 impl Layout {
