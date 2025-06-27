@@ -143,7 +143,7 @@ pub enum AlignEntry{
 #[derive(Clone, Default, Debug)]
 pub struct FinishedWalk {
     align_start: usize,
-    defer_index: usize,
+    deferred_count_before: usize,
     outer_size: DVec2,
 }
 
@@ -664,7 +664,7 @@ impl<'a,'b> Cx2d<'a,'b> {
 
             self.finished_walks.push(FinishedWalk {
                 align_start,
-                defer_index: 0,
+                deferred_count_before: 0,
                 outer_size: size + walk.margin.size(),
             });
             
@@ -706,7 +706,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             let defer_index = self.turtle().deferred_walk_count;
             self.finished_walks.push(FinishedWalk {
                 align_start,
-                defer_index,
+                deferred_count_before: defer_index,
                 outer_size,
             });
 
@@ -932,7 +932,7 @@ impl<'a,'b> Cx2d<'a,'b> {
     }
     
     pub fn end_turtle_with_guard(&mut self, guard_area: Area) -> Rect {
-        let turtle = self.turtles.last().unwrap();
+        let mut turtle = self.turtles.last().unwrap();
         if guard_area != turtle.guard_area {
             panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard_area, guard_area)
         }
@@ -971,17 +971,16 @@ impl<'a,'b> Cx2d<'a,'b> {
         match turtle.layout.flow {
             Flow::Right => {
                 if turtle.deferred_walk_count > 0 {
-                    let left = turtle.inner_unused_width();
-                    let part = left / turtle.deferred_walk_count as f64;
                     let align_y = turtle.layout.align.y;
                     let padded_height_or_used = turtle.inner_effective_height();
                     for i in turtle_walks_start..self.finished_walks.len() {
                         let walk = &self.finished_walks[i];
-                        let shift_x = walk.defer_index as f64 * part;
+                        let shift_x = turtle.deferred_width_up_to(walk.deferred_count_before);
                         let shift_y = align_y * (padded_height_or_used - walk.outer_size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                        turtle = self.turtles.last_mut().unwrap();
                     }
                 }
                 else {
@@ -1007,17 +1006,16 @@ impl<'a,'b> Cx2d<'a,'b> {
             }
             Flow::Down => {
                 if turtle.deferred_walk_count > 0 {
-                    let left = turtle.inner_unused_height();
-                    let part = left / turtle.deferred_walk_count as f64;
                     let padded_width_or_used = turtle.inner_effective_width();
                     let align_x = turtle.layout.align.x;
                     for i in turtle_walks_start..self.finished_walks.len() {
                         let walk = &self.finished_walks[i];
                         let shift_x = align_x * (padded_width_or_used- walk.outer_size.x);
-                        let shift_y = walk.defer_index as f64 * part;
+                        let shift_y = turtle.deferred_height_up_to(walk.deferred_count_before);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+                        turtle = self.turtles.last_mut().unwrap();
                     }
                 }
                 else {
@@ -1104,7 +1102,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle = self.turtles.last().unwrap();
         self.finished_walks.push(FinishedWalk {
             align_start: self.align_list.len(),
-            defer_index: turtle.deferred_walk_count,
+            deferred_count_before: turtle.deferred_walk_count,
             outer_size: rect.size,
         });
     }
