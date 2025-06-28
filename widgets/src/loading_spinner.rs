@@ -12,11 +12,12 @@ live_design!{
         draw_bg: {
             color: #00000000
             
-            instance rotation_speed: 1.2
-            instance stroke_width: 6.0
-            instance radius: 30.0
-            instance max_gap_ratio: 0.92
-            instance min_gap_ratio: 0.12
+            uniform rotation_speed: 1.2
+            uniform stroke_width: 6.0
+            uniform radius: 30.0
+            uniform max_gap_ratio: 0.92
+            uniform min_gap_ratio: 0.12
+            uniform spinner_color: vec3(0.29, 0.56, 0.89)
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -47,9 +48,7 @@ live_design!{
                     self.stroke_width
                 );
                 
-                let spinner_color = vec3(0.29, 0.56, 0.89);
-                
-                return sdf.fill(vec4(spinner_color.x, spinner_color.y, spinner_color.z, 1.0));
+                return sdf.fill(vec4(self.spinner_color, 1.0));
             }
         }
     }
