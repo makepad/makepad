@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, widget::*,
+    makepad_derive_widget::*, makepad_draw::*, widget::*, WidgetMatchEvent, WindowAction
 };
 
 live_design! {
@@ -206,6 +206,7 @@ impl LiveHook for AdaptiveView {
 
 impl Widget for AdaptiveView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.widget_match_event(cx, event, scope);
         if let Some(active_widget) = self.active_widget.as_mut() {
             active_widget.widget_ref.handle_event(cx, event, scope);
         }
@@ -215,6 +216,7 @@ impl Widget for AdaptiveView {
         if self.should_reapply_selector {
             let parent_size = cx.peek_walk_turtle(walk).size;
             self.apply_selector(cx, &parent_size);
+            self.should_reapply_selector = false;
         }
 
         if let Some(active_widget) = self.active_widget.as_mut() {
@@ -222,6 +224,16 @@ impl Widget for AdaptiveView {
         }
 
         DrawStep::done()
+    }
+}
+
+impl WidgetMatchEvent for AdaptiveView {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope) {
+        for action in actions {
+            if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
+                self.should_reapply_selector = true;
+            }
+        }
     }
 }
 
