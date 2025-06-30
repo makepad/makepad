@@ -48,7 +48,7 @@ live_design!{
                     self.stroke_width
                 );
                 
-                return sdf.fill(vec4(self.spinner_color, 1.0));
+                return sdf.fill(self.spinner_color);
             }
         }
     }
