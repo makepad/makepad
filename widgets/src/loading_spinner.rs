@@ -17,7 +17,7 @@ live_design!{
             uniform radius: 30.0
             uniform max_gap_ratio: 0.92
             uniform min_gap_ratio: 0.12
-            uniform spinner_color: vec3(0.29, 0.56, 0.89)
+            uniform spinner_color: #4A8FE3
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
