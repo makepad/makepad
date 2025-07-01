@@ -103,6 +103,10 @@ pub struct AdaptiveView {
     /// setting up a custom selector, so we should create a default widget.
     #[rust]
     has_custom_templates: bool,
+
+    /// The most recent size of the parent.
+    #[rust]
+    parent_size: DVec2,
 }
 
 pub struct WidgetVariant {
@@ -213,9 +217,12 @@ impl Widget for AdaptiveView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if self.should_reapply_selector {
-            let parent_size = cx.peek_walk_turtle(walk).size;
-            self.apply_selector(cx, &parent_size);
+        let parent_size = cx.peek_walk_turtle(walk).size;
+        let parent_size_has_changed = parent_size != self.parent_size;
+
+        if parent_size_has_changed || self.should_reapply_selector {
+            self.parent_size = parent_size;
+            self.apply_selector(cx);
             self.should_reapply_selector = false;
         }
 
@@ -230,8 +237,10 @@ impl Widget for AdaptiveView {
 impl WidgetMatchEvent for AdaptiveView {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope) {
         for action in actions {
+            // Window geometry has changed, reapply the selector. 
+            // Will use the most recent parent size, might be updated on next draw call.
             if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
-                self.should_reapply_selector = true;
+                self.apply_selector(cx);
             }
         }
     }
@@ -239,12 +248,12 @@ impl WidgetMatchEvent for AdaptiveView {
 
 impl AdaptiveView {
     /// Apply the variant selector to determine which template to use.
-    fn apply_selector(&mut self, cx: &mut Cx, parent_size: &DVec2) {
+    fn apply_selector(&mut self, cx: &mut Cx) {
         let Some(variant_selector) = self.variant_selector.as_mut() else {
             return;
         };
 
-        let template_id = variant_selector(cx, parent_size);
+        let template_id = variant_selector(cx, &self.parent_size);
 
         // If the selector resulted in a widget that is already active, do nothing
         if let Some(active_widget) = self.active_widget.as_mut() {
