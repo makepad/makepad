@@ -6,6 +6,7 @@ live_design! {
     use link::shaders::*;
     
     pub ButtonBase = {{Button}} {}
+    
     pub Button = <ButtonBase> {
         text: "Button"
         width: Fit, height: Fit,
@@ -14,7 +15,7 @@ live_design! {
         padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
         margin: <THEME_MSPACE_V_1> {}
         label_walk: { width: Fit, height: Fit },
-        
+
         draw_text: {
             instance hover: 0.0,
             instance down: 0.0,
@@ -79,32 +80,40 @@ live_design! {
                 )
             }
         }
-        
+
         draw_bg: {
             instance hover: 0.0
+            instance focus: 0.0
             instance down: 0.0
             instance enabled: 1.0
-            instance disabled: 0.0
-            instance focus: 0.0
-
-            uniform color_dither: 1.0
+            instance disabled: 1.0
 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color: (THEME_COLOR_OUTSET)
-            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_down: (THEME_COLOR_OUTSET_DOWN)
-            uniform color_focus: (THEME_COLOR_OUTSET_FOCUS)
-            uniform color_disabled: (THEME_COLOR_OUTSET_DISABLED)
+            uniform color_dither: 1.0
+            uniform gradient_axis: "Vertical"
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
-            uniform border_color_1_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+            uniform color: (THEME_COLOR_OUTSET_1)
+            uniform color_hover: (THEME_COLOR_OUTSET_1_HOVER)
+            uniform color_down: (THEME_COLOR_OUTSET_1_DOWN)
+            uniform color_focus: (THEME_COLOR_OUTSET_1_FOCUS)
+            uniform color_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
+            uniform color_2_down: (THEME_COLOR_OUTSET_2_DOWN)
+            uniform color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
+            uniform color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
+
+            uniform border_color: (THEME_COLOR_BEVEL_OUTSET_1)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
+            uniform border_color_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            // uniform border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
             uniform border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
@@ -113,7 +122,35 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+                
+                let color_2 = self.color;
+                let color_2_hover = self.color_hover;
+                let color_2_down = self.color_down;
+                let color_2_focus = self.color_focus;
+                let color_2_disabled = self.color_disabled;
 
+                let border_color_2 = self.border_color;
+                let border_color_2_hover = self.border_color_hover;
+                let border_color_2_down = self.border_color_down;
+                let border_color_2_focus = self.border_color_focus;
+                let border_color_2_disabled = self.border_color_disabled;
+
+                if (self.color_2.x > -1.) {
+                    color_2 = self.color_2
+                    color_2_hover = self.color_2_hover
+                    color_2_down = self.color_2_down;
+                    color_2_focus = self.color_2_focus;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                if (self.border_color_2.x > -1.) {
+                    border_color_2 = self.border_color_2;
+                    border_color_2_hover = self.border_color_2_hover;
+                    border_color_2_down = self.border_color_2_down;
+                    border_color_2_focus = self.border_color_2_focus;
+                    border_color_2_disabled = self.border_color_2_disabled;
+                }
+                
                 let border_sz_uv = vec2(
                     self.border_size / self.rect_size.x,
                     self.border_size / self.rect_size.y
@@ -151,41 +188,45 @@ live_design! {
                     mix(
                         mix(
                             mix(
-                                mix(self.color, self.color_focus, self.focus),
-                                self.color_hover,
+                                mix(
+                                    mix(self.color, color_2, gradient_fill.x),
+                                    mix(self.color_focus, color_2_focus, gradient_fill.x),
+                                    self.focus
+                                ),
+                                mix(self.color_hover, color_2_hover, gradient_fill.x),
                                 self.hover
                             ),
-                            self.color_down,
+                            mix(self.color_down, color_2_down, gradient_fill.x),
                             self.down
                         ),
-                        self.color_disabled,
+                        mix(self.color_disabled, color_2_disabled, gradient_fill.x),
                         self.disabled
                     )
                 )
-                
+
                 sdf.stroke(
                     mix(
                         mix(
                             mix(
                                 mix(
-                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    mix(self.border_color, border_color_2, gradient_border.y),
+                                    mix(self.border_color_focus, border_color_2_focus, gradient_border.y),
                                     self.focus
                                 ),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
+                                mix(self.border_color_hover, border_color_2_hover, gradient_border.y),
                                 self.hover
                             ),
-                            mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
+                            mix(self.border_color_down, border_color_2_down, gradient_border.y),
                             self.down
-                        ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                        self.disabled
-                    ), self.border_size
+                            ),
+                            mix(self.border_color_disabled, border_color_2_disabled, gradient_border.y),
+                            self.disabled
+                        ), self.border_size
                 )
-                return sdf.result;
+                return sdf.result
             }
         }
-        
+    
         animator: {
             disabled = {
                 default: off,
@@ -275,24 +316,14 @@ live_design! {
             }
         }
     }
-    
+ 
     pub ButtonGradientX = <Button> {
         draw_bg: {
-            instance hover: 0.0
-            instance down: 0.0
-            instance enabled: 1.0
-            instance disabled: 1.0
-
-            border_size: (THEME_BEVELING)
-            border_radius: (THEME_CORNER_RADIUS)
-
-            color_dither: 1.0
-
-            uniform color_1: (THEME_COLOR_OUTSET_1)
-            uniform color_1_hover: (THEME_COLOR_OUTSET_1_HOVER)
-            uniform color_1_down: (THEME_COLOR_OUTSET_1_DOWN)
-            uniform color_1_focus: (THEME_COLOR_OUTSET_1_FOCUS)
-            uniform color_1_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
+            uniform color: (THEME_COLOR_OUTSET_1)
+            uniform color_hover: (THEME_COLOR_OUTSET_1_HOVER)
+            uniform color_down: (THEME_COLOR_OUTSET_1_DOWN)
+            uniform color_focus: (THEME_COLOR_OUTSET_1_FOCUS)
+            uniform color_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
 
             uniform color_2: (THEME_COLOR_OUTSET_2)
             uniform color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
@@ -300,181 +331,24 @@ live_design! {
             uniform color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
             uniform color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
 
-            border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
-            border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
-            border_color_1_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
-            border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
-            border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+            border_color: (THEME_COLOR_BEVEL_OUTSET_1)
+            border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
+            border_color_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
+            border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
+            border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
 
             border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
             border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
             border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
             border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
             border_color_2_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
-                    self.border_size / self.rect_size.y
-                )
-
-                let gradient_border = vec2(
-                    self.pos.x + dither,
-                    self.pos.y + dither
-                )
-
-                let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.
-                );
-
-                let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
-                    self.rect_size.y / sz_inner_px.y
-                );
-
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
-                )
-
-                sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
-                    self.border_radius
-                )
-
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, gradient_fill.x),
-                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
-                                    self.focus
-                                ),
-                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.x),
-                                self.hover
-                            ),
-                            mix(self.color_1_down, self.color_2_down, gradient_fill.x),
-                            self.down
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.x),
-                        self.disabled
-                    )
-                )
-
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                    self.focus
-                                ),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                self.hover
-                            ),
-                            mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
-                            self.down
-                            ),
-                            mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                            self.disabled
-                        ), self.border_size
-                )
-                return sdf.result
-            }
         }
     }
 
     pub ButtonGradientY = <ButtonGradientX> {
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
-                    self.border_size / self.rect_size.y
-                )
-
-                let gradient_border = vec2(
-                    self.pos.x + dither,
-                    self.pos.y + dither
-                )
-
-                let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.
-                );
-
-                let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
-                    self.rect_size.y / sz_inner_px.y
-                );
-
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
-                )
-
-                sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
-                    self.border_radius
-                )
-
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, gradient_fill.y),
-                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
-                                    self.focus
-                                ),
-                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
-                                self.hover
-                            ),
-                            mix(self.color_1_down, self.color_2_down, gradient_fill.y),
-                            self.down
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
-                        self.disabled
-                    )
-                )
-
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix((THEME_COLOR_BEVEL_OUTSET_1), self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                    self.focus
-                                ),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                self.hover
-                            ),
-                            mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
-                            self.down
-                        ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                        self.disabled
-                    ), self.border_size
-                )
-
-                return sdf.result
-            }
-        }
+       draw_bg: {
+            gradient_axis: "Horizontal"
+       } 
     }
 
     pub ButtonFlat = <Button> {
@@ -484,18 +358,11 @@ live_design! {
             color_down: (THEME_COLOR_OUTSET_DOWN)
             color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
-            border_color_1: (THEME_COLOR_BEVEL)
-            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_1_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_1_disabled: (THEME_COLOR_BEVEL_DISABLED)
-
-            border_color_2: (THEME_COLOR_BEVEL)
-            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_2_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_DISABLED)
-
+            border_color: (THEME_COLOR_BEVEL)
+            border_color_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_down: (THEME_COLOR_BEVEL_DOWN)
+            border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
+            border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
         }
         
     }
@@ -508,17 +375,11 @@ live_design! {
             color_down: (THEME_COLOR_U_HIDDEN)
             color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
-            border_color_1: (THEME_COLOR_U_HIDDEN)
-            border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_1_down: (THEME_COLOR_U_HIDDEN)
-            border_color_1_focus: (THEME_COLOR_U_HIDDEN)
-            border_color_1_disabled: (THEME_COLOR_U_HIDDEN)
-
-            border_color_2: (THEME_COLOR_U_HIDDEN)
-            border_color_2_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_2_down: (THEME_COLOR_U_HIDDEN)
-            border_color_2_focus: (THEME_COLOR_U_HIDDEN)
-            border_color_2_disabled: (THEME_COLOR_U_HIDDEN)
+            border_color: (THEME_COLOR_U_HIDDEN)
+            border_color_hover: (THEME_COLOR_U_HIDDEN)
+            border_color_down: (THEME_COLOR_U_HIDDEN)
+            border_color_focus: (THEME_COLOR_U_HIDDEN)
+            border_color_disabled: (THEME_COLOR_U_HIDDEN)
         }
     }
     
@@ -547,6 +408,288 @@ live_design! {
         spacing: 0.
         text: ""
     }
+
+    // pub ButtonLEGACY = <ButtonBase> {
+    //     text: "Button"
+    //     width: Fit, height: Fit,
+    //     spacing: (THEME_SPACE_2),
+    //     align: {x: 0.5, y: 0.5},
+    //     padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
+    //     margin: <THEME_MSPACE_V_1> {}
+    //     label_walk: { width: Fit, height: Fit },
+        
+    //     draw_text: {
+    //         instance hover: 0.0,
+    //         instance down: 0.0,
+    //         instance focus: 0.0,
+    //         instance disabled: 0.0
+
+    //         color: (THEME_COLOR_LABEL_INNER)
+    //         uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+    //         uniform color_down: (THEME_COLOR_LABEL_INNER_DOWN)
+    //         uniform color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+    //         uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+
+    //         text_style: <THEME_FONT_REGULAR> {
+    //             font_size: (THEME_FONT_SIZE_P)
+    //         }
+    //         fn get_color(self) -> vec4 {
+    //             return mix(
+    //                 mix(
+    //                     mix(
+    //                         mix(self.color, self.color_focus, self.focus),
+    //                         self.color_hover,
+    //                         self.hover
+    //                     ),
+    //                     self.color_down,
+    //                     self.down
+    //                 ),
+    //                 self.color_disabled,
+    //                 self.disabled
+    //             )
+    //         }
+    //     }
+        
+    //     icon_walk: {
+    //         width: (THEME_DATA_ICON_WIDTH), height: Fit,
+    //     }
+        
+    //     draw_icon: {
+    //         instance hover: 0.0
+    //         instance down: 0.0
+    //         instance focus: 0.0
+    //         instance disabled: 0.0
+
+    //         uniform color: (THEME_COLOR_LABEL_INNER)
+    //         uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+    //         uniform color_down: (THEME_COLOR_LABEL_INNER_DOWN)
+    //         uniform color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+    //         uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+
+    //         fn get_color(self) -> vec4 {
+    //             return mix(
+    //                 mix(
+    //                     mix(
+    //                         mix(self.color, self.color_focus, self.focus),
+    //                         self.color_hover,
+    //                         self.hover
+    //                     ),
+    //                     self.color_down,
+    //                     self.down
+    //                 ),
+    //                 self.color_disabled,
+    //                 self.disabled
+    //             )
+    //         }
+    //     }
+        
+    //     draw_bg: {
+    //         instance hover: 0.0
+    //         instance down: 0.0
+    //         instance enabled: 1.0
+    //         instance disabled: 0.0
+    //         instance focus: 0.0
+
+    //         uniform color_dither: 1.0
+
+    //         uniform border_size: (THEME_BEVELING)
+    //         uniform border_radius: (THEME_CORNER_RADIUS)
+
+    //         uniform color: (THEME_COLOR_OUTSET)
+    //         uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+    //         uniform color_down: (THEME_COLOR_OUTSET_DOWN)
+    //         uniform color_focus: (THEME_COLOR_OUTSET_FOCUS)
+    //         uniform color_disabled: (THEME_COLOR_OUTSET_DISABLED)
+
+    //         uniform border_color: (THEME_COLOR_BEVEL_OUTSET_1)
+    //         uniform border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
+    //         uniform border_color_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
+    //         uniform border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
+    //         uniform border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+
+    //         uniform border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
+    //         uniform border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
+    //         uniform border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
+    //         uniform border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
+    //         uniform border_color_2_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
+
+    //         fn pixel(self) -> vec4 {
+    //             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+    //             let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+    //             let color_2 = #f00;
+    //             let color_2_hover = #f00;
+    //             let color_2_down = #f00;
+    //             let color_2_focus = #f00;
+    //             let color_2_disabled = #f00;
+
+    //             let border_color_2 = #f00;
+    //             let border_color_2_hover = #f00;
+    //             let border_color_2_down = #f00;
+    //             let border_color_2_focus = #f00;
+    //             let border_color_2_disabled = #f00;
+
+    //             let border_sz_uv = vec2(
+    //                 self.border_size / self.rect_size.x,
+    //                 self.border_size / self.rect_size.y
+    //             )
+
+    //             let gradient_border = vec2(
+    //                 self.pos.x + dither,
+    //                 self.pos.y + dither
+    //             )
+
+    //             let sz_inner_px = vec2(
+    //                 self.rect_size.x - self.border_size * 2.,
+    //                 self.rect_size.y - self.border_size * 2.
+    //             );
+
+    //             let scale_factor_fill = vec2(
+    //                 self.rect_size.x / sz_inner_px.x,
+    //                 self.rect_size.y / sz_inner_px.y
+    //             );
+
+    //             let gradient_fill = vec2(
+    //                 self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
+    //                 self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+    //             )
+
+    //             sdf.box(
+    //                 self.border_size,
+    //                 self.border_size,
+    //                 self.rect_size.x - self.border_size * 2.,
+    //                 self.rect_size.y - self.border_size * 2.,
+    //                 self.border_radius
+    //             )
+
+    //             sdf.fill_keep(
+    //                 mix(
+    //                     mix(
+    //                         mix(
+    //                             mix(self.color, self.color_focus, self.focus),
+    //                             self.color_hover,
+    //                             self.hover
+    //                         ),
+    //                         self.color_down,
+    //                         self.down
+    //                     ),
+    //                     self.color_disabled,
+    //                     self.disabled
+    //                 )
+    //             )
+                
+    //             sdf.stroke(
+    //                 mix(
+    //                     mix(
+    //                         mix(
+    //                             mix(
+    //                                 mix(self.border_color, self.border_color_2, gradient_border.y),
+    //                                 mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
+    //                                 self.focus
+    //                             ),
+    //                             mix(self.border_color_hover, self.border_color_2_hover, gradient_border.y),
+    //                             self.hover
+    //                         ),
+    //                         mix(self.border_color_down, self.border_color_2_down, gradient_border.y),
+    //                         self.down
+    //                     ),
+    //                     mix(self.border_color_disabled, self.border_color_2_disabled, gradient_border.y),
+    //                     self.disabled
+    //                 ), self.border_size
+    //             )
+    //             return sdf.result;
+    //         }
+    //     }
+        
+    //     animator: {
+    //         disabled = {
+    //             default: off,
+    //             off = {
+    //                 from: {all: Forward {duration: 0.}}
+    //                 apply: {
+    //                     draw_bg: {disabled: 0.0}
+    //                     draw_text: {disabled: 0.0}
+    //                     draw_icon: {disabled: 0.0}
+    //                 }
+    //             }
+    //             on = {
+    //                 from: {all: Forward {duration: 0.2}}
+    //                 apply: {
+    //                     draw_bg: {disabled: 1.0}
+    //                     draw_text: {disabled: 1.0}
+    //                     draw_icon: {disabled: 1.0}
+    //                 }
+    //             }
+    //         }
+    //         time = {
+    //             default: off,
+    //             off = {
+    //                 from: {all: Forward {duration: 0.}}
+    //                 apply: {
+    //                     //draw_bg: {anim_time: 0.0}
+    //                 }
+    //             }
+    //             on = {
+    //                 from: {all: Loop {duration: 1.0, end:1000000000.0}}
+    //                 apply: {
+    //                     draw_bg: {anim_time: [{time: 0.0, value: 0.0},{time:1.0, value:1.0}]}
+    //                 }
+    //             }
+    //         }
+    //         hover = {
+    //             default: off,
+    //             off = {
+    //                 from: {all: Forward {duration: 0.1}}
+    //                 apply: {
+    //                     draw_bg: {down: 0.0, hover: 0.0}
+    //                     draw_icon: {down: 0.0, hover: 0.0}
+    //                     draw_text: {down: 0.0, hover: 0.0}
+    //                 }
+    //             }
+                
+    //             on = {
+    //                 from: {
+    //                     all: Forward {duration: 0.1}
+    //                     down: Forward {duration: 0.01}
+    //                 }
+    //                 apply: {
+    //                     draw_bg: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+    //                     draw_icon: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+    //                     draw_text: {down: 0.0, hover: [{time: 0.0, value: 1.0}],}
+    //                 }
+    //             }
+                
+    //             down = {
+    //                 from: {all: Forward {duration: 0.2}}
+    //                 apply: {
+    //                     draw_bg: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+    //                     draw_icon: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+    //                     draw_text: {down: [{time: 0.0, value: 1.0}], hover: 1.0,}
+    //                 }
+    //             }
+    //         }
+    //         focus = {
+    //             default: off
+    //             off = {
+    //                 from: {all: Forward {duration: 0.2}}
+    //                 apply: {
+    //                     draw_bg: {focus: 0.0}
+    //                     draw_icon: {focus: 0.0}
+    //                     draw_text: {focus: 0.0}
+    //                 }
+    //             }
+    //             on = {
+    //                 cursor: Arrow,
+    //                 from: {all: Forward {duration: 0.0}}
+    //                 apply: {
+    //                     draw_bg: {focus: 1.0}
+    //                     draw_icon: {focus: 1.0}
+    //                     draw_text: {focus: 1.0}
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
     
 }
 
