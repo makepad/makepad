@@ -15,6 +15,23 @@ live_design!{
         demos = {
             <H4> { text: "Standard"}
             <UIZooRowH> {
+                <Button> {}
+                <Button> {
+                    draw_bg: {
+                        let color_2 = #f00;
+                        let color_2_hover = #f00;
+                        let color_2_down = #f00;
+                        let color_2_focus = #f00;
+                        let color_2_disabled = #f00;
+
+                        let border_color_2 = #f00;
+                        let border_color_2_hover = #f00;
+                        let border_color_2_down = #f00;
+                        let border_color_2_focus = #f00;
+                        let border_color_2_disabled = #f00;
+                    }
+                }
+
                 basicbutton = <Button> { }
 
                 iconbutton = <Button> {
@@ -60,17 +77,17 @@ live_design!{
                         border_radius: 1.0,
                         border_radius: 4.0
 
-                        color_1: #C00
-                        color_1_hover: #F0F
-                        color_1_down: #800
+                        color: #C00
+                        color_hover: #F0F
+                        color_down: #800
 
                         color_2: #0CC
                         color_2_hover: #0FF
                         color_2_down: #088
 
-                        border_color_1: #C
-                        border_color_1_hover: #F
-                        border_color_1_down: #0
+                        border_color: #C
+                        border_color_hover: #F
+                        border_color_down: #0
 
                         border_color_2: #3
                         border_color_2_hover: #6
@@ -103,17 +120,17 @@ live_design!{
                         border_radius: 1.0,
                         border_radius: 4.0
 
-                        color_1: #C00
-                        color_1_hover: #F0F
-                        color_1_down: #800
+                        color: #C00
+                        color_hover: #F0F
+                        color_down: #800
 
                         color_2: #0CC
                         color_2_hover: #0FF
                         color_2_down: #088
 
-                        border_color_1: #C
-                        border_color_1_hover: #F
-                        border_color_1_down: #0
+                        border_color: #C
+                        border_color_hover: #F
+                        border_color_down: #0
 
                         border_color_2: #3
                         border_color_2_hover: #6
@@ -238,11 +255,11 @@ live_design!{
                         color_focus: (THEME_COLOR_OUTSET_FOCUS)
                         color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
-                        border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
-                        border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
-                        border_color_1_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
-                        border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
-                        border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+                        border_color: (THEME_COLOR_BEVEL_OUTSET_1)
+                        border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
+                        border_color_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
+                        border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
+                        border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
 
                         border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
                         border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
