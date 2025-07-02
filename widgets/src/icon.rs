@@ -19,36 +19,59 @@ live_design! {
         
         draw_bg: {
             uniform color: #0000,
+            uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
+            uniform bg_gradient_vertical: 0.0; 
+
             fn pixel(self) -> vec4 {
-                return self.color;
+                let color_2 = self.color_2;
+
+                let gradient_bg_dir = self.pos.y;
+                if (self.bg_gradient_vertical > 0.5) {
+                    gradient_bg_dir = self.pos.x;
+                }
+
+                if (self.color_2.x < -0.5) {
+                    color_2 = self.color;
+                }
+
+                return mix(self.color, color_2, gradient_bg_dir)
             }
         }
 
         draw_icon: {
             uniform color: #f00
+            uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
+            uniform bg_gradient_vertical: 0.0; 
+
             fn get_color(self) -> vec4 {
-                return self.color
+                let color_2 = self.color_2;
+
+                let gradient_bg_dir = self.pos.y;
+                if (self.bg_gradient_vertical > 0.5) {
+                    gradient_bg_dir = self.pos.x;
+                }
+
+                if (self.color_2.x < -0.5) {
+                    color_2 = self.color;
+                }
+
+                return mix(self.color, color_2, gradient_bg_dir)
             }
         }
     }
 
     pub IconGradientX = <Icon> {
         draw_icon: {
-            uniform color_1: (#f00)
+            uniform color: (#f00)
             uniform color_2: (#00f)
-            fn get_color(self) -> vec4 {
-                return mix(self.color_1, self.color_2, self.pos.x);
-            }
+            uniform bg_gradient_vertical: 1.0; 
         }
     }
 
-    pub IconGradientY = <IconGradientX> {
+    pub IconGradientY = <Icon> {
         draw_icon: {
-            color_1: (#f00)
+            color: (#f00)
             color_2: (#00f)
-            fn get_color(self) -> vec4 {
-                return mix(self.color_1, self.color_2, self.pos.y);
-            }
         }
     }
 
