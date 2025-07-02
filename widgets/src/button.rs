@@ -93,7 +93,7 @@ live_design! {
 
             uniform color_dither: 1.0
             uniform border_gradient_vertical: 0.0; 
-            uniform bg_gradient_vertical: 0.0; 
+            uniform bg_gradient_horizontal: 0.0; 
 
             uniform color: (THEME_COLOR_OUTSET_1)
             uniform color_hover: (THEME_COLOR_OUTSET_1_HOVER)
@@ -183,7 +183,7 @@ live_design! {
                 )
 
                 let gradient_bg_dir = gradient_fill.y;
-                if (self.bg_gradient_vertical > 0.5) {
+                if (self.bg_gradient_horizontal > 0.5) {
                     gradient_bg_dir = gradient_fill.x;
                 }
 
@@ -358,7 +358,7 @@ live_design! {
 
     pub ButtonGradientY = <ButtonGradientX> {
        draw_bg: {
-            bg_gradient_vertical: 1.0
+            bg_gradient_horizontal: 1.0
        } 
     }
 
