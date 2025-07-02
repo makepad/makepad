@@ -136,7 +136,7 @@ live_design! {
                 let border_color_2_focus = self.border_color_focus;
                 let border_color_2_disabled = self.border_color_disabled;
 
-                if (self.color_2.x > -1.) {
+                if (self.color_2.x > -0.5) {
                     color_2 = self.color_2
                     color_2_hover = self.color_2_hover
                     color_2_down = self.color_2_down;
@@ -144,7 +144,7 @@ live_design! {
                     color_2_disabled = self.color_2_disabled;
                 }
 
-                if (self.border_color_2.x > -1.) {
+                if (self.border_color_2.x > -0.5) {
                     border_color_2 = self.border_color_2;
                     border_color_2_hover = self.border_color_2_hover;
                     border_color_2_down = self.border_color_2_down;
