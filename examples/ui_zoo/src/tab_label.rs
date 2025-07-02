@@ -21,8 +21,8 @@ live_design!{
             <LabelGradientX> { text: "<LabelGradientY>" }
             <LabelGradientX> {
                 draw_text: {
-                    color_1: #0ff
-                    color_1: #088
+                    color: #0ff
+                    color: #088
                     text_style: {
                         font_size: 20,
                     }
@@ -36,8 +36,8 @@ live_design!{
             <LabelGradientY> { text: "<LabelGradientY>" }
             <LabelGradientY> {
                 draw_text: {
-                    color_1: #0ff
-                    color_1: #088
+                    color: #0ff
+                    color: #088
                     text_style: {
                         font_size: 20,
                     }
