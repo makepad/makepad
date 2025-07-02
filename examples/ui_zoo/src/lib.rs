@@ -27,6 +27,7 @@ pub mod tab_rotatedimage;
 pub mod tab_scrollbar;
 pub mod tab_slider;
 pub mod tab_slidesview;
+pub mod tab_spinner;
 pub mod tab_textinput;
 pub mod tab_view;
 pub mod tab_widgetsoverview;
