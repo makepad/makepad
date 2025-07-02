@@ -14,8 +14,26 @@ live_design!{
     pub Label = <LabelBase> {
         width: Fit, height: Fit,
         padding: <THEME_MSPACE_1> {}
+
         draw_text: {
             color: (THEME_COLOR_LABEL_OUTER),
+            uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
+            uniform bg_gradient_vertical: 0.0
+
+            fn get_color(self) ->vec4{
+                let color_2 = self.color_2;
+
+                let gradient_bg_dir = self.pos.y;
+                if (self.bg_gradient_vertical > 0.5) {
+                    gradient_bg_dir = self.pos.x;
+                }
+
+                if (self.color_2.x < -0.5) {
+                    color_2 = self.color;
+                }
+
+                return mix(self.color, color_2, gradient_bg_dir)
+            }
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_WDGT_LINE_SPACING),
             },
@@ -34,20 +52,16 @@ live_design!{
     pub LabelGradientX = <Label> {
         width: Fit, height: Fit,
         draw_text: {
-            uniform color_1: #f00,
-            uniform color_2: #ff0
-
-            fn get_color(self) ->vec4{
-                return mix(self.color_1, self.color_2, self.pos.y)
-            }
+            color: #f00,
+            color_2: #ff0
+            bg_gradient_vertical: 1.0
         }
     }
     
-    pub LabelGradientY = <LabelGradientX> {
+    pub LabelGradientY = <Label> {
         draw_text: {
-            fn get_color(self) ->vec4{
-                return mix(self.color_1, self.color_2, self.pos.x)
-            }
+            color: #f00,
+            color_2: #ff0
         }
     }
     
@@ -55,11 +69,11 @@ live_design!{
         width: Fill, height: Fit,
         padding: { left: 0., right: 0., top: (THEME_SPACE_1), bottom: 0. }
         draw_text: {
+            color: (THEME_COLOR_TEXT)
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_LONGFORM_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_P)
             }
-            color: (THEME_COLOR_TEXT)
         }
         text: "TextBox"
     }
@@ -69,11 +83,11 @@ live_design!{
         padding: 0.
         draw_text: {
             wrap: Word
+            color: (THEME_COLOR_TEXT_HL)
             text_style: <THEME_FONT_BOLD> {
                 line_spacing: (THEME_FONT_HL_LINE_SPACING),
                 font_size: (THEME_FONT_SIZE_1)
             }
-            color: (THEME_COLOR_TEXT_HL)
         }
         text: "H1"
     }
