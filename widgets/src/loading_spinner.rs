@@ -3,6 +3,7 @@ use crate::makepad_draw::*;
 live_design!{
     link widgets;
     use makepad_draw::shader::std::*;
+    use link::theme::*;
     use link::widgets::View;
 
     pub LoadingSpinner = <View> {
@@ -10,18 +11,25 @@ live_design!{
         height: Fill
         show_bg: true,
         draw_bg: {
-            color: #00000000
+            color: (THEME_COLOR_MAKEPAD)
             
             uniform rotation_speed: 1.2
-            uniform stroke_width: 6.0
-            uniform radius: 30.0
+            uniform border_size: 20.0
+            uniform radius: -1.
             uniform max_gap_ratio: 0.92
             uniform min_gap_ratio: 0.12
-            uniform spinner_color: #4A8FE3
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                
+
+                let sz_factor = min(self.rect_size.x * 0.5, self.rect_size.y * 0.5);
+
+                let border_sz = self.border_size * sz_factor * 0.004;
+                let sz = self.radius;
+                if (sz < -0.5) {
+                    sz = sz_factor - self.border_size * 0.5;
+                }
+
                 let center = self.rect_size * 0.5;
                 
                 let rotation = self.time * self.rotation_speed * 2.0 * PI;
@@ -42,13 +50,13 @@ live_design!{
                 sdf.arc_round_caps(
                     center.x, 
                     center.y, 
-                    self.radius, 
+                    sz,
                     start_angle, 
                     start_angle + 2.0 * PI - gap_radians, 
-                    self.stroke_width
+                    border_sz
                 );
                 
-                return sdf.fill(self.spinner_color);
+                return sdf.fill(self.color);
             }
         }
     }
