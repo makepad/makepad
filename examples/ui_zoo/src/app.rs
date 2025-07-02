@@ -14,6 +14,7 @@
         // use crate::tab_desktopbutton::*;
         use crate::tab_dropdown::*;
         use crate::tab_filetree::*;
+        use crate::tab_spinner::*;
         // use crate::tab_foldbutton::*;
         use crate::tab_html::*;
         use crate::tab_icon::*;
@@ -91,6 +92,7 @@
                                 // tDesktopButton,
                                 tDropDown,
                                 tFiletree,
+                                tSpinner,
                                 // tFoldButton,
                                 tHTML,
                                 tIcon,
@@ -123,6 +125,7 @@
                         // tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
                         tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
+                        tSpinner = Tab { name: "Spinner", template: PermanentTab, kind: TabSpinner }
                         // tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
                         tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
                         tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
@@ -151,6 +154,7 @@
                         // TabDesktopButton = <UIZooTab> { <DemoDesktopButton> {} }
                         TabDropDown = <UIZooTab> { <DemoDropdown> {} }
                         TabFiletree = <UIZooTab> { <DemoFT> {} }
+                        TabSpinner = <UIZooTab> { <DemoSpinner> {} }
                         // TabFoldButton = <UIZooTab> { <DemoFoldButton> {} }
                         TabHTML = <UIZooTab> { <DemoHtml> {} }
                         TabIcon = <UIZooTab> { <DemoIcon> {} }
@@ -301,6 +305,7 @@ impl LiveRegister for App {
             // crate::tab_desktopbutton::live_design(cx);
             crate::tab_dropdown::live_design(cx);
             crate::tab_filetree::live_design(cx);
+            crate::tab_spinner::live_design(cx);
             // crate::tab_foldbutton::live_design(cx);
             crate::tab_html::live_design(cx);
             crate::tab_icon::live_design(cx);
