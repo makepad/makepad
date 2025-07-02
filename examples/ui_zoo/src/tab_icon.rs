@@ -42,9 +42,12 @@ live_design!{
                     margin: 10.
                 }
 
-                draw_bg: { color: #0 }
-                draw_icon: { color: #f0f }
-                draw_icon: { svg_file: dep("crate://self/resources/Icon_Favorite.svg") }
+                draw_bg: { color: #f00 }
+                draw_icon: {
+                    svg_file: dep("crate://self/resources/Icon_Favorite.svg")
+                    color: #f0f
+                    color_2: #ff0
+                }
             }
         }
     }
