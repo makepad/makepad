@@ -20,13 +20,13 @@ live_design! {
         draw_bg: {
             uniform color: #0000,
             uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
-            uniform bg_gradient_vertical: 0.0; 
+            uniform bg_gradient_horizontal: 0.0; 
 
             fn pixel(self) -> vec4 {
                 let color_2 = self.color_2;
 
                 let gradient_bg_dir = self.pos.y;
-                if (self.bg_gradient_vertical > 0.5) {
+                if (self.bg_gradient_horizontal > 0.5) {
                     gradient_bg_dir = self.pos.x;
                 }
 
@@ -41,13 +41,13 @@ live_design! {
         draw_icon: {
             uniform color: #f00
             uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
-            uniform bg_gradient_vertical: 0.0; 
+            uniform bg_gradient_horizontal: 0.0; 
 
             fn get_color(self) -> vec4 {
                 let color_2 = self.color_2;
 
                 let gradient_bg_dir = self.pos.y;
-                if (self.bg_gradient_vertical > 0.5) {
+                if (self.bg_gradient_horizontal > 0.5) {
                     gradient_bg_dir = self.pos.x;
                 }
 
@@ -64,7 +64,7 @@ live_design! {
         draw_icon: {
             uniform color: (#f00)
             uniform color_2: (#00f)
-            uniform bg_gradient_vertical: 1.0; 
+            uniform bg_gradient_horizontal: 1.0; 
         }
     }
 
