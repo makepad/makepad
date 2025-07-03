@@ -22,12 +22,12 @@ live_design!{
                         draw_text:{text_style:{font_size:18}}
                     }
                     <Button> {
-                        width: WeightedFill(200.0),
+                        width: Fill { weight: 200.0, max: 100.0 }
                         text: "BBB"
                         draw_text:{text_style:{font_size:18}}
                     }
                     <Button> {
-                        width: Fill,
+                        width: Fill { weight: 100.0 },
                         text: "CCC"
                         draw_text:{text_style:{font_size:18}}
                     }
