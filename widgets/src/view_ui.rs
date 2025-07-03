@@ -712,14 +712,25 @@ live_design! {
     pub GradientXView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
+            uniform bg_gradient_horizontal: 1.0
+
             color: #00f
-            uniform color_2: #f00
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform color_dither: 1.0
 
             fn get_color(self) -> vec4 {
-                
+                let color_2 = self.color;
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2;
+                }
+
+                let gradient_bg_dir = self.pos.y;
+                if (self.bg_gradient_horizontal > 0.5) {
+                    gradient_bg_dir = self.pos.x;
+                }
+
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                return mix(self.color, self.color_2, self.pos.x + dither)
+                return mix(self.color, color_2, gradient_bg_dir + dither)
             }
                             
             fn pixel(self) -> vec4 {
@@ -728,21 +739,14 @@ live_design! {
         }
     }
                 
-    pub GradientYView = <ViewBase> {
+    pub GradientYView = <GradientXView> {
         show_bg: true, 
         draw_bg: {
-            color: #00f
-            uniform color_2: #f00
-            uniform color_dither: 1.0
+            uniform bg_gradient_horizontal: 0.0
 
-            fn get_color(self) -> vec4 {
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                return mix(self.color, self.color_2, self.pos.y + dither)
-            }
-                            
-            fn pixel(self) -> vec4 {
-                return Pal::premul(self.get_color())
-            }
+            color: #00f
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_dither: 1.0
         }
     }
                 
