@@ -85,9 +85,13 @@ pub enum Flow {
 #[derive(Copy, Clone, Debug, Live)]
 #[live_ignore]
 pub enum Size {
-    #[pick] Fill,
-    #[live(100.0)] WeightedFill(f64),
-    #[live(200.0)] Fixed(f64),
+    #[pick {
+        weight: 100.0
+    }] Fill {
+        weight: f64,
+    },
+    #[live(200.0)]
+    Fixed(f64),
     Fit,
 }
 
@@ -517,7 +521,7 @@ impl Turtle {
 
     pub fn eval_width(&self, width: Size, margin: Margin) -> f64 {
         match width {
-            Size::Fill | Size::WeightedFill(_) => {
+            Size::Fill { .. } => {
                 let outer_width = match self.layout.flow {
                     Flow::Right => self.inner_unused_width(),
                     Flow::RightWrap => self.inner_unused_width_current_row(),
@@ -532,7 +536,7 @@ impl Turtle {
     
     pub fn eval_height(&self, height: Size, margin: Margin) -> f64 {
         match height {
-            Size::Fill | Size::WeightedFill(_) => {
+            Size::Fill { .. } => {
                 let outer_height = match self.layout.flow {
                     Flow::RightWrap | Flow::Right | Flow::Overlay => self.inner_effective_height(),
                     Flow::Down => self.inner_unused_height()
@@ -768,7 +772,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         
         match turtle.layout.flow {
             Flow::Right => {
-                let Some(weight) = walk.width.fill() else {
+                let Size::Fill { weight } = walk.width else {
                     return None
                 };
 
@@ -793,7 +797,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                 })
             },
             Flow::Down => {
-                let Some(weight) = walk.height.fill() else {
+                let Size::Fill { weight } = walk.height else {
                     return None
                 };
 
@@ -1550,8 +1554,8 @@ impl Walk {
         Self {
             abs_pos: None,
             margin: Margin::default(),
-            width: Size::Fill,
-            height: Size::Fill,
+            width: Size::fill(),
+            height: Size::fill(),
         }
     }
     
@@ -1559,7 +1563,7 @@ impl Walk {
         Self {
             abs_pos: None,
             margin: Margin::default(),
-            width: Size::Fill,
+            width: Size::fill(),
             height: Size::Fit,
         }
     }
@@ -1676,6 +1680,10 @@ impl LiveHook for Size {
                 }
                 Some(nodes.skip_node(index))
             }
+            LiveValue::BareEnum(live_id!(Fill))=>{
+                *self = Self::fill();
+                Some(index + 1)
+            }
             LiveValue::Expr {..} => {
                 panic!("Expr node found whilst deserialising DSL")
             },
@@ -1698,11 +1706,17 @@ impl LiveHook for Size {
 
 impl Default for Size {
     fn default() -> Self {
-        Size::Fill
+        Size::fill()
     }
 }
 
 impl Size {
+    pub fn fill() -> Self {
+        Self::Fill {
+            weight: 100.0
+        }
+    }
+
     pub fn fixed_or_zero(&self) -> f64 {
         match self {
             Self::Fixed(v) => *v,
@@ -1733,16 +1747,8 @@ impl Size {
     
     pub fn is_fill(&self) -> bool {
         match self {
-            Self::Fill | Self::WeightedFill(_) => true,
+            Self::Fill { .. } => true,
             _ => false
-        }
-    }
-
-    pub fn fill(self) -> Option<f64> {
-        match self {
-            Self::Fill => Some(100.0),
-            Self::WeightedFill(weight) => Some(weight),
-            _ => None,
         }
     }
 }
