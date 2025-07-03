@@ -19,7 +19,7 @@ live_design! {
 
         show_bg: true, 
         draw_bg: {
-            uniform color_1: (THEME_COLOR_BEVEL_OUTSET_2)
+            color: (THEME_COLOR_BEVEL_OUTSET_2)
             uniform color_2: (THEME_COLOR_BEVEL_OUTSET_1)
             uniform border_size: (THEME_BEVELING)
 
@@ -34,7 +34,7 @@ live_design! {
                     sz + 1.
                 )
 
-                sdf.fill(self.color_1);
+                sdf.fill(self.color);
 
                 sdf.rect(
                     0,
@@ -55,7 +55,7 @@ live_design! {
 
         show_bg: true, 
         draw_bg: {
-            uniform color_1: (THEME_COLOR_BEVEL_OUTSET_2)
+            color: (THEME_COLOR_BEVEL_OUTSET_2)
             uniform color_2: (THEME_COLOR_BEVEL_OUTSET_1)
             uniform border_size: (THEME_BEVELING)
 
@@ -70,7 +70,7 @@ live_design! {
                     self.rect_size.y
                 )
 
-                sdf.fill(self.color_1);
+                sdf.fill(self.color);
 
                 sdf.rect(
                     self.rect_size.x * 0.5 + sz,
@@ -86,7 +86,6 @@ live_design! {
         }
     }
     
-    // Spacer = <View> { width: Fill, height: Fill }
     pub Filler = <View> { width: Fill, height: Fill }
     
     pub SolidView = <ViewBase> {
@@ -101,40 +100,50 @@ live_design! {
             }
         }
     }
-    /*
-    Debug = <View> {show_bg: true, draw_bg: {
-        color: #f00
-        fn pixel(self) -> vec4 {
-            return self.color
-        }
-    }}*/
-        
+
     pub RectView = <ViewBase> {
         show_bg: true, 
+
         draw_bg: {
             uniform border_size: 0.0
-            uniform border_color: #0000
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
-                        
-            fn get_color(self) -> vec4 {
-                return self.color
-            }
-                        
-            fn get_border_color(self) -> vec4 {
-                return self.border_color
-            }
+            uniform bg_gradient_horizontal: 0.0
+            uniform border_gradient_horizontal: 0.0
+
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+
+            uniform border_color: #0000
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
                         
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let color_2 = self.color_2;
+                let border_color_2 = self.border_color_2;
+
+                let gradient_bg_dir = self.pos.y;
+                if (self.bg_gradient_horizontal > 0.5) {
+                    gradient_bg_dir = self.pos.x;
+                }
+
+                let gradient_border_dir = self.pos.y;
+                if (self.border_gradient_horizontal > 0.5) {
+                    gradient_border_dir = self.pos.x;
+                }
+
                 sdf.rect(
                     self.border_inset.x + self.border_size,
                     self.border_inset.y + self.border_size,
                     self.rect_size.x - (self.border_inset.x + self.border_inset.z + self.border_size * 2.0),
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0)
                 )
-                sdf.fill_keep(self.get_color())
+
+                sdf.fill_keep(mix(self.color, color_2, gradient_bg_dir))
+
                 if self.border_size > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_size)
+                    sdf.stroke(
+                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        self.border_size
+                    )
                 }
                 return sdf.result
             }
@@ -503,14 +512,14 @@ live_design! {
     pub GradientXView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            uniform color_1: #00f
+            color: #00f
             uniform color_2: #f00
             uniform color_dither: 1.0
 
             fn get_color(self) -> vec4 {
                 
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                return mix(self.color_1, self.color_2, self.pos.x + dither)
+                return mix(self.color, self.color_2, self.pos.x + dither)
             }
                             
             fn pixel(self) -> vec4 {
@@ -522,13 +531,13 @@ live_design! {
     pub GradientYView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            uniform color_1: #00f
+            color: #00f
             uniform color_2: #f00
             uniform color_dither: 1.0
 
             fn get_color(self) -> vec4 {
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                return mix(self.color_1, self.color_2, self.pos.y + dither)
+                return mix(self.color, self.color_2, self.pos.y + dither)
             }
                             
             fn pixel(self) -> vec4 {
