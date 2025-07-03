@@ -73,7 +73,7 @@ live_design!{
 
             uniform border_size: 1.
             uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform border_gradient_vertical: 0.0; 
+            uniform border_gradient_horizontal: 0.0; 
             uniform bg_gradient_horizontal: 0.0; 
             uniform color_dither: 1.
 
@@ -133,7 +133,7 @@ live_design!{
                 )
 
                 let gradient_border_dir = gradient_border.y;
-                if (self.border_gradient_vertical > 0.5) {
+                if (self.border_gradient_horizontal > 0.5) {
                     gradient_border_dir = gradient_border.x;
                 }
 
@@ -266,7 +266,7 @@ live_design!{
         draw_bg: {
             border_size: 1.
             border_radius: (THEME_CORNER_RADIUS)
-            border_gradient_vertical: 0.0; 
+            border_gradient_horizontal: 0.0; 
             bg_gradient_horizontal: 1.0; 
             color_dither: 1.
         }
