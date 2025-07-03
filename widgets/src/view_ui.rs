@@ -128,14 +128,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
-                let gradient_border_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x;
                 }
 
                 sdf.rect(
@@ -145,11 +145,11 @@ live_design! {
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0)
                 )
 
-                sdf.fill_keep(mix(self.color, color_2, gradient_bg_dir))
+                sdf.fill_keep(mix(self.color, color_2, bg_gradient_dir))
 
                 if self.border_size > 0.0 {
                     sdf.stroke(
-                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        mix(self.border_color, border_color_2, border_gradient_dir),
                         self.border_size
                     )
                 }
@@ -207,14 +207,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let gradient_border_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
                 sdf.rect(
@@ -230,10 +230,10 @@ live_design! {
                     sdf.clear(self.shadow_color*v)
                 }
                                                                 
-                sdf.fill_keep(mix(self.color, color_2, gradient_bg_dir));
+                sdf.fill_keep(mix(self.color, color_2, bg_gradient_dir));
                 if self.border_size > 0.0 {
                     sdf.stroke(
-                        mix(self.border_color, border_color_2, gradient_border_dir), self.border_size)
+                        mix(self.border_color, border_color_2, border_gradient_dir), self.border_size)
                 }
                 return sdf.result
             }
@@ -294,14 +294,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let gradient_border_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
                 sdf.box(
@@ -318,11 +318,11 @@ live_design! {
                     sdf.clear(self.shadow_color*v)
                 }
                                                                     
-                sdf.fill_keep(mix(self.color, color_2, gradient_bg_dir))
+                sdf.fill_keep(mix(self.color, color_2, bg_gradient_dir))
 
                 if self.border_size > 0.0 {
                     sdf.stroke(
-                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        mix(self.border_color, border_color_2, border_gradient_dir),
                         self.border_size)
                 }
                 return sdf.result
@@ -355,14 +355,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let gradient_border_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
                 sdf.box(
@@ -373,11 +373,11 @@ live_design! {
                     max(1.0, self.border_radius)
                 )
                 sdf.fill_keep(
-                    mix( self.color, color_2, gradient_bg_dir)
+                    mix( self.color, color_2, bg_gradient_dir)
                 )
                 if self.border_size > 0.0 {
                     sdf.stroke(
-                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        mix(self.border_color, border_color_2, border_gradient_dir),
                         self.border_size
                     )
                 }
@@ -412,14 +412,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let gradient_border_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
                 sdf.box_x(
@@ -431,11 +431,11 @@ live_design! {
                     self.border_radius.y
                 )
                 sdf.fill_keep(
-                    mix( self.color, color_2, gradient_bg_dir)
+                    mix( self.color, color_2, bg_gradient_dir)
                 )
                 if self.border_size > 0.0 {
                     sdf.stroke(
-                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        mix(self.border_color, border_color_2, border_gradient_dir),
                         self.border_size
                     )
                 }
@@ -471,14 +471,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let gradient_border_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
                 sdf.box_y(
@@ -491,12 +491,12 @@ live_design! {
                 )
 
                 sdf.fill_keep(
-                    mix(self.color, color_2, gradient_bg_dir)
+                    mix(self.color, color_2, bg_gradient_dir)
                 )
 
                 if self.border_size > 0.0 {
                     sdf.stroke(
-                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        mix(self.border_color, border_color_2, border_gradient_dir),
                         self.border_size
                     )
                 }
@@ -532,14 +532,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let gradient_border_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
                             
                 sdf.box_all(
@@ -554,12 +554,12 @@ live_design! {
                 )
 
                 sdf.fill_keep(
-                    mix(self.color, color_2, gradient_bg_dir)
+                    mix(self.color, color_2, bg_gradient_dir)
                 )
 
                 if self.border_size > 0.0 {
                     sdf.stroke(
-                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        mix(self.border_color, border_color_2, border_gradient_dir),
                         self.border_size
                     )
                 }
@@ -594,14 +594,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let gradient_border_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
                             
                 if self.border_radius > 0.0 {
@@ -623,12 +623,12 @@ live_design! {
                 }
 
                 sdf.fill_keep(
-                    mix(self.color, color_2, gradient_bg_dir)
+                    mix(self.color, color_2, bg_gradient_dir)
                 )
 
                 if self.border_size > 0.0 {
                     sdf.stroke(
-                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        mix(self.border_color, border_color_2, border_gradient_dir),
                         self.border_size
                     )
                 }
@@ -665,14 +665,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let gradient_border_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    gradient_border_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
                 if self.border_radius.x > 0.0 {
@@ -694,12 +694,12 @@ live_design! {
                 }
 
                 sdf.fill_keep(
-                    mix(self.color, color_2, gradient_bg_dir)
+                    mix(self.color, color_2, bg_gradient_dir)
                 )
 
                 if self.border_size > 0.0 {
                     sdf.stroke(
-                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        mix(self.border_color, border_color_2, border_gradient_dir),
                         self.border_size
                     )
                 }
@@ -724,13 +724,13 @@ live_design! {
                     color_2 = self.color_2;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                return mix(self.color, color_2, gradient_bg_dir + dither)
+                return mix(self.color, color_2, bg_gradient_dir + dither)
             }
                             
             fn pixel(self) -> vec4 {
