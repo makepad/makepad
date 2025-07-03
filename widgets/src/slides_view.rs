@@ -24,7 +24,8 @@ live_design!{
         padding: 50.
         draw_bg: {
             color: (THEME_COLOR_INSET_1),
-            border_radius: (THEME_CONTAINER_CORNER_RADIUS)
+            color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            border_radius: (THEME_CONTAINER_CORNER_RADIUS)    
         }
         title = <H1> {
             text: "SlideTitle",
@@ -42,6 +43,7 @@ live_design!{
         padding: 50,
         draw_bg: {
             color: (THEME_COLOR_MAKEPAD),
+            color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             border_radius: (THEME_CONTAINER_CORNER_RADIUS)
         }
         title = <H1> {
