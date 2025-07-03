@@ -223,8 +223,8 @@ impl Widget for SlidesView {
             cx.begin_turtle(Walk {
                 abs_pos: None,
                 margin: Default::default(),
-                width: Size::Fill,
-                height: Size::Fill
+                width: Size::fill(),
+                height: Size::fill()
             }, Layout::flow_down().with_scroll(
                 dvec2(rect.size.x * self.current_slide.fract(), 0.0)
             ));
@@ -245,8 +245,8 @@ impl Widget for SlidesView {
             cx.begin_turtle(Walk {
                 abs_pos: None,
                 margin: Default::default(),
-                width: Size::Fill,
-                height: Size::Fill
+                width: Size::fill(),
+                height: Size::fill()
             }, Layout::flow_down().with_scroll(
                 dvec2(-rect.size.x * (1.0-self.current_slide.fract()), 0.0)
             ));
