@@ -266,23 +266,13 @@ live_design!{
         draw_bg: {
             border_size: 1.
             border_radius: (THEME_CORNER_RADIUS)
+            border_gradient_vertical: 0.0; 
+            bg_gradient_horizontal: 1.0; 
             color_dither: 1.
+        }
 
-            uniform color: (THEME_COLOR_D_HIDDEN)
-            uniform color_hover: (THEME_COLOR_OUTSET_1_HOVER)
-            uniform color_active: (THEME_COLOR_BG_APP)
-
-            uniform color_2: (THEME_COLOR_D_HIDDEN)
-            uniform color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
-            uniform color_2_active: (THEME_COLOR_BG_APP)
-
-            border_color: (THEME_COLOR_U_HIDDEN)
-            border_color_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_active: (THEME_COLOR_BEVEL_OUTSET_1)
-
-            border_color_2: (THEME_COLOR_D_HIDDEN)
-            border_color_2_hover: (THEME_COLOR_D_HIDDEN)
-            border_color_2_active: (THEME_COLOR_D_HIDDEN)
+        draw_text: {
+            bg_gradient_horizontal: 1.0
         }
     }
 
@@ -291,22 +281,10 @@ live_design!{
             border_size: (THEME_BEVELING)
             border_radius: (THEME_CORNER_RADIUS)
             color_dither: 1.
+        }
 
-            color: (THEME_COLOR_D_HIDDEN)
-            color_hover: (THEME_COLOR_U_HIDDEN)
-            color_active: (THEME_COLOR_BG_APP)
-
-            color_2: (THEME_COLOR_D_HIDDEN)
-            color_2_hover: (THEME_COLOR_U_HIDDEN)
-            color_2_active: (THEME_COLOR_BG_APP)
-
-            border_color: (THEME_COLOR_U_HIDDEN)
-            border_color_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_active: (THEME_COLOR_BEVEL_OUTSET_1)
-
-            border_color_2: (THEME_COLOR_D_HIDDEN)
-            border_color_2_hover: (THEME_COLOR_D_HIDDEN)
-            border_color_2_active: (THEME_COLOR_D_HIDDEN)
+        draw_text: {
+            bg_gradient_horizontal: 1.0
         }
     }
     
