@@ -25,16 +25,16 @@ live_design! {
             fn pixel(self) -> vec4 {
                 let color_2 = self.color_2;
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
                 if (self.color_2.x < -0.5) {
                     color_2 = self.color;
                 }
 
-                return mix(self.color, color_2, gradient_bg_dir)
+                return mix(self.color, color_2, bg_gradient_dir)
             }
         }
 
@@ -46,16 +46,16 @@ live_design! {
             fn get_color(self) -> vec4 {
                 let color_2 = self.color_2;
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
                 if (self.color_2.x < -0.5) {
                     color_2 = self.color;
                 }
 
-                return mix(self.color, color_2, gradient_bg_dir)
+                return mix(self.color, color_2, bg_gradient_dir)
             }
         }
     }
