@@ -50,18 +50,18 @@ live_design!{
                     color_2_active = self.color_2_active;
                 }
 
-                let gradient_bg_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x;
                 }
 
                 return mix(
                     mix(
-                        mix(self.color, color_2, gradient_bg_dir),
-                        mix(self.color_active, color_2_active, gradient_bg_dir),
+                        mix(self.color, color_2, bg_gradient_dir),
+                        mix(self.color_active, color_2_active, bg_gradient_dir),
                         self.active
                     ),
-                    mix(self.color_hover, color_2_hover, gradient_bg_dir),
+                    mix(self.color_hover, color_2_hover, bg_gradient_dir),
                     self.hover
                 )
             }
@@ -132,9 +132,9 @@ live_design!{
                     self.pos.y * scale_factor_border.y + dither
                 )
 
-                let gradient_border_dir = gradient_border.y;
+                let border_gradient_dir = gradient_border.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    gradient_border_dir = gradient_border.x;
+                    border_gradient_dir = gradient_border.x;
                 }
 
                 let sz_inner_px = vec2(
@@ -152,9 +152,9 @@ live_design!{
                     self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
 
-                let gradient_bg_dir = gradient_fill.y;
+                let bg_gradient_dir = gradient_fill.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    gradient_bg_dir = gradient_fill.x;
+                    bg_gradient_dir = gradient_fill.x;
                 }
 
                 sdf.box_y(
@@ -168,11 +168,11 @@ live_design!{
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(self.color, color_2, gradient_bg_dir),
-                            mix(self.color_hover, color_2_hover, gradient_bg_dir),
+                            mix(self.color, color_2, bg_gradient_dir),
+                            mix(self.color_hover, color_2_hover, bg_gradient_dir),
                             self.hover
                         ),
-                        mix(self.color_active, color_2_active, gradient_bg_dir),
+                        mix(self.color_active, color_2_active, bg_gradient_dir),
                         self.active
                     )
                 )
@@ -180,11 +180,11 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color, border_color_2, gradient_border_dir),
-                            mix(self.border_color_hover, border_color_2_hover, gradient_border_dir),
+                            mix(self.border_color, border_color_2, border_gradient_dir),
+                            mix(self.border_color_hover, border_color_2_hover, border_gradient_dir),
                             self.hover
                         ),
-                        mix(self.border_color_active, border_color_2_active, gradient_border_dir),
+                        mix(self.border_color_active, border_color_2_active, border_gradient_dir),
                         self.active
                     ), self.border_size
                 )
