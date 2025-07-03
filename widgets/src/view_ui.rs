@@ -213,7 +213,7 @@ live_design! {
                 }
 
                 let gradient_bg_dir = self.pos.y;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.bg_gradient_horizontal > 0.5) {
                     gradient_bg_dir = self.pos.x;
                 }
 
@@ -300,7 +300,7 @@ live_design! {
                 }
 
                 let gradient_bg_dir = self.pos.y;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.bg_gradient_horizontal > 0.5) {
                     gradient_bg_dir = self.pos.x;
                 }
 
@@ -333,21 +333,38 @@ live_design! {
     pub RoundedView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
+            uniform border_gradient_horizontal: 0.0; 
+            uniform bg_gradient_horizontal: 0.0; 
+
             uniform border_size: 0.0
             uniform border_radius: 2.5
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color: #0000
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
-                                
-            fn get_color(self) -> vec4 {
-                return self.color
-            }
-                                
-            fn get_border_color(self) -> vec4 {
-                return self.border_color
-            }
                                 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let color_2 = self.color;
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2;
+                }
+
+                let border_color_2 = self.border_color;
+                if (self.border_color_2.x > -0.5) {
+                    border_color_2 = self.border_color_2;
+                }
+
+                let gradient_border_dir = self.pos.y;
+                if (self.border_gradient_horizontal > 0.5) {
+                    gradient_border_dir = self.pos.x;
+                }
+
+                let gradient_bg_dir = self.pos.y;
+                if (self.bg_gradient_horizontal > 0.5) {
+                    gradient_bg_dir = self.pos.x;
+                }
+
                 sdf.box(
                     self.border_inset.x + self.border_size,
                     self.border_inset.y + self.border_size,
@@ -355,9 +372,14 @@ live_design! {
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0),
                     max(1.0, self.border_radius)
                 )
-                sdf.fill_keep(self.get_color())
+                sdf.fill_keep(
+                    mix( self.color, color_2, gradient_bg_dir)
+                )
                 if self.border_size > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_size)
+                    sdf.stroke(
+                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        self.border_size
+                    )
                 }
                 return sdf.result;
             }
@@ -367,21 +389,38 @@ live_design! {
     pub RoundedXView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
+            uniform border_gradient_horizontal: 0.0; 
+            uniform bg_gradient_horizontal: 0.0; 
+
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+
             uniform border_size: 0.0
             uniform border_color: #0000
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
             uniform border_radius: vec2(2.5, 2.5)
                             
-            fn get_color(self) -> vec4 {
-                return self.color
-            }
-                            
-            fn get_border_color(self) -> vec4 {
-                return self.border_color
-            }
-                            
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let color_2 = self.color;
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2;
+                }
+
+                let border_color_2 = self.border_color;
+                if (self.border_color_2.x > -0.5) {
+                    border_color_2 = self.border_color_2;
+                }
+
+                let gradient_border_dir = self.pos.y;
+                if (self.border_gradient_horizontal > 0.5) {
+                    gradient_border_dir = self.pos.x;
+                }
+
+                let gradient_bg_dir = self.pos.y;
+                if (self.bg_gradient_horizontal > 0.5) {
+                    gradient_bg_dir = self.pos.x;
+                }
                 sdf.box_x(
                     self.border_inset.x + self.border_size,
                     self.border_inset.y + self.border_size,
@@ -390,9 +429,14 @@ live_design! {
                     self.border_radius.x,
                     self.border_radius.y
                 )
-                sdf.fill_keep(self.get_color())
+                sdf.fill_keep(
+                    mix( self.color, color_2, gradient_bg_dir)
+                )
                 if self.border_size > 0.0 {
-                    sdf.stroke(self.get_border_color(), self.border_size)
+                    sdf.stroke(
+                        mix(self.border_color, border_color_2, gradient_border_dir),
+                        self.border_size
+                    )
                 }
                 return sdf.result;
             }
