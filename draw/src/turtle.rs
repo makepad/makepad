@@ -87,6 +87,7 @@ pub enum Flow {
 pub enum Size {
     #[pick] Fill,
     #[live(200.0)] Fixed(f64),
+    #[live(1.0)] Ratio(f64),
     Fit,
     All
 }
@@ -952,6 +953,23 @@ impl Turtle {
         return match width {
             Size::Fit => std::f64::NAN,
             Size::Fixed(v) => max_zero_keep_nan(v),
+            Size::Ratio(s)=>{
+                match flow {
+                    Flow::RightWrap=> {
+                        max_zero_keep_nan(s*(self.width - (self.pos.x - self.origin.x) - margin.width() -self.layout.padding.right))
+                    }
+                    Flow::Right => {
+                        max_zero_keep_nan(s*(self.width_left() - margin.width()))
+                    },
+                    Flow::Down | Flow::Overlay => {
+                        let r = max_zero_keep_nan(s*(self.width - self.layout.padding.width() - margin.width()));
+                        if r.is_nan() {
+                            return max_zero_keep_nan(s*(self.width_used - margin.width() - self.layout.padding.right))
+                        }
+                        return r
+                    }
+                }
+            }
             Size::Fill => {
                 match flow {
                     Flow::RightWrap=> {
@@ -977,6 +995,20 @@ impl Turtle {
         return match height {
             Size::Fit => std::f64::NAN,
             Size::Fixed(v) => max_zero_keep_nan(v),
+            Size::Ratio(s)=>{
+                match flow {
+                    Flow::RightWrap | Flow::Right | Flow::Overlay => {
+                        let r = max_zero_keep_nan(s*(self.height - self.layout.padding.height() - margin.height()));
+                        if r.is_nan() {
+                            return max_zero_keep_nan(s*(self.height_used - margin.height() - self.layout.padding.bottom))
+                        }
+                        return r
+                    }
+                    Flow::Down => {
+                        max_zero_keep_nan(s*(self.height_left() - margin.height()))
+                    }
+                }
+            }
             Size::Fill => {
                 match flow {
                     Flow::RightWrap | Flow::Right | Flow::Overlay => {
@@ -1406,6 +1438,27 @@ impl Size {
     pub fn is_fixed(&self) -> bool {
         match self {
             Self::Fixed(_) => true,
+            _ => false
+        }
+    }
+
+    pub fn scale_or_zero(&self) -> f64 {
+        match self {
+            Self::Ratio(s) => *s,
+            _ => 0.
+        }
+    }
+    
+    pub fn scale_or_nan(&self) -> f64 {
+        match self {
+            Self::Ratio(s) => max_zero_keep_nan(*s),
+            _ => std::f64::NAN,
+        }
+    }
+
+    pub fn is_scale(&self) -> bool {
+        match self {
+            Self::Ratio(_) => true,
             _ => false
         }
     }
