@@ -953,18 +953,18 @@ impl Turtle {
         return match width {
             Size::Fit => std::f64::NAN,
             Size::Fixed(v) => max_zero_keep_nan(v),
-            Size::Ratio(s)=>{
+            Size::Ratio(r)=>{
                 match flow {
                     Flow::RightWrap=> {
-                        max_zero_keep_nan(s*(self.width - (self.pos.x - self.origin.x) - margin.width() -self.layout.padding.right))
+                        max_zero_keep_nan(r*(self.width - (self.pos.x - self.origin.x) - margin.width() -self.layout.padding.right))
                     }
                     Flow::Right => {
-                        max_zero_keep_nan(s*(self.width_left() - margin.width()))
+                        max_zero_keep_nan(r*(self.width_left() - margin.width()))
                     },
                     Flow::Down | Flow::Overlay => {
-                        let r = max_zero_keep_nan(s*(self.width - self.layout.padding.width() - margin.width()));
+                        let r = max_zero_keep_nan(r*(self.width - self.layout.padding.width() - margin.width()));
                         if r.is_nan() {
-                            return max_zero_keep_nan(s*(self.width_used - margin.width() - self.layout.padding.right))
+                            return max_zero_keep_nan(r*(self.width_used - margin.width() - self.layout.padding.right))
                         }
                         return r
                     }
@@ -995,17 +995,17 @@ impl Turtle {
         return match height {
             Size::Fit => std::f64::NAN,
             Size::Fixed(v) => max_zero_keep_nan(v),
-            Size::Ratio(s)=>{
+            Size::Ratio(r)=>{
                 match flow {
                     Flow::RightWrap | Flow::Right | Flow::Overlay => {
-                        let r = max_zero_keep_nan(s*(self.height - self.layout.padding.height() - margin.height()));
+                        let r = max_zero_keep_nan(r*(self.height - self.layout.padding.height() - margin.height()));
                         if r.is_nan() {
-                            return max_zero_keep_nan(s*(self.height_used - margin.height() - self.layout.padding.bottom))
+                            return max_zero_keep_nan(r*(self.height_used - margin.height() - self.layout.padding.bottom))
                         }
                         return r
                     }
                     Flow::Down => {
-                        max_zero_keep_nan(s*(self.height_left() - margin.height()))
+                        max_zero_keep_nan(r*(self.height_left() - margin.height()))
                     }
                 }
             }
