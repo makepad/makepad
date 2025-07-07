@@ -340,7 +340,7 @@ impl TabBar {
             );
         }
         self.tabs.retain_visible();
-        self.draw_fill.draw_walk(cx, Walk::size(Size::fill(), Size::fill()));
+        self.draw_fill.draw_walk(cx, Walk::new(Size::fill(), Size::fill()));
         self.scroll_bars.end(cx);
     }
     

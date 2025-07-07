@@ -389,7 +389,7 @@ impl DesignerOutlineTreeNode {
         self.draw_text.scale = scale as f32;
                         
         
-        self.draw_bg.begin(cx, Walk::size(Size::fill(), Size::Fixed(scale * node_height)), self.layout);
+        self.draw_bg.begin(cx, Walk::new(Size::fill(), Size::Fixed(scale * node_height)), self.layout);
                 
         cx.walk_turtle(self.indent_walk(depth));
         if draw_open_button{
@@ -512,7 +512,7 @@ impl DesignerOutlineTree {
         while walk < height_left {
             self.count += 1;
             self.filler.is_even = Self::is_even_as_f32(self.count);
-            self.filler.draw_walk(cx, Walk::size(Size::fill(), Size::Fixed(self.node_height.min(height_left - walk))));
+            self.filler.draw_walk(cx, Walk::new(Size::fill(), Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
         
@@ -535,7 +535,7 @@ impl DesignerOutlineTree {
     pub fn should_node_draw(&mut self, node_id: LiveId, cx: &mut Cx2d) -> bool {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
-        let walk = Walk::size(Size::fill(), Size::Fixed(height));
+        let walk = Walk::new(Size::fill(), Size::Fixed(height));
         if scale > 0.01 && cx.walk_turtle_would_be_visible(walk) {
             if let Some(view_id) = &self.scroll_into_view_id{
                 if *view_id == node_id{
