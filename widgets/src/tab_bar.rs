@@ -31,11 +31,39 @@ live_design!{
         draw_fill: {
             uniform color_dither: 1.0
             uniform border_radius: (THEME_CORNER_RADIUS)
-            color: (THEME_COLOR_BG_APP * 0.9);
+            uniform border_size: (THEME_BEVELING)
+            uniform bg_gradient_horizontal: 0.0
+            uniform border_gradient_horizontal: 0.0
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform border_color: #fff0
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+                let color_2 = self.color;
+                let border_color_2 = self.border_color;
+                let border_gradient_squeeze = 17.5
+                let bg_gradient_squeeze = 80.
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2;
+                }
+
+                if (self.border_color_2.x > -0.5) {
+                    border_color_2 = self.border_color_2;
+                }
+
+                let border_gradient_dir = pow(self.pos.y, border_gradient_squeeze) + dither;
+                if (self.border_gradient_horizontal > 0.5) {
+                    border_gradient_dir = pow(self.pos.x, border_gradient_squeeze) + dither;
+                }
+
+                let bg_gradient_dir = pow(self.pos.y, bg_gradient_squeeze) + dither;
+                if (self.bg_gradient_horizontal > 0.5) {
+                    bg_gradient_dir = pow(self.pos.x, bg_gradient_squeeze) + dither;
+                }
 
                 sdf.box_all(
                     1.,
@@ -48,29 +76,64 @@ live_design!{
                     0.5
                 )
 
-                sdf.fill(self.color);
+                sdf.fill(mix(self.color, color_2, bg_gradient_squeeze));
+                sdf.stroke(mix(self.border_color, border_color_2, border_gradient_squeeze), self.border_size);
+
                 return sdf.result
             }
         }
         
         draw_bg: {
             uniform color_dither: 1.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            color: (THEME_COLOR_BG_APP * 0.9);
+            uniform border_radius: 0.
+            uniform border_size: (THEME_BEVELING)
+            color: (THEME_COLOR_BG_APP * 0.875);
+            uniform bg_gradient_horizontal: 0.0
+            uniform border_gradient_horizontal: 0.0
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform border_color: #fff0
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                sdf.box(
+                let border_gradient_squeeze = 17.5
+                let bg_gradient_squeeze = 17.5
+                let bg_gradient_squeeze = 80.
+                let color_2 = (THEME_COLOR_BEVEL_OUTSET_1);
+                let border_color_2 = self.border_color;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2;
+                }
+
+                if (self.border_color_2.x > -0.5) {
+                    border_color_2 = self.border_color_2;
+                }
+
+                let border_gradient_dir = pow(self.pos.y, border_gradient_squeeze) + dither;
+                if (self.border_gradient_horizontal > 0.5) {
+                    border_gradient_dir = pow(self.pos.x, border_gradient_squeeze) + dither;
+                }
+
+                let bg_gradient_dir = pow(self.pos.y, bg_gradient_squeeze) + dither;
+                if (self.bg_gradient_horizontal > 0.5) {
+                    bg_gradient_dir = pow(self.pos.x, bg_gradient_squeeze) + dither;
+                }
+
+                sdf.rect(
                     1.,
                     1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    self.border_radius
+                    self.rect_size.x - 1.5,
+                    self.rect_size.y - 1.5
                 )
 
-                sdf.fill(self.color);
+                sdf.fill_keep(mix(self.color, color_2, bg_gradient_dir));
+
+                sdf.stroke(
+                    mix(self.border_color, border_color_2, border_gradient_dir), self.border_size
+                )
                 return sdf.result
             }
         }
@@ -101,27 +164,12 @@ live_design!{
         PermanentTab = <TabGradientX> {closeable: false}
 
         draw_bg: {
-            uniform color_dither: 1.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform color_1: (THEME_COLOR_BG_APP * 0.8);
-            uniform color_2: (THEME_COLOR_BG_APP * 1.2);
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    self.border_radius
-                )
-
-                sdf.fill(mix(self.color_1, self.color_2, self.pos.x + dither));
-
-                return sdf.result
-            }
+            bg_gradient_horizontal: 1.0
+            border_gradient_horizontal: 1.0
+            color_dither: 1.0
+            border_radius: (THEME_CORNER_RADIUS)
+            color: (THEME_COLOR_BG_APP * 0.8)
+            color_2: (THEME_COLOR_BG_APP * 1.2)
         }
     }
 
@@ -129,56 +177,20 @@ live_design!{
         CloseableTab = <TabGradientY> {closeable: true}
         PermanentTab = <TabGradientY> {closeable: false}
         draw_bg: {
-            uniform color_dither: 1.0
-            uniform border_radius: 0.
-            uniform border_size: (THEME_BEVELING)
-            uniform color_1: (THEME_COLOR_BG_APP * 0.875);
-            uniform color_2: (THEME_COLOR_SHADOW);
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                sdf.rect(
-                    1.,
-                    1.,
-                    self.rect_size.x - 1.5,
-                    self.rect_size.y - 1.5
-                )
-
-                sdf.fill_keep(mix(self.color_1, self.color_2, pow(self.pos.y, 17.5) + dither));
-
-                sdf.stroke(
-                    mix(#fff0, (THEME_COLOR_BEVEL_OUTSET_1), pow(self.pos.y, 80.)), self.border_size
-                )
-                return sdf.result
-            }
+            bg_gradient_horizontal: 0.0
+            border_gradient_horizontal: 0.0
+            color_dither: 1.0
+            border_radius: 0.
+            border_size: (THEME_BEVELING)
+            color: (THEME_COLOR_BG_APP * 0.875)
+            color_2: (THEME_COLOR_SHADOW)
         }
 
         draw_fill: {
-            uniform color_dither: 1.0
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform color_1: (THEME_COLOR_BG_APP * 0.9);
-            uniform color_2: #282828;
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                sdf.box_all(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.,
-                    self.rect_size.y - 2.,
-                    0.5,
-                    self.border_radius,
-                    0.0,
-                    0.5
-                )
-
-                sdf.fill(mix(self.color_1, self.color_2, pow(self.pos.y, 7.5) + dither));
-                return sdf.result
-            }
+            color_dither: 1.0
+            border_radius: (THEME_CORNER_RADIUS)
+            color: (THEME_COLOR_BG_APP * 0.9);
+            color_2: #282828;
         }
     }
 
