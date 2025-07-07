@@ -71,6 +71,8 @@ live_design!{
             instance hover: float
             instance active: float
 
+            uniform overlap_fix: 2.0,
+
             uniform border_size: 1.
             uniform border_radius: (THEME_CORNER_RADIUS)
             uniform border_gradient_horizontal: 0.0; 
@@ -158,7 +160,7 @@ live_design!{
                 }
 
                 sdf.box_y(
-                    self.border_size,
+                    self.border_size + self.overlap_fix,
                     self.border_size,
                     self.rect_size.x - self.border_size * 2.,
                     self.rect_size.y,
