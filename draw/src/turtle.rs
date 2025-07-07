@@ -1442,21 +1442,21 @@ impl Size {
         }
     }
 
-    pub fn scale_or_zero(&self) -> f64 {
+    pub fn ratio_or_zero(&self) -> f64 {
         match self {
             Self::Ratio(v) => *v,
             _ => 0.
         }
     }
     
-    pub fn scale_or_nan(&self) -> f64 {
+    pub fn ratio_or_nan(&self) -> f64 {
         match self {
             Self::Ratio(v) => max_zero_keep_nan(*v),
             _ => std::f64::NAN,
         }
     }
 
-    pub fn is_scale(&self) -> bool {
+    pub fn is_ratio(&self) -> bool {
         match self {
             Self::Ratio(_) => true,
             _ => false
