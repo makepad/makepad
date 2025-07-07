@@ -556,6 +556,7 @@ live_design! {
             color_2_empty: (THEME_COLOR_INSET_2_EMPTY)
             color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
 
+            border_color: (THEME_COLOR_BEVEL_INSET_2)
             border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
             border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
             border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
