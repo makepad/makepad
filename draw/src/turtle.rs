@@ -953,23 +953,7 @@ impl Turtle {
         return match width {
             Size::Fit => std::f64::NAN,
             Size::Fixed(v) => max_zero_keep_nan(v),
-            Size::Ratio(v)=>{
-                match flow {
-                    Flow::RightWrap=> {
-                        max_zero_keep_nan(v*(self.width - (self.pos.x - self.origin.x) - margin.width() -self.layout.padding.right))
-                    }
-                    Flow::Right => {
-                        max_zero_keep_nan(v*(self.width_left() - margin.width()))
-                    },
-                    Flow::Down | Flow::Overlay => {
-                        let r = max_zero_keep_nan(v*(self.width - self.layout.padding.width() - margin.width()));
-                        if r.is_nan() {
-                            return max_zero_keep_nan(v*(self.width_used - margin.width() - self.layout.padding.right))
-                        }
-                        return r
-                    }
-                }
-            }
+            Size::Ratio(r)=>r*self.width,
             Size::Fill => {
                 match flow {
                     Flow::RightWrap=> {
@@ -995,20 +979,7 @@ impl Turtle {
         return match height {
             Size::Fit => std::f64::NAN,
             Size::Fixed(v) => max_zero_keep_nan(v),
-            Size::Ratio(v)=>{
-                match flow {
-                    Flow::RightWrap | Flow::Right | Flow::Overlay => {
-                        let r = max_zero_keep_nan(v*(self.height - self.layout.padding.height() - margin.height()));
-                        if r.is_nan() {
-                            return max_zero_keep_nan(v*(self.height_used - margin.height() - self.layout.padding.bottom))
-                        }
-                        return r
-                    }
-                    Flow::Down => {
-                        max_zero_keep_nan(v*(self.height_left() - margin.height()))
-                    }
-                }
-            }
+            Size::Ratio(r)=>r*self.height,
             Size::Fill => {
                 match flow {
                     Flow::RightWrap | Flow::Right | Flow::Overlay => {
@@ -1255,6 +1226,24 @@ impl Walk {
         }
     }
     
+    pub fn ratio(w:f64, h:f64) -> Self{
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::Ratio(w),
+            height: Size::Ratio(h),
+        }
+    }
+    
+    pub fn ratio_size(size: DVec2) -> Self {
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::Ratio(size.x),
+            height: Size::Ratio(size.y),
+        }
+    }
+
     pub fn fit() -> Self {
         Self {
             abs_pos: None,
