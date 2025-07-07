@@ -5,100 +5,6 @@ use {
     }
 };
 
-#[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
-#[live_ignore]
-pub struct Layout {
-    #[live] pub scroll: DVec2,
-    #[live(true)] pub clip_x: bool,
-    #[live(true)] pub clip_y: bool,
-    #[live] pub padding: Padding,
-    #[live] pub align: Align,
-    #[live] pub flow: Flow,
-    #[live] pub spacing: f64,
-    //#[live] pub line_spacing: f64
-}
-
-impl Default for Layout{
-    fn default()->Self{
-        Self{
-            scroll: dvec2(0.0,0.0),
-            clip_x: true,
-            clip_y: true,
-            padding: Padding::default(),
-            align: Align{x:0.0,y:0.0},
-            flow: Flow::Right,
-            spacing: 0.0,
-            //line_spacing: 0.0
-        }
-    }
-}
-
-#[derive(Copy, Clone, Default, Debug, Live, LiveHook, LiveRegister)]
-#[live_ignore]
-pub struct Walk {
-    #[live] pub abs_pos: Option<DVec2>,
-    #[live] pub margin: Margin,
-    #[live] pub width: Size,
-    #[live] pub height: Size,
-}
-
-#[derive(Clone, Copy, Default, Debug, Live, LiveHook, LiveRegister)]
-#[live_ignore]
-pub struct Align {
-    #[live] pub x: f64,
-    #[live] pub y: f64
-}
-
-#[derive(Clone, Copy, Default, Debug, Live, LiveRegister)]
-#[live_ignore]
-pub struct Padding {
-    #[live] pub left: f64,
-    #[live] pub top: f64,
-    #[live] pub right: f64,
-    #[live] pub bottom: f64
-}
-
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
-#[live_ignore]
-pub enum Axis2 {
-    #[pick] Horizontal,
-    Vertical
-}
-
-impl Default for Axis2 {
-    fn default() -> Self {
-        Axis2::Horizontal
-    }
-}
-
-#[derive(Copy, Clone, Debug, Live, LiveHook, PartialEq)]
-#[live_ignore]
-pub enum Flow {
-    #[pick] Right,
-    Down,
-    //Left,
-    //Up,
-    Overlay, 
-    RightWrap
-}
-
-#[derive(Copy, Clone, Debug, Live)]
-#[live_ignore]
-pub enum Size {
-    #[pick {
-        weight: 100.0,
-        min: None,
-        max: None,
-    }] Fill {
-        weight: f64,
-        min: Option<f64>,
-        max: Option<f64>,
-    },
-    #[live(200.0)]
-    Fixed(f64),
-    Fit,
-}
-
 #[derive(Clone, Debug)]
 pub enum DeferredWalk {
     Unresolved {
@@ -163,6 +69,371 @@ pub struct FinishedWalk {
     outer_size: DVec2,
 }
 
+/// Specifies how a turtle should walk.
+#[derive(Copy, Clone, Default, Debug, Live, LiveHook, LiveRegister)]
+#[live_ignore]
+pub struct Walk {
+    #[doc(hidden)]
+    #[live]
+    pub abs_pos: Option<DVec2>,
+
+    /// The margin around the walk's rectangle.
+    #[live]
+    pub margin: Margin,
+
+    /// The desired width of the walk's rectangle.
+    #[live]
+    pub width: Size,
+
+    /// The desired height of the walk's rectangle.
+    #[live]
+    pub height: Size,
+}
+
+impl Walk {
+    /// Returns a `Walk` with `width` and `height` set to the given value, and no margin.
+    pub fn new(width: Size, height: Size) -> Self {
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width,
+            height,
+        }
+    }
+
+    /// Returns a `Walk` with both `width` and `height` set to 0.0, and no margin.
+    pub fn empty() -> Self {
+        Self::fixed(0.0, 0.0)
+    }
+
+    /// Returns a `Walk` with both `width` and `height` set to `Size::Fill`, and no margin.
+    pub fn fill() -> Self {
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::fill(),
+            height: Size::fill(),
+        }
+    }
+
+    /// Returns a `Walk` with `width` and `height` set to the given fixed values, and no margin.
+    pub fn fixed(width: f64, height: f64) -> Self {
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::Fixed(width),
+            height: Size::Fixed(height),
+        }
+    }
+
+    /// Returns a `Walk` with both `width` and `height` set to `Size::Fit`, and no margin.
+    pub fn fit() -> Self {
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::Fit,
+            height: Size::Fit,
+        }
+    }
+
+    /// Returns a `Walk` with `width` set to `Size::Fill`, `height` set to `Size::Fit`, and no
+    /// margin.
+    pub fn fill_fit() -> Self {
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::fill(),
+            height: Size::Fit,
+        }
+    }
+
+    /// Returns a copy of this `Walk` with `margin` set to the given value.
+    pub fn with_margin(self, margin: Margin) -> Self {
+        Self {
+            margin,
+            ..self
+        }
+    }
+
+    /// Returns a copy of this `Walk` with the left margin set to the given value.
+    pub fn with_margin_left(self, left: f64) -> Self {
+        Self {
+            margin: self.margin.with_left(left),
+            ..self
+        }
+    }
+
+    /// Returns a copy of this `Walk` with the right margin set to the given value.
+    pub fn with_margin_top(self, top: f64) -> Self {
+        Self {
+            margin: self.margin.with_top(top),
+            ..self
+        }
+    }
+
+    /// Returns a copy of this `Walk` with the bottom margin set to the given value.
+    pub fn with_margin_right(self, right: f64) -> Self {
+        Self {
+            margin: self.margin.with_right(right),
+            ..self
+        }
+    }
+
+    /// Returns a copy of this `Walk` with the bottom margin set to the given value.
+    pub fn with_margin_bottom(self, v: f64) -> Self {
+        Self {
+            margin: self.margin.with_bottom(v),
+            ..self
+        }
+    }
+}
+
+/// Specifies the desired width/height of the rectangle of a turtle's next walk.
+/// 
+/// See `Turtle::next_walk_width` and `Turtle::next_walk_height` for details on how the actual
+/// width/height is computed based on the desired width/height.
+#[derive(Copy, Clone, Debug, Live)]
+#[live_ignore]
+pub enum Size {
+    #[pick {
+        weight: 100.0,
+        min: None,
+        max: None,
+    }]
+    Fill {
+        weight: f64,
+        min: Option<f64>,
+        max: Option<f64>,
+    },
+    #[live(200.0)]
+    Fixed(f64),
+    Fit,
+}
+
+impl Size {
+    /// Returns a `Size::Fill` with a default `weight` of `100.0``, and no `min` or `max` constraints.
+    pub fn fill() -> Self {
+        Self::Fill {
+            weight: 100.0,
+            min: None,
+            max: None,
+        }
+    }
+
+    /// Returns `true` if this is a `Size::Fill`, or `false` otherwise.
+    pub fn is_fill(self) -> bool {
+        match self {
+            Self::Fill { .. } => true,
+            _ => false
+        }
+    }
+
+    /// Returns `true` if this is a `Size::Fixed`, or `false` otherwise.
+    pub fn is_fixed(self) -> bool {
+        match self {
+            Self::Fixed(_) => true,
+            _ => false
+        }
+    }
+
+    /// Returns `true` if this is a `Size::Fit`, or `false` otherwise.
+    pub fn is_fit(self) -> bool {
+        match self {
+            Self::Fit => true,
+            _ => false
+        }
+    }
+
+    /// Returns the fixed size if this is a `Size::Fixed`, or `None` otherwise.
+    pub fn to_fixed(self) -> Option<f64> {
+        match self {
+            Self::Fixed(size) => Some(size),
+            _ => None,
+        }
+    }
+}
+
+impl Default for Size {
+    fn default() -> Self {
+        Size::fill()
+    }
+}
+
+#[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
+#[live_ignore]
+pub struct Layout {
+    #[live] pub scroll: DVec2,
+    #[live(true)] pub clip_x: bool,
+    #[live(true)] pub clip_y: bool,
+    #[live] pub padding: Padding,
+    #[live] pub align: Align,
+    #[live] pub flow: Flow,
+    #[live] pub spacing: f64,
+}
+
+impl Layout {
+     /// Creates a copy of this `Layout` with `padding` set to the given value.
+     pub fn with_padding(self, padding: Padding) -> Self {
+        Self {
+            padding,
+            ..self
+        }
+    }
+    
+    /// Creates a copy of this `Layout` with the top padding set to the given value.
+    pub fn with_padding_top(self, top: f64) -> Self {
+        Self {
+            padding: self.padding.with_top(top),
+            ..self
+        }
+    }
+    
+    /// Creates a copy of this `Layout` with the right padding set to the given value.
+    pub fn with_padding_right(self, right: f64) -> Self {
+        Self {
+            padding: self.padding.with_right(right),
+            ..self
+        }
+    }
+    
+    /// Creates a copy of this `Layout` with the bottom padding set to the given value.
+    pub fn with_padding_bottom(self, bottom: f64) -> Self {
+        Self {
+            padding: self.padding.with_bottom(bottom),
+            ..self
+        }
+    }
+    
+    /// Creates a copy of this `Layout` with the left padding set to the given value.
+    pub fn with_padding_left(self, left: f64) -> Self {
+        Self {
+            padding: self.padding.with_left(left),
+            ..self
+        }
+    }
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            scroll: dvec2(0.0,0.0),
+            clip_x: true,
+            clip_y: true,
+            padding: Padding::default(),
+            align: Align::default(),
+            flow: Flow::default(),
+            spacing: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug, Live, LiveHook, LiveRegister)]
+#[live_ignore]
+pub struct Align {
+    #[live] pub x: f64,
+    #[live] pub y: f64
+}
+
+#[derive(Copy, Clone, Debug, Live, LiveHook, PartialEq)]
+#[live_ignore]
+pub enum Flow {
+    #[pick]
+    Right,
+    RightWrap,
+    Down,
+    Overlay, 
+}
+
+impl Default for Flow {
+    fn default() -> Self {
+        Flow::Right
+    }
+}
+
+/// Specifies the padding around the walk's inner rectangle.
+#[derive(Clone, Copy, Default, Debug, Live, LiveRegister)]
+#[live_ignore]
+pub struct Padding {
+    /// The left padding.
+    #[live]
+    pub left: f64,
+
+    /// The top padding.
+    #[live]
+    pub top: f64,
+
+    /// The right padding.
+    #[live]
+    pub right: f64,
+
+    /// The bottom padding.
+    #[live]
+    pub bottom: f64
+}
+
+impl Padding {
+    /// Returns a copy of this `Padding` with the left padding set to the given value.
+    pub fn with_left(self, left: f64) -> Self {
+        Self {
+            left,
+            ..self
+        }
+    }
+
+    /// Returns a copy of this `Padding` with the top padding set to the given value.
+    pub fn with_top(self, top: f64) -> Self {
+        Self {
+            top,
+            ..self
+        }
+    }
+
+    /// Returns a copy of this `Padding` with the right padding set to the given value.
+    pub fn with_right(self, right: f64) -> Self {
+        Self {
+            right,
+            ..self
+        }
+    }
+
+    /// Returns a copy of this `Padding` with the bottom padding set to the given value.
+    pub fn with_bottom(self, bottom: f64) -> Self {
+        Self {
+            bottom,
+            ..self
+        }
+    }
+
+    /// Returns a vector containing the left and top padding.
+    pub fn left_top(self) -> DVec2 {
+        dvec2(self.left, self.top)
+    }
+
+    /// Returns a vector containing the right and bottom padding.
+    pub fn right_bottom(self) -> DVec2 {
+        dvec2(self.right, self.bottom)
+    }
+
+    /// Returns a vector containing both the padding width and height.
+    pub fn size(self) -> DVec2 {
+        dvec2(self.width(), self.height())
+    }
+
+    /// Returns the horizontal padding.
+    /// 
+    /// This is the sum of the left and right padding.
+    pub fn width(self) -> f64 {
+        self.left + self.right
+    }
+
+    /// Returns the vertical padding.
+    /// 
+    /// This is the sum of the top and bottom padding.
+    pub fn height(self) -> f64 {
+        self.top + self.bottom
+    }
+}
+
 /// +-----------------+
 /// |     Margin      |
 /// | +-------------+ |
@@ -194,11 +465,11 @@ pub struct Turtle {
     shift: DVec2,
     pos: DVec2,
     origin: DVec2,
-    guard_area: Area
+    guard: Area
 }
 
 impl Turtle {
-    /// Returns a reference to this turtle's spacing.
+    /// Returns this turtle's spacing.
     pub fn spacing(&self) -> f64 {
         self.layout.spacing
     }
@@ -213,7 +484,7 @@ impl Turtle {
         &self.walk.margin
     }
 
-    /// Returns the inner rectangle of this turtle.
+    /// Returns this turtle's inner rectangle.
     pub fn inner_rect(&self) -> Rect {
         Rect {
             pos: self.inner_origin(),
@@ -221,7 +492,7 @@ impl Turtle {
         }
     }
 
-    /// Returns the inner rectangle of this turtle, without scrolling applied.
+    /// Returns this turtle's inner rectangle, without scrolling applied.
     pub fn inner_rect_unscrolled(&self) -> Rect {
         Rect {
             pos: self.inner_origin_unscrolled(),
@@ -419,7 +690,7 @@ impl Turtle {
         }
     }
 
-    /// Returns the outer rectangle of this turtle.
+    /// Returns this turtle's outer rectangle.
     pub fn outer_rect(&self) -> Rect {
         Rect {
             pos: self.outer_origin(),
@@ -427,7 +698,7 @@ impl Turtle {
         }
     }
 
-    /// Returns the outer rectangle of this turtle, without scrolling applied.
+    /// Returns this turtle's outer rectangle, without scrolling applied.
     pub fn outer_rect_unscrolled(&self) -> Rect {
         Rect {
             pos: self.outer_origin_unscrolled(),
@@ -523,14 +794,61 @@ impl Turtle {
         }
     }
 
-    pub fn eval_size(&self, width: Size, height: Size, margin: Margin) -> DVec2 {
+    /// Returns true if this turtle's next walk would be it's first.
+    pub fn next_walk_is_first(&self, finished_walks_end: usize) -> bool {
+        self.finished_walks_start == finished_walks_end && self.deferred_fills.len() == 0
+    }
+
+    /// Returns the offset to outer rectangle of this turtle's next walk.
+    /// 
+    /// This is either zero if this turtle's next walk would be it's first, or this turtle's
+    /// spacing in the direction of it's flow.
+    pub fn next_walk_outer_offset(&self, finished_walks_end: usize) -> DVec2 {
+        if self.next_walk_is_first(finished_walks_end) {
+            dvec2(0.0, 0.0)
+        } else {
+            match self.layout.flow {
+                Flow::Right | Flow::RightWrap => dvec2(self.spacing(), 0.0),
+                Flow::Down => dvec2(0.0, self.spacing()),
+                Flow::Overlay => dvec2(0.0, 0.0),
+            }
+        }
+    }
+
+    /// Returns the size of the rectangle of this turtle's next walk, based on the given desired
+    /// `width`, `height`, and `margin`.
+    pub fn next_walk_size(&self, width: Size, height: Size, margin: Margin) -> DVec2 {
         dvec2(
-            self.eval_width(width, margin),
-            self.eval_height(height, margin),
+            self.next_walk_width(width, margin),
+            self.next_walk_height(height, margin),
         )
     }
 
-    pub fn eval_width(&self, width: Size, margin: Margin) -> f64 {
+    /// Returns the width of the rectangle of this turtle's next walk, based on the given desired
+    /// `width` and `margin`.
+    ///
+    /// - If the desired width is `Size::Fill`, then the actual width is computed as follows:
+    /// 
+    ///   First, we compute the actual outer width. This depends on the turtle's flow:
+    ///   - If the flow is `Flow::Right`, then the actual outer width of this turtle's next walk is
+    ///     this turtle's remaining inner unused width.
+    ///   - If the flow is `Flow::RightWrap`, then the actual outer width of this turtle's next walk
+    ///     is this turtle's remaining inner unused width on the current row.
+    ///   - If the flow is either `Flow::Down` or `Flow::Overlay`, then the actual outer width of
+    ///     this turtle's next walk is this turtle's inner effective width.
+    ///   
+    ///   Next, the actual outer width is clamped to the given `min` and `max`` constraints, if any.
+    /// 
+    ///   Finally, the actual width is computed from the actual outer width by subtracting the
+    ///   margin width.
+    /// 
+    /// - If the desired width is `Size::Fixed`, then the actual width is simply the given width,
+    ///   clamped to be at least 0.0.
+    /// 
+    /// - If the desired width is `Size::Fit`, then the actual width cannot be computed until this
+    ///   turtle's final inner unused width is known, so we return NaN to indicate that the actual
+    ///   width is not yet known.
+    pub fn next_walk_width(&self, width: Size, margin: Margin) -> f64 {
         match width {
             Size::Fill { min, max, .. } => {
                 let mut outer_width = match self.layout.flow {
@@ -551,11 +869,33 @@ impl Turtle {
         }
     }
     
-    pub fn eval_height(&self, height: Size, margin: Margin) -> f64 {
+    /// Returns the height of the rectangle of this turtle's next walk, based on the given desired
+    /// `height` and `margin`.
+    /// 
+    /// - If the desired height is `Size::Fill`, then the actual height is computed as follows:
+    ///   
+    ///   First, we compute the actual outer height. This depends on the turtle's flow:
+    ///   - If the flow is either `Flow::Right`, `Flow::RightWrap`, or `Flow::Overlay, then the
+    ///     actual outer height of this turtle's next walk is this turtle's inner effective height.
+    ///   - If the flow is `Flow::Down`, then the actual outer height of this turtle's next walk is
+    ///     this turtle's remaining inner unused height.
+    /// 
+    ///   Next, the actual outer height is clamped to the given `min` and `max` constraints, if any.
+    /// 
+    ///   Finally, the actual height is computed from the actual outer height by subtracting the
+    ///   margin height.
+    /// 
+    /// - If the desired height is `Size::Fixed`, then the actual height is simply the given height,
+    ///   clamped to be at least 0.0.
+    /// 
+    /// - If the desired height is `Size::Fit`, then the actual height cannot be computed until this
+    ///   turtle's final inner unused height is known, so we return NaN to indicate that the actual
+    ///   height is not yet known.
+    pub fn next_walk_height(&self, height: Size, margin: Margin) -> f64 {
         match height {
             Size::Fill { min, max, .. } => {
                 let mut outer_height = match self.layout.flow {
-                    Flow::RightWrap | Flow::Right | Flow::Overlay => self.inner_effective_height(),
+                    Flow::Right | Flow::RightWrap | Flow::Overlay => self.inner_effective_height(),
                     Flow::Down => self.inner_unused_height()
                 };
                 if let Some(min) = min {
@@ -571,14 +911,14 @@ impl Turtle {
         }
     }
 
-    /// Sets this turtle's position.
-    pub fn set_pos(&mut self, pos: DVec2) {
+    /// Moves this turtle to the given position.
+    pub fn move_to(&mut self, pos: DVec2) {
         self.pos = pos
     }
 
     /// Moves this turtle right and down by the given amount.
     pub fn move_right_down(&mut self, amount: DVec2) {
-        self.set_pos(self.pos() + amount);
+        self.move_to(self.pos() + amount);
     }
 
     /// Moves this turtle right by the given amount.
@@ -598,36 +938,17 @@ impl Turtle {
     }
 
     /// Allocates additional width to the right of this turtle's position.
+    /// 
+    /// This will increase this turtle's used width if necessary.
     pub fn allocate_width(&mut self, additional: f64) {
         self.used_width = self.used_width.max(self.pos().x + additional - self.origin().x);
     }
 
     /// Allocates additional height below this turtle's position.
+    /// 
+    /// This will increase this turtle's used height if necessary.
     pub fn allocate_height(&mut self, additional: f64) {
         self.used_height = self.used_height.max(self.pos().y + additional - self.origin().y);
-    }
-
-    /// Returns true if this turtle has a previous walk.
-    /// 
-    /// This is true if the turtle has any finished or deferred walks.
-    fn has_previous_walk(&self, finished_walks_end: usize) -> bool {
-        self.finished_walks_start != finished_walks_end || self.deferred_fills.len() > 0
-    }
-
-    /// Returns the spacing for the next walk.
-    /// 
-    /// This is either the spacing for this turtle in the direction of the flow, or zero if there
-    /// is no previous walk.
-    fn spacing_for_next_walk(&self, finished_walks_end: usize) -> DVec2 {
-        if self.has_previous_walk(finished_walks_end) {
-            match self.layout.flow {
-                Flow::Right | Flow::RightWrap => dvec2(self.spacing(), 0.0),
-                Flow::Down => dvec2(0.0, self.spacing()),
-                Flow::Overlay => dvec2(0.0, 0.0),
-            }
-        } else {
-            dvec2(0.0, 0.0)
-        }
     }
 
     fn deferred_fill_count(&self) -> usize {
@@ -713,6 +1034,80 @@ impl<'a,'b> Cx2d<'a,'b> {
         self.turtles.last_mut().unwrap()
     }
 
+    /// Begins a new child turtle.
+    pub fn begin_turtle(&mut self, walk: Walk, layout: Layout) {
+        self.begin_turtle_with_guard(walk, layout, Area::Empty)
+    }
+
+    /// Begins a new child turtle, with a guard area.
+    pub fn begin_turtle_with_guard(&mut self, walk: Walk, layout: Layout, guard: Area) {
+        let parent = self.turtle();
+
+        let outer_origin = if let Some(outer_origin) = walk.abs_pos {
+            outer_origin
+        } else {
+            parent.pos() + parent.next_walk_outer_offset(self.finished_walks.len())
+        };
+        let origin = outer_origin + walk.margin.left_top();
+
+        let size = parent.next_walk_size(walk.width, walk.height, walk.margin);
+
+        let clip_min = dvec2(
+            if layout.clip_x {
+                origin.x
+            } else {
+                f64::NAN
+            },
+            if layout.clip_y {
+                origin.y
+            } else {
+                f64::NAN
+            }
+        );
+
+        let clip_max = dvec2(
+            if layout.clip_x {
+                origin.x + size.x
+            } else {
+                f64::NAN
+            },
+            if layout.clip_y {
+                origin.y + size.y
+            } else {
+                f64::NAN
+            }
+        );
+
+        let origin = origin - layout.scroll;
+        
+        self.align_list.push(AlignEntry::BeginTurtle(clip_min, clip_max));
+        
+        let child = Turtle {
+            walk,
+            layout,
+            align_start: self.align_list.len()-1,
+            finished_walks_start: self.finished_walks.len(),
+            deferred_fills: Vec::new(),
+            deferred_weight_prefix_sum: Vec::new(),
+            resolved_fills: Vec::new(),
+            resolved_length_suffix_sum: Vec::new(),
+            wrap_spacing: 0.0,
+            pos: DVec2 {
+                x: origin.x + layout.padding.left,
+                y: origin.y + layout.padding.top
+            },
+            origin,
+            width: size.x,
+            height: size.y,
+            shift: dvec2(0.0,0.0),
+            used_width: layout.padding.left,
+            used_height: layout.padding.top,
+            guard,
+        };
+        
+        self.turtles.push(child);
+    }
+
     /// Walks the turtle with the given `walk`.
     pub fn walk_turtle(&mut self, walk: Walk) -> Rect {
         self.walk_turtle_internal(walk, self.align_list.len())
@@ -723,11 +1118,11 @@ impl<'a,'b> Cx2d<'a,'b> {
 
         let old_pos = turtle.pos();
         
-        let size = turtle.eval_size(walk.width, walk.height, walk.margin);
+        let size = turtle.next_walk_size(walk.width, walk.height, walk.margin);
         let outer_size = size + walk.margin.size();
         
         if let Some(pos) = walk.abs_pos {
-            turtle.set_pos(pos);
+            turtle.move_to(pos);
 
             match turtle.layout.flow {
                 Flow::Right | Flow::RightWrap => turtle.allocate_height(outer_size.y),
@@ -738,7 +1133,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                 }
             }
 
-            turtle.set_pos(old_pos);
+            turtle.move_to(old_pos);
 
             self.finished_walks.push(FinishedWalk {
                 align_start,
@@ -752,7 +1147,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             }
         }
         else {
-            let spacing = turtle.spacing_for_next_walk(self.finished_walks.len());
+            let spacing = turtle.next_walk_outer_offset(self.finished_walks.len());
             
             match turtle.layout.flow {
                 Flow::RightWrap if size.x > turtle.inner_unused_width_current_row() => {
@@ -762,7 +1157,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                     );
                     let shift = new_pos.x - turtle.pos() - spacing;
                     
-                    turtle.set_pos(new_pos);
+                    turtle.move_to(new_pos);
                     turtle.allocate_size(outer_size);
             
                     self.move_align_list(shift.x, shift.y, align_start, self.align_list.len(), false, dvec2(0.0,0.0));
@@ -811,8 +1206,8 @@ impl<'a,'b> Cx2d<'a,'b> {
 
                 let old_pos = turtle.pos();
 
-                let spacing = turtle.spacing_for_next_walk(self.finished_walks.len());
-                let size = dvec2(0.0, turtle.eval_height(walk.height, walk.margin));
+                let spacing = turtle.next_walk_outer_offset(self.finished_walks.len());
+                let size = dvec2(0.0, turtle.next_walk_height(walk.height, walk.margin));
                 let outer_size = size + walk.margin.size();
                 
                 turtle.move_right(spacing.x);
@@ -836,8 +1231,8 @@ impl<'a,'b> Cx2d<'a,'b> {
 
                 let old_pos = turtle.pos();
 
-                let spacing = turtle.spacing_for_next_walk(self.finished_walks.len());
-                let size = dvec2(turtle.eval_width(walk.width, walk.margin), 0.0);
+                let spacing = turtle.next_walk_outer_offset(self.finished_walks.len());
+                let size = dvec2(turtle.next_walk_width(walk.width, walk.margin), 0.0);
                 let outer_size = size + walk.margin.size();
 
                 turtle.move_down(spacing.y);
@@ -860,10 +1255,6 @@ impl<'a,'b> Cx2d<'a,'b> {
             },
             _ => None,
         }
-    }
-    
-    pub fn begin_turtle(&mut self, walk: Walk, layout: Layout) {
-        self.begin_turtle_with_guard(walk, layout, Area::Empty)
     }
     
     pub fn begin_pass_sized_turtle_no_clip(&mut self, layout: Layout) {
@@ -903,7 +1294,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             shift: dvec2(0.0, 0.0),
             used_width: layout.padding.left,
             used_height: layout.padding.top,
-            guard_area: Area::Empty,
+            guard: Area::Empty,
         };
         self.turtles.push(turtle);
     }
@@ -943,72 +1334,6 @@ impl<'a,'b> Cx2d<'a,'b> {
         self.finished_walks.truncate(turtle.finished_walks_start);
     }
     
-    pub fn begin_turtle_with_guard(&mut self, walk: Walk, layout: Layout, guard_area: Area) {
-        let (origin, width, height, draw_clip) = if let Some(parent) = self.turtles.last() {
-            
-            let o = walk.margin.left_top() + if let Some(pos) = walk.abs_pos {pos} else {
-                parent.pos + parent.spacing_for_next_walk(self.finished_walks.len())
-            };
-            
-            let w = parent.eval_width(walk.width, walk.margin);
-            let h = parent.eval_height(walk.height, walk.margin);
-            
-            // figure out new clipping rect
-            let (x0, x1) = if layout.clip_x {
-                (/*parent.draw_clip.0.x.max(*/o.x/*)*/, if w.is_nan() {
-                    f64::NAN
-                    //parent.draw_clip.1.x
-                } else {
-                    /*parent.draw_clip.1.x.min*/o.x + w/*)*/
-                })
-            } else {
-                (f64::NAN, f64::NAN)//parent.draw_clip.0.x, parent.draw_clip.1.x)
-            };
-            
-            let (y0, y1) = if layout.clip_y {
-                (/*parent.draw_clip.0.y.max(*/o.y/*)*/, if h.is_nan() {
-                    f64::NAN
-                } else {
-                    /*parent.draw_clip.1.y.min(*/o.y + h/*)*/
-                })
-            }else {(f64::NAN,f64::NAN)};//parent.draw_clip.0.y, parent.draw_clip.1.y)};
-            
-            (o - layout.scroll, w, h, (dvec2(x0, y0), (dvec2(x1, y1))))
-        }
-        else {
-            let o = DVec2 {x: walk.margin.left, y: walk.margin.top};
-            let w = walk.width.fixed_or_nan();
-            let h = walk.height.fixed_or_nan();
-            
-            (o, w, h, (dvec2(o.x, o.y), dvec2(o.x + w, o.y + h)))
-        };
-        self.align_list.push(AlignEntry::BeginTurtle(draw_clip.0,draw_clip.1));
-        let turtle = Turtle {
-            walk,
-            layout,
-            align_start: self.align_list.len()-1,
-            finished_walks_start: self.finished_walks.len(),
-            deferred_fills: Vec::new(),
-            deferred_weight_prefix_sum: Vec::new(),
-            resolved_fills: Vec::new(),
-            resolved_length_suffix_sum: Vec::new(),
-            wrap_spacing: 0.0,
-            pos: DVec2 {
-                x: origin.x + layout.padding.left,
-                y: origin.y + layout.padding.top
-            },
-            origin,
-            width,
-            height,
-            shift: dvec2(0.0,0.0),
-            used_width: layout.padding.left,
-            used_height: layout.padding.top,
-            guard_area,
-        };
-        
-        self.turtles.push(turtle);
-    }
-    
     pub fn turtle_has_align_items(&mut self)->bool{
         self.align_list.len() != self.turtle().align_start + 1
     }
@@ -1025,8 +1350,8 @@ impl<'a,'b> Cx2d<'a,'b> {
     
     pub fn end_turtle_with_guard(&mut self, guard_area: Area) -> Rect {
         let mut turtle = self.turtles.last().unwrap();
-        if guard_area != turtle.guard_area {
-            panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard_area, guard_area)
+        if guard_area != turtle.guard {
+            panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard, guard_area)
         }
         
         let turtle_align_start = turtle.align_start;
@@ -1150,7 +1475,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         if self.turtles.len() == 0 {
             return Rect {
                 pos: dvec2(0.0, 0.0),
-                size: dvec2(w.fixed_or_zero(), h.fixed_or_zero())
+                size: dvec2(w.to_fixed().unwrap_or(0.0), h.to_fixed().unwrap_or(0.0))
             }
         }
         let rect = self.walk_turtle_internal(Walk {width: w, height: h, abs_pos:turtle_abs_pos, margin:turtle_margin}, turtle_align_start);
@@ -1205,15 +1530,15 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
         let turtle = self.turtles.last().unwrap();
         let size = dvec2(
-            turtle.eval_width(walk.width, walk.margin),
-            turtle.eval_height(walk.height, walk.margin),
+            turtle.next_walk_width(walk.width, walk.margin),
+            turtle.next_walk_height(walk.height, walk.margin),
         );
         
         if let Some(pos) = walk.abs_pos {
             Rect {pos: pos + walk.margin.left_top(), size}
         }
         else {
-            let spacing = turtle.spacing_for_next_walk(self.finished_walks.len());
+            let spacing = turtle.next_walk_outer_offset(self.finished_walks.len());
             let pos = turtle.pos;
             Rect {pos: pos + walk.margin.left_top() + spacing, size}
         }
@@ -1443,14 +1768,42 @@ impl Turtle {
         if walk.width.is_fit() {
             return None;
         }
-        Some(self.eval_width(walk.width, walk.margin) as f64)
+        Some(self.next_walk_width(walk.width, walk.margin) as f64)
     }
 
     pub fn max_height(&self, walk: Walk) -> Option<f64> {
         if walk.height.is_fit() {
             return None
         }
-        Some(self.eval_width(walk.height, walk.margin) as f64)
+        Some(self.next_walk_width(walk.height, walk.margin) as f64)
+    }
+}
+
+impl Walk {
+    pub fn abs_rect(rect:Rect) -> Self {
+        Self {
+            abs_pos: Some(rect.pos),
+            margin: Margin::default(),
+            width: Size::Fixed(rect.size.x),
+            height: Size::Fixed(rect.size.y),
+        }
+    }
+    
+    pub fn with_abs_pos(mut self, v: DVec2) -> Self {
+        self.abs_pos = Some(v);
+        self
+    }
+    pub fn with_margin_all(mut self, v: f64) -> Self {
+        self.margin = Margin {left: v, right: v, top: v, bottom: v};
+        self
+    }
+    
+    pub fn with_add_padding(mut self, v: Padding) -> Self {
+        self.margin.top += v.top;
+        self.margin.left += v.left;
+        self.margin.right += v.right;
+        self.margin.bottom += v.bottom;
+        self
     }
 }
 
@@ -1501,165 +1854,6 @@ impl Layout {
         self.padding = Padding {left: v, right: v, top: v, bottom: v};
         self
     }
-    
-    pub fn with_padding_top(mut self, v: f64) -> Self {
-        self.padding.top = v;
-        self
-    }
-    
-    pub fn with_padding_right(mut self, v: f64) -> Self {
-        self.padding.right = v;
-        self
-    }
-    
-    pub fn with_padding_bottom(mut self, v: f64) -> Self {
-        self.padding.bottom = v;
-        self
-    }
-    
-    pub fn with_padding_left(mut self, v: f64) -> Self {
-        self.padding.left = v;
-        self
-    }
-    
-    pub fn with_padding(mut self, v: Padding) -> Self {
-        self.padding = v;
-        self
-    }
-}
-
-impl Walk {
-    pub fn empty() -> Self {
-        Self {
-            abs_pos: None,
-            margin: Margin::default(),
-            width: Size::Fixed(0.0),
-            height: Size::Fixed(0.0),
-        }
-    }
-    
-    pub fn size(w: Size, h: Size) -> Self {
-        Self {
-            abs_pos: None,
-            margin: Margin::default(),
-            width: w,
-            height: h,
-        }
-    }
-
-    pub fn abs_rect(rect:Rect) -> Self {
-        Self {
-            abs_pos: Some(rect.pos),
-            margin: Margin::default(),
-            width: Size::Fixed(rect.size.x),
-            height: Size::Fixed(rect.size.y),
-        }
-    }
-    
-    pub fn fixed(w:f64, h:f64) -> Self {
-        Self {
-            abs_pos: None,
-            margin: Margin::default(),
-            width: Size::Fixed(w),
-            height: Size::Fixed(h),
-        }
-    }
-        
-    pub fn fixed_size(size: DVec2) -> Self {
-        Self {
-            abs_pos: None,
-            margin: Margin::default(),
-            width: Size::Fixed(size.x),
-            height: Size::Fixed(size.y),
-        }
-    }
-    
-    pub fn fit() -> Self {
-        Self {
-            abs_pos: None,
-            margin: Margin::default(),
-            width: Size::Fit,
-            height: Size::Fit,
-        }
-    }
-    
-    pub fn fill() -> Self {
-        Self {
-            abs_pos: None,
-            margin: Margin::default(),
-            width: Size::fill(),
-            height: Size::fill(),
-        }
-    }
-    
-    pub fn fill_fit() -> Self {
-        Self {
-            abs_pos: None,
-            margin: Margin::default(),
-            width: Size::fill(),
-            height: Size::Fit,
-        }
-    }
-    
-    pub fn with_abs_pos(mut self, v: DVec2) -> Self {
-        self.abs_pos = Some(v);
-        self
-    }
-    pub fn with_margin_all(mut self, v: f64) -> Self {
-        self.margin = Margin {left: v, right: v, top: v, bottom: v};
-        self
-    }
-    
-    pub fn with_margin_top(mut self, v: f64) -> Self {
-        self.margin.top = v;
-        self
-    }
-    
-    pub fn with_margin_right(mut self, v: f64) -> Self {
-        self.margin.right = v;
-        self
-    }
-    
-    pub fn with_margin_bottom(mut self, v: f64) -> Self {
-        self.margin.bottom = v;
-        self
-    }
-    
-    pub fn with_margin_left(mut self, v: f64) -> Self {
-        self.margin.left = v;
-        self
-    }
-    
-    pub fn with_margin(mut self, v: Margin) -> Self {
-        self.margin = v;
-        self
-    }
-    
-    pub fn with_add_padding(mut self, v: Padding) -> Self {
-        self.margin.top += v.top;
-        self.margin.left += v.left;
-        self.margin.right += v.right;
-        self.margin.bottom += v.bottom;
-        self
-    }
-}
-
-impl Padding {
-    pub fn left_top(&self) -> DVec2 {
-        dvec2(self.left, self.top)
-    }
-    pub fn right_bottom(&self) -> DVec2 {
-        dvec2(self.right, self.bottom)
-    }
-    pub fn size(&self) -> DVec2 {
-        dvec2(self.left + self.right, self.top + self.bottom)
-    }
-    pub fn width(&self) -> f64 {
-        self.left + self.right
-    }
-    pub fn height(&self) -> f64 {
-        self.top + self.bottom
-    }
 }
 
 impl LiveHook for Padding {
@@ -1673,11 +1867,6 @@ impl LiveHook for Padding {
         }
     }
 }
-
-impl Default for Flow {
-    fn default() -> Self {Self::Down}
-}
-
 
 impl LiveHook for Size {
     fn skip_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
@@ -1734,65 +1923,5 @@ impl LiveHook for Size {
             }
             _ => None
         }
-    }
-}
-
-impl Default for Size {
-    fn default() -> Self {
-        Size::fill()
-    }
-}
-
-impl Size {
-    pub fn fill() -> Self {
-        Self::Fill {
-            weight: 100.0,
-            min: None,
-            max: None,
-        }
-    }
-
-    pub fn fixed_or_zero(&self) -> f64 {
-        match self {
-            Self::Fixed(v) => *v,
-            _ => 0.
-        }
-    }
-    
-    pub fn fixed_or_nan(&self) -> f64 {
-        match self {
-            Self::Fixed(v) => max_zero_keep_nan(*v),
-            _ => std::f64::NAN,
-        }
-    }
-
-    pub fn is_fixed(&self) -> bool {
-        match self {
-            Self::Fixed(_) => true,
-            _ => false
-        }
-    }
-
-    pub fn is_fit(&self) -> bool {
-        match self {
-            Self::Fit => true,
-            _ => false
-        }
-    }
-    
-    pub fn is_fill(&self) -> bool {
-        match self {
-            Self::Fill { .. } => true,
-            _ => false
-        }
-    }
-}
-
-fn max_zero_keep_nan(v: f64) -> f64 {
-    if v.is_nan() {
-        v
-    }
-    else {
-        f64::max(v, 0.0)
     }
 }

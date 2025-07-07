@@ -274,7 +274,7 @@ impl LiveHook for DesktopButton {
             DesktopButtonType::XRMode => (50., 36.),
             DesktopButtonType::Fullscreen => (50., 36.),
         };
-        self.walk = Walk::fixed_size(dvec2(w, h))
+        self.walk = Walk::fixed(w, h)
     }
 }
 
