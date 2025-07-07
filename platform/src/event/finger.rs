@@ -232,11 +232,53 @@ pub struct TouchUpdateEvent {
 #[derive(Clone, Copy, Default, Debug, Live)]
 #[live_ignore]
 pub struct Margin {
+    /// The left margin.
     #[live] pub left: f64,
+
+    /// The top margin.
     #[live] pub top: f64,
+    
+    /// The right margin.
     #[live] pub right: f64,
+
+    /// The bottom margin.
     #[live] pub bottom: f64
 }
+
+impl Margin {
+    /// Returns a copy of this `Margin` with the left margin set to the given value.
+    pub fn with_left(mut self, left: f64) -> Self {
+        Self {
+            left,
+            ..self
+        }
+    }
+
+    /// Returns a copy of this `Margin` with the top margin set to the given value.
+    pub fn with_top(mut self, top: f64) -> Self {
+        Self {
+            top,
+            ..self
+        }
+    }
+
+    /// Returns a copy of this `Margin` with the right margin set to the given value.
+    pub fn with_right(mut self, right: f64) -> Self {
+        Self {
+            right,
+            ..self
+        }
+    }
+
+    /// Returns a copy of this `Margin` with the bottom margin set to the given value.
+    pub fn with_bottom(mut self, bottom: f64) -> Self {
+        Self {
+            bottom,
+            ..self
+        }
+    }
+}
+
 impl LiveRegister for Margin{}
 
 impl LiveHook for Margin {

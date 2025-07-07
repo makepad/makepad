@@ -158,7 +158,7 @@ impl Widget for PerformanceLiveGraph {
 impl PerformanceLiveGraph {
     pub fn add_y_entry(&mut self, cx: &mut Cx, y_entry: i64) {
         let frames_shown_count: usize =
-            (self.walk(cx).width.fixed_or_zero() / self.bar_width) as usize;
+            (self.walk(cx).width.to_fixed().unwrap_or(0.0) / self.bar_width) as usize;
         self.data.push_back(y_entry);
         while self.data.len() >= frames_shown_count {
             self.data.pop_front();
@@ -176,8 +176,8 @@ impl PerformanceLiveGraph {
         let color_warning = vec4(0.9, 0.9, 0.4, 1.0);
         let color_fatal = vec4(1.0, 0.2, 0.2, 1.0);
 
-        let graph_width = self.walk(cx).width.fixed_or_zero();
-        let graph_height = self.walk(cx).height.fixed_or_zero();
+        let graph_width = self.walk(cx).width.to_fixed().unwrap_or(0.0);
+        let graph_height = self.walk(cx).height.to_fixed().unwrap_or(0.0);
         let graph_zero_baseline = graph_height - 20.;
 
         self.label(id!(graph_label))
