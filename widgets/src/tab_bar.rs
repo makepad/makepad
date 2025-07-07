@@ -34,7 +34,7 @@ live_design!{
             uniform border_size: (THEME_BEVELING)
             uniform bg_gradient_horizontal: 0.0
             uniform border_gradient_horizontal: 0.0
-            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_2: #f00
             uniform border_color: #fff0
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             
@@ -44,8 +44,7 @@ live_design!{
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let color_2 = self.color;
                 let border_color_2 = self.border_color;
-                let border_gradient_squeeze = 17.5
-                let bg_gradient_squeeze = 80.
+                let gradient_squeeze = 20.
 
                 if (self.color_2.x > -0.5) {
                     color_2 = self.color_2;
@@ -55,14 +54,14 @@ live_design!{
                     border_color_2 = self.border_color_2;
                 }
 
-                let border_gradient_dir = pow(self.pos.y, border_gradient_squeeze) + dither;
+                let border_gradient_dir = pow(self.pos.y, gradient_squeeze) + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = pow(self.pos.x, border_gradient_squeeze) + dither;
+                    border_gradient_dir = pow(self.pos.x, gradient_squeeze) + dither;
                 }
 
-                let bg_gradient_dir = pow(self.pos.y, bg_gradient_squeeze) + dither;
+                let bg_gradient_dir = pow(self.pos.y, gradient_squeeze) + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = pow(self.pos.x, bg_gradient_squeeze) + dither;
+                    bg_gradient_dir = pow(self.pos.x, gradient_squeeze) + dither;
                 }
 
                 sdf.box_all(
@@ -72,12 +71,12 @@ live_design!{
                     self.rect_size.y - 2.,
                     0.5,
                     self.border_radius,
-                    0.0,
+                    0.5,
                     0.5
                 )
 
-                sdf.fill(mix(self.color, color_2, bg_gradient_squeeze));
-                sdf.stroke(mix(self.border_color, border_color_2, border_gradient_squeeze), self.border_size);
+                sdf.fill(mix(self.color, color_2, bg_gradient_dir));
+                sdf.stroke(mix(self.border_color, border_color_2, border_gradient_dir), self.border_size);
 
                 return sdf.result
             }
@@ -98,10 +97,8 @@ live_design!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
-                let border_gradient_squeeze = 17.5
-                let bg_gradient_squeeze = 17.5
-                let bg_gradient_squeeze = 80.
-                let color_2 = (THEME_COLOR_BEVEL_OUTSET_1);
+                let gradient_squeeze = 20.;
+                let color_2 = self.color;
                 let border_color_2 = self.border_color;
 
                 if (self.color_2.x > -0.5) {
@@ -112,14 +109,14 @@ live_design!{
                     border_color_2 = self.border_color_2;
                 }
 
-                let border_gradient_dir = pow(self.pos.y, border_gradient_squeeze) + dither;
+                let border_gradient_dir = pow(self.pos.y, gradient_squeeze) + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = pow(self.pos.x, border_gradient_squeeze) + dither;
+                    border_gradient_dir = pow(self.pos.x, gradient_squeeze) + dither;
                 }
 
-                let bg_gradient_dir = pow(self.pos.y, bg_gradient_squeeze) + dither;
+                let bg_gradient_dir = pow(self.pos.y, gradient_squeeze) + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = pow(self.pos.x, bg_gradient_squeeze) + dither;
+                    bg_gradient_dir = pow(self.pos.x, gradient_squeeze) + dither;
                 }
 
                 sdf.rect(
