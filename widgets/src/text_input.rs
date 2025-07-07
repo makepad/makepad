@@ -28,7 +28,7 @@ live_design! {
 
     pub TextInputBase = {{TextInput}} {}
     
-    pub TextInputStyled = <TextInputBase> {
+    pub TextInputFlat = <TextInputBase> {
         width: Fill, height: Fit,
         padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
         margin: <THEME_MSPACE_V_1> {}
@@ -520,24 +520,13 @@ live_design! {
         }
     }
 
-    pub TextInput = <TextInputStyled> {
+    pub TextInput = <TextInputFlat> {
         draw_bg: {
             border_color_2: (THEME_COLOR_BEVEL_INSET_1)
         }
     }
 
-    pub TextInputFlat = <TextInputStyled> {
-        draw_bg: {
-            border_color: (THEME_COLOR_BEVEL)
-            border_color_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_empty: (THEME_COLOR_BEVEL_EMPTY)
-            border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
-        }
-    }
-
-    pub TextInputGradientX = <TextInputStyled> {
+    pub TextInputGradientX = <TextInputFlat> {
         draw_bg: {
             border_gradient_horizontal: 1.0; 
             bg_gradient_horizontal: 1.0; 
