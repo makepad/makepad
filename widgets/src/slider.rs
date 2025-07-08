@@ -1765,11 +1765,11 @@ live_design!{
             border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
             border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
-            val_color_1: (THEME_COLOR_VAL_1);
-            val_color_1_hover: (THEME_COLOR_VAL_1);
-            val_color_1_focus: (THEME_COLOR_VAL_1);
-            val_color_1_disabled: (THEME_COLOR_VAL_1_DISABLED);
-            val_color_1_drag: (THEME_COLOR_VAL_1_DRAG);
+            val_color: (THEME_COLOR_VAL_1);
+            val_color_hover: (THEME_COLOR_VAL_1);
+            val_color_focus: (THEME_COLOR_VAL_1);
+            val_color_disabled: (THEME_COLOR_VAL_1_DISABLED);
+            val_color_drag: (THEME_COLOR_VAL_1_DRAG);
 
             val_color_2: vec4(-1.0, -1.0, -1.0, -1.0);
             val_color_2_hover: (THEME_COLOR_VAL_2);
