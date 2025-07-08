@@ -36,11 +36,11 @@ live_design!{
 
             uniform border_size: (THEME_BEVELING)
 
-            uniform color_1: (THEME_COLOR_INSET_1)
-            uniform color_1_hover: (THEME_COLOR_INSET_1_HOVER)
-            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
-            uniform color_1_disabled: (THEME_COLOR_INSET_1_DISABLED)
-            uniform color_1_drag: (THEME_COLOR_INSET_1_DRAG)
+            uniform color: (THEME_COLOR_INSET_1)
+            uniform color_hover: (THEME_COLOR_INSET_1_HOVER)
+            uniform color_focus: (THEME_COLOR_INSET_1_FOCUS)
+            uniform color_disabled: (THEME_COLOR_INSET_1_DISABLED)
+            uniform color_drag: (THEME_COLOR_INSET_1_DRAG)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
@@ -48,11 +48,11 @@ live_design!{
             uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
             uniform color_2_drag: (THEME_COLOR_INSET_2_DRAG)
             
-            uniform border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1)
-            uniform border_color_1_drag: (THEME_COLOR_BEVEL_OUTSET_1)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+            uniform border_color: (THEME_COLOR_BEVEL_OUTSET_1)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1)
+            uniform border_color_drag: (THEME_COLOR_BEVEL_OUTSET_1)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2)
@@ -124,18 +124,18 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                self.border_color_1,
-                                self.border_color_1_focus,
+                                self.border_color,
+                                self.border_color_focus,
                                 self.focus
                             ),
                             mix(
-                                self.border_color_1_hover, 
-                                self.border_color_1_drag,
+                                self.border_color_hover, 
+                                self.border_color_drag,
                                 self.drag
                             ),
                             self.hover
                         ),
-                        self.border_color_1_disabled,
+                        self.border_color_disabled,
                         self.disabled
                     )
                 );
@@ -385,11 +385,11 @@ live_design!{
 
     pub SliderMinimalFlat = <SliderMinimal> {
         draw_bg: {
-            border_color_1: (THEME_COLOR_BEVEL_OUTSET_2)
-            border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_2)
-            border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_2)
-            border_color_1_drag: (THEME_COLOR_BEVEL_OUTSET_2)
-            border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
+            border_color: (THEME_COLOR_BEVEL_OUTSET_2)
+            border_color_hover: (THEME_COLOR_BEVEL_OUTSET_2)
+            border_color_focus: (THEME_COLOR_BEVEL_OUTSET_2)
+            border_color_drag: (THEME_COLOR_BEVEL_OUTSET_2)
+            border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
 
             border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
             border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2)
@@ -413,49 +413,76 @@ live_design!{
             uniform color: (THEME_COLOR_INSET)
             uniform color_hover: (THEME_COLOR_INSET_HOVER)
             uniform color_focus: (THEME_COLOR_INSET_FOCUS)
-            uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
             uniform color_drag: (THEME_COLOR_INSET_DRAG)
+            uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-            uniform handle_color_1: (THEME_COLOR_HANDLE_1)
-            uniform handle_color_1_hover: (THEME_COLOR_HANDLE_1_HOVER)
-            uniform handle_color_1_focus: (THEME_COLOR_HANDLE_1_FOCUS)
-            uniform handle_color_1_disabled: (THEME_COLOR_HANDLE_1_DISABLED)
-            uniform handle_color_1_drag: (THEME_COLOR_HANDLE_1_DRAG)
+            uniform handle_color: (THEME_COLOR_HANDLE_1)
+            uniform handle_color_hover: (THEME_COLOR_HANDLE_1_HOVER)
+            uniform handle_color_focus: (THEME_COLOR_HANDLE_1_FOCUS)
+            uniform handle_color_drag: (THEME_COLOR_HANDLE_1_DRAG)
+            uniform handle_color_disabled: (THEME_COLOR_HANDLE_1_DISABLED)
 
-            uniform handle_color_2: (THEME_COLOR_HANDLE_2)
+            uniform handle_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform handle_color_2_hover: (THEME_COLOR_HANDLE_2_HOVER)
             uniform handle_color_2_focus: (THEME_COLOR_HANDLE_2_FOCUS)
-            uniform handle_color_2_disabled: (THEME_COLOR_HANDLE_2_DISABLED)
             uniform handle_color_2_drag: (THEME_COLOR_HANDLE_2_DRAG)
+            uniform handle_color_2_disabled: (THEME_COLOR_HANDLE_2_DISABLED)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-            uniform border_color_1_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+            uniform border_color: (THEME_COLOR_BEVEL_INSET_2)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            uniform border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
             uniform border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
             uniform val_padding: 5.
 
             uniform val_color: (THEME_COLOR_VAL)
             uniform val_color_hover: (THEME_COLOR_VAL_HOVER)
             uniform val_color_focus: (THEME_COLOR_VAL_FOCUS)
-            uniform val_color_disabled: (THEME_COLOR_VAL_DISABLED)
             uniform val_color_drag: (THEME_COLOR_VAL_DRAG)
+            uniform val_color_disabled: (THEME_COLOR_VAL_DISABLED)
 
             uniform handle_size: 20.
             uniform bipolar: 0.0,
 
             fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let handle_sz = self.handle_size;
-                    
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+
+                let color_2 = self.color;
+                let color_2_hover = self.color_hover;
+                let color_2_focus = self.color_focus;
+                let color_2_drag = self.color_drag;
+                let color_2_disabled = self.color_disabled;
+
+                let border_color_2 = self.border_color;
+                let border_color_2_hover = self.border_color_hover;
+                let border_color_2_focus = self.border_color_focus;
+                let border_color_2_drag = self.border_color_drag;
+                let border_color_2_disabled = self.border_color_disabled;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2
+                    color_2_hover = self.color_2_hover
+                    color_2_focus = self.color_2_focus;
+                    color_2_drag = self.color_2_drag;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                if (self.border_color_2.x > -0.5) {
+                    border_color_2 = self.border_color_2;
+                    border_color_2_hover = self.border_color_2_hover;
+                    border_color_2_focus = self.border_color_2_focus;
+                    border_color_2_drag = self.border_color_2_drag;
+                    border_color_2_disabled = self.border_color_2_disabled;
+                }
 
                 let offset_px = vec2(0, 20.)
 
@@ -539,19 +566,19 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                            mix(self.border_color, self.border_color_2, gradient_border.y),
                             mix(
-                                mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
                                 mix(
-                                    mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                    mix(self.border_color_1_drag, self.border_color_2_drag, gradient_border.y),
+                                    mix(self.border_color_hover, self.border_color_2_hover, gradient_border.y),
+                                    mix(self.border_color_drag, self.border_color_2_drag, gradient_border.y),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        mix(self.border_color_disabled, self.border_color_2_disabled, gradient_border.y),
                         self.disabled
                     ), self.border_size
                 )
@@ -568,19 +595,19 @@ live_design!{
                 sdf.fill(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_1_hover, self.hover),
+                            self.border_color,
                             mix(
-                                self.border_color_1_focus,
+                                self.border_color_focus,
                                 mix(
-                                    self.border_color_1_hover,
-                                    self.border_color_1_drag,
+                                    self.border_color_hover,
+                                    self.border_color_drag,
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        self.border_color_1_disabled,
+                        self.border_color_disabled,
                         self.disabled
                     )
                 );
@@ -670,22 +697,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.handle_color_1, self.handle_color_2, gradient_fill.y),
-                                mix(self.handle_color_1_hover, self.handle_color_2_hover, gradient_fill.y),
+                                mix(self.handle_color, self.handle_color_2, gradient_fill.y),
+                                mix(self.handle_color_hover, self.handle_color_2_hover, gradient_fill.y),
                                 self.hover
                             ),
                             mix(
-                                mix(self.handle_color_1_focus, self.handle_color_2_focus, gradient_fill.y),
+                                mix(self.handle_color_focus, self.handle_color_2_focus, gradient_fill.y),
                                 mix(
-                                    mix(self.handle_color_1_hover, self.handle_color_2_hover, gradient_fill.y),
-                                    mix(self.handle_color_1_drag, self.handle_color_2_drag, gradient_fill.y),
+                                    mix(self.handle_color_hover, self.handle_color_2_hover, gradient_fill.y),
+                                    mix(self.handle_color_drag, self.handle_color_2_drag, gradient_fill.y),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.handle_color_1_disabled, self.handle_color_2_disabled, gradient_fill.y),
+                        mix(self.handle_color_disabled, self.handle_color_2_disabled, gradient_fill.y),
                         self.disabled
                     )
                 )
@@ -693,15 +720,15 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color_2, self.border_color_1, gradient_border.y),
+                            mix(self.border_color_2, self.border_color, gradient_border.y),
                             mix(
-                                mix(self.border_color_2_hover, self.border_color_1_hover, gradient_border.y),
-                                mix(self.border_color_2_drag, self.border_color_1_drag, gradient_border.y),
+                                mix(self.border_color_2_hover, self.border_color_hover, gradient_border.y),
+                                mix(self.border_color_2_drag, self.border_color_drag, gradient_border.y),
                                 self.drag
                             ),
                             self.hover
                         ),
-                        mix(self.border_color_2_disabled, self.border_color_1_disabled, gradient_border.y),
+                        mix(self.border_color_2_disabled, self.border_color_disabled, gradient_border.y),
                         self.disabled
                     ), self.border_size
                 );
@@ -711,7 +738,7 @@ live_design!{
         }
     }
 
-    pub SliderGradientY = <Slider> {
+    pub SliderFlat = <Slider> {
         draw_bg: {
             instance disabled: 0.0,
 
@@ -720,11 +747,11 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color_1: (THEME_COLOR_INSET_1)
-            uniform color_1_hover: (THEME_COLOR_INSET_1_HOVER)
-            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
-            uniform color_1_disabled: (THEME_COLOR_INSET_1_DISABLED)
-            uniform color_1_drag: (THEME_COLOR_INSET_1_DRAG)
+            uniform color: (THEME_COLOR_INSET_1)
+            uniform color_hover: (THEME_COLOR_INSET_1_HOVER)
+            uniform color_focus: (THEME_COLOR_INSET_1_FOCUS)
+            uniform color_disabled: (THEME_COLOR_INSET_1_DISABLED)
+            uniform color_drag: (THEME_COLOR_INSET_1_DRAG)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
@@ -732,11 +759,11 @@ live_design!{
             uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
             uniform color_2_drag: (THEME_COLOR_INSET_2_DRAG)
 
-            uniform handle_color_1: (THEME_COLOR_HANDLE_1)
-            uniform handle_color_1_hover: (THEME_COLOR_HANDLE_1_HOVER)
-            uniform handle_color_1_focus: (THEME_COLOR_HANDLE_1_FOCUS)
-            uniform handle_color_1_disabled: (THEME_COLOR_HANDLE_1_DISABLED)
-            uniform handle_color_1_drag: (THEME_COLOR_HANDLE_1_DRAG)
+            uniform handle_color: (THEME_COLOR_HANDLE_1)
+            uniform handle_color_hover: (THEME_COLOR_HANDLE_1_HOVER)
+            uniform handle_color_focus: (THEME_COLOR_HANDLE_1_FOCUS)
+            uniform handle_color_disabled: (THEME_COLOR_HANDLE_1_DISABLED)
+            uniform handle_color_drag: (THEME_COLOR_HANDLE_1_DRAG)
 
             uniform handle_color_2: (THEME_COLOR_HANDLE_2)
             uniform handle_color_2_hover: (THEME_COLOR_HANDLE_2_HOVER)
@@ -744,11 +771,11 @@ live_design!{
             uniform handle_color_2_disabled: (THEME_COLOR_HANDLE_2_DISABLED)
             uniform handle_color_2_drag: (THEME_COLOR_HANDLE_2_DRAG)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-            uniform border_color_1_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+            uniform border_color: (THEME_COLOR_BEVEL_INSET_2)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            uniform border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_INSET_1)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
@@ -766,6 +793,44 @@ live_design!{
 
             uniform handle_size: 20.
             uniform bipolar: 0.0,
+
+
+            // TODO: Popuplate the uniforms above with these values as this is the actual flat styling
+            // border_size: (THEME_BEVELING)
+
+            // uniform color: (THEME_COLOR_INSET)
+            // uniform color_hover: (THEME_COLOR_INSET_HOVER)
+            // uniform color_focus: (THEME_COLOR_INSET_FOCUS)
+            // uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
+            // uniform color_drag: (THEME_COLOR_INSET_DRAG)
+
+            // border_color: (THEME_COLOR_BEVEL)
+            // border_color_hover: (THEME_COLOR_BEVEL_HOVER)
+            // border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
+            // border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            // border_color_drag: (THEME_COLOR_BEVEL_DRAG)
+
+            // border_color_2: (THEME_COLOR_BEVEL)
+            // border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
+            // border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
+            // border_color_2_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            // border_color_2_drag: (THEME_COLOR_BEVEL_DRAG)
+
+            // handle_color: (THEME_COLOR_HANDLE)
+            // handle_color_hover: (THEME_COLOR_HANDLE_HOVER)
+            // handle_color_focus: (THEME_COLOR_HANDLE_FOCUS)
+            // handle_color_disabled: (THEME_COLOR_HANDLE_DISABLED)
+            // handle_color_drag: (THEME_COLOR_HANDLE_DRAG)
+
+            // handle_color_2: (THEME_COLOR_HANDLE)
+            // handle_color_2_hover: (THEME_COLOR_HANDLE_HOVER)
+            // handle_color_2_focus: (THEME_COLOR_HANDLE_FOCUS)
+            // handle_color_2_disabled: (THEME_COLOR_HANDLE_DISABLED)
+            // handle_color_2_drag: (THEME_COLOR_HANDLE_DRAG)
+
+            // val_padding: 4.
+            // handle_size: 14.
+
 
             fn pixel(self) -> vec4 {
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
@@ -832,22 +897,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.color_1, self.color_2, gradient_fill.y),
-                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
+                                mix(self.color, self.color_2, gradient_fill.y),
+                                mix(self.color_hover, self.color_2_hover, gradient_fill.y),
                                 self.hover
                             ),
                             mix(
-                                mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
+                                mix(self.color_focus, self.color_2_focus, gradient_fill.y),
                                 mix(
-                                    mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
-                                    mix(self.color_1_drag, self.color_2_drag, gradient_fill.y),
+                                    mix(self.color_hover, self.color_2_hover, gradient_fill.y),
+                                    mix(self.color_drag, self.color_2_drag, gradient_fill.y),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
+                        mix(self.color_disabled, self.color_2_disabled, gradient_fill.y),
                         self.disabled
                     )
                 )
@@ -855,19 +920,19 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                            mix(self.border_color, self.border_color_2, gradient_border.y),
                             mix(
-                                mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
                                 mix(
-                                    mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                    mix(self.border_color_1_drag, self.border_color_2_drag, gradient_border.y),
+                                    mix(self.border_color_hover, self.border_color_2_hover, gradient_border.y),
+                                    mix(self.border_color_drag, self.border_color_2_drag, gradient_border.y),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        mix(self.border_color_disabled, self.border_color_2_disabled, gradient_border.y),
                         self.disabled
                     ), self.border_size
                 )
@@ -884,19 +949,19 @@ live_design!{
                 sdf.fill(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_1_hover, self.hover),
+                            mix(self.border_color, self.border_color_hover, self.hover),
                             mix(
-                                self.border_color_1_focus,
+                                self.border_color_focus,
                                 mix(
-                                    self.border_color_1_hover,
-                                    self.border_color_1_drag,
+                                    self.border_color_hover,
+                                    self.border_color_drag,
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        self.border_color_1_disabled,
+                        self.border_color_disabled,
                         self.disabled
                     )
                 );
@@ -985,22 +1050,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.handle_color_1, self.handle_color_2, gradient_fill.y),
-                                mix(self.handle_color_1_hover, self.handle_color_2_hover, gradient_fill.y),
+                                mix(self.handle_color, self.handle_color_2, gradient_fill.y),
+                                mix(self.handle_color_hover, self.handle_color_2_hover, gradient_fill.y),
                                 self.hover
                             ),
                             mix(
-                                mix(self.handle_color_1_focus, self.handle_color_2_focus, gradient_fill.y),
+                                mix(self.handle_color_focus, self.handle_color_2_focus, gradient_fill.y),
                                 mix(
-                                    mix(self.handle_color_1_hover, self.handle_color_2_hover, gradient_fill.y),
-                                    mix(self.handle_color_1_drag, self.handle_color_2_drag, gradient_fill.y),
+                                    mix(self.handle_color_hover, self.handle_color_2_hover, gradient_fill.y),
+                                    mix(self.handle_color_drag, self.handle_color_2_drag, gradient_fill.y),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.handle_color_1_disabled, self.handle_color_2_disabled, gradient_fill.y),
+                        mix(self.handle_color_disabled, self.handle_color_2_disabled, gradient_fill.y),
                         self.disabled
                     )
                 )
@@ -1008,15 +1073,15 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color_2, self.border_color_1, gradient_border.y),
+                            mix(self.border_color_2, self.border_color, gradient_border.y),
                             mix(
-                                mix(self.border_color_2_hover, self.border_color_1_hover, gradient_border.y),
-                                mix(self.border_color_2_drag, self.border_color_1_drag, gradient_border.y),
+                                mix(self.border_color_2_hover, self.border_color_hover, gradient_border.y),
+                                mix(self.border_color_2_drag, self.border_color_drag, gradient_border.y),
                                 self.drag
                             ),
                             self.hover
                         ),
-                        mix(self.border_color_2_disabled, self.border_color_1_disabled, gradient_border.y),
+                        mix(self.border_color_2_disabled, self.border_color_disabled, gradient_border.y),
                         self.disabled
                     ), self.border_size
                 );
@@ -1026,42 +1091,60 @@ live_design!{
         }
     }
 
-    pub SliderFlat = <Slider> {
+    pub SliderGradientY = <SliderFlat> {
         draw_bg: {
+            // TODO: remove redundant stylings
             border_size: (THEME_BEVELING)
+            border_radius: (THEME_CORNER_RADIUS)
 
-            uniform color: (THEME_COLOR_INSET)
-            uniform color_hover: (THEME_COLOR_INSET_HOVER)
-            uniform color_focus: (THEME_COLOR_INSET_FOCUS)
-            uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
-            uniform color_drag: (THEME_COLOR_INSET_DRAG)
+            color_dither: 1.0
 
-            border_color_1: (THEME_COLOR_BEVEL)
-            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_1_disabled: (THEME_COLOR_BEVEL_DISABLED)
-            border_color_1_drag: (THEME_COLOR_BEVEL_DRAG)
+            color: (THEME_COLOR_INSET_1)
+            color_hover: (THEME_COLOR_INSET_1_HOVER)
+            color_focus: (THEME_COLOR_INSET_1_FOCUS)
+            color_disabled: (THEME_COLOR_INSET_1_DISABLED)
+            color_drag: (THEME_COLOR_INSET_1_DRAG)
 
-            border_color_2: (THEME_COLOR_BEVEL)
-            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_DISABLED)
-            border_color_2_drag: (THEME_COLOR_BEVEL_DRAG)
+            color_2: (THEME_COLOR_INSET_2)
+            color_2_hover: (THEME_COLOR_INSET_2_HOVER)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
+            color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
+            color_2_drag: (THEME_COLOR_INSET_2_DRAG)
 
-            handle_color_1: (THEME_COLOR_HANDLE)
-            handle_color_1_hover: (THEME_COLOR_HANDLE_HOVER)
-            handle_color_1_focus: (THEME_COLOR_HANDLE_FOCUS)
-            handle_color_1_disabled: (THEME_COLOR_HANDLE_DISABLED)
-            handle_color_1_drag: (THEME_COLOR_HANDLE_DRAG)
+            handle_color: (THEME_COLOR_HANDLE_1)
+            handle_color_hover: (THEME_COLOR_HANDLE_1_HOVER)
+            handle_color_focus: (THEME_COLOR_HANDLE_1_FOCUS)
+            handle_color_disabled: (THEME_COLOR_HANDLE_1_DISABLED)
+            handle_color_drag: (THEME_COLOR_HANDLE_1_DRAG)
 
-            handle_color_2: (THEME_COLOR_HANDLE)
-            handle_color_2_hover: (THEME_COLOR_HANDLE_HOVER)
-            handle_color_2_focus: (THEME_COLOR_HANDLE_FOCUS)
-            handle_color_2_disabled: (THEME_COLOR_HANDLE_DISABLED)
-            handle_color_2_drag: (THEME_COLOR_HANDLE_DRAG)
+            handle_color_2: (THEME_COLOR_HANDLE_2)
+            handle_color_2_hover: (THEME_COLOR_HANDLE_2_HOVER)
+            handle_color_2_focus: (THEME_COLOR_HANDLE_2_FOCUS)
+            handle_color_2_disabled: (THEME_COLOR_HANDLE_2_DISABLED)
+            handle_color_2_drag: (THEME_COLOR_HANDLE_2_DRAG)
 
-            val_padding: 4.
-            handle_size: 14.
+            border_color: (THEME_COLOR_BEVEL_INSET_2)
+            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+
+            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+
+            val_padding: 5.
+
+            val_color: (THEME_COLOR_VAL)
+            val_color_hover: (THEME_COLOR_VAL_HOVER)
+            val_color_focus: (THEME_COLOR_VAL_FOCUS)
+            val_color_disabled: (THEME_COLOR_VAL_DISABLED)
+            val_color_drag: (THEME_COLOR_VAL_DRAG)
+
+            handle_size: 20.
+            bipolar: 0.0,
         }
 
     }
@@ -1162,11 +1245,11 @@ live_design!{
             uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
             uniform color_drag: (THEME_COLOR_INSET_DRAG)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-            uniform border_color_1_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+            uniform border_color: (THEME_COLOR_BEVEL_INSET_2)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            uniform border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_INSET_1)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
@@ -1176,11 +1259,11 @@ live_design!{
 
             uniform val_padding: (SLIDER_ALT1_VAL_PADDING)
             
-            uniform val_color_1: (THEME_COLOR_VAL_1)
-            uniform val_color_1_hover: (THEME_COLOR_VAL_1_HOVER)
-            uniform val_color_1_focus: (THEME_COLOR_VAL_1_FOCUS)
-            uniform val_color_1_disabled: (THEME_COLOR_VAL_1_DISABLED)
-            uniform val_color_1_drag: (THEME_COLOR_VAL_1_DRAG)
+            uniform val_color: (THEME_COLOR_VAL_1)
+            uniform val_color_hover: (THEME_COLOR_VAL_1_HOVER)
+            uniform val_color_focus: (THEME_COLOR_VAL_1_FOCUS)
+            uniform val_color_disabled: (THEME_COLOR_VAL_1_DISABLED)
+            uniform val_color_drag: (THEME_COLOR_VAL_1_DRAG)
 
             uniform val_color_2: (THEME_COLOR_VAL_2)
             uniform val_color_2_hover: (THEME_COLOR_VAL_2_HOVER)
@@ -1270,19 +1353,19 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                            mix(self.border_color, self.border_color_2, gradient_border.y),
                             mix(
-                                mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
                                 mix(
-                                    mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                    mix(self.border_color_1_drag, self.border_color_2_drag, gradient_border.y),
+                                    mix(self.border_color_hover, self.border_color_2_hover, gradient_border.y),
+                                    mix(self.border_color_drag, self.border_color_2_drag, gradient_border.y),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        mix(self.border_color_disabled, self.border_color_2_disabled, gradient_border.y),
                         self.disabled
                     ), self.border_size
                 )
@@ -1317,22 +1400,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.val_color_1, self.val_color_2, gradient_fill.x),
-                                mix(self.val_color_1_hover, self.val_color_2_hover, gradient_fill.x),
+                                mix(self.val_color, self.val_color_2, gradient_fill.x),
+                                mix(self.val_color_hover, self.val_color_2_hover, gradient_fill.x),
                                 self.hover
                             ),
                             mix(
-                                mix(self.val_color_1_focus, self.val_color_2_focus, gradient_fill.x),
+                                mix(self.val_color_focus, self.val_color_2_focus, gradient_fill.x),
                                 mix(
-                                    mix(self.val_color_1_hover, self.val_color_2_hover, gradient_fill.x),
-                                    mix(self.val_color_1_drag, self.val_color_2_drag, gradient_fill.x),
+                                    mix(self.val_color_hover, self.val_color_2_hover, gradient_fill.x),
+                                    mix(self.val_color_drag, self.val_color_2_drag, gradient_fill.x),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.val_color_1_disabled, self.val_color_2_disabled, gradient_fill.x),
+                        mix(self.val_color_disabled, self.val_color_2_disabled, gradient_fill.x),
                         self.disabled
                     )
                 )
@@ -1390,11 +1473,11 @@ live_design!{
 
             uniform color_dither: 1.0
             
-            uniform color_1: (THEME_COLOR_INSET_1)
-            uniform color_1_hover: (THEME_COLOR_INSET_1_HOVER)
-            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
-            uniform color_1_disabled: (THEME_COLOR_INSET_1_DISABLED)
-            uniform color_1_drag: (THEME_COLOR_INSET_1_DRAG)
+            uniform color: (THEME_COLOR_INSET_1)
+            uniform color_hover: (THEME_COLOR_INSET_1_HOVER)
+            uniform color_focus: (THEME_COLOR_INSET_1_FOCUS)
+            uniform color_disabled: (THEME_COLOR_INSET_1_DISABLED)
+            uniform color_drag: (THEME_COLOR_INSET_1_DRAG)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
@@ -1402,11 +1485,11 @@ live_design!{
             uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
             uniform color_2_drag: (THEME_COLOR_INSET_2_DRAG)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-            uniform border_color_1_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+            uniform border_color: (THEME_COLOR_BEVEL_INSET_2)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            uniform border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_INSET_1)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
@@ -1416,11 +1499,11 @@ live_design!{
 
             uniform val_padding: (SLIDER_ALT1_VAL_PADDING)
 
-            uniform val_color_1: (THEME_COLOR_VAL_1)
-            uniform val_color_1_hover: (THEME_COLOR_VAL_1_HOVER)
-            uniform val_color_1_focus: (THEME_COLOR_VAL_1_FOCUS)
-            uniform val_color_1_disabled: (THEME_COLOR_VAL_1_DISABLED)
-            uniform val_color_1_drag: (THEME_COLOR_VAL_1_DRAG)
+            uniform val_color: (THEME_COLOR_VAL_1)
+            uniform val_color_hover: (THEME_COLOR_VAL_1_HOVER)
+            uniform val_color_focus: (THEME_COLOR_VAL_1_FOCUS)
+            uniform val_color_disabled: (THEME_COLOR_VAL_1_DISABLED)
+            uniform val_color_drag: (THEME_COLOR_VAL_1_DRAG)
 
             uniform val_color_2: (THEME_COLOR_VAL_2)
             uniform val_color_2_hover: (THEME_COLOR_VAL_2_HOVER)
@@ -1487,39 +1570,39 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.color_1, self.color_2, gradient_fill.y),
-                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
+                                mix(self.color, self.color_2, gradient_fill.y),
+                                mix(self.color_hover, self.color_2_hover, gradient_fill.y),
                                 self.hover
                             ),
                             mix(
-                                mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
+                                mix(self.color_focus, self.color_2_focus, gradient_fill.y),
                                 mix(
-                                    mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
-                                    mix(self.color_1_drag, self.color_2_drag, gradient_fill.y),
+                                    mix(self.color_hover, self.color_2_hover, gradient_fill.y),
+                                    mix(self.color_drag, self.color_2_drag, gradient_fill.y),
                                     self.drag
                                 ),
                                 self.hover
                             ),
-                            self.focus), mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y), self.disabled
+                            self.focus), mix(self.color_disabled, self.color_2_disabled, gradient_fill.y), self.disabled
                     )
                 )
 
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
+                            mix(self.border_color, self.border_color_2, gradient_border.y),
                             mix(
-                                mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
                                 mix(
-                                    mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                    mix(self.border_color_1_drag, self.border_color_2_drag, gradient_border.y),
+                                    mix(self.border_color_hover, self.border_color_2_hover, gradient_border.y),
+                                    mix(self.border_color_drag, self.border_color_2_drag, gradient_border.y),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        mix(self.border_color_disabled, self.border_color_2_disabled, gradient_border.y),
                         self.disabled
                     ), self.border_size
                 )
@@ -1554,22 +1637,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.val_color_1, self.val_color_2, gradient_fill.x),
-                                mix(self.val_color_1_hover, self.val_color_2_hover, gradient_fill.x),
+                                mix(self.val_color, self.val_color_2, gradient_fill.x),
+                                mix(self.val_color_hover, self.val_color_2_hover, gradient_fill.x),
                                 self.hover
                             ),
                             mix(
-                                mix(self.val_color_1_focus, self.val_color_2_focus, gradient_fill.x),
+                                mix(self.val_color_focus, self.val_color_2_focus, gradient_fill.x),
                                 mix(
-                                    mix(self.val_color_1_hover, self.val_color_2_hover, gradient_fill.x),
-                                    mix(self.val_color_1_drag, self.val_color_2_drag, gradient_fill.x),
+                                    mix(self.val_color_hover, self.val_color_2_hover, gradient_fill.x),
+                                    mix(self.val_color_drag, self.val_color_2_drag, gradient_fill.x),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.val_color_1_disabled, self.val_color_2_disabled, gradient_fill.x),
+                        mix(self.val_color_disabled, self.val_color_2_disabled, gradient_fill.x),
                         self.disabled
                     )
                 )
@@ -1621,11 +1704,11 @@ live_design!{
 
             val_padding: (SLIDER_ALT1_VAL_PADDING)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_DISABLED)
-            uniform border_color_1_drag: (THEME_COLOR_BEVEL_DRAG)
+            uniform border_color: (THEME_COLOR_BEVEL)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_HOVER)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            uniform border_color_drag: (THEME_COLOR_BEVEL_DRAG)
 
             uniform border_color_2: (THEME_COLOR_BEVEL)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
@@ -1666,11 +1749,11 @@ live_design!{
             uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
             uniform color_drag: (THEME_COLOR_INSET_DRAG)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_INSET_1)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            uniform border_color_1_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            uniform border_color: (THEME_COLOR_BEVEL_INSET_1)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            uniform border_color_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
             uniform border_color_2: (THEME_COLOR_BEVEL_INSET_2)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
@@ -1684,11 +1767,11 @@ live_design!{
             uniform handle_color_disabled: (THEME_COLOR_HANDLE_DISABLED);
             uniform handle_color_drag: (THEME_COLOR_HANDLE_DRAG);
 
-            uniform val_color_1: (THEME_COLOR_VAL_1);
-            uniform val_color_1_hover: (THEME_COLOR_VAL_1);
-            uniform val_color_1_focus: (THEME_COLOR_VAL_1);
-            uniform val_color_1_disabled: (THEME_COLOR_VAL_1_DISABLED);
-            uniform val_color_1_drag: (THEME_COLOR_VAL_1_DRAG);
+            uniform val_color: (THEME_COLOR_VAL_1);
+            uniform val_color_hover: (THEME_COLOR_VAL_1);
+            uniform val_color_focus: (THEME_COLOR_VAL_1);
+            uniform val_color_disabled: (THEME_COLOR_VAL_1_DISABLED);
+            uniform val_color_drag: (THEME_COLOR_VAL_1_DRAG);
 
             uniform val_color_2: (THEME_COLOR_VAL_2);
             uniform val_color_2_hover: (THEME_COLOR_VAL_2);
@@ -1804,22 +1887,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix((THEME_COLOR_U_HIDDEN), self.border_color_1, gradient_down),
-                                mix((THEME_COLOR_U_HIDDEN), self.border_color_1_hover, gradient_down),
+                                mix((THEME_COLOR_U_HIDDEN), self.border_color, gradient_down),
+                                mix((THEME_COLOR_U_HIDDEN), self.border_color_hover, gradient_down),
                                 self.hover
                             ),
                             mix(
-                                mix((THEME_COLOR_U_HIDDEN), self.border_color_1_focus, gradient_down),
+                                mix((THEME_COLOR_U_HIDDEN), self.border_color_focus, gradient_down),
                                 mix(
-                                    mix((THEME_COLOR_U_HIDDEN), self.border_color_1_hover, gradient_down),
-                                    mix((THEME_COLOR_U_HIDDEN), self.border_color_1_drag, gradient_down),
+                                    mix((THEME_COLOR_U_HIDDEN), self.border_color_hover, gradient_down),
+                                    mix((THEME_COLOR_U_HIDDEN), self.border_color_drag, gradient_down),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix((THEME_COLOR_U_HIDDEN), self.border_color_1_disabled, gradient_down),
+                        mix((THEME_COLOR_U_HIDDEN), self.border_color_disabled, gradient_down),
                         self.disabled
                     )
                 );
@@ -1907,22 +1990,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.val_color_1, self.val_color_2, self.slide_pos),
-                                mix(self.val_color_1_hover, self.val_color_2_hover, self.slide_pos),
+                                mix(self.val_color, self.val_color_2, self.slide_pos),
+                                mix(self.val_color_hover, self.val_color_2_hover, self.slide_pos),
                                 self.hover
                             ),
                             mix(
-                                mix(self.val_color_1_focus, self.val_color_2_focus, self.slide_pos),
+                                mix(self.val_color_focus, self.val_color_2_focus, self.slide_pos),
                                 mix(
-                                mix(self.val_color_1_focus, self.val_color_2_hover, self.slide_pos),
-                                mix(self.val_color_1_drag, self.val_color_2_drag, self.slide_pos),
+                                mix(self.val_color_focus, self.val_color_2_hover, self.slide_pos),
+                                mix(self.val_color_drag, self.val_color_2_drag, self.slide_pos),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                            mix(self.val_color_1_disabled, self.val_color_2_disabled, self.slide_pos),
+                            mix(self.val_color_disabled, self.val_color_2_disabled, self.slide_pos),
                         self.disabled
                     )
                 )
@@ -2012,22 +2095,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.border_color_1, (THEME_COLOR_U_HIDDEN), gradient_up),
-                                mix(self.border_color_1_hover, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                mix(self.border_color, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                mix(self.border_color_hover, (THEME_COLOR_U_HIDDEN), gradient_up),
                                 self.hover
                             ),
                             mix(
-                                mix(self.border_color_1_focus, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                mix(self.border_color_focus, (THEME_COLOR_U_HIDDEN), gradient_up),
                                 mix(
-                                    mix(self.border_color_1_hover, (THEME_COLOR_U_HIDDEN), gradient_up),
-                                    mix(self.border_color_1_drag, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                    mix(self.border_color_hover, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                    mix(self.border_color_drag, (THEME_COLOR_U_HIDDEN), gradient_up),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.border_color_1_disabled, (THEME_COLOR_U_HIDDEN), gradient_up),
+                        mix(self.border_color_disabled, (THEME_COLOR_U_HIDDEN), gradient_up),
                         self.disabled
                     )
                 );
@@ -2039,11 +2122,11 @@ live_design!{
 
     pub RotaryGradientY = <Rotary> {
         draw_bg: {
-            uniform color_1: (THEME_COLOR_INSET_1)
-            uniform color_1_hover: (THEME_COLOR_INSET_1_HOVER)
-            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
-            uniform color_1_disabled: (THEME_COLOR_INSET_1_DISABLED)
-            uniform color_1_drag: (THEME_COLOR_INSET_1_DRAG)
+            uniform color: (THEME_COLOR_INSET_1)
+            uniform color_hover: (THEME_COLOR_INSET_1_HOVER)
+            uniform color_focus: (THEME_COLOR_INSET_1_FOCUS)
+            uniform color_disabled: (THEME_COLOR_INSET_1_DISABLED)
+            uniform color_drag: (THEME_COLOR_INSET_1_DRAG)
 
             uniform color_2: (THEME_COLOR_INSET_2)
             uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
@@ -2122,22 +2205,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.color_1, self.color_2, gradient_border.y),
-                                mix(self.color_1_hover, self.color_2_hover, gradient_border.y),
+                                mix(self.color, self.color_2, gradient_border.y),
+                                mix(self.color_hover, self.color_2_hover, gradient_border.y),
                                 self.hover
                             ),
                             mix(
-                                mix(self.color_1_focus, self.color_2_focus, gradient_border.y),
+                                mix(self.color_focus, self.color_2_focus, gradient_border.y),
                                 mix(
-                                    mix(self.color_1_hover, self.color_2_hover, gradient_border.y),
-                                    mix(self.color_1_drag, self.color_2_drag, gradient_border.y),
+                                    mix(self.color_hover, self.color_2_hover, gradient_border.y),
+                                    mix(self.color_drag, self.color_2_drag, gradient_border.y),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_border.y),
+                        mix(self.color_disabled, self.color_2_disabled, gradient_border.y),
                         self.disabled
                     )
                 )
@@ -2159,22 +2242,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix((THEME_COLOR_U_HIDDEN), self.border_color_1, gradient_down),
-                                mix((THEME_COLOR_U_HIDDEN), self.border_color_1_hover, gradient_down),
+                                mix((THEME_COLOR_U_HIDDEN), self.border_color, gradient_down),
+                                mix((THEME_COLOR_U_HIDDEN), self.border_color_hover, gradient_down),
                                 self.hover
                             ),
                             mix(
-                                mix((THEME_COLOR_U_HIDDEN), self.border_color_1_focus, gradient_down),
+                                mix((THEME_COLOR_U_HIDDEN), self.border_color_focus, gradient_down),
                                 mix(
-                                    mix((THEME_COLOR_U_HIDDEN), self.border_color_1_hover, gradient_down),
-                                    mix((THEME_COLOR_U_HIDDEN), self.border_color_1_drag, gradient_down),
+                                    mix((THEME_COLOR_U_HIDDEN), self.border_color_hover, gradient_down),
+                                    mix((THEME_COLOR_U_HIDDEN), self.border_color_drag, gradient_down),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix((THEME_COLOR_U_HIDDEN), self.border_color_1_disabled, gradient_down),
+                        mix((THEME_COLOR_U_HIDDEN), self.border_color_disabled, gradient_down),
                         self.disabled
                     )
                 );
@@ -2262,22 +2345,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.val_color_1, self.val_color_2, self.slide_pos),
-                                mix(self.val_color_1_hover, self.val_color_2_hover, self.slide_pos),
+                                mix(self.val_color, self.val_color_2, self.slide_pos),
+                                mix(self.val_color_hover, self.val_color_2_hover, self.slide_pos),
                                 self.hover
                             ),
                             mix(
-                                mix(self.val_color_1_focus, self.val_color_2_focus, self.slide_pos),
+                                mix(self.val_color_focus, self.val_color_2_focus, self.slide_pos),
                                 mix(
-                                mix(self.val_color_1_focus, self.val_color_2_hover, self.slide_pos),
-                                mix(self.val_color_1_drag, self.val_color_2_drag, self.slide_pos),
+                                mix(self.val_color_focus, self.val_color_2_hover, self.slide_pos),
+                                mix(self.val_color_drag, self.val_color_2_drag, self.slide_pos),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                            mix(self.val_color_1_disabled, self.val_color_2_disabled, self.slide_pos),
+                            mix(self.val_color_disabled, self.val_color_2_disabled, self.slide_pos),
                         self.disabled
                     )
                 )
@@ -2367,22 +2450,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.border_color_1, (THEME_COLOR_U_HIDDEN), gradient_up),
-                                mix(self.border_color_1_hover, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                mix(self.border_color, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                mix(self.border_color_hover, (THEME_COLOR_U_HIDDEN), gradient_up),
                                 self.hover
                             ),
                             mix(
-                                mix(self.border_color_1_focus, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                mix(self.border_color_focus, (THEME_COLOR_U_HIDDEN), gradient_up),
                                 mix(
-                                    mix(self.border_color_1_hover, (THEME_COLOR_U_HIDDEN), gradient_up),
-                                    mix(self.border_color_1_drag, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                    mix(self.border_color_hover, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                    mix(self.border_color_drag, (THEME_COLOR_U_HIDDEN), gradient_up),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.border_color_1_disabled, (THEME_COLOR_U_HIDDEN), gradient_up),
+                        mix(self.border_color_disabled, (THEME_COLOR_U_HIDDEN), gradient_up),
                         self.disabled
                     )
                 );
