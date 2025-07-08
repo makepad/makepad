@@ -198,11 +198,11 @@ live_design!{
                         color_disabled: (THEME_COLOR_INSET_DISABLED)
                         color_drag: (THEME_COLOR_INSET_DRAG)
 
-                        border_color_1: (THEME_COLOR_BEVEL_INSET_1)
-                        border_color_1_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-                        border_color_1_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
-                        border_color_1_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-                        border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+                        border_color: (THEME_COLOR_BEVEL_INSET_1)
+                        border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+                        border_color_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+                        border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+                        border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
                         border_color_2: (THEME_COLOR_BEVEL_INSET_2)
                         border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
@@ -216,11 +216,11 @@ live_design!{
                         handle_color_disabled: (THEME_COLOR_HANDLE_DISABLED);
                         handle_color_drag: (THEME_COLOR_HANDLE_DRAG);
 
-                        val_color_1: (THEME_COLOR_VAL_1);
-                        val_color_1_hover: (THEME_COLOR_VAL_1);
-                        val_color_1_focus: (THEME_COLOR_VAL_1);
-                        val_color_1_disabled: (THEME_COLOR_VAL_1);
-                        val_color_1_drag: (THEME_COLOR_VAL_1_DRAG);
+                        val_color: (THEME_COLOR_VAL_1);
+                        val_color_hover: (THEME_COLOR_VAL_1);
+                        val_color_focus: (THEME_COLOR_VAL_1);
+                        val_color_disabled: (THEME_COLOR_VAL_1);
+                        val_color_drag: (THEME_COLOR_VAL_1_DRAG);
 
                         val_color_2: (THEME_COLOR_VAL_2);
                         val_color_2_hover: (THEME_COLOR_VAL_2);
