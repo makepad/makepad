@@ -203,25 +203,23 @@ impl PlistValues{
             <plist version="1.0">
             <dict>
                 <key>CFBundleIdentifier</key>
-                <string>{0}</string>
+                <string>{identifier}</string>
                 <key>CFBundleDisplayName</key>
-                <string>{1}</string>
+                <string>{display_name}</string>
                 <key>CFBundleName</key>
-                <string>{2}</string>
+                <string>{name}</string>
                 <key>CFBundleExecutable</key>
-                <string>{3}</string>
+                <string>{executable}</string>
                 <key>CFBundleVersion</key>
-                <string>{4}</string>
+                <string>{version}</string>
                 <key>CFBundleShortVersionString</key>
-                <string>{4}</string>
+                <string>{version}</string>
                 <key>UILaunchStoryboardName</key>
                 <string></string>
                 <key>CFBundleSupportedPlatforms</key>
                 <array>
                     <string>iPhoneOS</string>
                 </array>
-                <key>CFBundleVersion</key>
-                <string>1</string>
                 <key>DTCompiler</key>
                 <string>com.apple.compilers.llvm.clang.1_0</string>
                 <key>DTPlatformBuild</key>
@@ -271,15 +269,23 @@ impl PlistValues{
                     <string>UIInterfaceOrientationLandscapeLeft</string>
                     <string>UIInterfaceOrientationLandscapeRight</string>
                 </array>
+                <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+                <string>For basic location access.</string>
+                <key>NSLocationWhenInUseUsageDescription</key>
+                <string>For basic location access.</string>
+                <key>NSLocationUsageDescription</key>
+                <string>For basic location access.</string>
+                <key>NSLocationDefaultAccuracyReduced</key>
+                <false/>
                 <key>NSFaceIDUsageDescription</key>
                 <string>For biometric authentication</string>
             </dict>
             </plist>"#,
-            self.identifier,
-            self.display_name,
-            self.name,
-            self.executable,
-            self.version,
+            identifier = self.identifier,
+            display_name = self.display_name,
+            name = self.name,
+            executable = self.executable,
+            version = self.version,
         )
     }
     fn to_tvos_plist_file(&self)->String{
@@ -293,25 +299,25 @@ impl PlistValues{
             <key>CFBundleDevelopmentRegion</key>
             <string>en</string>
             <key>CFBundleExecutable</key>
-            <string>{3}</string>
+            <string>{executable}</string>
             <key>CFBundleIdentifier</key>
-            <string>{0}</string>
+            <string>{identifier}</string>
             <key>CFBundleInfoDictionaryVersion</key>
             <string>6.0</string>
             <key>CFBundleDisplayName</key>
-            <string>{1}</string>
+            <string>{display_name}</string>
             <key>CFBundleName</key>
-            <string>{2}</string>
+            <string>{name}</string>
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleShortVersionString</key>
-            <string>1.0</string>
+            <string>{version}</string>
             <key>CFBundleSupportedPlatforms</key>
             <array>
             <string>AppleTVOS</string>
             </array>
             <key>CFBundleVersion</key>
-            <string>{4}</string>
+            <string>{version}</string>
             <key>DTCompiler</key>
             <string>com.apple.compilers.llvm.clang.1_0</string>
             <key>DTPlatformBuild</key>
@@ -349,11 +355,11 @@ impl PlistValues{
             <string>Automatic</string>
             </dict>
             </plist>"#,
-            self.identifier,
-            self.display_name,
-            self.name,
-            self.executable,
-            self.version,
+            identifier = self.identifier,
+            display_name = self.display_name,
+            name = self.name,
+            executable = self.executable,
+            version = self.version,
         )
     }
 }
@@ -432,7 +438,7 @@ pub fn build(stable:bool, org: &str, product: &str, args: &[String], apple_targe
         display_name: product.to_string(),
         name: product.to_string(),
         executable: build_crate.to_string(),
-        version: "1".to_string(),
+        version: "1.0.0".to_string(),
     };
     let profile = get_profile_from_args(args);
     
