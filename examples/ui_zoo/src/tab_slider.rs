@@ -122,10 +122,10 @@ live_design!{
                         color: #0ff;
                     }
                     draw_bg: {
-                        val_color_1: #F08
-                        val_color_1_hover: #F4A
-                        val_color_1_focus: #C04
-                        val_color_1_drag: #F08
+                        val_color: #F08
+                        val_color_hover: #F4A
+                        val_color_focus: #C04
+                        val_color_drag: #F08
 
                         val_color_2: #F08
                         val_color_2_hover: #F4A
@@ -141,7 +141,7 @@ live_design!{
                 <SliderRound> {
                     text: "Solid",
                     draw_bg: {
-                        val_color_1: #6,
+                        val_color: #6,
                         val_color_2: #6,
                         handle_color: #0,
                     }
@@ -284,11 +284,11 @@ live_design!{
                     color_disabled: (THEME_COLOR_INSET_DISABLED)
                     color_drag: (THEME_COLOR_INSET_DRAG)
 
-                    handle_color_1: (THEME_COLOR_HANDLE_1)
-                    handle_color_1_hover: (THEME_COLOR_HANDLE_1_HOVER)
-                    handle_color_1_focus: (THEME_COLOR_HANDLE_1_FOCUS)
-                    handle_color_1_disabled: (THEME_COLOR_HANDLE_1_DISABLED)
-                    handle_color_1_drag: (THEME_COLOR_HANDLE_1_DRAG)
+                    handle_color: (THEME_COLOR_HANDLE_1)
+                    handle_color_hover: (THEME_COLOR_HANDLE_1_HOVER)
+                    handle_color_focus: (THEME_COLOR_HANDLE_1_FOCUS)
+                    handle_color_disabled: (THEME_COLOR_HANDLE_1_DISABLED)
+                    handle_color_drag: (THEME_COLOR_HANDLE_1_DRAG)
 
                     handle_color_2: (THEME_COLOR_HANDLE_2)
                     handle_color_2_hover: (THEME_COLOR_HANDLE_2_HOVER)
@@ -296,11 +296,11 @@ live_design!{
                     handle_color_2_disabled: (THEME_COLOR_HANDLE_2_DISABLED)
                     handle_color_2_drag: (THEME_COLOR_HANDLE_2_DRAG)
 
-                    border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-                    border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-                    border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-                    border_color_1_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+                    border_color: (THEME_COLOR_BEVEL_INSET_2)
+                    border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+                    border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+                    border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+                    border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
 
                     border_color_2: (THEME_COLOR_BEVEL_INSET_1)
                     border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
@@ -411,11 +411,11 @@ live_design!{
                 draw_bg: {
                     border_size: (THEME_BEVELING)
 
-                    color_1: (THEME_COLOR_INSET_1)
-                    color_1_hover: (THEME_COLOR_INSET_1_HOVER)
-                    color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
-                    color_1_disabled: (THEME_COLOR_INSET_1_DISABLED)
-                    color_1_drag: (THEME_COLOR_INSET_1_DRAG)
+                    color: (THEME_COLOR_INSET_1)
+                    color_hover: (THEME_COLOR_INSET_1_HOVER)
+                    color_focus: (THEME_COLOR_INSET_1_FOCUS)
+                    color_disabled: (THEME_COLOR_INSET_1_DISABLED)
+                    color_drag: (THEME_COLOR_INSET_1_DRAG)
 
                     color_2: (THEME_COLOR_INSET_2)
                     color_2_hover: (THEME_COLOR_INSET_2_HOVER)
@@ -423,11 +423,11 @@ live_design!{
                     color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
                     color_2_drag: (THEME_COLOR_INSET_2_DRAG)
                     
-                    border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1)
-                    border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1)
-                    border_color_1_drag: (THEME_COLOR_BEVEL_OUTSET_1)
-                    border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+                    border_color: (THEME_COLOR_BEVEL_OUTSET_1)
+                    border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1)
+                    border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1)
+                    border_color_drag: (THEME_COLOR_BEVEL_OUTSET_1)
+                    border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
 
                     border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
                     border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2)
@@ -533,10 +533,10 @@ live_design!{
                     border_size: 0.75
                     border_radius: (THEME_CORNER_RADIUS * 2.)
 
-                    val_color_1: #FFCC00
-                    val_color_1_hover: #FF9944
-                    val_color_1_focus: #FFCC44
-                    val_color_1_drag: #FFAA00
+                    val_color: #FFCC00
+                    val_color_hover: #FF9944
+                    val_color_focus: #FFCC44
+                    val_color_drag: #FFAA00
 
                     val_color_2: #F00
                     val_color_2_hover: #F00
@@ -560,11 +560,11 @@ live_design!{
                     handle_color_drag: (THEME_COLOR_HANDLE_DRAG)
                     handle_color_disabled: (THEME_COLOR_HANDLE_DISABLED)
 
-                    border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-                    border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-                    border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-                    border_color_1_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+                    border_color: (THEME_COLOR_BEVEL_INSET_2)
+                    border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+                    border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+                    border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+                    border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
 
                     border_color_2: (THEME_COLOR_BEVEL_INSET_1)
                     border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
