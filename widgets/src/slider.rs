@@ -999,6 +999,8 @@ live_design!{
                     bg_gradient_dir = gradient_fill.x;
                 }
 
+                let val_gradient_dir = gradient_fill.x;
+
                 let handle_size = (SLIDER_ALT1_HANDLE_SIZE);
                 let padding = self.val_padding;
 
@@ -1087,22 +1089,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.val_color, val_color_2, bg_gradient_dir),
-                                mix(self.val_color_hover, val_color_2_hover, bg_gradient_dir),
+                                mix(self.val_color, val_color_2, val_gradient_dir),
+                                mix(self.val_color_hover, val_color_2_hover, val_gradient_dir),
                                 self.hover
                             ),
                             mix(
-                                mix(self.val_color_focus, val_color_2_focus, bg_gradient_dir),
+                                mix(self.val_color_focus, val_color_2_focus, val_gradient_dir),
                                 mix(
-                                    mix(self.val_color_hover, val_color_2_hover, bg_gradient_dir),
-                                    mix(self.val_color_drag, val_color_2_drag, bg_gradient_dir),
+                                    mix(self.val_color_hover, val_color_2_hover, val_gradient_dir),
+                                    mix(self.val_color_drag, val_color_2_drag, val_gradient_dir),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.val_color_disabled, val_color_2_disabled, bg_gradient_dir),
+                        mix(self.val_color_disabled, val_color_2_disabled, val_gradient_dir),
                         self.disabled
                     )
                 )
@@ -1236,13 +1238,6 @@ live_design!{
             val_color_focus: (THEME_COLOR_VAL_1_FOCUS)
             val_color_disabled: (THEME_COLOR_VAL_1_DISABLED)
             val_color_drag: (THEME_COLOR_VAL_1_DRAG)
-
-            val_color_2: (THEME_COLOR_VAL_2)
-            val_color_2_hover: (THEME_COLOR_VAL_2_HOVER)
-            val_color_2_focus: (THEME_COLOR_VAL_2_FOCUS)
-            val_color_2_disabled: (THEME_COLOR_VAL_2_DISABLED)
-            val_color_2_drag: (THEME_COLOR_VAL_2_DRAG)
-
         }
     }
 
@@ -1272,8 +1267,6 @@ live_design!{
             border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
             border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
             border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
-
-            val_padding: (SLIDER_ALT1_VAL_PADDING)
 
             val_color: (THEME_COLOR_VAL_1)
             val_color_hover: (THEME_COLOR_VAL_1_HOVER)
