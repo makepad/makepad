@@ -46,6 +46,22 @@ live_design!{
                 <SliderGradientY> { text: "stepped", step: 0.1 }
                 
                 <Hr> {}
+                <H4> { text: "SliderGradientY"}
+                <SliderGradientX> { text: "Default" }
+                <SliderGradientX> {
+                    text: "disabled"
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
+                }
+                <SliderGradientX> { text: "label_align", label_align: { x: 0.5, y: 0. } }
+                <SliderGradientX> { text: "min/max", min: 0., max: 100. }
+                <SliderGradientX> { text: "precision", precision: 20 }
+                <SliderGradientX> { text: "stepped", step: 0.1 }
+                
+                <Hr> {}
                 <H4> { text: "SliderFlat"}
                 <SliderFlat> { text: "Default" }
                 <SliderFlat> {
