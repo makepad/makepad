@@ -87,6 +87,7 @@ pub enum Flow {
 pub enum Size {
     #[pick] Fill,
     #[live(200.0)] Fixed(f64),
+    #[live(1.0)] Ratio(f64),
     Fit,
     All
 }
@@ -952,6 +953,7 @@ impl Turtle {
         return match width {
             Size::Fit => std::f64::NAN,
             Size::Fixed(v) => max_zero_keep_nan(v),
+            Size::Ratio(r)=>r*self.width,
             Size::Fill => {
                 match flow {
                     Flow::RightWrap=> {
@@ -977,6 +979,7 @@ impl Turtle {
         return match height {
             Size::Fit => std::f64::NAN,
             Size::Fixed(v) => max_zero_keep_nan(v),
+            Size::Ratio(r)=>r*self.height,
             Size::Fill => {
                 match flow {
                     Flow::RightWrap | Flow::Right | Flow::Overlay => {
@@ -1223,6 +1226,24 @@ impl Walk {
         }
     }
     
+    pub fn ratio(w:f64, h:f64) -> Self{
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::Ratio(w),
+            height: Size::Ratio(h),
+        }
+    }
+    
+    pub fn ratio_size(size: DVec2) -> Self {
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::Ratio(size.x),
+            height: Size::Ratio(size.y),
+        }
+    }
+
     pub fn fit() -> Self {
         Self {
             abs_pos: None,
@@ -1406,6 +1427,27 @@ impl Size {
     pub fn is_fixed(&self) -> bool {
         match self {
             Self::Fixed(_) => true,
+            _ => false
+        }
+    }
+
+    pub fn ratio_or_zero(&self) -> f64 {
+        match self {
+            Self::Ratio(v) => *v,
+            _ => 0.
+        }
+    }
+    
+    pub fn ratio_or_nan(&self) -> f64 {
+        match self {
+            Self::Ratio(v) => max_zero_keep_nan(*v),
+            _ => std::f64::NAN,
+        }
+    }
+
+    pub fn is_ratio(&self) -> bool {
+        match self {
+            Self::Ratio(_) => true,
             _ => false
         }
     }
