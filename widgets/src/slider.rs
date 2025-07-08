@@ -580,7 +580,7 @@ live_design!{
                                 self.hover
                             ),
                             mix(
-                                self.color_focus,
+                                mix(self.color_focus, color_2_focus, bg_gradient_dir),
                                 mix(
                                     mix(self.color_hover, color_2_hover, bg_gradient_dir),
                                     mix(self.color_drag, color_2_drag, bg_gradient_dir),
@@ -772,17 +772,6 @@ live_design!{
 
     pub Slider = <SliderFlat> {
         draw_bg: {
-            border_size: (THEME_BEVELING)
-            border_radius: (THEME_CORNER_RADIUS)
-
-            color_dither: 1.0
-
-            color: (THEME_COLOR_INSET)
-            color_hover: (THEME_COLOR_INSET_HOVER)
-            color_focus: (THEME_COLOR_INSET_FOCUS)
-            color_disabled: (THEME_COLOR_INSET_DISABLED)
-            color_drag: (THEME_COLOR_INSET_DRAG)
-
             handle_color: (THEME_COLOR_HANDLE_1)
             handle_color_hover: (THEME_COLOR_HANDLE_1_HOVER)
             handle_color_focus: (THEME_COLOR_HANDLE_1_FOCUS)
@@ -806,25 +795,12 @@ live_design!{
             border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
             border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
             border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
-
-            val_padding: 5.
-
-            val_color: (THEME_COLOR_VAL)
-            val_color_hover: (THEME_COLOR_VAL_HOVER)
-            val_color_focus: (THEME_COLOR_VAL_FOCUS)
-            val_color_disabled: (THEME_COLOR_VAL_DISABLED)
-            val_color_drag: (THEME_COLOR_VAL_DRAG)
         }
     }
 
     pub SliderGradientY = <SliderFlat> {
         draw_bg: {
             // TODO: remove redundant stylings
-            border_size: (THEME_BEVELING)
-            border_radius: (THEME_CORNER_RADIUS)
-
-            color_dither: 1.0
-
             color: (THEME_COLOR_INSET_1)
             color_hover: (THEME_COLOR_INSET_1_HOVER)
             color_focus: (THEME_COLOR_INSET_1_FOCUS)
@@ -860,17 +836,6 @@ live_design!{
             border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
             border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
             border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
-
-            val_padding: 5.
-
-            val_color: (THEME_COLOR_VAL)
-            val_color_hover: (THEME_COLOR_VAL_HOVER)
-            val_color_focus: (THEME_COLOR_VAL_FOCUS)
-            val_color_disabled: (THEME_COLOR_VAL_DISABLED)
-            val_color_drag: (THEME_COLOR_VAL_DRAG)
-
-            handle_size: 20.
-            bipolar: 0.0,
         }
     }
 
