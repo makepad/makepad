@@ -162,7 +162,9 @@ impl Rasterizer {
                         self.a[linestart + (x1i - 1) as usize] += d * (1.0 - a2 - am);
                     }
                 }
-                self.a[linestart + x1i as usize] += d * am;
+                if x1i < self.width as i32 {
+                    self.a[linestart + x1i as usize] += d * am;
+                }
             }
             x = xnext;
         }
