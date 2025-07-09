@@ -22,7 +22,7 @@ impl DeferredWalk {
             Self::Unresolved{index, pos, margin, other_axis}=>{
                 let turtle = cx.turtles.last_mut().unwrap();
 
-                let walk = match turtle.layout.flow {
+                let walk = match turtle.flow() {
                     Flow::Right => Walk {
                         abs_pos: Some(pos + dvec2(turtle.total_resolved_length_to(index), 0.0)),
                         margin,
@@ -65,7 +65,7 @@ pub enum AlignEntry{
 #[derive(Clone, Default, Debug)]
 pub struct FinishedWalk {
     align_start: usize,
-    deferred_count_before: usize,
+    deferred_before_count: usize,
     outer_size: DVec2,
 }
 
@@ -77,15 +77,15 @@ pub struct Walk {
     #[live]
     pub abs_pos: Option<DVec2>,
 
-    /// The margin around the walk's rectangle.
+    /// The margin around this walk's rectangle.
     #[live]
     pub margin: Margin,
 
-    /// The desired width of the walk's rectangle.
+    /// The desired width of this walk's rectangle.
     #[live]
     pub width: Size,
 
-    /// The desired height of the walk's rectangle.
+    /// The desired height of this walk's rectangle.
     #[live]
     pub height: Size,
 }
@@ -188,7 +188,7 @@ impl Walk {
     }
 }
 
-/// Specifies the desired width/height of the rectangle of a turtle's next walk.
+/// Specifies the desired width/height of a walk's rectangle.
 /// 
 /// See `Turtle::next_walk_width` and `Turtle::next_walk_height` for details on how the actual
 /// width/height is computed based on the desired width/height.
@@ -259,21 +259,69 @@ impl Default for Size {
     }
 }
 
+/// Specifies how walks should be laid out with respect to each other.
 #[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Layout {
     #[live] pub scroll: DVec2,
     #[live(true)] pub clip_x: bool,
     #[live(true)] pub clip_y: bool,
-    #[live] pub padding: Padding,
-    #[live] pub align: Align,
+
+    /// The direction in which walks are laid out.
     #[live] pub flow: Flow,
-    #[live] pub spacing: f64,
+
+    /// The spacing between each walk.
+    #[live]
+    pub spacing: f64,
+
+    /// The padding around each walk's inner rectangle.
+    #[live]
+    pub padding: Padding,
+
+    /// The alignment of all walks within their turtle's rectangle.
+    #[live]
+    pub align: Align,
 }
 
 impl Layout {
-     /// Creates a copy of this `Layout` with `padding` set to the given value.
-     pub fn with_padding(self, padding: Padding) -> Self {
+    /// Creates a `Layout` in which walks are laid out from left to right, and all other fields
+    /// are set to their default values.
+    pub fn flow_right() -> Self {
+        Self {
+            flow: Flow::Right,
+            ..Self::default()
+        }
+    }
+    
+    /// Creates a `Layout` in which walks are laid out from left to right, wrapping to the next row
+    /// if we run out of space, and all other fields are set to their default values.
+    pub fn flow_right_wrap() -> Self {
+        Self {
+            flow: Flow::RightWrap,
+            ..Self::default()
+        }
+    }
+
+    /// Creates a `Layout` in which walks are laid out from top to bottom, and all other fields
+    /// are set to their default values.
+    pub fn flow_down() -> Self {
+        Self {
+            flow: Flow::Down,
+            ..Self::default()
+        }
+    }
+    
+    /// Creates a `Layout` in which walks are laid out on top of each other, and all other fields
+    /// are set to their default values.
+    pub fn flow_overlay() -> Self {
+        Self {
+            flow: Flow::Overlay,
+            ..Self::default()
+        }
+    }
+
+    /// Creates a copy of this `Layout` with `padding` set to the given value.
+    pub fn with_padding(self, padding: Padding) -> Self {
         Self {
             padding,
             ..self
@@ -327,20 +375,40 @@ impl Default for Layout {
     }
 }
 
+/// Specifies the alignment of all walks within their turtle's rectangle.
 #[derive(Clone, Copy, Default, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Align {
-    #[live] pub x: f64,
-    #[live] pub y: f64
+    /// The fraction of the turtle's unused inner width that will be added to the left of all walks:
+    /// - Setting this to 0.0 will align all walks to the left.
+    /// - Setting this to 0.5 will center all walks horizontally.
+    /// - Setting this to 1.0 will align all walks to the right.
+    #[live]
+    pub x: f64,
+
+    /// The fraction of the turtle's unused inner height that will be added above all walks:
+    /// - Setting this to 0.0 will align all walks to the top.
+    /// - Setting this to 0.5 will center all walks vertically.
+    /// - Setting this to 1.0 will align all walks to the bottom.
+    #[live]
+    pub y: f64
 }
 
+/// Specifies the direction in which walks are laid out.
 #[derive(Copy, Clone, Debug, Live, LiveHook, PartialEq)]
 #[live_ignore]
 pub enum Flow {
+    // Walks are laid out from left to right.
     #[pick]
     Right,
+
+    // Walks are laid out from left to right, wrapping to the next row if we run out of space.
     RightWrap,
+    
+    // Walks are laid out from top to bottom.
     Down,
+    
+    // Walks are laid out on top of each other.
     Overlay, 
 }
 
@@ -350,7 +418,7 @@ impl Default for Flow {
     }
 }
 
-/// Specifies the padding around the walk's inner rectangle.
+/// Specifies the padding around a walk's inner rectangle.
 #[derive(Clone, Copy, Default, Debug, Live, LiveRegister)]
 #[live_ignore]
 pub struct Padding {
@@ -434,6 +502,15 @@ impl Padding {
     }
 }
 
+/// The turtle is the main layout primitive in Makepad.
+/// 
+/// A turtle can be walked to allocate space on the screen. Each walk produces a rectangle that
+/// represents the area allocated by the walk.
+/// 
+/// Turtles can be nested. When a nested turtle is created, the parent turtle starts a new walk. The
+/// nested turtle then walks inside the rectangle of the parent turtle's walk. When the nested turtle
+/// is finished, the parent turtle finishes its walk.
+/// 
 /// +-----------------+
 /// |     Margin      |
 /// | +-------------+ |
@@ -469,19 +546,39 @@ pub struct Turtle {
 }
 
 impl Turtle {
-    /// Returns this turtle's spacing.
-    pub fn spacing(&self) -> f64 {
-        self.layout.spacing
+    /// Returns a reference to the walk with which this turtle was created.
+    pub fn walk(&self) -> &Walk {
+        &self.walk
     }
 
-    /// Returns a reference to this turtle's padding.
-    pub fn padding(&self) -> Padding {
-        self.layout.padding
+    /// Returns a reference to the layout with which this turtle was created.
+    pub fn layout(&self) -> &Layout {
+        &self.layout
     }
 
     /// Return a reference to this turtle's margin.
     pub fn margin(&self) -> &Margin {
         &self.walk.margin
+    }
+
+    /// Returns the direction in which this turtle's walks are laid out.
+    pub fn flow(&self) -> Flow {
+        self.layout.flow
+    }
+
+    /// Returns the spacing between each walk for this turtle.
+    pub fn spacing(&self) -> f64 {
+        self.layout.spacing
+    }
+
+    /// Returns a reference to the padding around each walk's inner rectangle for this turtle.
+    pub fn padding(&self) -> Padding {
+        self.layout.padding
+    }
+
+    /// Returns the alignment of all walks within this turtle's rectangle.
+    pub fn align(&self) -> Align {
+        self.layout.align
     }
 
     /// Returns this turtle's inner rectangle.
@@ -799,9 +896,9 @@ impl Turtle {
         self.finished_walks_start == finished_walks_end && self.deferred_fills.len() == 0
     }
 
-    /// Returns the offset to outer rectangle of this turtle's next walk.
+    /// Returns the offset to this turtle's next walk.
     /// 
-    /// This is either zero if this turtle's next walk would be it's first, or this turtle's
+    /// This is either zero if this turtle's next walk would be its first, or this turtle's
     /// spacing in the direction of it's flow.
     pub fn next_walk_outer_offset(&self, finished_walks_end: usize) -> DVec2 {
         if self.next_walk_is_first(finished_walks_end) {
@@ -829,13 +926,14 @@ impl Turtle {
     ///
     /// - If the desired width is `Size::Fill`, then the actual width is computed as follows:
     /// 
-    ///   First, we compute the actual outer width. This depends on the turtle's flow:
-    ///   - If the flow is `Flow::Right`, then the actual outer width of this turtle's next walk is
-    ///     this turtle's remaining inner unused width.
-    ///   - If the flow is `Flow::RightWrap`, then the actual outer width of this turtle's next walk
-    ///     is this turtle's remaining inner unused width on the current row.
-    ///   - If the flow is either `Flow::Down` or `Flow::Overlay`, then the actual outer width of
-    ///     this turtle's next walk is this turtle's inner effective width.
+    ///   First, we compute the actual outer width. This depends on the direction in which this
+    ///   turtle's walks are laid out:
+    ///   - If this is `Flow::Right`, then the actual outer width of this turtle's next walk is this
+    ///     turtle's remaining inner unused width.
+    ///   - If this is `Flow::RightWrap`, then the actual outer width of this turtle's next walk is
+    ///     this turtle's remaining inner unused width on the current row.
+    ///   - If this is either `Flow::Down` or `Flow::Overlay`, then the actual outer width of this
+    ///     turtle's next walk is this turtle's inner effective width.
     ///   
     ///   Next, the actual outer width is clamped to the given `min` and `max`` constraints, if any.
     /// 
@@ -874,10 +972,11 @@ impl Turtle {
     /// 
     /// - If the desired height is `Size::Fill`, then the actual height is computed as follows:
     ///   
-    ///   First, we compute the actual outer height. This depends on the turtle's flow:
-    ///   - If the flow is either `Flow::Right`, `Flow::RightWrap`, or `Flow::Overlay, then the
-    ///     actual outer height of this turtle's next walk is this turtle's inner effective height.
-    ///   - If the flow is `Flow::Down`, then the actual outer height of this turtle's next walk is
+    ///   First, we compute the actual outer height. This depends on the direction in which this
+    ///   turtle's walks are laid out:
+    ///   - If this is either `Flow::Right`, `Flow::RightWrap`, or `Flow::Overlay, then the actual
+    ///     outer height of this turtle's next walk is this turtle's inner effective height.
+    ///   - If this is `Flow::Down`, then the actual outer height of this turtle's next walk is
     ///     this turtle's remaining inner unused height.
     /// 
     ///   Next, the actual outer height is clamped to the given `min` and `max` constraints, if any.
@@ -1034,12 +1133,28 @@ impl<'a,'b> Cx2d<'a,'b> {
         self.turtles.last_mut().unwrap()
     }
 
-    /// Begins a new child turtle.
+    /// Starts a nested turtle.
+    /// 
+    /// When a nested turtle is started, the parent turtle starts a new walk with the given `walk`.
+    /// The nested turtle then walks inside the rectangle of the parent turtle's walk. When the
+    /// nested turtle is finished, the parent turtle finishes its walk.
+    /// 
+    /// The given `layout` determines how the nested turtle's walks are laid out with respect to
+    /// each other.
+    /// 
+    /// The nested turtle's rectangle is that of the parent turtle's walk. Since the width/height
+    /// of this walk may be `Size::Fit`, the width/height of this rectangle may not be known until
+    /// the nested turtle is finished.
     pub fn begin_turtle(&mut self, walk: Walk, layout: Layout) {
         self.begin_turtle_with_guard(walk, layout, Area::Empty)
     }
 
-    /// Begins a new child turtle, with a guard area.
+    /// Starts a nested turtle, with a guard area.
+    /// 
+    /// When the nested turtle is later finished, it should be finished with the same guard area
+    /// that was used to start it.
+    /// 
+    /// See [`begin_turtle`] for more information.
     pub fn begin_turtle_with_guard(&mut self, walk: Walk, layout: Layout, guard: Area) {
         let parent = self.turtle();
 
@@ -1108,7 +1223,206 @@ impl<'a,'b> Cx2d<'a,'b> {
         self.turtles.push(child);
     }
 
-    /// Walks the turtle with the given `walk`.
+    /// Finishes the current turtle.
+    pub fn end_turtle(&mut self) -> Rect {
+        self.end_turtle_with_guard(Area::Empty)
+    }
+    
+    /// Finishes the current turtle, with a guard area.
+    /// 
+    /// The current turtle should be finished with the same guard area that was used to start it.
+    pub fn end_turtle_with_guard(&mut self, guard: Area) -> Rect {
+        let mut turtle = self.turtles.last().unwrap();
+        if guard != turtle.guard {
+            panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard, guard)
+        }
+        
+        let turtle_align_start = turtle.align_start;
+        let turtle_abs_pos = turtle.walk.abs_pos;
+        let turtle_margin = turtle.walk.margin;
+        let turtle_walks_start = turtle.finished_walks_start;
+        let turtle_shift = turtle.shift;
+                
+        // If the current turtle's width is not yet known, we can now compute it based on the used width.
+        let width = if !turtle.width.is_nan() {
+            turtle.width
+        } else {
+            let width = turtle.used_width() + turtle.padding().right;
+
+            if let AlignEntry::BeginTurtle(clip_min,clip_max) = &mut self.align_list[turtle.align_start] {
+                clip_max.x = clip_min.x + width;
+            }
+
+            width
+        };
+        
+        // If the current turtle's height is not yet known, we can now compute it based on the used height.
+        let height = if !turtle.height.is_nan() {
+            turtle.height
+        } else {
+            let height = turtle.used_height() + turtle.padding().bottom;
+
+            if let AlignEntry::BeginTurtle(clip_min, clip_max) = &mut self.align_list[turtle.align_start] {
+                clip_max.y = clip_min.y + height;
+            }
+
+            height
+        };
+
+        // Now that the current turtle's rectangle is known, we can perform alignment.
+        match turtle.flow() {
+            Flow::Right => {
+                if turtle.deferred_fills.len() == 0 {
+                    // If walks are laid out from left to right, and there are no deferred walks,
+                    // then the horizontal alignment is applied to all walks as a whole, while
+                    // the vertical alignment is applied to each walk individually.
+                    if turtle.align().x != 0.0 || turtle.align().y != 0.0 {
+                        let inner_unused_width = turtle.inner_unused_width();
+                        let inner_effective_height = turtle.inner_effective_height();
+
+                        for finished_walk_index in turtle.finished_walks_start..self.finished_walks.len() {
+                            let finished_walk = &self.finished_walks[finished_walk_index];
+                            
+                            let inner_unused_height = inner_effective_height - finished_walk.outer_size.y;
+
+                            let dx = turtle.align().x * inner_unused_width;
+                            let dy = turtle.align().y * inner_unused_height;
+
+                            let align_start = finished_walk.align_start;
+                            let align_end = self.get_turtle_walk_align_end(finished_walk_index);
+                            self.move_align_list(dx, dy, align_start, align_end, false, turtle_shift);
+                            
+                            turtle = self.turtles.last_mut().unwrap();
+                        }
+                    }
+                } else {
+                    // If walks are laid out from left to right, and there are deferred walks, then
+                    // the inner unused width is distributed over the deferred walks, while the
+                    // vertical alignment is applied to each walk individually.
+                    let inner_effective_height = turtle.inner_effective_height();
+
+                    for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
+                        let finished_walk = &self.finished_walks[finished_walk_index];
+
+                        let inner_unused_height = inner_effective_height - finished_walk.outer_size.y;
+
+                        let dx = turtle.total_resolved_length_to(finished_walk.deferred_before_count);
+                        let dy = turtle.align().y * inner_unused_height;
+
+                        let align_start = finished_walk.align_start;
+                        let align_end = self.get_turtle_walk_align_end(finished_walk_index);
+                        self.move_align_list(dx, dy, align_start, align_end, false, turtle_shift);
+
+                        turtle = self.turtles.last_mut().unwrap();
+                    }
+                }
+            },
+            Flow::RightWrap=>{
+                if turtle.deferred_fills.is_empty() {
+                    // TODO   
+                } else {
+                    panic!()
+                }
+            }
+            Flow::Down => {
+                // If walks are laid out from top to bottom, and there are no deferred walks, then
+                // the horizontal alignment is applied each walk individually, while the vertical
+                // alignment is applied to all walks as a whole.
+                if turtle.deferred_fills.is_empty() {
+                    if turtle.align().x != 0.0 || turtle.align().y != 0.0 {
+                        let inner_effective_width = turtle.inner_effective_width();
+                        let inner_unused_height = turtle.inner_unused_height();
+                        
+                        for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
+                            let finished_walk = &self.finished_walks[finished_walk_index];
+
+                            let inner_unused_width = inner_effective_width - finished_walk.outer_size.x;
+
+                            let dx = turtle.align().x * inner_unused_width;
+                            let dy = turtle.align().y * inner_unused_height;
+
+                            let align_start = finished_walk.align_start;
+                            let align_end = self.get_turtle_walk_align_end(finished_walk_index);
+                            self.move_align_list(dx, dy, align_start, align_end, false, turtle_shift);
+
+                            turtle = self.turtles.last_mut().unwrap();
+                        }
+                    }
+                } else {
+                    // If walks are laid out from top to bottom, and there are deferred walks, then
+                    // the horizontal alignment is applied each walk individually, while the inner
+                    // unused height is distributed over the deferred walks.
+                    let inner_effective_width = turtle.inner_effective_width();
+
+                    for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
+                        let finished_walk = &self.finished_walks[finished_walk_index];
+
+                        let inner_unused_width = inner_effective_width - finished_walk.outer_size.x;
+
+                        let shift_x = turtle.align().y * inner_unused_width;
+                        let shift_y = turtle.total_resolved_length_to(finished_walk.deferred_before_count);
+
+                        let align_start = finished_walk.align_start;
+                        let align_end = self.get_turtle_walk_align_end(finished_walk_index);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+
+                        turtle = self.turtles.last_mut().unwrap();
+                    }
+                }
+            },
+            Flow::Overlay => {
+                // If walks are laid out on top of each other, then both the horizontal and vertical
+                // alignment are applied to each walk individually.
+                if turtle.align().x != 0.0 || turtle.align().y != 0.0 {
+                    let inner_effective_width = turtle.inner_effective_width();
+                    let inner_effective_height = turtle.inner_effective_height();
+
+                    for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
+                        let finished_walk = &self.finished_walks[finished_walk_index];
+
+                        let inner_unused_width = inner_effective_width - finished_walk.outer_size.x;
+                        let inner_unused_height = inner_effective_height - finished_walk.outer_size.y;
+
+                        let shift_x = turtle.align().x * inner_unused_width;
+                        let shift_y = turtle.align().y * inner_unused_height;
+
+                        let align_start = finished_walk.align_start;
+                        let align_end = self.get_turtle_walk_align_end(finished_walk_index);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
+
+                        turtle = self.turtles.last_mut().unwrap();
+                    }
+                }
+            }
+        }
+
+        self.align_list.push(AlignEntry::EndTurtle);
+
+        // Pop the current turtle from the turtle stack.
+        self.finished_walks.truncate(turtle.finished_walks_start);
+        self.turtles.pop();
+
+        if self.turtles.is_empty() {
+            Rect {
+                pos: dvec2(0.0, 0.0),
+                size: dvec2(width, height)
+            }
+        } else {
+            self.walk_turtle_internal(
+                Walk {
+                    width: Size::Fixed(width),
+                    height: Size::Fixed(height),
+                    abs_pos: turtle_abs_pos,
+                    margin:turtle_margin
+                },
+                turtle_align_start
+            )
+        }
+    }
+
+    /// Walks the turtle with the given `walk` to allocate space on the screen.
+    /// 
+    /// Each walk produces a rectangle that represents the area allocated by the walk.
     pub fn walk_turtle(&mut self, walk: Walk) -> Rect {
         self.walk_turtle_internal(walk, self.align_list.len())
     }
@@ -1124,7 +1438,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         if let Some(pos) = walk.abs_pos {
             turtle.move_to(pos);
 
-            match turtle.layout.flow {
+            match turtle.flow() {
                 Flow::Right | Flow::RightWrap => turtle.allocate_height(outer_size.y),
                 Flow::Down => turtle.allocate_width(outer_size.x),
                 Flow::Overlay => {
@@ -1137,7 +1451,7 @@ impl<'a,'b> Cx2d<'a,'b> {
 
             self.finished_walks.push(FinishedWalk {
                 align_start,
-                deferred_count_before: 0,
+                deferred_before_count: 0,
                 outer_size: size + walk.margin.size(),
             });
             
@@ -1149,7 +1463,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         else {
             let spacing = turtle.next_walk_outer_offset(self.finished_walks.len());
             
-            match turtle.layout.flow {
+            match turtle.flow() {
                 Flow::RightWrap if size.x > turtle.inner_unused_width_current_row() => {
                     let new_pos = dvec2(
                         turtle.origin.x + turtle.layout.padding.left,
@@ -1179,7 +1493,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             let defer_index = self.turtle().deferred_fills.len();
             self.finished_walks.push(FinishedWalk {
                 align_start,
-                deferred_count_before: defer_index,
+                deferred_before_count: defer_index,
                 outer_size,
             });
 
@@ -1198,7 +1512,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         
         let turtle = self.turtles.last_mut().unwrap();
         
-        match turtle.layout.flow {
+        match turtle.flow() {
             Flow::Right => {
                 let Size::Fill { weight, min, max } = walk.width else {
                     return None
@@ -1338,147 +1652,9 @@ impl<'a,'b> Cx2d<'a,'b> {
         self.align_list.len() != self.turtle().align_start + 1
     }
     
-    pub fn end_turtle(&mut self) -> Rect {
-        self.end_turtle_with_guard(Area::Empty)
-    }
-    
     pub fn end_turtle_with_area(&mut self, area: &mut Area)->Rect {
         let rect = self.end_turtle_with_guard(Area::Empty);
         self.add_aligned_rect_area(area, rect);
-        rect
-    }
-    
-    pub fn end_turtle_with_guard(&mut self, guard_area: Area) -> Rect {
-        let mut turtle = self.turtles.last().unwrap();
-        if guard_area != turtle.guard {
-            panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard, guard_area)
-        }
-        
-        let turtle_align_start = turtle.align_start;
-        let turtle_abs_pos = turtle.walk.abs_pos;
-        let turtle_margin = turtle.walk.margin;
-        let turtle_walks_start = turtle.finished_walks_start;
-        let turtle_shift = turtle.shift;
-                
-        // computed width / height
-        let w = if turtle.width.is_nan() {
-            let w = turtle.used_width + turtle.layout.padding.right - turtle.layout.scroll.x;
-            // we should update the clip pos
-            if let AlignEntry::BeginTurtle(p1,p2) = &mut self.align_list[turtle_align_start]{
-                p2.x = p1.x + w;
-            }
-            Size::Fixed(w)
-        }
-        else {
-            Size::Fixed(turtle.width)
-        };
-        
-        let h = if turtle.height.is_nan() {
-            let h =  turtle.used_height + turtle.layout.padding.bottom - turtle.layout.scroll.y;
-            // we should update the clip pos
-            if let AlignEntry::BeginTurtle(p1,p2) = &mut self.align_list[turtle_align_start]{
-                p2.y = p1.y + h;
-            }
-            Size::Fixed(h)
-        }
-        else {
-            Size::Fixed(turtle.height)
-        };
-                
-        match turtle.layout.flow {
-            Flow::Right => {
-                if turtle.deferred_fills.len() > 0 {
-                    let align_y = turtle.layout.align.y;
-                    let padded_height_or_used = turtle.inner_effective_height();
-                    for i in turtle_walks_start..self.finished_walks.len() {
-                        let walk = &self.finished_walks[i];
-                        let shift_x = turtle.total_resolved_length_to(walk.deferred_count_before);
-                        let shift_y = align_y * (padded_height_or_used - walk.outer_size.y);
-                        let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
-                        turtle = self.turtles.last_mut().unwrap();
-                    }
-                }
-                else {
-                    let align_x = turtle.layout.align.x;
-                    let align_y = turtle.layout.align.y;
-                    let width_left = turtle.inner_unused_width();
-                    let padded_height_or_used = turtle.inner_effective_height();
-                    if align_x != 0.0 || align_y != 0.0{
-                        for i in turtle_walks_start..self.finished_walks.len() {
-                            let walk = &self.finished_walks[i];
-                            let shift_x = align_x * width_left;
-                            let shift_y = align_y * (padded_height_or_used - walk.outer_size.y);
-                            let align_start = walk.align_start;
-                            let align_end = self.get_turtle_walk_align_end(i);
-                            self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
-                        }
-                    }
-                }
-            },
-            Flow::RightWrap=>{
-                if turtle.deferred_fills.len() > 0{panic!()}
-                // for now we only support align:0,0
-            }
-            Flow::Down => {
-                if turtle.deferred_fills.len() > 0 {
-                    let padded_width_or_used = turtle.inner_effective_width();
-                    let align_x = turtle.layout.align.x;
-                    for i in turtle_walks_start..self.finished_walks.len() {
-                        let walk = &self.finished_walks[i];
-                        let shift_x = align_x * (padded_width_or_used- walk.outer_size.x);
-                        let shift_y = turtle.total_resolved_length_to(walk.deferred_count_before);
-                        let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
-                        turtle = self.turtles.last_mut().unwrap();
-                    }
-                }
-                else {
-                    let align_x = turtle.layout.align.x;
-                    let align_y = turtle.layout.align.y;
-                    let padded_width_or_used = turtle.inner_effective_width();
-                    let height_left = turtle.inner_unused_height();
-                    if align_x != 0.0 || align_y != 0.0{
-                        for i in turtle_walks_start..self.finished_walks.len() {
-                            let walk = &self.finished_walks[i];
-                            let shift_x = align_x * (padded_width_or_used - walk.outer_size.x);
-                            let shift_y = align_y * height_left;
-                            let align_start = walk.align_start;
-                            let align_end = self.get_turtle_walk_align_end(i);
-                            self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
-                        }
-                    }
-                }
-            },
-            Flow::Overlay => {
-                let align_x = turtle.layout.align.x;
-                let align_y = turtle.layout.align.y;
-                if align_x != 0.0 || align_y != 0.0{
-                    let padded_width_or_used = turtle.inner_effective_width();
-                    let padded_height_or_used = turtle.inner_effective_height();
-                    for i in turtle_walks_start..self.finished_walks.len() {
-                        let walk = &self.finished_walks[i];
-                        let shift_x = align_x * (padded_width_or_used - walk.outer_size.x);
-                        let shift_y = align_y * (padded_height_or_used - walk.outer_size.y);
-                        let align_start = walk.align_start;
-                        let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle_shift);
-                    }
-                }
-            }
-        }
-        self.turtles.pop();
-        self.finished_walks.truncate(turtle_walks_start);
-        self.align_list.push(AlignEntry::EndTurtle);
-        if self.turtles.len() == 0 {
-            return Rect {
-                pos: dvec2(0.0, 0.0),
-                size: dvec2(w.to_fixed().unwrap_or(0.0), h.to_fixed().unwrap_or(0.0))
-            }
-        }
-        let rect = self.walk_turtle_internal(Walk {width: w, height: h, abs_pos:turtle_abs_pos, margin:turtle_margin}, turtle_align_start);
         rect
     }
     
@@ -1519,7 +1695,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle = self.turtles.last().unwrap();
         self.finished_walks.push(FinishedWalk {
             align_start: self.align_list.len(),
-            deferred_count_before: turtle.deferred_fills.len(),
+            deferred_before_count: turtle.deferred_fills.len(),
             outer_size: rect.size,
         });
     }
@@ -1720,10 +1896,6 @@ impl Turtle {
         self.shift = shift;
     }
     
-    pub fn layout(&self)->&Layout{
-        &self.layout
-    }
-    
     pub fn used(&self) -> DVec2 {
         dvec2(self.used_width, self.used_height)
     }
@@ -1808,27 +1980,6 @@ impl Walk {
 }
 
 impl Layout {
-    pub fn flow_right() -> Self {
-        Self {
-            flow: Flow::Right,
-            ..Self::default()
-        }
-    }
-    
-    pub fn flow_down() -> Self {
-        Self {
-            flow: Flow::Down,
-            ..Self::default()
-        }
-    }
-    
-    pub fn flow_overlay() -> Self {
-        Self {
-            flow: Flow::Overlay,
-            ..Self::default()
-        }
-    }
-
     pub fn with_scroll(mut self, v: DVec2) -> Self {
         self.scroll = v;
         self
