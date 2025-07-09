@@ -14,7 +14,7 @@ live_design!{
     pub DrawCheckBox = {{DrawCheckBox}} {}
     pub CheckBoxBase = {{CheckBox}} {}
     
-    pub CheckBox = <CheckBoxBase> {
+    pub CheckBoxFlat = <CheckBoxBase> {
         width: Fit, height: Fit,
         padding: <THEME_MSPACE_2> {}
         align: { x: 0., y: 0. }
@@ -28,7 +28,10 @@ live_design!{
             instance disabled: 0.0,
             instance down: 0.0,
 
-            uniform size: 14.0;
+            uniform size: 15.0;
+
+            uniform border_gradient_horizontal: 0.0; 
+            uniform bg_gradient_horizontal: 0.0; 
 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
@@ -42,14 +45,21 @@ live_design!{
             uniform color_focus: (THEME_COLOR_INSET_FOCUS)
             uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-            uniform border_color_1_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
+            uniform color_2_down: (THEME_COLOR_INSET_2_DOWN)
+            uniform color_2_active: (THEME_COLOR_INSET_2_ACTIVE)
+            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
+            uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+            uniform border_color: (THEME_COLOR_BEVEL)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_HOVER)
+            uniform border_color_down: (THEME_COLOR_BEVEL_DOWN)
+            uniform border_color_active: (THEME_COLOR_BEVEL_ACTIVE)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
+
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
             uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
@@ -68,6 +78,38 @@ live_design!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                let color_2 = self.color;
+                let color_2_hover = self.color_hover;
+                let color_2_down = self.color_down;
+                let color_2_active = self.color_active;
+                let color_2_focus = self.color_focus;
+                let color_2_disabled = self.color_disabled;
+
+                let border_color_2 = self.border_color;
+                let border_color_2_hover = self.border_color_hover;
+                let border_color_2_down = self.border_color_down;
+                let border_color_2_active = self.border_color_active;
+                let border_color_2_focus = self.border_color_focus;
+                let border_color_2_disabled = self.border_color_disabled;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2
+                    color_2_hover = self.color_2_hover
+                    color_2_down = self.color_2_down;
+                    color_2_active = self.color_2_active;
+                    color_2_focus = self.color_2_focus;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                if (self.border_color_2.x > -0.5) {
+                    border_color_2 = self.border_color_2;
+                    border_color_2_hover = self.border_color_2_hover;
+                    border_color_2_down = self.border_color_2_down;
+                    border_color_2_active = self.border_color_2_active;
+                    border_color_2_focus = self.border_color_2_focus;
+                    border_color_2_disabled = self.border_color_2_disabled;
+                }
 
                 let sz_px = self.size;
                 let sz_inner_px = sz_px - self.border_size * 2.;
@@ -102,6 +144,11 @@ live_design!{
                     (self.pos.y - offset_uv.y) * scale_factor_border.y + dither
                 )
 
+                let border_gradient_dir = gradient_border.y;
+                if (self.border_gradient_horizontal > 0.5) {
+                    border_gradient_dir = gradient_border.x;
+                }
+
                 let scale_factor_fill = vec2(
                     self.rect_size.x / sz_inner_px,
                     self.rect_size.y / sz_inner_px 
@@ -112,85 +159,105 @@ live_design!{
                     (self.pos.y - offset_uv.y) * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
 
-                // Draw background
-                sdf.box(
-                    offset_px.x + self.border_size,
-                    offset_px.y + self.border_size,
-                    sz_px - self.border_size * 2.,
-                    sz_px - self.border_size * 2.,
-                    self.border_radius * 0.5
-                );
+                let bg_gradient_dir = gradient_fill.y;
+                if (self.bg_gradient_horizontal > 0.5) {
+                    bg_gradient_dir = gradient_fill.x;
+                }
 
-                sdf.stroke_keep(
-                    mix(
-                        mix(
+                match self.check_type {
+                    CheckType::Check => {
+
+                        // Draw background
+                        sdf.box(
+                            offset_px.x + self.border_size,
+                            offset_px.y + self.border_size,
+                            sz_px - self.border_size * 2.,
+                            sz_px - self.border_size * 2.,
+                            self.border_radius * 0.5
+                        );
+
+                        sdf.stroke_keep(
                             mix(
                                 mix(
-                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                    self.focus
+                                    mix(
+                                        mix(
+                                            mix(self.border_color, border_color_2, border_gradient_dir),
+                                            mix(self.border_color_focus, border_color_2_focus, border_gradient_dir),
+                                            self.focus
+                                        ),
+                                        mix(
+                                            mix(self.border_color_active, border_color_2_active, border_gradient_dir),
+                                            mix(self.border_color_focus, border_color_2_focus, border_gradient_dir),
+                                            self.focus
+                                        ),
+                                        self.active
+                                    ),
+                                    mix(
+                                        mix(self.border_color_down, border_color_2_down, border_gradient_dir),
+                                        mix(self.border_color_hover, border_color_2_hover, border_gradient_dir),
+                                        self.down
+                                    ),
+                                    self.hover
                                 ),
-                                mix(
-                                    mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                    self.focus
-                                ),
-                                self.active
-                            ),
-                            mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                            self.hover
-                        ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                        self.disabled
-                    ), self.border_size
-                )
+                                mix(self.border_color_disabled, border_color_2_disabled, border_gradient_dir),
+                                self.disabled
+                            ), self.border_size
+                        )
 
-                sdf.fill(
-                    mix(
-                        mix(
+                        sdf.fill(
                             mix(
                                 mix(
-                                    self.color,
-                                    self.color_focus,
-                                    self.focus
+                                    mix(
+                                        mix(
+                                            mix(self.color, color_2, bg_gradient_dir),
+                                            mix(self.color_focus, color_2_focus, bg_gradient_dir),
+                                            self.focus
+                                        ),
+                                        mix(
+                                            mix(self.color_active, color_2_active, bg_gradient_dir),
+                                            mix(self.color_focus, color_2_focus, bg_gradient_dir),
+                                            self.focus
+                                        ),
+                                        self.active
+                                    ),
+                                    mix(
+                                        mix(self.color_hover, color_2_hover, bg_gradient_dir),
+                                        mix(self.color_down, color_2_down, bg_gradient_dir),
+                                        self.down
+                                    ),
+                                    self.hover
                                 ),
-                                mix(
-                                    self.color_active,
-                                    self.color_focus,
-                                    self.focus
-                                ),
-                                self.active
-                            ),
+                                mix(self.color_disabled, color_2_disabled, bg_gradient_dir),
+                                self.disabled
+                            )
+                        )
+
+                        // Draw mark
+                        let mark_padding = 0.275 * self.size
+                        sdf.move_to(mark_padding, center_px.y);
+                        sdf.line_to(center_px.x, center_px.y + sz_px * 0.5 - mark_padding);
+                        sdf.line_to(sz_px - mark_padding, offset_px.y + mark_padding);
+
+                        sdf.stroke(
                             mix(
-                                self.color_hover,
-                                self.color_down,
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        self.color_disabled,
-                        self.disabled
-                    )
-                )
+                                mix(
+                                    mix(self.mark_color, self.mark_color_hover, self.hover),
+                                    mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
+                                    self.active
+                                ),
+                                self.mark_color_disabled,
+                                self.disabled
+                            ), self.size * 0.09
+                        );
 
-                // Draw mark
-                let mark_padding = 0.275 * self.size
-                sdf.move_to(mark_padding, center_px.y);
-                sdf.line_to(center_px.x, center_px.y + sz_px * 0.5 - mark_padding);
-                sdf.line_to(sz_px - mark_padding, offset_px.y + mark_padding);
+                    }
 
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(self.mark_color, self.mark_color_hover, self.hover),
-                            mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
-                            self.active
-                        ),
-                        self.mark_color_disabled,
-                        self.disabled
-                    ), self.size * 0.09
-                );
+                    // CheckType::Toggle => { }
 
+                    CheckType::None => {
+                        sdf.fill(THEME_COLOR_D_HIDDEN);
+                    }
+                }
                 return sdf.result
             }
         }
@@ -344,7 +411,7 @@ live_design!{
         }
     }
 
-    pub CheckBoxFlat = <CheckBox> {
+    pub CheckBox = <CheckBoxFlat> {
         draw_bg: {
             color: (THEME_COLOR_INSET)
             color_hover: (THEME_COLOR_INSET_HOVER)
@@ -353,361 +420,44 @@ live_design!{
             color_focus: (THEME_COLOR_INSET_FOCUS)
             color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-            border_color_1: (THEME_COLOR_BEVEL)
-            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_1_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_1_active: (THEME_COLOR_BEVEL_ACTIVE)
-            border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_1_down: (THEME_COLOR_BEVEL_DISABLED)
+            border_color: (THEME_COLOR_BEVEL_INSET_2)
+            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+            border_color_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            border_color_down: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
-            border_color_2: (THEME_COLOR_BEVEL)
-            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_2_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_2_active: (THEME_COLOR_BEVEL_ACTIVE)
-            border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_2_down: (THEME_COLOR_BEVEL_DISABLED)
+            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
+            border_color_2_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
+            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
         }
-
     }
 
     pub CheckBoxGradientY = <CheckBox> {
-        width: Fit, height: Fit,
-        padding: <THEME_MSPACE_2> {}
-        align: { x: 0., y: 0. }
-        
-        label_walk: {
-            width: Fit, height: Fit,
-            margin: <THEME_MSPACE_H_1> { left: 13. }
-        }
-        
         draw_bg: {
-            instance disabled: 0.0,
-            instance down: 0.0,
+            color: (THEME_COLOR_INSET_1)
+            color_hover: (THEME_COLOR_INSET_1_HOVER)
+            color_down: (THEME_COLOR_INSET_1_DOWN)
+            color_active: (THEME_COLOR_INSET_1_ACTIVE)
+            color_focus: (THEME_COLOR_INSET_1_FOCUS)
+            color_disabled: (THEME_COLOR_INSET_1_DISABLED)
 
-            uniform size: 15.0;
-
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: (THEME_CORNER_RADIUS)
-
-            uniform color_dither: 1.0
-
-            uniform color_1: (THEME_COLOR_INSET_1)
-            uniform color_1_hover: (THEME_COLOR_INSET_1_HOVER)
-            uniform color_1_down: (THEME_COLOR_INSET_1_DOWN)
-            uniform color_1_active: (THEME_COLOR_INSET_1_ACTIVE)
-            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
-            uniform color_1_disabled: (THEME_COLOR_INSET_1_DISABLED)
-
-            uniform color_2: (THEME_COLOR_INSET_2)
-            uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
-            uniform color_2_down: (THEME_COLOR_INSET_2_DOWN)
-            uniform color_2_active: (THEME_COLOR_INSET_2_ACTIVE)
-            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
-            uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
-
-            uniform border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-            uniform border_color_1_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-
-            uniform border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            uniform border_color_2_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
-
-            uniform mark_size: 0.65
-            uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_hover: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_down: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_active: (THEME_COLOR_MARK_ACTIVE)
-            uniform mark_color_active_hover: (THEME_COLOR_MARK_ACTIVE_HOVER)
-            uniform mark_color_focus: (THEME_COLOR_MARK_FOCUS)
-            uniform mark_color_disabled: (THEME_COLOR_MARK_DISABLED)
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let sz_px = self.size;
-                let sz_inner_px = sz_px - self.border_size * 2.;
-                let shift_px = vec2(0, 0)
-                let center_px = vec2(
-                    sz_px * 0.5,
-                    self.rect_size.y * 0.5
-                )
-                
-                let offset_px = vec2(
-                    shift_px.x,
-                    shift_px.y + center_px.y - sz_px * 0.5
-                )
-
-                let offset_uv = vec2(
-                    offset_px.x / self.rect_size.x,
-                    offset_px.y / self.rect_size.y
-                )
-
-                let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
-                    self.border_size / self.rect_size.y
-                )
-
-                let scale_factor_border = vec2(
-                    self.rect_size.x / sz_px,
-                    self.rect_size.y / sz_px 
-                );
-
-                let gradient_border = vec2(
-                    (self.pos.x - offset_uv.x) * scale_factor_border.x + dither,
-                    (self.pos.y - offset_uv.y) * scale_factor_border.y + dither
-                )
-
-                let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px,
-                    self.rect_size.y / sz_inner_px 
-                );
-
-                let gradient_fill = vec2(
-                    (self.pos.x - offset_uv.x) * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    (self.pos.y - offset_uv.y) * scale_factor_fill.y - border_sz_uv.y * 2. + dither
-                )
-
-                match self.check_type {
-                    CheckType::Check => {
-
-                        // Draw background
-                        sdf.box(
-                            offset_px.x + self.border_size,
-                            offset_px.y + self.border_size,
-                            sz_px - self.border_size * 2.,
-                            sz_px - self.border_size * 2.,
-                            self.border_radius * 0.5
-                        );
-
-                        sdf.stroke_keep(
-                            mix(
-                                mix(
-                                    mix(
-                                        mix(
-                                            mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                            mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                            self.focus
-                                        ),
-                                        mix(
-                                            mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                                            mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                            self.focus
-                                        ),
-                                        self.active
-                                    ),
-                                    mix(
-                                        mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
-                                        mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                        self.down
-                                    ),
-                                    self.hover
-                                ),
-                                mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                                self.disabled
-                            ), self.border_size
-                        )
-
-                        sdf.fill(
-                            mix(
-                                mix(
-                                    mix(
-                                        mix(
-                                            mix(self.color_1, self.color_2, gradient_fill.y),
-                                            mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
-                                            self.focus
-                                        ),
-                                        mix(
-                                            mix(self.color_1_active, self.color_2_active, gradient_fill.y),
-                                            mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
-                                            self.focus
-                                        ),
-                                        self.active
-                                    ),
-                                    mix(
-                                        mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
-                                        mix(self.color_1_down, self.color_2_down, gradient_fill.y),
-                                        self.down
-                                    ),
-                                    self.hover
-                                ),
-                                mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
-                                self.disabled
-                            )
-                        )
-
-                        // Draw mark
-                        let mark_padding = 0.275 * self.size
-                        sdf.move_to(mark_padding, center_px.y);
-                        sdf.line_to(center_px.x, center_px.y + sz_px * 0.5 - mark_padding);
-                        sdf.line_to(sz_px - mark_padding, offset_px.y + mark_padding);
-
-                        sdf.stroke(
-                            mix(
-                                mix(
-                                    mix(self.mark_color, self.mark_color_hover, self.hover),
-                                    mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
-                                    self.active
-                                ),
-                                self.mark_color_disabled,
-                                self.disabled
-                            ), self.size * 0.09
-                        );
-
-                    }
-
-                    // CheckType::Toggle => { }
-
-                    CheckType::None => {
-                        sdf.fill(THEME_COLOR_D_HIDDEN);
-                    }
-                }
-                return sdf.result
-            }
+            color_2: (THEME_COLOR_INSET_2)
+            color_2_hover: (THEME_COLOR_INSET_2_HOVER)
+            color_2_down: (THEME_COLOR_INSET_2_DOWN)
+            color_2_active: (THEME_COLOR_INSET_2_ACTIVE)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
+            color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
         }
     }
         
     pub CheckBoxGradientX = <CheckBoxGradientY> {
         draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let sz_px = self.size;
-                let sz_inner_px = sz_px - self.border_size * 2.;
-                let shift_px = vec2(0, 0)
-                let center_px = vec2(
-                    sz_px * 0.5,
-                    self.rect_size.y * 0.5
-                )
-                
-                let offset_px = vec2(
-                    shift_px.x,
-                    shift_px.y + center_px.y - sz_px * 0.5
-                )
-
-                let offset_uv = vec2(
-                    offset_px.x / self.rect_size.x,
-                    offset_px.y / self.rect_size.y
-                )
-
-                let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
-                    self.border_size / self.rect_size.y
-                )
-
-                let scale_factor_border = vec2(
-                    self.rect_size.x / sz_px,
-                    self.rect_size.y / sz_px 
-                );
-
-                let gradient_border = vec2(
-                    (self.pos.x - offset_uv.x) * scale_factor_border.x + dither,
-                    (self.pos.y - offset_uv.y) * scale_factor_border.y + dither
-                )
-
-                let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px,
-                    self.rect_size.y / sz_inner_px 
-                );
-
-                let gradient_fill = vec2(
-                    (self.pos.x - offset_uv.x) * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    (self.pos.y - offset_uv.y) * scale_factor_fill.y - border_sz_uv.y * 2. + dither
-                )
-
-                // Draw background
-                sdf.box(
-                    offset_px.x + self.border_size,
-                    offset_px.y + self.border_size,
-                    sz_px - self.border_size * 2.,
-                    sz_px - self.border_size * 2.,
-                    self.border_radius * 0.5
-                );
-
-                sdf.stroke_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                    self.focus
-                                ),
-                                mix(
-                                    mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                    self.focus
-                                ),
-                                self.active
-                            ),
-                            mix(
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                        self.disabled
-                    ), self.border_size
-                )
-
-                sdf.fill(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, gradient_fill.x),
-                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
-                                    self.focus
-                                ),
-                                mix(
-                                    mix(self.color_1_active, self.color_2_active, gradient_fill.x),
-                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
-                                    self.focus
-                                ),
-                                self.active
-                            ),
-                            mix(
-                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.x),
-                                mix(self.color_1_down, self.color_2_down, gradient_fill.x),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.x),
-                        self.disabled
-                    )
-                )
-
-                // Draw mark
-                let mark_padding = 0.275 * self.size
-                sdf.move_to(mark_padding, center_px.y);
-                sdf.line_to(center_px.x, center_px.y + sz_px * 0.5 - mark_padding);
-                sdf.line_to(sz_px - mark_padding, offset_px.y + mark_padding);
-
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(self.mark_color, self.mark_color_hover, self.hover),
-                            mix(self.mark_color_active, self.mark_color_active_hover, self.hover),
-                            self.active
-                        ),
-                        self.mark_color_disabled,
-                        self.disabled
-                    ), self.size * 0.09
-                );
-
-                return sdf.result
-            }
+            border_gradient_horizontal: 1.0; 
+            bg_gradient_horizontal: 1.0; 
         } 
     }
 
@@ -790,25 +540,25 @@ live_design!{
                         mix(
                             mix(
                                 mix(
-                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    mix(self.border_color, self.border_color_2, gradient_border.y),
+                                    mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
                                     self.focus
                                 ),
                                 mix(
-                                    mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    mix(self.border_color_active, self.border_color_2_active, gradient_border.y),
+                                    mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
                                     self.focus
                                 ),
                                 self.active
                             ),
                             mix(
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
+                                mix(self.border_color_hover, self.border_color_2_hover, gradient_border.y),
+                                mix(self.border_color_down, self.border_color_2_down, gradient_border.y),
                                 self.down
                             ),
                             self.hover
                         ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        mix(self.border_color_disabled, self.border_color_2_disabled, gradient_border.y),
                         self.disabled
                     ), self.border_size
                 )
@@ -841,26 +591,26 @@ live_design!{
                     //     mix(
                     //         mix(
                     //             mix(
-                    //                 mix(self.color_1, self.color_2, gradient_fill.y),
-                    //                 mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
+                    //                 mix(self.color, self.color_2, gradient_fill.y),
+                    //                 mix(self.color_hover, self.color_2_hover, gradient_fill.y),
                     //                 self.hover
                     //             ),
                     //             mix(
-                    //                 mix(self.color_1_active, self.color_2_active, gradient_fill.y),
-                    //                 mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
+                    //                 mix(self.color_active, self.color_2_active, gradient_fill.y),
+                    //                 mix(self.color_focus, self.color_2_focus, gradient_fill.y),
                     //                 self.focus
                     //             ),
                     //             self.active
                     //         ),
                     //         mix(
-                    //             // mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
+                    //             // mix(self.color_hover, self.color_2_hover, gradient_fill.y),
                     //             #f00,
-                    //             mix(self.color_1_down, self.color_2_down, gradient_fill.y),
+                    //             mix(self.color_down, self.color_2_down, gradient_fill.y),
                     //             self.down
                     //         ),
                     //         self.hover
                     //     ),
-                    //     mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
+                    //     mix(self.color_disabled, self.color_2_disabled, gradient_fill.y),
                     //     self.disabled
                     // )
                 // )
@@ -1072,25 +822,25 @@ live_design!{
                         mix(
                             mix(
                                 mix(
-                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    mix(self.border_color, self.border_color_2, gradient_border.y),
+                                    mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
                                     self.focus
                                 ),
                                 mix(
-                                    mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    mix(self.border_color_active, self.border_color_2_active, gradient_border.y),
+                                    mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
                                     self.focus
                                 ),
                                 self.active
                             ),
                             mix(
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
+                                mix(self.border_color_hover, self.border_color_2_hover, gradient_border.y),
+                                mix(self.border_color_down, self.border_color_2_down, gradient_border.y),
                                 self.down
                             ),
                             self.hover
                         ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        mix(self.border_color_disabled, self.border_color_2_disabled, gradient_border.y),
                         self.disabled
                     ), self.border_size
                 )
@@ -1100,21 +850,21 @@ live_design!{
                         mix(
                             mix(
                                 mix(
-                                    mix(self.color_1, self.color_2, gradient_fill.y),
-                                    mix(self.color_1_active, self.color_2_active, gradient_fill.y),
+                                    mix(self.color, self.color_2, gradient_fill.y),
+                                    mix(self.color_active, self.color_2_active, gradient_fill.y),
                                     self.active
                                 ),
-                                mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
+                                mix(self.color_focus, self.color_2_focus, gradient_fill.y),
                                 self.focus
                             ),
                             mix(
-                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
-                                mix(self.color_1_down, self.color_2_down, gradient_fill.y),
+                                mix(self.color_hover, self.color_2_hover, gradient_fill.y),
+                                mix(self.color_down, self.color_2_down, gradient_fill.y),
                                 self.down
                             ),
                             self.hover
                         ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
+                        mix(self.color_disabled, self.color_2_disabled, gradient_fill.y),
                         self.disabled
                     )
                 )
@@ -1256,12 +1006,12 @@ live_design!{
             color_focus: (THEME_COLOR_INSET_FOCUS)
             color_down: (THEME_COLOR_INSET_DISABLED)
 
-            border_color_1: (THEME_COLOR_BEVEL)
-            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_1_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_1_active: (THEME_COLOR_BEVEL_ACTIVE)
-            border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_1_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            border_color: (THEME_COLOR_BEVEL)
+            border_color_hover: (THEME_COLOR_BEVEL_HOVER)
+            border_color_down: (THEME_COLOR_BEVEL_DOWN)
+            border_color_active: (THEME_COLOR_BEVEL_ACTIVE)
+            border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
+            border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
 
             border_color_2: (THEME_COLOR_BEVEL)
             border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
@@ -1343,25 +1093,25 @@ live_design!{
                         mix(
                             mix(
                                 mix(
-                                    mix(self.color_1, self.color_2, gradient_fill.x),
-                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
+                                    mix(self.color, self.color_2, gradient_fill.x),
+                                    mix(self.color_focus, self.color_2_focus, gradient_fill.x),
                                     self.focus
                                 ),
                                 mix(
-                                    mix(self.color_1_active, self.color_2_active, gradient_fill.x),
-                                    mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
+                                    mix(self.color_active, self.color_2_active, gradient_fill.x),
+                                    mix(self.color_focus, self.color_2_focus, gradient_fill.x),
                                     self.focus
                                 ),
                                 self.active
                             ),
                             mix(
-                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.x),
-                                mix(self.color_1_down, self.color_2_down, gradient_fill.x),
+                                mix(self.color_hover, self.color_2_hover, gradient_fill.x),
+                                mix(self.color_down, self.color_2_down, gradient_fill.x),
                                 self.down
                             ),
                             self.hover
                         ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.x),
+                        mix(self.color_disabled, self.color_2_disabled, gradient_fill.x),
                         self.disabled
                     )
                 )
@@ -1371,25 +1121,25 @@ live_design!{
                         mix(
                             mix(
                                 mix(
-                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    mix(self.border_color, self.border_color_2, gradient_border.y),
+                                    mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
                                     self.focus
                                 ),
                                 mix(
-                                    mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                                    mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                    mix(self.border_color_active, self.border_color_2_active, gradient_border.y),
+                                    mix(self.border_color_focus, self.border_color_2_focus, gradient_border.y),
                                     self.focus
                                 ),
                                 self.active
                             ),
                             mix(
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
+                                mix(self.border_color_hover, self.border_color_2_hover, gradient_border.y),
+                                mix(self.border_color_down, self.border_color_2_down, gradient_border.y),
                                 self.down
                             ),
                             self.hover
                         ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        mix(self.border_color_disabled, self.border_color_2_disabled, gradient_border.y),
                         self.disabled
                     ), self.border_size
                 )
