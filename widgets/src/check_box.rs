@@ -589,6 +589,11 @@ live_design!{
                     (self.pos.y - offset_uv.y) * scale_factor_border.y + dither
                 )
 
+                let border_gradient_dir = gradient_border.y;
+                if (self.border_gradient_horizontal > 0.5) {
+                    border_gradient_dir = gradient_border.x;
+                }
+
                 let scale_factor_fill = vec2(
                     self.rect_size.x / sz_inner_px.x,
                     self.rect_size.y / sz_inner_px.y
@@ -598,6 +603,12 @@ live_design!{
                     (self.pos.x - offset_uv.x) * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
                     (self.pos.y - offset_uv.y) * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
+
+                let bg_gradient_dir = gradient_fill.y;
+                if (self.bg_gradient_horizontal > 0.5) {
+                    bg_gradient_dir = gradient_fill.x;
+                }
+
 
                 // Draw background                        
                 sdf.box(
