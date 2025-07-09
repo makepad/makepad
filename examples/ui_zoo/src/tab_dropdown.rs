@@ -120,11 +120,11 @@ live_design!{
                     color_focus: (THEME_COLOR_OUTSET_FOCUS)
                     color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
-                    border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
-                    border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
-                    border_color_1_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
-                    border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+                    border_color: (THEME_COLOR_BEVEL_OUTSET_1)
+                    border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
+                    border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
+                    border_color_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
+                    border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
 
                     border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
                     border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
