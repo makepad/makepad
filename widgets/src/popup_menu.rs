@@ -53,22 +53,28 @@ live_design!{
             instance hover: 0.0
             instance disabled: 0.0
 
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: (THEME_CORNER_RADIUS)
-
             uniform color_dither: 1.0
+            uniform border_size: (THEME_BEVELING)
+            uniform border_gradient_horizontal: 0.0
+            uniform bg_gradient_horizontal: 0.0
+            uniform border_radius: (THEME_CORNER_RADIUS)
 
             uniform color: (THEME_COLOR_U_HIDDEN)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
             uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
-            uniform color_disabled: (THEME_COLOR_OUTSET_ACTIVE)
+            uniform color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
-            uniform border_color_1: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_active: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_disabled: (THEME_COLOR_U_HIDDEN)
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
+            uniform color_2_active: (THEME_COLOR_OUTSET_2_ACTIVE)
+            uniform color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
 
-            uniform border_color_2: (THEME_COLOR_U_HIDDEN)
+            uniform border_color: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_hover: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_active: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_disabled: (THEME_COLOR_U_HIDDEN)
+
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color_2_hover: (THEME_COLOR_U_HIDDEN)
             uniform border_color_2_active: (THEME_COLOR_U_HIDDEN)
             uniform border_color_2_disabled: (THEME_COLOR_U_HIDDEN)
@@ -80,6 +86,30 @@ live_design!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+                
+                let color_2 = self.color;
+                let color_2_hover = self.color_hover;
+                let color_2_active = self.color_active;
+                let color_2_disabled = self.color_disabled;
+
+                let border_color_2 = self.border_color;
+                let border_color_2_hover = self.border_color_hover;
+                let border_color_2_active = self.border_color_active;
+                let border_color_2_disabled = self.border_color_disabled;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2
+                    color_2_hover = self.color_2_hover
+                    color_2_active = self.color_2_active;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                if (self.border_color_2.x > -0.5) {
+                    border_color_2 = self.border_color_2;
+                    border_color_2_hover = self.border_color_2_hover;
+                    border_color_2_active = self.border_color_2_active;
+                    border_color_2_disabled = self.border_color_2_disabled;
+                }
 
                 let border_sz_uv = vec2(
                     self.border_size / self.rect_size.x,
@@ -90,6 +120,11 @@ live_design!{
                     self.pos.x + dither,
                     self.pos.y + dither
                 )
+
+                let border_gradient_dir = gradient_border.y;
+                if (self.border_gradient_horizontal > 0.5) {
+                    border_gradient_dir = gradient_border.x;
+                }
 
                 let sz_inner_px = vec2(
                     self.rect_size.x - self.border_size * 2.,
@@ -105,7 +140,12 @@ live_design!{
                     self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
                     self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
-                
+
+                let bg_gradient_dir = gradient_fill.y;
+                if (self.bg_gradient_horizontal > 0.5) {
+                    bg_gradient_dir = gradient_fill.x;
+                }
+
                 // Background
                 sdf.box(
                     self.border_size,
@@ -119,14 +159,14 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                self.color,
-                                self.color_active,
+                                mix(self.color, color_2, bg_gradient_dir),
+                                mix(self.color_active, color_2_active, bg_gradient_dir),
                                 self.active
                             ),
-                            self.color_hover,
+                            mix(self.color_hover, color_2_hover, bg_gradient_dir),
                             self.hover
                         ),
-                        self.color_disabled,
+                        mix(self.color_disabled, color_2_disabled, bg_gradient_dir),
                         self.disabled
                     )
                 );
@@ -135,14 +175,14 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
+                                mix(self.border_color, border_color_2, border_gradient_dir),
+                                mix(self.border_color_hover, border_color_2_hover, border_gradient_dir),
                                 self.hover
                             ),
-                            mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
+                            mix(self.border_color_active, border_color_2_active, border_gradient_dir),
                             self.active
                         ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        mix(self.border_color_disabled, border_color_2_disabled, border_gradient_dir),
                         self.disabled
                     ), self.border_size
                 );
@@ -164,8 +204,7 @@ live_design!{
                         ),
                         self.mark_color_disabled,
                         self.disabled
-                    ), 1.
-                );
+                    ), 1.);
                 
                 return sdf.result;
             }
@@ -231,215 +270,38 @@ live_design!{
 
     PopupMenuItemGradientX = <PopupMenuItem> {
         draw_bg: {
-            uniform color_1: (THEME_COLOR_U_HIDDEN)
-            uniform color_1_hover: (THEME_COLOR_OUTSET_1_HOVER)
-            uniform color_1_active: (THEME_COLOR_OUTSET_1_ACTIVE)
-            uniform color_1_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
+            border_gradient_horizontal: 0.0
+            bg_gradient_horizontal: 1.0
 
-            uniform color_2: (THEME_COLOR_U_HIDDEN)
-            uniform color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
-            uniform color_2_active: (THEME_COLOR_OUTSET_2_ACTIVE)
-            uniform color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
+            color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_OUTSET_1_HOVER)
+            color_active: (THEME_COLOR_OUTSET_1_ACTIVE)
+            color_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
 
-            uniform border_color_1: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_active: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_1_disabled: (THEME_COLOR_U_HIDDEN)
+            color_2: (THEME_COLOR_U_HIDDEN)
+            color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
+            color_2_active: (THEME_COLOR_OUTSET_2_ACTIVE)
+            color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
 
-            uniform border_color_2: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_2_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_2_active: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_2_disabled: (THEME_COLOR_U_HIDDEN)
+            border_color: (THEME_COLOR_U_HIDDEN)
+            border_color_hover: (THEME_COLOR_U_HIDDEN)
+            border_color_active: (THEME_COLOR_U_HIDDEN)
+            border_color_disabled: (THEME_COLOR_U_HIDDEN)
 
-            uniform mark_color: (THEME_COLOR_U_HIDDEN)
-            uniform mark_color_active: (THEME_COLOR_MARK_ACTIVE)
-            uniform mark_color_disabled: (THEME_COLOR_MARK_DISABLED)
-            
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                
-                let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
-                    self.border_size / self.rect_size.y
-                )
+            border_color_2: (THEME_COLOR_U_HIDDEN)
+            border_color_2_hover: (THEME_COLOR_U_HIDDEN)
+            border_color_2_active: (THEME_COLOR_U_HIDDEN)
+            border_color_2_disabled: (THEME_COLOR_U_HIDDEN)
 
-                let gradient_border = vec2(
-                    self.pos.x + dither,
-                    self.pos.y + dither
-                )
-
-                let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.
-                );
-
-                let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
-                    self.rect_size.y / sz_inner_px.y
-                );
-
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
-                )
-
-                // Background
-                sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
-                    self.border_radius
-                );
-
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(self.color_1, self.color_2, self.pos.x),
-                                mix(self.color_1_active, self.color_2_active, self.pos.x),
-                                self.active
-                            ),
-                            mix(self.color_1_hover, self.color_2_hover, self.pos.x),
-                            self.hover
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, self.pos.x),
-                        self.disabled
-                    )
-                );
-
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(self.border_color_1, self.border_color_2, self.pos.y + dither),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, self.pos.y + dither),
-                                self.hover
-                            ),
-                            mix(self.border_color_1_active, self.border_color_2_active, self.pos.y + dither),
-                            self.active
-                        ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, self.pos.y + dither),
-                        self.disabled
-                    ), self.border_size
-                );
-
-                // Mark
-                let sz = 3.;
-                let dx = 2.0;
-                let c = vec2(8.0, 0.5 * self.rect_size.y);
-                sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx);
-                sdf.line_to(c.x, c.y + sz);
-                sdf.line_to(c.x + sz, c.y - sz);
-
-                sdf.stroke(
-                    mix(
-                        mix(
-                            self.mark_color,
-                            self.mark_color_active,
-                            self.active
-                        ),
-                        self.mark_color_disabled,
-                        self.disabled
-                    ), 1.);
-                
-                return sdf.result;
-            }
+            mark_color: (THEME_COLOR_U_HIDDEN)
+            mark_color_active: (THEME_COLOR_MARK_ACTIVE)
+            mark_color_disabled: (THEME_COLOR_MARK_DISABLED)
         }
     }
 
     PopupMenuItemGradientY = <PopupMenuItemGradientX> {
-        draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-                
-                let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
-                    self.border_size / self.rect_size.y
-                )
-
-                let gradient_border = vec2(
-                    self.pos.x + dither,
-                    self.pos.y + dither
-                )
-
-                let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.
-                );
-
-                let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
-                    self.rect_size.y / sz_inner_px.y
-                );
-
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
-                )
-
-                // Background
-                sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
-                    self.border_radius
-                );
-
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(self.color_1, self.color_2, gradient_fill.y),
-                                mix(self.color_1_active, self.color_2_active, gradient_fill.y),
-                                self.active
-                            ),
-                            mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
-                            self.hover
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
-                        self.disabled
-                    )
-                );
-
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                self.hover
-                            ),
-                            mix(self.border_color_1_active, self.border_color_2_active, gradient_border.y),
-                            self.active
-                        ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                        self.disabled
-                    ), self.border_size
-                );
-
-                // Mark
-                let sz = 3.;
-                let dx = 2.0;
-                let c = vec2(8.0, 0.5 * self.rect_size.y);
-                sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx);
-                sdf.line_to(c.x, c.y + sz);
-                sdf.line_to(c.x + sz, c.y - sz);
-
-                sdf.stroke(
-                    mix(
-                        mix( self.mark_color, self.mark_color_active, self.active),
-                        self.mark_color_disabled,
-                        self.disabled
-                    ), 1.
-                );
-                
-                return sdf.result;
-            }
-        }
+            border_gradient_horizontal: 0.0
+            bg_gradient_horizontal: 0.0
     }
 
     pub PopupMenu = <PopupMenuBase> {
@@ -455,7 +317,7 @@ live_design!{
 
             uniform border_radius: (THEME_CORNER_RADIUS)
             uniform border_size: (THEME_BEVELING)
-            uniform border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
+            uniform border_color: (THEME_COLOR_BEVEL_OUTSET_1)
             uniform border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
             
             fn pixel(self) -> vec4 {
@@ -500,7 +362,7 @@ live_design!{
                 if self.border_size > 0.0 {
                     sdf.stroke(
                         mix(
-                            self.border_color_1,
+                            self.border_color,
                             self.border_color_2,
                             gradient_border.y
                         ), self.border_size
@@ -515,7 +377,7 @@ live_design!{
         menu_item: <PopupMenuItem> {}
 
         draw_bg: {
-            uniform border_color_1: (THEME_COLOR_BEVEL)
+            uniform border_color: (THEME_COLOR_BEVEL)
             uniform border_color_2: (THEME_COLOR_BEVEL)
         }
     }
@@ -528,7 +390,7 @@ live_design!{
         menu_item: <PopupMenuItemGradientY> {}
         
         draw_bg: {
-            uniform color_1: (THEME_COLOR_FG_APP)
+            uniform color: (THEME_COLOR_FG_APP)
             uniform color_2: (THEME_COLOR_FG_APP * 1.2)
 
             fn pixel(self) -> vec4 {
@@ -568,12 +430,12 @@ live_design!{
                     self.border_radius
                 )
 
-                sdf.fill_keep(mix(self.color_1, self.color_2, gradient_fill.y));
+                sdf.fill_keep(mix(self.color, self.color_2, gradient_fill.y));
 
                 if self.border_size > 0.0 {
                     sdf.stroke(
                         mix(
-                            self.border_color_1,
+                            self.border_color,
                             self.border_color_2,
                             gradient_border.y
                         ), self.border_size
@@ -626,12 +488,12 @@ live_design!{
                     self.border_radius
                 )
 
-                sdf.fill_keep(mix(self.color_1, self.color_2, gradient_fill.x));
+                sdf.fill_keep(mix(self.color, self.color_2, gradient_fill.x));
 
                 if self.border_size > 0.0 {
                     sdf.stroke(
                         mix(
-                            self.border_color_1,
+                            self.border_color,
                             self.border_color_2,
                             gradient_border.y
                         ), self.border_size
