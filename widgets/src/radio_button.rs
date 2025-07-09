@@ -42,28 +42,28 @@ live_design!{
 
             uniform color_dither: 1.0
 
-            uniform color: (THEME_COLOR_INSET_1)
-            uniform color_hover: (THEME_COLOR_INSET_1_HOVER)
-            uniform color_down: (THEME_COLOR_INSET_1_DOWN)
-            uniform color_active: (THEME_COLOR_INSET_1_ACTIVE)
-            uniform color_focus: (THEME_COLOR_INSET_1_FOCUS)
-            uniform color_disabled: (THEME_COLOR_INSET_1_DISABLED)
+            uniform color: (THEME_COLOR_INSET)
+            uniform color_hover: (THEME_COLOR_INSET_HOVER)
+            uniform color_down: (THEME_COLOR_INSET_DOWN)
+            uniform color_active: (THEME_COLOR_INSET_ACTIVE)
+            uniform color_focus: (THEME_COLOR_INSET_FOCUS)
+            uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-            uniform color_2: (THEME_COLOR_INSET_2)
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
             uniform color_2_down: (THEME_COLOR_INSET_2_DOWN)
             uniform color_2_active: (THEME_COLOR_INSET_2_ACTIVE)
             uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
             uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
 
-            uniform border_color: (THEME_COLOR_BEVEL_INSET_2)
-            uniform border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-            uniform border_color_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
-            uniform border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            uniform border_color: (THEME_COLOR_BEVEL)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_HOVER)
+            uniform border_color_down: (THEME_COLOR_BEVEL_DOWN)
+            uniform border_color_active: (THEME_COLOR_BEVEL_ACTIVE)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
             uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
             uniform border_color_2_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
@@ -94,8 +94,8 @@ live_design!{
                 let border_color_2_disabled = self.border_color_disabled;
 
                 if (self.color_2.x > -0.5) {
-                    color_2 = self.color_2
-                    color_2_hover = self.color_2_hover
+                    color_2 = self.color_2;
+                    color_2_hover = self.color_2_hover;
                     color_2_down = self.color_2_down;
                     color_2_active = self.color_2_active;
                     color_2_focus = self.color_2_focus;
@@ -411,30 +411,46 @@ live_design!{
             color_focus: (THEME_COLOR_INSET_FOCUS)
             color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-            border_color: (THEME_COLOR_BEVEL)
-            border_color_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_active: (THEME_COLOR_BEVEL_ACTIVE)
-            border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            border_color: (THEME_COLOR_BEVEL_INSET_2)
+            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+            border_color_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
-            border_color_2: (THEME_COLOR_BEVEL)
-            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_2_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_2_active: (THEME_COLOR_BEVEL_ACTIVE)
-            border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
+            border_color_2_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
+            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
-            mark_offset: 0.
-            mark_color_active: (THEME_COLOR_MARK_ACTIVE)
         }
     }
 
     pub RadioButtonGradientY = <RadioButton> {
+        draw_bg: {
+            color: (THEME_COLOR_INSET_1)
+            color_hover: (THEME_COLOR_INSET_1_HOVER)
+            color_down: (THEME_COLOR_INSET_1_DOWN)
+            color_active: (THEME_COLOR_INSET_1_ACTIVE)
+            color_focus: (THEME_COLOR_INSET_1_FOCUS)
+            color_disabled: (THEME_COLOR_INSET_1_DISABLED)
 
+            color_2: (THEME_COLOR_INSET_2)
+            color_2_hover: (THEME_COLOR_INSET_2_HOVER)
+            color_2_down: (THEME_COLOR_INSET_2_DOWN)
+            color_2_active: (THEME_COLOR_INSET_2_ACTIVE)
+            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
+            color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
+        }
     }
 
     pub RadioButtonGradientX = <RadioButtonGradientY> {
+        draw_bg: {
+            border_gradient_horizontal: 1.0; 
+            bg_gradient_horizontal: 1.0; 
+        }
     }
 
     pub RadioButtonCustom = <RadioButton> {
