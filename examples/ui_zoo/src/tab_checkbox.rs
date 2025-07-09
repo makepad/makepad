@@ -137,12 +137,12 @@ live_design!{
                         color_focus: (THEME_COLOR_INSET_FOCUS)
                         color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-                        border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-                        border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-                        border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-                        border_color_1_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
-                        border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-                        border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+                        border_color: (THEME_COLOR_BEVEL_INSET_2)
+                        border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+                        border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+                        border_color_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+                        border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+                        border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
                         border_color_2: (THEME_COLOR_BEVEL_INSET_1)
                         border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
