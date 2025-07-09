@@ -613,25 +613,25 @@ live_design!{
                         mix(
                             mix(
                                 mix(
-                                    mix(self.border_color, border_color_2, gradient_border.y),
-                                    mix(self.border_color_focus, border_color_2_focus, gradient_border.y),
+                                    mix(self.border_color, border_color_2, border_gradient_dir),
+                                    mix(self.border_color_focus, border_color_2_focus, border_gradient_dir),
                                     self.focus
                                 ),
                                 mix(
-                                    mix(self.border_color_active, border_color_2_active, gradient_border.y),
-                                    mix(self.border_color_focus, border_color_2_focus, gradient_border.y),
+                                    mix(self.border_color_active, border_color_2_active, border_gradient_dir),
+                                    mix(self.border_color_focus, border_color_2_focus, border_gradient_dir),
                                     self.focus
                                 ),
                                 self.active
                             ),
                             mix(
-                                mix(self.border_color_hover, border_color_2_hover, gradient_border.y),
-                                mix(self.border_color_down, border_color_2_down, gradient_border.y),
+                                mix(self.border_color_hover, border_color_2_hover, border_gradient_dir),
+                                mix(self.border_color_down, border_color_2_down, border_gradient_dir),
                                 self.down
                             ),
                             self.hover
                         ),
-                        mix(self.border_color_disabled, border_color_2_disabled, gradient_border.y),
+                        mix(self.border_color_disabled, border_color_2_disabled, border_gradient_dir),
                         self.disabled
                     ), self.border_size
                 )
@@ -641,21 +641,21 @@ live_design!{
                         mix(
                             mix(
                                 mix(
-                                    mix(self.color, color_2, gradient_fill.y),
-                                    mix(self.color_active, color_2_active, gradient_fill.y),
+                                    mix(self.color, color_2, bg_gradient_dir),
+                                    mix(self.color_active, color_2_active, bg_gradient_dir),
                                     self.active
                                 ),
-                                mix(self.color_focus, color_2_focus, gradient_fill.y),
+                                mix(self.color_focus, color_2_focus, bg_gradient_dir),
                                 self.focus
                             ),
                             mix(
-                                mix(self.color_hover, color_2_hover, gradient_fill.y),
-                                mix(self.color_down, color_2_down, gradient_fill.y),
+                                mix(self.color_hover, color_2_hover, bg_gradient_dir),
+                                mix(self.color_down, color_2_down, bg_gradient_dir),
                                 self.down
                             ),
                             self.hover
                         ),
-                        mix(self.color_disabled, color_2_disabled, gradient_fill.y),
+                        mix(self.color_disabled, color_2_disabled, bg_gradient_dir),
                         self.disabled
                     )
                 )
