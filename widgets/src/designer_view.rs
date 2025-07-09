@@ -760,7 +760,7 @@ impl Widget for DesignerView {
                         
             self.draw_list.begin_always(cx);
             let size = cx.current_pass_size();
-            cx.begin_sized_turtle_no_clip(size, Layout::flow_down());
+            cx.begin_unclipped_root_turtle(size, Layout::flow_down());
             
             let data = scope.data.get_mut::<DesignerData>().unwrap();
             

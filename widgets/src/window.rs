@@ -221,7 +221,7 @@ impl Window {
         self.main_draw_list.begin_always(cx);
         
         let size = cx.current_pass_size();
-        cx.begin_sized_turtle(size, Layout::flow_down());
+        cx.begin_root_turtle(size, Layout::flow_down());
         
         self.overlay.begin(cx);
         
@@ -509,7 +509,7 @@ impl Widget for Window {
         self.main_draw_list.begin_always(cx);
         
         let size = dvec2(1500.0,1200.0);
-        cx.begin_sized_turtle(size, Layout::flow_down());
+        cx.begin_root_turtle(size, Layout::flow_down());
                 
         self.overlay.begin(cx);
         

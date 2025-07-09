@@ -778,7 +778,7 @@ impl PopupMenu {
         self.draw_list.begin_overlay_reuse(cx);
         
         let size = cx.current_pass_size();
-        cx.begin_sized_turtle(size, Layout::flow_down());
+        cx.begin_root_turtle(size, Layout::flow_down());
         
         // ok so. this thing needs a complete position reset
         self.draw_bg.begin(cx, self.walk, self.layout);
