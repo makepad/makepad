@@ -84,7 +84,6 @@ live_design!{
                 }
             }
 
-            <Hr> {}
             <H4> { text: "Custom styled marker"}
             radios_demo_8 = <UIZooRowH> {
                 radio1 = <RadioButtonCustom> {
@@ -99,9 +98,9 @@ live_design!{
                     label_align: { x: 0., y: 0. }
                     
                     draw_icon: {
-                        color_1: #A00
-                        color_1_active: #F00
-                        color_1_disabled: #4
+                        color: #A00
+                        color_active: #F00
+                        color_disabled: #4
 
                         color_2: #0
                         color_2_active: #F00
@@ -121,9 +120,9 @@ live_design!{
                     label_align: { x: 0., y: 0. }
                     
                     draw_icon: {
-                        color_1: #A00
-                        color_1_active: #F00
-                        color_1_disabled: #4
+                        color: #A00
+                        color_active: #F00
+                        color_disabled: #4
 
                         color_2: #0
                         color_2_active: #F00
@@ -189,9 +188,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -217,9 +216,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -245,9 +244,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -273,9 +272,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -314,9 +313,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -341,9 +340,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -368,9 +367,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -395,9 +394,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -442,12 +441,12 @@ live_design!{
                             color_focus: (THEME_COLOR_INSET_FOCUS)
                             color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-                            border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-                            border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-                            border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-                            border_color_1_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
-                            border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-                            border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+                            border_color: (THEME_COLOR_BEVEL_INSET_2)
+                            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+                            border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+                            border_color_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+                            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+                            border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
                             border_color_2: (THEME_COLOR_BEVEL_INSET_1)
                             border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
@@ -477,9 +476,9 @@ live_design!{
 
                         draw_icon: {
                             color_dither: 1.0
-                            color_1: (THEME_COLOR_LABEL_OUTER)
-                            color_1_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
-                            color_1_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
+                            color: (THEME_COLOR_LABEL_OUTER)
+                            color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
+                            color_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
 
                             color_2: (THEME_COLOR_LABEL_OUTER)
                             color_2_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
