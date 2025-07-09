@@ -53,20 +53,6 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "DropDownFlatter" }
-            dropdown_flatter = <DropDownFlatter> {
-                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
-                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
-            }
-
-            <H4> { text: "DropDownFlatter, Position: BelowInput" }
-            dropdown_flatter_below = <DropDownFlatter> {
-                popup_menu_position: BelowInput,
-                labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],
-                values: [ValueOne, ValueTwo, Third, FourthValue, OptionE, Hexagons]
-            }
-
-            <Hr> {}
             <H4> { text: "DropDownGradientX" }
             dropdown_gradient_x = <DropDownGradientX> {
                 labels: ["Value One", "Value Two", "Third", "Fourth Value", "Option E", "Hexagons"],

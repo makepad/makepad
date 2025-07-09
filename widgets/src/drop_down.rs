@@ -15,7 +15,6 @@ live_design!{
     use link::shaders::*;
     use crate::popup_menu::PopupMenu;
     use crate::popup_menu::PopupMenuFlat;
-    use crate::popup_menu::PopupMenuFlatter;
     use crate::popup_menu::PopupMenuGradientX;
     use crate::popup_menu::PopupMenuGradientY;
     
@@ -313,17 +312,6 @@ live_design!{
 
         popup_menu: <PopupMenuFlat> {}
     }
-
-    pub DropDownFlatter = <DropDownFlat> {
-        draw_bg: {
-            border_size: 0.
-            color: (THEME_COLOR_U_HIDDEN)
-            color_hover: (THEME_COLOR_U_HIDDEN)
-            color_down: (THEME_COLOR_U_HIDDEN)
-        }
-        popup_menu: <PopupMenuFlatter> {}
-    }
-
 
     pub DropDownGradientX = <DropDown> {
         popup_menu: <PopupMenuGradientX> {}
