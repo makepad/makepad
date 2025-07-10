@@ -29,6 +29,7 @@ live_design!{
                 font_size: (THEME_FONT_SIZE_P)
             }
 
+            uniform color_dither: 1.0
             uniform bg_gradient_horizontal: 0.0
 
             uniform color: (THEME_COLOR_LABEL_INNER),
@@ -40,6 +41,7 @@ live_design!{
             uniform color_2_active: #0F0
 
             fn get_color(self) -> vec4 {
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let color_2 = self.color;
                 let color_2_hover = self.color_hover;
                 let color_2_active = self.color_active;
@@ -50,18 +52,18 @@ live_design!{
                     color_2_active = self.color_2_active;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let gradient_fill_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    gradient_fill_dir = self.pos.x + dither;
                 }
 
                 return mix(
                     mix(
-                        mix(self.color, color_2, bg_gradient_dir),
-                        mix(self.color_active, color_2_active, bg_gradient_dir),
+                        mix(self.color, color_2, gradient_fill_dir),
+                        mix(self.color_active, color_2_active, gradient_fill_dir),
                         self.active
                     ),
-                    mix(self.color_hover, color_2_hover, bg_gradient_dir),
+                    mix(self.color_hover, color_2_hover, gradient_fill_dir),
                     self.hover
                 )
             }
@@ -134,9 +136,9 @@ live_design!{
                     self.pos.y * scale_factor_border.y + dither
                 )
 
-                let border_gradient_dir = gradient_border.y;
+                let gradient_border_dir = gradient_border.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = gradient_border.x;
+                    gradient_border_dir = gradient_border.x;
                 }
 
                 let sz_inner_px = vec2(
@@ -154,9 +156,9 @@ live_design!{
                     self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
 
-                let bg_gradient_dir = gradient_fill.y;
+                let gradient_fill_dir = gradient_fill.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = gradient_fill.x;
+                    gradient_fill_dir = gradient_fill.x;
                 }
 
                 sdf.box_y(
@@ -170,11 +172,11 @@ live_design!{
                 sdf.fill_keep(
                     mix(
                         mix(
-                            mix(self.color, color_2, bg_gradient_dir),
-                            mix(self.color_hover, color_2_hover, bg_gradient_dir),
+                            mix(self.color, color_2, gradient_fill_dir),
+                            mix(self.color_hover, color_2_hover, gradient_fill_dir),
                             self.hover
                         ),
-                        mix(self.color_active, color_2_active, bg_gradient_dir),
+                        mix(self.color_active, color_2_active, gradient_fill_dir),
                         self.active
                     )
                 )
@@ -182,11 +184,11 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color, border_color_2, border_gradient_dir),
-                            mix(self.border_color_hover, border_color_2_hover, border_gradient_dir),
+                            mix(self.border_color, border_color_2, gradient_border_dir),
+                            mix(self.border_color_hover, border_color_2_hover, gradient_border_dir),
                             self.hover
                         ),
-                        mix(self.border_color_active, border_color_2_active, border_gradient_dir),
+                        mix(self.border_color_active, border_color_2_active, gradient_border_dir),
                         self.active
                     ), self.border_size
                 )
