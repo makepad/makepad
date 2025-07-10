@@ -16,6 +16,9 @@ live_design!{
             <GradientYView> {
                 height: 4000.
                 width: Fill,
+                draw_bg: {
+                    color_2: #f00
+                }
             }
             scroll_bars: <ScrollBars> { }
         }
