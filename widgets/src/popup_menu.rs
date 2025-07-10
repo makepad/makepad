@@ -122,9 +122,9 @@ live_design!{
                     self.pos.y + dither
                 )
 
-                let border_gradient_dir = gradient_border.y;
+                let gradient_border_dir = gradient_border.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = gradient_border.x;
+                    gradient_border_dir = gradient_border.x;
                 }
 
                 let sz_inner_px = vec2(
@@ -142,9 +142,9 @@ live_design!{
                     self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
 
-                let bg_gradient_dir = gradient_fill.y;
+                let gradient_fill_dir = gradient_fill.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = gradient_fill.x;
+                    gradient_fill_dir = gradient_fill.x;
                 }
 
                 // Background
@@ -160,14 +160,14 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.color, color_2, bg_gradient_dir),
-                                mix(self.color_active, color_2_active, bg_gradient_dir),
+                                mix(self.color, color_2, gradient_fill_dir),
+                                mix(self.color_active, color_2_active, gradient_fill_dir),
                                 self.active
                             ),
-                            mix(self.color_hover, color_2_hover, bg_gradient_dir),
+                            mix(self.color_hover, color_2_hover, gradient_fill_dir),
                             self.hover
                         ),
-                        mix(self.color_disabled, color_2_disabled, bg_gradient_dir),
+                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
                         self.disabled
                     )
                 );
@@ -176,14 +176,14 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.border_color, border_color_2, border_gradient_dir),
-                                mix(self.border_color_hover, border_color_2_hover, border_gradient_dir),
+                                mix(self.border_color, border_color_2, gradient_border_dir),
+                                mix(self.border_color_hover, border_color_2_hover, gradient_border_dir),
                                 self.hover
                             ),
-                            mix(self.border_color_active, border_color_2_active, border_gradient_dir),
+                            mix(self.border_color_active, border_color_2_active, gradient_border_dir),
                             self.active
                         ),
-                        mix(self.border_color_disabled, border_color_2_disabled, border_gradient_dir),
+                        mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir),
                         self.disabled
                     ), self.border_size
                 );
@@ -326,8 +326,8 @@ live_design!{
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform color_dither: 1.0
 
-            uniform bg_gradient_dir: 0.0
-            uniform border_gradient_dir: 0.0
+            uniform gradient_fill_dir: 0.0
+            uniform gradient_border_dir: 0.0
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -354,9 +354,9 @@ live_design!{
                     self.pos.y + dither
                 )
 
-                let border_gradient_dir = gradient_border.y;
+                let gradient_border_dir = gradient_border.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = gradient_border.x;
+                    gradient_border_dir = gradient_border.x;
                 }
 
                 let sz_inner_px = vec2(
@@ -374,9 +374,9 @@ live_design!{
                     self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
 
-                let bg_gradient_dir = gradient_fill.y;
+                let gradient_fill_dir = gradient_fill.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = gradient_fill.x;
+                    gradient_fill_dir = gradient_fill.x;
                 }
 
                 sdf.box(
@@ -387,14 +387,14 @@ live_design!{
                     self.border_radius
                 )
 
-                sdf.fill_keep(mix(self.color, color_2, bg_gradient_dir));
+                sdf.fill_keep(mix(self.color, color_2, gradient_fill_dir));
 
                 if self.border_size > 0.0 {
                     sdf.stroke(
                         mix(
                             self.border_color,
                             border_color_2,
-                            border_gradient_dir
+                            gradient_border_dir
                         ), self.border_size
                     );
                 }

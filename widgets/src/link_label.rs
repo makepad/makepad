@@ -26,6 +26,7 @@ live_design!{
             instance focus: 0.0
             instance disabled: 0.0
 
+            uniform color_dither: 1.0
             uniform bg_gradient_horizontal: 0.0
 
             uniform color: (THEME_COLOR_LABEL_INNER)
@@ -41,6 +42,7 @@ live_design!{
             uniform color_2_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
 
             fn get_color(self) -> vec4 {
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let color_2 = self.color;
                 let color_2_hover = self.color_hover;
                 let color_2_down = self.color_down;
@@ -55,9 +57,9 @@ live_design!{
                     color_2_disabled = self.color_2_disabled;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 return mix(
@@ -86,6 +88,7 @@ live_design!{
             instance focus: 0.0
             instance disabled: 0.0
 
+            uniform color_dither: 1.0
             uniform bg_gradient_horizontal: 0.0
 
             uniform color: (THEME_COLOR_LABEL_INNER)
@@ -102,6 +105,7 @@ live_design!{
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let offset_y = 1.0
 
                 let color_2 = self.color;
@@ -118,9 +122,9 @@ live_design!{
                     color_2_disabled = self.color_2_disabled;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 sdf.move_to(0., self.rect_size.y - offset_y);
@@ -158,6 +162,7 @@ live_design!{
                 font_size: (THEME_FONT_SIZE_P)
             }
 
+            uniform color_dither: 1.0
             uniform bg_gradient_horizontal: 0.0
 
             uniform color: (THEME_COLOR_LABEL_INNER),
@@ -173,6 +178,7 @@ live_design!{
             uniform color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
 
             fn get_color(self) -> vec4 {
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let color_2 = self.color;
                 let color_2_hover = self.color_hover;
                 let color_2_down = self.color_down;
@@ -187,9 +193,9 @@ live_design!{
                     color_2_disabled = self.color_2_disabled;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 return
