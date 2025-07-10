@@ -36,7 +36,9 @@ live_design!{
 
                 iconbutton = <Button> {
                     draw_icon: {
+                        gradient_fill_horizontal: 1.0
                         color: #f00,
+                        color_2: #00f,
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
                     text: "<Button>"
@@ -61,10 +63,11 @@ live_design!{
             <UIZooRowH> {
                 <ButtonIcon> {
                     draw_icon: {
+                        gradient_fill_horizontal: 1.0
                         color: #f00,
+                        color_2: #00f,
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
-                    text: ""
                 }
             }
 
