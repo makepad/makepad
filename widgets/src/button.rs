@@ -368,22 +368,6 @@ live_design! {
             uniform color_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
 
             uniform color_2: (THEME_COLOR_OUTSET_2)
-            uniform color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
-            uniform color_2_down: (THEME_COLOR_OUTSET_2_DOWN)
-            uniform color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
-            uniform color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
-
-            border_color: (THEME_COLOR_BEVEL_OUTSET_1)
-            border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
-            border_color_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
-            border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
-            border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
-
-            border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
-            border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
-            border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
-            border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
         }
     }
 
