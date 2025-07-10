@@ -73,7 +73,7 @@ live_design!{
             uniform mark_color: (THEME_COLOR_MARK_OFF)
             uniform mark_color_active: (THEME_COLOR_MARK_ACTIVE)
             uniform mark_color_disabled: (THEME_COLOR_MARK_DISABLED)
-            uniform mark_offset: -0.5
+            uniform mark_offset: 0.
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -419,6 +419,8 @@ live_design!{
             border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
             border_color_2: (THEME_COLOR_BEVEL_INSET_2)
+
+            uniform mark_offset: -0.5
         }
     }
 
@@ -506,7 +508,7 @@ live_design!{
             uniform color_dither: 1.0
 
             uniform color: (THEME_COLOR_INSET)
-            uniform color_active: (THEME_COLOR_INSET_ACTIVE)
+            uniform color_active: (THEME_COLOR_OUTSET_ACTIVE)
             uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
@@ -649,7 +651,7 @@ live_design!{
     pub RadioButtonTabGradientY = <RadioButtonTab> {
         draw_bg: {
             color: (THEME_COLOR_OUTSET_1)
-            color_active: (THEME_COLOR_OUTSET_2_ACTIVE)
+            color_active: (THEME_COLOR_OUTSET_1_ACTIVE)
             color_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
 
             color_2: (THEME_COLOR_OUTSET_2)
