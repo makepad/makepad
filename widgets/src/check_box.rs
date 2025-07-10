@@ -60,11 +60,11 @@ live_design!{
             uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
 
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            uniform border_color_2_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+            uniform border_color_2_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
             uniform mark_size: 0.65
             uniform mark_color: (THEME_COLOR_U_HIDDEN)
@@ -420,19 +420,19 @@ live_design!{
             color_focus: (THEME_COLOR_INSET_FOCUS)
             color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-            border_color: (THEME_COLOR_BEVEL_INSET_2)
-            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-            border_color_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
-            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            border_color_down: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            border_color: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            border_color_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
+            border_color_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
+            border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            border_color_down: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
-            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            border_color_2_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
-            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            border_color_2: (THEME_COLOR_BEVEL_INSET_2)
+            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+            border_color_2_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
         }
     }
 
@@ -499,11 +499,11 @@ live_design!{
             border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
 
             border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            border_color_2_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
-            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+            border_color_2_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
             mark_size: 0.65
             mark_color: (THEME_COLOR_LABEL_OUTER)
@@ -808,19 +808,19 @@ live_design!{
             color_focus: (THEME_COLOR_INSET_FOCUS)
             color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-            border_color: (THEME_COLOR_BEVEL_INSET_2)
-            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-            border_color_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
-            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            border_color: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            border_color_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
+            border_color_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
+            border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
-            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            border_color_2_active: (THEME_COLOR_BEVEL_INSET_1_ACTIVE)
-            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            border_color_2: (THEME_COLOR_BEVEL_INSET_2)
+            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+            border_color_2_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
         }
     }
         
@@ -828,11 +828,6 @@ live_design!{
     pub ToggleGradientY = <Toggle> {
         draw_bg: {
             color_2: (THEME_COLOR_INSET_2)
-            color_2_hover: (THEME_COLOR_INSET_2_HOVER)
-            color_2_down: (THEME_COLOR_INSET_2_DOWN)
-            color_2_active: (THEME_COLOR_INSET_2_ACTIVE)
-            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
-            color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
         }
     }
 

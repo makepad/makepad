@@ -366,10 +366,6 @@ live_design!{
             color_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
 
             color_2: (THEME_COLOR_OUTSET_2)
-            color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
-            color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
-            color_2_down: (THEME_COLOR_OUTSET_2_DOWN)
-            color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
         }
     }
 
