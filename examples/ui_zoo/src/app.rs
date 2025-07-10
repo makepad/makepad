@@ -273,12 +273,11 @@
         #[live] fnumber: f32,
         #[live] inumber: i32,
         #[live] dropdown: DropDownEnum,
-        #[live] dropdown_customized: DropDownEnum,
         #[live] dropdown_below: DropDownEnum,
+        #[live] dropdown_disabled: DropDownEnum,
+        #[live] dropdown_customized: DropDownEnum,
         #[live] dropdown_flat: DropDownEnum,
         #[live] dropdown_flat_below: DropDownEnum,
-        #[live] dropdown_flatter: DropDownEnum,
-        #[live] dropdown_flatter_below: DropDownEnum,
         #[live] dropdown_gradient_x: DropDownEnum,
         #[live] dropdown_gradient_x_below: DropDownEnum,
         #[live] dropdown_gradient_y: DropDownEnum,
@@ -466,12 +465,15 @@ impl AppMain for App {
 
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
+        db.bind(id!(dropdown), ids!(dropdown));
+        db.bind(id!(dropdown_below), ids!(dropdown_below));
         db.bind(id!(dropdown_disabled), ids!(dropdown_disabled));
-        db.bind(id!(dropdown_demo), ids!(dropdown_demo));
+        db.bind(id!(dropdown_customized), ids!(dropdown_customized));
         db.bind(id!(dropdown_flat), ids!(dropdown_flat));
-        db.bind(id!(dropdown_flatter), ids!(dropdown_flatter));
+        db.bind(id!(dropdown_flat_below), ids!(dropdown_flat_below));
         db.bind(id!(dropdown_gradient_x), ids!(dropdown_gradient_x));
+        db.bind(id!(dropdown_gradient_x_below), ids!(dropdown_gradient_x_below));
         db.bind(id!(dropdown_gradient_y), ids!(dropdown_gradient_y));
-        db.bind(id!(dropdown_custom), ids!(dropdown_custom));
+        db.bind(id!(dropdown_gradient_y_below), ids!(dropdown_gradient_y_below));
     }
 }

@@ -108,8 +108,8 @@ live_design! {
             uniform color_dither: 1.0
             uniform border_size: 0.0
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
-            uniform bg_gradient_horizontal: 0.0
-            uniform border_gradient_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
+            uniform gradient_border_horizontal: 0.0
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
 
@@ -132,12 +132,12 @@ live_design! {
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
@@ -169,8 +169,8 @@ live_design! {
         draw_bg: {
             uniform color_dither: 1.0
             uniform border_size: 0.0
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color: #f00
@@ -213,12 +213,12 @@ live_design! {
                 }
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -252,8 +252,8 @@ live_design! {
         show_bg: true,
         draw_bg: {
             uniform color_dither: 1.0
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
 
             color: #8
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
@@ -301,12 +301,12 @@ live_design! {
                 }
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -340,8 +340,8 @@ live_design! {
         show_bg: true, 
         draw_bg: {
             uniform color_dither: 1.0
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
 
             uniform border_size: 0.0
             uniform border_radius: 2.5
@@ -365,12 +365,12 @@ live_design! {
                 }
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -399,8 +399,8 @@ live_design! {
         show_bg: true, 
         draw_bg: {
             uniform color_dither: 1.0
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
 
@@ -425,12 +425,12 @@ live_design! {
                 }
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -460,8 +460,8 @@ live_design! {
         show_bg: true, 
         draw_bg: {
             uniform color_dither: 1.0
-            uniform border_gradient_horizontal: 0.0
-            uniform bg_gradient_horizontal: 0.0;
+            uniform gradient_border_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0;
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
 
@@ -486,12 +486,12 @@ live_design! {
                 }
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -524,8 +524,8 @@ live_design! {
         show_bg: true, 
         draw_bg: {
             uniform color_dither: 1.0
-            uniform border_gradient_horizontal: 0.0
-            uniform bg_gradient_horizontal: 0.0
+            uniform gradient_border_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_size: 0.0
@@ -549,12 +549,12 @@ live_design! {
                 }
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
                             
@@ -589,8 +589,8 @@ live_design! {
         show_bg: true, 
         draw_bg: {
             uniform color_dither: 1.0
-            uniform border_gradient_horizontal: 0.0
-            uniform bg_gradient_horizontal: 0.0
+            uniform gradient_border_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_size: 0.0
             uniform border_color: #0000
@@ -613,12 +613,12 @@ live_design! {
                 }
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
                             
@@ -660,8 +660,8 @@ live_design! {
         show_bg: true, 
         draw_bg: {
             uniform color_dither: 1.0
-            uniform border_gradient_horizontal: 0.0
-            uniform bg_gradient_horizontal: 0.0
+            uniform gradient_border_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
@@ -686,12 +686,12 @@ live_design! {
                 }
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -732,7 +732,7 @@ live_design! {
     pub GradientXView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
-            uniform bg_gradient_horizontal: 1.0
+            uniform gradient_fill_horizontal: 1.0
 
             uniform color_dither: 1.0
             color: #00f
@@ -747,7 +747,7 @@ live_design! {
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -763,7 +763,7 @@ live_design! {
     pub GradientYView = <GradientXView> {
         show_bg: true, 
         draw_bg: {
-            uniform bg_gradient_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
 
             color: #00f
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
