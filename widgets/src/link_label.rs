@@ -57,26 +57,26 @@ live_design!{
                     color_2_disabled = self.color_2_disabled;
                 }
 
-                let bg_gradient_dir = self.pos.y + dither;
+                let gradient_fill_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x + dither;
+                    gradient_fill_dir = self.pos.x + dither;
                 }
 
                 return mix(
                     mix(
                         mix(
                             mix(
-                                mix(self.color, color_2, bg_gradient_dir),
-                                mix(self.color_focus, color_2_focus, bg_gradient_dir),
+                                mix(self.color, color_2, gradient_fill_dir),
+                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
                                 self.focus
                             ),
-                            mix(self.color_hover, color_2_hover, bg_gradient_dir),
+                            mix(self.color_hover, color_2_hover, gradient_fill_dir),
                             self.hover
                         ),
-                        mix(self.color_down, color_2_down, bg_gradient_dir),
+                        mix(self.color_down, color_2_down, gradient_fill_dir),
                         self.down
                     ),
-                    mix(self.color_disabled, color_2_disabled, bg_gradient_dir),
+                    mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
                     self.disabled
                 );
             }
@@ -122,9 +122,9 @@ live_design!{
                     color_2_disabled = self.color_2_disabled;
                 }
 
-                let bg_gradient_dir = self.pos.y + dither;
+                let gradient_border_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x + dither;
+                    gradient_border_dir = self.pos.x + dither;
                 }
 
                 sdf.move_to(0., self.rect_size.y - offset_y);
@@ -135,17 +135,17 @@ live_design!{
                         mix(
                             mix(
                                 mix(
-                                    mix(self.color, color_2, bg_gradient_dir),
-                                    mix(self.color_focus, color_2_focus, bg_gradient_dir),
+                                    mix(self.color, color_2, gradient_border_dir),
+                                    mix(self.color_focus, color_2_focus, gradient_border_dir),
                                     self.focus
                                 ),
-                                mix(self.color_hover, color_2_hover, bg_gradient_dir),
+                                mix(self.color_hover, color_2_hover, gradient_border_dir),
                                 self.hover
                             ),
-                            mix(self.color_down, color_2_down, bg_gradient_dir),
+                            mix(self.color_down, color_2_down, gradient_border_dir),
                             self.down
                         ),
-                        mix(self.color_disabled, color_2_disabled, bg_gradient_dir),
+                        mix(self.color_disabled, color_2_disabled, gradient_border_dir),
                         self.disabled
                     ), mix(.7, 1., self.hover));
             }
@@ -193,9 +193,9 @@ live_design!{
                     color_2_disabled = self.color_2_disabled;
                 }
 
-                let bg_gradient_dir = self.pos.y + dither;
+                let gradient_fill_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x + dither;
+                    gradient_fill_dir = self.pos.x + dither;
                 }
 
                 return
@@ -203,17 +203,17 @@ live_design!{
                         mix(
                             mix(
                                 mix(
-                                    mix(self.color, color_2, bg_gradient_dir),
-                                    mix(self.color_focus, color_2_focus, bg_gradient_dir),
+                                    mix(self.color, color_2, gradient_fill_dir),
+                                    mix(self.color_focus, color_2_focus, gradient_fill_dir),
                                     self.focus
                                 ),
-                                mix(self.color_hover, color_2_hover, bg_gradient_dir),
+                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
                                 self.hover
                             ),
-                            mix(self.color_down, color_2_down, bg_gradient_dir),
+                            mix(self.color_down, color_2_down, gradient_fill_dir),
                             self.down
                         ),
-                        mix(self.color_disabled, color_2_disabled, bg_gradient_dir),
+                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
                         self.disabled
                     );
             }
