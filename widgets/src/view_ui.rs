@@ -105,6 +105,7 @@ live_design! {
         show_bg: true, 
 
         draw_bg: {
+            uniform color_dither: 1.0
             uniform border_size: 0.0
             uniform border_inset: vec4(0.0, 0.0, 0.0, 0.0)
             uniform bg_gradient_horizontal: 0.0
@@ -117,6 +118,8 @@ live_design! {
                         
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
                 let color_2 = self.color;
                 let border_color_2 = self.border_color_2;
 
@@ -128,14 +131,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
-                let border_gradient_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x + dither;
                 }
 
                 sdf.rect(
@@ -164,6 +167,7 @@ live_design! {
                 
         show_bg: true, 
         draw_bg: {
+            uniform color_dither: 1.0
             uniform border_size: 0.0
             uniform border_gradient_horizontal: 0.0; 
             uniform bg_gradient_horizontal: 0.0; 
@@ -196,6 +200,7 @@ live_design! {
                                                 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size3)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
                 let color_2 = self.color;
                 if (self.color_2.x > -0.5) {
@@ -207,14 +212,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let border_gradient_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x + dither;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 sdf.rect(
@@ -246,6 +251,7 @@ live_design! {
                             
         show_bg: true,
         draw_bg: {
+            uniform color_dither: 1.0
             uniform border_gradient_horizontal: 0.0; 
             uniform bg_gradient_horizontal: 0.0; 
 
@@ -280,9 +286,9 @@ live_design! {
                 return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size3)
             }
                                                         
-            fn pixel(self) -> vec4 {
-                                                                
+            fn pixel(self) -> vec4 {                                                
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size3)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
                 let color_2 = self.color;
                 if (self.color_2.x > -0.5) {
@@ -294,14 +300,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let border_gradient_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x + dither;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 sdf.box(
@@ -333,6 +339,7 @@ live_design! {
     pub RoundedView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
+            uniform color_dither: 1.0
             uniform border_gradient_horizontal: 0.0; 
             uniform bg_gradient_horizontal: 0.0; 
 
@@ -345,6 +352,8 @@ live_design! {
                                 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
                 let color_2 = self.color;
                 if (self.color_2.x > -0.5) {
                     color_2 = self.color_2;
@@ -355,14 +364,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let border_gradient_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x + dither;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 sdf.box(
@@ -389,6 +398,7 @@ live_design! {
     pub RoundedXView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
+            uniform color_dither: 1.0
             uniform border_gradient_horizontal: 0.0; 
             uniform bg_gradient_horizontal: 0.0; 
 
@@ -402,6 +412,8 @@ live_design! {
                             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
                 let color_2 = self.color;
                 if (self.color_2.x > -0.5) {
                     color_2 = self.color_2;
@@ -412,14 +424,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let border_gradient_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x + dither;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 sdf.box_x(
@@ -447,6 +459,7 @@ live_design! {
     pub RoundedYView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
+            uniform color_dither: 1.0
             uniform border_gradient_horizontal: 0.0
             uniform bg_gradient_horizontal: 0.0;
 
@@ -460,6 +473,7 @@ live_design! {
                                                         
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
                 let color_2 = self.color;
                 if (self.color_2.x > -0.5) {
@@ -471,14 +485,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let border_gradient_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x + dither;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 sdf.box_y(
@@ -509,6 +523,7 @@ live_design! {
     pub RoundedAllView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
+            uniform color_dither: 1.0
             uniform border_gradient_horizontal: 0.0
             uniform bg_gradient_horizontal: 0.0
 
@@ -521,6 +536,7 @@ live_design! {
                             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
                 let color_2 = self.color;
                 if (self.color_2.x > -0.5) {
@@ -532,14 +548,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let border_gradient_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x + dither;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
                             
                 sdf.box_all(
@@ -572,6 +588,7 @@ live_design! {
     pub CircleView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
+            uniform color_dither: 1.0
             uniform border_gradient_horizontal: 0.0
             uniform bg_gradient_horizontal: 0.0
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
@@ -583,6 +600,7 @@ live_design! {
                             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
 
                 let color_2 = self.color;
                 if (self.color_2.x > -0.5) {
@@ -594,14 +612,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let border_gradient_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x + dither;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
                             
                 if self.border_radius > 0.0 {
@@ -641,6 +659,7 @@ live_design! {
     pub HexagonView = <ViewBase> {
         show_bg: true, 
         draw_bg: {
+            uniform color_dither: 1.0
             uniform border_gradient_horizontal: 0.0
             uniform bg_gradient_horizontal: 0.0
 
@@ -654,6 +673,7 @@ live_design! {
                             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 
                 let color_2 = self.color;
                 if (self.color_2.x > -0.5) {
@@ -665,14 +685,14 @@ live_design! {
                     border_color_2 = self.border_color_2;
                 }
 
-                let border_gradient_dir = self.pos.y;
+                let border_gradient_dir = self.pos.y + dither;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = self.pos.x;
+                    border_gradient_dir = self.pos.x + dither;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 if self.border_radius.x > 0.0 {
