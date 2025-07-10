@@ -14,9 +14,6 @@ live_design!{
     use link::theme::*;
     use link::shaders::*;
     use crate::popup_menu::*;
-    use crate::popup_menu::PopupMenuFlat;
-    use crate::popup_menu::PopupMenuGradientX;
-    use crate::popup_menu::PopupMenuGradientY;
     
     pub DrawLabelText = {{DrawLabelText}} {}
     pub DropDownBase = {{DropDown}} {}
