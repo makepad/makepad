@@ -6,6 +6,8 @@ use crate::{
 
 live_design! {
     link widgets
+    use link::shaders::*;
+
     pub IconBase = {{Icon}} {}
 
     pub Icon = <IconBase> {
@@ -18,44 +20,48 @@ live_design! {
         }
         
         draw_bg: {
+            uniform color_dither: 1.0
             uniform color: #0000,
             uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
             uniform bg_gradient_horizontal: 0.0; 
 
             fn pixel(self) -> vec4 {
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let color_2 = self.color_2;
 
-                let bg_gradient_dir = self.pos.y;
+                let gradient_fill_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    gradient_fill_dir = self.pos.x + dither;
                 }
 
                 if (self.color_2.x < -0.5) {
                     color_2 = self.color;
                 }
 
-                return mix(self.color, color_2, bg_gradient_dir)
+                return mix(self.color, color_2, gradient_fill_dir)
             }
         }
 
         draw_icon: {
+            uniform color_dither: 1.0
             uniform color: #f00
             uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
             uniform bg_gradient_horizontal: 0.0; 
 
             fn get_color(self) -> vec4 {
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let color_2 = self.color_2;
 
-                let bg_gradient_dir = self.pos.y;
+                let gradient_fill_dir = self.pos.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    gradient_fill_dir = self.pos.x + dither;
                 }
 
                 if (self.color_2.x < -0.5) {
                     color_2 = self.color;
                 }
 
-                return mix(self.color, color_2, bg_gradient_dir)
+                return mix(self.color, color_2, gradient_fill_dir)
             }
         }
     }
