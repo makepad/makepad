@@ -283,20 +283,6 @@ live_design!{
             color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
             color_2_active: (THEME_COLOR_OUTSET_2_ACTIVE)
             color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
-
-            border_color: (THEME_COLOR_U_HIDDEN)
-            border_color_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_active: (THEME_COLOR_U_HIDDEN)
-            border_color_disabled: (THEME_COLOR_U_HIDDEN)
-
-            border_color_2: (THEME_COLOR_U_HIDDEN)
-            border_color_2_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_2_active: (THEME_COLOR_U_HIDDEN)
-            border_color_2_disabled: (THEME_COLOR_U_HIDDEN)
-
-            mark_color: (THEME_COLOR_U_HIDDEN)
-            mark_color_active: (THEME_COLOR_MARK_ACTIVE)
-            mark_color_disabled: (THEME_COLOR_MARK_DISABLED)
         }
     }
 

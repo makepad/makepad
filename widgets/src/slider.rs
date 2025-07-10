@@ -419,16 +419,16 @@ live_design!{
             uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform color_2_hover: (THEME_COLOR_INSET_HOVER)
-            uniform color_2_focus: (THEME_COLOR_INSET_FOCUS)
-            uniform color_2_drag: (THEME_COLOR_INSET_DRAG)
-            uniform color_2_disabled: (THEME_COLOR_INSET_DISABLED)
+            uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
+            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
+            uniform color_2_drag: (THEME_COLOR_INSET_2_DRAG)
+            uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
 
-            uniform handle_color: (THEME_COLOR_HANDLE_1)
-            uniform handle_color_hover: (THEME_COLOR_HANDLE_1_HOVER)
-            uniform handle_color_focus: (THEME_COLOR_HANDLE_1_FOCUS)
-            uniform handle_color_drag: (THEME_COLOR_HANDLE_1_DRAG)
-            uniform handle_color_disabled: (THEME_COLOR_HANDLE_1_DISABLED)
+            uniform handle_color: (THEME_COLOR_HANDLE)
+            uniform handle_color_hover: (THEME_COLOR_HANDLE_HOVER)
+            uniform handle_color_focus: (THEME_COLOR_HANDLE_FOCUS)
+            uniform handle_color_drag: (THEME_COLOR_HANDLE_DRAG)
+            uniform handle_color_disabled: (THEME_COLOR_HANDLE_DISABLED)
 
             uniform handle_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform handle_color_2_hover: (THEME_COLOR_HANDLE_2_HOVER)
@@ -436,17 +436,17 @@ live_design!{
             uniform handle_color_2_drag: (THEME_COLOR_HANDLE_2_DRAG)
             uniform handle_color_2_disabled: (THEME_COLOR_HANDLE_2_DISABLED)
 
-            uniform border_color: (THEME_COLOR_BEVEL_INSET_2)
-            uniform border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
-            uniform border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            uniform border_color: (THEME_COLOR_BEVEL_INSET_1)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            uniform border_color_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            uniform border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            uniform border_color_2_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
             uniform val_padding: 5.
 
@@ -779,28 +779,19 @@ live_design!{
             handle_color_drag: (THEME_COLOR_HANDLE_1_DRAG)
 
             handle_color_2: (THEME_COLOR_HANDLE_2)
-            handle_color_2_hover: (THEME_COLOR_HANDLE_2_HOVER)
-            handle_color_2_focus: (THEME_COLOR_HANDLE_2_FOCUS)
-            handle_color_2_disabled: (THEME_COLOR_HANDLE_2_DISABLED)
-            handle_color_2_drag: (THEME_COLOR_HANDLE_2_DRAG)
 
-            border_color: (THEME_COLOR_BEVEL_INSET_2)
-            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-            border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
+            border_color: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            border_color_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
 
-            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
-            border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+            border_color_2: (THEME_COLOR_BEVEL_INSET_2)
         }
     }
 
-    pub SliderGradientY = <SliderFlat> {
+    pub SliderGradientY = <Slider> {
         draw_bg: {
-            // TODO: remove redundant stylings
             color: (THEME_COLOR_INSET_1)
             color_hover: (THEME_COLOR_INSET_1_HOVER)
             color_focus: (THEME_COLOR_INSET_1_FOCUS)
@@ -808,34 +799,6 @@ live_design!{
             color_drag: (THEME_COLOR_INSET_1_DRAG)
 
             color_2: (THEME_COLOR_INSET_2)
-            color_2_hover: (THEME_COLOR_INSET_2_HOVER)
-            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
-            color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
-            color_2_drag: (THEME_COLOR_INSET_2_DRAG)
-
-            handle_color: (THEME_COLOR_HANDLE_1)
-            handle_color_hover: (THEME_COLOR_HANDLE_1_HOVER)
-            handle_color_focus: (THEME_COLOR_HANDLE_1_FOCUS)
-            handle_color_disabled: (THEME_COLOR_HANDLE_1_DISABLED)
-            handle_color_drag: (THEME_COLOR_HANDLE_1_DRAG)
-
-            handle_color_2: (THEME_COLOR_HANDLE_2)
-            handle_color_2_hover: (THEME_COLOR_HANDLE_2_HOVER)
-            handle_color_2_focus: (THEME_COLOR_HANDLE_2_FOCUS)
-            handle_color_2_disabled: (THEME_COLOR_HANDLE_2_DISABLED)
-            handle_color_2_drag: (THEME_COLOR_HANDLE_2_DRAG)
-
-            border_color: (THEME_COLOR_BEVEL_INSET_2)
-            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-            border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
-
-            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
-            border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
         }
     }
 
@@ -891,10 +854,10 @@ live_design!{
             uniform border_color_drag: (THEME_COLOR_BEVEL_DRAG)
 
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
-            uniform border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            uniform border_color_2_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
 
             uniform val_padding: (SLIDER_ALT1_VAL_PADDING)
 
@@ -1215,58 +1178,13 @@ live_design!{
 
     pub SliderRound = <SliderRoundFlat> {
         draw_bg: {
-            color: (THEME_COLOR_INSET)
-            color_hover: (THEME_COLOR_INSET_HOVER)
-            color_focus: (THEME_COLOR_INSET_FOCUS)
-            color_disabled: (THEME_COLOR_INSET_DISABLED)
-            color_drag: (THEME_COLOR_INSET_DRAG)
+            border_color: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            border_color_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
 
-            border_color: (THEME_COLOR_BEVEL_INSET_2)
-            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-            border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
-
-            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
-            border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
-
-            val_color: (THEME_COLOR_VAL_1)
-            val_color_hover: (THEME_COLOR_VAL_1_HOVER)
-            val_color_focus: (THEME_COLOR_VAL_1_FOCUS)
-            val_color_disabled: (THEME_COLOR_VAL_1_DISABLED)
-            val_color_drag: (THEME_COLOR_VAL_1_DRAG)
-        }
-    }
-
-
-    pub SliderRoundGradientY = <SliderRoundFlat> {
-        draw_bg: {
-            color: (THEME_COLOR_INSET_1)
-            color_hover: (THEME_COLOR_INSET_1_HOVER)
-            color_focus: (THEME_COLOR_INSET_1_FOCUS)
-            color_disabled: (THEME_COLOR_INSET_1_DISABLED)
-            color_drag: (THEME_COLOR_INSET_1_DRAG)
-
-            color_2: (THEME_COLOR_INSET_2)
-            color_2_hover: (THEME_COLOR_INSET_2_HOVER)
-            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
-            color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
-            color_2_drag: (THEME_COLOR_INSET_2_DRAG)
-
-            border_color: (THEME_COLOR_BEVEL_INSET_2)
-            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-            border_color_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
-
-            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
-            border_color_2_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+            border_color_2: (THEME_COLOR_BEVEL_INSET_2)
 
             val_color: (THEME_COLOR_VAL_1)
             val_color_hover: (THEME_COLOR_VAL_1_HOVER)
@@ -1275,16 +1193,19 @@ live_design!{
             val_color_drag: (THEME_COLOR_VAL_1_DRAG)
 
             val_color_2: (THEME_COLOR_VAL_2)
-            val_color_2_hover: (THEME_COLOR_VAL_2_HOVER)
-            val_color_2_focus: (THEME_COLOR_VAL_2_FOCUS)
-            val_color_2_disabled: (THEME_COLOR_VAL_2_DISABLED)
-            val_color_2_drag: (THEME_COLOR_VAL_2_DRAG)
+        }
+    }
 
-            handle_color: (THEME_COLOR_HANDLE);
-            handle_color_hover: (THEME_COLOR_HANDLE_HOVER);
-            handle_color_focus: (THEME_COLOR_HANDLE_FOCUS);
-            handle_color_disabled: (THEME_COLOR_HANDLE_DISABLED);
-            handle_color_drag: (THEME_COLOR_HANDLE_DRAG);
+
+    pub SliderRoundGradientY = <SliderRound> {
+        draw_bg: {
+            color: (THEME_COLOR_INSET_1)
+            color_hover: (THEME_COLOR_INSET_1_HOVER)
+            color_focus: (THEME_COLOR_INSET_1_FOCUS)
+            color_disabled: (THEME_COLOR_INSET_1_DISABLED)
+            color_drag: (THEME_COLOR_INSET_1_DRAG)
+
+            color_2: (THEME_COLOR_INSET_2)
         }
 
     }
@@ -1687,22 +1608,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(border_color_2, (THEME_COLOR_D_HIDDEN), gradient_down),
-                                mix(border_color_2_hover, (THEME_COLOR_D_HIDDEN), gradient_down),
+                                mix(self.border_color, (THEME_COLOR_D_HIDDEN), gradient_down),
+                                mix(self.border_color_hover, (THEME_COLOR_D_HIDDEN), gradient_down),
                                 self.hover
                             ),
                             mix(
-                                mix(border_color_2_focus, (THEME_COLOR_D_HIDDEN), gradient_down),
+                                mix(self.border_color_focus, (THEME_COLOR_D_HIDDEN), gradient_down),
                                 mix(
-                                    mix(border_color_2_hover, (THEME_COLOR_D_HIDDEN), gradient_down),
-                                    mix(border_color_2_drag, (THEME_COLOR_D_HIDDEN), gradient_down),
+                                    mix(self.border_color_hover, (THEME_COLOR_D_HIDDEN), gradient_down),
+                                    mix(self.border_color_drag, (THEME_COLOR_D_HIDDEN), gradient_down),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(border_color_2_disabled, (THEME_COLOR_D_HIDDEN), gradient_down),
+                        mix(self.border_color_disabled, (THEME_COLOR_D_HIDDEN), gradient_down),
                         self.disabled
                     )
                 );
@@ -1747,12 +1668,6 @@ live_design!{
 
     pub Rotary = <RotaryFlat> {
         draw_bg: {
-            color: (THEME_COLOR_INSET)
-            color_hover: (THEME_COLOR_INSET_HOVER)
-            color_focus: (THEME_COLOR_INSET_FOCUS)
-            color_disabled: (THEME_COLOR_INSET_DISABLED)
-            color_drag: (THEME_COLOR_INSET_DRAG)
-
             border_color: (THEME_COLOR_BEVEL_INSET_1)
             border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
             border_color_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
@@ -1760,10 +1675,6 @@ live_design!{
             border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
             border_color_2: (THEME_COLOR_BEVEL_INSET_2)
-            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            border_color_2_drag: (THEME_COLOR_BEVEL_INSET_2_DRAG)
-            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
             val_color: (THEME_COLOR_VAL_1);
             val_color_hover: (THEME_COLOR_VAL_1);
@@ -1771,11 +1682,7 @@ live_design!{
             val_color_disabled: (THEME_COLOR_VAL_1_DISABLED);
             val_color_drag: (THEME_COLOR_VAL_1_DRAG);
 
-            val_color_2: vec4(-1.0, -1.0, -1.0, -1.0);
-            val_color_2_hover: (THEME_COLOR_VAL_2);
-            val_color_2_focus: (THEME_COLOR_VAL_2);
-            val_color_2_disabled: (THEME_COLOR_VAL_2_DISABLED);
-            val_color_2_drag: (THEME_COLOR_VAL_2_DRAG);
+            val_color_2: (THEME_COLOR_VAL_2);
         }
     }
 
@@ -1788,10 +1695,6 @@ live_design!{
             color_drag: (THEME_COLOR_INSET_1_DRAG)
 
             color_2: (THEME_COLOR_INSET_2)
-            color_2_hover: (THEME_COLOR_INSET_2_HOVER)
-            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
-            color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
-            color_2_drag: (THEME_COLOR_INSET_2_DRAG)
         }
     }
 
