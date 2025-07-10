@@ -68,6 +68,7 @@ live_design!{
             instance hover: 0.0
             instance focus: 0.0
             instance down: 0.0
+            instance active: 0.0
             instance disabled: 0.0
 
             uniform gradient_border_horizontal: 0.0; 
