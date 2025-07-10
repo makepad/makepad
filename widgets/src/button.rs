@@ -7,7 +7,7 @@ live_design! {
     
     pub ButtonBase = {{Button}} {}
     
-    pub Button = <ButtonBase> {
+    pub ButtonFlat = <ButtonBase> {
         text: "Button"
         width: Fit, height: Fit,
         spacing: (THEME_SPACE_2),
@@ -95,11 +95,11 @@ live_design! {
             uniform border_gradient_horizontal: 0.0; 
             uniform bg_gradient_horizontal: 0.0; 
 
-            uniform color: (THEME_COLOR_OUTSET_1)
-            uniform color_hover: (THEME_COLOR_OUTSET_1_HOVER)
-            uniform color_down: (THEME_COLOR_OUTSET_1_DOWN)
-            uniform color_focus: (THEME_COLOR_OUTSET_1_FOCUS)
-            uniform color_disabled: (THEME_COLOR_OUTSET_1_DISABLED)
+            uniform color: (THEME_COLOR_OUTSET)
+            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
+            uniform color_down: (THEME_COLOR_OUTSET_DOWN)
+            uniform color_focus: (THEME_COLOR_OUTSET_FOCUS)
+            uniform color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform color_2_hover: (THEME_COLOR_OUTSET_2_HOVER)
@@ -107,14 +107,13 @@ live_design! {
             uniform color_2_focus: (THEME_COLOR_OUTSET_2_FOCUS)
             uniform color_2_disabled: (THEME_COLOR_OUTSET_2_DISABLED)
 
-            uniform border_color: (THEME_COLOR_BEVEL_OUTSET_1)
-            uniform border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
-            uniform border_color_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
-            uniform border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
-            uniform border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+            uniform border_color: (THEME_COLOR_BEVEL)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_HOVER)
+            uniform border_color_down: (THEME_COLOR_BEVEL_DOWN)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
 
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            // uniform border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
             uniform border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
             uniform border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
@@ -327,6 +326,38 @@ live_design! {
             }
         }
     }
+
+    pub ButtonFlatter = <ButtonFlat> {
+        draw_bg: {
+            color: (THEME_COLOR_U_HIDDEN)
+            color_hover: (THEME_COLOR_U_HIDDEN)
+            color_down: (THEME_COLOR_U_HIDDEN)
+            color_disabled: (THEME_COLOR_OUTSET_DISABLED)
+
+            border_color: (THEME_COLOR_U_HIDDEN)
+            border_color_hover: (THEME_COLOR_U_HIDDEN)
+            border_color_down: (THEME_COLOR_U_HIDDEN)
+            border_color_focus: (THEME_COLOR_U_HIDDEN)
+            border_color_disabled: (THEME_COLOR_U_HIDDEN)
+        }
+    }
+
+    pub Button = <ButtonFlat> {
+        draw_bg: {
+            border_color: (THEME_COLOR_BEVEL_OUTSET_1)
+            border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
+            border_color_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
+            border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
+            border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+
+            border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
+            border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
+            border_color_2_down: (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
+            border_color_2_focus: (THEME_COLOR_BEVEL_OUTSET_2_FOCUS)
+            border_color_2_disabled: (THEME_COLOR_BEVEL_OUTSET_2_DISABLED)
+        }
+        
+    }
  
     pub ButtonGradientX = <Button> {
         draw_bg: {
@@ -361,39 +392,7 @@ live_design! {
             bg_gradient_horizontal: 1.0
        } 
     }
-
-    pub ButtonFlat = <Button> {
-        draw_bg: {
-            color: (THEME_COLOR_OUTSET)
-            color_hover: (THEME_COLOR_OUTSET_HOVER)
-            color_down: (THEME_COLOR_OUTSET_DOWN)
-            color_disabled: (THEME_COLOR_OUTSET_DISABLED)
-
-            border_color: (THEME_COLOR_BEVEL)
-            border_color_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
-        }
-        
-    }
-    
-    pub ButtonFlatter = <ButtonFlat> {
-        draw_bg: {
-            
-            color: (THEME_COLOR_U_HIDDEN)
-            color_hover: (THEME_COLOR_U_HIDDEN)
-            color_down: (THEME_COLOR_U_HIDDEN)
-            color_disabled: (THEME_COLOR_OUTSET_DISABLED)
-
-            border_color: (THEME_COLOR_U_HIDDEN)
-            border_color_hover: (THEME_COLOR_U_HIDDEN)
-            border_color_down: (THEME_COLOR_U_HIDDEN)
-            border_color_focus: (THEME_COLOR_U_HIDDEN)
-            border_color_disabled: (THEME_COLOR_U_HIDDEN)
-        }
-    }
-    
+  
     pub ButtonIcon = <Button> {
         spacing: 0.
         text: ""
