@@ -13,7 +13,7 @@ live_design!{
     link widgets;
     use link::theme::*;
     use link::shaders::*;
-    use crate::popup_menu::PopupMenu;
+    use crate::popup_menu::*;
     use crate::popup_menu::PopupMenuFlat;
     use crate::popup_menu::PopupMenuGradientX;
     use crate::popup_menu::PopupMenuGradientY;
@@ -73,8 +73,8 @@ live_design!{
             instance down: 0.0
             instance disabled: 0.0
 
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
@@ -184,7 +184,7 @@ live_design!{
                 )
 
                 let gradient_border_dir = gradient_border.y;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = gradient_border.x;
                 }
 
@@ -204,7 +204,7 @@ live_design!{
                 )
 
                 let gradient_fill_dir = gradient_fill.y;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = gradient_fill.x;
                 }
 
@@ -373,8 +373,8 @@ live_design!{
         popup_menu: <PopupMenuGradientX> {}
 
         draw_bg: {
-            border_gradient_horizontal: 1.0; 
-            bg_gradient_horizontal: 1.0; 
+            gradient_border_horizontal: 1.0; 
+            gradient_fill_horizontal: 1.0; 
         }    
     }
 

@@ -32,8 +32,8 @@ live_design!{
             uniform color_dither: 1.0
             uniform border_radius: (THEME_CORNER_RADIUS)
             uniform border_size: (THEME_BEVELING)
-            uniform bg_gradient_horizontal: 0.0
-            uniform border_gradient_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
+            uniform gradient_border_horizontal: 0.0
             uniform color_2: #f00
             uniform border_color: #fff0
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
@@ -55,12 +55,12 @@ live_design!{
                 }
 
                 let gradient_border_dir = pow(self.pos.y, gradient_squeeze) + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = pow(self.pos.x, gradient_squeeze) + dither;
                 }
 
                 let gradient_fill_dir = pow(self.pos.y, gradient_squeeze) + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = pow(self.pos.x, gradient_squeeze) + dither;
                 }
 
@@ -87,8 +87,8 @@ live_design!{
             uniform border_radius: 0.
             uniform border_size: (THEME_BEVELING)
             color: (THEME_COLOR_BG_APP * 0.875);
-            uniform bg_gradient_horizontal: 0.0
-            uniform border_gradient_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
+            uniform gradient_border_horizontal: 0.0
             uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color: #fff0
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
@@ -110,12 +110,12 @@ live_design!{
                 }
 
                 let gradient_border_dir = pow(self.pos.y, gradient_squeeze) + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = pow(self.pos.x, gradient_squeeze) + dither;
                 }
 
                 let gradient_fill_dir = pow(self.pos.y, gradient_squeeze) + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = pow(self.pos.x, gradient_squeeze) + dither;
                 }
 
@@ -161,8 +161,8 @@ live_design!{
         PermanentTab = <TabGradientX> {closeable: false}
 
         draw_bg: {
-            bg_gradient_horizontal: 1.0
-            border_gradient_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
+            gradient_border_horizontal: 1.0
             color_dither: 1.0
             border_radius: (THEME_CORNER_RADIUS)
             color: (THEME_COLOR_BG_APP * 0.8)
@@ -174,8 +174,8 @@ live_design!{
         CloseableTab = <TabGradientY> {closeable: true}
         PermanentTab = <TabGradientY> {closeable: false}
         draw_bg: {
-            bg_gradient_horizontal: 0.0
-            border_gradient_horizontal: 0.0
+            gradient_fill_horizontal: 0.0
+            gradient_border_horizontal: 0.0
             color_dither: 1.0
             border_radius: 0.
             border_size: (THEME_BEVELING)

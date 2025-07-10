@@ -62,7 +62,7 @@ live_design!{
                     text: "Click me!"
                     draw_icon: {
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
-                        bg_gradient_horizontal: 1.0
+                        gradient_fill_horizontal: 1.0
 
                         color: #f00
                         color_hover: (THEME_COLOR_LABEL_INNER_HOVER)

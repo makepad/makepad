@@ -30,7 +30,7 @@ live_design!{
             }
 
             uniform color_dither: 1.0
-            uniform bg_gradient_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
 
             uniform color: (THEME_COLOR_LABEL_INNER),
             uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER),
@@ -53,7 +53,7 @@ live_design!{
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -77,8 +77,8 @@ live_design!{
 
             uniform border_size: 1.
             uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
             uniform color_dither: 1.
 
             uniform color: (THEME_COLOR_D_HIDDEN)
@@ -137,7 +137,7 @@ live_design!{
                 )
 
                 let gradient_border_dir = gradient_border.y;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = gradient_border.x;
                 }
 
@@ -157,7 +157,7 @@ live_design!{
                 )
 
                 let gradient_fill_dir = gradient_fill.y;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = gradient_fill.x;
                 }
 
@@ -270,13 +270,13 @@ live_design!{
         draw_bg: {
             border_size: 1.
             border_radius: (THEME_CORNER_RADIUS)
-            border_gradient_horizontal: 0.0; 
-            bg_gradient_horizontal: 1.0; 
+            gradient_border_horizontal: 0.0; 
+            gradient_fill_horizontal: 1.0; 
             color_dither: 1.
         }
 
         draw_text: {
-            bg_gradient_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
         }
     }
 
@@ -288,7 +288,7 @@ live_design!{
         }
 
         draw_text: {
-            bg_gradient_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
         }
     }
     
