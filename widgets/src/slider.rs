@@ -407,8 +407,8 @@ live_design!{
 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
 
             uniform color_dither: 1.0
 
@@ -534,7 +534,7 @@ live_design!{
                 )
 
                 let gradient_border_dir = gradient_border.y;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = gradient_border.x;
                 }
 
@@ -554,7 +554,7 @@ live_design!{
                 )
                     
                 let gradient_fill_dir = gradient_fill.y;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = gradient_fill.x;
                 }
 
@@ -804,8 +804,8 @@ live_design!{
 
     pub SliderGradientX = <SliderGradientY> {
         draw_bg: {
-            border_gradient_horizontal: 1.0; 
-            bg_gradient_horizontal: 1.0; 
+            gradient_border_horizontal: 1.0; 
+            gradient_fill_horizontal: 1.0; 
         }
     }
 
@@ -825,8 +825,8 @@ live_design!{
 
             label_size: 75.
 
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
 
             uniform val_heat: 10.
 
@@ -953,12 +953,12 @@ live_design!{
                 )
 
                 let gradient_border_dir = gradient_border.y;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = gradient_border.x;
                 }
 
                 let gradient_fill_dir = gradient_fill.y;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = gradient_fill.x;
                 }
 
@@ -1212,8 +1212,8 @@ live_design!{
 
     pub SliderRoundGradientX = <SliderRoundGradientY> {
         draw_bg: {
-            border_gradient_horizontal: 1.0; 
-            bg_gradient_horizontal: 1.0; 
+            gradient_border_horizontal: 1.0; 
+            gradient_fill_horizontal: 1.0; 
         }
     }
 
@@ -1575,15 +1575,15 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.border_color, (THEME_COLOR_D_HIDDEN), gradient_down),
-                                mix(self.border_color_hover, (THEME_COLOR_D_HIDDEN), gradient_down),
+                                mix(self.border_color, border_color_2, gradient_down),
+                                mix(self.border_color_hover, border_color_2_hover, gradient_down),
                                 self.hover
                             ),
                             mix(
-                                mix(self.border_color, (THEME_COLOR_D_HIDDEN), gradient_down),
+                                mix(self.border_color, border_color_2, gradient_down),
                                 mix(
-                                    mix(self.border_color_hover, (THEME_COLOR_D_HIDDEN), gradient_down),
-                                    mix(self.border_color_drag, (THEME_COLOR_D_HIDDEN), gradient_down),
+                                    mix(self.border_color_hover, border_color_2_hover, gradient_down),
+                                    mix(self.border_color_drag, border_color_2_drag, gradient_down),
                                     self.drag
                                 ),
                                 self.hover
