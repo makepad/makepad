@@ -75,11 +75,11 @@ live_design! {
             uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
 
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            uniform border_color_2_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+            uniform border_color_2_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
+            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -522,11 +522,18 @@ live_design! {
 
     pub TextInput = <TextInputFlat> {
         draw_bg: {
+            border_color: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            border_color_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
+            border_color_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
+            border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+
             border_color_2: (THEME_COLOR_BEVEL_INSET_1)
         }
     }
 
-    pub TextInputGradientX = <TextInputFlat> {
+    pub TextInputGradientX = <TextInput> {
         draw_bg: {
             border_gradient_horizontal: 1.0; 
             bg_gradient_horizontal: 1.0; 
@@ -539,25 +546,6 @@ live_design! {
             color_disabled: (THEME_COLOR_INSET_1_DISABLED)
 
             color_2: (THEME_COLOR_INSET_2)
-            color_2_hover: (THEME_COLOR_INSET_2_HOVER)
-            color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
-            color_2_down: (THEME_COLOR_INSET_2_DOWN)
-            color_2_empty: (THEME_COLOR_INSET_2_EMPTY)
-            color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
-
-            border_color: (THEME_COLOR_BEVEL_INSET_2)
-            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-            border_color_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
-            border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-
-            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-            border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            border_color_2_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
         }
 
         draw_selection: {
