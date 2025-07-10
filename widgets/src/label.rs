@@ -26,16 +26,16 @@ live_design!{
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let color_2 = self.color_2;
 
-                let bg_gradient_dir = self.pos.y + dither;
+                let gradient_fill_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x + dither;
+                    gradient_fill_dir = self.pos.x + dither;
                 }
 
                 if (self.color_2.x < -0.5) {
                     color_2 = self.color;
                 }
 
-                return mix(self.color, color_2, bg_gradient_dir)
+                return mix(self.color, color_2, gradient_fill_dir)
             }
             text_style: <THEME_FONT_REGULAR> {
                 line_spacing: (THEME_FONT_WDGT_LINE_SPACING),
