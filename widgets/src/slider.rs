@@ -1422,39 +1422,6 @@ live_design!{
 
                 sdf.arc_round_caps(
                     center_px.x,
-                    center_px.y + border_sz,
-                    radius_px,
-                    start,
-                    outer_end, 
-                    border_sz * 4.
-                );
-
-                sdf.fill(
-                    mix(
-                        mix(
-                            mix(
-                                mix((THEME_COLOR_U_HIDDEN), self.border_color, gradient_down),
-                                mix((THEME_COLOR_U_HIDDEN), self.border_color_hover, gradient_down),
-                                self.hover
-                            ),
-                            mix(
-                                mix((THEME_COLOR_U_HIDDEN), self.border_color_focus, gradient_down),
-                                mix(
-                                    mix((THEME_COLOR_U_HIDDEN), self.border_color_hover, gradient_down),
-                                    mix((THEME_COLOR_U_HIDDEN), self.border_color_drag, gradient_down),
-                                    self.drag
-                                ),
-                                self.hover
-                            ),
-                            self.focus
-                        ),
-                        mix((THEME_COLOR_U_HIDDEN), self.border_color_disabled, gradient_down),
-                        self.disabled
-                    )
-                );
-
-                sdf.arc_round_caps(
-                    center_px.x,
                     center_px.y - border_sz,
                     radius_px,
                     start,
@@ -1466,22 +1433,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(border_color_2, (THEME_COLOR_D_HIDDEN), gradient_up),
-                                mix(border_color_2_hover, (THEME_COLOR_D_HIDDEN), gradient_up),
+                                mix(self.border_color, (THEME_COLOR_D_HIDDEN), gradient_up),
+                                mix(self.border_color_hover, (THEME_COLOR_D_HIDDEN), gradient_up),
                                 self.hover
                             ),
                             mix(
-                                mix(border_color_2_focus, (THEME_COLOR_D_HIDDEN), gradient_up),
+                                mix(self.border_color_focus, (THEME_COLOR_D_HIDDEN), gradient_up),
                                 mix(
-                                    mix(border_color_2_hover, (THEME_COLOR_D_HIDDEN), gradient_up),
-                                    mix(border_color_2_drag, (THEME_COLOR_D_HIDDEN), gradient_up),
+                                    mix(self.border_color_hover, (THEME_COLOR_D_HIDDEN), gradient_up),
+                                    mix(self.border_color_drag, (THEME_COLOR_D_HIDDEN), gradient_up),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(border_color_2_disabled, (THEME_COLOR_D_HIDDEN), gradient_up),
+                        mix(self.border_color_disabled, (THEME_COLOR_D_HIDDEN), gradient_up),
                         self.disabled
                     )
                 );
@@ -1500,22 +1467,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                border_color_2,
-                                border_color_2_hover,
+                                self.border_color,
+                                self.border_color_hover,
                                 self.hover
                             ),
                             mix(
-                                border_color_2_focus,
+                                self.border_color,
                                 mix(
-                                    border_color_2_hover,
-                                    border_color_2_drag,
+                                    self.border_color_hover,
+                                    self.border_color_drag,
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        border_color_2_disabled,
+                        self.border_color_disabled,
                         self.disabled
                     )
                 );
@@ -1613,7 +1580,7 @@ live_design!{
                                 self.hover
                             ),
                             mix(
-                                mix(self.border_color_focus, (THEME_COLOR_D_HIDDEN), gradient_down),
+                                mix(self.border_color, (THEME_COLOR_D_HIDDEN), gradient_down),
                                 mix(
                                     mix(self.border_color_hover, (THEME_COLOR_D_HIDDEN), gradient_down),
                                     mix(self.border_color_drag, (THEME_COLOR_D_HIDDEN), gradient_down),
