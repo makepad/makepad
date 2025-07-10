@@ -296,24 +296,42 @@ live_design!{
             instance active: 0.0
 
             uniform color_dither: 1.0
+
+            uniform gradient_fill_horizontal: 0.
             uniform color: (THEME_COLOR_LABEL_OUTER)
             uniform color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
             uniform color_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
 
-            uniform color_2: (THEME_COLOR_LABEL_OUTER)
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform color_2_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
             uniform color_2_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
 
             fn get_color(self) -> vec4 {
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                let color_2 = self.color;
+                let color_2_active = self.color_active;
+                let color_2_disabled = self.color_disabled;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2
+                    color_2_active = self.color_2_active;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                let gradient_fill_dir = self.pos.y + dither;
+                if (self.gradient_fill_horizontal > 0.5) {
+                    gradient_fill_dir = self.pos.x + dither;
+                }
+
                 return
                     mix(
                         mix(
-                            mix(self.color, self.color_2, self.pos.y + dither),
-                            mix(self.color_active, self.color_2_active, self.pos.y + dither),
+                            mix(self.color, color_2, gradient_fill_dir),
+                            mix(self.color_active, color_2_active, gradient_fill_dir),
                             self.active
                         ),
-                        mix(self.color_disabled, self.color_2_disabled, self.pos.y + dither),
+                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
                         self.disabled
                     )
             }

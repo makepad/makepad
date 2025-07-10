@@ -58,24 +58,58 @@ live_design! {
             instance focus: 0.0
             instance disabled: 0.0
 
-            uniform color: (THEME_COLOR_LABEL_INNER)
-            uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
-            uniform color_down: (THEME_COLOR_LABEL_INNER_DOWN)
-            uniform color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
-            uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+            uniform color_dither: 1.0
+
+            uniform gradient_fill_horizontal: 0.
+            uniform color: (THEME_COLOR_LABEL_OUTER)
+            uniform color_hover: (THEME_COLOR_LABEL_OUTER_HOVER)
+            uniform color_down: (THEME_COLOR_LABEL_OUTER_DOWN)
+            uniform color_focus: (THEME_COLOR_LABEL_OUTER_FOCUS)
+            uniform color_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
+
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_2_hover: (THEME_COLOR_LABEL_OUTER_HOVER)
+            uniform color_2_down: (THEME_COLOR_LABEL_OUTER_DOWN)
+            uniform color_2_focus: (THEME_COLOR_LABEL_OUTER_FOCUS)
+            uniform color_2_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
 
             fn get_color(self) -> vec4 {
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                let color_2 = self.color;
+                let color_2_hover = self.color_hover;
+                let color_2_down = self.color_down;
+                let color_2_focus = self.color_focus;
+                let color_2_disabled = self.color_disabled;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2
+                    color_2_hover = self.color_2_hover;
+                    color_2_down = self.color_2_down;
+                    color_2_focus = self.color_2_focus;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                let gradient_fill_dir = self.pos.y + dither;
+                if (self.gradient_fill_horizontal > 0.5) {
+                    gradient_fill_dir = self.pos.x + dither;
+                }
+
                 return mix(
                     mix(
                         mix(
-                            mix(self.color, self.color_focus, self.focus),
-                            self.color_hover,
+                            mix(
+                                mix(self.color, color_2, gradient_fill_dir),
+                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
+                                self.focus
+                            ),
+                            mix(self.color_hover, color_2_hover, gradient_fill_dir),
                             self.hover
                         ),
-                        self.color_down,
+                        mix(self.color_down, color_2_down, gradient_fill_dir),
                         self.down
                     ),
-                    self.color_disabled,
+                    mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
                     self.disabled
                 )
             }
