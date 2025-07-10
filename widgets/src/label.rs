@@ -9,6 +9,7 @@ use {
 live_design!{
     link widgets;
     use link::theme::*;
+    use link::shaders::*;
     
     pub LabelBase = {{Label}} {}
     pub Label = <LabelBase> {
@@ -16,16 +17,18 @@ live_design!{
         padding: <THEME_MSPACE_1> {}
 
         draw_text: {
+            uniform color_dither: 1.0
             color: (THEME_COLOR_LABEL_OUTER),
             uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
             uniform bg_gradient_horizontal: 0.0
 
             fn get_color(self) ->vec4{
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let color_2 = self.color_2;
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 if (self.color_2.x < -0.5) {

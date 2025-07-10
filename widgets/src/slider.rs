@@ -533,9 +533,9 @@ live_design!{
                     (self.pos.y - offset_uv.y) * scale_factor_border.y + dither
                 )
 
-                let border_gradient_dir = gradient_border.y;
+                let gradient_border_dir = gradient_border.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = gradient_border.x;
+                    gradient_border_dir = gradient_border.x;
                 }
 
                 let sz_inner_px = vec2(
@@ -553,9 +553,9 @@ live_design!{
                     (self.pos.y - offset_uv.y) * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
                     
-                let bg_gradient_dir = gradient_fill.y;
+                let gradient_fill_dir = gradient_fill.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = gradient_fill.x;
+                    gradient_fill_dir = gradient_fill.x;
                 }
 
                 let slider_top = offset_px.y + self.border_size;
@@ -575,15 +575,15 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.color, color_2, bg_gradient_dir),
-                                mix(self.color_hover, color_2_hover, bg_gradient_dir),
+                                mix(self.color, color_2, gradient_fill_dir),
+                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
                                 self.hover
                             ),
                             mix(
-                                mix(self.color_focus, color_2_focus, bg_gradient_dir),
+                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
                                 mix(
-                                    mix(self.color_hover, color_2_hover, bg_gradient_dir),
-                                    mix(self.color_drag, color_2_drag, bg_gradient_dir),
+                                    mix(self.color_hover, color_2_hover, gradient_fill_dir),
+                                    mix(self.color_drag, color_2_drag, gradient_fill_dir),
                                     self.drag
                                 ),
                                 self.hover
@@ -598,19 +598,19 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color, border_color_2, border_gradient_dir),
+                            mix(self.border_color, border_color_2, gradient_border_dir),
                             mix(
-                                mix(self.border_color_focus, border_color_2_focus, border_gradient_dir),
+                                mix(self.border_color_focus, border_color_2_focus, gradient_border_dir),
                                 mix(
-                                    mix(self.border_color_hover, border_color_2_hover, border_gradient_dir),
-                                    mix(self.border_color_drag, border_color_2_drag, border_gradient_dir),
+                                    mix(self.border_color_hover, border_color_2_hover, gradient_border_dir),
+                                    mix(self.border_color_drag, border_color_2_drag, gradient_border_dir),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.border_color_disabled, border_color_2_disabled, border_gradient_dir),
+                        mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir),
                         self.disabled
                     ), self.border_size
                 )
@@ -729,22 +729,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.handle_color, handle_color_2, bg_gradient_dir),
-                                mix(self.handle_color_hover, handle_color_2_hover, bg_gradient_dir),
+                                mix(self.handle_color, handle_color_2, gradient_fill_dir),
+                                mix(self.handle_color_hover, handle_color_2_hover, gradient_fill_dir),
                                 self.hover
                             ),
                             mix(
-                                mix(self.handle_color_focus, handle_color_2_focus, bg_gradient_dir),
+                                mix(self.handle_color_focus, handle_color_2_focus, gradient_fill_dir),
                                 mix(
-                                    mix(self.handle_color_hover, handle_color_2_hover, bg_gradient_dir),
-                                    mix(self.handle_color_drag, handle_color_2_drag, bg_gradient_dir),
+                                    mix(self.handle_color_hover, handle_color_2_hover, gradient_fill_dir),
+                                    mix(self.handle_color_drag, handle_color_2_drag, gradient_fill_dir),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.handle_color_disabled, handle_color_2_disabled, bg_gradient_dir),
+                        mix(self.handle_color_disabled, handle_color_2_disabled, gradient_fill_dir),
                         self.disabled
                     )
                 )
@@ -752,15 +752,15 @@ live_design!{
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(border_color_2, self.border_color, border_gradient_dir),
+                            mix(border_color_2, self.border_color, gradient_border_dir),
                             mix(
-                                mix(border_color_2_hover, self.border_color_hover, border_gradient_dir),
-                                mix(border_color_2_drag, self.border_color_drag, border_gradient_dir),
+                                mix(border_color_2_hover, self.border_color_hover, gradient_border_dir),
+                                mix(border_color_2_drag, self.border_color_drag, gradient_border_dir),
                                 self.drag
                             ),
                             self.hover
                         ),
-                        mix(border_color_2_disabled, self.border_color_disabled, border_gradient_dir),
+                        mix(border_color_2_disabled, self.border_color_disabled, gradient_border_dir),
                         self.disabled
                     ), self.border_size
                 );
@@ -989,14 +989,14 @@ live_design!{
                     self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
 
-                let border_gradient_dir = gradient_border.y;
+                let gradient_border_dir = gradient_border.y;
                 if (self.border_gradient_horizontal > 0.5) {
-                    border_gradient_dir = gradient_border.x;
+                    gradient_border_dir = gradient_border.x;
                 }
 
-                let bg_gradient_dir = gradient_fill.y;
+                let gradient_fill_dir = gradient_fill.y;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = gradient_fill.x;
+                    gradient_fill_dir = gradient_fill.x;
                 }
 
                 let val_gradient_dir = gradient_fill.x;
@@ -1022,39 +1022,39 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.color, color_2, bg_gradient_dir),
-                                mix(self.color_hover, color_2_hover, bg_gradient_dir),
+                                mix(self.color, color_2, gradient_fill_dir),
+                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
                                 self.hover
                             ),
                             mix(
-                                mix(self.color_focus, color_2_focus, bg_gradient_dir),
+                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
                                 mix(
-                                    mix(self.color_hover, color_2_hover, bg_gradient_dir),
-                                    mix(self.color_drag, color_2_drag, bg_gradient_dir),
+                                    mix(self.color_hover, color_2_hover, gradient_fill_dir),
+                                    mix(self.color_drag, color_2_drag, gradient_fill_dir),
                                     self.drag
                                 ),
                                 self.hover
                             ),
-                            self.focus), mix(self.color_disabled, color_2_disabled, bg_gradient_dir), self.disabled
+                            self.focus), mix(self.color_disabled, color_2_disabled, gradient_fill_dir), self.disabled
                     )
                 )
 
                 sdf.stroke(
                     mix(
                         mix(
-                            mix(self.border_color, border_color_2, border_gradient_dir),
+                            mix(self.border_color, border_color_2, gradient_border_dir),
                             mix(
-                                mix(self.border_color_focus, border_color_2_focus, border_gradient_dir),
+                                mix(self.border_color_focus, border_color_2_focus, gradient_border_dir),
                                 mix(
-                                    mix(self.border_color_hover, border_color_2_hover, border_gradient_dir),
-                                    mix(self.border_color_drag, border_color_2_drag, border_gradient_dir),
+                                    mix(self.border_color_hover, border_color_2_hover, gradient_border_dir),
+                                    mix(self.border_color_drag, border_color_2_drag, gradient_border_dir),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.border_color_disabled, border_color_2_disabled, border_gradient_dir),
+                        mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir),
                         self.disabled
                     ), self.border_size
                 )
