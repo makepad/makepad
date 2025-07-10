@@ -20,14 +20,14 @@ live_design!{
             uniform color_dither: 1.0
             color: (THEME_COLOR_LABEL_OUTER),
             uniform color_2: vec4(-1.0, -1.0,-1.0,-1.0)
-            uniform bg_gradient_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
 
             fn get_color(self) ->vec4{
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let color_2 = self.color_2;
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -57,7 +57,7 @@ live_design!{
         draw_text: {
             color: #f00,
             color_2: #ff0
-            bg_gradient_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
         }
     }
     

@@ -92,8 +92,8 @@ live_design! {
             uniform border_radius: (THEME_CORNER_RADIUS)
 
             uniform color_dither: 1.0
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
 
             uniform color: (THEME_COLOR_OUTSET)
             uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
@@ -162,7 +162,7 @@ live_design! {
                 )
 
                 let gradient_border_dir = gradient_border.y;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = gradient_border.x;
                 }
 
@@ -182,7 +182,7 @@ live_design! {
                 )
 
                 let gradient_fill_dir = gradient_fill.y;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = gradient_fill.x;
                 }
 
@@ -373,7 +373,7 @@ live_design! {
 
     pub ButtonGradientY = <ButtonGradientX> {
        draw_bg: {
-            bg_gradient_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
        } 
     }
   

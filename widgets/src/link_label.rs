@@ -27,7 +27,7 @@ live_design!{
             instance disabled: 0.0
 
             uniform color_dither: 1.0
-            uniform bg_gradient_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
 
             uniform color: (THEME_COLOR_LABEL_INNER)
             uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
@@ -58,7 +58,7 @@ live_design!{
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -89,7 +89,7 @@ live_design!{
             instance disabled: 0.0
 
             uniform color_dither: 1.0
-            uniform bg_gradient_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
 
             uniform color: (THEME_COLOR_LABEL_INNER)
             uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
@@ -123,7 +123,7 @@ live_design!{
                 }
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
@@ -163,7 +163,7 @@ live_design!{
             }
 
             uniform color_dither: 1.0
-            uniform bg_gradient_horizontal: 0.0
+            uniform gradient_fill_horizontal: 0.0
 
             uniform color: (THEME_COLOR_LABEL_INNER),
             uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER),
@@ -194,7 +194,7 @@ live_design!{
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -311,7 +311,7 @@ live_design!{
 
     pub LinkLabelGradientY = <LinkLabel> {
         draw_icon: {
-            bg_gradient_horizontal: 0.0
+            gradient_fill_horizontal: 0.0
 
             color: (THEME_COLOR_LABEL_INNER)
             color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
@@ -359,7 +359,7 @@ live_design!{
     
     pub LinkLabelGradientX = <LinkLabel> {
         draw_icon: {
-            bg_gradient_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
 
             color: (THEME_COLOR_LABEL_INNER)
             color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
@@ -375,7 +375,7 @@ live_design!{
         }
 
         draw_bg: {
-            bg_gradient_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
 
             color: #0ff,
             color_hover: #0ff,
@@ -391,7 +391,7 @@ live_design!{
         }
 
         draw_text: {
-            bg_gradient_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
 
             color: #0ff,
             color_hover: #0ff,

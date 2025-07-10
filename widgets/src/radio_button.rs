@@ -35,8 +35,8 @@ live_design!{
 
             uniform size: 15.0,
 
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
@@ -152,7 +152,7 @@ live_design!{
                 )
 
                 let gradient_border_dir = gradient_border.y;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = gradient_border.x;
                 }
 
@@ -162,7 +162,7 @@ live_design!{
                 )
 
                 let gradient_fill_dir = gradient_fill.y;
-                if (self.bg_gradient_horizontal > 0.5) {
+                if (self.gradient_fill_horizontal > 0.5) {
                     gradient_fill_dir = gradient_fill.x;
                 }
 
@@ -439,8 +439,8 @@ live_design!{
 
     pub RadioButtonGradientX = <RadioButtonGradientY> {
         draw_bg: {
-            border_gradient_horizontal: 1.0; 
-            bg_gradient_horizontal: 1.0; 
+            gradient_border_horizontal: 1.0; 
+            gradient_fill_horizontal: 1.0; 
         }
     }
 
@@ -500,8 +500,8 @@ live_design!{
 
             uniform size: 15.0,
 
-            uniform border_gradient_horizontal: 0.0; 
-            uniform bg_gradient_horizontal: 0.0; 
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
             uniform border_size: (THEME_BEVELING)
             uniform border_radius: (THEME_CORNER_RADIUS)
 
@@ -573,12 +573,12 @@ live_design!{
                 )
 
                 let gradient_border_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_border_dir = self.pos.x + dither;
                 }
 
                 let gradient_fill_dir = self.pos.y + dither;
-                if (self.border_gradient_horizontal > 0.5) {
+                if (self.gradient_border_horizontal > 0.5) {
                     gradient_fill_dir = self.pos.x + dither;
                 }
 
@@ -660,8 +660,8 @@ live_design!{
 
     pub RadioButtonTabGradientX = <RadioButtonTabGradientY> {
         draw_bg: {
-            border_gradient_horizontal: 1.0; 
-            bg_gradient_horizontal: 1.0; 
+            gradient_border_horizontal: 1.0; 
+            gradient_fill_horizontal: 1.0; 
         }
     }
 
