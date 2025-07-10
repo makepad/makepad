@@ -311,9 +311,9 @@ live_design! {
                     color_2_disabled = self.color_2_disabled;
                 }
 
-                let bg_gradient_dir = self.pos.y;
+                let bg_gradient_dir = self.pos.y + dither;
                 if (self.bg_gradient_horizontal > 0.5) {
-                    bg_gradient_dir = self.pos.x;
+                    bg_gradient_dir = self.pos.x + dither;
                 }
 
                 sdf.box(
