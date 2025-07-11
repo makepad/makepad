@@ -149,7 +149,7 @@ pub enum StackNavigationTransitionAction {
     ShowBegin,
     ShowDone,
     HideBegin,
-    HideEnd,
+    HideEnd(WidgetUid), // Include the parent navigation's UID
 }
 
 #[derive(Live, LiveHook, Widget)]
@@ -157,17 +157,31 @@ pub struct StackNavigationView {
     #[deref]
     view: View,
 
+    /// The offset of the stack view from the left edge of the parent view.
     #[live]
     offset: f64,
 
+    /// Wether the stack view should take over the entire screen.
+    /// 
+    /// If false, the stack view will be constrained to the size of the parent view,
+    // and no animatons will be played when navigating (due to a current limitation of the animator and this implementation).
+    #[live(true)]
+    full_screen: bool,
+
+    /// The offset of the stack view from the left edge of the parent view when it is fully hidden.
     #[rust(10000.0)]
     offset_to_hide: f64,
 
     #[animator]
     animator: Animator,
 
+    /// The state of the stack view.
     #[rust]
     state: StackNavigationViewState,
+
+    /// The UID of the parent navigation.
+    #[rust]
+    parent_navigation_uid: Option<WidgetUid>,
 }
 
 impl Widget for StackNavigationView {
@@ -183,20 +197,40 @@ impl Widget for StackNavigationView {
     }
 
     fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk) -> DrawStep{
+        let abs_pos = if self.full_screen {
+            // In fully screen mode, position at the offset.
+            DVec2 {
+                x: self.offset,
+                y: 0.,
+            }
+        } else {
+            let parent_rect = cx.peek_walk_turtle(walk);
+
+            // Not in fully screen mode, position at the parent ignoring the offset 
+            // (offset ignored since we're not animating the slide-in).
+            DVec2 {
+                x: parent_rect.pos.x,
+                y: parent_rect.pos.y,
+            }
+        };
+
         self.view.draw_walk(
             cx,
             scope,
-            walk.with_abs_pos(DVec2 {
-                x: self.offset,
-                y: 0.,
-            }),
+            walk.with_abs_pos(abs_pos),
         )
     }
 }
 
 impl StackNavigationView {
     fn hide_stack_view(&mut self, cx: &mut Cx) {
-        self.animator_play(cx, id!(slide.hide));
+        if self.full_screen {
+            self.animator_play(cx, id!(slide.hide));
+        } else {
+            // Cut straight into the hide state without animating the slide-out.
+            self.animator_cut(cx, id!(slide.hide));
+        }
+        
         cx.widget_action(
             self.widget_uid(),
             &HeapLiveIdPath::default(),
@@ -231,10 +265,18 @@ impl StackNavigationView {
             if self.offset > self.offset_to_hide {
                 self.apply_over(cx, live! { visible: false });
 
+                // Dispatch HideEnd with the parent navigation's UID
+                let hide_end_action = if let Some(parent_uid) = self.parent_navigation_uid {
+                    StackNavigationTransitionAction::HideEnd(parent_uid)
+                } else {
+                    error!("No parent navigation UID found for stack view {:?}", self.widget_uid());
+                    return;
+                };
+
                 cx.widget_action(
                     self.widget_uid(),
                     &HeapLiveIdPath::default(),
-                    StackNavigationTransitionAction::HideEnd,
+                    hide_end_action,
                 );
 
                 self.animator_cut(cx, id!(slide.hide));
@@ -248,7 +290,11 @@ impl StackNavigationView {
             self.animator.animator_in_state(cx, id!(slide.show))
         {
             const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
-            if self.offset < OPENING_OFFSET_THRESHOLD {
+            // If the stack view is not full screen, we can consider it fully opened at any offset (offset ignored in draw_walk).
+            // Since for non-full screen we ignore the offset and animation, we "cut" to the fully opened state.
+            // TODO: Ideally this should be done by calling `self.animator_cut(cx, id!(slide.show));` at self.show instead, 
+            // however that introduces some bugs in the animator (it does work for slide.hide though).
+            if self.offset < OPENING_OFFSET_THRESHOLD || !self.full_screen {
                 cx.widget_action(
                     self.widget_uid(),
                     &HeapLiveIdPath::default(),
@@ -295,6 +341,12 @@ impl StackNavigationViewRef {
     pub fn hide(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.hide_stack_view(cx);
+        }
+    }
+
+    pub fn set_parent_navigation_uid(&self, parent_uid: WidgetUid) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.parent_navigation_uid = Some(parent_uid);
         }
     }
 }
@@ -444,24 +496,33 @@ impl WidgetMatchEvent for StackNavigation {
                 }
             }
 
-            // Handle navigation actions
-            match action.as_widget_action().cast() {
-                StackNavigationAction::Push(view_id) => {
-                    self.push_view(view_id, cx);
-                }
-                StackNavigationAction::Pop => {
-                    self.pop_view(cx);
-                }
-                StackNavigationAction::PopToRoot => {
-                    self.pop_to_root(cx);
-                }
-                _ => {}
-            }
+            if let Some(widget_action) = action.as_widget_action() {
+                // Check if the action is coming from one of our descendant StackNavigationView's.
+                if !self.uid_to_widget(widget_action.widget_uid).is_empty() {
+                    // Handle navigation actions
+                    match widget_action.cast() {
+                        StackNavigationAction::Push(view_id) => {
+                            self.push_view(view_id, cx);
+                        }
+                        StackNavigationAction::Pop => {
+                            self.pop_view(cx);
+                        }
+                        StackNavigationAction::PopToRoot => {
+                            self.pop_to_root(cx);
+                        }
+                        _ => {}
+                    }
 
-            // If the active stack view is already hidden, we need to update the navigation stack.
-            if let StackNavigationTransitionAction::HideEnd = action.as_widget_action().cast() {
-                // The current view has finished hiding, so we can remove it from the stack
-                self.navigation_stack.pop();
+                    // Handle HideEnd actions only if they are specifically targeted at this navigation
+                    if let StackNavigationTransitionAction::HideEnd(target_parent_uid) = widget_action.cast() {
+                        // Checking the specific target_parent_uid is necessary, 
+                        // because the above descendant check is not enough for nested StackNavigation's.
+                        if target_parent_uid == self.widget_uid() {
+                            // The current view has finished hiding, so we can remove it from the stack
+                            self.navigation_stack.pop();
+                        }
+                    }
+                }
             }
         }
     }
@@ -477,6 +538,10 @@ impl StackNavigation {
         self.navigation_stack.push(view_id);
 
         let stack_view_ref = self.stack_navigation_view(&[view_id]);
+        
+        // Set the parent navigation UID so the view knows who its parent is
+        stack_view_ref.set_parent_navigation_uid(self.widget_uid());
+        
         stack_view_ref.show(cx, self.screen_width);
 
         // Send a `Show` action to the view being shown so it can be aware of the transition.
