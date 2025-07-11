@@ -10,7 +10,6 @@ live_design!{
         width: Fill,
         height: Fill
         show_bg: true,
-        debug: true,
         draw_bg: {
             color: (THEME_COLOR_MAKEPAD)
             
