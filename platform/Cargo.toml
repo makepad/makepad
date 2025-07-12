@@ -110,5 +110,7 @@ features = [
     "implement"
 ]
 
+## The vast majority of the Rust ecosystem is currently on
+## `windows-targets` v0.52.*, so we use that version to avoid duplicates.
 [target.'cfg(windows)'.dependencies.windows-targets]
-version = "0.48.3"
+version = "0.52"
