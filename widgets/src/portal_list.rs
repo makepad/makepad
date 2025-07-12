@@ -781,9 +781,13 @@ impl PortalList {
     ///    If `None`, the default value of 20 is used.
     pub fn smooth_scroll_to_end(&mut self, cx: &mut Cx, speed: f64, max_items_to_show: Option<usize>) {
         if self.items.is_empty() { return };
+        let speed = speed * self.range_end as f64;
+        self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show);
+    }
 
-	let speed = speed * self.range_end as f64;
-	self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show);
+    /// Returns whether this PortalList is currently filling the viewport.
+    pub fn is_filling_viewport(&self) -> bool {
+        !self.not_filling_viewport
     }
 }
 
@@ -1234,7 +1238,7 @@ impl PortalListRef {
     /// ```
     pub fn smooth_scroll_to(&self, cx: &mut Cx, target_id: usize, speed: f64, max_items_to_show: Option<usize>) {
         let Some(mut inner) = self.borrow_mut() else { return };
-	inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show);
+	    inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show);
     }
 
     /// Returns the ID of the item that is currently being smoothly scrolled to, if any.
@@ -1267,8 +1271,13 @@ impl PortalListRef {
     ///    If `None`, the default value of 20 is used.
     pub fn smooth_scroll_to_end(&self, cx: &mut Cx, speed: f64, max_items_to_show: Option<usize>) {
         let Some(mut inner) = self.borrow_mut() else { return };
+	    inner.smooth_scroll_to_end(cx, speed, max_items_to_show);
+    }
 
-	inner.smooth_scroll_to_end(cx, speed, max_items_to_show);
+    /// Returns whether this PortalList is currently filling the viewport.
+    pub fn is_filling_viewport(&self) -> bool {
+        let Some(inner) = self.borrow() else { return false };
+        inner.is_filling_viewport()
     }
 
     /// It indicates if we have items not displayed towards the end of the list (below)
