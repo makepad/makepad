@@ -235,11 +235,11 @@ impl Widget for AdaptiveView {
 }
 
 impl WidgetMatchEvent for AdaptiveView {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope) {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         for action in actions {
             // Window geometry has changed, reapply the selector. 
             // Will use the most recent parent size, might be updated on next draw call.
-            if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
+            if let WindowAction::WindowGeomChange(_ce) = action.as_widget_action().cast() {
                 self.apply_selector(cx);
             }
         }
