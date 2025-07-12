@@ -15,21 +15,14 @@ live_design!{
             
             uniform rotation_speed: 1.2
             uniform border_size: 20.0
-            uniform radius: -1.
             uniform max_gap_ratio: 0.92
             uniform min_gap_ratio: 0.12
-            
+            uniform stroke_width: 3.0
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
 
-                let sz_factor = min(self.rect_size.x * 0.5, self.rect_size.y * 0.5);
-
-                let border_sz = self.border_size * sz_factor * 0.004;
-                let sz = self.radius;
-                if (sz < -0.5) {
-                    sz = sz_factor - self.border_size * 0.5;
-                }
-
+                let radius = min(self.rect_size.x * 0.5, self.rect_size.y * 0.5) - self.stroke_width * 0.5;
                 let center = self.rect_size * 0.5;
                 
                 let rotation = self.time * self.rotation_speed * 2.0 * PI;
@@ -50,10 +43,10 @@ live_design!{
                 sdf.arc_round_caps(
                     center.x, 
                     center.y, 
-                    sz,
+                    radius,
                     start_angle, 
                     start_angle + 2.0 * PI - gap_radians, 
-                    border_sz
+                    self.stroke_width
                 );
                 
                 return sdf.fill(self.color);
