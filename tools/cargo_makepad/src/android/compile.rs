@@ -433,7 +433,7 @@ fn add_resources(sdk_dir: &Path, build_crate: &str, build_paths: &BuildPaths, bu
             "fa-solid-900.ttf",
             //"LXGWWenKaiBold.ttf",
             "LiberationMono-Regular.ttf",
-            "GoNotoKurrent-Bold.ttf",
+            //"GoNotoKurrent-Bold.ttf",
            // "NotoColorEmoji.ttf",
             //"IBMPlexSans-SemiBold.ttf",
             "NotoSans-Regular.ttf",
