@@ -1254,11 +1254,11 @@ live_design!{
             uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
             uniform color_2_drag: (THEME_COLOR_INSET_2_DRAG)
 
-            uniform border_color: (THEME_COLOR_BEVEL)
-            uniform border_color_hover: (THEME_COLOR_BEVEL_HOVER)
-            uniform border_color_drag: (THEME_COLOR_BEVEL_DRAG)
-            uniform border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
-            uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            uniform border_color: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_hover: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_drag: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_focus: (THEME_COLOR_U_HIDDEN)
+            uniform border_color_disabled: (THEME_COLOR_U_HIDDEN)
 
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
@@ -1608,22 +1608,22 @@ live_design!{
                     mix(
                         mix(
                             mix(
-                                mix(self.border_color, (THEME_COLOR_U_HIDDEN), gradient_up),
-                                mix(self.border_color_hover, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                mix(self.border_color, border_color_2, gradient_down),
+                                mix(self.border_color_hover, border_color_2_hover, gradient_down),
                                 self.hover
                             ),
                             mix(
-                                mix(self.border_color_focus, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                mix(self.border_color, border_color_2, gradient_down),
                                 mix(
-                                    mix(self.border_color_hover, (THEME_COLOR_U_HIDDEN), gradient_up),
-                                    mix(self.border_color_drag, (THEME_COLOR_U_HIDDEN), gradient_up),
+                                    mix(self.border_color_hover, border_color_2_hover, gradient_down),
+                                    mix(self.border_color_drag, border_color_2_drag, gradient_down),
                                     self.drag
                                 ),
                                 self.hover
                             ),
                             self.focus
                         ),
-                        mix(self.border_color_disabled, (THEME_COLOR_U_HIDDEN), gradient_up),
+                        mix(self.border_color_disabled, (THEME_COLOR_D_HIDDEN), gradient_down),
                         self.disabled
                     )
                 );
