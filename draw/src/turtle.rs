@@ -1409,7 +1409,7 @@ impl<'a,'b> Cx2d<'a,'b> {
 
                         let inner_unused_width = inner_effective_width - finished_walk.outer_size.x;
 
-                        let dx = turtle.align().y * inner_unused_width;
+                        let dx = turtle.align().x * inner_unused_width;
                         let dy = turtle.total_resolved_length_to(finished_walk.deferred_before_count);
 
                         let align_list_start = finished_walk.align_list_start;
