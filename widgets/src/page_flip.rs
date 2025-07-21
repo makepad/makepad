@@ -72,15 +72,17 @@ impl LiveHook for PageFlip {
 }
 
 impl PageFlip {
-    
+    /// Returns the widget for the given page templated ID, creating it if necessary.
     pub fn page(&mut self, cx: &mut Cx, page_id: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.pointers.get(&page_id) {
-            let entry = self.pages.get_or_insert(cx, page_id, | cx | {
+            let entry = self.pages.get_or_insert(cx, page_id, |cx| {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
             });
-            return Some(entry.clone())
+            Some(entry.clone())
+        } else {
+            error!("Template not found: {page_id}. Did you add it to the <PageFlip> instance in `live_design!{{}}`?");
+            None
         }
-        None
     }
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
@@ -147,7 +149,7 @@ impl Widget for PageFlip {
         }
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if let Some(page) = self.page(cx, self.active_page) {
             if self.draw_state.begin_with(cx, &(), | cx, _ | {
                 page.walk(cx)
@@ -167,14 +169,24 @@ impl Widget for PageFlip {
     }
 }
 
-impl PageFlipRef {
-    pub fn set_active_page(&self, cx: &mut Cx, page: LiveId) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.redraw(cx);
-            inner.active_page = page;
+impl PageFlip {
+    /// Sets the active page of the PageFlip widget, creating it if necessary.
+    ///
+    /// Returns `None` if the `page_id` template was not found in the `<PageFlip>` widget DSL.
+    pub fn set_active_page(&mut self, cx: &mut Cx, page_id: LiveId) -> Option<WidgetRef> {
+        let page_widget = self.page(cx, page_id)?;
+        if self.active_page != page_id {
+            self.active_page = page_id;
+            self.redraw(cx);
         }
+        Some(page_widget)
     }
 }
 
-impl PageFlipSet {
+impl PageFlipRef {
+    /// See [`PageFlip::set_active_page()`].
+    pub fn set_active_page(&self, cx: &mut Cx, page_id: LiveId) -> Option<WidgetRef> {
+        let mut inner = self.borrow_mut()?;
+        inner.set_active_page(cx, page_id)
+    }
 }
