@@ -598,7 +598,7 @@ impl PortalList {
                 }
             }
         } else {
-            warning!("Template not found: {template}. Did you add it to the <PortalList> instance in `live_design!{{}}`?");
+            error!("Template not found: {template}. Did you add it to the <PortalList> instance in `live_design!{{}}`?");
             (WidgetRef::empty(), false)
         }
     }
