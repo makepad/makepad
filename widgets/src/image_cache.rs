@@ -350,17 +350,17 @@ pub trait ImageCacheImpl {
     }
 
     fn image_size_by_path(image_path:&Path)-> Result<(usize,usize), ImageError> {
-        if let Ok(mut f) = File::open(image_path){
-            let mut data = vec![0u8;1024]; // yolo chunk size
-            match f.read(&mut data) {
-                Ok(_len) => {
-                    Self::image_size_by_data(&data, image_path)
-                }
-                Err(err) => {
-                    error!("load_image_file_by_path: Resource not found {:?} {}", image_path, err);
-                    return Err(ImageError::PathNotFound(image_path.into()))
-                }
-            }
+        if let Ok(data) = std::fs::read(image_path){
+            //let mut data = vec![0u8;1024]; // yolo chunk size
+            //match f.read(&mut data) {
+            //    Ok(_len) => {
+            Self::image_size_by_data(&data, image_path)
+            //    }
+            //    Err(err) => {
+            //        error!("load_image_file_by_path: Resource not found {:?} {}", image_path, err);
+            //        return Err(ImageError::PathNotFound(image_path.into()))
+            //    }
+            // }
         }
         else{
             error!("load_image_file_by_path: File not found {:?}", image_path);
