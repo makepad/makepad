@@ -1107,7 +1107,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers.on_input = e => {
             // if IME composition is in progress, do not handle the normal input event
             if (is_composing) {
-                console.log('⏸️ Skipping input event during composition');
+                // console.log('⏸️ Skipping input event during composition');
                 return;
             }
             if (ta.value.length > 0) {
