@@ -1105,6 +1105,11 @@ export class WasmWebBrowser extends WasmBridge {
         ta.addEventListener('select', e => this.handlers.on_select(e))
         
         this.handlers.on_input = e => {
+            // if IME composition is in progress, do not handle the normal input event
+            if (is_composing) {
+                // console.log('⏸️ Skipping input event during composition');
+                return;
+            }
             if (ta.value.length > 0) {
                 if (was_paste) {
                     was_paste = false;
@@ -1140,6 +1145,38 @@ export class WasmWebBrowser extends WasmBridge {
             last_len = ta.value.length;
         };
         ta.addEventListener('input', e => this.handlers.on_input(e));
+        
+        // add composition events handling, this is the standard way to handle IME input
+        var is_composing = false;
+        var composition_data = "";
+        
+        ta.addEventListener('compositionstart', e => {
+            is_composing = true;
+            composition_data = "";
+        });
+        
+        ta.addEventListener('compositionupdate', e => {
+            composition_data = e.data || "";
+        });
+        
+        ta.addEventListener('compositionend', e => {
+            is_composing = false;
+            
+            // send final IME input result
+            if (e.data && e.data !== '\n') {
+                this.to_wasm.ToWasmTextInput({
+                    was_paste: false,
+                    input: e.data,
+                    replace_last: composition_data.length > 0, // 如果之前有组合数据，则替换
+                });
+                this.do_wasm_pump();
+            }
+            
+            composition_data = "";
+            // clear textarea
+            ta.value = "";
+            last_len = 0;
+        });
         
         ta.addEventListener('mousedown', e => this.handlers.on_mouse_down(e));
         ta.addEventListener('mouseup', e => this.handlers.on_mouse_up(e));
