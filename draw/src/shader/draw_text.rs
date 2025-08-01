@@ -11,7 +11,7 @@ use {
             fonts::Fonts,
             geom::{Point, Rect, Size, Transform},
             layouter::{
-                BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, Span,
+                BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions,
                 Style,
             },
             loader::{FontDefinition, FontFamilyDefinition},
@@ -335,17 +335,13 @@ impl DrawText {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 
-        let text_len = text.len();
         fonts.get_or_layout(BorrowedLayoutParams {
             text,
-            spans: &[Span {
-                style: Style {
-                    font_family_id: self.text_style.font_family.to_font_family_id(),
-                    font_size_in_pts: self.text_style.font_size,
-                    color: None,
-                },
-                len: text_len,
-            }],
+            style: Style {
+                font_family_id: self.text_style.font_family.to_font_family_id(),
+                font_size_in_pts: self.text_style.font_size,
+                color: None,
+            },
             options: LayoutOptions {
                 first_row_indent_in_lpxs,
                 first_row_min_line_spacing_below_in_lpxs,
