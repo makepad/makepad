@@ -1488,21 +1488,18 @@ impl<'a,'b> Cx2d<'a,'b> {
     fn walk_turtle_internal(&mut self, walk: Walk, align_list_start: usize) -> Rect {
         let turtle = self.turtles.last_mut().unwrap();
 
-        let old_pos = turtle.pos();
-        
         let size = turtle.size_of_next_walk(walk.width, walk.height, walk.margin);
         let outer_size = size + walk.margin.size();
         
-        if let Some(pos) = walk.abs_pos {
-            turtle.move_to(pos);
+        if let Some(outer_origin) = walk.abs_pos {
+            let old_pos = turtle.pos();
+
+            turtle.move_to(outer_origin);
 
             match turtle.flow() {
                 Flow::Right | Flow::RightWrap => turtle.allocate_height(outer_size.y),
                 Flow::Down => turtle.allocate_width(outer_size.x),
-                Flow::Overlay => {
-                    turtle.allocate_width(size.x);
-                    turtle.allocate_height(size.y);
-                }
+                Flow::Overlay => turtle.allocate_size(outer_size),
             }
 
             turtle.move_to(old_pos);
@@ -1513,41 +1510,52 @@ impl<'a,'b> Cx2d<'a,'b> {
                 outer_size: size + walk.margin.size(),
             });
             
+            let origin = outer_origin + walk.margin.left_top();
             Rect {
-                pos: pos + walk.margin.left_top(),
+                pos: origin,
                 size
             }
         }
         else {
             let spacing = turtle.offset_to_next_walk(self.finished_walks.len());
             
-            match turtle.flow() {
+            let outer_origin = match turtle.flow() {
                 Flow::RightWrap if size.x > turtle.unused_inner_width_for_current_row() => {
-                    let new_pos = dvec2(
+                    let outer_origin = dvec2(
                         turtle.origin.x + turtle.layout.padding.left,
                         turtle.origin.y + turtle.used_height + turtle.wrap_spacing
                     );
-                    let shift = new_pos.x - turtle.pos() - spacing;
+                    let shift = outer_origin - turtle.pos() - spacing;
                     
-                    turtle.move_to(new_pos);
+                    turtle.move_to(outer_origin);
                     turtle.allocate_size(outer_size);
             
                     self.move_align_list(align_list_start, self.align_list.len(), shift.x, shift.y, false);
+
+                    outer_origin
                 },
                 Flow::Right | Flow::RightWrap => {
                     turtle.move_right(spacing.x);
+                    let outer_origin = turtle.pos();
                     turtle.allocate_size(outer_size);
                     turtle.move_right(outer_size.x);
+                    outer_origin
                 },
                 
                 Flow::Down => {
                     turtle.move_down(spacing.y);
+                    let outer_origin = turtle.pos();
                     turtle.allocate_size(outer_size);
                     turtle.move_down(outer_size.y);
+                    outer_origin
                 },
-                Flow::Overlay => turtle.allocate_size(outer_size),
+                Flow::Overlay => {
+                    let outer_origin = turtle.pos();
+                    turtle.allocate_size(outer_size);
+                    outer_origin
+                }
             };
-            
+
             let defer_index = self.turtle().deferred_fills.len();
             self.finished_walks.push(FinishedWalk {
                 align_list_start,
@@ -1555,8 +1563,9 @@ impl<'a,'b> Cx2d<'a,'b> {
                 outer_size,
             });
 
+            let origin = outer_origin + walk.margin.left_top();
             Rect {
-                pos: old_pos + spacing + walk.margin.left_top(),
+                pos: origin,
                 size
             }
         }
