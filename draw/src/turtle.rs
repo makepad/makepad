@@ -1520,7 +1520,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             let spacing = turtle.offset_to_next_walk(self.finished_walks.len());
             
             let outer_origin = match turtle.flow() {
-                Flow::RightWrap if size.x > turtle.unused_inner_width_for_current_row() => {
+                Flow::RightWrap if outer_size.x > turtle.unused_inner_width_for_current_row() => {
                     let outer_origin = dvec2(
                         turtle.origin.x + turtle.layout.padding.left,
                         turtle.origin.y + turtle.used_height + turtle.wrap_spacing
@@ -1529,6 +1529,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                     
                     turtle.move_to(outer_origin);
                     turtle.allocate_size(outer_size);
+                    turtle.move_right(outer_size.x);
             
                     self.move_align_list(align_list_start, self.align_list.len(), shift.x, shift.y, false);
 
