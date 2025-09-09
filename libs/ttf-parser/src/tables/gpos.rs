@@ -907,7 +907,7 @@ impl<'a> AnchorMatrix<'a> {
     }
 
     /// Returns an [`Anchor`] at position.
-    pub fn get(&self, row: u16, col: u16) -> Option<Anchor> {
+    pub fn get(&self, row: u16, col: u16) -> Option<Anchor<'_>> {
         let idx = u32::from(row) * u32::from(self.cols) + u32::from(col);
         let offset = self.matrix.get(idx)?.to_usize();
         Anchor::parse(self.data.get(offset..)?)

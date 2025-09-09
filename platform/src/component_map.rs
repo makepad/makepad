@@ -61,7 +61,7 @@ impl<K: std::cmp::Eq + std::hash::Hash + Copy,V> ComponentMap<K,V>{
         }
     }
 
-    pub fn entry(&mut self, key: K) -> Entry<K, V> {
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
         self.visible.insert(key);
         self.map.entry(key)
     }

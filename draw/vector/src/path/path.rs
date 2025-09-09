@@ -34,7 +34,7 @@ impl Path {
     }
 
     /// Returns an iterator over the commands that make up `self`.
-    pub fn commands(&self) -> Commands {
+    pub fn commands(&self) -> Commands<'_> {
         Commands {
             verbs: self.verbs.iter().cloned(),
             points: self.points.iter().cloned(),

@@ -60,7 +60,7 @@ impl<'a> ItemVariationStore<'a> {
         })
     }
 
-    pub fn region_indices(&self, index: u16) -> Option<LazyArray16<u16>> {
+    pub fn region_indices(&self, index: u16) -> Option<LazyArray16<'_,u16>> {
         // Offsets in bytes from the start of the item variation store
         // to each item variation data subtable.
         let offset = self.data_offsets.get(index)?;

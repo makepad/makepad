@@ -318,7 +318,7 @@ impl WidgetSet {
         }
     }
 
-    pub fn iter(&self)->WidgetSetIterator{
+    pub fn iter(&self)->WidgetSetIterator<'_>{
         return WidgetSetIterator{
             widget_set: self,
             index: 0

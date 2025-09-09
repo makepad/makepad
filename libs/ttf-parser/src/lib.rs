@@ -2123,7 +2123,7 @@ impl<'a> Face<'a> {
         &self,
         glyph_id: GlyphId,
         pixels_per_em: u16,
-    ) -> Option<RasterGlyphImage> {
+    ) -> Option<RasterGlyphImage<'_>> {
         if let Some(table) = self.tables.sbix {
             if let Some(strike) = table.best_strike(pixels_per_em) {
                 return strike.get(glyph_id);

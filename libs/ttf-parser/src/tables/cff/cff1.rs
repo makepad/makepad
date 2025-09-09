@@ -791,7 +791,7 @@ fn parse_sid_metadata<'a>(
     Some(FontKind::SID(metadata))
 }
 
-fn parse_cid_metadata(data: &[u8], top_dict: TopDict, number_of_glyphs: u16) -> Option<FontKind> {
+fn parse_cid_metadata(data: &[u8], top_dict: TopDict, number_of_glyphs: u16) -> Option<FontKind<'_>> {
     let (charset_offset, fd_array_offset, fd_select_offset) = match (
         top_dict.charset_offset,
         top_dict.fd_array_offset,
