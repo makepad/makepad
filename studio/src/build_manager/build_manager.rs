@@ -553,7 +553,6 @@ impl BuildManager {
                             cx.action(AppAction::RedrawLog)
                         }
                         AppToStudio::Screenshot(screenshot)=>{
-                                                        
                             // lets throw the screenshot to disk as jpg
                             // alright lets save it for fun
                             if let Some(build) = active.builds.get(&build_id){

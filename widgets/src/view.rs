@@ -42,6 +42,25 @@ pub enum ViewDebug {
 }
 
 impl LiveHook for ViewDebug {
+    /*
+    fn before_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, _nodes: &[LiveNode]){
+        match apply.from{
+            ApplyFrom::NewFromDoc{file_id} | ApplyFrom::UpdateFromDoc{file_id}=>{
+                // store this here
+                
+                let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
+                
+                let registry = cx.live_registry.clone();
+                let registry = registry.borrow();
+                let  (nodes,index) = registry.ptr_to_nodes_index(live_ptr);
+                // then apply it
+                
+            }
+            _=>{}
+        }
+    }
+    */
+    
     fn skip_apply(
         &mut self,
         _cx: &mut Cx,
@@ -813,7 +832,7 @@ impl Widget for View {
                     }
                     let texture_cache = self.texture_cache.as_mut().unwrap();
                     cx.make_child_pass(&texture_cache.pass);
-                    cx.begin_pass(&texture_cache.pass, self.dpi_factor);
+                    cx.begin_pass(&texture_cache.pass, self.dpi_factor); 
                     self.draw_list.as_mut().unwrap().begin_always(cx)
                 }
                 ViewOptimize::DrawList => {
