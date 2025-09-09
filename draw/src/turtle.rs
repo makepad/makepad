@@ -489,9 +489,7 @@ pub struct Turtle {
     align_start: usize,
     finished_walks_start: usize,
     deferred_fills: Vec<DeferredFill>,
-    deferred_weight_prefix_sum: Vec<f64>,
     resolved_fills: Vec<f64>,
-    resolved_length_suffix_sum: Vec<f64>,
     pos: DVec2,
     origin: DVec2,
     guard: Area
@@ -1011,19 +1009,11 @@ impl Turtle {
     }
 
     fn total_deferred_weight_from(&self, index: usize) -> f64 {
-        if index == self.deferred_fill_count() {
-            0.0
-        } else {
-            self.deferred_weight_prefix_sum[index]
-        }
+        self.deferred_fills[index..].iter().map(|deferred_fill| deferred_fill.weight).sum()
     }
 
     fn total_resolved_length_to(&self, index: usize) -> f64 {
-        if index == 0 {
-            0.0
-        } else {
-            self.resolved_length_suffix_sum[index - 1]
-        }
+        self.resolved_fills[..index].iter().sum()
     }
 
     fn inner_unused_length(&self) -> f64 {
@@ -1063,14 +1053,10 @@ impl Turtle {
             min,
             max,
         });
-        let total_deferred_weight = self.deferred_weight_prefix_sum.first().copied().unwrap_or(0.0);
-        self.deferred_weight_prefix_sum.insert(0, weight + total_deferred_weight);
     }
 
     fn push_resolved_fill(&mut self, length: f64) {
         self.resolved_fills.push(length);
-        let total_resolved_length = self.resolved_length_suffix_sum.last().copied().unwrap_or(0.0);
-        self.resolved_length_suffix_sum.push(total_resolved_length + length);
     }
 }
 
@@ -1159,8 +1145,6 @@ impl<'a,'b> Cx2d<'a,'b> {
             finished_walks_start: self.finished_walks.len(),
             deferred_fills: Vec::new(),
             resolved_fills: Vec::new(),
-            deferred_weight_prefix_sum: Vec::new(),
-            resolved_length_suffix_sum: Vec::new(),
             pos: DVec2 {
                 x: layout.padding.left,
                 y: layout.padding.top
@@ -1265,9 +1249,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             align_start: self.align_list.len()-1,
             finished_walks_start: self.finished_walks.len(),
             deferred_fills: Vec::new(),
-            deferred_weight_prefix_sum: Vec::new(),
             resolved_fills: Vec::new(),
-            resolved_length_suffix_sum: Vec::new(),
             wrap_spacing: 0.0,
             pos: DVec2 {
                 x: origin.x + layout.padding.left,
