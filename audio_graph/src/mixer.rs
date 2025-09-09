@@ -112,7 +112,7 @@ impl AudioComponent for Mixer {
         }
     }
     
-    fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<AudioQueryCb>) -> AudioResult {
+    fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<AudioQueryCb>) -> AudioResult<'_> {
         for input in self.inputs.values_mut() {
             input.audio_query(query, callback) ?;
         }
