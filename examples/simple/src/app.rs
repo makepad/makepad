@@ -9,27 +9,18 @@ live_design!{
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
-                body = <View>{
-                    flow: Right,
-                    spacing: 10,
-                    align: {
-                        x: 0.5,
-                        y: 0.5
-                    },
+                body = <View> {
                     <Button> {
-                        width: Fill,
+                        width: Fill { weight: 200},
                         text: "AAA"
-                        draw_text:{text_style:{font_size:18}}
                     }
                     <Button> {
-                        width: Fill { weight: 200.0, max: 100.0 }
+                        width: Fill { weight: 200}
                         text: "BBB"
-                        draw_text:{text_style:{font_size:18}}
                     }
                     <Button> {
-                        width: Fill { weight: 100.0 },
+                        width: Fill { weight: 100 },
                         text: "CCC"
-                        draw_text:{text_style:{font_size:18}}
                     }
                 }
             }
