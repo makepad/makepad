@@ -124,7 +124,7 @@ impl AudioComponent for AudioUnitEffect {
         }
     }
     
-    fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<AudioQueryCb>) -> AudioResult {
+    fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<AudioQueryCb>) -> AudioResult<'_> {
         self.input.audio_query(query, callback)
     }
 }
