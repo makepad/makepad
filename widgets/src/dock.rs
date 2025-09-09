@@ -554,7 +554,7 @@ impl Dock {
         &self.items
     }
 
-    pub fn visible_items(&mut self) -> DockVisibleItemIterator {
+    pub fn visible_items(&mut self) -> DockVisibleItemIterator<'_> {
         self.dock_item_iter_stack.clear();
         self.dock_item_iter_stack.push((live_id!(root), 0));
         DockVisibleItemIterator {

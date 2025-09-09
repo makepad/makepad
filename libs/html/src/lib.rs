@@ -254,7 +254,7 @@ impl<'a> HtmlWalker<'a>{
  }
  
  impl HtmlDoc{
-     pub fn new_walker(&self)->HtmlWalker{
+     pub fn new_walker(&self)->HtmlWalker<'_>{
          HtmlWalker{
              decoded:&self.decoded,
              index: 0,
@@ -262,7 +262,7 @@ impl<'a> HtmlWalker<'a>{
          }
      }
      
-     pub fn new_walker_with_index(&self, index: usize)->HtmlWalker{
+     pub fn new_walker_with_index(&self, index: usize)->HtmlWalker<'_>{
          HtmlWalker{
              decoded:&self.decoded,
              index,

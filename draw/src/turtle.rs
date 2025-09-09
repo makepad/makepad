@@ -1000,7 +1000,7 @@ impl Turtle {
         self.used_height = self.used_height.max(self.pos().y + additional - self.origin().y);
     }
 
-    fn deferred_fill_count(&self) -> usize {
+    fn _deferred_fill_count(&self) -> usize {
         self.deferred_fills.len()
     }
 

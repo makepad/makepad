@@ -40,7 +40,7 @@ pub struct StructAnalyser<'a> {
 }
 
 impl<'a> StructAnalyser<'a> {
-    fn ty_checker(&self) -> TyChecker {
+    fn ty_checker(&self) -> TyChecker<'_> {
         TyChecker {
             live_registry: self.live_registry,
             shader_registry: self.shader_registry,
@@ -119,7 +119,7 @@ pub struct DrawShaderAnalyser<'a> {
 }
 
 impl<'a> DrawShaderAnalyser<'a> {
-    fn ty_checker(&self) -> TyChecker {
+    fn ty_checker(&self) -> TyChecker<'_> {
         TyChecker {
             live_registry: self.live_registry,
             scopes: self.scopes,
@@ -531,7 +531,7 @@ pub struct ConstAnalyser<'a> {
 }
 
 impl<'a> ConstAnalyser<'a> {
-    fn ty_checker(&self) -> TyChecker {
+    fn ty_checker(&self) -> TyChecker<'_> {
         TyChecker {
             live_registry: self.live_registry,
             shader_registry: self.shader_registry,
@@ -575,7 +575,7 @@ pub struct FnDefAnalyser<'a> {
 }
 
 impl<'a> FnDefAnalyser<'a> {
-    fn ty_checker(&self) -> TyChecker {
+    fn ty_checker(&self) -> TyChecker<'_> {
         TyChecker {
             live_registry: self.live_registry,
             shader_registry: self.shader_registry,
@@ -589,14 +589,14 @@ impl<'a> FnDefAnalyser<'a> {
         }
     }
     
-    fn const_gatherer(&self) -> ConstGatherer {
+    fn const_gatherer(&self) -> ConstGatherer<'_> {
         ConstGatherer {
             fn_def: self.fn_def,
             const_gather_active: self.options.const_gather_active
         }
     }
     
-    fn dep_analyser(&self) -> DepAnalyser {
+    fn dep_analyser(&self) -> DepAnalyser<'_> {
         DepAnalyser {
             shader_registry: self.shader_registry,
             fn_def: self.fn_def,

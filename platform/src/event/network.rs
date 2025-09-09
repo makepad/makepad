@@ -99,7 +99,7 @@ impl HttpRequest {
         }
     }
 
-    pub fn split_url(&self)->SplitUrl{
+    pub fn split_url(&self)->SplitUrl<'_>{
         let (proto, rest) = self.url.split_once("://").unwrap_or((&self.url, "http://"));
         let (host, port, rest) = if let Some((host, rest)) = rest.split_once(":"){
             let (port, rest) = rest.split_once("/").unwrap_or((rest, ""));
