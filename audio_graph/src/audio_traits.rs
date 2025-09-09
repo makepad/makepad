@@ -17,7 +17,7 @@ pub trait AudioComponent: LiveApply {
     fn ref_cast_type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
     fn handle_event_with(&mut self, _cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
     fn get_graph_node(&mut self, cx: &mut Cx) -> Box<dyn AudioGraphNode + Send>;
-    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult;
+    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult<'_>;
 }
 
 pub trait AudioGraphNode {
@@ -104,7 +104,7 @@ impl AudioComponentRef {
         self.0.as_mut()
     }
     
-    pub fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<AudioQueryCb>) -> AudioResult {
+    pub fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<AudioQueryCb>) -> AudioResult<'_> {
         if let Some(inner) = &mut self.0 {
             match query {
                 AudioQuery::TypeId(id) => {
