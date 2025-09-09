@@ -22,6 +22,7 @@ pub struct GoogleAiResponse{
     pub candidates: Vec<GoogleAiCandidate>,
     pub usageMetadata: GoogleAiMetadata,
     pub modelVersion: String,
+    pub responseId: String,
 }
 
 #[allow(non_snake_case)]
@@ -46,7 +47,9 @@ pub struct GoogleAiMetadata {
     pub candidatesTokenCount: usize,
     pub totalTokenCount: usize,
     pub thoughtsTokenCount: usize,
-    pub promptTokensDetails: Vec<GoogleAiTokenDetail>
+    pub cachedContentTokenCount: usize,
+    pub promptTokensDetails: Vec<GoogleAiTokenDetail>,
+    pub cacheTokensDetails: Vec<GoogleAiTokenDetail>
 } 
 
 #[allow(non_snake_case)]
