@@ -47,9 +47,9 @@ pub struct GoogleAiMetadata {
     pub candidatesTokenCount: usize,
     pub totalTokenCount: usize,
     pub thoughtsTokenCount: usize,
-    pub cachedContentTokenCount: usize,
+    pub cachedContentTokenCount: Option<usize>,
     pub promptTokensDetails: Vec<GoogleAiTokenDetail>,
-    pub cacheTokensDetails: Vec<GoogleAiTokenDetail>
+    pub cacheTokensDetails: Option<Vec<GoogleAiTokenDetail>>
 } 
 
 #[allow(non_snake_case)]
