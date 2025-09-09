@@ -142,7 +142,7 @@ impl AudioComponent for AudioUnitInstrument {
         }
     }
     // we dont have inputs
-    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult {
+    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult<'_> {
         AudioResult::not_found()
     }
 }
