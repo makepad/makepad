@@ -23,7 +23,7 @@ impl Default for AiChatManager{
                 AiModel{
                     name: "local".to_string(),
                     backend: AiBackend::OpenAI{
-                        url:"http://10.0.0.113:8080/v1/chat/completions".to_string(),
+                        url:"http://127.0.0.1:8080/v1/chat/completions".to_string(),
                         model:"".to_string(),
                         reasoning_effort: None,
                         key:"".to_string()
@@ -317,15 +317,21 @@ impl Default for AiChatManager{
                     files:vec![]
                 },
                 AiProject{
-                    name:"makepad-experiment-ai-snake".to_string(),
+                    name:"makepad-ai-demo1".to_string(),
                     files:vec![
-                        AiContextFile::new("Main app to rewrite","ai_snake/src/app.rs")
+                        AiContextFile::new("Main app to rewrite","ai_demo1/src/app.rs")
                     ]
                 },
                 AiProject{
-                    name:"makepad-experiment-ai-mr".to_string(),
+                    name:"makepad-ai-demo2".to_string(),
                     files:vec![
-                        AiContextFile::new("Main app to rewrite","ai_mr/src/app.rs")
+                        AiContextFile::new("Main app to rewrite","ai_demo2/src/app.rs")
+                    ]
+                },
+                AiProject{
+                    name:"makepad-ai-demo3".to_string(),
+                    files:vec![
+                        AiContextFile::new("Main app to rewrite","ai_demo3/src/app.rs")
                     ]
                 },
             ]
@@ -702,6 +708,8 @@ impl AiChatManager{
                             if let Some(new_data) = new_data.strip_suffix("```"){
                                 // alright depending
                                 // go set the snapshot textbox
+                                
+                                
                                 if let Some(AiChatMessage::User(usr)) = usr.cloned(){
                                     cx.action(AppAction::SetSnapshotMessage{message:usr.message.clone()});
                                 }
@@ -821,6 +829,7 @@ impl AiChatManager{
                     }
                     
                     request.set_json_body(OpenAiChatPrompt {
+                        cache_prompt: true,
                         messages: out_messages,
                         model: model.to_string(),
                         reasoning_effort:reasoning_effort.clone(),

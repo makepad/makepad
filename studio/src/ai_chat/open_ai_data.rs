@@ -2,6 +2,7 @@ use crate::makepad_micro_serde::*;
 
 #[derive(Debug, SerJson, DeJson)]
 pub struct OpenAiChatPrompt {
+    pub cache_prompt: bool,
     pub messages: Vec<OpenAiChatMessage>,
     pub model: String,
     pub reasoning_effort: Option<String>,
