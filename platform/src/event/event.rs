@@ -601,5 +601,5 @@ pub struct ToWasmMsgEvent{
 
 #[cfg(target_arch = "wasm32")]
 impl ToWasmMsgEvent{
-    pub fn as_ref(&self)->ToWasmMsgRef{self.msg.as_ref_at(self.offset)}
+    pub fn as_ref(&self)->ToWasmMsgRef<'_>{self.msg.as_ref_at(self.offset)}
 }
