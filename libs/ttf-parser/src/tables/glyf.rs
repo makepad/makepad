@@ -484,7 +484,7 @@ fn outline_impl(
 pub(crate) fn parse_simple_outline(
     glyph_data: &[u8],
     number_of_contours: NonZeroU16,
-) -> Option<GlyphPointsIter> {
+) -> Option<GlyphPointsIter<'_>> {
     let mut s = Stream::new(glyph_data);
     let endpoints = s.read_array16::<u16>(number_of_contours.get())?;
 
