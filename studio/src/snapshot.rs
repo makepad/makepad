@@ -29,6 +29,7 @@ live_design!{
             height: Fit,
             padding: <THEME_MSPACE_2> {}
             margin: 0.
+            text: "",
             icon_walk: {
                 width: 12, height: Fit,
                 margin: { left: 10 }
