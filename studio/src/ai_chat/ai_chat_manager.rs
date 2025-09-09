@@ -159,12 +159,28 @@ impl Default for AiChatManager{
                     ]
                 },
                 BaseContext{
+                    name: "Makepad AiStream".to_string(),
+                    apply: AiApply::WholeFile,
+                    system_pre: live_id!(AISTREAM_PRE),
+                    system_post: live_id!(AISTREAM_POST),
+                    general_post: live_id!(AISTREAM_GENPOST),
+                    files: vec![
+                        AiContextFile::new("AiStream example","makepad/examples/aistream/src/app.rs"),
+                    ]
+                },
+                
+                BaseContext{
                     name: "Makepad Rust".to_string(),
                     apply: AiApply::WholeFile,
                     system_pre: live_id!(ALL_PRE),
                     system_post: live_id!(ALL_POST),
                     general_post: live_id!(GENERAL_POST),
                     files: vec![
+                        AiContextFile::new("News feed example","makepad/examples/news_feed/src/app.rs"),
+                        AiContextFile::new("Todo example","makepad/examples/todo/src/app.rs"),
+                        AiContextFile::new("Simple example","makepad/examples/simple/src/app.rs"),
+                        AiContextFile::new("Snake game example","makepad/examples/snake/src/app.rs"),
+                        AiContextFile::new("Slides viewer example","makepad/examples/slides/src/app.rs"),
                     ]
                 },
                 BaseContext{

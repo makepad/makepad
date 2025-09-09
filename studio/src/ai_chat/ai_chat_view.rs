@@ -491,7 +491,7 @@ impl Widget for AiChatView {
                         while let Some(item_id) = list.next_visible_item(cx) {
                             match doc.file.history[self.history_slot].messages.get(item_id){
                                 Some(AiChatMessage::Assistant(val))=>{
-                                    let busy = item_id == 0 && 
+                                    let busy = item_id == items_len - 1 && 
                                     doc.in_flight.is_some();
                                     let item = list.item(cx, item_id, live_id!(Assistant));
                                     // alright we got the assistant. lets set the markdown stuff
