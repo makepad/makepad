@@ -442,6 +442,7 @@ impl Cx {
     }
 
     pub fn get_pass_rect(&self, pass_id: PassId, dpi: f64) -> Option<Rect> {
+        println!("pass: {:?}", self.passes[pass_id].pass_rect );
         match self.passes[pass_id].pass_rect {
             Some(CxPassRect::Area(area)) => {
                 let rect = area.rect(self);
