@@ -20,7 +20,7 @@ use {
         makepad_live_id::*,
         thread::SignalToUI,
         event::*,
-        permission::{PermissionCheckEvent, PermissionResult, PermissionStatus},
+        permission::{PermissionResult, PermissionStatus},
         pass::CxPassParent,
         cx::{Cx, OsType,LinuxWindowParams}, 
         os::cx_stdin::PollTimers,
@@ -349,7 +349,7 @@ impl Cx {
                 CxOsOp::CheckPermission {permission, request_id} => {
                     // Linux desktop apps have all permissions granted by default (handled at system level)
                     // TODO: Handle sandbox cases like flatpak
-                    self.call_event_handler(&Event::PermissionCheck(crate::permission::PermissionCheckEvent {
+                    self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
                         permission,
                         request_id,
                         status: crate::permission::PermissionStatus::Granted,
@@ -358,9 +358,10 @@ impl Cx {
                 CxOsOp::RequestPermission {permission, request_id} => {
                     // Linux desktop apps have all permissions granted by default (handled at system level)
                     // TODO: Handle sandbox cases like flatpak
-                    self.call_event_handler(&Event::PermissionGranted(crate::permission::PermissionResult {
+                    self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
                         permission,
                         request_id,
+                        status: crate::permission::PermissionStatus::Granted,
                     }));
                 },
                 e=>{

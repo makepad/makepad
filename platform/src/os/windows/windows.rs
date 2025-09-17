@@ -8,7 +8,7 @@ use {
         makepad_live_id::*,
         cx::*,
         event::*,
-        permission::{PermissionCheckEvent, PermissionResult, PermissionStatus},
+        permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
         os::{
             windows::{
@@ -406,7 +406,7 @@ impl Cx {
                 }
                 CxOsOp::CheckPermission {permission, request_id} => {
                     // Windows desktop apps have all permissions granted by default
-                    self.call_event_handler(&Event::PermissionCheck(crate::permission::PermissionCheckEvent {
+                    self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
                         permission,
                         request_id,
                         status: crate::permission::PermissionStatus::Granted,
@@ -414,9 +414,10 @@ impl Cx {
                 },
                 CxOsOp::RequestPermission {permission, request_id} => {
                     // Windows desktop apps have all permissions granted by default
-                    self.call_event_handler(&Event::PermissionGranted(crate::permission::PermissionResult {
+                    self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
                         permission,
                         request_id,
+                        status: crate::permission::PermissionStatus::Granted,
                     }));
                 },
                 e=>{
