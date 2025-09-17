@@ -31,6 +31,7 @@ mod draw_vars;
 
 mod id_pool;
 pub mod event;
+pub mod permission;
 mod area;
 mod window;
 mod pass;

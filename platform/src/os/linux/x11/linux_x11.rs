@@ -20,6 +20,7 @@ use {
         makepad_live_id::*,
         thread::SignalToUI,
         event::*,
+        permission::{PermissionCheckEvent, PermissionResult, PermissionStatus},
         pass::CxPassParent,
         cx::{Cx, OsType,LinuxWindowParams}, 
         os::cx_stdin::PollTimers,
@@ -344,6 +345,23 @@ impl Cx {
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_spot(dvec2(0.0,0.0));
                     });
+                },
+                CxOsOp::CheckPermission {permission, request_id} => {
+                    // Linux desktop apps have all permissions granted by default (handled at system level)
+                    // TODO: Handle sandbox cases like flatpak
+                    self.call_event_handler(&Event::PermissionCheck(crate::permission::PermissionCheckEvent {
+                        permission,
+                        request_id,
+                        status: crate::permission::PermissionStatus::Granted,
+                    }));
+                },
+                CxOsOp::RequestPermission {permission, request_id} => {
+                    // Linux desktop apps have all permissions granted by default (handled at system level)
+                    // TODO: Handle sandbox cases like flatpak
+                    self.call_event_handler(&Event::PermissionGranted(crate::permission::PermissionResult {
+                        permission,
+                        request_id,
+                    }));
                 },
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);

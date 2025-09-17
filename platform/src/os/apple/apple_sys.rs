@@ -192,6 +192,7 @@ extern "C" {
     pub static AVAudioChannelLayout: ObjcId;
     pub static AVAudioSession: ObjcId;
     pub static AVMediaTypeVideo: ObjcId;
+    pub static AVMediaTypeAudio: ObjcId;
     pub static AVCaptureSession: ObjcId;
     pub static AVCaptureDeviceInput: ObjcId;
     pub static AVCaptureVideoDataOutput: ObjcId;
