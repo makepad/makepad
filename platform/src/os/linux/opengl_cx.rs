@@ -147,7 +147,6 @@ impl Cx {
                 let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
                 (opengl_cx.libegl.eglMakeCurrent.unwrap())(opengl_cx.egl_display, egl_surface, egl_surface, opengl_cx.egl_context);
                 (gl.glViewport)(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
-                println!("viewport set to {}x{}", pix_width.floor() as i32, pix_height.floor() as i32);
             }
 
             let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -165,7 +164,6 @@ impl Cx {
             };
 
             if !self.passes[pass_id].dont_clear {
-                println!("clear pass for pass {:?}", pass_id);
                 unsafe {
                     (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
                     (gl.glClearDepthf)(clear_depth as f32);

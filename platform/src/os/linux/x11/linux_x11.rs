@@ -71,17 +71,7 @@ impl X11Cx {
         //let mut paint_dirty = false;
 
         //self.process_desktop_pre_event(&mut event);
-        match event {
-            XlibEvent::Paint | XlibEvent::Timer(_)=> {
-            }
-            XlibEvent::MouseMove(_) | XlibEvent::WindowDragQuery(_)  => {
-                return EventFlow::Poll;
-            }
-            _ => {
-                println!("event: {:?}", event);
-            }
-        }
-        match event {
+       match event {
             XlibEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 let mut cx = self.cx.borrow_mut();
                 for window in opengl_windows.iter_mut() {

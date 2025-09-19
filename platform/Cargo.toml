@@ -45,13 +45,13 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "1.0.0" }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
 wayland-client = "0.31.11"
-wayland-protocols = { version = "0.32.9", features = ["client", "unstable"] }
+wayland-protocols = { version = "0.32.9", features = ["client", "unstable", "staging"] }
 wayland-egl = "0.32.8"
 tempfile = "3.22"
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 wayland-client = "0.31.11"
-wayland-protocols = { version = "0.32.9", features = ["client", "unstable"] }
+wayland-protocols = { version = "0.32.9", features = ["client", "unstable", "staging"] }
 wayland-egl = "0.32.8"
 tempfile = "3.22"
 
