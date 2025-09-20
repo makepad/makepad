@@ -26,12 +26,17 @@ type c_long = std::os::raw::c_long;
 type c_ulong = std::os::raw::c_ulong;
 type c_void = std::os::raw::c_void;
 type c_char = std::os::raw::c_char;
-type size_t = usize;
+pub type off_t = i64;
+pub type size_t = usize;
 
 pub const FD_SETSIZE: usize = 1024;
 pub const EPIPE: c_int = 32;
 pub const ESPIPE: c_int = 29;
 pub const O_RDWR: c_int = 2;
+pub const PROT_READ: c_int = 1;
+pub const PROT_WRITE: c_int = 2;
+pub const MAP_SHARED: c_int = 1;
+pub const MAP_PRIVATE: c_int = 2;
 
 #[repr(C)]
 pub struct fd_set {
@@ -57,6 +62,15 @@ extern "C"{
         errorfds: *mut fd_set,
         timeout: *mut timeval,
     ) -> c_int;
+    pub fn mmap(
+        addr: *mut c_void,
+        length: size_t,
+        prot: c_int,
+        flags: c_int,
+        fd: c_int,
+        offset: off_t,
+    ) -> *mut c_void;
+    pub fn munmap(addr: *mut c_void, length: size_t) -> c_int;
     pub fn read(fd: c_int, buf: *mut c_void, count: size_t) -> c_int;
     pub fn syscall(num: c_long, ...) -> c_long;
 }

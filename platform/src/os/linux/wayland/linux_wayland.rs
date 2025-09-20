@@ -2,6 +2,7 @@
 use std::rc::Rc;
 use std::cell::{Cell, RefCell};
 
+use crate::wayland::xkb_sys;
 use crate::x11::xlib_event::XlibEvent;
 use crate::WindowId;
 use crate::cx_native::EventFlow;
@@ -21,11 +22,16 @@ pub fn wayland_event_loop(cx: Rc<RefCell<Cx>>) {
     WaylandCx::event_loop_impl(cx);
 }
 
-pub(crate) struct WaylandCx{cx: Rc<RefCell<Cx>>, modifiers: KeyModifiers, qhandle: Option<wayland_client::QueueHandle<WaylandState>>}
+pub(crate) struct WaylandCx{
+    cx: Rc<RefCell<Cx>>,
+    qhandle: Option<wayland_client::QueueHandle<WaylandState>>,
+}
 
 impl WaylandCx {
     pub fn event_loop_impl(cx: Rc<RefCell<Cx>>) {
-        let wayland_cx = Rc::new(RefCell::new(WaylandCx{cx: cx.clone(), modifiers: KeyModifiers::default(), qhandle: None}));
+        let wayland_cx = Rc::new(RefCell::new(WaylandCx{
+            cx: cx.clone(), qhandle: None,
+        }));
         let conn = Connection::connect_to_env().unwrap();
         let display = conn.display();
 
@@ -110,7 +116,6 @@ impl WaylandCx {
                         }
                     }
                 }
-                println!("re: {:?}", re);
                 // ok lets not redraw all, just this window
                 cx.call_event_handler(&Event::WindowGeomChange(re));
             }

@@ -1,5 +1,5 @@
-use std::{cell::{Cell, RefCell}, io::Read, os::{fd::{AsFd, AsRawFd, FromRawFd}, unix::fs::FileExt}, rc::Rc};
-use crate::{libc_sys, makepad_math::{dvec2, DVec2}, wayland::wayland_type, Area, KeyModifiers, MouseDownEvent, MouseMoveEvent, MouseUpEvent, WindowClosedEvent};
+use std::{cell::{Cell, RefCell}, fs::File, io::Read, os::{fd::{AsFd, AsRawFd, FromRawFd}, unix::fs::FileExt}, rc::Rc};
+use crate::{libc_sys::{self, munmap}, makepad_math::{dvec2, DVec2}, wayland::{wayland_type, xkb_sys}, Area, KeyEvent, KeyModifiers, MouseDownEvent, MouseMoveEvent, MouseUpEvent, WindowClosedEvent};
 
 use wayland_client::{delegate_noop, protocol::{wl_buffer, wl_compositor, wl_keyboard, wl_output, wl_pointer::{self, ButtonState}, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface}, Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::{wp::{cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1::{self, WpCursorShapeManagerV1}}, fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1}, viewporter::client::{wp_viewport, wp_viewporter}}, xdg::{self, decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1}, shell::client::{xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base}}};
@@ -24,6 +24,8 @@ pub(crate) struct WaylandState {
     pub(crate) last_mouse_pos: DVec2,
     pub(crate) scale_manager: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
     pub(crate) viewporter: Option<wp_viewporter::WpViewporter>,
+    pub(crate) xkb_state: Option<xkb_sys::XkbState>,
+    pub(crate) xkb_cx: xkb_sys::XkbContext,
     event_callback: Option<Box<dyn FnMut(&mut WaylandState, XlibEvent)>>,
 
     pub(crate) event_flow: EventFlow,
@@ -46,6 +48,8 @@ impl WaylandState {
             current_window: None,
             pointer_serial: None,
             modifiers: KeyModifiers::default(),
+            xkb_state: None,
+            xkb_cx: xkb_sys::XkbContext::new().unwrap(),
             last_mouse_pos: dvec2(0., 0.),
             timers: SelectTimers::new(),
             event_callback: Some(event_callback),
@@ -219,6 +223,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
         }
     }
 }
+
 impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
     fn event(
         state: &mut Self,
@@ -230,16 +235,69 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
     ) {
         match event {
             wl_keyboard::Event::Enter { serial, surface, keys } => {
-                state.do_callback(XlibEvent::AppGotFocus);
+                // state.do_callback(XlibEvent::AppGotFocus);
             },
             wl_keyboard::Event::Leave { serial, surface } => {
-                state.do_callback(XlibEvent::AppLostFocus);
+                // state.do_callback(XlibEvent::AppLostFocus);
             },
-            wl_keyboard::Event::Key { serial, time, key, state: _ } => {
-                // state.modifiers = KeyModifiers { shift: (), control: (), alt: (), logo: () };
+            wl_keyboard::Event::Key { serial: _, time: _, key, state: key_state } => {
+                if let Some(xkb_state) = state.xkb_state.as_mut() {
+                        if let WEnum::Value(key_state) = key_state {
+                            match key_state {
+                                wl_keyboard::KeyState::Pressed => {
+                                    xkb_state.update_key(key, xkb_sys::XkbKeyDirection::Down);
+                                    let key_code = xkb_state.keycode_to_makepad_keycode(key + 8);
+                                    state.do_callback(XlibEvent::KeyDown(KeyEvent{
+                                        key_code: key_code,
+                                        is_repeat: false,
+                                        modifiers: state.modifiers,
+                                        time: state.time_now(),
+                                    }))
+                                },
+                                wl_keyboard::KeyState::Released => {
+                                    let key_code = xkb_state.keycode_to_makepad_keycode(key + 8);
+                                    state.do_callback(XlibEvent::KeyUp(KeyEvent{
+                                        key_code: key_code,
+                                        is_repeat: false,
+                                        modifiers: state.modifiers,
+                                        time: state.time_now(),
+                                    }))
+                                },
+                                _ => {}
+                            };
+                        }
+
+                }
             },
-            wl_keyboard::Event::RepeatInfo { rate, delay } => todo!(),
-            wl_keyboard::Event::Keymap { format, fd, size } => {}
+            // wl_keyboard::Event::RepeatInfo { rate, delay } => {},
+            wl_keyboard::Event::Modifiers { serial: _, mods_depressed, mods_latched, mods_locked, group } => {
+                if let Some(xkb_state) = state.xkb_state.as_mut() {
+                    xkb_state.update_mask(
+                        mods_depressed,
+                        mods_latched,
+                        mods_locked,
+                        0,
+                        0,
+                        group
+                    );
+                    state.modifiers = xkb_state.get_key_modifiers();
+                }
+            }
+            wl_keyboard::Event::Keymap { format, fd, size } => {
+                match format {
+                    WEnum::Value(wl_keyboard::KeymapFormat::XkbV1) => {
+                        let map_str = unsafe {
+                            libc_sys::mmap(std::ptr::null_mut(), size as libc_sys::size_t, libc_sys::PROT_READ, libc_sys::MAP_SHARED, fd.as_raw_fd(), 0)
+                        };
+                        let keymap = xkb_sys::XkbKeymap::from_cstr(&state.xkb_cx, map_str).unwrap();
+                        unsafe {
+                            munmap(map_str, size as libc_sys::size_t);
+                        }
+                        state.xkb_state = xkb_sys::XkbState::new(&keymap);
+                    },
+                    _ => {}
+                }
+            }
             _ => {},
         }
     }
