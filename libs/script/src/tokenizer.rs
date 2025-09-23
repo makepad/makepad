@@ -153,7 +153,6 @@ impl ScriptDoc{
                 color
             }
         };
-
         let len = self.temp.len();
         self.temp.clear();
         self.tokens.push(ScriptTokenPos{
@@ -373,7 +372,8 @@ impl ScriptDoc{
                         if let Ok(v) = i64::from_str_radix(&self.temp, 16){
                             self.append_unfinished_string(v as u8 as char);                            
                         }
-                        self.state = State::EscapeInString(double);
+                        self.temp.clear();
+                        self.state = State::String(double);
                     }
                 }
                 State::UnicodeHexInString(double)=>{
@@ -388,6 +388,8 @@ impl ScriptDoc{
                                     self.append_unfinished_string(v);                            
                                 }
                             }
+                            self.temp.clear();
+                            self.state = State::String(double);
                         }
                     }
                 }
@@ -398,6 +400,7 @@ impl ScriptDoc{
                                 self.append_unfinished_string(v);                            
                             }
                         }
+                        self.temp.clear();
                         self.state = State::String(double);
                     }
                     else{
