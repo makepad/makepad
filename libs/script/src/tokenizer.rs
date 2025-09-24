@@ -5,7 +5,7 @@ use crate::colorhex::hex_bytes_to_u32;
 use makepad_script_derive::*;
 //use crate::value::Value;
 
-#[derive(Copy,Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum ScriptToken{
     End,
     StreamEnd,
@@ -24,9 +24,14 @@ pub enum ScriptToken{
 }
 
 impl ScriptToken{
-    pub fn is_identifier(&self)->bool{match self{ScriptToken::Identifier(_)=>true,_=>false}}
     pub fn identifier(&self)->Id{match self{ScriptToken::Identifier(id)=>*id,_=>id!()}}
     pub fn operator(&self)->Id{match self{ScriptToken::Operator(id)=>*id,_=>id!()}}
+    pub fn number(&self)->f64{match self{ScriptToken::Number(v)=>*v,_=>0.0}}
+    pub fn maybe_number(&self)->Option<f64>{match self{ScriptToken::Number(v)=>Some(*v),_=>None}}
+    pub fn maybe_color(&self)->Option<u32>{match self{ScriptToken::Color(v)=>Some(*v),_=>None}}
+    pub fn maybe_string(&self)->Option<usize>{match self{ScriptToken::StringUnfinished(v)=>Some(*v),ScriptToken::String(v)=>Some(*v),_=>None}}
+        
+    pub fn is_identifier(&self)->bool{match self{ScriptToken::Identifier(_)=>true,_=>false}}
     pub fn is_operator(&self)->bool{match self{ScriptToken::Operator(_)=>true,_=>false}}
     pub fn is_open_curly(&self)->bool{match self{ScriptToken::OpenCurly=>true,_=>false}}
     pub fn is_close_curly(&self)->bool{match self{ScriptToken::CloseCurly=>true,_=>false}}
@@ -62,7 +67,7 @@ enum State{
     Color
 }
 
-pub struct ScriptDoc{
+pub struct ScriptTokenizer{
     pos: usize,
     pub tokens: Vec<ScriptTokenPos>,
     original: String,
@@ -72,7 +77,7 @@ pub struct ScriptDoc{
     state: State,
 }
 
-impl Default for ScriptDoc{
+impl Default for ScriptTokenizer{
     fn default()->Self{
         Self{
             tokens: Default::default(),
@@ -91,7 +96,35 @@ pub struct ScriptLoc{
     pub col: usize
 }
 
-impl ScriptDoc{
+impl ScriptTokenizer{
+    pub fn lookup_string(&self, index:usize)->&str{
+        let st = self.string_table[index];
+        &self.strings[st.0..(st.0+st.1)]
+    }
+    
+    pub fn dump_tokens(&self){
+        for i in 0..self.tokens.len(){
+            match self.tokens[i].token{
+                ScriptToken::End=>print!("End"),
+                ScriptToken::StreamEnd=>print!("StreamEnd"),
+                ScriptToken::Identifier(id)=>print!("{id}"),
+                ScriptToken::Operator(id)=>print!("{id}"),
+                ScriptToken::OpenCurly=>print!("{{"),
+                ScriptToken::CloseCurly=>print!("}}"),
+                ScriptToken::OpenRound=>print!("("),
+                ScriptToken::CloseRound=>print!(")"),
+                ScriptToken::OpenSquare=>print!("["),
+                ScriptToken::CloseSquare=>print!("]"),
+                ScriptToken::StringUnfinished(index)=>print!("\"{}\"..",self.lookup_string(index)),
+                ScriptToken::String(index)=>print!("\"{}\"",self.lookup_string(index)),
+                ScriptToken::Number(v)=>print!("{v}"),
+                ScriptToken::Color(v)=>print!("{:08x}", v),
+            }
+            print!(" ");
+        }
+        print!("\n");
+    }
+    
     pub fn pos_to_loc(&self, pos:usize)->Option<ScriptLoc>{
         let mut row = 0;
         let mut col = 0;
@@ -210,11 +243,11 @@ impl ScriptDoc{
         }
     }
     
-    pub fn parse(&mut self, new_chars: &str)->&[ScriptTokenPos]{
+    pub fn tokenize(&mut self, new_chars: &str)->&[ScriptTokenPos]{
         let mut iter = new_chars.chars();
         
         fn is_operator(c:char)->bool{
-            c == '!' || c == '^' || c == '&' || c == '*' || c == '+' || c == '-'|| c == '|' || c == '?' || c == ':' || c == '=' || c == '@' || c=='>' || c=='<' || c == '.'
+            c == '!' || c == '^' || c == '&' || c == '*' || c == '+' || c == '-'|| c == '|' || c == '?' || c == ':' || c == '=' || c == '@' || c=='>' || c=='<' || c == '.' || c== ',' || c == ';'
         }
         fn is_block(c:char)->Option<ScriptToken>{
             match c{
@@ -339,6 +372,10 @@ impl ScriptDoc{
                         self.temp.push(c);
                     }
                     else if (c == '!' || c == '^') && self.temp.len() > 0{
+                        self.emit_operator();
+                        self.temp.push(c);
+                    }
+                    else if (c == ',' || c == ';') && self.temp.len() > 0{
                         self.emit_operator();
                         self.temp.push(c);
                     }
