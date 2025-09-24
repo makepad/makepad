@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use crate::tokenizer::*;
 use crate::id::*;
+use crate::value::*;
 use makepad_script_derive::*;
 
 #[derive(Default)]
@@ -21,7 +22,7 @@ enum State{
 pub struct ScriptCode{
     pub index: usize,
     pub doc: ScriptDoc,
-    pub code: Vec<u64>,
+    pub code: Vec<Value>,
     state: Vec<State>,
 }
 
