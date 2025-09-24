@@ -9,12 +9,9 @@ use std::cell::RefCell;
 pub trait RustComponent{
 }
 
-pub struct ScriptCode{
-    pub code: Vec<u8>
-}
 
 pub struct ScriptArenas{
-    pub code: Vec<ScriptCode>,
+    pub code: Vec<Value>,
     pub rust: Vec<RustComponentRef>,
     pub object: Vec<ScriptObject>,
 }
@@ -24,8 +21,8 @@ pub struct RustComponentRef{
 }
 
 pub struct ObjectField{
-    pub key: ScriptValue,
-    pub value: ScriptValue,
+    pub key: Value,
+    pub value: Value,
 }
 
 pub struct ScriptObject{
@@ -33,7 +30,7 @@ pub struct ScriptObject{
 }
 
 impl ScriptObject{
-    pub fn get(&self, key:ScriptValue)->Option<ScriptValue>{
+    pub fn get(&self, key:Value)->Option<Value>{
         for ov in &self.fields{
             if ov.key == key{
                 return Some(ov.value)
@@ -42,6 +39,6 @@ impl ScriptObject{
         None
     }
     
-    pub fn set(&self, _key:ScriptValue, _value: ScriptValue){
+    pub fn set(&self, _key:Value, _value: Value){
     }
 }

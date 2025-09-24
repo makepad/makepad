@@ -1,86 +1,89 @@
 
-use makepad_widgets::*;
+Todo = {done:false}
 
-// The new ai_stream DSL which can be executed streaming
-ai_stream!{
-    // A Todo list example
-        
-    // In AiStream we have a global namespace of Name = value
-    // We also don't import any UI components from the makepad component library,
-    // the namespace is always global and has forward referencing.
-        
-    // define the Todo base object
-    Todo = {done:false}
-        
-    // Todo{ } does prototypical inheritance from Todo and adds fields
-    Todos = [Todo{text:"Item1"}, Todo{text:"Item1"},Todo{text:"itemr"}]
-    
-    // the scripting language is very similar to Javascript
-    // and entirely dynamically typed
+Instructions
 
-    // global functions are defined like so 
-    fn globalfn(){
-    }
-         
-    // Normal makepad DSL but without the < > around UI components
-    Ui = View{
-        list = PortalList{
-            // callbacks can be defined as such (like a JS method on an object)
-            // on draw item is called for each item, item is a usize
-            // just like in JS methods dont have a this/self argument
-            // the script syntax is entirely untyped and highly similar to javascript
-            on_draw_item(item){
-                                                
-                // store the items UI structure on 'self'
-                .[item] = View{
-                    // whilst this code is being generated
-                    // the UI can already update as each UI element pops into view
-                    input = TextInput{
-                        // read the text value from the DATA array
-                        text: Todos[item].text
-                        on_change(value){
-                            Todos[item].text = value
-                            // use of the starting- . operator like swift
-                            .text = value
-                        }
-                    }
-                    done = CheckBox{
-                        check: DATA[item].done
-                        on_change(value){
-                            TODOS[item].done = value
-                        }
-                    }
-                    delete = Button{
-                        text: "delete"
-                        on_click(){
-                            // in AiStream you can't remove items from an array
-                            // but you can mark them with the 'deleted' tombstone value
-                            Todos[item] = deleted
-                        }
-                    }
-                }
-            }
-        }
-        // Creating new todo items
-        extra = View{
-            flow: Right
-            // UI components are given a name/id with the assignment = operator
-            new_item = TextInput{}
-            add = Button{
-                text: Add
-                on_click(){
-                    // += on an array adds a new item
-                    Todos += Todo{text: ..new_item.text}
-                    ..new_item.text = ""
-                }
-            }
-        }
-    }
-    
-    // Aistream can append to existing Ui structures like so
-    Ui.extra += Button{
-    }
-    
-    // AiStream can 'stream' generate items such as new data
-    Todos += Todo{text:"Whilst this text is being generated the UI can update"}
+num.const 1
+num.const 2
+add
+1 + 2
+
+a.b = 1
+ident a
+ident b
+propaccess
+num.const 1
+assign
+
+ident on_draw_item
+closure_with_args 1
+ident item
+begin_block
+end_block
+assign
+
+// assign sees on_draw_item on stack
+// and a closure on stack 
+// then it assigns it
+
+
+on_draw_item: |item|{
 }
+
+
+Todos = [
+    Todo{text:"Design Splash"}
+    Todo{text:"Implement it"}
+]
+
+Ui = View{
+    PortalList{
+        Button{} // niet nil/undefined/null
+        on_draw_item: |item|{
+            View{
+                TextInput{
+                    text: Todos[item].text
+                }
+                CheckBox{
+                    check: Todos[item].done
+                }
+                Button{
+                    text: "delete"
+                    on_click: {
+                        delete Todos[item]
+                    }
+                }
+            }
+        }
+    }
+    
+    View{
+        flow: Right
+        _new_item = TextInput{}
+        Button{
+            text: "Add"
+            on_click: {
+                Todos += Todo{
+                    text: _new_item.text
+                }
+                _new_item.text = ""
+            }
+        }
+        Button{
+            text: "Clear completed"
+            on_click: {
+                delete Todos[?@.done]
+            }
+        }
+    }
+}
+
+let req = http.fetch("https://todolistservice" + 10)
+let json = req.result.parse_json()
+for todo in json{
+    Todos += Todo{
+        text: todo.text
+        done: todo.done
+    }
+}
+Todos += Todo{text:"Whilst this text is being generated the UI can update"}
