@@ -17,8 +17,8 @@ pub enum ScriptToken{
     CloseRound,
     OpenSquare,
     CloseSquare,
-    StringUnfinished(usize,usize),
-    String(usize,usize),
+    StringUnfinished(usize),
+    String(usize),
     Number(f64),
     Color(u32),
 }
@@ -34,7 +34,7 @@ impl ScriptToken{
     pub fn is_close_round(&self)->bool{match self{ScriptToken::CloseRound=>true,_=>false}}
     pub fn is_open_square(&self)->bool{match self{ScriptToken::OpenSquare=>true,_=>false}}
     pub fn is_close_square(&self)->bool{match self{ScriptToken::CloseSquare=>true,_=>false}}
-    pub fn is_string(&self)->bool{match self{ScriptToken::StringUnfinished(_,_)|ScriptToken::String(_,_)=>true,_=>false}}
+    pub fn is_string(&self)->bool{match self{ScriptToken::StringUnfinished(_)|ScriptToken::String(_)=>true,_=>false}}
     pub fn is_number(&self)->bool{match self{ScriptToken::Number(_)=>true,_=>false}}
     pub fn is_color(&self)->bool{match self{ScriptToken::Color(_)=>true,_=>false}}
 }
@@ -62,14 +62,28 @@ enum State{
     Color
 }
 
-#[derive(Default)]
 pub struct ScriptDoc{
     pos: usize,
     pub tokens: Vec<ScriptTokenPos>,
     original: String,
     strings: String,
+    string_table: Vec<(usize, usize)>,
     temp: String,
     state: State,
+}
+
+impl Default for ScriptDoc{
+    fn default()->Self{
+        Self{
+            tokens: Default::default(),
+            temp: Default::default(),
+            original: Default::default(),
+            strings: Default::default(),
+            string_table:vec![(0,0)],
+            state: State::Whitespace,
+            pos: 0,
+        }
+    }
 }
 
 pub struct ScriptLoc{
@@ -96,17 +110,6 @@ impl ScriptDoc{
         None
     }
     
-    pub fn new()->Self{
-        Self{
-            tokens: Default::default(),
-            temp: Default::default(),
-            original: Default::default(),
-            strings: Default::default(),
-            state: State::Whitespace,
-            pos: 0,
-        }
-    }
-        
     fn emit_number(&mut self){
         let number = if let Ok(v) = self.temp.parse::<f64>(){
             self.temp.clear();
@@ -185,24 +188,25 @@ impl ScriptDoc{
     }
     
     fn append_unfinished_string(&mut self, c:char){
-        if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(_,len),..}) = self.tokens.last_mut(){
+        if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(index),..}) = self.tokens.last_mut(){
             self.strings.push(c);
-            *len += 1;
+            self.string_table[*index].1 += 1;
         }
         else{
-            self.tokens.push(ScriptTokenPos{pos: self.pos, token: ScriptToken::StringUnfinished(self.strings.len(), 1)});
+            self.tokens.push(ScriptTokenPos{pos: self.pos, token: ScriptToken::StringUnfinished(self.string_table.len())});
+            self.string_table.push((self.strings.len(),1));
             self.strings.push(c);
         }
     }
     
     fn finish_string(&mut self){
-        if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(_,_),..}) = self.tokens.last(){
-            if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(start,len),pos}) = self.tokens.pop(){
-                self.tokens.push(ScriptTokenPos{token:ScriptToken::String(start,len), pos})
+        if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(_),..}) = self.tokens.last(){
+            if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(index),pos}) = self.tokens.pop(){
+                self.tokens.push(ScriptTokenPos{token:ScriptToken::String(index), pos})
             }
         }
         else{
-            self.tokens.push(ScriptTokenPos{token:ScriptToken::String(0,0), pos:self.pos})
+            self.tokens.push(ScriptTokenPos{token:ScriptToken::String(0), pos:self.pos})
         }
     }
     
@@ -224,7 +228,7 @@ impl ScriptDoc{
             }
         }
         // unfinished string at the end
-        let start = if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(_,_),..}) = self.tokens.last_mut(){
+        let start = if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(_),..}) = self.tokens.last_mut(){
             self.tokens.len() - 1
         }
         else{

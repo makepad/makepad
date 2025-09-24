@@ -5,6 +5,8 @@ pub struct Value(u64);
 // NaN box value
 
 impl Value{
+    pub const TYPE_MASK: u64 = 0xFFFF_FF00_0000_0000;
+        
     pub const TYPE_NAN: u64 = 0xFFFF_0100_0000_0000;
     pub const NAN: Value = Value( Self::TYPE_NAN);
     
@@ -22,6 +24,12 @@ impl Value{
     pub const OP_PROP: Value = Value(Self::TYPE_OPCODE | 0x0000_0001);
     pub const OP_ADD: Value = Value(Self::TYPE_OPCODE | 0x0000_0002);
     
+    pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
+    pub const TYPE_STRING_MASK: u64 = 0xFFFF_FFFF_0000_0000;
+    pub const TYPE_HEAP_STRING: u64 = 0xFFFF_0501_0000_0000;
+    pub const TYPE_STACK_STRING: u64 = 0xFFFF_0502_0000_0000;
+    pub const TYPE_STATIC_STRING: u64 = 0xFFFF_0503_0000_0000;
+
     // TODO: make this behave like javascript as much as is sensible
     
     pub fn from_f64(val:f64)->Self{
