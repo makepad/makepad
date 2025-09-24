@@ -790,8 +790,8 @@ impl XkbState {
             return String::new();
         }
 
-        // Allocate buffer and get the actual string
-        let mut buffer = vec![0u8; size as usize];
+        // Allocate buffer and get the actual string, including the null terminator
+        let mut buffer = vec![0u8; (size + 1) as usize];
         let actual_size = unsafe {
             xkb_state_key_get_utf8(
                 self.ptr,

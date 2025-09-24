@@ -1,8 +1,8 @@
 use std::{cell::{Cell, RefCell}, fs::File, io::Read, os::{fd::{AsFd, AsRawFd, FromRawFd}, unix::fs::FileExt}, rc::Rc};
-use crate::{libc_sys::{self, munmap}, makepad_math::{dvec2, DVec2}, wayland::{wayland_type, xkb_sys}, Area, KeyEvent, KeyModifiers, MouseDownEvent, MouseMoveEvent, MouseUpEvent, WindowClosedEvent};
+use crate::{libc_sys::{self, munmap}, makepad_math::{dvec2, DVec2}, wayland::{wayland_type, xkb_sys}, Area, KeyEvent, KeyModifiers, MouseDownEvent, MouseMoveEvent, MouseUpEvent, TextInputEvent, WindowClosedEvent};
 
 use wayland_client::{delegate_noop, protocol::{wl_buffer, wl_compositor, wl_keyboard, wl_output, wl_pointer::{self, ButtonState}, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface}, Connection, Dispatch, Proxy, QueueHandle, WEnum};
-use wayland_protocols::{wp::{cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1::{self, WpCursorShapeManagerV1}}, fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1}, viewporter::client::{wp_viewport, wp_viewporter}}, xdg::{self, decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1}, shell::client::{xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base}}};
+use wayland_protocols::{wp::{cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1::{self, WpCursorShapeManagerV1}}, fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1}, text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3}, viewporter::client::{wp_viewport, wp_viewporter}}, xdg::{self, decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1}, shell::client::{xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base}}};
 
 use crate::{cx_native::EventFlow, event::WindowGeom, select_timer::SelectTimers, wayland::wayland_app::WaylandApp, x11::xlib_event::XlibEvent, WindowCloseRequestedEvent, WindowGeomChangeEvent, WindowId, WindowMovedEvent};
 
@@ -15,17 +15,19 @@ pub(crate) struct WaylandState {
     pub(crate) cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub(crate) cursor_shape: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     pub(crate) pointer: Option<wl_pointer::WlPointer>,
+    pub(crate) last_mouse_pos: DVec2,
+    pub(crate) pointer_serial: Option<u32>,
     pub(crate) decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     pub(crate) windows: Vec<WaylandWindow>,
     pub(crate) current_window: Option<WindowId>,
-    pub(crate) pointer_serial: Option<u32>,
     pub(crate) modifiers: KeyModifiers,
     pub(crate) timers: SelectTimers,
-    pub(crate) last_mouse_pos: DVec2,
     pub(crate) scale_manager: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
     pub(crate) viewporter: Option<wp_viewporter::WpViewporter>,
     pub(crate) xkb_state: Option<xkb_sys::XkbState>,
     pub(crate) xkb_cx: xkb_sys::XkbContext,
+    pub(crate) text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
+    pub(crate) text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
     event_callback: Option<Box<dyn FnMut(&mut WaylandState, XlibEvent)>>,
 
     pub(crate) event_flow: EventFlow,
@@ -50,6 +52,8 @@ impl WaylandState {
             modifiers: KeyModifiers::default(),
             xkb_state: None,
             xkb_cx: xkb_sys::XkbContext::new().unwrap(),
+            text_input: None,
+            text_input_manager: None,
             last_mouse_pos: dvec2(0., 0.),
             timers: SelectTimers::new(),
             event_callback: Some(event_callback),
@@ -96,6 +100,10 @@ impl Dispatch<wl_registry::WlRegistry, ()>  for WaylandState {
                 "wp_viewporter" => {
                     let viewporter = wl_registry.bind::<wp_viewporter::WpViewporter, _, _>(name, 1, qhandle, ());
                     state.viewporter = Some(viewporter);
+                },
+                "zwp_text_input_manager_v3" => {
+                    let text_input_manager = wl_registry.bind::<zwp_text_input_manager_v3::ZwpTextInputManagerV3, _, _>(name, 1, qhandle, ());
+                    state.text_input_manager = Some(text_input_manager);
                 },
                 _ => {}
             }
@@ -209,6 +217,9 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
         conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
+        if let Some(input_manager) = state.text_input_manager.as_ref() {
+            state.text_input = Some(input_manager.get_text_input(&seat, qhandle, ()));
+        }
         if let wl_seat::Event::Capabilities { capabilities: WEnum::Value(capabilities) } = event {
             if capabilities.contains(wl_seat::Capability::Keyboard) {
                 seat.get_keyboard(qhandle, ());
@@ -220,6 +231,49 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
                 }
                 state.pointer = Some(pointer);
             }
+        }
+    }
+}
+impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        proxy: &zwp_text_input_v3::ZwpTextInputV3,
+        event: <zwp_text_input_v3::ZwpTextInputV3 as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_text_input_v3::Event::Enter { surface } => {
+            },
+            zwp_text_input_v3::Event::Leave { surface } => {
+            },
+            zwp_text_input_v3::Event::PreeditString { text, cursor_begin, cursor_end } => {
+            },
+            zwp_text_input_v3::Event::CommitString { text } => {
+                if let Some(text_str) = text {
+                    state.do_callback(XlibEvent::TextInput(TextInputEvent{ input: text_str, replace_last: false, was_paste: false }));
+                }
+            },
+            zwp_text_input_v3::Event::DeleteSurroundingText { before_length, after_length } => {},
+            zwp_text_input_v3::Event::Done { serial } => {
+            },
+            _ => {},
+        }
+    }
+}
+
+impl Dispatch<zwp_text_input_manager_v3::ZwpTextInputManagerV3, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        proxy: &zwp_text_input_manager_v3::ZwpTextInputManagerV3,
+        event: <zwp_text_input_manager_v3::ZwpTextInputManagerV3 as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        if let Some(seat) = state.seat.as_ref() {
+            state.text_input = Some(proxy.get_text_input(seat, qhandle, ()));
         }
     }
 }
@@ -245,14 +299,17 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                         if let WEnum::Value(key_state) = key_state {
                             match key_state {
                                 wl_keyboard::KeyState::Pressed => {
-                                    xkb_state.update_key(key, xkb_sys::XkbKeyDirection::Down);
                                     let key_code = xkb_state.keycode_to_makepad_keycode(key + 8);
+                                    let text_str = xkb_state.key_get_utf8(key + 8);
+
+                                    // todo(drindr): distinguish `block_text`
+                                    state.do_callback(XlibEvent::TextInput(TextInputEvent{ input: text_str, replace_last: false, was_paste: false }));
                                     state.do_callback(XlibEvent::KeyDown(KeyEvent{
                                         key_code: key_code,
                                         is_repeat: false,
                                         modifiers: state.modifiers,
                                         time: state.time_now(),
-                                    }))
+                                    }));
                                 },
                                 wl_keyboard::KeyState::Released => {
                                     let key_code = xkb_state.keycode_to_makepad_keycode(key + 8);
@@ -321,17 +378,6 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         state.current_window = window_id;
                     }
                 });
-                if let Some(window_id) = window_id {
-                    let pos = dvec2(surface_x as f64, surface_y as f64);
-                    state.last_mouse_pos = pos;
-                    state.do_callback(XlibEvent::MouseMove(MouseMoveEvent{
-                        abs: pos,
-                        window_id: window_id,
-                        modifiers: state.modifiers,
-                        time: state.time_now(),
-                        handled: Cell::new(Area::Empty),
-                    }));
-                }
                 state.do_callback(XlibEvent::AppGotFocus);
             },
             wl_pointer::Event::Leave { serial, surface: _ } => {

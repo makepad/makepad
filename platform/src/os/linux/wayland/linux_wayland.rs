@@ -2,6 +2,7 @@
 use std::rc::Rc;
 use std::cell::{Cell, RefCell};
 
+use crate::gl_sys::TEXTURE0;
 use crate::wayland::xkb_sys;
 use crate::x11::xlib_event::XlibEvent;
 use crate::WindowId;
@@ -78,10 +79,13 @@ impl WaylandCx {
 
         match event {
             XlibEvent::Paint | XlibEvent::Timer(_) |
-            XlibEvent::MouseMove(_) | XlibEvent::WindowDragQuery(_)  => {
+            XlibEvent::MouseMove(_) | XlibEvent::WindowDragQuery(_) |
+            XlibEvent::WindowGeomChange(_) |
+            XlibEvent::MouseDown(_) | XlibEvent::MouseUp(_) |
+            XlibEvent::KeyDown(_) | XlibEvent::KeyUp(_) => {
             }
             _ => {
-                println!("event: {:?}", event);
+                // println!("event: {:?}", event);
             }
         }
         match event {
@@ -149,6 +153,12 @@ impl WaylandCx {
 
                 self.handle_repaint(state);
             }
+            XlibEvent::MouseMove(e) => {
+                let mut cx = self.cx.borrow_mut();
+                cx.call_event_handler(&Event::MouseMove(e.into()));
+                cx.fingers.cycle_hover_area(live_id!(mouse).into());
+                cx.fingers.switch_captures();
+            }
             XlibEvent::MouseDown(e) => {
                 let mut cx = self.cx.borrow_mut();
                 cx.fingers.process_tap_count(
@@ -157,12 +167,6 @@ impl WaylandCx {
                 );
                 cx.fingers.mouse_down(e.button, e.window_id);
                 cx.call_event_handler(&Event::MouseDown(e.into()))
-            }
-            XlibEvent::MouseMove(e) => {
-                let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::MouseMove(e.into()));
-                cx.fingers.cycle_hover_area(live_id!(mouse).into());
-                cx.fingers.switch_captures();
             }
             XlibEvent::MouseUp(e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -220,7 +224,6 @@ impl WaylandCx {
             }
             XlibEvent::Timer(e) => {
                 let mut cx = self.cx.borrow_mut();
-                //println!("TIMER! {:?}", std::time::Instant::now());
                 if e.timer_id == 0{
                     if SignalToUI::check_and_clear_ui_signal(){
                         cx.handle_media_signals();
@@ -257,7 +260,12 @@ impl WaylandCx {
             return EventFlow::Poll;
         }
         while let Some(op) = cx.platform_ops.pop() {
-            println!("handle op: {:?}", op);
+            match op {
+                CxOsOp::SetCursor(_) | CxOsOp::StartTimer{..} | CxOsOp::StopTimer(_) => {}
+                _ => {
+                    //println!("handle op: {:?}", op)
+                }
+            }
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
@@ -328,8 +336,21 @@ impl WaylandCx {
                     state.stop_timer(timer_id);
                 },
                 CxOsOp::ShowTextIME(area, pos) => {
+                    if let Some(window) = state.current_window {
+                        if let Some(text_input) = state.text_input.as_ref() {
+                            text_input.enable();
+
+                            // todo: follow the cursor while input
+                            text_input.set_cursor_rectangle(state.last_mouse_pos.x as i32, state.last_mouse_pos.y as i32, 0, 0 );
+                            text_input.commit();
+                        }
+                    }
                 },
                 CxOsOp::HideTextIME => {
+                    if let Some(text_input) = state.text_input.as_ref() {
+                        text_input.disable();
+                        text_input.commit();
+                    }
                 },
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
