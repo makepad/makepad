@@ -22,6 +22,8 @@ impl Value{
     pub const OP_PROP: Value = Value(Self::TYPE_OPCODE | 0x0000_0001);
     pub const OP_ADD: Value = Value(Self::TYPE_OPCODE | 0x0000_0002);
     
+    // TODO: make this behave like javascript as much as is sensible
+    
     pub fn from_f64(val:f64)->Self{
         if val.is_nan(){
             Self::NAN
@@ -39,10 +41,7 @@ impl Value{
         if self.is_bool(){
             return *self == Self::TRUE
         }
-        if *self == Self::NIL{
-            return false
-        }
-        self.to_f64() > 0.0
+        self.to_f64() != 0.0
     }
     
     pub fn to_f64(&self)->f64{
