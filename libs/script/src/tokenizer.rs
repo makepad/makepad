@@ -1,25 +1,21 @@
-// ok lets tokenize splash streaming.
-// we should input text, and output tokens
-
-// how do we parse this thing tho
-// we cant use the usual recursive descent parsing
-
-// lets first build a continuable tokenizer
-// the tokenizer is in a state and is eating characters
-// and can be continued
+// Makepad script streaming tokenizer
 
 use crate::id::Id;
 use crate::colorhex::hex_bytes_to_u32;
+use makepad_script_derive::*;
 //use crate::value::Value;
 
+#[derive(Copy,Clone)]
 pub enum ScriptToken{
+    End,
+    StreamEnd,
     Identifier(Id),
     Operator(Id),
     OpenCurly,
-    OpenRound,
-    OpenSquare,
     CloseCurly,
+    OpenRound,
     CloseRound,
+    OpenSquare,
     CloseSquare,
     StringUnfinished(usize,usize),
     String(usize,usize),
@@ -27,12 +23,30 @@ pub enum ScriptToken{
     Color(u32),
 }
 
-struct ScriptTokenPos{
-    token: ScriptToken,
+impl ScriptToken{
+    pub fn is_identifier(&self)->bool{match self{ScriptToken::Identifier(_)=>true,_=>false}}
+    pub fn identifier(&self)->Id{match self{ScriptToken::Identifier(id)=>*id,_=>id!()}}
+    pub fn operator(&self)->Id{match self{ScriptToken::Operator(id)=>*id,_=>id!()}}
+    pub fn is_operator(&self)->bool{match self{ScriptToken::Operator(_)=>true,_=>false}}
+    pub fn is_open_curly(&self)->bool{match self{ScriptToken::OpenCurly=>true,_=>false}}
+    pub fn is_close_curly(&self)->bool{match self{ScriptToken::CloseCurly=>true,_=>false}}
+    pub fn is_open_round(&self)->bool{match self{ScriptToken::OpenRound=>true,_=>false}}
+    pub fn is_close_round(&self)->bool{match self{ScriptToken::CloseRound=>true,_=>false}}
+    pub fn is_open_square(&self)->bool{match self{ScriptToken::OpenSquare=>true,_=>false}}
+    pub fn is_close_square(&self)->bool{match self{ScriptToken::CloseSquare=>true,_=>false}}
+    pub fn is_string(&self)->bool{match self{ScriptToken::StringUnfinished(_,_)|ScriptToken::String(_,_)=>true,_=>false}}
+    pub fn is_number(&self)->bool{match self{ScriptToken::Number(_)=>true,_=>false}}
+    pub fn is_color(&self)->bool{match self{ScriptToken::Color(_)=>true,_=>false}}
+}
+
+pub struct ScriptTokenPos{
+    pub token: ScriptToken,
     pos: usize
 }
 
+#[derive(Default)]
 enum State{ 
+    #[default]
     Whitespace,
     Identifier,
     Operator,
@@ -48,9 +62,10 @@ enum State{
     Color
 }
 
+#[derive(Default)]
 pub struct ScriptDoc{
     pos: usize,
-    tokens: Vec<ScriptTokenPos>,
+    pub tokens: Vec<ScriptTokenPos>,
     original: String,
     strings: String,
     temp: String,
@@ -191,7 +206,7 @@ impl ScriptDoc{
         }
     }
     
-    pub fn parse(&mut self, new_chars: &str){
+    pub fn parse(&mut self, new_chars: &str)->&[ScriptTokenPos]{
         let mut iter = new_chars.chars();
         
         fn is_operator(c:char)->bool{
@@ -208,6 +223,13 @@ impl ScriptDoc{
                 _=>None
             }
         }
+        // unfinished string at the end
+        let start = if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(_,_),..}) = self.tokens.last_mut(){
+            self.tokens.len() - 1
+        }
+        else{
+            self.tokens.len()
+        };
         
         while let Some(c) = iter.next(){
             self.original.push(c);
@@ -309,6 +331,10 @@ impl ScriptDoc{
                         self.temp.push(c);
                     }
                     else if c == '+' && self.temp.len() > 0 && self.temp.chars().last() != Some('+'){
+                        self.emit_operator();
+                        self.temp.push(c);
+                    }
+                    else if (c == '!' || c == '^') && self.temp.len() > 0{
                         self.emit_operator();
                         self.temp.push(c);
                     }
@@ -478,7 +504,7 @@ impl ScriptDoc{
                         self.emit_number();
                         self.state = State::String(true);
                     }
-                    else if c == '\''{
+                    else if c == '\''{ 
                         self.emit_number();
                         self.state = State::String(false);
                     }
@@ -499,6 +525,8 @@ impl ScriptDoc{
                             self.emit_color();
                             self.state = State::Whitespace
                         }
+                    }
+                    else if c == 'x' && self.temp.len() == 0{ // eat first x
                     }
                     else if c.is_alphabetic(){
                         self.emit_color();
@@ -535,5 +563,6 @@ impl ScriptDoc{
                 }
             }
         }
+        &self.tokens[start..self.tokens.len()]
     }
 }
