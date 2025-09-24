@@ -6,4 +6,21 @@ pub mod value;
 pub mod id;
 pub mod colorhex;
 pub mod parser;
-pub mod interpret;
+pub mod interpreter;
+
+pub fn test(){
+    use crate::parser::*;
+    use crate::interpreter::*;
+    let code = "
+    Todo = {done:1+2}
+    Todo{
+        x:10
+        y:20
+    }
+    ";
+    let mut parser = ScriptParser::default();
+    parser.parse(&code);
+    parser.tok.dump_tokens();
+    let mut interpreter = ScriptInterpreter::default();
+    interpreter.run(&parser);
+}
