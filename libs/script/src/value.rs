@@ -212,7 +212,7 @@ impl fmt::Display for Value {
             match *self{
                 Self::OP_MUL => return write!(f, "*"),
                 Self::OP_DIV => return write!(f, "/"),
-               Self::OP_MOD => return write!(f, "%"),
+                Self::OP_MOD => return write!(f, "%"),
                 Self::OP_ADD => return write!(f, "+"),
                 Self::OP_SUB => return write!(f, "-"),
                 Self::OP_SHL => return write!(f, "<<"),
