@@ -14,8 +14,9 @@ enum State{
     EndStmt,
     EmitOp(Id),
     Bare,
+    Call,
     Prototype,
-    //EndArrayIndex,
+    ArrayIndex,
     Inherit(Id),
     CloseRound,
     For,
@@ -52,6 +53,7 @@ Order list from highest prio to lowest
 impl State{
     fn operator_order(op:Id)->usize{
         match op{
+            id!(.) => 3,
             id!(*) | id!(/) | id!(%) => 8,
             id!(+) | id!(-) => 9,
             id!(<<) | id!(>>) => 10,
@@ -98,6 +100,7 @@ impl State{
             id!(^=) => Value::OP_ASSIGN_XOR,
             id!(<<=) => Value::OP_ASSIGN_SHL,
             id!(>>=)  => Value::OP_ASSIGN_SHR,
+            id!(.)  => Value::OP_FIELD,
             _=> Value::OP_NOP,
         }
     }
@@ -203,11 +206,50 @@ impl ScriptParser{
                 // a b * c +
             }
             State::Bare=>{
-                self.code.push(Value::OP_END_BLOCK);
+                self.code.push(Value::OP_END_BARE);
+                self.state.push(State::EndExpr);
+                if ct.is_close_curly() {
+                    return 1
+                }
+                else {
+                    println!("Expected }} not found");
+                    return 0
+                }
             }
             // emit the create prototype instruction
             State::Prototype=>{
-                self.code.push(Value::OP_END_BLOCK);
+                self.code.push(Value::OP_END_PROTO);
+                self.state.push(State::EndExpr);
+                if ct.is_close_curly() {
+                    return 1
+                }
+                else {
+                    println!("Expected }} not found");
+                    return 0
+                }
+            }
+            State::Call=>{
+                // expect )
+                self.code.push(Value::OP_END_CALL);
+                self.state.push(State::EndExpr);
+                if ct.is_close_round() {
+                    return 1
+                }
+                else {
+                    println!("Expected ) not found");
+                    return 0
+                }
+            }
+            State::ArrayIndex=>{
+                self.code.push(Value::OP_ARRAY_INDEX);
+                self.state.push(State::EndExpr);
+                if ct.is_close_square() {
+                    return 1
+                }
+                else {
+                    println!("Expected ] not found");
+                    return 0
+                }
             }
             State::EndExpr=>{ // parse potential expression operations
                 // if we find an identifier, we pop and terminate
@@ -228,11 +270,40 @@ impl ScriptParser{
                     self.state.push(State::BeginExpr);
                     return 1
                 }
+                
                 // open curly means prototype inherit
                 if ct.is_open_curly(){
                     self.code.push(Value::OP_BEGIN_PROTO);
                     self.state.push(State::Prototype);
                     self.state.push(State::BeginStmt);
+                    return 1
+                }
+                if ct.is_open_round(){ // function call on LHS
+                    // if we have a . operator we need to emit it first
+                    if let Some(last) = self.state.pop(){
+                        if let State::EmitOp(id!(.)) = last{
+                            self.code.push(State::operator_to_opcode(id!(.)));
+                        }
+                        else{
+                            self.state.push(last);
+                        }
+                    }
+                    self.code.push(Value::OP_BEGIN_CALL);
+                    self.state.push(State::Call);
+                    self.state.push(State::BeginStmt);
+                    return 1
+                }
+                if ct.is_open_square(){ // array index
+                    if let Some(last) = self.state.pop(){
+                        if let State::EmitOp(id!(.)) = last{
+                            self.code.push(State::operator_to_opcode(id!(.)));
+                        }
+                        else{
+                            self.state.push(last);
+                        }
+                    }
+                    self.state.push(State::ArrayIndex);
+                    self.state.push(State::BeginExpr);
                     return 1
                 }
                 return 0
@@ -242,7 +313,7 @@ impl ScriptParser{
                 // open curly means bare object
                 if ct.is_open_curly(){
                     self.code.push(Value::OP_BEGIN_BARE);
-                    self.state.push(State::Bare);
+                    self.state.push(State::EndExpr);
                     self.state.push(State::BeginStmt);
                     return 1
                 }
@@ -301,9 +372,9 @@ impl ScriptParser{
                     self.state.push(State::BeginStmt);
                     return 1
                 }
-                if ct.is_close_round(){
-                    println!("Unexpected )");
-                    return 1
+                if ct.is_close_round() || ct.is_close_curly() || ct.is_close_square(){
+                    // pop and let the stack handle it
+                    return 0
                 }
                 // lets do an expression statement
                 self.state.push(State::EndStmt);
@@ -325,11 +396,8 @@ impl ScriptParser{
             }
             State::EndStmt=>{
                 // if we dont have a close curly 
-                if !ct.is_close_curly(){
-                    self.state.push(State::BeginStmt);
-                    return 0
-                }
-                return 1
+                self.state.push(State::BeginStmt);
+                return 0
             }
         }
         0
