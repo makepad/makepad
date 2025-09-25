@@ -12,11 +12,7 @@ pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
     let code = "
-    Todo = {done:1+2}
-    Todo{
-        x:10
-        y:20
-    }
+    1+2+3+2*2+1
     ";
     let mut parser = ScriptParser::default();
     parser.parse(&code);
