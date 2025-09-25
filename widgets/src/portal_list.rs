@@ -374,14 +374,14 @@ impl PortalList {
                                 abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + self.first_scroll)),
                                 margin: Default::default(),
                                 width: Size::fill(),
-                                height: Size::Fit
+                                height: Size::fit()
                             }, layout);
                         }
                         Vec2Index::X => {
                             cx.begin_turtle(Walk {
                                 abs_pos: Some(dvec2(viewport.pos.x + self.first_scroll, viewport.pos.y)),
                                 margin: Default::default(),
-                                width: Size::Fit,
+                                width: Size::fit(),
                                 height: Size::fill()
                             }, layout);
                         }
@@ -415,14 +415,14 @@ impl PortalList {
                                         abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                                         margin: Default::default(),
                                         width: Size::fill(),
-                                        height: Size::Fit
+                                        height: Size::fit()
                                     }, layout);
                                 }
                                 Vec2Index::X => {
                                     cx.begin_turtle(Walk {
                                         abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                                         margin: Default::default(),
-                                        width: Size::Fit,
+                                        width: Size::fit(),
                                         height: Size::fill()
                                     }, layout);
                                 }
@@ -454,14 +454,14 @@ impl PortalList {
                                 abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + pos + rect.size.index(vi))),
                                 margin: Default::default(),
                                 width: Size::fill(),
-                                height: Size::Fit
+                                height: Size::fit()
                             }, layout);
                         }
                         Vec2Index::X => {
                             cx.begin_turtle(Walk {
                                 abs_pos: Some(dvec2(viewport.pos.x + pos + rect.size.index(vi), viewport.pos.y)),
                                 margin: Default::default(),
-                                width: Size::Fit,
+                                width: Size::fit(),
                                 height: Size::fill()
                             }, layout);
                         }
@@ -496,7 +496,7 @@ impl PortalList {
                                     abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + total_height)),
                                     margin: Default::default(),
                                     width: Size::fill(),
-                                    height: Size::Fit
+                                    height: Size::fit()
                                 }, Layout::flow_down());
                                 return Some(last_index + 1);
                             }
@@ -521,7 +521,7 @@ impl PortalList {
                         abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                         margin: Default::default(),
                         width: Size::fill(),
-                        height: Size::Fit
+                        height: Size::fit()
                     }, Layout::flow_down());
                     
                     return Some(index - 1);
