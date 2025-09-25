@@ -8,11 +8,13 @@ use makepad_script_derive::*;
 enum State{
     #[default]
     ClosureArgs,
-    Statement,
+    BeginStmt,
     BeginExpr,
     EndExpr,
-    EndStatement,
-    EmitOperator(Id),
+    EndStmt,
+    EmitOp(Id),
+    Bare,
+    Prototype,
     //EndArrayIndex,
     Inherit(Id),
     CloseRound,
@@ -59,7 +61,7 @@ impl State{
             id!(==) | id!(!=)  | id!(<) | id!(>) | id!(<=) | id!(>=) => 14,
             id!(&&)  => 15,
             id!(||)  => 16,
-            id!(=) | id!(+=)  | id!(-=) | id!(*=) | id!(/=) | id!(%=) => 17,
+            id!(:) | id!(=) | id!(+=)  | id!(-=) | id!(*=) | id!(/=) | id!(%=) => 17,
             id!(&=) | id!(|=)  | id!(^=) | id!(<<=) | id!(>>=) => 18,
             _=>0
         }
@@ -85,7 +87,7 @@ impl State{
             id!(>=) => Value::OP_GEQ,
             id!(&&) => Value::OP_LOGIC_AND,
             id!(||)  => Value::OP_LOGIC_OR,
-            id!(=) => Value::OP_ASSIGN,
+            id!(:) | id!(=) => Value::OP_ASSIGN,
             id!(+=) => Value::OP_ASSIGN_ADD,
             id!(-=) => Value::OP_ASSIGN_SUB,
             id!(*=) => Value::OP_ASSIGN_MUL,
@@ -102,9 +104,9 @@ impl State{
     
     fn is_heq_prio(&self, other:State)->bool{
         match self{
-            Self::EmitOperator(op1)=>{
+            Self::EmitOp(op1)=>{
                 match other{
-                    Self::EmitOperator(op2)=>{
+                    Self::EmitOp(op2)=>{
                         Self::operator_order(*op1) <= Self::operator_order(op2)
                     }
                     _=>false
@@ -133,7 +135,7 @@ impl Default for ScriptParser{
             tok: Default::default(),
             code: Default::default(),
             opstack: Default::default(),
-            state: vec![State::Statement],
+            state: vec![State::BeginStmt],
         }
     }
 }
@@ -168,7 +170,7 @@ impl ScriptParser{
         let cid = ct.identifier();
         let _nt = self.nt();
         println!("LOOPIN {:?}",self.state);
-        match self.state.last().unwrap(){
+        match self.state.pop().unwrap(){
             State::For=>{}
             State::ForIdent=>{}
             State::ForRange=>{}
@@ -178,7 +180,6 @@ impl ScriptParser{
             State::CloseRound=>{
                 // we expect a ) here
                 if ct.is_close_round(){
-                    self.state.pop();
                     return 1
                 }
                 else{
@@ -189,9 +190,8 @@ impl ScriptParser{
                 // we're parsing ident, ident, ident, 
             }
             // alright we parsed a + b * c
-            State::EmitOperator(cop)=>{
-                self.code.push(State::operator_to_opcode(*cop));
-                self.state.pop();
+            State::EmitOp(cop)=>{
+                self.code.push(State::operator_to_opcode(cop));
                 return 0
                 // ok what does our stack look like at a * b + c
                 // output stack is
@@ -201,18 +201,20 @@ impl ScriptParser{
                 // we need this
                 // a b * c +
             }
-            State::EndStatement=>{
+            State::Bare=>{
+                self.code.push(Value::OP_END_BLOCK);
+            }
+            // emit the create prototype instruction
+            State::Prototype=>{
+                self.code.push(Value::OP_END_BLOCK);
             }
             State::EndExpr=>{ // parse potential expression operations
                 // if we find an identifier, we pop and terminate
                 if State::operator_order(cop) != 0{
-                    
-                    self.state.pop();
-                    // alright lets see if we need to pop an emitoperator
-                    let next_state = State::EmitOperator(cop);
+                    let next_state = State::EmitOp(cop);
                     if let Some(last) = self.state.pop(){
-                        if last.is_heq_prio(next_state){ // ok now what
-                            self.state.push(State::EmitOperator(cop));
+                        if last.is_heq_prio(next_state){
+                            self.state.push(State::EmitOp(cop));
                             self.state.push(State::BeginExpr);
                             self.state.push(last);
                             return 1
@@ -221,18 +223,29 @@ impl ScriptParser{
                             self.state.push(last);
                         }
                     }
-                    self.state.push(State::EmitOperator(cop));
+                    self.state.push(State::EmitOp(cop));
                     self.state.push(State::BeginExpr);
                     return 1
                 }
-                // otherwise end of expression
-                self.state.pop();
+                // open curly means prototype inherit
+                if ct.is_open_curly(){
+                    self.code.push(Value::OP_BEGIN_PROTO);
+                    self.state.push(State::Prototype);
+                    self.state.push(State::BeginStmt);
+                    return 1
+                }
                 return 0
             }
             State::BeginExpr=>{
                 // (expr)
+                // open curly means bare object
+                if ct.is_open_curly(){
+                    self.code.push(Value::OP_BEGIN_BARE);
+                    self.state.push(State::Bare);
+                    self.state.push(State::BeginStmt);
+                    return 1
+                }
                 if ct.is_open_round(){
-                    self.state.pop();
                     self.state.push(State::CloseRound);
                     self.state.push(State::BeginExpr);
                     return 1
@@ -240,13 +253,11 @@ impl ScriptParser{
                 if let Some(v) = ct.maybe_number(){
                     // just return the number
                     self.code.push(Value::from_f64(v));
-                    self.state.pop();
                     self.state.push(State::EndExpr);
                     return 1
                 }
                 if cid != id!(){ // its an identifier
                     self.code.push(Value::from_id(cid));
-                    self.state.pop();
                     self.state.push(State::EndExpr);
                     return 1
                 }
@@ -272,7 +283,7 @@ impl ScriptParser{
                     return 1
                 }*/
             }
-            State::Statement => {
+            State::BeginStmt => {
                 let cid = ct.identifier();
                 if cid == id!(for){
                     self.state.push(State::For);
@@ -284,8 +295,13 @@ impl ScriptParser{
                     self.state.push(State::BeginExpr);
                     return 1
                 }
+                if cop == id!(;) || cop == id!(,){ // just eat it
+                    // we can pop all operator emits
+                    self.state.push(State::BeginStmt);
+                    return 1
+                }
                 // lets do an expression statement
-                self.state.push(State::EndStatement);
+                self.state.push(State::EndStmt);
                 self.state.push(State::BeginExpr);
                 return 0;
                 // otherwise we're going to parse an expression
@@ -302,8 +318,15 @@ impl ScriptParser{
                 // end of object
                 
             }
+            State::EndStmt=>{
+                // if we dont have a close curly 
+                if !ct.is_close_curly(){
+                    self.state.push(State::BeginStmt);
+                    return 0
+                }
+                return 1
+            }
         }
-        println!("FELL THROUGH {:?}", self.state);
         0
     }
     
@@ -311,7 +334,8 @@ impl ScriptParser{
         self.tok.tokenize(new_code);
         
         // wait for the tokens to be consumed
-        while self.index < self.tok.tokens.len(){
+        while self.index < self.tok.tokens.len() && self.state.len()>0{
+            println!("AT TOKEN {:?}", self.tok.tokens[self.index].token);
             let step = self.handle();
             self.index += step;
         }
