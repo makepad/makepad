@@ -61,16 +61,18 @@ impl Value{
     pub const OP_ASSIGN_XOR: Value = Value(Self::TYPE_OPCODE | 30);
     pub const OP_ASSIGN_SHL: Value = Value(Self::TYPE_OPCODE | 31);
     pub const OP_ASSIGN_SHR: Value = Value(Self::TYPE_OPCODE | 32);
-    
-    pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | 33);
+    pub const OP_ASSIGN_IFNIL: Value = Value(Self::TYPE_OPCODE | 33);
+    pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | 34);
     pub const OP_END_PROTO: Value = Value(Self::TYPE_OPCODE | 35);
     pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | 36);
     pub const OP_END_BARE: Value = Value(Self::TYPE_OPCODE | 37);
     pub const OP_BEGIN_CALL: Value = Value(Self::TYPE_OPCODE | 38);
     pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | 39);
-    
-    pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 40);
-    pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 41);
+    pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | 40);
+    pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | 41);
+        
+    pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 42);
+    pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 43);
         
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
     pub const TYPE_STRING_MASK: u64 = 0xFFFF_FFFF_0000_0000;
@@ -251,6 +253,8 @@ impl fmt::Display for Value {
                 Self::OP_END_BARE => return write!(f, "}}"),
                 Self::OP_BEGIN_CALL => return write!(f, "Call("),
                 Self::OP_END_CALL => return write!(f, ")"),
+                Self::OP_BEGIN_FRAG => return write!(f, "Frag("),
+                Self::OP_END_FRAG => return write!(f, ")"),
                 Self::OP_FIELD => return write!(f, "."),
                 Self::OP_ARRAY_INDEX => return write!(f, "[]"),
                 _=>return write!(f, "OP?")

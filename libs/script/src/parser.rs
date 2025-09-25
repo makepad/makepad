@@ -17,8 +17,7 @@ enum State{
     Call,
     Prototype,
     ArrayIndex,
-    Inherit(Id),
-    CloseRound,
+    EndFrag,
     For,
     ForIdent,
     ForRange,
@@ -100,6 +99,7 @@ impl State{
             id!(^=) => Value::OP_ASSIGN_XOR,
             id!(<<=) => Value::OP_ASSIGN_SHL,
             id!(>>=)  => Value::OP_ASSIGN_SHR,
+            id!(?=)  => Value::OP_ASSIGN_IFNIL,
             id!(.)  => Value::OP_FIELD,
             _=> Value::OP_NOP,
         }
@@ -178,10 +178,9 @@ impl ScriptParser{
             State::ForIdent=>{}
             State::ForRange=>{}
             State::If=>{}
-            State::Inherit(_id)=>{
-            }
-            State::CloseRound=>{
+            State::EndFrag=>{
                 // we expect a ) here
+                self.code.push(Value::OP_END_FRAG);
                 if ct.is_close_round(){
                     self.state.push(State::EndExpr);
                     return 1
@@ -191,19 +190,20 @@ impl ScriptParser{
                 }
             }
             State::ClosureArgs=>{
-                // we're parsing ident, ident, ident, 
+                if cid != id!(){
+                    
+                }
+                if cop == id!(|){
+                    self.state.pop();
+                    self.state.push(State::ClosureArgs);
+                    return 1
+                }
+                // we're parsing ident,? ident,? ident,? 
             }
             // alright we parsed a + b * c
             State::EmitOp(cop)=>{
                 self.code.push(State::operator_to_opcode(cop));
                 return 0
-                // ok what does our stack look like at a * b + c
-                // output stack is
-                // a b c
-                // our stack looks like
-                // Operation(+), Operation(*)
-                // we need this
-                // a b * c +
             }
             State::Bare=>{
                 self.code.push(Value::OP_END_BARE);
@@ -251,8 +251,7 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::EndExpr=>{ // parse potential expression operations
-                // if we find an identifier, we pop and terminate
+            State::EndExpr=>{
                 if State::operator_order(cop) != 0{
                     let next_state = State::EmitOp(cop);
                     if let Some(last) = self.state.pop(){
@@ -271,15 +270,13 @@ impl ScriptParser{
                     return 1
                 }
                 
-                // open curly means prototype inherit
                 if ct.is_open_curly(){
                     self.code.push(Value::OP_BEGIN_PROTO);
                     self.state.push(State::Prototype);
                     self.state.push(State::BeginStmt);
                     return 1
                 }
-                if ct.is_open_round(){ // function call on LHS
-                    // if we have a . operator we need to emit it first
+                if ct.is_open_round(){ 
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp(id!(.)) = last{
                             self.code.push(State::operator_to_opcode(id!(.)));
@@ -293,7 +290,7 @@ impl ScriptParser{
                     self.state.push(State::BeginStmt);
                     return 1
                 }
-                if ct.is_open_square(){ // array index
+                if ct.is_open_square(){
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp(id!(.)) = last{
                             self.code.push(State::operator_to_opcode(id!(.)));
@@ -309,8 +306,6 @@ impl ScriptParser{
                 return 0
             }
             State::BeginExpr=>{
-                // (expr)
-                // open curly means bare object
                 if ct.is_open_curly(){
                     self.code.push(Value::OP_BEGIN_BARE);
                     self.state.push(State::EndExpr);
@@ -318,22 +313,21 @@ impl ScriptParser{
                     return 1
                 }
                 if ct.is_open_round(){
-                    self.state.push(State::CloseRound);
+                    self.code.push(Value::OP_BEGIN_FRAG);
+                    self.state.push(State::EndFrag);
                     self.state.push(State::BeginExpr);
                     return 1
                 }
                 if let Some(v) = ct.maybe_number(){
-                    // just return the number
                     self.code.push(Value::from_f64(v));
                     self.state.push(State::EndExpr);
                     return 1
                 }
-                if cid != id!(){ // its an identifier
+                if cid != id!(){
                     self.code.push(Value::from_id(cid));
                     self.state.push(State::EndExpr);
                     return 1
                 }
-                /*
                 if let Some(v) = ct.maybe_color(){
                     self.code.push(Value::from_color(v));
                     self.state.pop();
@@ -349,11 +343,6 @@ impl ScriptParser{
                     self.state.push(State::ClosureArgs);
                     return 1
                 }
-                if cid != id!(){ // its an identifier
-                    self.code.push(Value::from_id(cid));
-                    self.state.pop();
-                    return 1
-                }*/
             }
             State::BeginStmt => {
                 let cid = ct.identifier();
@@ -376,26 +365,13 @@ impl ScriptParser{
                     // pop and let the stack handle it
                     return 0
                 }
-                // lets do an expression statement
+                // lets do an expression statement as fallthrough
                 self.state.push(State::EndStmt);
                 self.state.push(State::BeginExpr);
                 return 0;
-                // otherwise we're going to parse an expression
-                /*if nt.is_open_curly(){
-                    // emit code where we inherit from ident
-                    // upnext is a new object
-                    self.state.push(State::Object);
-                    return 2;
-                }
-                if nt.is_open_square(){
-                    self.state.push(State::Index);
-                    return 1
-                }*/
-                // end of object
-                
             }
             State::EndStmt=>{
-                // if we dont have a close curly 
+                // just start a new statement
                 self.state.push(State::BeginStmt);
                 return 0
             }

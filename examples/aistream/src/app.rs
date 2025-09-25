@@ -1,33 +1,6 @@
 
-Todo = {done:false}
-
-Instructions
-
-num.const 1
-num.const 2
-add
-1 + 2
-
-a.b = 1
-ident a
-ident b
-propaccess
-num.const 1
-assign
-
-ident on_draw_item
-closure_with_args 1
-ident item
-begin_block
-end_block
-assign
-
-// assign sees on_draw_item on stack
-// and a closure on stack 
-// then it assigns it
-
-
-on_draw_item: |item|{
+on_draw_item: |item:string, item:string|{
+    let x:item = 
 }
 
 
