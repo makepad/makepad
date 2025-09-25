@@ -63,9 +63,15 @@ impl Value{
     pub const OP_ASSIGN_SHR: Value = Value(Self::TYPE_OPCODE | 32);
     
     pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | 33);
-    pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | 34);
-    pub const OP_END_BLOCK: Value = Value(Self::TYPE_OPCODE | 35);
-                    
+    pub const OP_END_PROTO: Value = Value(Self::TYPE_OPCODE | 35);
+    pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | 36);
+    pub const OP_END_BARE: Value = Value(Self::TYPE_OPCODE | 37);
+    pub const OP_BEGIN_CALL: Value = Value(Self::TYPE_OPCODE | 38);
+    pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | 39);
+    
+    pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 40);
+    pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 41);
+        
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
     pub const TYPE_STRING_MASK: u64 = 0xFFFF_FFFF_0000_0000;
     pub const TYPE_HEAP_STRING: u64 = 0xFFFF_0501_0000_0000;
@@ -240,9 +246,13 @@ impl fmt::Display for Value {
                 Self::OP_ASSIGN_SHL => return write!(f, "<<="),
                 Self::OP_ASSIGN_SHR => return write!(f, ">>="),
                 Self::OP_BEGIN_PROTO => return write!(f, "Proto{{"),
+                Self::OP_END_PROTO => return write!(f, "}}"),
                 Self::OP_BEGIN_BARE => return write!(f, "Bare{{"),
-                Self::OP_END_BLOCK => return write!(f, "}}"),
-                
+                Self::OP_END_BARE => return write!(f, "}}"),
+                Self::OP_BEGIN_CALL => return write!(f, "Call("),
+                Self::OP_END_CALL => return write!(f, ")"),
+                Self::OP_FIELD => return write!(f, "."),
+                Self::OP_ARRAY_INDEX => return write!(f, "[]"),
                 _=>return write!(f, "OP?")
             }
         }
