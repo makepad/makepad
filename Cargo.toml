@@ -4,6 +4,7 @@ workspace.members = [
     "examples/ironfish",
     "examples/teamtalk",
     "examples/fractal_zoom",
+    "examples/layout",
     "examples/simple",
     "examples/ui_zoo",
     "examples/news_feed",
