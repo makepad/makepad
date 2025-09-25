@@ -180,6 +180,7 @@ impl ScriptParser{
             State::CloseRound=>{
                 // we expect a ) here
                 if ct.is_close_round(){
+                    self.state.push(State::EndExpr);
                     return 1
                 }
                 else{
@@ -298,6 +299,10 @@ impl ScriptParser{
                 if cop == id!(;) || cop == id!(,){ // just eat it
                     // we can pop all operator emits
                     self.state.push(State::BeginStmt);
+                    return 1
+                }
+                if ct.is_close_round(){
+                    println!("Unexpected )");
                     return 1
                 }
                 // lets do an expression statement
