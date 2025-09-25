@@ -17,7 +17,7 @@ impl Value{
     
     pub const TYPE_NIL: u64 = 0xFFFF_0300_0000_0000;
     pub const NIL: Value = Value(Self::TYPE_NIL);
-    
+        
                 
     pub const TYPE_COLOR: u64 = 0xFFFF_0400_0000_0000;
     
@@ -26,9 +26,42 @@ impl Value{
         
     // opcodes
     pub const TYPE_OPCODE: u64 = 0xFFFF_0500_0000_0000;
-    pub const OP_PROP: Value = Value(Self::TYPE_OPCODE | 0x0000_0001);
-    pub const OP_ADD: Value = Value(Self::TYPE_OPCODE | 0x0000_0002);
+    pub const OP_NOP: Value = Value(Self::TYPE_OPCODE | 0);
+    pub const OP_PROP: Value = Value(Self::TYPE_OPCODE | 1);
+    pub const OP_NOT: Value = Value(Self::TYPE_OPCODE | 2);
+    pub const OP_NEG: Value = Value(Self::TYPE_OPCODE | 3);
+    pub const OP_MUL: Value = Value(Self::TYPE_OPCODE | 4);
+    pub const OP_DIV: Value = Value(Self::TYPE_OPCODE | 5);
+    pub const OP_MOD: Value = Value(Self::TYPE_OPCODE | 6);
+    pub const OP_ADD: Value = Value(Self::TYPE_OPCODE | 7);
+    pub const OP_SUB: Value = Value(Self::TYPE_OPCODE | 8);
+    pub const OP_SHL: Value = Value(Self::TYPE_OPCODE | 9);
+    pub const OP_SHR: Value = Value(Self::TYPE_OPCODE | 10);
+    pub const OP_AND: Value = Value(Self::TYPE_OPCODE | 11);
+    pub const OP_OR: Value = Value(Self::TYPE_OPCODE | 12);
+    pub const OP_XOR: Value = Value(Self::TYPE_OPCODE | 13);
     
+    pub const OP_EQ: Value = Value(Self::TYPE_OPCODE | 14);
+    pub const OP_NEQ: Value = Value(Self::TYPE_OPCODE | 15);
+    pub const OP_LT: Value = Value(Self::TYPE_OPCODE | 16);
+    pub const OP_GT: Value = Value(Self::TYPE_OPCODE | 17);
+    pub const OP_LEQ: Value = Value(Self::TYPE_OPCODE | 18);
+    pub const OP_GEQ: Value = Value(Self::TYPE_OPCODE | 19);
+    pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | 20);
+    pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | 21);
+    
+    pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | 22);
+    pub const OP_ASSIGN_ADD: Value = Value(Self::TYPE_OPCODE | 23);
+    pub const OP_ASSIGN_SUB: Value = Value(Self::TYPE_OPCODE | 24);
+    pub const OP_ASSIGN_MUL: Value = Value(Self::TYPE_OPCODE | 25);
+    pub const OP_ASSIGN_DIV: Value = Value(Self::TYPE_OPCODE | 26);
+    pub const OP_ASSIGN_MOD: Value = Value(Self::TYPE_OPCODE | 27);
+    pub const OP_ASSIGN_AND: Value = Value(Self::TYPE_OPCODE | 28);
+    pub const OP_ASSIGN_OR: Value = Value(Self::TYPE_OPCODE | 29);
+    pub const OP_ASSIGN_XOR: Value = Value(Self::TYPE_OPCODE | 30);
+    pub const OP_ASSIGN_SHL: Value = Value(Self::TYPE_OPCODE | 31);
+    pub const OP_ASSIGN_SHR: Value = Value(Self::TYPE_OPCODE | 32);
+                                            
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
     pub const TYPE_STRING_MASK: u64 = 0xFFFF_FFFF_0000_0000;
     pub const TYPE_HEAP_STRING: u64 = 0xFFFF_0501_0000_0000;
@@ -173,8 +206,35 @@ impl fmt::Display for Value {
         }
         if self.is_opcode(){
             match *self{
-                Self::OP_PROP=>return write!(f, "OP_PROP"),
-                Self::OP_ADD=>return write!(f, "OP_ADD"),
+                Self::OP_MUL => return write!(f, "*"),
+                Self::OP_DIV => return write!(f, "/"),
+               Self::OP_MOD => return write!(f, "%"),
+                Self::OP_ADD => return write!(f, "+"),
+                Self::OP_SUB => return write!(f, "-"),
+                Self::OP_SHL => return write!(f, "<<"),
+                Self::OP_SHR => return write!(f, ">>"),
+                Self::OP_AND => return write!(f, "&"),
+                Self::OP_XOR => return write!(f, "^"),
+                Self::OP_OR => return write!(f, "|"),
+                Self::OP_EQ => return write!(f, "=="),
+                Self::OP_NEQ => return write!(f, "!="),
+                Self::OP_LT => return write!(f, "<"),
+                Self::OP_GT => return write!(f, ">"),
+                Self::OP_LEQ => return write!(f, "<="),
+                Self::OP_GEQ => return write!(f, ">="),
+                Self::OP_LOGIC_AND => return write!(f, "&&"),
+                Self::OP_LOGIC_OR => return write!(f, "||"),
+                Self::OP_ASSIGN => return write!(f, "="),
+                Self::OP_ASSIGN_ADD => return write!(f, "+="),
+                Self::OP_ASSIGN_SUB => return write!(f, "-="),
+                Self::OP_ASSIGN_MUL => return write!(f, "*="),
+                Self::OP_ASSIGN_DIV => return write!(f, "/="),
+                Self::OP_ASSIGN_MOD => return write!(f, "%="),
+                Self::OP_ASSIGN_AND => return write!(f, "&="),
+                Self::OP_ASSIGN_OR => return write!(f, "|="),
+                Self::OP_ASSIGN_XOR => return write!(f, "^="),
+                Self::OP_ASSIGN_SHL => return write!(f, "<<="),
+                Self::OP_ASSIGN_SHR => return write!(f, ">>="),
                 _=>return write!(f, "OP?")
             }
         }
