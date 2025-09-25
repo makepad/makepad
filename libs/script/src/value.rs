@@ -61,7 +61,11 @@ impl Value{
     pub const OP_ASSIGN_XOR: Value = Value(Self::TYPE_OPCODE | 30);
     pub const OP_ASSIGN_SHL: Value = Value(Self::TYPE_OPCODE | 31);
     pub const OP_ASSIGN_SHR: Value = Value(Self::TYPE_OPCODE | 32);
-                                            
+    
+    pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | 33);
+    pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | 34);
+    pub const OP_END_BLOCK: Value = Value(Self::TYPE_OPCODE | 35);
+                    
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
     pub const TYPE_STRING_MASK: u64 = 0xFFFF_FFFF_0000_0000;
     pub const TYPE_HEAP_STRING: u64 = 0xFFFF_0501_0000_0000;
@@ -235,6 +239,10 @@ impl fmt::Display for Value {
                 Self::OP_ASSIGN_XOR => return write!(f, "^="),
                 Self::OP_ASSIGN_SHL => return write!(f, "<<="),
                 Self::OP_ASSIGN_SHR => return write!(f, ">>="),
+                Self::OP_BEGIN_PROTO => return write!(f, "Proto{{"),
+                Self::OP_BEGIN_BARE => return write!(f, "Bare{{"),
+                Self::OP_END_BLOCK => return write!(f, "}}"),
+                
                 _=>return write!(f, "OP?")
             }
         }
