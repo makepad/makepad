@@ -2,8 +2,10 @@
 
 use crate::id::Id;
 use crate::colorhex::hex_bytes_to_u32;
+use crate::string_table::*;
 use makepad_script_derive::*;
 //use crate::value::Value;
+ 
 
 #[derive(Copy, Clone, Debug)]
 pub enum ScriptToken{
@@ -17,8 +19,8 @@ pub enum ScriptToken{
     CloseRound,
     OpenSquare,
     CloseSquare,
-    StringUnfinished(usize),
-    String(usize),
+    StringUnfinished(StringIndex),
+    String(StringIndex),
     Number(f64),
     Color(u32),
 }
@@ -29,7 +31,7 @@ impl ScriptToken{
     pub fn number(&self)->f64{match self{ScriptToken::Number(v)=>*v,_=>0.0}}
     pub fn maybe_number(&self)->Option<f64>{match self{ScriptToken::Number(v)=>Some(*v),_=>None}}
     pub fn maybe_color(&self)->Option<u32>{match self{ScriptToken::Color(v)=>Some(*v),_=>None}}
-    pub fn maybe_string(&self)->Option<usize>{match self{ScriptToken::StringUnfinished(v)=>Some(*v),ScriptToken::String(v)=>Some(*v),_=>None}}
+    pub fn maybe_string(&self)->Option<StringIndex>{match self{ScriptToken::StringUnfinished(v)=>Some(*v),ScriptToken::String(v)=>Some(*v),_=>None}}
         
     pub fn is_identifier(&self)->bool{match self{ScriptToken::Identifier(_)=>true,_=>false}}
     pub fn is_operator(&self)->bool{match self{ScriptToken::Operator(_)=>true,_=>false}}
@@ -71,8 +73,7 @@ pub struct ScriptTokenizer{
     pos: usize,
     pub tokens: Vec<ScriptTokenPos>,
     original: String,
-    strings: String,
-    string_table: Vec<(usize, usize)>,
+    strings: StringTable,
     temp: String,
     state: State,
 }
@@ -84,7 +85,6 @@ impl Default for ScriptTokenizer{
             temp: Default::default(),
             original: Default::default(),
             strings: Default::default(),
-            string_table:vec![(0,0)],
             state: State::Whitespace,
             pos: 0,
         }
@@ -97,10 +97,6 @@ pub struct ScriptLoc{
 }
 
 impl ScriptTokenizer{
-    pub fn lookup_string(&self, index:usize)->&str{
-        let st = self.string_table[index];
-        &self.strings[st.0..(st.0+st.1)]
-    }
     
     pub fn dump_tokens(&self){
         for i in 0..self.tokens.len(){
@@ -115,8 +111,8 @@ impl ScriptTokenizer{
                 ScriptToken::CloseRound=>print!(")"),
                 ScriptToken::OpenSquare=>print!("["),
                 ScriptToken::CloseSquare=>print!("]"),
-                ScriptToken::StringUnfinished(index)=>print!("\"{}\"..",self.lookup_string(index)),
-                ScriptToken::String(index)=>print!("\"{}\"",self.lookup_string(index)),
+                ScriptToken::StringUnfinished(index)=>print!("\"{}\"..",self.strings.lookup(index)),
+                ScriptToken::String(index)=>print!("\"{}\"",self.strings.lookup(index)),
                 ScriptToken::Number(v)=>print!("{v}"),
                 ScriptToken::Color(v)=>print!("{:08x}", v),
             }
@@ -222,13 +218,11 @@ impl ScriptTokenizer{
     
     fn append_unfinished_string(&mut self, c:char){
         if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(index),..}) = self.tokens.last_mut(){
-            self.strings.push(c);
-            self.string_table[*index].1 += 1;
+            self.strings.append_char(*index, c);
         }
         else{
-            self.tokens.push(ScriptTokenPos{pos: self.pos, token: ScriptToken::StringUnfinished(self.string_table.len())});
-            self.string_table.push((self.strings.len(),1));
-            self.strings.push(c);
+            let index = self.strings.add_char(c);
+            self.tokens.push(ScriptTokenPos{pos: self.pos, token: ScriptToken::StringUnfinished(index)});
         }
     }
     
@@ -239,7 +233,7 @@ impl ScriptTokenizer{
             }
         }
         else{
-            self.tokens.push(ScriptTokenPos{token:ScriptToken::String(0), pos:self.pos})
+            self.tokens.push(ScriptTokenPos{token:ScriptToken::String(StringIndex(0)), pos:self.pos})
         }
     }
     

@@ -9,6 +9,15 @@ Todos = [
     Todo{text:"Implement it"}
 ]
 
+// decide the variable resolution algorithm.
+// we have 3 sources
+// one is the let scope chain
+// one is the object tree
+// one is function arguments
+    // ONLY when explicit. implicit ones are done using args object
+// how do these things relate.
+
+
 Ui = View{
     PortalList{
         Button{} // niet nil/undefined/null
