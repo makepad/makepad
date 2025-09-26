@@ -1,4 +1,5 @@
 use crate::id::Id;
+use crate::string_table::StringIndex;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Value(u64);
@@ -17,13 +18,10 @@ impl Value{
     
     pub const TYPE_NIL: u64 = 0xFFFF_0300_0000_0000;
     pub const NIL: Value = Value(Self::TYPE_NIL);
-        
-                
     pub const TYPE_COLOR: u64 = 0xFFFF_0400_0000_0000;
     
     pub const TYPE_ID: u64 = 0xFFFF_8000_0000_0000;
     
-        
     // opcodes
     pub const TYPE_OPCODE: u64 = 0xFFFF_0500_0000_0000;
     pub const OP_NOP: Value = Value(Self::TYPE_OPCODE | 0);
@@ -70,15 +68,21 @@ impl Value{
     pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | 39);
     pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | 40);
     pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | 41);
-        
+    pub const OP_BEGIN_FN_ARGS: Value = Value(Self::TYPE_OPCODE | 42);
+    pub const OP_BEGIN_FN_BODY: Value = Value(Self::TYPE_OPCODE | 43);
+    pub const OP_END_FN_BODY: Value = Value(Self::TYPE_OPCODE | 44);
+    
     pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 42);
     pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 43);
-        
+    
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
     pub const TYPE_STRING_MASK: u64 = 0xFFFF_FFFF_0000_0000;
     pub const TYPE_HEAP_STRING: u64 = 0xFFFF_0501_0000_0000;
     pub const TYPE_STACK_STRING: u64 = 0xFFFF_0502_0000_0000;
     pub const TYPE_STATIC_STRING: u64 = 0xFFFF_0503_0000_0000;
+    
+    
+    pub const TYPE_OBJECT: u64 = 0xFFFF_0600_0000_0000;
     
     // TODO: make this behave like javascript as much as is sensible
     
@@ -91,6 +95,10 @@ impl Value{
         }
     }
     
+    pub fn from_object(val: usize)->Self{
+         Self((val as u64&0xffff_ffff) | Self::TYPE_OBJECT)
+    }
+        
     pub fn from_bool(val: bool)->Self{
         if val{Self::TRUE}
         else{Self::FALSE}
@@ -104,8 +112,8 @@ impl Value{
         Self(val.0|Self::TYPE_ID)
     }
     
-    pub fn from_static_string(index: usize)->Self{
-        Self((index as u64 & 0xffff_ffff)|Self::TYPE_STATIC_STRING)
+    pub fn from_static_string(index: StringIndex)->Self{
+        Self((index.0 as u64 & 0xffff_ffff)|Self::TYPE_STATIC_STRING)
     }
     
     pub fn to_bool(&self)->bool{
@@ -159,6 +167,21 @@ impl Value{
         }
         None
     }
+    
+               
+    pub fn as_object(&self)->Option<usize>{
+        if self.is_object(){
+            return Some(self.0 as usize & 0x0000_0000_ffff_ffff)
+        }
+        None
+    }
+    
+    pub fn as_heap_string(&self)->Option<usize>{
+        if self.is_heap_string(){
+            return Some(self.0 as usize & 0x0000_0000_ffff_ffff)
+        }
+        None
+    }
         
     pub fn as_color(&self)->Option<u32>{
         if self.is_color(){
@@ -193,6 +216,14 @@ impl Value{
     
     pub fn is_string(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_STRING
+    }
+    
+    pub fn is_heap_string(&self)->bool{
+        (self.0 & Self::TYPE_STRING_MASK) == Self::TYPE_HEAP_STRING
+    }
+    
+    pub fn is_object(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
     }
 }
 

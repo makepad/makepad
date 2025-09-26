@@ -7,7 +7,8 @@ use makepad_script_derive::*;
 #[derive(Default, Debug)]
 enum State{
     #[default]
-    ClosureArgs,
+    FnArgs,
+    FnBody,
     BeginStmt,
     BeginExpr,
     EndExpr,
@@ -172,7 +173,6 @@ impl ScriptParser{
         let cop = ct.operator();
         let cid = ct.identifier();
         let _nt = self.nt();
-        println!("LOOPIN {:?}",self.state);
         match self.state.pop().unwrap(){
             State::For=>{}
             State::ForIdent=>{}
@@ -189,13 +189,16 @@ impl ScriptParser{
                     println!("PARSE ERROR")
                 }
             }
-            State::ClosureArgs=>{
+            State::FnBody=>{
+                
+            }
+            State::FnArgs=>{
                 if cid != id!(){
                     
                 }
                 if cop == id!(|){
                     self.state.pop();
-                    self.state.push(State::ClosureArgs);
+                    self.state.push(State::FnBody);
                     return 1
                 }
                 // we're parsing ident,? ident,? ident,? 
@@ -340,7 +343,8 @@ impl ScriptParser{
                 }
                 if cop == id!(|){
                     self.state.pop();
-                    self.state.push(State::ClosureArgs);
+                    self.code.push(Value::OP_BEGIN_FN_ARGS);
+                    self.state.push(State::FnArgs);
                     return 1
                 }
             }
@@ -384,7 +388,6 @@ impl ScriptParser{
         
         // wait for the tokens to be consumed
         while self.index < self.tok.tokens.len() && self.state.len()>0{
-            println!("AT TOKEN {:?}", self.tok.tokens[self.index].token);
             let step = self.handle();
             self.index += step;
         }

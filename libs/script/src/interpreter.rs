@@ -3,15 +3,7 @@
 //use crate::parser::*;
 //use crate::tokenizer::*;
 use crate::parser::ScriptParser;
-use crate::object::*;
 use crate::value::Value;
-
-#[derive(Default)]
-struct Arenas{
-    _string: Vec<String>,
-    _object: Vec<Object>,
-    value: Vec<Value>,
-}
 
 #[derive(Default)]
 enum This{
@@ -23,24 +15,37 @@ enum This{
 
 #[derive(Default)]
 pub struct ScriptInterpreter{
-    stack: Arenas,
-    _heap: Arenas,
-    _this: This,
+    temp: String,
+    stack: Vec<Value>,
+    _this: Option<usize>,
     pub ip: usize
 }
 
 impl ScriptInterpreter{
+    pub fn get_string(&self, _value:Value){
+        // lets get a stack or heap string
+    }
+    
+    pub fn pop_free(&mut self){
+        // lets pop values off the stack and free associated values
+    }
+    
     pub fn op_add(&mut self){
-        let op1 = self.stack.value.pop().unwrap();
-        let op2 = self.stack.value.pop().unwrap();
+        // ok we're popping 2 values off the stack
+        // if these things are 'stack' strings/objects we need to pop them off as well
+        // we want this things value tho but its invalid now because of the stackpop
+        let op1 = self.stack.pop().unwrap();
+        let op2 = self.stack.pop().unwrap();
         
         if let Some(v1) = op1.as_f64(){
             if op2.is_string(){ // string concat
-                
+                // 
+                self.temp.clear();
+                //write!(self.temp,"{} {}")
             }
             // otherwise hardcast
             let v2 = op2.to_f64();
-            self.stack.value.push(Value::from_f64(v1 + v2));
+            self.stack.push(Value::from_f64(v1 + v2));
             return
         }
     }
@@ -67,7 +72,7 @@ impl ScriptInterpreter{
             }
         }
         else{ // its a direct value-to-stack?
-            self.stack.value.push(code);
+            self.stack.push(code);
         }
     }
 }
