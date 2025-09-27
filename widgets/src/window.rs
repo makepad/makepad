@@ -403,16 +403,15 @@ impl Widget for Window {
             },
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
-
-                    if self.view(id!(caption_bar)).visible() {
-                        let size = self.window.get_inner_size(cx);
                     
-                        if dq.abs.y < 25. {
-                            if dq.abs.x < size.x - 135.0 {
-                                dq.response.set(WindowDragQueryResponse::Caption);
-                            }
+                    let view_ref = self.view(id!(caption_label));
+                    
+                    if view_ref.visible() {
+                        let rect = view_ref.area().clipped_rect(cx);
+                        
+                        if rect.contains(dq.abs) {
+                            dq.response.set(WindowDragQueryResponse::Caption);
                             cx.set_cursor(MouseCursor::Default);
-
                         }
                         /*
                         if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
