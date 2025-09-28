@@ -7,6 +7,7 @@ pub mod id;
 pub mod colorhex;
 pub mod parser;
 pub mod interpreter;
+pub mod heap;
 
 // lifetimes
 // stack

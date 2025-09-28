@@ -6,15 +6,9 @@ Todos = [
     Todo{text:"Implement it"}
 ]
 
-
-/*
-
-   /*hi*/ 
-*/
-
 Ui = View{
     PortalList{
-        Button{} // niet nil/undefined/null
+        Button{}
         on_draw_item: |item|{
             View{
                 TextInput{
@@ -62,4 +56,4 @@ for todo in json{
         done: todo.done
     }
 }
-Todos += Todo{text:"Whilst this text is being generatekjhkjhkjhkjhkjhd the UI can update"}
+Todos += Todo{text:"Whilst this text is being generated the UI can update"}

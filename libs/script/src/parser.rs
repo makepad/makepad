@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use crate::tokenizer::*;
 use crate::id::*;
-use crate::object::*;
+use crate::heap::*;
 use crate::value::*;
 use makepad_script_derive::*;
 
@@ -61,11 +61,12 @@ impl State{
             id!(&)  => 11,
             id!(^)  => 12,
             id!(|)  => 13,
-            id!(==) | id!(!=)  | id!(<) | id!(>) | id!(<=) | id!(>=) => 14,
-            id!(&&)  => 15,
-            id!(||)  => 16,
-            id!(:) | id!(=) | id!(+=)  | id!(-=) | id!(*=) | id!(/=) | id!(%=) => 17,
-            id!(&=) | id!(|=)  | id!(^=) | id!(<<=) | id!(>>=) => 18,
+            id!(++) => 14,
+            id!(==) | id!(!=)  | id!(<) | id!(>) | id!(<=) | id!(>=) => 15,
+            id!(&&)  => 16,
+            id!(||)  => 17,
+            id!(:) | id!(=) | id!(+=)  | id!(-=) | id!(*=) | id!(/=) | id!(%=) => 18,
+            id!(&=) | id!(|=)  | id!(^=) | id!(<<=) | id!(>>=) => 19,
             _=>0
         }
     }
@@ -82,6 +83,7 @@ impl State{
             id!(&)  => Value::OP_AND,
             id!(^) => Value::OP_XOR,
             id!(|)  => Value::OP_OR,
+            id!(++)  => Value::OP_CONCAT,
             id!(==) => Value::OP_EQ,
             id!(!=) => Value::OP_NEQ,
             id!(<) => Value::OP_LT,
