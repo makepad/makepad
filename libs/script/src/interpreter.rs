@@ -4,6 +4,7 @@
 //use crate::tokenizer::*;
 use crate::parser::ScriptParser;
 use crate::value::Value;
+use crate::object::*;
 
 #[derive(Default)]
 enum This{
@@ -17,13 +18,14 @@ enum This{
 pub struct ScriptInterpreter{
     temp: String,
     stack: Vec<Value>,
+    pub heap: ScriptHeap,
     _this: Option<usize>,
     pub ip: usize
 }
 
 impl ScriptInterpreter{
-    pub fn get_string(&self, _value:Value){
-        // lets get a stack or heap string
+    pub fn tokenizer_strings(&mut self)->&mut Vec<HeapString>{
+        &mut self.heap.zones[0].strings
     }
     
     pub fn pop_free(&mut self){
@@ -39,7 +41,9 @@ impl ScriptInterpreter{
         
         if let Some(v1) = op1.as_f64(){
             if op2.is_string(){ // string concat
-                // 
+                // get str value
+                let _op2s = self.heap.value_string(op2);
+                
                 self.temp.clear();
                 //write!(self.temp,"{} {}")
             }
