@@ -7,7 +7,6 @@ pub mod id;
 pub mod colorhex;
 pub mod parser;
 pub mod interpreter;
-pub mod string_table;
 
 // lifetimes
 // stack
@@ -32,9 +31,9 @@ pub fn test(){
     // Todo = Todo{done:1*x[1].y(2+3)};
         
     
-    let mut parser = ScriptParser::default();
-    parser.parse(&code);
-    parser.tok.dump_tokens();
     let mut interpreter = ScriptInterpreter::default();
+    let mut parser = ScriptParser::default();
+    parser.parse(&code, &mut interpreter.heap);
+    parser.tok.dump_tokens(&interpreter.heap);
     interpreter.run(&parser);
 }

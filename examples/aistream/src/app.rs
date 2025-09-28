@@ -1,22 +1,16 @@
 
-on_draw_item: |item:string, item:string|{
-    let x:item = 
-}
 
-
+Todo = {done:false}
 Todos = [
     Todo{text:"Design Splash"}
     Todo{text:"Implement it"}
 ]
 
-// decide the variable resolution algorithm.
-// we have 3 sources
-// one is the let scope chain
-// one is the object tree
-// one is function arguments
-    // ONLY when explicit. implicit ones are done using args object
-// how do these things relate.
 
+/*
+
+   /*hi*/ 
+*/
 
 Ui = View{
     PortalList{
@@ -68,4 +62,4 @@ for todo in json{
         done: todo.done
     }
 }
-Todos += Todo{text:"Whilst this text is being generated the UI can update"}
+Todos += Todo{text:"Whilst this text is being generatekjhkjhkjhkjhkjhd the UI can update"}
