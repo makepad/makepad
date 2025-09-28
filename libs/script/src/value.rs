@@ -9,10 +9,34 @@ pub struct ObjectPtr{
     pub index: u32    
 }
 
+impl From<ObjectPtr> for Value{
+    fn from(v:ObjectPtr) -> Self{
+        Value::from_object(v)
+    }
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct StringPtr{
     pub zone: u8,
     pub index: u32    
+}
+
+impl From<StringPtr> for Value{
+    fn from(v:StringPtr) -> Self{
+        Value::from_string(v)
+    }
+}
+
+impl From<f64> for Value{
+    fn from(v:f64) -> Self{
+        Value::from_f64(v)
+    }
+}
+
+impl From<Id> for Value{
+    fn from(v:Id) -> Self{
+        Value::from_id(v)
+    }
 }
 
 use std::fmt;
@@ -31,11 +55,13 @@ impl Value{
     pub const TYPE_NIL: u64 = 0xFFFF_0300_0000_0000;
     pub const NIL: Value = Value(Self::TYPE_NIL);
     pub const TYPE_COLOR: u64 = 0xFFFF_0400_0000_0000;
+    pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
+    pub const TYPE_OBJECT: u64 = 0xFFFF_0600_0000_0000;
     
     pub const TYPE_ID: u64 = 0xFFFF_8000_0000_0000;
     
     // opcodes
-    pub const TYPE_OPCODE: u64 = 0xFFFF_0500_0000_0000;
+    pub const TYPE_OPCODE: u64 = 0xFFFF_0700_0000_0000;
     pub const OP_NOP: Value = Value(Self::TYPE_OPCODE | 0);
     pub const OP_PROP: Value = Value(Self::TYPE_OPCODE | 1);
     pub const OP_NOT: Value = Value(Self::TYPE_OPCODE | 2);
@@ -51,44 +77,43 @@ impl Value{
     pub const OP_OR: Value = Value(Self::TYPE_OPCODE | 12);
     pub const OP_XOR: Value = Value(Self::TYPE_OPCODE | 13);
     
-    pub const OP_EQ: Value = Value(Self::TYPE_OPCODE | 14);
-    pub const OP_NEQ: Value = Value(Self::TYPE_OPCODE | 15);
-    pub const OP_LT: Value = Value(Self::TYPE_OPCODE | 16);
-    pub const OP_GT: Value = Value(Self::TYPE_OPCODE | 17);
-    pub const OP_LEQ: Value = Value(Self::TYPE_OPCODE | 18);
-    pub const OP_GEQ: Value = Value(Self::TYPE_OPCODE | 19);
-    pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | 20);
-    pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | 21);
+    pub const OP_CONCAT: Value = Value(Self::TYPE_OPCODE | 14);
+    pub const OP_EQ: Value = Value(Self::TYPE_OPCODE | 15);
+    pub const OP_NEQ: Value = Value(Self::TYPE_OPCODE | 16);
+    pub const OP_LT: Value = Value(Self::TYPE_OPCODE | 17);
+    pub const OP_GT: Value = Value(Self::TYPE_OPCODE | 18);
+    pub const OP_LEQ: Value = Value(Self::TYPE_OPCODE | 19);
+    pub const OP_GEQ: Value = Value(Self::TYPE_OPCODE | 20);
+    pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | 21);
+    pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | 22);
     
-    pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | 22);
-    pub const OP_ASSIGN_ADD: Value = Value(Self::TYPE_OPCODE | 23);
-    pub const OP_ASSIGN_SUB: Value = Value(Self::TYPE_OPCODE | 24);
-    pub const OP_ASSIGN_MUL: Value = Value(Self::TYPE_OPCODE | 25);
-    pub const OP_ASSIGN_DIV: Value = Value(Self::TYPE_OPCODE | 26);
-    pub const OP_ASSIGN_MOD: Value = Value(Self::TYPE_OPCODE | 27);
-    pub const OP_ASSIGN_AND: Value = Value(Self::TYPE_OPCODE | 28);
-    pub const OP_ASSIGN_OR: Value = Value(Self::TYPE_OPCODE | 29);
-    pub const OP_ASSIGN_XOR: Value = Value(Self::TYPE_OPCODE | 30);
-    pub const OP_ASSIGN_SHL: Value = Value(Self::TYPE_OPCODE | 31);
-    pub const OP_ASSIGN_SHR: Value = Value(Self::TYPE_OPCODE | 32);
-    pub const OP_ASSIGN_IFNIL: Value = Value(Self::TYPE_OPCODE | 33);
-    pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | 34);
-    pub const OP_END_PROTO: Value = Value(Self::TYPE_OPCODE | 35);
-    pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | 36);
-    pub const OP_END_BARE: Value = Value(Self::TYPE_OPCODE | 37);
-    pub const OP_BEGIN_CALL: Value = Value(Self::TYPE_OPCODE | 38);
-    pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | 39);
-    pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | 40);
-    pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | 41);
-    pub const OP_BEGIN_FN_ARGS: Value = Value(Self::TYPE_OPCODE | 42);
-    pub const OP_BEGIN_FN_BODY: Value = Value(Self::TYPE_OPCODE | 43);
-    pub const OP_END_FN_BODY: Value = Value(Self::TYPE_OPCODE | 44);
+    pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | 23);
+    pub const OP_ASSIGN_ADD: Value = Value(Self::TYPE_OPCODE | 24);
+    pub const OP_ASSIGN_SUB: Value = Value(Self::TYPE_OPCODE | 25);
+    pub const OP_ASSIGN_MUL: Value = Value(Self::TYPE_OPCODE | 26);
+    pub const OP_ASSIGN_DIV: Value = Value(Self::TYPE_OPCODE | 27);
+    pub const OP_ASSIGN_MOD: Value = Value(Self::TYPE_OPCODE | 28);
+    pub const OP_ASSIGN_AND: Value = Value(Self::TYPE_OPCODE | 29);
+    pub const OP_ASSIGN_OR: Value = Value(Self::TYPE_OPCODE | 30);
+    pub const OP_ASSIGN_XOR: Value = Value(Self::TYPE_OPCODE | 31);
+    pub const OP_ASSIGN_SHL: Value = Value(Self::TYPE_OPCODE | 32);
+    pub const OP_ASSIGN_SHR: Value = Value(Self::TYPE_OPCODE | 33);
+    pub const OP_ASSIGN_IFNIL: Value = Value(Self::TYPE_OPCODE | 34);
+    pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | 35);
+    pub const OP_END_PROTO: Value = Value(Self::TYPE_OPCODE | 36);
+    pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | 37);
+    pub const OP_END_BARE: Value = Value(Self::TYPE_OPCODE | 38);
+    pub const OP_BEGIN_CALL: Value = Value(Self::TYPE_OPCODE | 39);
+    pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | 40);
+    pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | 41);
+    pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | 42);
+    pub const OP_BEGIN_FN_ARGS: Value = Value(Self::TYPE_OPCODE | 43);
+    pub const OP_BEGIN_FN_BODY: Value = Value(Self::TYPE_OPCODE | 44);
+    pub const OP_END_FN_BODY: Value = Value(Self::TYPE_OPCODE | 45);
     
-    pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 42);
-    pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 43);
+    pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 46);
+    pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 47);
     
-    pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
-    pub const TYPE_OBJECT: u64 = 0xFFFF_0600_0000_0000;
         
     // TODO: make this behave like javascript as much as is sensible
     
@@ -121,7 +146,7 @@ impl Value{
     pub fn from_string(ptr: StringPtr)->Self{
          Self(((ptr.zone as u64) << 32) | ptr.index as u64 | Self::TYPE_STRING)
     }
-    
+    /*
     pub fn to_bool(&self)->bool{
         if self.is_bool(){
             return *self == Self::TRUE
@@ -151,7 +176,7 @@ impl Value{
             return (self.0&0xffff_ffff) as u32
         }
         0
-    }
+    }*/
     
     pub fn as_bool(&self)->Option<bool>{
         if self.is_bool(){
@@ -242,14 +267,20 @@ impl fmt::Debug for Value {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.is_f64(){
-            return write!(f, "{}", self.to_f64())
+        if let Some(v) = self.as_f64(){
+            return write!(f, "{}", v)
         }
-        if self.is_id(){
-            return write!(f, "{}", self.to_id())
+        if let Some(v) = self.as_id(){
+            return write!(f, "{}", v)
         }
-        if self.is_bool(){
-            return write!(f, "{}", self.to_bool())
+        if let Some(v) = self.as_bool(){
+            return write!(f, "{}", v)
+        }
+        if let Some(_) = self.as_string(){
+            return write!(f, "[String]")
+        }
+        if let Some(_) = self.as_object(){
+            return write!(f, "[Object]")
         }
         if self.is_nil(){
             return write!(f, "nil")

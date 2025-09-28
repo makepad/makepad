@@ -3,7 +3,7 @@
 use crate::id::Id;
 use crate::colorhex::hex_bytes_to_u32;
 use makepad_script_derive::*;
-use crate::object::*;
+use crate::heap::*;
 use crate::value::*;
  
 

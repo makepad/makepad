@@ -4,7 +4,7 @@
 //use crate::tokenizer::*;
 use crate::parser::ScriptParser;
 use crate::value::Value;
-use crate::object::*;
+use crate::heap::*;
 
 #[derive(Default)]
 enum This{
@@ -16,7 +16,6 @@ enum This{
 
 #[derive(Default)]
 pub struct ScriptInterpreter{
-    temp: String,
     stack: Vec<Value>,
     pub heap: ScriptHeap,
     _this: Option<usize>,
@@ -24,34 +23,26 @@ pub struct ScriptInterpreter{
 }
 
 impl ScriptInterpreter{
-    pub fn tokenizer_strings(&mut self)->&mut Vec<HeapString>{
-        &mut self.heap.zones[0].strings
-    }
-    
     pub fn pop_free(&mut self){
         // lets pop values off the stack and free associated values
     }
     
     pub fn op_add(&mut self){
-        // ok we're popping 2 values off the stack
-        // if these things are 'stack' strings/objects we need to pop them off as well
-        // we want this things value tho but its invalid now because of the stackpop
         let op1 = self.stack.pop().unwrap();
         let op2 = self.stack.pop().unwrap();
-        
-        if let Some(v1) = op1.as_f64(){
-            if op2.is_string(){ // string concat
-                // get str value
-                let _op2s = self.heap.value_string(op2);
-                
-                self.temp.clear();
-                //write!(self.temp,"{} {}")
-            }
-            // otherwise hardcast
-            let v2 = op2.to_f64();
-            self.stack.push(Value::from_f64(v1 + v2));
-            return
-        }
+        let v1 = self.heap.cast_to_f64(op1);
+        let v2 = self.heap.cast_to_f64(op2);
+        self.stack.push(Value::from_f64(v1 + v2));
+    }
+    
+    pub fn op_concat(&mut self){
+        let op1 = self.stack.pop().unwrap();
+        let op2 = self.stack.pop().unwrap();
+        let ptr = self.heap.new_dyn_string_with(|heap, out|{
+            heap.cast_to_string(op1, out);
+            heap.cast_to_string(op2, out);
+        });
+        self.stack.push(ptr.into());
     }
     
     pub fn run(&mut self, parser: &ScriptParser){
@@ -69,6 +60,9 @@ impl ScriptInterpreter{
                 }
                 Value::OP_ADD=>{
                     self.op_add();
+                }
+                Value::OP_CONCAT=>{
+                    self.op_concat();
                 }
                 _=>{
                     // unknown instruction
