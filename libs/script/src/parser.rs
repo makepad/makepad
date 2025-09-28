@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use crate::tokenizer::*;
 use crate::id::*;
+use crate::object::*;
 use crate::value::*;
 use makepad_script_derive::*;
 
@@ -120,7 +121,6 @@ impl State{
         }
     }
 }
-
 
 
 
@@ -336,8 +336,8 @@ impl ScriptParser{
                     self.state.pop();
                     return 1
                 }
-                if let Some(index) = ct.maybe_string(){
-                    self.code.push(Value::from_static_string(index));
+                if let Some(ptr) = ct.maybe_string(){
+                    self.code.push(Value::from_string(ptr));
                     self.state.pop();
                     return 1
                 }
@@ -383,8 +383,8 @@ impl ScriptParser{
         0
     }
     
-    pub fn parse(&mut self, new_code:&str){
-        self.tok.tokenize(new_code);
+    pub fn parse(&mut self, new_code:&str, heap:&mut ScriptHeap){
+        self.tok.tokenize(new_code, heap);
         
         // wait for the tokens to be consumed
         while self.index < self.tok.tokens.len() && self.state.len()>0{

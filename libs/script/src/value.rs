@@ -1,8 +1,20 @@
 use crate::id::Id;
-use crate::string_table::StringIndex;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Value(u64);
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct ObjectPtr{
+    pub zone: u8,
+    pub index: u32    
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct StringPtr{
+    pub zone: u8,
+    pub index: u32    
+}
+
 use std::fmt;
 // NaN box value
 
@@ -76,14 +88,8 @@ impl Value{
     pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 43);
     
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
-    pub const TYPE_STRING_MASK: u64 = 0xFFFF_FFFF_0000_0000;
-    pub const TYPE_HEAP_STRING: u64 = 0xFFFF_0501_0000_0000;
-    pub const TYPE_STACK_STRING: u64 = 0xFFFF_0502_0000_0000;
-    pub const TYPE_STATIC_STRING: u64 = 0xFFFF_0503_0000_0000;
-    
-    
     pub const TYPE_OBJECT: u64 = 0xFFFF_0600_0000_0000;
-    
+        
     // TODO: make this behave like javascript as much as is sensible
     
     pub fn from_f64(val:f64)->Self{
@@ -95,8 +101,8 @@ impl Value{
         }
     }
     
-    pub fn from_object(val: usize)->Self{
-         Self((val as u64&0xffff_ffff) | Self::TYPE_OBJECT)
+    pub fn from_object(ptr: ObjectPtr)->Self{
+         Self(((ptr.zone as u64) << 32) | ptr.index as u64 | Self::TYPE_OBJECT)
     }
         
     pub fn from_bool(val: bool)->Self{
@@ -112,8 +118,8 @@ impl Value{
         Self(val.0|Self::TYPE_ID)
     }
     
-    pub fn from_static_string(index: StringIndex)->Self{
-        Self((index.0 as u64 & 0xffff_ffff)|Self::TYPE_STATIC_STRING)
+    pub fn from_string(ptr: StringPtr)->Self{
+         Self(((ptr.zone as u64) << 32) | ptr.index as u64 | Self::TYPE_STRING)
     }
     
     pub fn to_bool(&self)->bool{
@@ -168,17 +174,22 @@ impl Value{
         None
     }
     
-               
-    pub fn as_object(&self)->Option<usize>{
+    pub fn as_object(&self)->Option<ObjectPtr>{
         if self.is_object(){
-            return Some(self.0 as usize & 0x0000_0000_ffff_ffff)
+            return Some(ObjectPtr{
+                zone: ((self.0 &0xff_0000_0000) >>32) as u8,
+                index: (self.0 & 0xffff_ffff) as u32
+            })
         }
         None
     }
     
-    pub fn as_heap_string(&self)->Option<usize>{
-        if self.is_heap_string(){
-            return Some(self.0 as usize & 0x0000_0000_ffff_ffff)
+    pub fn as_string(&self)->Option<StringPtr>{
+        if self.is_string(){
+            return Some(StringPtr{
+                zone: ((self.0 & 0xff_0000_0000) >>32) as u8,
+                index: (self.0 & 0xffff_ffff) as u32
+            })
         }
         None
     }
@@ -216,10 +227,6 @@ impl Value{
     
     pub fn is_string(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_STRING
-    }
-    
-    pub fn is_heap_string(&self)->bool{
-        (self.0 & Self::TYPE_STRING_MASK) == Self::TYPE_HEAP_STRING
     }
     
     pub fn is_object(&self)->bool{
