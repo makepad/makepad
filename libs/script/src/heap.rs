@@ -1,6 +1,8 @@
 use std::fmt::Write;
 use crate::value::*;
 use crate::object::*;
+use crate::id::*;
+use makepad_script_derive::*;
 
 #[derive(Default)]
 pub struct HeapTag(u32);
@@ -75,6 +77,29 @@ impl HeapZone{
         }
     }
     
+    pub fn new_object(&mut self)->ObjectPtr{
+        if let Some(index) = self.objects_free.pop(){
+            self.objects[index].tag.clear_free();
+            ObjectPtr{
+                zone: self.zone,
+                index: index as _
+            }
+        }
+        else{
+            let index = self.objects.len();
+            self.objects.push(Default::default());
+            ObjectPtr{
+                zone: self.zone,
+                index: index as _
+            }
+        }
+    }
+    
+    pub fn free_object(&mut self, index: usize){
+        self.objects[index].tag.set_free();
+        self.objects_free.push(index);
+    }
+     
     fn new(zone:u8)->Self{
         Self{
             zone,
@@ -96,13 +121,23 @@ impl HeapZone{
         obj.tag.set_mark();
         let len = obj.fields.len();
         for i in 0..len{
-            let value = self.objects[index].fields[i];
-            if let Some(ptr) = value.as_object(){
+            let field = &self.objects[index].fields[i];
+            if let Some(ptr) = field.key.as_object(){
                 if ptr.zone == self.zone{
                     self.mark_vec.push(ptr.index as usize);
                 }
             }
-            else if let Some(ptr) = value.as_string(){
+            else if let Some(ptr) = field.key.as_string(){
+                if ptr.zone == self.zone{
+                    self.strings[ptr.index as usize].tag.set_mark();
+                }
+            }
+            if let Some(ptr) = field.value.as_object(){
+                if ptr.zone == self.zone{
+                    self.mark_vec.push(ptr.index as usize);
+                }
+            }
+            else if let Some(ptr) = field.value.as_string(){
                 if ptr.zone == self.zone{
                     self.strings[ptr.index as usize].tag.set_mark();
                 }
@@ -137,7 +172,7 @@ impl HeapZone{
         for i in 0..self.objects.len(){
             let obj = &mut self.objects[i];
             if !obj.tag.is_marked() && !obj.tag.is_free(){
-                obj.tag.set_free();
+                obj.make_free();
                 obj.fields.clear();
                 self.objects_free.push(i);
             }
@@ -197,7 +232,7 @@ impl ScriptHeap{
     }
         
     pub fn cast_to_string(&self, v:Value, out:&mut String){
-        if let Some(v) = v.as_string(){ 
+        if let Some(v) = v.as_string(){
             let str = self.string(v);
             out.push_str(str);
         }
@@ -230,7 +265,7 @@ impl ScriptHeap{
         if let Some(v) = v.as_f64(){
             v
         }
-        else if let Some(v) = v.as_string(){ 
+        else if let Some(v) = v.as_string(){
             let str = self.string(v);
             if let Ok(v) = str.parse::<f64>(){
                 return v
@@ -289,7 +324,15 @@ impl ScriptHeap{
         &mut self.zones[ptr.zone as usize].strings[ptr.index as usize].string
     }
     
-    pub fn alloc_static_string(&mut self, string:String)->StringPtr{
+    pub fn new_dyn_object(&mut self)->ObjectPtr{
+        self.zones[Self::DYNAMIC].new_object()
+    }
+        
+    pub fn free_object(&mut self, ptr:ObjectPtr){
+        self.zones[ptr.zone as usize].free_object(ptr.index as usize);
+    }
+    
+    pub fn new_static_string(&mut self, string:String)->StringPtr{
         let zone = &mut self.zones[Self::STATIC];
         let index = zone.strings.len();
         zone.strings.push(HeapString{
@@ -302,12 +345,69 @@ impl ScriptHeap{
         }
     }
     
-    pub fn freeze(&mut self, _index:usize){
-        // move object tree at index to frozen heapzone
+    pub fn object_value(&self, set_ptr:ObjectPtr, key:Value)->Value{
+        let mut ptr = set_ptr;
+        loop{
+            let object = &self.zones[ptr.zone as usize].objects[ptr.index as usize];
+            if key == id!(proto).to_value(){
+                return object.proto
+            }
+            for field in &object.fields{
+                if field.key == key{
+                    return field.value
+                }
+            }
+            if let Some(next_ptr) = object.proto.as_object(){
+                ptr = next_ptr
+            }
+            else{
+                break;
+            }
+        }
+        Value::NIL
     }
     
-    pub fn unfreeze(&mut self, _index:usize){
-       // self.mark_vec.clear();
-        // unfreeze/unmanual an entire tree so it can be gc'ed again
+    pub fn set_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
+        let object = &mut self.zones[ptr.zone as usize].objects[ptr.index as usize];
+        if key == id!(proto).to_value(){
+            object.proto = value;
+            return
+        }
+        for field in &mut object.fields{
+            if field.key == key{
+                field.value = value;
+                return
+            }
+        }
+        object.fields.push(Field{
+            key,
+            value
+        });
+    }
+    
+    pub fn set_proto_value(&mut self, set_ptr:ObjectPtr, key:Value, value:Value){
+        let mut ptr = set_ptr;
+        // scan up the chain to set the proto value
+        loop{
+            let object = &mut self.zones[ptr.zone as usize].objects[ptr.index as usize];
+            for field in &mut object.fields{
+                if field.key == key{
+                    field.value = value;
+                    return
+                }
+            }
+            if let Some(next_ptr) = object.proto.as_object(){
+                ptr = next_ptr
+            }
+            else{
+                break;
+            }
+        }
+        // append to current object
+        let object = &mut self.zones[set_ptr.zone as usize].objects[set_ptr.index as usize];
+        object.fields.push(Field{
+            key,
+            value
+        });
     }
 }

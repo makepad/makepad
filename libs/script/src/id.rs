@@ -10,7 +10,7 @@ use {
         fmt,
     }
 };
-
+use crate::value::*;
 
 impl IdToString {
     pub fn add(&mut self, val: &str) {
@@ -63,11 +63,11 @@ impl Id {
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
-    
-    pub fn value(&self) -> u64 {
-        self.0
-    }
         
+    pub const fn to_value(self)->Value{
+        Value::from_id(self)
+    }
+    
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
     pub const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize) -> Self {

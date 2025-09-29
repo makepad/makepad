@@ -3,6 +3,12 @@ use crate::id::Id;
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Value(u64);
 
+impl Default for Value{
+    fn default()->Self{
+        Self::NIL
+    }
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct ObjectPtr{
     pub zone: u8,
@@ -63,31 +69,31 @@ impl Value{
     // opcodes
     pub const TYPE_OPCODE: u64 = 0xFFFF_0700_0000_0000;
     pub const OP_NOP: Value = Value(Self::TYPE_OPCODE | 0);
-    pub const OP_PROP: Value = Value(Self::TYPE_OPCODE | 1);
-    pub const OP_NOT: Value = Value(Self::TYPE_OPCODE | 2);
-    pub const OP_NEG: Value = Value(Self::TYPE_OPCODE | 3);
-    pub const OP_MUL: Value = Value(Self::TYPE_OPCODE | 4);
-    pub const OP_DIV: Value = Value(Self::TYPE_OPCODE | 5);
-    pub const OP_MOD: Value = Value(Self::TYPE_OPCODE | 6);
-    pub const OP_ADD: Value = Value(Self::TYPE_OPCODE | 7);
-    pub const OP_SUB: Value = Value(Self::TYPE_OPCODE | 8);
-    pub const OP_SHL: Value = Value(Self::TYPE_OPCODE | 9);
-    pub const OP_SHR: Value = Value(Self::TYPE_OPCODE | 10);
-    pub const OP_AND: Value = Value(Self::TYPE_OPCODE | 11);
-    pub const OP_OR: Value = Value(Self::TYPE_OPCODE | 12);
-    pub const OP_XOR: Value = Value(Self::TYPE_OPCODE | 13);
+    pub const OP_NOT: Value = Value(Self::TYPE_OPCODE | 1);
+    pub const OP_NEG: Value = Value(Self::TYPE_OPCODE | 2);
+    pub const OP_MUL: Value = Value(Self::TYPE_OPCODE | 3);
+    pub const OP_DIV: Value = Value(Self::TYPE_OPCODE | 4);
+    pub const OP_MOD: Value = Value(Self::TYPE_OPCODE | 5);
+    pub const OP_ADD: Value = Value(Self::TYPE_OPCODE | 6);
+    pub const OP_SUB: Value = Value(Self::TYPE_OPCODE | 7);
+    pub const OP_SHL: Value = Value(Self::TYPE_OPCODE | 8);
+    pub const OP_SHR: Value = Value(Self::TYPE_OPCODE | 9);
+    pub const OP_AND: Value = Value(Self::TYPE_OPCODE | 10);
+    pub const OP_OR: Value = Value(Self::TYPE_OPCODE | 11);
+    pub const OP_XOR: Value = Value(Self::TYPE_OPCODE | 12);
     
-    pub const OP_CONCAT: Value = Value(Self::TYPE_OPCODE | 14);
-    pub const OP_EQ: Value = Value(Self::TYPE_OPCODE | 15);
-    pub const OP_NEQ: Value = Value(Self::TYPE_OPCODE | 16);
-    pub const OP_LT: Value = Value(Self::TYPE_OPCODE | 17);
-    pub const OP_GT: Value = Value(Self::TYPE_OPCODE | 18);
-    pub const OP_LEQ: Value = Value(Self::TYPE_OPCODE | 19);
-    pub const OP_GEQ: Value = Value(Self::TYPE_OPCODE | 20);
-    pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | 21);
-    pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | 22);
+    pub const OP_CONCAT: Value = Value(Self::TYPE_OPCODE | 13);
+    pub const OP_EQ: Value = Value(Self::TYPE_OPCODE | 14);
+    pub const OP_NEQ: Value = Value(Self::TYPE_OPCODE | 15);
+    pub const OP_LT: Value = Value(Self::TYPE_OPCODE | 16);
+    pub const OP_GT: Value = Value(Self::TYPE_OPCODE | 17);
+    pub const OP_LEQ: Value = Value(Self::TYPE_OPCODE | 18);
+    pub const OP_GEQ: Value = Value(Self::TYPE_OPCODE | 19);
+    pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | 20);
+    pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | 21);
     
-    pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | 23);
+    pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | 22);
+    pub const OP_ASSIGN_FIELD: Value = Value(Self::TYPE_OPCODE | 23);
     pub const OP_ASSIGN_ADD: Value = Value(Self::TYPE_OPCODE | 24);
     pub const OP_ASSIGN_SUB: Value = Value(Self::TYPE_OPCODE | 25);
     pub const OP_ASSIGN_MUL: Value = Value(Self::TYPE_OPCODE | 26);
@@ -117,7 +123,7 @@ impl Value{
         
     // TODO: make this behave like javascript as much as is sensible
     
-    pub fn from_f64(val:f64)->Self{
+    pub const fn from_f64(val:f64)->Self{
         if val.is_nan(){
             Self::NAN
         }
@@ -130,16 +136,16 @@ impl Value{
          Self(((ptr.zone as u64) << 32) | ptr.index as u64 | Self::TYPE_OBJECT)
     }
         
-    pub fn from_bool(val: bool)->Self{
+    pub const fn from_bool(val: bool)->Self{
         if val{Self::TRUE}
         else{Self::FALSE}
     }
     
-    pub fn from_color(val: u32)->Self{
+    pub const fn from_color(val: u32)->Self{
         Self(val as u64|Self::TYPE_COLOR)
     }
     
-    pub fn from_id(val: Id)->Self{
+    pub const fn from_id(val: Id)->Self{
         Self(val.0|Self::TYPE_ID)
     }
     
@@ -306,6 +312,7 @@ impl fmt::Display for Value {
                 Self::OP_LOGIC_AND => return write!(f, "&&"),
                 Self::OP_LOGIC_OR => return write!(f, "||"),
                 Self::OP_ASSIGN => return write!(f, "="),
+                Self::OP_ASSIGN_FIELD => return write!(f, ":"),
                 Self::OP_ASSIGN_ADD => return write!(f, "+="),
                 Self::OP_ASSIGN_SUB => return write!(f, "-="),
                 Self::OP_ASSIGN_MUL => return write!(f, "*="),
