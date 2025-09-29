@@ -424,7 +424,7 @@ impl Markdown {
                     } else {
                         "•".to_string()
                     };
-                    tf.begin_list_item(cx, &marker, 1.5);
+                    tf.begin_list_item(cx, &marker, 2.5);
                 }
                 MdEvent::End(TagEnd::Item) => {
                     tf.end_list_item(cx);
