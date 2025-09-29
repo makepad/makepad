@@ -565,8 +565,9 @@ impl Widget for Button {
                     cx.set_key_focus(self.draw_bg.area());
                 }
                 cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
-                    self.animator_play(cx, id!(hover.down));
-                    self.set_key_focus(cx);
+                self.animator_play(cx, id!(hover.down));
+                self.set_key_focus(cx);
+                cx.set_cursor(MouseCursor::Hand);
             }
             Hit::FingerHoverIn(_) => {
                 if self.enabled {

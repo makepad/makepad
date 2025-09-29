@@ -1202,9 +1202,11 @@ impl Widget for TextInput {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, id!(hover.on));
+                cx.set_cursor(MouseCursor::Text);
             }
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, id!(hover.off));
+                cx.set_cursor(MouseCursor::Default);
             }
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, id!(focus.on));
