@@ -19,7 +19,7 @@ Ui = View{
                 }
                 Button{
                     text: "delete"
-                    on_click: {
+                    on_click: ||{
                         delete Todos[item]
                     }
                 }
@@ -29,19 +29,19 @@ Ui = View{
     
     View{
         flow: Right
-        _new_item = TextInput{}
+        _new_item: TextInput{}
         Button{
             text: "Add"
-            on_click: {
+            on_click: ||{
                 Todos += Todo{
-                    text: _new_item.text
+                    text: up._new_item.text
                 }
-                _new_item.text = ""
+                up._new_item.text = ""
             }
         }
         Button{
             text: "Clear completed"
-            on_click: {
+            on_click: ||{
                 delete Todos[?@.done]
             }
         }
