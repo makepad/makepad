@@ -219,7 +219,7 @@ impl ScriptTokenizer{
             heap.mut_string(*ptr).push(c);
         }
         else{
-            let ptr = heap.alloc_static_string(c.into());
+            let ptr = heap.new_static_string(c.into());
             self.tokens.push(ScriptTokenPos{pos: self.pos, token: ScriptToken::StringUnfinished(ptr)});
         }
     }
