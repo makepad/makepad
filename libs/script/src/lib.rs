@@ -37,7 +37,8 @@ pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
     let code = "
-        let t = 1.0
+        t[x] = 1.0
+        t.x = t.y
         Todo = {
             done: t
         };
@@ -45,9 +46,9 @@ pub fn test(){
         
     // Todo = Todo{done:1*x[1].y(2+3)};
     
-    let mut interpreter = ScriptInterpreter::new();
+    let mut interp = ScriptInterpreter::new();
     let mut parser = ScriptParser::default();
-    parser.parse(&code, &mut interpreter.heap);
-    parser.tok.dump_tokens(&interpreter.heap);
-    interpreter.run(&parser);
+    parser.parse(&code, &mut interp.heap);
+    parser.tok.dump_tokens(&interp.heap);
+    interp.run(&parser);
 }

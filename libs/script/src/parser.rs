@@ -15,9 +15,11 @@ enum State{
     EndExpr,
     EndStmt,
     EmitOp(Id),
-    Bare,
+    EmitFieldAssign(Id),
+    EmitIndexAssign(Id),
+    EndBare,
     Call,
-    Prototype,
+    EndProto,
     ArrayIndex,
     EndFrag,
     For,
@@ -71,6 +73,52 @@ impl State{
         }
     }
     
+    fn is_assign_operator(op:Id)->bool{
+        match op{
+            id!(=) | id!(:) | id!(+=) | 
+            id!(-=) | id!(*=) | id!(/=) |
+            id!(%=) | id!(&=) | id!(|=) | 
+            id!(^=) | id!(<<=) | id!(>>=) | 
+            id!(?=)  => true,
+            _=>false
+        }
+    }
+    
+    fn operator_to_field_assign(op:Id)->Value{
+        match op{
+            id!(=) => Value::OP_ASSIGN_FIELD,
+            id!(+=) => Value::OP_ASSIGN_FIELD_ADD,
+            id!(-=) => Value::OP_ASSIGN_FIELD_SUB,
+            id!(*=) => Value::OP_ASSIGN_FIELD_MUL,
+            id!(/=) => Value::OP_ASSIGN_FIELD_DIV,
+            id!(%=) => Value::OP_ASSIGN_FIELD_MOD, 
+            id!(&=) => Value::OP_ASSIGN_FIELD_AND,
+            id!(|=) => Value::OP_ASSIGN_FIELD_OR,
+            id!(^=) => Value::OP_ASSIGN_FIELD_XOR,
+            id!(<<=) => Value::OP_ASSIGN_FIELD_SHL,
+            id!(>>=) => Value::OP_ASSIGN_FIELD_SHR,
+            id!(?=) => Value::OP_ASSIGN_FIELD_IFNIL,
+            _=>Value::OP_NOP,
+        }
+    }
+    
+    fn operator_to_index_assign(op:Id)->Value{
+        match op{
+            id!(=) => Value::OP_ASSIGN_INDEX,
+            id!(+=) => Value::OP_ASSIGN_INDEX_ADD,
+            id!(-=) => Value::OP_ASSIGN_INDEX_SUB,
+            id!(*=) => Value::OP_ASSIGN_INDEX_MUL,
+            id!(/=) => Value::OP_ASSIGN_INDEX_DIV,
+            id!(%=) => Value::OP_ASSIGN_INDEX_MOD, 
+            id!(&=) => Value::OP_ASSIGN_INDEX_AND,
+            id!(|=) => Value::OP_ASSIGN_INDEX_OR,
+            id!(^=) => Value::OP_ASSIGN_INDEX_XOR,
+            id!(<<=) => Value::OP_ASSIGN_INDEX_SHL,
+            id!(>>=) => Value::OP_ASSIGN_INDEX_SHR,
+            id!(?=) => Value::OP_ASSIGN_INDEX_IFNIL,
+            _=>Value::OP_NOP,
+        }
+    }
     fn operator_to_opcode(op:Id)->Value{
         match op{
             id!(*) => Value::OP_MUL,
@@ -92,8 +140,8 @@ impl State{
             id!(>=) => Value::OP_GEQ,
             id!(&&) => Value::OP_LOGIC_AND,
             id!(||)  => Value::OP_LOGIC_OR,
+            id!(:) => Value::OP_ASSIGN_IT,
             id!(=) => Value::OP_ASSIGN,
-            id!(:) => Value::OP_ASSIGN_FIELD,
             id!(+=) => Value::OP_ASSIGN_ADD,
             id!(-=) => Value::OP_ASSIGN_SUB,
             id!(*=) => Value::OP_ASSIGN_MUL,
@@ -149,33 +197,19 @@ impl Default for ScriptParser{
 
 impl ScriptParser{
     
-    fn ct(&self)->ScriptToken{
-        if let Some(tok) = self.tok.tokens.get(self.index){
-            tok.token.clone()
-        }
-        else{
-            ScriptToken::StreamEnd
-        }
-    }
-    
-    fn nt(&self)->ScriptToken{
-        if let Some(tok) = self.tok.tokens.get(self.index+1){
-            tok.token.clone()
-        }
-        else{
-            ScriptToken::StreamEnd
-        }
-    }
-    
     fn push_state(&mut self, state:State){
         self.state.push(state)
     }
     
     fn handle(&mut self)->usize{
-        let ct = self.ct();
-        let cop = ct.operator();
-        let cid = ct.identifier();
-        let _nt = self.nt();
+        let tok = if let Some(tok) = self.tok.tokens.get(self.index){
+            tok.token.clone()
+        }
+        else{
+            ScriptToken::StreamEnd
+        };
+        let op = tok.operator();
+        let id = tok.identifier();
         match self.state.pop().unwrap(){
             State::For=>{}
             State::ForIdent=>{}
@@ -184,7 +218,7 @@ impl ScriptParser{
             State::EndFrag=>{
                 // we expect a ) here
                 self.code.push(Value::OP_END_FRAG);
-                if ct.is_close_round(){
+                if tok.is_close_round(){
                     self.state.push(State::EndExpr);
                     return 1
                 }
@@ -196,10 +230,10 @@ impl ScriptParser{
                 
             }
             State::FnArgs=>{
-                if cid != id!(){
+                if id != id!(){
                     
                 }
-                if cop == id!(|){
+                if op == id!(|){
                     self.state.pop();
                     self.state.push(State::FnBody);
                     return 1
@@ -207,14 +241,20 @@ impl ScriptParser{
                 // we're parsing ident,? ident,? ident,? 
             }
             // alright we parsed a + b * c
-            State::EmitOp(cop)=>{
-                self.code.push(State::operator_to_opcode(cop));
+            State::EmitFieldAssign(what_op)=>{
+                self.code.push(State::operator_to_field_assign(what_op));
+            }
+            State::EmitIndexAssign(what_op)=>{
+                self.code.push(State::operator_to_index_assign(what_op));
+            }
+            State::EmitOp(what_op)=>{
+                self.code.push(State::operator_to_opcode(what_op));
                 return 0
             }
-            State::Bare=>{
+            State::EndBare=>{
                 self.code.push(Value::OP_END_BARE);
                 self.state.push(State::EndExpr);
-                if ct.is_close_curly() {
+                if tok.is_close_curly() {
                     return 1
                 }
                 else {
@@ -223,10 +263,10 @@ impl ScriptParser{
                 }
             }
             // emit the create prototype instruction
-            State::Prototype=>{
+            State::EndProto=>{
                 self.code.push(Value::OP_END_PROTO);
                 self.state.push(State::EndExpr);
-                if ct.is_close_curly() {
+                if tok.is_close_curly() {
                     return 1
                 }
                 else {
@@ -238,7 +278,7 @@ impl ScriptParser{
                 // expect )
                 self.code.push(Value::OP_END_CALL);
                 self.state.push(State::EndExpr);
-                if ct.is_close_round() {
+                if tok.is_close_round() {
                     return 1
                 }
                 else {
@@ -249,7 +289,7 @@ impl ScriptParser{
             State::ArrayIndex=>{
                 self.code.push(Value::OP_ARRAY_INDEX);
                 self.state.push(State::EndExpr);
-                if ct.is_close_square() {
+                if tok.is_close_square() {
                     return 1
                 }
                 else {
@@ -258,11 +298,27 @@ impl ScriptParser{
                 }
             }
             State::EndExpr=>{
-                if State::operator_order(cop) != 0{
-                    let next_state = State::EmitOp(cop);
+                if State::operator_order(op) != 0{
+                    let next_state = State::EmitOp(op);
+                    // check if we have a ..[] = 
+                    if let Some(&Value::OP_ARRAY_INDEX) = self.code.last(){
+                        if State::is_assign_operator(op){
+                            self.code.pop();
+                            self.state.push(State::EmitIndexAssign(op));
+                            self.state.push(State::BeginExpr);
+                            return 1
+                        }
+                    }
                     if let Some(last) = self.state.pop(){
+                        if let State::EmitOp(id!(.)) = last{
+                            if State::is_assign_operator(op){
+                                self.state.push(State::EmitFieldAssign(op));
+                                self.state.push(State::BeginExpr);
+                                return 1
+                            }
+                        }
                         if last.is_heq_prio(next_state){
-                            self.state.push(State::EmitOp(cop));
+                            self.state.push(State::EmitOp(op));
                             self.state.push(State::BeginExpr);
                             self.state.push(last);
                             return 1
@@ -271,18 +327,18 @@ impl ScriptParser{
                             self.state.push(last);
                         }
                     }
-                    self.state.push(State::EmitOp(cop));
+                    self.state.push(State::EmitOp(op));
                     self.state.push(State::BeginExpr);
                     return 1
                 }
                 
-                if ct.is_open_curly(){
+                if tok.is_open_curly(){
                     self.code.push(Value::OP_BEGIN_PROTO);
-                    self.state.push(State::Prototype);
+                    self.state.push(State::EndProto);
                     self.state.push(State::BeginStmt);
                     return 1
                 }
-                if ct.is_open_round(){ 
+                if tok.is_open_round(){ 
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp(id!(.)) = last{
                             self.code.push(State::operator_to_opcode(id!(.)));
@@ -296,7 +352,7 @@ impl ScriptParser{
                     self.state.push(State::BeginStmt);
                     return 1
                 }
-                if ct.is_open_square(){
+                if tok.is_open_square(){
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp(id!(.)) = last{
                             self.code.push(State::operator_to_opcode(id!(.)));
@@ -312,39 +368,39 @@ impl ScriptParser{
                 return 0
             }
             State::BeginExpr=>{
-                if ct.is_open_curly(){
+                if tok.is_open_curly(){
                     self.code.push(Value::OP_BEGIN_BARE);
-                    self.state.push(State::EndExpr);
+                    self.state.push(State::EndBare);
                     self.state.push(State::BeginStmt);
                     return 1
                 }
-                if ct.is_open_round(){
+                if tok.is_open_round(){
                     self.code.push(Value::OP_BEGIN_FRAG);
                     self.state.push(State::EndFrag);
                     self.state.push(State::BeginExpr);
                     return 1
                 }
-                if let Some(v) = ct.maybe_number(){
+                if let Some(v) = tok.maybe_number(){
                     self.code.push(Value::from_f64(v));
                     self.state.push(State::EndExpr);
                     return 1
                 }
-                if cid != id!(){
-                    self.code.push(Value::from_id(cid));
+                if id != id!(){
+                    self.code.push(Value::from_id(id));
                     self.state.push(State::EndExpr);
                     return 1
                 }
-                if let Some(v) = ct.maybe_color(){
+                if let Some(v) = tok.maybe_color(){
                     self.code.push(Value::from_color(v));
                     self.state.pop();
                     return 1
                 }
-                if let Some(ptr) = ct.maybe_string(){
+                if let Some(ptr) = tok.maybe_string(){
                     self.code.push(Value::from_string(ptr));
                     self.state.pop();
                     return 1
                 }
-                if cop == id!(|){
+                if op == id!(|){
                     self.state.pop();
                     self.code.push(Value::OP_BEGIN_FN_ARGS);
                     self.state.push(State::FnArgs);
@@ -352,7 +408,7 @@ impl ScriptParser{
                 }
             }
             State::BeginStmt => {
-                let cid = ct.identifier();
+                let cid = tok.identifier();
                 if cid == id!(for){
                     self.state.push(State::For);
                     self.state.push(State::ForIdent);
@@ -363,12 +419,12 @@ impl ScriptParser{
                     self.state.push(State::BeginExpr);
                     return 1
                 }
-                if cop == id!(;) || cop == id!(,){ // just eat it
+                if op == id!(;) || op == id!(,){ // just eat it
                     // we can pop all operator emits
                     self.state.push(State::BeginStmt);
                     return 1
                 }
-                if ct.is_close_round() || ct.is_close_curly() || ct.is_close_square(){
+                if tok.is_close_round() || tok.is_close_curly() || tok.is_close_square(){
                     // pop and let the stack handle it
                     return 0
                 }
