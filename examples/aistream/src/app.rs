@@ -1,10 +1,14 @@
 
 
 Todo = {done:false}
-Todos = [
-    Todo{text:"Design Splash"}
-    Todo{text:"Implement it"}
+todos = [
+    Todo{text: "Design Splash"}
+    Todo{text: "Implement it"}
 ]
+
+sum = |a,b|{
+    return a+b
+}
 
 Ui = View{
     PortalList{
@@ -12,37 +16,37 @@ Ui = View{
         on_draw_item: |item|{
             View{
                 TextInput{
-                    text: Todos[item].text
+                    it.text_style.font_size += 1.0
+                    text: todos[item].text
                 }
                 CheckBox{
-                    check: Todos[item].done
+                    check: todos[item].done
                 }
                 Button{
-                    text: "delete"
+                    text: delete
                     on_click: ||{
-                        delete Todos[item]
+                        delete todos[item]
                     }
                 }
             }
         }
     }
-    
-    View{
+    view: View{
         flow: Right
-        _new_item: TextInput{}
+        $new_item: TextInput{}
         Button{
-            text: "Add"
+            text: "Add",
             on_click: ||{
-                Todos += Todo{
-                    text: up._new_item.text
+                todos += Todo{
+                    text: $new_item.text
                 }
-                up._new_item.text = ""
+                $new_item.text = ""
             }
         }
         Button{
-            text: "Clear completed"
+            text: "Clear completed",
             on_click: ||{
-                delete Todos[?@.done]
+                delete todos[?|v| !v.done]
             }
         }
     }
@@ -56,4 +60,4 @@ for todo in json{
         done: todo.done
     }
 }
-Todos += Todo{text:"Whilst this text is being generated the UI can update"}
+Todos += Todo{text: "Whilst this text is being generated the UI can update"}

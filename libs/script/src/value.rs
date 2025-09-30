@@ -69,6 +69,7 @@ impl Value{
     // opcodes
     pub const TYPE_OPCODE: u64 = 0xFFFF_0700_0000_0000;
     pub const OP_NOP: Value = Value(Self::TYPE_OPCODE | 0);
+    
     pub const OP_NOT: Value = Value(Self::TYPE_OPCODE | 1);
     pub const OP_NEG: Value = Value(Self::TYPE_OPCODE | 2);
     pub const OP_MUL: Value = Value(Self::TYPE_OPCODE | 3);
@@ -92,8 +93,8 @@ impl Value{
     pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | 20);
     pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | 21);
     
-    pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | 22);
-    pub const OP_ASSIGN_FIELD: Value = Value(Self::TYPE_OPCODE | 23);
+    pub const OP_ASSIGN_IT: Value = Value(Self::TYPE_OPCODE | 22);
+    pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | 23);
     pub const OP_ASSIGN_ADD: Value = Value(Self::TYPE_OPCODE | 24);
     pub const OP_ASSIGN_SUB: Value = Value(Self::TYPE_OPCODE | 25);
     pub const OP_ASSIGN_MUL: Value = Value(Self::TYPE_OPCODE | 26);
@@ -105,20 +106,46 @@ impl Value{
     pub const OP_ASSIGN_SHL: Value = Value(Self::TYPE_OPCODE | 32);
     pub const OP_ASSIGN_SHR: Value = Value(Self::TYPE_OPCODE | 33);
     pub const OP_ASSIGN_IFNIL: Value = Value(Self::TYPE_OPCODE | 34);
-    pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | 35);
-    pub const OP_END_PROTO: Value = Value(Self::TYPE_OPCODE | 36);
-    pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | 37);
-    pub const OP_END_BARE: Value = Value(Self::TYPE_OPCODE | 38);
-    pub const OP_BEGIN_CALL: Value = Value(Self::TYPE_OPCODE | 39);
-    pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | 40);
-    pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | 41);
-    pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | 42);
-    pub const OP_BEGIN_FN_ARGS: Value = Value(Self::TYPE_OPCODE | 43);
-    pub const OP_BEGIN_FN_BODY: Value = Value(Self::TYPE_OPCODE | 44);
-    pub const OP_END_FN_BODY: Value = Value(Self::TYPE_OPCODE | 45);
     
-    pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 46);
-    pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 47);
+    pub const OP_ASSIGN_FIELD: Value = Value(Self::TYPE_OPCODE | 35);
+    pub const OP_ASSIGN_FIELD_ADD: Value = Value(Self::TYPE_OPCODE | 36);
+    pub const OP_ASSIGN_FIELD_SUB: Value = Value(Self::TYPE_OPCODE | 37);
+    pub const OP_ASSIGN_FIELD_MUL: Value = Value(Self::TYPE_OPCODE | 38);
+    pub const OP_ASSIGN_FIELD_DIV: Value = Value(Self::TYPE_OPCODE | 39);
+    pub const OP_ASSIGN_FIELD_MOD: Value = Value(Self::TYPE_OPCODE | 40);
+    pub const OP_ASSIGN_FIELD_AND: Value = Value(Self::TYPE_OPCODE | 41);
+    pub const OP_ASSIGN_FIELD_OR: Value = Value(Self::TYPE_OPCODE | 42);
+    pub const OP_ASSIGN_FIELD_XOR: Value = Value(Self::TYPE_OPCODE | 43);
+    pub const OP_ASSIGN_FIELD_SHL: Value = Value(Self::TYPE_OPCODE | 44);
+    pub const OP_ASSIGN_FIELD_SHR: Value = Value(Self::TYPE_OPCODE | 45);
+    pub const OP_ASSIGN_FIELD_IFNIL: Value = Value(Self::TYPE_OPCODE | 46);
+        
+    pub const OP_ASSIGN_INDEX: Value = Value(Self::TYPE_OPCODE | 47);
+    pub const OP_ASSIGN_INDEX_ADD: Value = Value(Self::TYPE_OPCODE | 48);
+    pub const OP_ASSIGN_INDEX_SUB: Value = Value(Self::TYPE_OPCODE | 49);
+    pub const OP_ASSIGN_INDEX_MUL: Value = Value(Self::TYPE_OPCODE | 50);
+    pub const OP_ASSIGN_INDEX_DIV: Value = Value(Self::TYPE_OPCODE | 51);
+    pub const OP_ASSIGN_INDEX_MOD: Value = Value(Self::TYPE_OPCODE | 52);
+    pub const OP_ASSIGN_INDEX_AND: Value = Value(Self::TYPE_OPCODE | 53);
+    pub const OP_ASSIGN_INDEX_OR: Value = Value(Self::TYPE_OPCODE | 54);
+    pub const OP_ASSIGN_INDEX_XOR: Value = Value(Self::TYPE_OPCODE | 55);
+    pub const OP_ASSIGN_INDEX_SHL: Value = Value(Self::TYPE_OPCODE | 56);
+    pub const OP_ASSIGN_INDEX_SHR: Value = Value(Self::TYPE_OPCODE | 57);
+    pub const OP_ASSIGN_INDEX_IFNIL: Value = Value(Self::TYPE_OPCODE | 58);    
+    pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | 59);
+    pub const OP_END_PROTO: Value = Value(Self::TYPE_OPCODE | 60);
+    pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | 61);
+    pub const OP_END_BARE: Value = Value(Self::TYPE_OPCODE | 62);
+    pub const OP_BEGIN_CALL: Value = Value(Self::TYPE_OPCODE | 63);
+    pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | 64);
+    pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | 65);
+    pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | 66);
+    pub const OP_BEGIN_FN_ARGS: Value = Value(Self::TYPE_OPCODE | 67);
+    pub const OP_BEGIN_FN_BODY: Value = Value(Self::TYPE_OPCODE | 68);
+    pub const OP_END_FN_BODY: Value = Value(Self::TYPE_OPCODE | 69);
+    
+    pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 70);
+    pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 71);
     
         
     // TODO: make this behave like javascript as much as is sensible
@@ -311,8 +338,9 @@ impl fmt::Display for Value {
                 Self::OP_GEQ => return write!(f, ">="),
                 Self::OP_LOGIC_AND => return write!(f, "&&"),
                 Self::OP_LOGIC_OR => return write!(f, "||"),
+                
                 Self::OP_ASSIGN => return write!(f, "="),
-                Self::OP_ASSIGN_FIELD => return write!(f, ":"),
+                Self::OP_ASSIGN_IT => return write!(f, ":"),
                 Self::OP_ASSIGN_ADD => return write!(f, "+="),
                 Self::OP_ASSIGN_SUB => return write!(f, "-="),
                 Self::OP_ASSIGN_MUL => return write!(f, "*="),
@@ -323,6 +351,33 @@ impl fmt::Display for Value {
                 Self::OP_ASSIGN_XOR => return write!(f, "^="),
                 Self::OP_ASSIGN_SHL => return write!(f, "<<="),
                 Self::OP_ASSIGN_SHR => return write!(f, ">>="),
+                
+                Self::OP_ASSIGN_FIELD => return write!(f, ".="),
+                Self::OP_ASSIGN_FIELD_ADD => return write!(f, ".+="),
+                Self::OP_ASSIGN_FIELD_SUB => return write!(f, ".-="),
+                Self::OP_ASSIGN_FIELD_MUL => return write!(f, ".*="),
+                Self::OP_ASSIGN_FIELD_DIV => return write!(f, "./="),
+                Self::OP_ASSIGN_FIELD_MOD => return write!(f, ".%="),
+                Self::OP_ASSIGN_FIELD_AND => return write!(f, ".&="),
+                Self::OP_ASSIGN_FIELD_OR => return write!(f, ".|="),
+                Self::OP_ASSIGN_FIELD_XOR => return write!(f, ".^="),
+                Self::OP_ASSIGN_FIELD_SHL => return write!(f, ".<<="),
+                Self::OP_ASSIGN_FIELD_SHR => return write!(f, ".>>="),
+                Self::OP_ASSIGN_FIELD_IFNIL => return write!(f, ".?="),
+                
+                Self::OP_ASSIGN_INDEX => return write!(f, "[]="),
+                Self::OP_ASSIGN_INDEX_ADD => return write!(f, "[]+="),
+                Self::OP_ASSIGN_INDEX_SUB => return write!(f, "[]-="),
+                Self::OP_ASSIGN_INDEX_MUL => return write!(f, "[]*="),
+                Self::OP_ASSIGN_INDEX_DIV => return write!(f, "[]/="),
+                Self::OP_ASSIGN_INDEX_MOD => return write!(f, "[]%="),
+                Self::OP_ASSIGN_INDEX_AND => return write!(f, "[]&="),
+                Self::OP_ASSIGN_INDEX_OR => return write!(f, "[]|="),
+                Self::OP_ASSIGN_INDEX_XOR => return write!(f, "[]^="),
+                Self::OP_ASSIGN_INDEX_SHL => return write!(f, "[]<<="),
+                Self::OP_ASSIGN_INDEX_SHR => return write!(f, "[]>>="),
+                Self::OP_ASSIGN_INDEX_IFNIL => return write!(f, "[]?="),
+                
                 Self::OP_BEGIN_PROTO => return write!(f, "Proto{{"),
                 Self::OP_END_PROTO => return write!(f, "}}"),
                 Self::OP_BEGIN_BARE => return write!(f, "Bare{{"),
