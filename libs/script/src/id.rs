@@ -44,6 +44,34 @@ pub struct Id(pub u64);
 impl Id {
     pub const SEED:u64 = 0xd6e8_feb8_6659_fd93;
     pub const COUNTED: u64 = 0x0000_4000_0000_0000;
+    // from https://nullprogram.com/blog/2018/07/31/
+    // i have no idea what im doing with start value and finalisation.
+    pub const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize, or:u64) -> Self {
+        let mut x = seed;
+        let mut i = start;
+        while i < end {
+            x = x.overflowing_add(id_bytes[i] as u64).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            i += 1;
+        }
+        // truncate to 47 bits fitting in a NaN box
+        Self ((x & 0x0000_3fff_ffff_ffff) | or)
+    }
+        
+    pub const fn from_str(id_str: &str) -> Self {
+        let bytes = id_str.as_bytes();
+        let or =  if bytes.len()>0 && bytes[0] == b'$'{
+            Self::COUNTED
+        }
+        else{
+            0
+        };
+        Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), or)
+    }
     
     pub fn empty() -> Self {
         Self (0)
@@ -69,35 +97,7 @@ impl Id {
         Value::from_id(self)
     }
     
-    // from https://nullprogram.com/blog/2018/07/31/
-    // i have no idea what im doing with start value and finalisation.
-    pub const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize, or:u64) -> Self {
-        let mut x = seed;
-        let mut i = start;
-        while i < end {
-            x = x.overflowing_add(id_bytes[i] as u64).0;
-            x ^= x >> 32;
-            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
-            x ^= x >> 32;
-            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
-            x ^= x >> 32;
-            i += 1;
-        }
-        // truncate to 47 bits fitting in a NaN box
-        Self ((x & 0x0000_3fff_ffff_ffff) | or)
-    }
-    
-    pub const fn from_str(id_str: &str) -> Self {
-        let bytes = id_str.as_bytes();
-        let or =  if bytes.len()>0 && bytes[0] == b'$'{
-            Self::COUNTED
-        }
-        else{
-            0
-        };
-        Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), or)
-    }
-    
+
     pub const fn is_counted(&self)->bool{
         self.0 & Self::COUNTED != 0
     }
