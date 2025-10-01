@@ -32,19 +32,13 @@ on_click: ||{
     call => instructions
 }*/
 
-
 pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
     let code = "
-        t[x] = 1.0
-        t.x = t.y
-        Todo = {
-            done: t
-        };
+        .text_style.font_size.prop += 1.0
+        ;
     ";
-        
-    // Todo = Todo{done:1*x[1].y(2+3)};
     
     let mut interp = ScriptInterpreter::new();
     let mut parser = ScriptParser::default();

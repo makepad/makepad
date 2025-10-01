@@ -312,6 +312,12 @@ impl ScriptParser{
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp(id!(.)) = last{
                             if State::is_assign_operator(op){
+                                for code in self.code.iter().rev(){
+                                    println!("{:?}", code);
+                                }
+                                // this is a chain assign
+                                // check upwards the entire property chain in the code emitted
+                                // and change it to do deep prototype clone
                                 self.state.push(State::EmitFieldAssign(op));
                                 self.state.push(State::BeginExpr);
                                 return 1
@@ -404,6 +410,12 @@ impl ScriptParser{
                     self.state.pop();
                     self.code.push(Value::OP_BEGIN_FN_ARGS);
                     self.state.push(State::FnArgs);
+                    return 1
+                }
+                if op == id!(.){
+                    self.code.push(id!(it).into());
+                    self.state.push(State::EmitOp(op));
+                    self.state.push(State::BeginExpr);
                     return 1
                 }
             }
