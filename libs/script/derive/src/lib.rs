@@ -3,27 +3,40 @@ use proc_macro::TokenStream;
 
 use makepad_micro_proc_macro::{TokenBuilder, TokenParser};
 
-const LIVE_ID_SEED:u64 = 0xd6e8_feb8_6659_fd93;
+#[derive(Clone, Default, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
+struct Id(pub u64);
 
-const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize) -> u64 {
-    let mut x = seed;
-    let mut i = start;
-    while i < end {
-        x = x.overflowing_add(id_bytes[i] as u64).0;
-        x ^= x >> 32;
-        x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
-        x ^= x >> 32;
-        x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
-        x ^= x >> 32;
-        i += 1;
+impl Id {
+    pub const SEED:u64 = 0xd6e8_feb8_6659_fd93;
+    pub const COUNTED: u64 = 0x0000_4000_0000_0000;
+    // from https://nullprogram.com/blog/2018/07/31/
+    // i have no idea what im doing with start value and finalisation.
+    pub const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize, or:u64) -> Self {
+        let mut x = seed;
+        let mut i = start;
+        while i < end {
+            x = x.overflowing_add(id_bytes[i] as u64).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            i += 1;
+        }
+        // truncate to 47 bits fitting in a NaN box
+        Self ((x & 0x0000_3fff_ffff_ffff) | or)
     }
-    // mark high bit as meaning that this is a hash id
-    x & 0x0000_7fff_ffff_ffff
-}
-
-const fn from_str_unchecked(id_str: &str) -> u64 {
-    let bytes = id_str.as_bytes();
-    from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len())
+            
+    pub const fn from_str(id_str: &str) -> Self {
+        let bytes = id_str.as_bytes();
+        let or =  if bytes.len()>0 && bytes[0] == b'$'{
+            Self::COUNTED
+        }
+        else{
+            0
+        };
+        Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), or)
+    }
 }
 
 #[proc_macro] 
@@ -31,8 +44,8 @@ pub fn id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let v = item.to_string();
     if v != ""{
-        let id = from_str_unchecked(&v);
-        tb.add("Id (").suf_u64(id).add(")");
+        let id = Id::from_str(&v);
+        tb.add("Id (").suf_u64(id.0).add(")");
     }
     else {
         tb.add("Id (0)");
@@ -54,8 +67,8 @@ pub fn ids(item: TokenStream) -> TokenStream {
             }
             else{
                 let ident = parser.expect_any_ident()?;
-                let id = from_str_unchecked(&ident);
-                tb.add("Id (").suf_u64(id).add("),");
+                let id = Id::from_str(&ident);
+                tb.add("Id (").suf_u64(id.0).add("),");
             }
                             
             if parser.eat_eot(){
@@ -81,8 +94,8 @@ pub fn ids_array(item: TokenStream) -> TokenStream {
             tb.add("&[");
             loop{
                 let ident = parser.expect_any_ident()?;
-                let id = from_str_unchecked(&ident);
-                tb.add("LiveId (").suf_u64(id).add("),");
+                let id = Id::from_str(&ident);
+                tb.add("Id (").suf_u64(id.0).add("),");
                 if parser.eat_eot(){
                     tb.add("]");
                     break 'outer
@@ -113,11 +126,11 @@ pub fn id_lut(item: TokenStream) -> TokenStream {
     
     let mut parser = TokenParser::new(item);
     if let Some(name) = parser.eat_any_ident() {
-        tb.add("LiveId::from_str_with_lut(").string(&name).add(").unwrap()");
+        tb.add("Id::from_str_with_lut(").string(&name).add(").unwrap()");
         tb.end()
     }
     else if let Some(punct) = parser.eat_any_punct(){
-        tb.add("LiveId::from_str_with_lut(").string(&punct).add(").unwrap()");
+        tb.add("Id::from_str_with_lut(").string(&punct).add(").unwrap()");
         tb.end()
     }
     else{
