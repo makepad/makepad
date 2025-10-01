@@ -17,9 +17,9 @@ pub struct Object{
 }
 
 impl Object{
-    pub fn make_free(&mut self){
+    pub fn clear(&mut self){
         self.proto = Value::NIL;
-        self.tag.set_free();
+        self.tag.clear();
         self.fields.clear();
     }
 }

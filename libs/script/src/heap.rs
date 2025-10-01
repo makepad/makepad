@@ -8,25 +8,28 @@ use makepad_script_derive::*;
 pub struct HeapTag(u32);
 
 impl HeapTag{
-    const FREE:u32 = 0x1;
-    const ARRAY:u32 = 0x2;
-    const MARK:u32 = 0x4;
+    const MARK:u32 = 0x1;
+    const ALLOCED:u32 = 0x2;
+    const SHALLOW_PROTO:u32 = 0x4;
     
-    // means all data is packed 
-    pub fn is_array(&self)->bool{
-        self.0&Self::ARRAY != 0
+    pub fn set_shallow_proto(&mut self){
+        self.0 |= Self::SHALLOW_PROTO
     }
     
-    pub fn is_free(&self)->bool{
-        return self.0 & Self::FREE != 0
-    }
-    
-    pub fn set_free(&mut self){
-        self.0 = Self::FREE;
+    pub fn is_shallow_proto(&self)->bool{
+        self.0 & Self::SHALLOW_PROTO != 0
     }
         
-    pub fn clear_free(&mut self){
-        self.0 = Self::FREE;
+    pub fn is_alloced(&self)->bool{
+        return self.0 & Self::ALLOCED != 0
+    }
+    
+    pub fn set_alloced(&mut self){
+        self.0 |= Self::ALLOCED
+    }
+    
+    pub fn clear(&mut self){
+        self.0 = 0;
     }
     
     pub fn is_marked(&self)->bool{
@@ -48,6 +51,13 @@ pub struct HeapString{
     pub string: String
 }
 
+impl HeapString{
+    fn clear(&mut self){
+        self.tag.clear();
+        self.string.clear()
+    }
+}
+
 pub struct HeapZone{
     pub zone: u8,
     pub mark_vec: Vec<usize>,
@@ -61,7 +71,7 @@ pub struct HeapZone{
 impl HeapZone{
     pub fn new_string(&mut self)->StringPtr{
         if let Some(index) = self.strings_free.pop(){
-            self.strings[index].tag.clear_free();
+            self.strings[index].tag.set_alloced();
             StringPtr{
                 zone: self.zone,
                 index: index as _
@@ -69,7 +79,9 @@ impl HeapZone{
         }
         else{
             let index = self.strings.len();
-            self.strings.push(Default::default());
+            let mut string = HeapString::default();
+            string.tag.set_alloced();
+            self.strings.push(string);
             StringPtr{
                 zone: self.zone,
                 index: index as _
@@ -79,7 +91,7 @@ impl HeapZone{
     
     pub fn new_object(&mut self)->ObjectPtr{
         if let Some(index) = self.objects_free.pop(){
-            self.objects[index].tag.clear_free();
+            self.objects[index].tag.set_alloced();
             ObjectPtr{
                 zone: self.zone,
                 index: index as _
@@ -87,7 +99,9 @@ impl HeapZone{
         }
         else{
             let index = self.objects.len();
-            self.objects.push(Default::default());
+            let mut object = Object::default();
+            object.tag.set_alloced();
+            self.objects.push(object);
             ObjectPtr{
                 zone: self.zone,
                 index: index as _
@@ -95,11 +109,34 @@ impl HeapZone{
         }
     }
     
+    pub fn new_shallow_object(&mut self)->ObjectPtr{
+        if let Some(index) = self.objects_free.pop(){
+            let object = &mut self.objects[index];
+            object.tag.set_alloced();
+            object.tag.set_shallow_proto();
+            ObjectPtr{
+                zone: self.zone,
+                index: index as _
+            }
+        }
+        else{
+            let index = self.objects.len();
+            let mut object = Object::default();
+            object.tag.set_alloced();
+            object.tag.set_shallow_proto();
+            self.objects.push(object);
+            ObjectPtr{
+                zone: self.zone,
+                index: index as _
+            }
+        }
+    }
+    /*
     pub fn free_object(&mut self, index: usize){
-        self.objects[index].tag.set_free();
+        self.objects[index].tag.clear();
         self.objects_free.push(index);
     }
-     
+     */
     fn new(zone:u8)->Self{
         Self{
             zone,
@@ -115,7 +152,7 @@ impl HeapZone{
     
     pub fn mark_inner(&mut self, index:usize){
         let obj = &mut self.objects[index];
-        if obj.tag.is_marked() || obj.tag.is_free(){
+        if obj.tag.is_marked() || !obj.tag.is_alloced(){
             return;
         }
         obj.tag.set_mark();
@@ -171,9 +208,8 @@ impl HeapZone{
     pub fn sweep(&mut self){
         for i in 0..self.objects.len(){
             let obj = &mut self.objects[i];
-            if !obj.tag.is_marked() && !obj.tag.is_free(){
-                obj.make_free();
-                obj.fields.clear();
+            if !obj.tag.is_marked() && obj.tag.is_alloced(){
+                obj.clear();
                 self.objects_free.push(i);
             }
             else{
@@ -183,9 +219,8 @@ impl HeapZone{
         // always leave the empty null string at 0
         for i in 1..self.strings.len(){
             let str = &mut self.strings[i];
-            if !str.tag.is_marked() && !str.tag.is_free(){
-                str.tag.set_free();
-                str.string.clear();
+            if !str.tag.is_marked() && str.tag.is_alloced(){
+                str.clear();
                 self.strings_free.push(i)
             }
             else {
@@ -327,11 +362,15 @@ impl ScriptHeap{
     pub fn new_dyn_object(&mut self)->ObjectPtr{
         self.zones[Self::DYNAMIC].new_object()
     }
-        
+    
+    pub fn new_dyn_shallow_object(&mut self)->ObjectPtr{
+        self.zones[Self::DYNAMIC].new_shallow_object()
+    }
+        /*
     pub fn free_object(&mut self, ptr:ObjectPtr){
         self.zones[ptr.zone as usize].free_object(ptr.index as usize);
     }
-    
+    */
     pub fn new_static_string(&mut self, string:String)->StringPtr{
         let zone = &mut self.zones[Self::STATIC];
         let index = zone.strings.len();
@@ -367,44 +406,47 @@ impl ScriptHeap{
         Value::NIL
     }
     
-    pub fn set_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
-        let object = &mut self.zones[ptr.zone as usize].objects[ptr.index as usize];
-        if key == id!(proto).to_value(){
+    pub fn set_object_value(&mut self, set_ptr:ObjectPtr, key:Value, value:Value){
+        let object = &mut self.zones[set_ptr.zone as usize].objects[set_ptr.index as usize];
+        
+        if key == id!(__prototype__).to_value(){
             object.proto = value;
             return
         }
+        
+        if object.tag.is_shallow_proto(){
+            let mut ptr = set_ptr;
+            // scan up the chain to set the proto value
+            loop{
+                let object = &mut self.zones[ptr.zone as usize].objects[ptr.index as usize];
+                for field in &mut object.fields{
+                    if field.key == key{
+                        field.value = value;
+                        return
+                    }
+                }
+                if let Some(next_ptr) = object.proto.as_object(){
+                    ptr = next_ptr
+                }
+                else{
+                    break;
+                }
+            }
+            // append to current object
+            let object = &mut self.zones[set_ptr.zone as usize].objects[set_ptr.index as usize];
+            object.fields.push(Field{
+                key,
+                value
+            });
+            return
+        }
+        
         for field in &mut object.fields{
             if field.key == key{
                 field.value = value;
                 return
             }
         }
-        object.fields.push(Field{
-            key,
-            value
-        });
-    }
-    
-    pub fn set_proto_value(&mut self, set_ptr:ObjectPtr, key:Value, value:Value){
-        let mut ptr = set_ptr;
-        // scan up the chain to set the proto value
-        loop{
-            let object = &mut self.zones[ptr.zone as usize].objects[ptr.index as usize];
-            for field in &mut object.fields{
-                if field.key == key{
-                    field.value = value;
-                    return
-                }
-            }
-            if let Some(next_ptr) = object.proto.as_object(){
-                ptr = next_ptr
-            }
-            else{
-                break;
-            }
-        }
-        // append to current object
-        let object = &mut self.zones[set_ptr.zone as usize].objects[set_ptr.index as usize];
         object.fields.push(Field{
             key,
             value
