@@ -1,21 +1,8 @@
+use makepad_script_derive::*;
+use crate::id::*;
 use crate::parser::ScriptParser;
 use crate::value::*;
 use crate::heap::*;
-
-#[derive(Default)]
-enum This{
-    _Heap(usize),
-    _Stack(usize),
-    #[default]
-    Nil
-}
-
-// ok how do function args work
-// we make a new 'args' object prototypically inherited
-// from the closure scope object
-// every time we create a closure we also store a reference to the scope
-// in slint you have special variables
-// we could say self.
 
 pub struct CallFrame{
     pub scope: ObjectPtr,
@@ -33,17 +20,20 @@ pub struct ScriptThread{
 pub struct ScriptInterpreter{
     pub threads: Vec<ScriptThread>,
     pub heap: ScriptHeap,
+    pub global: ObjectPtr,
 }
 
 impl ScriptInterpreter{
     pub fn new()->Self{
+        let mut heap = ScriptHeap::default();
         Self{
             threads: vec![ScriptThread::new()],
-            heap: ScriptHeap::default()
+            global: heap.new_dyn_object(),
+            heap: heap,
         }
     }
     pub fn run(&mut self, parser: &ScriptParser){
-        self.threads[0].run(parser, &mut self.heap)
+        self.threads[0].run(parser, &mut self.heap, self.global)
     }
 }
 
@@ -56,6 +46,31 @@ impl ScriptThread{
             its: vec![],
             ip: 0
         }
+    }
+    
+    // lets resolve an id to a Value
+    pub fn resolve(&self, id: Id)->Value{
+        if id == id!(it){
+            if let Some(it) = self.its.last(){
+                return (*it).into()
+            }
+            return Value::NIL
+        }
+        if id == id!(scope){
+            if let Some(call) = self.calls.last(){
+                return (call.scope).into()
+            }
+            return Value::NIL
+        }
+        /*
+        if id == id!(this){
+            if let Some(it) = self.calls.last(){
+                return (*it).into()
+            }
+        }*/
+        // look up id on the scope object
+        
+        Value::NIL
     }
     
     pub fn op_add(&mut self, heap:&mut ScriptHeap){
@@ -76,28 +91,47 @@ impl ScriptThread{
         self.stack.push(ptr.into());
     }
     
-    pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap){
-        let scope = heap.new_dyn_object();
+    pub fn op_assign_field(&mut self, heap:&mut ScriptHeap){
+        let field = self.stack.pop().unwrap();
+        let value = self.stack.pop().unwrap();
+        if let Some(it) = self.its.last(){
+            heap.set_object_value(*it, field, value);
+        }
+    }
+    
+    pub fn op_assign(&mut self, heap:&mut ScriptHeap){
+        let field = self.stack.pop().unwrap();
+        let value = self.stack.pop().unwrap();
+        if let Some(it) = self.its.last(){
+            heap.set_object_value(*it, field, value);
+        }
+    }
+    
+    pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, global:ObjectPtr){
+        let scope = heap.new_dyn_shallow_object();
+        
+        
         let call = CallFrame{
             scope,
             stack_base: 0,
             return_ip: 0,
         };
+        self.its.push(global);
         self.calls.push(call);
-        
         for i in 0..parser.code.len(){
             self.ip = i;
             self.step(parser, heap);
         }
-        
         self.calls.pop();
-        
+        self.its.pop();
+                
         //self.heap.free_object(scope);
     }
     
     pub fn step(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap){
         let code = parser.code[self.ip];
         if code.is_opcode(){
+            println!("RUNNING {}", code);
             match code{
                 Value::OP_ADD=>{
                     self.op_add(heap);
@@ -110,11 +144,9 @@ impl ScriptThread{
                     
                 }
                 Value::OP_ASSIGN_FIELD=>{
-                    // alright what do we have on our left
-                    // it has to be one ident or else we dont know what to do
+                    self.op_assign_field(heap);
                 }
-                Value::OP_BEGIN_BARE=>{
-                    // lets make anew object
+                Value::OP_BEGIN_BARE=>{ // bare object
                     let it = heap.new_dyn_object();
                     self.its.push(it);
                 }
