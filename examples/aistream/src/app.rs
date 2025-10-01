@@ -1,14 +1,19 @@
+let Todo = {done:false}
 
-
-Todo = {done:false}
-todos = [
+let todos = [
     Todo{text: "Design Splash"}
     Todo{text: "Implement it"}
 ]
 
-sum = |a,b|{
+let sum = |a,b|{
     return a+b
 }
+
+let sum = |a,b|{
+    return a+b
+}
+
+text_style = {}
 
 Ui = View{
     PortalList{
@@ -16,14 +21,14 @@ Ui = View{
         on_draw_item: |item|{
             View{
                 TextInput{
-                    it.text_style.font_size += 1.0
+                    .draw_text.text_style.font_size += 1.0
                     text: todos[item].text
                 }
                 CheckBox{
                     check: todos[item].done
                 }
                 Button{
-                    text: delete
+                    text: "delete"
                     on_click: ||{
                         delete todos[item]
                     }
@@ -46,7 +51,7 @@ Ui = View{
         Button{
             text: "Clear completed",
             on_click: ||{
-                delete todos[?|v| !v.done]
+                todos.retain(|v| !v.done)
             }
         }
     }

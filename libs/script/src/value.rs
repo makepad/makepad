@@ -146,7 +146,9 @@ impl Value{
     
     pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 70);
     pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 71);
-    
+    // prototypically inherit the chain for deep prototype fields
+    pub const OP_PROTO_FIELD: Value = Value(Self::TYPE_OPCODE | 72);
+            
         
     // TODO: make this behave like javascript as much as is sensible
     
@@ -179,38 +181,7 @@ impl Value{
     pub fn from_string(ptr: StringPtr)->Self{
          Self(((ptr.zone as u64) << 32) | ptr.index as u64 | Self::TYPE_STRING)
     }
-    /*
-    pub fn to_bool(&self)->bool{
-        if self.is_bool(){
-            return *self == Self::TRUE
-        }
-        self.to_f64() != 0.0
-    }
-    
-    pub fn to_f64(&self)->f64{
-        if self.is_f64(){
-            return f64::from_bits(self.0)
-        }
-        if *self == Self::TRUE{
-            return 1.0
-        }
-        0.0
-    }
-    
-    pub fn to_id(&self)->Id{
-        if self.is_id(){
-            return Id(self.0&0x0000_7fff_ffff_ffff)
-        }
-        Id(0)
-    }
-    
-    pub fn to_color(&self)->u32{
-        if self.is_color(){
-            return (self.0&0xffff_ffff) as u32
-        }
-        0
-    }*/
-    
+
     pub fn as_bool(&self)->Option<bool>{
         if self.is_bool(){
             return Some(*self == Self::TRUE)
