@@ -246,7 +246,7 @@ impl FitBound {
 }
 
 impl LiveHook for FitBound {
-    fn skip_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+    fn skip_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         match nodes[index].value {
             LiveValue::Int64(value) => {
                 *self = Self::Abs(value as f64);
