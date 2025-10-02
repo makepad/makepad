@@ -10,17 +10,48 @@ live_design!{
         ui: <Root>{
             main_window = <Window>{
                 body = <View> {
+                    align: {
+                        x: 0.5,
+                        y: 0.5,
+                    },
                     <Button> {
-                        width: Fill { weight: 200},
-                        text: "AAA"
-                    }
-                    <Button> {
-                        width: Fill { weight: 200}
-                        text: "BBB"
-                    }
-                    <Button> {
-                        width: Fill { weight: 100 },
-                        text: "CCC"
+                        width: 256,
+                        height: 256,
+                        draw_bg: {
+                            fn compute_erf7(x: float) -> float {
+                                let x = x * 1.128379;
+                                let xx = x * x;
+                                let x = x + (0.24295 + (0.03395 + 0.0104 * xx) * xx) * (xx * x);
+                                return x / sqrt(x * x + 1);
+                            }
+
+                            fn hypot(x: float, y: float) -> float {
+                                return sqrt(x * x + y * y);
+                            }
+
+                            fn pixel(self) -> vec4 {
+                                let p = self.pos * self.rect_size - 128;
+                                let b = vec2(128, 64);
+                                let r = 16;
+                                let s = 16;
+                                let r_max = 0.5 * min(b.x, b.y);
+                                let r0 = min(hypot(r, 1.15 * s), r_max);
+                                let r1 = min(hypot(r, 2 * s), r_max);
+                                let exp = 2 * r1 / r0;
+                                let s_inv = 1 / s;
+                                let k = 0.5 * compute_erf7(s_inv * 0.5 * (max(b.x, b.y) - 0.5 * r));
+                                let p0 = abs(p) - 0.5 * b + r1;
+                                let p1 = max(p0, 0);
+                                let d_neg = min(max(p0.x, p0.y), 0);
+                                let d_pos = pow(pow(p1.x, exp) + pow(p1.y, exp), 1 / exp);
+                                let d = d_neg + d_pos - r1;
+                                let z = k * (compute_erf7(s_inv * (min(b.x, b.y) + d)) - compute_erf7(s_inv * d));
+                                return vec4(z, z, z, 1);
+                            }
+                        }
+                        draw_text: {
+                            color: #F00,
+                        }
                     }
                 }
             }

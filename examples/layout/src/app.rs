@@ -142,7 +142,7 @@ live_design!{
                         }
                     }
                     <Label> {
-                        text: "Fit with maximal size. The outer view uses a fit with a maximum size of 100, so the red square is clipped.",
+                        text: "Fit with maximal size. The parent view uses a fit with a maximum size of 100, so the red square of size 200 is clipped.",
                     }
                     <View> {
                         width: Fit {
@@ -161,6 +161,68 @@ live_design!{
                             show_bg: true,
                             draw_bg: {
                                 color: #F00
+                            }
+                        }
+                    }
+                    <Label> {
+                        text: "Fit with relative minimal size. The dark gray square uses a fit with a minimum of half its parent size, so it takes up more space than it normally would.",
+                    }
+                    <View> {
+                        width: 400,
+                        height: 400,
+                        show_bg: true,
+                        draw_bg: {
+                            color: #888
+                        }
+                        <View> {
+                            width: Fit {
+                                min: Rel(0.5)
+                            },
+                            height: Fit {
+                                min: Rel(0.5)
+                            },
+                            show_bg: true,
+                            draw_bg: {
+                                color: #444
+                            }
+                            <View> {
+                                width: 100.0,
+                                height: 100.0,
+                                show_bg: true,
+                                draw_bg: {
+                                    color: #F00
+                                }
+                            }
+                        }
+                    }
+                    <Label> {
+                        text: "Fit with relative minimal size. The parent view uses a fit with a maximum of half its parent size, so the red square of size 300 is clipped.",
+                    }
+                    <View> {
+                        width: 400,
+                        height: 400,
+                        show_bg: true,
+                        draw_bg: {
+                            color: #888
+                        }
+                        <View> {
+                            width: Fit {
+                                max: Rel(0.5)
+                            },
+                            height: Fit {
+                                max: Rel(0.5)
+                            },
+                            show_bg: true,
+                            draw_bg: {
+                                color: #444
+                            }
+                            <View> {
+                                width: 300.0,
+                                height: 300.0,
+                                show_bg: true,
+                                draw_bg: {
+                                    color: #F00
+                                }
                             }
                         }
                     }

@@ -165,8 +165,8 @@ pub enum Size {
         max: None,
     }]
     Fit {
-        min: Option<f64>,
-        max: Option<f64>,
+        min: Option<FitBound>,
+        max: Option<FitBound>,
     }
 }
 
@@ -225,6 +225,43 @@ impl Size {
 impl Default for Size {
     fn default() -> Self {
         Size::fill()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Live)]
+pub enum FitBound {
+    #[pick(100.0)]
+    Abs(f64),
+    #[live(100.0)]
+    Rel(f64),
+}
+
+impl FitBound {
+    fn eval(self, parent_size: f64) -> f64 {
+        match self {
+            FitBound::Abs(abs) => abs,
+            FitBound::Rel(rel) => rel * parent_size,
+        }
+    }
+}
+
+impl LiveHook for FitBound {
+    fn skip_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+        match nodes[index].value {
+            LiveValue::Int64(value) => {
+                *self = Self::Abs(value as f64);
+                Some(index + 1)
+            }
+            LiveValue::Float32(value) => {
+                *self = Self::Abs(value as f64);
+                Some(index + 1)
+            }
+            LiveValue::Float64(value) => {
+                *self = Self::Abs(value);
+                Some(index + 1)
+            }
+            _ => None
+        }
     }
 }
 
@@ -1304,10 +1341,14 @@ impl<'a,'b> Cx2d<'a,'b> {
             turtle.width = turtle.used_width() + turtle.padding().right;
             if let Size::Fit { min, max } = turtle.walk.width {
                 if let Some(min) = min {
-                    turtle.width = turtle.width.max(min);
+                    let parent_width = self.turtles[self.turtles.len() - 2].width;
+                    turtle = self.turtles.last_mut().unwrap();
+                    turtle.width = turtle.width.max(min.eval(parent_width));
                 }
                 if let Some(max) = max {
-                    turtle.width = turtle.width.min(max);
+                    let parent_width = self.turtles[self.turtles.len() - 2].width;
+                    turtle = self.turtles.last_mut().unwrap();
+                    turtle.width = turtle.width.min(max.eval(parent_width));
                 }
             }
             if let AlignEntry::BeginTurtle(clip_min,clip_max) = &mut self.align_list[turtle.align_start] {
@@ -1320,10 +1361,14 @@ impl<'a,'b> Cx2d<'a,'b> {
             turtle.height = turtle.used_height() + turtle.padding().bottom;
             if let Size::Fit { min, max } = turtle.walk.height {
                 if let Some(min) = min {
-                    turtle.height = turtle.height.max(min);
+                    let parent_height = self.turtles[self.turtles.len() - 2].height;
+                    turtle = self.turtles.last_mut().unwrap();
+                    turtle.height = turtle.height.max(min.eval(parent_height));
                 }
                 if let Some(max) = max {
-                    turtle.height = turtle.height.min(max);
+                    let parent_height = self.turtles[self.turtles.len() - 2].height;
+                    turtle = self.turtles.last_mut().unwrap();
+                    turtle.height = turtle.height.min(max.eval(parent_height));
                 }
             }
             if let AlignEntry::BeginTurtle(clip_min, clip_max) = &mut self.align_list[turtle.align_start] {
