@@ -28,9 +28,66 @@ impl IdToString {
         static IDMAP: Mutex<Option<IdToString>> = Mutex::new(None);
         static ONCE: Once = Once::new();
         ONCE.call_once( ||{
-            let map = IdToString {
+            let mut map = IdToString {
+                //alloc: 0,
                 id_to_string: HashMap::new()
             };
+            // pre-seed list for debugging purposes
+            let fill = [
+                "default",
+                "true",
+                "false",
+                "#",
+                "$",
+                "@",
+                "^",
+                "^=",
+                "|",
+                "||",
+                "|=",
+                "%",
+                "%=",
+                "!=",
+                "!",
+                "&&",
+                "*=",
+                "*",
+                "+=",
+                "+",
+                ",",
+                "-=",
+                "->",
+                "-",
+                "..",
+                "...",
+                "..=",
+                ".",
+                "/=",
+                "/",
+                "::",
+                ":",
+                ";",
+                "<=",
+                "<",
+                "<<",
+                "<<=",
+                "==",
+                "=",
+                ">=",
+                "=>",
+                ">",
+                ">>",
+                ">>=",
+                "?",
+                "me",
+                "it"
+            ];
+            for item in &fill {
+                if map.contains(item) {
+                    eprintln!("WE HAVE AN ID COLLISION!");
+                }
+                map.add(item);
+            }
             *IDMAP.lock().unwrap() = Some(map)
         });
         let mut idmap = IDMAP.lock().unwrap();

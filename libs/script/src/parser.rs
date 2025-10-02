@@ -26,6 +26,12 @@ enum State{
     ForIdent,
     ForRange,
     If,
+    Let,
+    LetDynOrTyped,
+    LetType,
+    LetTypedAssign,
+    EmitLetDyn,
+    EmitLetTyped
 }
 
 // we have a stack, and we have operations
@@ -140,7 +146,7 @@ impl State{
             id!(>=) => Value::OP_GEQ,
             id!(&&) => Value::OP_LOGIC_AND,
             id!(||)  => Value::OP_LOGIC_OR,
-            id!(:) => Value::OP_ASSIGN_IT,
+            id!(:) => Value::OP_ASSIGN_ME,
             id!(=) => Value::OP_ASSIGN,
             id!(+=) => Value::OP_ASSIGN_ADD,
             id!(-=) => Value::OP_ASSIGN_SUB,
@@ -163,6 +169,9 @@ impl State{
             Self::EmitOp(op1)=>{
                 match other{
                     Self::EmitOp(op2)=>{
+                        //if Self::is_assign_operator(*op1) && Self::is_assign_operator(op2){
+                        //    return false
+                        //}
                         Self::operator_order(*op1) <= Self::operator_order(op2)
                     }
                     _=>false
@@ -215,6 +224,58 @@ impl ScriptParser{
             State::ForIdent=>{}
             State::ForRange=>{}
             State::If=>{}
+            State::Let=>{
+                if id != id!(){ // lets expect an assignment expression
+                    // push the id on to the stack
+                    self.code.push(id.into());
+                    self.state.push(State::LetDynOrTyped);
+                    return 1
+                }
+                else{ // unknown
+                    println!("Let expected identifier");
+                }
+            }
+            State::LetDynOrTyped=>{
+                if op == id!(=){ // assignment following
+                    self.state.push(State::EmitLetDyn);
+                    self.state.push(State::BeginExpr);
+                    return 1
+                }
+                else if op == id!(:){ // type following
+                    self.state.push(State::LetType);
+                    return 1
+                }
+                else{
+                    self.code.push(Value::OP_LET_DYN_NIL);
+                }
+            }
+            State::LetType=>{
+                if id != id!(){ // lets expect an assignment expression
+                    // push the id on to the stack
+                    self.code.push(id.into());
+                    self.state.push(State::LetTypedAssign);
+                    return 1
+                }
+                else{ // unknown
+                    println!("Let type expected");
+                }
+            }
+            State::LetTypedAssign=>{
+                if op == id!(=){ // assignment following
+                    self.state.push(State::EmitLetTyped);
+                    self.state.push(State::BeginExpr);
+                    return 1
+                }
+                else{
+                    self.code.push(Value::OP_LET_TYPED_NIL);
+                }
+            }
+            State::EmitLetDyn=>{
+                self.code.push(Value::OP_LET_DYN);
+            }
+            State::EmitLetTyped=>{
+                self.code.push(Value::OP_LET_TYPED);
+            }
             State::EndFrag=>{
                 // we expect a ) here
                 self.code.push(Value::OP_END_FRAG);
@@ -299,6 +360,12 @@ impl ScriptParser{
             }
             State::EndExpr=>{
                 if State::operator_order(op) != 0{
+                    /*if State::is_assign_operator(op){
+                        // lets error on assignments in pure expression position
+                        println!("{:?}", self.state);
+                        println!("{:?}", self.code);
+                    }*/
+                    
                     let next_state = State::EmitOp(op);
                     // check if we have a ..[] = 
                     if let Some(&Value::OP_ARRAY_INDEX) = self.code.last(){
@@ -312,12 +379,14 @@ impl ScriptParser{
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp(id!(.)) = last{
                             if State::is_assign_operator(op){
-                                for code in self.code.iter().rev(){
-                                    println!("{:?}", code);
+                                for pair in self.code.rchunks_mut(2){
+                                    if pair[0] == Value::OP_FIELD && pair[1].is_id(){
+                                        pair[0] = Value::OP_PROTO_FIELD
+                                    }
+                                    else{
+                                        break
+                                    }
                                 }
-                                // this is a chain assign
-                                // check upwards the entire property chain in the code emitted
-                                // and change it to do deep prototype clone
                                 self.state.push(State::EmitFieldAssign(op));
                                 self.state.push(State::BeginExpr);
                                 return 1
@@ -413,22 +482,26 @@ impl ScriptParser{
                     return 1
                 }
                 if op == id!(.){
-                    self.code.push(id!(it).into());
+                    self.code.push(id!(me).into());
                     self.state.push(State::EmitOp(op));
                     self.state.push(State::BeginExpr);
                     return 1
                 }
             }
             State::BeginStmt => {
-                let cid = tok.identifier();
-                if cid == id!(for){
+                if id == id!(for){
                     self.state.push(State::For);
                     self.state.push(State::ForIdent);
                     return 1
                 }
-                else if cid == id!(if){
+                else if id == id!(if){
                     self.state.push(State::If);
                     self.state.push(State::BeginExpr);
+                    return 1
+                }
+                else if id == id!(let){
+                    // we have to have an identifier after let
+                    self.state.push(State::Let);
                     return 1
                 }
                 if op == id!(;) || op == id!(,){ // just eat it
@@ -447,6 +520,7 @@ impl ScriptParser{
             }
             State::EndStmt=>{
                 // just start a new statement
+                 
                 self.state.push(State::BeginStmt);
                 return 0
             }
