@@ -93,7 +93,7 @@ impl Value{
     pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | 20);
     pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | 21);
     
-    pub const OP_ASSIGN_IT: Value = Value(Self::TYPE_OPCODE | 22);
+    pub const OP_ASSIGN_ME: Value = Value(Self::TYPE_OPCODE | 22);
     pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | 23);
     pub const OP_ASSIGN_ADD: Value = Value(Self::TYPE_OPCODE | 24);
     pub const OP_ASSIGN_SUB: Value = Value(Self::TYPE_OPCODE | 25);
@@ -148,7 +148,12 @@ impl Value{
     pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 71);
     // prototypically inherit the chain for deep prototype fields
     pub const OP_PROTO_FIELD: Value = Value(Self::TYPE_OPCODE | 72);
-            
+    pub const OP_POP_TO_ME: Value  = Value(Self::TYPE_OPCODE | 73);
+    
+    pub const OP_LET_DYN_NIL: Value  = Value(Self::TYPE_OPCODE | 74);
+    pub const OP_LET_TYPED_NIL: Value  = Value(Self::TYPE_OPCODE | 75);
+    pub const OP_LET_TYPED: Value  = Value(Self::TYPE_OPCODE | 76);
+    pub const OP_LET_DYN: Value  = Value(Self::TYPE_OPCODE | 77);
         
     // TODO: make this behave like javascript as much as is sensible
     
@@ -311,7 +316,7 @@ impl fmt::Display for Value {
                 Self::OP_LOGIC_OR => return write!(f, "||"),
                 
                 Self::OP_ASSIGN => return write!(f, "="),
-                Self::OP_ASSIGN_IT => return write!(f, ":"),
+                Self::OP_ASSIGN_ME => return write!(f, ":"),
                 Self::OP_ASSIGN_ADD => return write!(f, "+="),
                 Self::OP_ASSIGN_SUB => return write!(f, "-="),
                 Self::OP_ASSIGN_MUL => return write!(f, "*="),
@@ -358,7 +363,14 @@ impl fmt::Display for Value {
                 Self::OP_BEGIN_FRAG => return write!(f, "Frag("),
                 Self::OP_END_FRAG => return write!(f, ")"),
                 Self::OP_FIELD => return write!(f, "."),
+                Self::OP_PROTO_FIELD=> return write!(f, "(proto)."),
                 Self::OP_ARRAY_INDEX => return write!(f, "[]"),
+                
+                Self::OP_LET_DYN_NIL=> return write!(f, "<let dyn nil>"),
+                Self::OP_LET_TYPED_NIL=> return write!(f, "<let typed nil>"),
+                Self::OP_LET_TYPED => return write!(f, "<let typed>"),
+                Self::OP_LET_DYN => return write!(f, "<let dyn>"),
+                
                 _=>return write!(f, "OP?")
             }
         }

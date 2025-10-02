@@ -32,12 +32,12 @@ on_click: ||{
     call => instructions
 }*/
 
+// object string float vec2 vec3 vec4 bool color nil true false
 pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
     let code = "
-        .text_style.font_size.prop += 1.0
-        ;
+        let x = |x:type| y
     ";
     
     let mut interp = ScriptInterpreter::new();
