@@ -13,7 +13,7 @@ pub struct CallFrame{
 pub struct ScriptThread{
     stack: Vec<Value>,
     calls: Vec<CallFrame>,
-    its: Vec<ObjectPtr>,
+    mes: Vec<ObjectPtr>,
     pub ip: usize
 }
     
@@ -43,16 +43,16 @@ impl ScriptThread{
         Self{
             stack: vec![],
             calls: vec![],
-            its: vec![],
+            mes: vec![],
             ip: 0
         }
     }
     
     // lets resolve an id to a Value
     pub fn resolve(&self, id: Id)->Value{
-        if id == id!(it){
-            if let Some(it) = self.its.last(){
-                return (*it).into()
+        if id == id!(me){
+            if let Some(me) = self.mes.last(){
+                return (*me).into()
             }
             return Value::NIL
         }
@@ -94,16 +94,16 @@ impl ScriptThread{
     pub fn op_assign_field(&mut self, heap:&mut ScriptHeap){
         let field = self.stack.pop().unwrap();
         let value = self.stack.pop().unwrap();
-        if let Some(it) = self.its.last(){
-            heap.set_object_value(*it, field, value);
+        if let Some(me) = self.mes.last(){
+            heap.set_object_value(*me, field, value);
         }
     }
     
     pub fn op_assign(&mut self, heap:&mut ScriptHeap){
         let field = self.stack.pop().unwrap();
         let value = self.stack.pop().unwrap();
-        if let Some(it) = self.its.last(){
-            heap.set_object_value(*it, field, value);
+        if let Some(me) = self.mes.last(){
+            heap.set_object_value(*me, field, value);
         }
     }
     
@@ -116,14 +116,14 @@ impl ScriptThread{
             stack_base: 0,
             return_ip: 0,
         };
-        self.its.push(global);
+        self.mes.push(global);
         self.calls.push(call);
         for i in 0..parser.code.len(){
             self.ip = i;
             self.step(parser, heap);
         }
         self.calls.pop();
-        self.its.pop();
+        self.mes.pop();
                 
         //self.heap.free_object(scope);
     }
@@ -131,7 +131,6 @@ impl ScriptThread{
     pub fn step(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap){
         let code = parser.code[self.ip];
         if code.is_opcode(){
-            println!("RUNNING {}", code);
             match code{
                 Value::OP_ADD=>{
                     self.op_add(heap);
@@ -148,10 +147,10 @@ impl ScriptThread{
                 }
                 Value::OP_BEGIN_BARE=>{ // bare object
                     let it = heap.new_dyn_object();
-                    self.its.push(it);
+                    self.mes.push(it);
                 }
                 Value::OP_END_BARE=>{
-                    self.stack.push(self.its.pop().unwrap().into());
+                    self.stack.push(self.mes.pop().unwrap().into());
                 }
                 _=>{
                     // unknown instruction
