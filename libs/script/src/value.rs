@@ -1,5 +1,4 @@
 use crate::id::Id;
-use makepad_script_derive::*;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Value(u64);
@@ -164,9 +163,9 @@ impl Value{
     pub const OI_LET_DYN:u64 = 81;pub const OP_LET_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN);
     
     pub const OI_ID_AS_VAR:u64 = 82;pub const OP_ID_AS_VAR: Value = Value(Self::TYPE_OPCODE | Self::OI_ID_AS_VAR);
-    
-    pub const ESCAPED_IDENTIFIER_ID: Id =id!(__escaped__identifier__);
-    pub const ESCAPED_IDENTIFIER_VALUE: Value = Value::from_id(Self::ESCAPED_IDENTIFIER_ID);
+        
+    pub const OI_SEARCH_TREE:u64 = 83;pub const OP_SEARCH_TREE: Value = Value(Self::TYPE_OPCODE | Self::OI_SEARCH_TREE);
+        
     // TODO: make this behave like javascript as much as is sensible
     
     pub const fn from_f64(val:f64)->Self{
@@ -384,34 +383,35 @@ impl fmt::Display for Value {
                 Self::OP_ASSIGN_INDEX_IFNIL => return write!(f, "[]?="),
                 
                 Self::OP_BEGIN_PROTO => return write!(f, "<proto>{{"),
-                Self::OP_END_PROTO => return write!(f, "<proto>}}"),
+                Self::OP_END_PROTO => return write!(f, "}}"),
                 Self::OP_BEGIN_BARE => return write!(f, "<bare>{{"),
-                Self::OP_END_BARE => return write!(f, "<bare>}}"),
+                Self::OP_END_BARE => return write!(f, "}}"),
                 Self::OP_BEGIN_CALL => return write!(f, "<call>("),
-                Self::OP_END_CALL => return write!(f, "<call>)"),
+                Self::OP_END_CALL => return write!(f, ")"),
                 Self::OP_BEGIN_FRAG => return write!(f, "<frag>("),
-                Self::OP_END_FRAG => return write!(f, "<frag>)"),
+                Self::OP_END_FRAG => return write!(f, ")"),
                 
                 Self::OP_BEGIN_FN=> return write!(f, "<fn>|"),
                 Self::OP_FN_ARG_DYN=> return write!(f, "<arg dyn nil>"),
                 Self::OP_FN_ARG_TYPED=> return write!(f, "<arg typed nil>"),
                 Self::OP_FN_EXPR=> return write!(f, "|<fnexpr>"),
                 Self::OP_BEGIN_FN_BLOCK=> return write!(f, "|<fnblock>{{"),
-                Self::OP_END_FN_BLOCK=> return write!(f, "<fnblock>}}"),
+                Self::OP_END_FN_BLOCK=> return write!(f, "}}"),
                 Self::OP_RETURN=> return write!(f, "<return>"),
                                 
                 Self::OP_FIELD => return write!(f, "."),
                 Self::OP_ARRAY_INDEX => return write!(f, "[]"),
                                 
                 Self::OP_PROTO_FIELD=> return write!(f, "<proto>."),
-                Self::OP_POP_TO_ME=> return write!(f, "<pop to me>"),
+                Self::OP_POP_TO_ME=> return write!(f, "<me>"),
                  
-                Self::OP_LET_DYN_NIL=> return write!(f, "<let dyn nil>"),
-                Self::OP_LET_TYPED_NIL=> return write!(f, "<let typed nil>"),
-                Self::OP_LET_TYPED => return write!(f, "<let typed>"),
-                Self::OP_LET_DYN => return write!(f, "<let dyn>"),
-                Self::OP_ID_AS_VAR => return write!(f, "<@>"),
-                                
+                Self::OP_LET_DYN_NIL=> return write!(f, "let dyn nil"),
+                Self::OP_LET_TYPED_NIL=> return write!(f, "let typed nil"),
+                Self::OP_LET_TYPED => return write!(f, "let typed"),
+                Self::OP_LET_DYN => return write!(f, "let dyn"),
+                Self::OP_ID_AS_VAR => return write!(f, "@"),
+                
+                Self::OP_SEARCH_TREE => return write!(f, "$"),
                 _=>return write!(f, "OP?")
             }
         }

@@ -258,6 +258,8 @@ impl ScriptThread{
                     self.push_stack_value(Value::NIL)
                 }
             }
+            Value::OI_SEARCH_TREE=>{
+            }
             _=>{
                 // unknown instruction
             }
