@@ -1,4 +1,5 @@
 use crate::id::Id;
+use makepad_script_derive::*;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Value(u64);
@@ -161,7 +162,9 @@ impl Value{
     pub const OI_LET_DYN:u64 = 81;pub const OP_LET_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN);
     
     pub const OI_ID_AS_VAR:u64 = 82;pub const OP_ID_AS_VAR: Value = Value(Self::TYPE_OPCODE | Self::OI_ID_AS_VAR);
-            
+    
+    pub const ESCAPED_IDENTIFIER_ID: Id =id!(__escaped__identifier__);
+    pub const ESCAPED_IDENTIFIER_VALUE: Value = Value::from_id(Self::ESCAPED_IDENTIFIER_ID);
     // TODO: make this behave like javascript as much as is sensible
     
     pub const fn from_f64(val:f64)->Self{
