@@ -10,14 +10,14 @@ pub struct HeapTag(u32);
 impl HeapTag{
     const MARK:u32 = 0x1;
     const ALLOCED:u32 = 0x2;
-    const SHALLOW_PROTO:u32 = 0x4;
+    const DEEP:u32 = 0x4;
     
-    pub fn set_shallow_proto(&mut self){
-        self.0 |= Self::SHALLOW_PROTO
+    pub fn set_deep(&mut self){
+        self.0 |= Self::DEEP
     }
     
-    pub fn is_shallow_proto(&self)->bool{
-        self.0 & Self::SHALLOW_PROTO != 0
+    pub fn is_deep(&self)->bool{
+        self.0 & Self::DEEP != 0
     }
         
     pub fn is_alloced(&self)->bool{
@@ -109,10 +109,11 @@ impl HeapZone{
         }
     }
     
-   pub fn new_object_with_proto(&mut self, proto:Value)->ObjectPtr{
+   pub fn new_object_with_proto(&mut self, proto:Value, deep:bool)->ObjectPtr{
         if let Some(index) = self.objects_free.pop(){
             let object = &mut self.objects[index];
             object.tag.set_alloced();
+            if deep{object.tag.set_deep()}
             object.proto = proto;
             ObjectPtr{
                 zone: self.zone,
@@ -123,6 +124,7 @@ impl HeapZone{
             let index = self.objects.len();
             let mut object = Object::with_proto(proto);
             object.tag.set_alloced();
+            if deep{object.tag.set_deep()}
             self.objects.push(object);
             ObjectPtr{
                 zone: self.zone,
@@ -131,11 +133,11 @@ impl HeapZone{
         }
     }
     
-    pub fn new_shallow_object(&mut self)->ObjectPtr{
+    pub fn new_deep_object(&mut self)->ObjectPtr{
         if let Some(index) = self.objects_free.pop(){
             let object = &mut self.objects[index];
             object.tag.set_alloced();
-            object.tag.set_shallow_proto();
+            object.tag.set_deep();
             ObjectPtr{
                 zone: self.zone,
                 index: index as _
@@ -145,7 +147,7 @@ impl HeapZone{
             let index = self.objects.len();
             let mut object = Object::default();
             object.tag.set_alloced();
-            object.tag.set_shallow_proto();
+            object.tag.set_deep();
             self.objects.push(object);
             ObjectPtr{
                 zone: self.zone,
@@ -385,18 +387,20 @@ impl ScriptHeap{
         self.zones[Self::DYNAMIC].new_object()
     }
     
-    pub fn new_dyn_shallow_object(&mut self)->ObjectPtr{
-        self.zones[Self::DYNAMIC].new_shallow_object()
+    pub fn new_dyn_deep_object(&mut self)->ObjectPtr{
+        self.zones[Self::DYNAMIC].new_deep_object()
     }
     
     pub fn new_dyn_object_with_proto(&mut self, proto:Value)->ObjectPtr{
-        self.zones[Self::DYNAMIC].new_object_with_proto(proto)
+        let deep = if let Some(ptr) = proto.as_object(){
+            self.zones[ptr.zone as usize].objects[ptr.index as usize].tag.is_deep()
+        }
+        else{
+            false
+        };
+        self.zones[Self::DYNAMIC].new_object_with_proto(proto, deep)
     }
-        /*
-    pub fn free_object(&mut self, ptr:ObjectPtr){
-        self.zones[ptr.zone as usize].free_object(ptr.index as usize);
-    }
-    */
+    
     pub fn new_static_string(&mut self, string:String)->StringPtr{
         let zone = &mut self.zones[Self::STATIC];
         let index = zone.strings.len();
@@ -456,7 +460,8 @@ impl ScriptHeap{
             return
         }
         
-        if object.tag.is_shallow_proto(){
+        // deep objects do value mutations on their prototypes
+        if object.tag.is_deep(){
             let mut ptr = set_ptr;
             // scan up the chain to set the proto value
             loop{
