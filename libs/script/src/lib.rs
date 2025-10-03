@@ -47,7 +47,7 @@ pub fn test(){
         $thing.prop = 10.0;
     ";*/
     let code = "
-        let x = '123';
+        let x = {'123'};
     ";
     
     let mut interp = ScriptInterpreter::new();
