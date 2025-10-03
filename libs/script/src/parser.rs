@@ -142,6 +142,7 @@ impl State{
         match op{
             id!(!)=> Value::OP_NOT,
             id!(-)=> Value::OP_NEG,
+            id!(@)=> Value::OP_ID_AS_VAR,
             _=>Value::OP_NOP
         }
     }
@@ -553,7 +554,7 @@ impl ScriptParser{
                     self.code.push(Value::from_string(ptr));
                     return 1
                 }
-                if op == id!(-) || op == id!(!) {
+                if op == id!(-) || op == id!(!) || op == id!(@){
                     self.state.push(State::EmitUnary(op));
                     self.state.push(State::BeginExpr);
                     return 1
