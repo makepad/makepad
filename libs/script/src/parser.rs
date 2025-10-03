@@ -143,7 +143,7 @@ impl State{
         match op{
             id!(!)=> Value::OP_NOT,
             id!(-)=> Value::OP_NEG,
-            id!(@)=> Value::OP_ID_AS_VAR,
+            id!(@)=> Value::OP_ESCAPE_ID,
             _=>Value::OP_NOP
         }
     }

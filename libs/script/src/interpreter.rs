@@ -245,7 +245,7 @@ impl ScriptThread{
                 heap.push_object_value(call.scope, id.into(), Value::NIL);
                 self.push_stack_value(Value::NIL);
             }
-            Value::OI_ID_AS_VAR=>{
+            Value::OI_ESCAPE_ID=>{
                 let value = self.pop_stack_value();
                 if let Some(id) = value.as_id(){
                     self.push_stack_value(Value::from_escaped_id(id));
