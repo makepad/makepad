@@ -67,6 +67,8 @@ impl Value{
     
     pub const TYPE_ID: u64 = 0xFFFF_8000_0000_0000;
     
+    pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
+    
     // opcodes
     pub const TYPE_OPCODE: u64 = 0xFFFF_0700_0000_0000;
     pub const OI_NOP: u64 = 0;pub const OP_NOP: Value = Value(Self::TYPE_OPCODE | Self::OI_NOP);
@@ -193,6 +195,10 @@ impl Value{
         Self(val.0|Self::TYPE_ID)
     }
     
+    pub const fn from_escaped_id(val: Id)->Self{
+        Self(val.0|Self::TYPE_ID|Self::ESCAPED_ID)
+    }
+        
     pub fn from_string(ptr: StringPtr)->Self{
          Self(((ptr.zone as u64) << 32) | ptr.index as u64 | Self::TYPE_STRING)
     }
@@ -213,11 +219,16 @@ impl Value{
         
     pub fn as_id(&self)->Option<Id>{
         if self.is_id(){
-            return Some(Id(self.0&0x0000_7fff_ffff_ffff))
+            return Some(Id(self.0&0x0000_3fff_ffff_ffff))
         }
         None
     }
     
+    pub fn is_escaped_id(&self)->bool{
+        self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
+    }
+        
+        
     pub fn as_object(&self)->Option<ObjectPtr>{
         if self.is_object(){
             return Some(ObjectPtr{
