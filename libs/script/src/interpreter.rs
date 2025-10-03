@@ -90,7 +90,7 @@ impl ScriptThread{
             }
             return heap.object_value(call.scope, id.into())
         }
-        return Value::NIL
+        Value::NIL
     }
     
     pub fn op_concat(&mut self, heap:&mut ScriptHeap){
@@ -104,11 +104,7 @@ impl ScriptThread{
     }
     
     pub fn op_assign_field(&mut self, heap:&mut ScriptHeap){
-        let field = self.stack.pop().unwrap();
-        let value = self.pop_stack_resolved(heap);
-        if let Some(me) = self.mes.last(){
-            heap.set_object_value(*me, field, value);
-        }
+        
     }
     
     pub fn op_assign_me(&mut self, heap:&mut ScriptHeap){
@@ -142,8 +138,17 @@ impl ScriptThread{
             Value::OP_XOR=>fu64_op_impl!(self, heap, ^),
 
             Value::OP_CONCAT=>self.op_concat(heap),
-            //Value::OP_ASSIGN=>self.op_assign(heap),
-            Value::OP_ASSIGN_FIELD=>self.op_assign_field(heap),
+            Value::OP_ASSIGN_ME=>{
+                let value = self.pop_stack_resolved(heap);
+                let field = self.stack.pop().unwrap();
+                if let Some(me) = self.mes.last(){
+                    heap.set_object_value(*me, field, value);
+                }
+                self.stack.push(Value::NIL);
+            }
+            Value::OP_ASSIGN_FIELD=>{
+                
+            }
             Value::OP_BEGIN_BARE=>{ // bare object
                 let it = heap.new_dyn_object();
                 self.mes.push(it);
@@ -231,9 +236,9 @@ impl ScriptThread{
         print!("Scope:");
         heap.print_object(call.scope);
         self.mes.pop();
-        print!("Global:");
+        print!("\nGlobal:");
         heap.print_object(global);
-                                
+        println!("");                                
         //self.heap.free_object(scope);
     }
 }
