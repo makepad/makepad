@@ -26,7 +26,7 @@ pub enum ScriptToken{
 }
 
 impl ScriptToken{
-    pub fn identifier(&self)->Id{match self{ScriptToken::Identifier{id,..}=>*id,_=>id!()}}
+    pub fn identifier(&self)->(Id, bool){match self{ScriptToken::Identifier{id,starts_with_ds}=>(*id,*starts_with_ds),_=>(id!(),false)}}
     pub fn operator(&self)->Id{match self{ScriptToken::Operator(id)=>*id,_=>id!()}}
     pub fn number(&self)->f64{match self{ScriptToken::Number(v)=>*v,_=>0.0}}
     pub fn maybe_number(&self)->Option<f64>{match self{ScriptToken::Number(v)=>Some(*v),_=>None}}
