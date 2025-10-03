@@ -355,11 +355,12 @@ impl ScriptTokenizer{
                         }
                         self.state = State::BlockComment(0);
                     }
-                    else if c == '-' && self.temp.len() > 0 && self.temp.chars().last() != Some('-'){
-                        self.emit_operator();
-                        self.temp.push(c);
-                    }
-                    else if c == '+' && self.temp.len() > 0 && self.temp.chars().last() != Some('+'){
+                    else if // break up operator sequence
+                    (c == ':' && self.temp.len() > 0 && self.temp.chars().last() != Some(':')) ||
+                    (c != ':' && self.temp.len() > 0 && self.temp.chars().last() == Some(':')) ||
+                    (c == '-' && self.temp.len() > 0 && self.temp.chars().last() != Some('-')) ||
+                    (c == '+' && self.temp.len() > 0 && self.temp.chars().last() != Some('+'))
+                    {
                         self.emit_operator();
                         self.temp.push(c);
                     }

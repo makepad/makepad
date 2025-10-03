@@ -414,6 +414,13 @@ impl ScriptHeap{
             return
         }
         
+        if key.is_nil(){ // array like push
+            object.fields.push(Field{
+                key,
+                value
+            })
+        }
+        
         if object.tag.is_shallow_proto(){
             let mut ptr = set_ptr;
             // scan up the chain to set the proto value
