@@ -64,6 +64,14 @@ impl Value{
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
     pub const TYPE_OBJECT: u64 = 0xFFFF_0600_0000_0000;
     
+    pub const TYPE_INLINE_STRING_0: u64 = 0xFFFF_0800_0000_0000;
+    pub const TYPE_INLINE_STRING_1: u64 = 0xFFFF_0900_0000_0000;
+    pub const TYPE_INLINE_STRING_2: u64 = 0xFFFF_0A00_0000_0000;
+    pub const TYPE_INLINE_STRING_3: u64 = 0xFFFF_0B00_0000_0000;
+    pub const TYPE_INLINE_STRING_4: u64 = 0xFFFF_0C00_0000_0000;
+    pub const TYPE_INLINE_STRING_5: u64 = 0xFFFF_0D00_0000_0000;
+    pub const TYPE_INLINE_STRING_END: u64 = 0xFFFF_0E00_0000_0000;
+                
     pub const TYPE_ID: u64 = 0xFFFF_8000_0000_0000;
     
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
@@ -201,7 +209,56 @@ impl Value{
     pub fn from_string(ptr: StringPtr)->Self{
          Self(((ptr.zone as u64) << 32) | ptr.index as u64 | Self::TYPE_STRING)
     }
-
+    
+    pub fn from_inline_string(str: &str)->Option<Self>{
+        let bytes = str.as_bytes();
+        if bytes.len()>5{
+            return None
+        }
+        if bytes.len() == 0{
+            Some(Self(Self::TYPE_INLINE_STRING_0))
+        }
+        else if bytes.len() == 1{
+            Some(Self(Self::TYPE_INLINE_STRING_1 | bytes[0] as u64))
+        }
+        else if bytes.len() == 2{
+            Some(Self(Self::TYPE_INLINE_STRING_2 | bytes[0] as u64 | ((bytes[1] as u64)<<8)))
+        }
+        else if bytes.len() == 3{
+            Some(Self(Self::TYPE_INLINE_STRING_3 | bytes[0] as u64 | ((bytes[1] as u64)<<8) | ((bytes[2] as u64)<<16)))
+        }
+        else if bytes.len() == 4{
+            Some(Self(Self::TYPE_INLINE_STRING_4 | bytes[0] as u64 | ((bytes[1] as u64)<<8) | ((bytes[2] as u64)<<16) | ((bytes[3] as u64)<<24)))
+        }
+        else{
+            Some(Self(Self::TYPE_INLINE_STRING_5 | bytes[0] as u64 | ((bytes[1] as u64)<<8) | ((bytes[2] as u64)<<16) | ((bytes[3] as u64)<<24) | ((bytes[4] as u64)<<32)))
+        }                    
+    }
+    
+    pub fn with_inline_string<R,F:FnOnce(&str)->R>(&self, f:F)->Option<R>{
+        if !self.is_inline_string(){
+            return None
+        }
+        if self.0 < Self::TYPE_INLINE_STRING_1{
+            return Some(f(""))
+        }
+        else if self.0 < Self::TYPE_INLINE_STRING_2{
+            return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8])}))
+        }
+        else if self.0 < Self::TYPE_INLINE_STRING_3{
+            return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8, ((self.0>>8) & 0xff) as u8])}))
+        }
+        else if self.0 < Self::TYPE_INLINE_STRING_4{
+            return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8, ((self.0>>8) & 0xff) as u8, ((self.0>>16) & 0xff) as u8])}))
+        }
+        else if self.0 < Self::TYPE_INLINE_STRING_5{
+            return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8, ((self.0>>8) & 0xff) as u8, ((self.0>>16) & 0xff) as u8, ((self.0>>24) & 0xff) as u8])}))
+        }
+        else{
+            return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8, ((self.0>>8) & 0xff) as u8, ((self.0>>16) & 0xff) as u8, ((self.0>>24) & 0xff) as u8, ((self.0>>32) & 0xff) as u8])}))
+        }
+    }
+    
     pub fn as_bool(&self)->Option<bool>{
         if self.is_bool(){
             return Some(*self == Self::TRUE)
@@ -221,6 +278,10 @@ impl Value{
             return Some(Id(self.0&0x0000_3fff_ffff_ffff))
         }
         None
+    }
+    
+    pub fn is_inline_string(&self)->bool{
+        self.0 >= Self::TYPE_INLINE_STRING_0  && self.0 < Self::TYPE_INLINE_STRING_END
     }
     
     pub fn is_escaped_id(&self)->bool{
@@ -315,6 +376,11 @@ impl fmt::Display for Value {
         }
         if let Some(_) = self.as_string(){
             return write!(f, "[String]")
+        }
+        if self.is_inline_string(){
+            return self.with_inline_string(|s|{
+                write!(f, "{s}")
+            }).unwrap();
         }
         if let Some(_) = self.as_object(){
             return write!(f, "[Object]")
