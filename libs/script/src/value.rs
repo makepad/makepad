@@ -80,99 +80,99 @@ impl Value{
     pub const TYPE_OPCODE: u64 = 0xFFFF_0700_0000_0000;
     pub const OI_NOP: u64 = 0;pub const OP_NOP: Value = Value(Self::TYPE_OPCODE | Self::OI_NOP);
     
-    pub const OI_NOT:u64 = 1;pub const OP_NOT: Value = Value(Self::TYPE_OPCODE | Self::OI_NOT);
-    pub const OI_NEG:u64 = 2;pub const OP_NEG: Value = Value(Self::TYPE_OPCODE | Self::OI_NEG);
-    pub const OI_MUL:u64 = 3;pub const OP_MUL: Value = Value(Self::TYPE_OPCODE | Self::OI_MUL);
-    pub const OI_DIV:u64 = 4;pub const OP_DIV: Value = Value(Self::TYPE_OPCODE | Self::OI_DIV);
-    pub const OI_MOD:u64 = 5;pub const OP_MOD: Value = Value(Self::TYPE_OPCODE | Self::OI_MOD);
-    pub const OI_ADD:u64 = 6;pub const OP_ADD: Value = Value(Self::TYPE_OPCODE | Self::OI_ADD);
-    pub const OI_SUB:u64 = 7;pub const OP_SUB: Value = Value(Self::TYPE_OPCODE | Self::OI_SUB);
-    pub const OI_SHL:u64 = 8;pub const OP_SHL: Value = Value(Self::TYPE_OPCODE | Self::OI_SHL);
-    pub const OI_SHR:u64 = 9;pub const OP_SHR: Value = Value(Self::TYPE_OPCODE | Self::OI_SHR);
-    pub const OI_AND:u64 = 10;pub const OP_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_AND);
-    pub const OI_OR:u64 = 11;pub const OP_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_OR);
-    pub const OI_XOR:u64 = 12;pub const OP_XOR: Value = Value(Self::TYPE_OPCODE | Self::OI_XOR);
+    pub const OI_NOT:u64 = 1;pub const OP_NOT: Value = Value(Self::TYPE_OPCODE | Self::OI_NOT<<32);
+    pub const OI_NEG:u64 = 2;pub const OP_NEG: Value = Value(Self::TYPE_OPCODE | Self::OI_NEG<<32);
+    pub const OI_MUL:u64 = 3;pub const OP_MUL: Value = Value(Self::TYPE_OPCODE | Self::OI_MUL<<32);
+    pub const OI_DIV:u64 = 4;pub const OP_DIV: Value = Value(Self::TYPE_OPCODE | Self::OI_DIV<<32);
+    pub const OI_MOD:u64 = 5;pub const OP_MOD: Value = Value(Self::TYPE_OPCODE | Self::OI_MOD<<32);
+    pub const OI_ADD:u64 = 6;pub const OP_ADD: Value = Value(Self::TYPE_OPCODE | Self::OI_ADD<<32);
+    pub const OI_SUB:u64 = 7;pub const OP_SUB: Value = Value(Self::TYPE_OPCODE | Self::OI_SUB<<32);
+    pub const OI_SHL:u64 = 8;pub const OP_SHL: Value = Value(Self::TYPE_OPCODE | Self::OI_SHL<<32);
+    pub const OI_SHR:u64 = 9;pub const OP_SHR: Value = Value(Self::TYPE_OPCODE | Self::OI_SHR<<32);
+    pub const OI_AND:u64 = 10;pub const OP_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_AND<<32);
+    pub const OI_OR:u64 = 11;pub const OP_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_OR<<32);
+    pub const OI_XOR:u64 = 12;pub const OP_XOR: Value = Value(Self::TYPE_OPCODE | Self::OI_XOR<<32);
     
-    pub const OI_CONCAT:u64 = 13;pub const OP_CONCAT: Value = Value(Self::TYPE_OPCODE | Self::OI_CONCAT);
-    pub const OI_EQ:u64 = 14;pub const OP_EQ: Value = Value(Self::TYPE_OPCODE | Self::OI_EQ);
-    pub const OI_NEQ:u64 = 15;pub const OP_NEQ: Value = Value(Self::TYPE_OPCODE | Self::OI_NEQ);
-    pub const OI_LT:u64 = 16;pub const OP_LT: Value = Value(Self::TYPE_OPCODE | Self::OI_LT);
-    pub const OI_GT:u64 = 17;pub const OP_GT: Value = Value(Self::TYPE_OPCODE | Self::OI_GT);
-    pub const OI_LEQ:u64 = 18;pub const OP_LEQ: Value = Value(Self::TYPE_OPCODE | Self::OI_LEQ);
-    pub const OI_GEQ:u64 = 19;pub const OP_GEQ: Value = Value(Self::TYPE_OPCODE | Self::OI_GEQ);
-    pub const OI_LOGIC_AND:u64 = 20;pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_LOGIC_AND);
-    pub const OI_LOGIC_OR:u64 = 21;pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_LOGIC_OR);
+    pub const OI_CONCAT:u64 = 13;pub const OP_CONCAT: Value = Value(Self::TYPE_OPCODE | Self::OI_CONCAT<<32);
+    pub const OI_EQ:u64 = 14;pub const OP_EQ: Value = Value(Self::TYPE_OPCODE | Self::OI_EQ<<32);
+    pub const OI_NEQ:u64 = 15;pub const OP_NEQ: Value = Value(Self::TYPE_OPCODE | Self::OI_NEQ<<32);
+    pub const OI_LT:u64 = 16;pub const OP_LT: Value = Value(Self::TYPE_OPCODE | Self::OI_LT<<32);
+    pub const OI_GT:u64 = 17;pub const OP_GT: Value = Value(Self::TYPE_OPCODE | Self::OI_GT<<32);
+    pub const OI_LEQ:u64 = 18;pub const OP_LEQ: Value = Value(Self::TYPE_OPCODE | Self::OI_LEQ<<32);
+    pub const OI_GEQ:u64 = 19;pub const OP_GEQ: Value = Value(Self::TYPE_OPCODE | Self::OI_GEQ<<32);
+    pub const OI_LOGIC_AND:u64 = 20;pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_LOGIC_AND<<32);
+    pub const OI_LOGIC_OR:u64 = 21;pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_LOGIC_OR<<32);
     
-    pub const OI_ASSIGN_ME:u64 = 22;pub const OP_ASSIGN_ME: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_ME);
-    pub const OI_ASSIGN:u64 = 23;pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN);
-    pub const OI_ASSIGN_ADD:u64 = 24;pub const OP_ASSIGN_ADD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_ADD);
-    pub const OI_ASSIGN_SUB:u64 = 25;pub const OP_ASSIGN_SUB: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_SUB);
-    pub const OI_ASSIGN_MUL:u64 = 26;pub const OP_ASSIGN_MUL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_MUL);
-    pub const OI_ASSIGN_DIV:u64 = 27;pub const OP_ASSIGN_DIV: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_DIV);
-    pub const OI_ASSIGN_MOD:u64 = 28;pub const OP_ASSIGN_MOD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_MOD);
-    pub const OI_ASSIGN_AND:u64 = 29;pub const OP_ASSIGN_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_AND);
-    pub const OI_ASSIGN_OR:u64 = 30;pub const OP_ASSIGN_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_OR);
-    pub const OI_ASSIGN_XOR:u64 = 31;pub const OP_ASSIGN_XOR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_XOR);
-    pub const OI_ASSIGN_SHL:u64 = 32;pub const OP_ASSIGN_SHL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_SHL);
-    pub const OI_ASSIGN_SHR:u64 = 33;pub const OP_ASSIGN_SHR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_SHR);
-    pub const OI_ASSIGN_IFNIL:u64 = 34;pub const OP_ASSIGN_IFNIL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_IFNIL);
+    pub const OI_ASSIGN_ME:u64 = 22;pub const OP_ASSIGN_ME: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_ME<<32);
+    pub const OI_ASSIGN:u64 = 23;pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN<<32);
+    pub const OI_ASSIGN_ADD:u64 = 24;pub const OP_ASSIGN_ADD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_ADD<<32);
+    pub const OI_ASSIGN_SUB:u64 = 25;pub const OP_ASSIGN_SUB: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_SUB<<32);
+    pub const OI_ASSIGN_MUL:u64 = 26;pub const OP_ASSIGN_MUL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_MUL<<32);
+    pub const OI_ASSIGN_DIV:u64 = 27;pub const OP_ASSIGN_DIV: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_DIV<<32);
+    pub const OI_ASSIGN_MOD:u64 = 28;pub const OP_ASSIGN_MOD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_MOD<<32);
+    pub const OI_ASSIGN_AND:u64 = 29;pub const OP_ASSIGN_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_AND<<32);
+    pub const OI_ASSIGN_OR:u64 = 30;pub const OP_ASSIGN_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_OR<<32);
+    pub const OI_ASSIGN_XOR:u64 = 31;pub const OP_ASSIGN_XOR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_XOR<<32);
+    pub const OI_ASSIGN_SHL:u64 = 32;pub const OP_ASSIGN_SHL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_SHL<<32);
+    pub const OI_ASSIGN_SHR:u64 = 33;pub const OP_ASSIGN_SHR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_SHR<<32);
+    pub const OI_ASSIGN_IFNIL:u64 = 34;pub const OP_ASSIGN_IFNIL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_IFNIL<<32);
     
-    pub const OI_ASSIGN_FIELD:u64 = 35;pub const OP_ASSIGN_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD);
-    pub const OI_ASSIGN_FIELD_ADD:u64 = 36;pub const OP_ASSIGN_FIELD_ADD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_ADD);
-    pub const OI_ASSIGN_FIELD_SUB:u64 = 37;pub const OP_ASSIGN_FIELD_SUB: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_SUB);
-    pub const OI_ASSIGN_FIELD_MUL:u64 = 38;pub const OP_ASSIGN_FIELD_MUL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_MUL);
-    pub const OI_ASSIGN_FIELD_DIV:u64 = 39;pub const OP_ASSIGN_FIELD_DIV: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_DIV);
-    pub const OI_ASSIGN_FIELD_MOD:u64 = 40;pub const OP_ASSIGN_FIELD_MOD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_MOD);
-    pub const OI_ASSIGN_FIELD_AND:u64 = 41;pub const OP_ASSIGN_FIELD_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_AND);
-    pub const OI_ASSIGN_FIELD_OR:u64 = 42;pub const OP_ASSIGN_FIELD_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_OR);
-    pub const OI_ASSIGN_FIELD_XOR:u64 = 43;pub const OP_ASSIGN_FIELD_XOR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_XOR);
-    pub const OI_ASSIGN_FIELD_SHL:u64 = 44;pub const OP_ASSIGN_FIELD_SHL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_SHL);
-    pub const OI_ASSIGN_FIELD_SHR:u64 = 45;pub const OP_ASSIGN_FIELD_SHR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_SHR);
-    pub const OI_ASSIGN_FIELD_IFNIL:u64 = 46;pub const OP_ASSIGN_FIELD_IFNIL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_IFNIL);
+    pub const OI_ASSIGN_FIELD:u64 = 35;pub const OP_ASSIGN_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD<<32);
+    pub const OI_ASSIGN_FIELD_ADD:u64 = 36;pub const OP_ASSIGN_FIELD_ADD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_ADD<<32);
+    pub const OI_ASSIGN_FIELD_SUB:u64 = 37;pub const OP_ASSIGN_FIELD_SUB: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_SUB<<32);
+    pub const OI_ASSIGN_FIELD_MUL:u64 = 38;pub const OP_ASSIGN_FIELD_MUL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_MUL<<32);
+    pub const OI_ASSIGN_FIELD_DIV:u64 = 39;pub const OP_ASSIGN_FIELD_DIV: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_DIV<<32);
+    pub const OI_ASSIGN_FIELD_MOD:u64 = 40;pub const OP_ASSIGN_FIELD_MOD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_MOD<<32);
+    pub const OI_ASSIGN_FIELD_AND:u64 = 41;pub const OP_ASSIGN_FIELD_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_AND<<32);
+    pub const OI_ASSIGN_FIELD_OR:u64 = 42;pub const OP_ASSIGN_FIELD_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_OR<<32);
+    pub const OI_ASSIGN_FIELD_XOR:u64 = 43;pub const OP_ASSIGN_FIELD_XOR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_XOR<<32);
+    pub const OI_ASSIGN_FIELD_SHL:u64 = 44;pub const OP_ASSIGN_FIELD_SHL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_SHL<<32);
+    pub const OI_ASSIGN_FIELD_SHR:u64 = 45;pub const OP_ASSIGN_FIELD_SHR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_SHR<<32);
+    pub const OI_ASSIGN_FIELD_IFNIL:u64 = 46;pub const OP_ASSIGN_FIELD_IFNIL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_IFNIL<<32);
         
-    pub const OI_ASSIGN_INDEX:u64 = 47;pub const OP_ASSIGN_INDEX: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX);
-    pub const OI_ASSIGN_INDEX_ADD:u64 = 48;pub const OP_ASSIGN_INDEX_ADD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_ADD);
-    pub const OI_ASSIGN_INDEX_SUB:u64 = 49;pub const OP_ASSIGN_INDEX_SUB: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_SUB);
-    pub const OI_ASSIGN_INDEX_MUL:u64 = 50;pub const OP_ASSIGN_INDEX_MUL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_MUL);
-    pub const OI_ASSIGN_INDEX_DIV:u64 = 51;pub const OP_ASSIGN_INDEX_DIV: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_DIV);
-    pub const OI_ASSIGN_INDEX_MOD:u64 = 52;pub const OP_ASSIGN_INDEX_MOD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_MOD);
-    pub const OI_ASSIGN_INDEX_AND:u64 = 53;pub const OP_ASSIGN_INDEX_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_AND);
-    pub const OI_ASSIGN_INDEX_OR:u64 = 54;pub const OP_ASSIGN_INDEX_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_OR);
-    pub const OI_ASSIGN_INDEX_XOR:u64 = 55;pub const OP_ASSIGN_INDEX_XOR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_XOR);
-    pub const OI_ASSIGN_INDEX_SHL:u64 = 56;pub const OP_ASSIGN_INDEX_SHL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_SHL);
-    pub const OI_ASSIGN_INDEX_SHR:u64 = 57;pub const OP_ASSIGN_INDEX_SHR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_SHR);
-    pub const OI_ASSIGN_INDEX_IFNIL:u64 = 58;pub const OP_ASSIGN_INDEX_IFNIL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_IFNIL);    
-    pub const OI_BEGIN_PROTO:u64 = 59;pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_PROTO);
-    pub const OI_END_PROTO:u64 = 60;pub const OP_END_PROTO: Value = Value(Self::TYPE_OPCODE | Self::OI_END_PROTO);
-    pub const OI_BEGIN_BARE:u64 = 61;pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_BARE);
-    pub const OI_END_BARE:u64 = 62;pub const OP_END_BARE: Value = Value(Self::TYPE_OPCODE | Self::OI_END_BARE);
-    pub const OI_BEGIN_CALL:u64 = 63;pub const OP_BEGIN_CALL: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_CALL);
-    pub const OI_END_CALL:u64 = 64;pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | Self::OI_END_CALL);
-    pub const OI_BEGIN_FRAG:u64 = 65;pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FRAG);
-    pub const OI_END_FRAG:u64 = 66;pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | Self::OI_END_FRAG);
+    pub const OI_ASSIGN_INDEX:u64 = 47;pub const OP_ASSIGN_INDEX: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX<<32);
+    pub const OI_ASSIGN_INDEX_ADD:u64 = 48;pub const OP_ASSIGN_INDEX_ADD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_ADD<<32);
+    pub const OI_ASSIGN_INDEX_SUB:u64 = 49;pub const OP_ASSIGN_INDEX_SUB: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_SUB<<32);
+    pub const OI_ASSIGN_INDEX_MUL:u64 = 50;pub const OP_ASSIGN_INDEX_MUL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_MUL<<32);
+    pub const OI_ASSIGN_INDEX_DIV:u64 = 51;pub const OP_ASSIGN_INDEX_DIV: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_DIV<<32);
+    pub const OI_ASSIGN_INDEX_MOD:u64 = 52;pub const OP_ASSIGN_INDEX_MOD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_MOD<<32);
+    pub const OI_ASSIGN_INDEX_AND:u64 = 53;pub const OP_ASSIGN_INDEX_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_AND<<32);
+    pub const OI_ASSIGN_INDEX_OR:u64 = 54;pub const OP_ASSIGN_INDEX_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_OR<<32);
+    pub const OI_ASSIGN_INDEX_XOR:u64 = 55;pub const OP_ASSIGN_INDEX_XOR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_XOR<<32);
+    pub const OI_ASSIGN_INDEX_SHL:u64 = 56;pub const OP_ASSIGN_INDEX_SHL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_SHL<<32);
+    pub const OI_ASSIGN_INDEX_SHR:u64 = 57;pub const OP_ASSIGN_INDEX_SHR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_SHR<<32);
+    pub const OI_ASSIGN_INDEX_IFNIL:u64 = 58;pub const OP_ASSIGN_INDEX_IFNIL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_IFNIL<<32);    
+    pub const OI_BEGIN_PROTO:u64 = 59;pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_PROTO<<32);
+    pub const OI_END_PROTO:u64 = 60;pub const OP_END_PROTO: Value = Value(Self::TYPE_OPCODE | Self::OI_END_PROTO<<32);
+    pub const OI_BEGIN_BARE:u64 = 61;pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_BARE<<32);
+    pub const OI_END_BARE:u64 = 62;pub const OP_END_BARE: Value = Value(Self::TYPE_OPCODE | Self::OI_END_BARE<<32);
+    pub const OI_BEGIN_CALL:u64 = 63;pub const OP_BEGIN_CALL: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_CALL<<32);
+    pub const OI_END_CALL:u64 = 64;pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | Self::OI_END_CALL<<32);
+    pub const OI_BEGIN_FRAG:u64 = 65;pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FRAG<<32);
+    pub const OI_END_FRAG:u64 = 66;pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | Self::OI_END_FRAG<<32);
     
-    pub const OI_BEGIN_FN:u64 = 67;pub const OP_BEGIN_FN: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FN);
-    pub const OI_FN_ARG_DYN:u64 = 68;pub const OP_FN_ARG_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_ARG_DYN);
-    pub const OI_FN_ARG_TYPED:u64 = 69;pub const OP_FN_ARG_TYPED: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_ARG_TYPED);
-    pub const OI_FN_EXPR:u64 = 70;pub const OP_FN_EXPR: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_EXPR);
-    pub const OI_BEGIN_FN_BLOCK:u64 = 71;pub const OP_BEGIN_FN_BLOCK: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FN_BLOCK);
-    pub const OI_END_FN_BLOCK:u64 = 72;pub const OP_END_FN_BLOCK: Value = Value(Self::TYPE_OPCODE | Self::OI_END_FN_BLOCK);
-    pub const OP_RETURN:  Value = Value(Self::TYPE_OPCODE | 73);
+    pub const OI_BEGIN_FN:u64 = 67;pub const OP_BEGIN_FN: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FN<<32);
+    pub const OI_FN_ARG_DYN:u64 = 68;pub const OP_FN_ARG_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_ARG_DYN<<32);
+    pub const OI_FN_ARG_TYPED:u64 = 69;pub const OP_FN_ARG_TYPED: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_ARG_TYPED<<32);
+    pub const OI_FN_EXPR:u64 = 70;pub const OP_FN_EXPR: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_EXPR<<32);
+    pub const OI_BEGIN_FN_BLOCK:u64 = 71;pub const OP_BEGIN_FN_BLOCK: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FN_BLOCK<<32);
+    pub const OI_END_FN_BLOCK:u64 = 72;pub const OP_END_FN_BLOCK: Value = Value(Self::TYPE_OPCODE | Self::OI_END_FN_BLOCK<<32);
+    pub const OI_RETURN:u64=73; pub const OP_RETURN:  Value = Value(Self::TYPE_OPCODE | Self::OI_RETURN<<32);
     
-    pub const OI_FIELD:u64 = 74;pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_FIELD);
-    pub const OI_ARRAY_INDEX:u64 = 75;pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | Self::OI_ARRAY_INDEX);
+    pub const OI_FIELD:u64 = 74;pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_FIELD<<32);
+    pub const OI_ARRAY_INDEX:u64 = 75;pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | Self::OI_ARRAY_INDEX<<32);
     // prototypically inherit the chain for deep prototype fields
-    pub const OI_PROTO_FIELD:u64 = 76;pub const OP_PROTO_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_PROTO_FIELD);
-    pub const OI_POP_TO_ME:u64 = 77;pub const OP_POP_TO_ME: Value = Value(Self::TYPE_OPCODE | Self::OI_POP_TO_ME);
+    pub const OI_PROTO_FIELD:u64 = 76;pub const OP_PROTO_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_PROTO_FIELD<<32);
+    pub const OI_POP_TO_ME:u64 = 77;pub const OP_POP_TO_ME: Value = Value(Self::TYPE_OPCODE | Self::OI_POP_TO_ME<<32);
     
-    pub const OI_LET_DYN_NIL:u64 = 78;pub const OP_LET_DYN_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN_NIL);
-    pub const OI_LET_TYPED_NIL:u64 = 79;pub const OP_LET_TYPED_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED_NIL);
-    pub const OI_LET_TYPED:u64 = 80;pub const OP_LET_TYPED: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED);
-    pub const OI_LET_DYN:u64 = 81;pub const OP_LET_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN);
+    pub const OI_LET_DYN_NIL:u64 = 78;pub const OP_LET_DYN_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN_NIL<<32);
+    pub const OI_LET_TYPED_NIL:u64 = 79;pub const OP_LET_TYPED_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED_NIL<<32);
+    pub const OI_LET_TYPED:u64 = 80;pub const OP_LET_TYPED: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED<<32);
+    pub const OI_LET_DYN:u64 = 81;pub const OP_LET_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN<<32);
     
-    pub const OI_ID_AS_VAR:u64 = 82;pub const OP_ID_AS_VAR: Value = Value(Self::TYPE_OPCODE | Self::OI_ID_AS_VAR);
+    pub const OI_ESCAPE_ID:u64 = 82;pub const OP_ESCAPE_ID: Value = Value(Self::TYPE_OPCODE | Self::OI_ESCAPE_ID<<32);
         
-    pub const OI_SEARCH_TREE:u64 = 83;pub const OP_SEARCH_TREE: Value = Value(Self::TYPE_OPCODE | Self::OI_SEARCH_TREE);
+    pub const OI_SEARCH_TREE:u64 = 83;pub const OP_SEARCH_TREE: Value = Value(Self::TYPE_OPCODE | Self::OI_SEARCH_TREE<<32);
         
     // TODO: make this behave like javascript as much as is sensible
     
@@ -301,7 +301,7 @@ impl Value{
         
     pub fn as_opcode_index(&self)->Option<u64>{
         if self.is_opcode(){
-            return Some(self.0 & 0xff)
+            return Some((self.0>>32) & 0xff)
         }
         None
     }
@@ -474,7 +474,7 @@ impl fmt::Display for Value {
                 Self::OP_LET_TYPED_NIL=> return write!(f, "let typed nil"),
                 Self::OP_LET_TYPED => return write!(f, "let typed"),
                 Self::OP_LET_DYN => return write!(f, "let dyn"),
-                Self::OP_ID_AS_VAR => return write!(f, "@"),
+                Self::OP_ESCAPE_ID => return write!(f, "@"),
                 
                 Self::OP_SEARCH_TREE => return write!(f, "$"),
                 _=>return write!(f, "OP?")
