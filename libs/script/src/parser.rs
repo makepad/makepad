@@ -27,6 +27,7 @@ enum State{
     EmitFieldAssign(Id),
     EmitIndexAssign(Id),
     EndBare,
+    EndBareSquare,
     EndProto,
     EndFrag,
             
@@ -393,6 +394,17 @@ impl ScriptParser{
                 self.code.push(State::operator_to_unary(what_op));
                 return 0
             }
+            State::EndBareSquare=>{
+                self.code.push(Value::OP_END_BARE);
+                self.state.push(State::EndExpr);
+                if tok.is_close_square() {
+                    return 1
+                }
+                else {
+                    println!("Expected ] not found");
+                    return 0
+                }
+            }
             State::EndBare=>{
                 self.code.push(Value::OP_END_BARE);
                 self.state.push(State::EndExpr);
@@ -527,6 +539,12 @@ impl ScriptParser{
                 if tok.is_open_curly(){
                     self.code.push(Value::OP_BEGIN_BARE);
                     self.state.push(State::EndBare);
+                    self.state.push(State::BeginStmt);
+                    return 1
+                }
+                if tok.is_open_square(){
+                    self.code.push(Value::OP_BEGIN_BARE);
+                    self.state.push(State::EndBareSquare);
                     self.state.push(State::BeginStmt);
                     return 1
                 }

@@ -37,11 +37,12 @@ pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
     let code = "
-        let va = {@prop1, @prop2, @prop3};
+        let va = [@prop1, @prop2, @prop3];
         .z = {prop:@prop6},
         .z[.z.prop] = 5,
         let x = z{key:43}
         let t = x + 2;
+        $thing.prop = 10.0;
     ";
     
     let mut interp = ScriptInterpreter::new();
