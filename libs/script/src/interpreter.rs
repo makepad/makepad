@@ -93,9 +93,8 @@ impl ScriptThread{
             if let Some(me) = self.mes.last(){
                 return (*me).into()
             }
-            return Value::NIL
         }
-        if let Some(call) = self.calls.last(){
+        else if let Some(call) = self.calls.last(){
             if id == id!(scope){
                 return (call.scope).into()
             }
