@@ -22,6 +22,7 @@ enum State{
     EmitFnArgTyped,
     EmitFnArgDyn,
     
+    EmitUnary(Id),
     EmitOp(Id),
     EmitFieldAssign(Id),
     EmitIndexAssign(Id),
@@ -41,7 +42,7 @@ enum State{
     LetDynOrTyped,
     LetType,
     LetTypedAssign,
-EmitLetDyn,
+    EmitLetDyn,
     EmitLetTyped
 }
 
@@ -136,6 +137,15 @@ impl State{
             _=>Value::OP_NOP,
         }
     }
+    
+    fn operator_to_unary(op:Id)->Value{
+        match op{
+            id!(!)=> Value::OP_NOT,
+            id!(-)=> Value::OP_NEG,
+            _=>Value::OP_NOP
+        }
+    }
+    
     fn operator_to_opcode(op:Id)->Value{
         match op{
             id!(*) => Value::OP_MUL,
@@ -180,9 +190,9 @@ impl State{
             Self::EmitOp(op1)=>{
                 match other{
                     Self::EmitOp(op2)=>{
-                        //if Self::is_assign_operator(*op1) && Self::is_assign_operator(op2){
-                        //    return false
-                        //}
+                        if Self::is_assign_operator(*op1) && Self::is_assign_operator(op2){
+                            return false
+                        }
                         Self::operator_order(*op1) <= Self::operator_order(op2)
                     }
                     _=>false
@@ -311,6 +321,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{
+                    self.state.push(State::EmitFnArgDyn);
                     println!("Argument type expected in function")
                 }
             }
@@ -332,8 +343,10 @@ impl ScriptParser{
                     self.state.push(State::FnBody(fn_slot));
                     return 1
                 }
-                // unexpected
-                println!("Unexpected token in function argument list");
+                // unexpected token, but just stay in the arg list mode
+                println!("Unexpected token in function argument list {:?}", tok);
+                self.state.push(State::FnArgList(fn_slot));
+                return 1
             }
             State::FnBody(fn_slot)=>{
                 if tok.is_open_curly(){ // function body
@@ -373,6 +386,10 @@ impl ScriptParser{
             }
             State::EmitOp(what_op)=>{
                 self.code.push(State::operator_to_opcode(what_op));
+                return 0
+            }
+            State::EmitUnary(what_op)=>{
+                self.code.push(State::operator_to_unary(what_op));
                 return 0
             }
             State::EndBare=>{
@@ -536,6 +553,11 @@ impl ScriptParser{
                     self.code.push(Value::from_string(ptr));
                     return 1
                 }
+                if op == id!(-) || op == id!(!) {
+                    self.state.push(State::EmitUnary(op));
+                    self.state.push(State::BeginExpr);
+                    return 1
+                }
                 if op == id!(|){
                     let fn_slot = self.code.len();
                     self.code.push(Value::NIL);
@@ -552,17 +574,20 @@ impl ScriptParser{
             }
             State::BeginStmt => {
                 if id == id!(for){
+                    self.state.push(State::EndStmt);
                     self.state.push(State::For);
                     self.state.push(State::ForIdent);
                     return 1
                 }
                 else if id == id!(if){
+                    self.state.push(State::EndStmt);
                     self.state.push(State::If);
                     self.state.push(State::BeginExpr);
                     return 1
                 }
                 else if id == id!(let){
                     // we have to have an identifier after let
+                    self.state.push(State::EndStmt);
                     self.state.push(State::Let);
                     return 1
                 }
@@ -581,8 +606,8 @@ impl ScriptParser{
                 return 0;
             }
             State::EndStmt=>{
-                // just start a new statement
-                 
+                // we need to emit the pop-stack-check
+                self.code.push(Value::OP_POP_TO_ME);
                 self.state.push(State::BeginStmt);
                 return 0
             }
