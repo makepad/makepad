@@ -140,20 +140,25 @@ impl Value{
     pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | 64);
     pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | 65);
     pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | 66);
-    pub const OP_BEGIN_FN_ARGS: Value = Value(Self::TYPE_OPCODE | 67);
-    pub const OP_BEGIN_FN_BODY: Value = Value(Self::TYPE_OPCODE | 68);
-    pub const OP_END_FN_BODY: Value = Value(Self::TYPE_OPCODE | 69);
     
-    pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 70);
-    pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 71);
+    pub const OP_BEGIN_FN: Value = Value(Self::TYPE_OPCODE | 67);
+    pub const OP_FN_ARG_DYN: Value = Value(Self::TYPE_OPCODE | 68);
+    pub const OP_FN_ARG_TYPED: Value = Value(Self::TYPE_OPCODE | 69);
+    pub const OP_FN_EXPR: Value = Value(Self::TYPE_OPCODE | 70);
+    pub const OP_BEGIN_FN_BLOCK: Value = Value(Self::TYPE_OPCODE | 71);
+    pub const OP_END_FN_BLOCK: Value = Value(Self::TYPE_OPCODE | 72);
+    pub const OP_RETURN:  Value = Value(Self::TYPE_OPCODE | 73);
+    
+    pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | 74);
+    pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | 75);
     // prototypically inherit the chain for deep prototype fields
-    pub const OP_PROTO_FIELD: Value = Value(Self::TYPE_OPCODE | 72);
-    pub const OP_POP_TO_ME: Value  = Value(Self::TYPE_OPCODE | 73);
+    pub const OP_PROTO_FIELD: Value = Value(Self::TYPE_OPCODE | 76);
+    pub const OP_POP_TO_ME: Value  = Value(Self::TYPE_OPCODE | 77);
     
-    pub const OP_LET_DYN_NIL: Value  = Value(Self::TYPE_OPCODE | 74);
-    pub const OP_LET_TYPED_NIL: Value  = Value(Self::TYPE_OPCODE | 75);
-    pub const OP_LET_TYPED: Value  = Value(Self::TYPE_OPCODE | 76);
-    pub const OP_LET_DYN: Value  = Value(Self::TYPE_OPCODE | 77);
+    pub const OP_LET_DYN_NIL: Value  = Value(Self::TYPE_OPCODE | 78);
+    pub const OP_LET_TYPED_NIL: Value  = Value(Self::TYPE_OPCODE | 79);
+    pub const OP_LET_TYPED: Value  = Value(Self::TYPE_OPCODE | 80);
+    pub const OP_LET_DYN: Value  = Value(Self::TYPE_OPCODE | 81);
         
     // TODO: make this behave like javascript as much as is sensible
     
@@ -354,18 +359,29 @@ impl fmt::Display for Value {
                 Self::OP_ASSIGN_INDEX_SHR => return write!(f, "[]>>="),
                 Self::OP_ASSIGN_INDEX_IFNIL => return write!(f, "[]?="),
                 
-                Self::OP_BEGIN_PROTO => return write!(f, "Proto{{"),
-                Self::OP_END_PROTO => return write!(f, "}}"),
-                Self::OP_BEGIN_BARE => return write!(f, "Bare{{"),
-                Self::OP_END_BARE => return write!(f, "}}"),
-                Self::OP_BEGIN_CALL => return write!(f, "Call("),
-                Self::OP_END_CALL => return write!(f, ")"),
-                Self::OP_BEGIN_FRAG => return write!(f, "Frag("),
-                Self::OP_END_FRAG => return write!(f, ")"),
-                Self::OP_FIELD => return write!(f, "."),
-                Self::OP_PROTO_FIELD=> return write!(f, "(proto)."),
-                Self::OP_ARRAY_INDEX => return write!(f, "[]"),
+                Self::OP_BEGIN_PROTO => return write!(f, "<proto>{{"),
+                Self::OP_END_PROTO => return write!(f, "<proto>}}"),
+                Self::OP_BEGIN_BARE => return write!(f, "<bare>{{"),
+                Self::OP_END_BARE => return write!(f, "<bare>}}"),
+                Self::OP_BEGIN_CALL => return write!(f, "<call>("),
+                Self::OP_END_CALL => return write!(f, "<call>)"),
+                Self::OP_BEGIN_FRAG => return write!(f, "<frag>("),
+                Self::OP_END_FRAG => return write!(f, "<frag>)"),
                 
+                Self::OP_BEGIN_FN=> return write!(f, "<fn>|"),
+                Self::OP_FN_ARG_DYN=> return write!(f, "<arg dyn nil>"),
+                Self::OP_FN_ARG_TYPED=> return write!(f, "<arg typed nil>"),
+                Self::OP_FN_EXPR=> return write!(f, "|<fnexpr>"),
+                Self::OP_BEGIN_FN_BLOCK=> return write!(f, "|<fnblock>{{"),
+                Self::OP_END_FN_BLOCK=> return write!(f, "<fnblock>}}"),
+                Self::OP_RETURN=> return write!(f, "<return>"),
+                                
+                Self::OP_FIELD => return write!(f, "."),
+                Self::OP_ARRAY_INDEX => return write!(f, "[]"),
+                                
+                Self::OP_PROTO_FIELD=> return write!(f, "<proto>."),
+                Self::OP_POP_TO_ME=> return write!(f, "<pop to me>"),
+                 
                 Self::OP_LET_DYN_NIL=> return write!(f, "<let dyn nil>"),
                 Self::OP_LET_TYPED_NIL=> return write!(f, "<let typed nil>"),
                 Self::OP_LET_TYPED => return write!(f, "<let typed>"),
