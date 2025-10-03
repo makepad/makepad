@@ -71,17 +71,17 @@ impl ScriptThread{
     pub fn pop_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
         let val = self.stack.pop().unwrap();
         if let Some(id) = val.as_id(){
+            if id == Value::ESCAPED_IDENTIFIER_ID{
+                return  self.stack.pop().unwrap()
+            }
             return self.resolve(id, heap)
-        }
-        if val == Value::OP_ID_AS_VAR{ // escaped symbol
-            return  self.stack.pop().unwrap()
         }
         val    
     }
     
     pub fn pop_stack_value(&mut self)->Value{
         let val = self.stack.pop().unwrap();
-        if val == Value::OP_ID_AS_VAR{ // escaped symbol
+        if val == Value::ESCAPED_IDENTIFIER_VALUE{
             return  self.stack.pop().unwrap()
         }
         val
@@ -93,6 +93,9 @@ impl ScriptThread{
     
     // lets resolve an id to a Value
     pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
+        if id.is_counted(){ // do special ui tree lookup
+            println!("SPECIAL LOOKUP {}", id);
+        }
         if id == id!(me){
             if let Some(me) = self.mes.last(){
                 return (*me).into()
@@ -103,6 +106,9 @@ impl ScriptThread{
             if id == id!(scope){
                 return (call.scope).into()
             }
+            if id.is_counted(){ // we find this on me chain
+                
+            }
             return heap.object_value(call.scope, id.into())
         }
         Value::NIL
@@ -112,7 +118,7 @@ impl ScriptThread{
         match index{
             Value::OI_POP_TO_ME=>{
                 let value = self.stack.pop().unwrap();
-                if value == Value::OP_ID_AS_VAR{ // escaped symbol
+                if value == Value::ESCAPED_IDENTIFIER_VALUE{ // escaped symbol
                     let value = self.stack.pop().unwrap();
                     if let Some(me) = self.mes.last(){
                         heap.push_object_value(*me, Value::NIL, value);
@@ -255,7 +261,7 @@ impl ScriptThread{
                 let value = self.pop_stack_value();
                 if value.is_id(){
                     self.push_stack_value(value);
-                    self.push_stack_value(Value::OP_ID_AS_VAR);
+                    self.push_stack_value(Value::ESCAPED_IDENTIFIER_VALUE);
                 }
                 else if let Some(str) = value.as_string(){
                     self.push_stack_value(Id::from_str(heap.string(str)).into())
