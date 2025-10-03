@@ -147,8 +147,34 @@ impl ScriptThread{
                 }
                 self.stack.push(Value::NIL);
             }
+            Value::OI_FIELD=>{
+                let field = self.stack.pop().unwrap();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    self.stack.push(heap.object_value(obj, field))
+                }
+                else{
+                    self.stack.push(Value::NIL);
+                }
+            }
+            Value::OI_PROTO_FIELD=>{ // implement proto field!
+                let field = self.stack.pop().unwrap();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    self.stack.push(heap.object_value(obj, field))
+                }
+                else{
+                    self.stack.push(Value::NIL);
+                }
+            }
             Value::OI_ASSIGN_FIELD=>{
-                
+                let value = self.pop_stack_resolved(heap);
+                let field = self.stack.pop().unwrap();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    heap.set_object_value(obj, field, value);
+                }
+                self.stack.push(Value::NIL);
             }
             Value::OI_BEGIN_PROTO=>{
                 let proto = self.pop_stack_resolved(heap);
@@ -210,8 +236,7 @@ impl ScriptThread{
     }
       
     pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, global:ObjectPtr){
-        let scope = heap.new_dyn_shallow_object();
-                
+        let scope = heap.new_dyn_deep_object();
                 
         let call = CallFrame{
             scope,
