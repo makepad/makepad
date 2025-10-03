@@ -37,8 +37,9 @@ pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
     let code = "
-        let z = {prop:1}
-        let x = {key:43}
+        .z = {prop:1},
+        .z.prop = 2
+        let x = z{key:43}
         let t = x + 2;
     ";
     
