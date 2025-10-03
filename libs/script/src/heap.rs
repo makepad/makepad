@@ -291,7 +291,9 @@ impl ScriptHeap{
     }
         
     pub fn cast_to_string(&self, v:Value, out:&mut String){
-        if let Some(v) = v.as_string(){
+        if v.with_inline_string(|s|{write!(out, "{s}")}).is_some(){
+        }
+        else if let Some(v) = v.as_string(){
             let str = self.string(v);
             out.push_str(str);
         }
@@ -315,11 +317,7 @@ impl ScriptHeap{
         else if v.is_opcode(){
             write!(out, "[Opcode]").ok();
         }
-        else if v.is_inline_string(){
-            v.with_inline_string(|s|{
-                write!(out, "{s}").ok();
-            }).unwrap()
-        }
+        
         else{
             write!(out, "[Unknown]").ok();
         }

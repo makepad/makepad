@@ -232,7 +232,7 @@ impl Value{
         }
         else{
             Some(Self(Self::TYPE_INLINE_STRING_5 | bytes[0] as u64 | ((bytes[1] as u64)<<8) | ((bytes[2] as u64)<<16) | ((bytes[3] as u64)<<24) | ((bytes[4] as u64)<<32)))
-        }                    
+        }
     }
     
     pub fn with_inline_string<R,F:FnOnce(&str)->R>(&self, f:F)->Option<R>{
@@ -298,7 +298,6 @@ impl Value{
         }
         None
     }
-    
         
     pub fn as_opcode_index(&self)->Option<u64>{
         if self.is_opcode(){
@@ -377,10 +376,10 @@ impl fmt::Display for Value {
         if let Some(_) = self.as_string(){
             return write!(f, "[String]")
         }
-        if self.is_inline_string(){
-            return self.with_inline_string(|s|{
+        if let Some(r) = self.with_inline_string(|s|{
                 write!(f, "{s}")
-            }).unwrap();
+            }){
+            return r;
         }
         if let Some(_) = self.as_object(){
             return write!(f, "[Object]")
