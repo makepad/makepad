@@ -391,7 +391,7 @@ impl ScriptHeap{
             if key == id!(proto).to_value(){
                 return object.proto
             }
-            for field in &object.fields{
+            for field in object.fields.iter().rev(){
                 if field.key == key{
                     return field.value
                 }
@@ -406,6 +406,14 @@ impl ScriptHeap{
         Value::NIL
     }
     
+    pub fn push_object_value(&mut self, set_ptr:ObjectPtr, key: Value, value:Value){
+        let object = &mut self.zones[set_ptr.zone as usize].objects[set_ptr.index as usize];
+        object.fields.push(Field{
+            key,
+            value
+        });
+    }
+        
     pub fn set_object_value(&mut self, set_ptr:ObjectPtr, key:Value, value:Value){
         let object = &mut self.zones[set_ptr.zone as usize].objects[set_ptr.index as usize];
         
@@ -418,7 +426,8 @@ impl ScriptHeap{
             object.fields.push(Field{
                 key,
                 value
-            })
+            });
+            return
         }
         
         if object.tag.is_shallow_proto(){
@@ -426,7 +435,7 @@ impl ScriptHeap{
             // scan up the chain to set the proto value
             loop{
                 let object = &mut self.zones[ptr.zone as usize].objects[ptr.index as usize];
-                for field in &mut object.fields{
+                for field in object.fields.iter_mut().rev(){
                     if field.key == key{
                         field.value = value;
                         return
@@ -458,5 +467,29 @@ impl ScriptHeap{
             key,
             value
         });
+    }
+    
+    pub fn print_object(&self, set_ptr:ObjectPtr){
+        let mut ptr = set_ptr;
+        // scan up the chain to set the proto value
+        print!("{{");
+        let mut first = true;
+        loop{
+            let object = &self.zones[ptr.zone as usize].objects[ptr.index as usize];
+            for field in object.fields.iter().rev(){
+                if !first{print!(",")}
+                print!("{}:{}", field.key, field.value);
+                first = false;
+            }
+            if let Some(next_ptr) = object.proto.as_object(){
+                if !first{print!(",")}
+                print!("^");
+                ptr = next_ptr
+            }
+            else{
+                break;
+            }
+        }
+        println!("}}");
     }
 }
