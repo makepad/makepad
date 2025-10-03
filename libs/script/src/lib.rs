@@ -37,7 +37,8 @@ pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
     let code = "
-        let x = {key:43}
+        let z = {prop:1}
+        let x = z{key:43}
         let t = x + 2;
     ";
     
@@ -47,3 +48,6 @@ pub fn test(){
     parser.tok.dump_tokens(&interp.heap);
     interp.run(&parser);
 }
+/*
+pub const OP_(\w+): Value = Value\(Self::TYPE_OPCODE \| (\d+)\);
+pub const ID_$1:u64 = $2;pub const OP_$1: Value = Value(Self::TYPE_OPCODE | Self::ID_$1);*/
