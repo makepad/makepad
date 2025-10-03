@@ -71,8 +71,8 @@ impl ScriptThread{
     pub fn pop_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
         let val = self.stack.pop().unwrap();
         if let Some(id) = val.as_id(){
-            if id == Value::ESCAPED_IDENTIFIER_ID{
-                return  self.stack.pop().unwrap()
+            if val.is_escaped_id(){
+                return val
             }
             return self.resolve(id, heap)
         }
@@ -80,11 +80,7 @@ impl ScriptThread{
     }
     
     pub fn pop_stack_value(&mut self)->Value{
-        let val = self.stack.pop().unwrap();
-        if val == Value::ESCAPED_IDENTIFIER_VALUE{
-            return  self.stack.pop().unwrap()
-        }
-        val
+        self.stack.pop().unwrap()
     }
     
     pub fn push_stack_value(&mut self, value:Value){
@@ -93,9 +89,6 @@ impl ScriptThread{
     
     // lets resolve an id to a Value
     pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
-        if id.is_counted(){ // do special ui tree lookup
-            println!("SPECIAL LOOKUP {}", id);
-        }
         if id == id!(me){
             if let Some(me) = self.mes.last(){
                 return (*me).into()
@@ -106,9 +99,6 @@ impl ScriptThread{
             if id == id!(scope){
                 return (call.scope).into()
             }
-            if id.is_counted(){ // we find this on me chain
-                
-            }
             return heap.object_value(call.scope, id.into())
         }
         Value::NIL
@@ -118,15 +108,14 @@ impl ScriptThread{
         match index{
             Value::OI_POP_TO_ME=>{
                 let value = self.stack.pop().unwrap();
-                if value == Value::ESCAPED_IDENTIFIER_VALUE{ // escaped symbol
-                    let value = self.stack.pop().unwrap();
-                    if let Some(me) = self.mes.last(){
-                        heap.push_object_value(*me, Value::NIL, value);
-                    }
-                }
-                else if !value.is_nil(){
+                if !value.is_nil(){
                     let (key, value) = if let Some(id) = value.as_id(){
-                        (value, self.resolve(id, heap))
+                        if value.is_escaped_id(){
+                            (Value::NIL, value)
+                        }
+                        else{
+                            (value, self.resolve(id, heap))
+                        }
                     }
                     else{
                         (Value::NIL, value)
@@ -259,12 +248,11 @@ impl ScriptThread{
             }
             Value::OI_ID_AS_VAR=>{
                 let value = self.pop_stack_value();
-                if value.is_id(){
-                    self.push_stack_value(value);
-                    self.push_stack_value(Value::ESCAPED_IDENTIFIER_VALUE);
+                if let Some(id) = value.as_id(){
+                    self.push_stack_value(Value::from_escaped_id(id));
                 }
                 else if let Some(str) = value.as_string(){
-                    self.push_stack_value(Id::from_str(heap.string(str)).into())
+                    self.push_stack_value(Value::from_escaped_id(Id::from_str(heap.string(str))))
                 }
                 else{
                     self.push_stack_value(Value::NIL)
