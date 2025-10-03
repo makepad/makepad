@@ -109,6 +109,28 @@ impl HeapZone{
         }
     }
     
+   pub fn new_object_with_proto(&mut self, proto:Value)->ObjectPtr{
+        if let Some(index) = self.objects_free.pop(){
+            let object = &mut self.objects[index];
+            object.tag.set_alloced();
+            object.proto = proto;
+            ObjectPtr{
+                zone: self.zone,
+                index: index as _
+            }
+        }
+        else{
+            let index = self.objects.len();
+            let mut object = Object::with_proto(proto);
+            object.tag.set_alloced();
+            self.objects.push(object);
+            ObjectPtr{
+                zone: self.zone,
+                index: index as _
+            }
+        }
+    }
+    
     pub fn new_shallow_object(&mut self)->ObjectPtr{
         if let Some(index) = self.objects_free.pop(){
             let object = &mut self.objects[index];
@@ -365,6 +387,10 @@ impl ScriptHeap{
     
     pub fn new_dyn_shallow_object(&mut self)->ObjectPtr{
         self.zones[Self::DYNAMIC].new_shallow_object()
+    }
+    
+    pub fn new_dyn_object_with_proto(&mut self, proto:Value)->ObjectPtr{
+        self.zones[Self::DYNAMIC].new_object_with_proto(proto)
     }
         /*
     pub fn free_object(&mut self, ptr:ObjectPtr){
