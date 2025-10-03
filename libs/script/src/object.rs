@@ -17,6 +17,13 @@ pub struct Object{
 }
 
 impl Object{
+    pub fn with_proto(proto:Value)->Self{
+        Self{
+            proto,
+            ..Default::default()
+        }
+    }
+    
     pub fn clear(&mut self){
         self.proto = Value::NIL;
         self.tag.clear();
