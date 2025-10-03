@@ -150,6 +150,14 @@ impl ScriptThread{
             Value::OI_ASSIGN_FIELD=>{
                 
             }
+            Value::OI_BEGIN_PROTO=>{
+                let proto = self.pop_stack_resolved(heap);
+                let me = heap.new_dyn_object_with_proto(proto);
+                self.mes.push(me);
+            }
+            Value::OI_END_PROTO=>{
+                self.stack.push(self.mes.pop().unwrap().into());
+            }
             Value::OI_BEGIN_BARE=>{ // bare object
                 let me = heap.new_dyn_object();
                 self.mes.push(me);
