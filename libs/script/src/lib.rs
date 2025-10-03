@@ -36,7 +36,7 @@ on_click: ||{
 pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
-    /*
+    
     let code = "
         let va = [@prop1, @prop2, @prop3];
         .z = {prop:@prop6},
@@ -45,9 +45,6 @@ pub fn test(){
         let x = z{key:43}
         let t = x + 2;
         $thing.prop = 10.0;
-    ";*/
-    let code = "
-        let x = {'123'};
     ";
     
     let mut interp = ScriptInterpreter::new();

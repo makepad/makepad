@@ -103,6 +103,8 @@ impl Value{
     pub const OI_LOGIC_AND:u64 = 20;pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_LOGIC_AND<<32);
     pub const OI_LOGIC_OR:u64 = 21;pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_LOGIC_OR<<32);
     
+    pub const IO_ASSIGN_FIRST:u64 = 22;
+    
     pub const OI_ASSIGN_ME:u64 = 22;pub const OP_ASSIGN_ME: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_ME<<32);
     pub const OI_ASSIGN:u64 = 23;pub const OP_ASSIGN: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN<<32);
     pub const OI_ASSIGN_ADD:u64 = 24;pub const OP_ASSIGN_ADD: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_ADD<<32);
@@ -128,6 +130,7 @@ impl Value{
     pub const OI_ASSIGN_FIELD_XOR:u64 = 43;pub const OP_ASSIGN_FIELD_XOR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_XOR<<32);
     pub const OI_ASSIGN_FIELD_SHL:u64 = 44;pub const OP_ASSIGN_FIELD_SHL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_SHL<<32);
     pub const OI_ASSIGN_FIELD_SHR:u64 = 45;pub const OP_ASSIGN_FIELD_SHR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_SHR<<32);
+    
     pub const OI_ASSIGN_FIELD_IFNIL:u64 = 46;pub const OP_ASSIGN_FIELD_IFNIL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_FIELD_IFNIL<<32);
         
     pub const OI_ASSIGN_INDEX:u64 = 47;pub const OP_ASSIGN_INDEX: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX<<32);
@@ -142,6 +145,9 @@ impl Value{
     pub const OI_ASSIGN_INDEX_SHL:u64 = 56;pub const OP_ASSIGN_INDEX_SHL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_SHL<<32);
     pub const OI_ASSIGN_INDEX_SHR:u64 = 57;pub const OP_ASSIGN_INDEX_SHR: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_SHR<<32);
     pub const OI_ASSIGN_INDEX_IFNIL:u64 = 58;pub const OP_ASSIGN_INDEX_IFNIL: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_INDEX_IFNIL<<32);    
+    
+    pub const IO_ASSIGN_LAST:u64 = 58;
+    
     pub const OI_BEGIN_PROTO:u64 = 59;pub const OP_BEGIN_PROTO: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_PROTO<<32);
     pub const OI_END_PROTO:u64 = 60;pub const OP_END_PROTO: Value = Value(Self::TYPE_OPCODE | Self::OI_END_PROTO<<32);
     pub const OI_BEGIN_BARE:u64 = 61;pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_BARE<<32);
@@ -165,14 +171,14 @@ impl Value{
     pub const OI_PROTO_FIELD:u64 = 76;pub const OP_PROTO_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_PROTO_FIELD<<32);
     pub const OI_POP_TO_ME:u64 = 77;pub const OP_POP_TO_ME: Value = Value(Self::TYPE_OPCODE | Self::OI_POP_TO_ME<<32);
     
+    pub const OI_LET_FIRST: u64 = 78;
     pub const OI_LET_DYN_NIL:u64 = 78;pub const OP_LET_DYN_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN_NIL<<32);
     pub const OI_LET_TYPED_NIL:u64 = 79;pub const OP_LET_TYPED_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED_NIL<<32);
     pub const OI_LET_TYPED:u64 = 80;pub const OP_LET_TYPED: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED<<32);
     pub const OI_LET_DYN:u64 = 81;pub const OP_LET_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN<<32);
-    
-    pub const OI_ESCAPE_ID:u64 = 82;pub const OP_ESCAPE_ID: Value = Value(Self::TYPE_OPCODE | Self::OI_ESCAPE_ID<<32);
+    pub const OI_LET_LAST: u64 = 81;
         
-    pub const OI_SEARCH_TREE:u64 = 83;pub const OP_SEARCH_TREE: Value = Value(Self::TYPE_OPCODE | Self::OI_SEARCH_TREE<<32);
+    pub const OI_SEARCH_TREE:u64 = 82;pub const OP_SEARCH_TREE: Value = Value(Self::TYPE_OPCODE | Self::OI_SEARCH_TREE<<32);
         
     // TODO: make this behave like javascript as much as is sensible
     
@@ -235,7 +241,7 @@ impl Value{
         }
     }
     
-    pub fn with_inline_string<R,F:FnOnce(&str)->R>(&self, f:F)->Option<R>{
+    pub fn as_inline_string<R,F:FnOnce(&str)->R>(&self, f:F)->Option<R>{
         if !self.is_inline_string(){
             return None
         }
@@ -299,11 +305,33 @@ impl Value{
         None
     }
         
-    pub fn as_opcode_index(&self)->Option<u64>{
+    pub fn as_opcode_index(&self)->Option<(u64,u64)>{
         if self.is_opcode(){
-            return Some((self.0>>32) & 0xff)
+            return Some((((self.0>>32) & 0xff),(self.0 & 0xffff_ffff)))
         }
         None
+    }
+    
+    pub fn is_assign_opcode(&self)->bool{
+        if self.is_opcode(){
+            let code = (self.0>>32) & 0xff;
+            return code >= Self::IO_ASSIGN_FIRST && code <= Self::IO_ASSIGN_LAST
+        }
+        false
+    }
+    
+    pub fn is_let_opcode(&self)->bool{
+        if self.is_opcode(){
+            let code = (self.0>>32) & 0xff;
+            return code >= Self::OI_LET_FIRST && code <= Self::OI_LET_LAST
+        }
+        false
+    }
+    
+    pub fn set_opcode_arg(&mut self, arg:u64){
+        if self.is_opcode(){
+            self.0 |= arg;
+        }
     }
     
     pub fn as_string(&self)->Option<StringPtr>{
@@ -376,7 +404,7 @@ impl fmt::Display for Value {
         if let Some(_) = self.as_string(){
             return write!(f, "[String]")
         }
-        if let Some(r) = self.with_inline_string(|s|{
+        if let Some(r) = self.as_inline_string(|s|{
                 write!(f, "{s}")
             }){
             return r;
@@ -387,96 +415,95 @@ impl fmt::Display for Value {
         if self.is_nil(){
             return write!(f, "nil")
         }
-        if self.is_opcode(){
-            match *self{
-                Self::OP_MUL => return write!(f, "*"),
-                Self::OP_DIV => return write!(f, "/"),
-                Self::OP_MOD => return write!(f, "%"),
-                Self::OP_ADD => return write!(f, "+"),
-                Self::OP_SUB => return write!(f, "-"),
-                Self::OP_SHL => return write!(f, "<<"),
-                Self::OP_SHR => return write!(f, ">>"),
-                Self::OP_AND => return write!(f, "&"),
-                Self::OP_XOR => return write!(f, "^"),
-                Self::OP_OR => return write!(f, "|"),
-                Self::OP_EQ => return write!(f, "=="),
-                Self::OP_NEQ => return write!(f, "!="),
-                Self::OP_LT => return write!(f, "<"),
-                Self::OP_GT => return write!(f, ">"),
-                Self::OP_LEQ => return write!(f, "<="),
-                Self::OP_GEQ => return write!(f, ">="),
-                Self::OP_LOGIC_AND => return write!(f, "&&"),
-                Self::OP_LOGIC_OR => return write!(f, "||"),
+        if let Some((index, args)) = self.as_opcode_index(){
+            match index{
+                Self::OI_MUL => return write!(f, "*"),
+                Self::OI_DIV => return write!(f, "/"),
+                Self::OI_MOD => return write!(f, "%"),
+                Self::OI_ADD => return write!(f, "+"),
+                Self::OI_SUB => return write!(f, "-"),
+                Self::OI_SHL => return write!(f, "<<"),
+                Self::OI_SHR => return write!(f, ">>"),
+                Self::OI_AND => return write!(f, "&"),
+                Self::OI_XOR => return write!(f, "^"),
+                Self::OI_OR => return write!(f, "|"),
+                Self::OI_EQ => return write!(f, "=="),
+                Self::OI_NEQ => return write!(f, "!="),
+                Self::OI_LT => return write!(f, "<"),
+                Self::OI_GT => return write!(f, ">"),
+                Self::OI_LEQ => return write!(f, "<="),
+                Self::OI_GEQ => return write!(f, ">="),
+                Self::OI_LOGIC_AND => return write!(f, "&&"),
+                Self::OI_LOGIC_OR => return write!(f, "||"),
                 
-                Self::OP_ASSIGN => return write!(f, "="),
-                Self::OP_ASSIGN_ME => return write!(f, ":"),
-                Self::OP_ASSIGN_ADD => return write!(f, "+="),
-                Self::OP_ASSIGN_SUB => return write!(f, "-="),
-                Self::OP_ASSIGN_MUL => return write!(f, "*="),
-                Self::OP_ASSIGN_DIV => return write!(f, "/="),
-                Self::OP_ASSIGN_MOD => return write!(f, "%="),
-                Self::OP_ASSIGN_AND => return write!(f, "&="),
-                Self::OP_ASSIGN_OR => return write!(f, "|="),
-                Self::OP_ASSIGN_XOR => return write!(f, "^="),
-                Self::OP_ASSIGN_SHL => return write!(f, "<<="),
-                Self::OP_ASSIGN_SHR => return write!(f, ">>="),
+                Self::OI_ASSIGN => return write!(f, "="),
+                Self::OI_ASSIGN_ME => return write!(f, ":"),
+                Self::OI_ASSIGN_ADD => return write!(f, "+="),
+                Self::OI_ASSIGN_SUB => return write!(f, "-="),
+                Self::OI_ASSIGN_MUL => return write!(f, "*="),
+                Self::OI_ASSIGN_DIV => return write!(f, "/="),
+                Self::OI_ASSIGN_MOD => return write!(f, "%="),
+                Self::OI_ASSIGN_AND => return write!(f, "&="),
+                Self::OI_ASSIGN_OR => return write!(f, "|="),
+                Self::OI_ASSIGN_XOR => return write!(f, "^="),
+                Self::OI_ASSIGN_SHL => return write!(f, "<<="),
+                Self::OI_ASSIGN_SHR => return write!(f, ">>="),
                 
-                Self::OP_ASSIGN_FIELD => return write!(f, ".="),
-                Self::OP_ASSIGN_FIELD_ADD => return write!(f, ".+="),
-                Self::OP_ASSIGN_FIELD_SUB => return write!(f, ".-="),
-                Self::OP_ASSIGN_FIELD_MUL => return write!(f, ".*="),
-                Self::OP_ASSIGN_FIELD_DIV => return write!(f, "./="),
-                Self::OP_ASSIGN_FIELD_MOD => return write!(f, ".%="),
-                Self::OP_ASSIGN_FIELD_AND => return write!(f, ".&="),
-                Self::OP_ASSIGN_FIELD_OR => return write!(f, ".|="),
-                Self::OP_ASSIGN_FIELD_XOR => return write!(f, ".^="),
-                Self::OP_ASSIGN_FIELD_SHL => return write!(f, ".<<="),
-                Self::OP_ASSIGN_FIELD_SHR => return write!(f, ".>>="),
-                Self::OP_ASSIGN_FIELD_IFNIL => return write!(f, ".?="),
+                Self::OI_ASSIGN_FIELD => return write!(f, ".="),
+                Self::OI_ASSIGN_FIELD_ADD => return write!(f, ".+="),
+                Self::OI_ASSIGN_FIELD_SUB => return write!(f, ".-="),
+                Self::OI_ASSIGN_FIELD_MUL => return write!(f, ".*="),
+                Self::OI_ASSIGN_FIELD_DIV => return write!(f, "./="),
+                Self::OI_ASSIGN_FIELD_MOD => return write!(f, ".%="),
+                Self::OI_ASSIGN_FIELD_AND => return write!(f, ".&="),
+                Self::OI_ASSIGN_FIELD_OR => return write!(f, ".|="),
+                Self::OI_ASSIGN_FIELD_XOR => return write!(f, ".^="),
+                Self::OI_ASSIGN_FIELD_SHL => return write!(f, ".<<="),
+                Self::OI_ASSIGN_FIELD_SHR => return write!(f, ".>>="),
+                Self::OI_ASSIGN_FIELD_IFNIL => return write!(f, ".?="),
                 
-                Self::OP_ASSIGN_INDEX => return write!(f, "[]="),
-                Self::OP_ASSIGN_INDEX_ADD => return write!(f, "[]+="),
-                Self::OP_ASSIGN_INDEX_SUB => return write!(f, "[]-="),
-                Self::OP_ASSIGN_INDEX_MUL => return write!(f, "[]*="),
-                Self::OP_ASSIGN_INDEX_DIV => return write!(f, "[]/="),
-                Self::OP_ASSIGN_INDEX_MOD => return write!(f, "[]%="),
-                Self::OP_ASSIGN_INDEX_AND => return write!(f, "[]&="),
-                Self::OP_ASSIGN_INDEX_OR => return write!(f, "[]|="),
-                Self::OP_ASSIGN_INDEX_XOR => return write!(f, "[]^="),
-                Self::OP_ASSIGN_INDEX_SHL => return write!(f, "[]<<="),
-                Self::OP_ASSIGN_INDEX_SHR => return write!(f, "[]>>="),
-                Self::OP_ASSIGN_INDEX_IFNIL => return write!(f, "[]?="),
+                Self::OI_ASSIGN_INDEX => return write!(f, "[]="),
+                Self::OI_ASSIGN_INDEX_ADD => return write!(f, "[]+="),
+                Self::OI_ASSIGN_INDEX_SUB => return write!(f, "[]-="),
+                Self::OI_ASSIGN_INDEX_MUL => return write!(f, "[]*="),
+                Self::OI_ASSIGN_INDEX_DIV => return write!(f, "[]/="),
+                Self::OI_ASSIGN_INDEX_MOD => return write!(f, "[]%="),
+                Self::OI_ASSIGN_INDEX_AND => return write!(f, "[]&="),
+                Self::OI_ASSIGN_INDEX_OR => return write!(f, "[]|="),
+                Self::OI_ASSIGN_INDEX_XOR => return write!(f, "[]^="),
+                Self::OI_ASSIGN_INDEX_SHL => return write!(f, "[]<<="),
+                Self::OI_ASSIGN_INDEX_SHR => return write!(f, "[]>>="),
+                Self::OI_ASSIGN_INDEX_IFNIL => return write!(f, "[]?="),
                 
-                Self::OP_BEGIN_PROTO => return write!(f, "<proto>{{"),
-                Self::OP_END_PROTO => return write!(f, "}}"),
-                Self::OP_BEGIN_BARE => return write!(f, "<bare>{{"),
-                Self::OP_END_BARE => return write!(f, "}}"),
-                Self::OP_BEGIN_CALL => return write!(f, "<call>("),
-                Self::OP_END_CALL => return write!(f, ")"),
-                Self::OP_BEGIN_FRAG => return write!(f, "<frag>("),
-                Self::OP_END_FRAG => return write!(f, ")"),
+                Self::OI_BEGIN_PROTO => return write!(f, "<proto>{{"),
+                Self::OI_END_PROTO => return write!(f, "}}"),
+                Self::OI_BEGIN_BARE => return write!(f, "<bare>{{"),
+                Self::OI_END_BARE => return write!(f, "}}"),
+                Self::OI_BEGIN_CALL => return write!(f, "<call>("),
+                Self::OI_END_CALL => return write!(f, ")"),
+                Self::OI_BEGIN_FRAG => return write!(f, "<frag>("),
+                Self::OI_END_FRAG => return write!(f, ")"),
                 
-                Self::OP_BEGIN_FN=> return write!(f, "<fn>|"),
-                Self::OP_FN_ARG_DYN=> return write!(f, "<arg dyn nil>"),
-                Self::OP_FN_ARG_TYPED=> return write!(f, "<arg typed nil>"),
-                Self::OP_FN_EXPR=> return write!(f, "|<fnexpr>"),
-                Self::OP_BEGIN_FN_BLOCK=> return write!(f, "|<fnblock>{{"),
-                Self::OP_END_FN_BLOCK=> return write!(f, "}}"),
-                Self::OP_RETURN=> return write!(f, "<return>"),
+                Self::OI_BEGIN_FN=> return write!(f, "<fn>|"),
+                Self::OI_FN_ARG_DYN=> return write!(f, "<arg dyn nil>"),
+                Self::OI_FN_ARG_TYPED=> return write!(f, "<arg typed nil>"),
+                Self::OI_FN_EXPR=> return write!(f, "|<fnexpr>"),
+                Self::OI_BEGIN_FN_BLOCK=> return write!(f, "|<fnblock>{{"),
+                Self::OI_END_FN_BLOCK=> return write!(f, "}}"),
+                Self::OI_RETURN=> return write!(f, "<return>"),
                                 
-                Self::OP_FIELD => return write!(f, "."),
-                Self::OP_ARRAY_INDEX => return write!(f, "[]"),
+                Self::OI_FIELD => return write!(f, "."),
+                Self::OI_ARRAY_INDEX => return write!(f, "[]"),
                                 
-                Self::OP_PROTO_FIELD=> return write!(f, "<proto>."),
-                Self::OP_POP_TO_ME=> return write!(f, "<me>"),
+                Self::OI_PROTO_FIELD=> return write!(f, "<proto>."),
+                Self::OI_POP_TO_ME=> return write!(f, "<me>"),
                  
-                Self::OP_LET_DYN_NIL=> return write!(f, "let dyn nil"),
-                Self::OP_LET_TYPED_NIL=> return write!(f, "let typed nil"),
-                Self::OP_LET_TYPED => return write!(f, "let typed"),
-                Self::OP_LET_DYN => return write!(f, "let dyn"),
-                Self::OP_ESCAPE_ID => return write!(f, "@"),
+                Self::OI_LET_DYN_NIL=> return write!(f, "let dyn nil"),
+                Self::OI_LET_TYPED_NIL=> return write!(f, "let typed nil"),
+                Self::OI_LET_TYPED => return write!(f, "let typed"),
+                Self::OI_LET_DYN => return write!(f, "let dyn"),
                 
-                Self::OP_SEARCH_TREE => return write!(f, "$"),
+                Self::OI_SEARCH_TREE => return write!(f, "$"),
                 _=>return write!(f, "OP?")
             }
         }

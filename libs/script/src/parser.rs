@@ -13,6 +13,8 @@ enum State{
     EndExpr,
     EndStmt,
     
+    EscapedId,
+    
     FnArgList(usize),
     FnArgMaybeType,
     FnArgType,
@@ -143,7 +145,6 @@ impl State{
         match op{
             id!(!)=> Value::OP_NOT,
             id!(-)=> Value::OP_NEG,
-            id!(@)=> Value::OP_ESCAPE_ID,
             _=>Value::OP_NOP
         }
     }
@@ -361,6 +362,16 @@ impl ScriptParser{
                     self.code.push(Value::OP_FN_EXPR);
                     self.state.push(State::EndFnExpr(fn_slot));
                     self.state.push(State::BeginExpr);
+                }
+            }
+            State::EscapedId=>{
+                if id != id!(){ // ident
+                    let value = Value::from_escaped_id(id);
+                    self.code.push(value);
+                    return 1
+                }
+                else{
+                    println!("Expected identifier after @");
                 }
             }
             State::EndFnExpr(fn_slot)=>{
@@ -582,9 +593,13 @@ impl ScriptParser{
                     }
                     return 1
                 }
-                if op == id!(-) || op == id!(!) || op == id!(@){
+                if op == id!(-) || op == id!(!) {
                     self.state.push(State::EmitUnary(op));
                     self.state.push(State::BeginExpr);
+                    return 1
+                }
+                if op == id!(@){
+                    self.state.push(State::EscapedId);
                     return 1
                 }
                 if op == id!(|){
@@ -635,7 +650,19 @@ impl ScriptParser{
                 return 0;
             }
             State::EndStmt=>{
-                // we need to emit the pop-stack-check
+                if let Some(code) = self.code.last_mut(){
+                    if code.is_assign_opcode(){
+                        code.set_opcode_arg(1);
+                        self.state.push(State::BeginStmt);
+                        return 0;
+                    }
+                    if code.is_let_opcode(){
+                        code.set_opcode_arg(1);
+                        self.state.push(State::BeginStmt);
+                        return 0;
+                    }
+                }
+                // otherwise pop to me
                 self.code.push(Value::OP_POP_TO_ME);
                 self.state.push(State::BeginStmt);
                 return 0
