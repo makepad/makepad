@@ -241,7 +241,7 @@ impl ScriptParser{
             ScriptToken::StreamEnd
         };
         let op = tok.operator();
-        let id = tok.identifier();
+        let (id,starts_with_ds) = tok.identifier();
         match self.state.pop().unwrap(){
             State::For=>{}
             State::ForIdent=>{}
@@ -561,6 +561,9 @@ impl ScriptParser{
                 }
                 if id != id!(){
                     self.code.push(Value::from_id(id));
+                    if starts_with_ds{
+                        self.code.push(Value::OP_SEARCH_TREE);
+                    }
                     self.state.push(State::EndExpr);
                     return 1
                 }
