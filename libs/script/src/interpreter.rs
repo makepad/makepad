@@ -103,7 +103,7 @@ impl ScriptThread{
         Value::NIL
     }
     
-    pub fn opcode(&mut self,index: u64, _parser: &ScriptParser, heap:&mut ScriptHeap){
+    pub fn opcode(&mut self,index: u64, args:u64, _parser: &ScriptParser, heap:&mut ScriptHeap){
         match index{
             Value::OI_POP_TO_ME=>{
                 let value = self.stack.pop().unwrap();
@@ -160,7 +160,9 @@ impl ScriptThread{
                 if let Some(me) = self.mes.last(){
                     heap.set_object_value(*me, field, value);
                 }
-                self.push_stack_value(Value::NIL);
+                if args == 0{
+                    self.push_stack_value(Value::NIL);
+                }
             }
             Value::OI_FIELD=>{
                 let field = self.pop_stack_value();
@@ -189,7 +191,9 @@ impl ScriptThread{
                 if let Some(obj) = object.as_object(){
                     heap.set_object_value(obj, index, value);
                 }
-                self.push_stack_value(Value::NIL);
+                if args == 0{
+                    self.push_stack_value(Value::NIL);
+                }
             }
             Value::OI_ASSIGN_FIELD=>{
                 let value = self.pop_stack_resolved(heap);
@@ -198,7 +202,9 @@ impl ScriptThread{
                 if let Some(obj) = object.as_object(){
                     heap.set_object_value(obj, field, value);
                 }
-                self.push_stack_value(Value::NIL);
+                if args == 0{
+                    self.push_stack_value(Value::NIL);
+                }
             }
             Value::OI_BEGIN_PROTO=>{
                 let proto = self.pop_stack_resolved(heap);
@@ -222,13 +228,11 @@ impl ScriptThread{
                 let id = self.pop_stack_value().as_id().unwrap();
                 let call = self.calls.last_mut().unwrap();
                 heap.push_object_value(call.scope, id.into(), value);
-                self.push_stack_value(Value::NIL);
             }
             Value::OI_LET_DYN_NIL=>{
                 let id = self.pop_stack_value().as_id().unwrap();
                 let call = self.calls.last_mut().unwrap();
                 heap.push_object_value(call.scope, id.into(), Value::NIL);
-                self.push_stack_value(Value::NIL);
             }
             Value::OI_LET_TYPED=>{
                 let value = self.pop_stack_resolved(heap);
@@ -236,26 +240,12 @@ impl ScriptThread{
                 let id = self.pop_stack_value().as_id().unwrap();
                 let call = self.calls.last_mut().unwrap();
                 heap.push_object_value(call.scope, id.into(), value);
-                self.push_stack_value(Value::NIL);
             }
             Value::OI_LET_TYPED_NIL=>{
                 let _ty = self.pop_stack_value();
                 let id = self.pop_stack_value().as_id().unwrap();
                 let call = self.calls.last_mut().unwrap();
                 heap.push_object_value(call.scope, id.into(), Value::NIL);
-                self.push_stack_value(Value::NIL);
-            }
-            Value::OI_ESCAPE_ID=>{
-                let value = self.pop_stack_value();
-                if let Some(id) = value.as_id(){
-                    self.push_stack_value(Value::from_escaped_id(id));
-                }
-                else if let Some(str) = value.as_string(){
-                    self.push_stack_value(Value::from_escaped_id(Id::from_str(heap.string(str))))
-                }
-                else{
-                    self.push_stack_value(Value::NIL)
-                }
             }
             Value::OI_SEARCH_TREE=>{
             }
@@ -267,8 +257,8 @@ impl ScriptThread{
     
     pub fn step(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap){ 
         let code = parser.code[self.ip];
-        if let Some(index) = code.as_opcode_index(){
-            self.opcode(index, parser, heap);   
+        if let Some((index, args)) = code.as_opcode_index(){
+            self.opcode(index, args, parser, heap);   
         }
         else{ // its a direct value-to-stack?
             self.push_stack_value(code);

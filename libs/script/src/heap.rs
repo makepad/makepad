@@ -291,7 +291,7 @@ impl ScriptHeap{
     }
         
     pub fn cast_to_string(&self, v:Value, out:&mut String){
-        if v.with_inline_string(|s|{write!(out, "{s}")}).is_some(){
+        if v.as_inline_string(|s|{write!(out, "{s}")}).is_some(){
         }
         else if let Some(v) = v.as_string(){
             let str = self.string(v);
