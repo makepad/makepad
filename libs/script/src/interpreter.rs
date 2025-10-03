@@ -37,6 +37,26 @@ impl ScriptInterpreter{
     }
 }
 
+macro_rules! f64_op_impl{
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let op1 = $obj.pop_stack_resolved();
+        let op2 = $obj.pop_stack_resolved();
+        let v1 = $heap.cast_to_f64(op1);
+        let v2 = $heap.cast_to_f64(op2);
+        $obj.stack.push(Value::from_f64(v1 $op v2));
+    }}
+}
+
+macro_rules! fu64_op_impl{
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let op1 = $obj.pop_stack_resolved();
+        let op2 = $obj.pop_stack_resolved();
+        let v1 = $heap.cast_to_f64(op1) as u64;
+        let v2 = $heap.cast_to_f64(op2) as u64;
+        $obj.stack.push(Value::from_f64((v1 $op v2) as f64));
+    }}
+} 
+
 impl ScriptThread{
     
     pub fn new()->Self{
@@ -46,6 +66,14 @@ impl ScriptThread{
             mes: vec![],
             ip: 0
         }
+    }
+    
+    pub fn pop_stack_resolved(&mut self)->Value{
+        let val = self.stack.pop().unwrap();
+        if let Some(id) = val.as_id(){
+            return self.resolve(id)
+        }
+        val    
     }
     
     // lets resolve an id to a Value
@@ -62,28 +90,12 @@ impl ScriptThread{
             }
             return Value::NIL
         }
-        /*
-        if id == id!(this){
-            if let Some(it) = self.calls.last(){
-                return (*it).into()
-            }
-        }*/
-        // look up id on the scope object
-        
         Value::NIL
     }
     
-    pub fn op_add(&mut self, heap:&mut ScriptHeap){
-        let op1 = self.stack.pop().unwrap();
-        let op2 = self.stack.pop().unwrap();
-        let v1 = heap.cast_to_f64(op1);
-        let v2 = heap.cast_to_f64(op2);
-        self.stack.push(Value::from_f64(v1 + v2));
-    }
-    
     pub fn op_concat(&mut self, heap:&mut ScriptHeap){
-        let op1 = self.stack.pop().unwrap();
-        let op2 = self.stack.pop().unwrap();
+        let op1 = self.pop_stack_resolved();
+        let op2 = self.pop_stack_resolved();
         let ptr = heap.new_dyn_string_with(|heap, out|{
             heap.cast_to_string(op1, out);
             heap.cast_to_string(op2, out);
@@ -93,15 +105,15 @@ impl ScriptThread{
     
     pub fn op_assign_field(&mut self, heap:&mut ScriptHeap){
         let field = self.stack.pop().unwrap();
-        let value = self.stack.pop().unwrap();
+        let value = self.pop_stack_resolved();
         if let Some(me) = self.mes.last(){
             heap.set_object_value(*me, field, value);
         }
     }
     
-    pub fn op_assign(&mut self, heap:&mut ScriptHeap){
+    pub fn op_assign_me(&mut self, heap:&mut ScriptHeap){
         let field = self.stack.pop().unwrap();
-        let value = self.stack.pop().unwrap();
+        let value = self.pop_stack_resolved();
         if let Some(me) = self.mes.last(){
             heap.set_object_value(*me, field, value);
         }
@@ -128,34 +140,58 @@ impl ScriptThread{
         //self.heap.free_object(scope);
     }
     
+    pub fn opcode(&mut self,code: Value, parser: &ScriptParser, heap:&mut ScriptHeap){
+        match code{
+            Value::OP_NOT=>{
+                let v = heap.cast_to_f64(self.pop_stack_resolved()) as u64;
+                self.stack.push(Value::from_f64((!v) as f64));
+            },
+            Value::OP_NEG=>{
+                let v = heap.cast_to_f64(self.pop_stack_resolved());
+                self.stack.push(Value::from_f64(-v));
+            },
+            Value::OP_MUL=>f64_op_impl!(self, heap, *),
+            Value::OP_DIV=>f64_op_impl!(self, heap, /),
+            Value::OP_MOD=>f64_op_impl!(self, heap, %),
+            Value::OP_ADD=>f64_op_impl!(self, heap, +),
+            Value::OP_SUB=>f64_op_impl!(self, heap, -),
+            Value::OP_SHL=>fu64_op_impl!(self, heap, >>),
+            Value::OP_SHR=>fu64_op_impl!(self, heap, <<),
+            Value::OP_AND=>fu64_op_impl!(self, heap,&),
+            Value::OP_OR=>fu64_op_impl!(self, heap, |),
+            Value::OP_XOR=>fu64_op_impl!(self, heap, ^),
+
+            Value::OP_CONCAT=>self.op_concat(heap),
+            //Value::OP_ASSIGN=>self.op_assign(heap),
+            Value::OP_ASSIGN_FIELD=>self.op_assign_field(heap),
+            Value::OP_BEGIN_BARE=>{ // bare object
+                let it = heap.new_dyn_object();
+                self.mes.push(it);
+            }
+            Value::OP_END_BARE=>{
+                self.stack.push(self.mes.pop().unwrap().into());
+            }
+            Value::OP_LET_DYN=>{
+                                    
+            }
+            Value::OP_POP_TO_ME=>{
+                let value = self.pop_stack_resolved();
+                if !value.is_nil(){
+                    if let Some(me) = self.mes.last(){
+                        heap.set_object_value(*me, Value::NIL, value);
+                    }
+                }
+            }
+            _=>{
+                // unknown instruction
+            }
+        }
+    }
+    
     pub fn step(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap){
         let code = parser.code[self.ip];
         if code.is_opcode(){
-            match code{
-                Value::OP_ADD=>{
-                    self.op_add(heap);
-                }
-                Value::OP_CONCAT=>{
-                    self.op_concat(heap);
-                }
-                Value::OP_ASSIGN=>{
-                    // ok we have to assign to something lhs
-                    
-                }
-                Value::OP_ASSIGN_FIELD=>{
-                    self.op_assign_field(heap);
-                }
-                Value::OP_BEGIN_BARE=>{ // bare object
-                    let it = heap.new_dyn_object();
-                    self.mes.push(it);
-                }
-                Value::OP_END_BARE=>{
-                    self.stack.push(self.mes.pop().unwrap().into());
-                }
-                _=>{
-                    // unknown instruction
-                }
-            }
+            self.opcode(code, parser, heap)    
         }
         else{ // its a direct value-to-stack?
             self.stack.push(code);
