@@ -37,7 +37,7 @@ pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
     let code = "
-        let x = |x:type| y
+        let x = |x x:t| x
     ";
     
     let mut interp = ScriptInterpreter::new();

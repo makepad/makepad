@@ -8,29 +8,40 @@ use makepad_script_derive::*;
 #[derive(Default, Debug)]
 enum State{
     #[default]
-    FnArgs,
-    FnBody,
     BeginStmt,
     BeginExpr,
     EndExpr,
     EndStmt,
+    
+    FnArgList(usize),
+    FnArgMaybeType,
+    FnArgType,
+    FnBody(usize),
+    EndFnBlock(usize),
+    EndFnExpr(usize),
+    EmitFnArgTyped,
+    EmitFnArgDyn,
+    
     EmitOp(Id),
     EmitFieldAssign(Id),
     EmitIndexAssign(Id),
     EndBare,
-    Call,
     EndProto,
-    ArrayIndex,
     EndFrag,
+            
+    Call,
+    ArrayIndex,
+    
     For,
     ForIdent,
     ForRange,
     If,
+    
     Let,
     LetDynOrTyped,
     LetType,
     LetTypedAssign,
-    EmitLetDyn,
+EmitLetDyn,
     EmitLetTyped
 }
 
@@ -287,19 +298,71 @@ impl ScriptParser{
                     println!("PARSE ERROR")
                 }
             }
-            State::FnBody=>{
-                
+            State::EmitFnArgTyped=>{
+                self.code.push(Value::OP_FN_ARG_TYPED);
             }
-            State::FnArgs=>{
+            State::EmitFnArgDyn=>{
+                self.code.push(Value::OP_FN_ARG_DYN);
+            }
+            State::FnArgType=>{
                 if id != id!(){
-                    
-                }
-                if op == id!(|){
-                    self.state.pop();
-                    self.state.push(State::FnBody);
+                    self.code.push(id.into());
+                    self.state.push(State::EmitFnArgTyped);
                     return 1
                 }
-                // we're parsing ident,? ident,? ident,? 
+                else{
+                    println!("Argument type expected in function")
+                }
+            }
+            State::FnArgMaybeType=>{
+                if op == id!(:){
+                    self.state.push(State::FnArgType);
+                    return 1
+                }
+                self.state.push(State::EmitFnArgDyn);
+            }
+            State::FnArgList(fn_slot)=>{
+                if id != id!(){ // ident
+                    self.code.push(id.into());
+                    self.state.push(State::FnArgList(fn_slot));
+                    self.state.push(State::FnArgMaybeType);
+                    return 1
+                }
+                if op == id!(|){
+                    self.state.push(State::FnBody(fn_slot));
+                    return 1
+                }
+                // unexpected
+                println!("Unexpected token in function argument list");
+            }
+            State::FnBody(fn_slot)=>{
+                if tok.is_open_curly(){ // function body
+                    self.code.push(Value::OP_BEGIN_FN_BLOCK);
+                    self.state.push(State::EndFnBlock(fn_slot));
+                    self.state.push(State::BeginStmt);
+                    return 1
+                }
+                else{ // function body is expression
+                    self.code.push(Value::OP_FN_EXPR);
+                    self.state.push(State::EndFnExpr(fn_slot));
+                    self.state.push(State::BeginExpr);
+                }
+            }
+            State::EndFnExpr(fn_slot)=>{
+                self.code.push(Value::OP_RETURN);
+                self.code[fn_slot] = (self.code.len() as f64).into();
+                // we have to write the function 'jump' at the beginning
+            }
+            State::EndFnBlock(fn_slot)=>{
+                self.code.push(Value::OP_END_FN_BLOCK);
+                self.code[fn_slot] = (self.code.len() as f64).into();
+                if tok.is_close_curly() {
+                    return 1
+                }
+                else {
+                    println!("Expected }} not found");
+                    return 0
+                }
             }
             // alright we parsed a + b * c
             State::EmitFieldAssign(what_op)=>{
@@ -467,18 +530,17 @@ impl ScriptParser{
                 }
                 if let Some(v) = tok.maybe_color(){
                     self.code.push(Value::from_color(v));
-                    self.state.pop();
                     return 1
                 }
                 if let Some(ptr) = tok.maybe_string(){
                     self.code.push(Value::from_string(ptr));
-                    self.state.pop();
                     return 1
                 }
                 if op == id!(|){
-                    self.state.pop();
-                    self.code.push(Value::OP_BEGIN_FN_ARGS);
-                    self.state.push(State::FnArgs);
+                    let fn_slot = self.code.len();
+                    self.code.push(Value::NIL);
+                    self.code.push(Value::OP_BEGIN_FN);
+                    self.state.push(State::FnArgList(fn_slot));
                     return 1
                 }
                 if op == id!(.){
