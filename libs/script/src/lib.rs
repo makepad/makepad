@@ -38,7 +38,7 @@ pub fn test(){
     use crate::interpreter::*;
     let code = "
         let x = 1
-        x + 2;
+        let t = x + 2;
     ";
     
     let mut interp = ScriptInterpreter::new();
