@@ -315,6 +315,11 @@ impl ScriptHeap{
         else if v.is_opcode(){
             write!(out, "[Opcode]").ok();
         }
+        else if v.is_inline_string(){
+            v.with_inline_string(|s|{
+                write!(out, "{s}").ok();
+            }).unwrap()
+        }
         else{
             write!(out, "[Unknown]").ok();
         }

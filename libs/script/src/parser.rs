@@ -233,7 +233,7 @@ impl ScriptParser{
         self.state.push(state)
     }
     
-    fn handle(&mut self)->usize{
+    fn handle(&mut self, heap:&mut ScriptHeap)->usize{
         let tok = if let Some(tok) = self.tok.tokens.get(self.index){
             tok.token.clone()
         }
@@ -572,7 +572,14 @@ impl ScriptParser{
                     return 1
                 }
                 if let Some(ptr) = tok.maybe_string(){
-                    self.code.push(Value::from_string(ptr));
+                    // maybe make the string inline
+                    let str = heap.string(ptr);
+                    if let Some(value) = Value::from_inline_string(str){
+                        self.code.push(value);
+                    }
+                    else{
+                        self.code.push(Value::from_string(ptr));
+                    }
                     return 1
                 }
                 if op == id!(-) || op == id!(!) || op == id!(@){
@@ -642,7 +649,7 @@ impl ScriptParser{
         
         // wait for the tokens to be consumed
         while self.index < self.tok.tokens.len() && self.state.len()>0{
-            let step = self.handle();
+            let step = self.handle(heap);
             self.index += step;
         }
         
