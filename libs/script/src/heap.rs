@@ -478,7 +478,13 @@ impl ScriptHeap{
             let object = &self.zones[ptr.zone as usize].objects[ptr.index as usize];
             for field in object.fields.iter().rev(){
                 if !first{print!(",")}
-                print!("{}:{}", field.key, field.value);
+                if let Some(obj) = field.value.as_object(){
+                    print!("{}:", field.key);
+                    self.print_object(obj);
+                }
+                else{
+                    print!("{}:{}", field.key, field.value);
+                }
                 first = false;
             }
             if let Some(next_ptr) = object.proto.as_object(){
@@ -490,6 +496,6 @@ impl ScriptHeap{
                 break;
             }
         }
-        println!("}}");
+        print!("}}");
     }
 }
