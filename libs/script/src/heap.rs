@@ -295,7 +295,7 @@ impl ScriptHeap{
             let str = self.string(v);
             out.push_str(str);
         }
-        if let Some(v) = v.as_f64(){
+        else if let Some(v) = v.as_f64(){
             write!(out, "{v}").ok();
         }
         else if let Some(v) = v.as_bool(){
@@ -488,12 +488,13 @@ impl ScriptHeap{
             return
         }
         
-        for field in &mut object.fields{
+        for field in object.fields.iter_mut().rev(){
             if field.key == key{
                 field.value = value;
                 return
             }
         }
+        
         object.fields.push(Field{
             key,
             value
@@ -502,19 +503,28 @@ impl ScriptHeap{
     
     pub fn print_object(&self, set_ptr:ObjectPtr){
         let mut ptr = set_ptr;
+        let mut str = String::new();
         // scan up the chain to set the proto value
         print!("{{");
         let mut first = true;
         loop{
             let object = &self.zones[ptr.zone as usize].objects[ptr.index as usize];
-            for field in object.fields.iter().rev(){
+            for field in object.fields.iter(){
                 if !first{print!(",")}
                 if let Some(obj) = field.value.as_object(){
-                    print!("{}:", field.key);
+                    if !field.key.is_nil(){
+                        str.clear();self.cast_to_string(field.key, &mut str);
+                        print!("{}:", str);
+                    }
                     self.print_object(obj);
                 }
                 else{
-                    print!("{}:{}", field.key, field.value);
+                    if !field.key.is_nil(){
+                        str.clear();self.cast_to_string(field.key, &mut str);
+                        print!("{}:",str);
+                    }
+                    str.clear();self.cast_to_string(field.value, &mut str);
+                    print!("{}",str);
                 }
                 first = false;
             }

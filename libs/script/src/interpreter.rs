@@ -73,7 +73,22 @@ impl ScriptThread{
         if let Some(id) = val.as_id(){
             return self.resolve(id, heap)
         }
+        if val == Value::OP_ID_AS_VAR{ // escaped symbol
+            return  self.stack.pop().unwrap()
+        }
         val    
+    }
+    
+    pub fn pop_stack_value(&mut self)->Value{
+        let val = self.stack.pop().unwrap();
+        if val == Value::OP_ID_AS_VAR{ // escaped symbol
+            return  self.stack.pop().unwrap()
+        }
+        val
+    }
+    
+    pub fn push_stack_value(&mut self, value:Value){
+        self.stack.push(value);
     }
     
     // lets resolve an id to a Value
@@ -97,7 +112,13 @@ impl ScriptThread{
         match index{
             Value::OI_POP_TO_ME=>{
                 let value = self.stack.pop().unwrap();
-                if !value.is_nil(){
+                if value == Value::OP_ID_AS_VAR{ // escaped symbol
+                    let value = self.stack.pop().unwrap();
+                    if let Some(me) = self.mes.last(){
+                        heap.push_object_value(*me, Value::NIL, value);
+                    }
+                }
+                else if !value.is_nil(){
                     let (key, value) = if let Some(id) = value.as_id(){
                         (value, self.resolve(id, heap))
                     }
@@ -113,11 +134,11 @@ impl ScriptThread{
             }
             Value::OI_NOT=>{
                 let v = heap.cast_to_f64(self.pop_stack_resolved(heap)) as u64;
-                self.stack.push(Value::from_f64((!v) as f64));
+                self.push_stack_value(Value::from_f64((!v) as f64));
             },
             Value::OI_NEG=>{
                 let v = heap.cast_to_f64(self.pop_stack_resolved(heap));
-                self.stack.push(Value::from_f64(-v));
+                self.push_stack_value(Value::from_f64(-v));
             },
             Value::OI_MUL=>f64_op_impl!(self, heap, *),
             Value::OI_DIV=>f64_op_impl!(self, heap, /),
@@ -137,44 +158,53 @@ impl ScriptThread{
                     heap.cast_to_string(op1, out);
                     heap.cast_to_string(op2, out);
                 });
-                self.stack.push(ptr.into());
+                self.push_stack_value(ptr.into());
             }
             Value::OI_ASSIGN_ME=>{
                 let value = self.pop_stack_resolved(heap);
-                let field = self.stack.pop().unwrap();
+                let field = self.pop_stack_value();
                 if let Some(me) = self.mes.last(){
                     heap.set_object_value(*me, field, value);
                 }
-                self.stack.push(Value::NIL);
+                self.push_stack_value(Value::NIL);
             }
             Value::OI_FIELD=>{
-                let field = self.stack.pop().unwrap();
+                let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    self.stack.push(heap.object_value(obj, field))
+                    self.push_stack_value(heap.object_value(obj, field))
                 }
                 else{
-                    self.stack.push(Value::NIL);
+                    self.push_stack_value(Value::NIL);
                 }
             }
             Value::OI_PROTO_FIELD=>{ // implement proto field!
-                let field = self.stack.pop().unwrap();
+                let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    self.stack.push(heap.object_value(obj, field))
+                    self.push_stack_value(heap.object_value(obj, field))
                 }
                 else{
-                    self.stack.push(Value::NIL);
+                    self.push_stack_value(Value::NIL);
                 }
+            }
+            Value::OI_ASSIGN_INDEX=>{
+                let value = self.pop_stack_resolved(heap);
+                let index = self.pop_stack_value();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    heap.set_object_value(obj, index, value);
+                }
+                self.push_stack_value(Value::NIL);
             }
             Value::OI_ASSIGN_FIELD=>{
                 let value = self.pop_stack_resolved(heap);
-                let field = self.stack.pop().unwrap();
+                let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
                     heap.set_object_value(obj, field, value);
                 }
-                self.stack.push(Value::NIL);
+                self.push_stack_value(Value::NIL);
             }
             Value::OI_BEGIN_PROTO=>{
                 let proto = self.pop_stack_resolved(heap);
@@ -182,42 +212,57 @@ impl ScriptThread{
                 self.mes.push(me);
             }
             Value::OI_END_PROTO=>{
-                self.stack.push(self.mes.pop().unwrap().into());
+                let me = self.mes.pop().unwrap();
+                self.push_stack_value(me.into());
             }
             Value::OI_BEGIN_BARE=>{ // bare object
                 let me = heap.new_dyn_object();
                 self.mes.push(me);
             }
             Value::OI_END_BARE=>{
-                self.stack.push(self.mes.pop().unwrap().into());
+                let me = self.mes.pop().unwrap();
+                self.push_stack_value(me.into());
             }
             Value::OI_LET_DYN=>{
                 let value = self.pop_stack_resolved(heap);
-                let id = self.stack.pop().unwrap().as_id().unwrap();
+                let id = self.pop_stack_value().as_id().unwrap();
                 let call = self.calls.last_mut().unwrap();
                 heap.push_object_value(call.scope, id.into(), value);
-                self.stack.push(Value::NIL);
+                self.push_stack_value(Value::NIL);
             }
             Value::OI_LET_DYN_NIL=>{
-                let id = self.stack.pop().unwrap().as_id().unwrap();
+                let id = self.pop_stack_value().as_id().unwrap();
                 let call = self.calls.last_mut().unwrap();
                 heap.push_object_value(call.scope, id.into(), Value::NIL);
-                self.stack.push(Value::NIL);
+                self.push_stack_value(Value::NIL);
             }
             Value::OI_LET_TYPED=>{
                 let value = self.pop_stack_resolved(heap);
-                let _ty = self.stack.pop();
-                let id = self.stack.pop().unwrap().as_id().unwrap();
+                let _ty = self.pop_stack_value();
+                let id = self.pop_stack_value().as_id().unwrap();
                 let call = self.calls.last_mut().unwrap();
                 heap.push_object_value(call.scope, id.into(), value);
-                self.stack.push(Value::NIL);
+                self.push_stack_value(Value::NIL);
             }
             Value::OI_LET_TYPED_NIL=>{
-                let _ty = self.stack.pop();
-                let id = self.stack.pop().unwrap().as_id().unwrap();
+                let _ty = self.pop_stack_value();
+                let id = self.pop_stack_value().as_id().unwrap();
                 let call = self.calls.last_mut().unwrap();
                 heap.push_object_value(call.scope, id.into(), Value::NIL);
-                self.stack.push(Value::NIL);
+                self.push_stack_value(Value::NIL);
+            }
+            Value::OI_ID_AS_VAR=>{
+                let value = self.pop_stack_value();
+                if value.is_id(){
+                    self.push_stack_value(value);
+                    self.push_stack_value(Value::OP_ID_AS_VAR);
+                }
+                else if let Some(str) = value.as_string(){
+                    self.push_stack_value(Id::from_str(heap.string(str)).into())
+                }
+                else{
+                    self.push_stack_value(Value::NIL)
+                }
             }
             _=>{
                 // unknown instruction
@@ -231,7 +276,7 @@ impl ScriptThread{
             self.opcode(index, parser, heap);   
         }
         else{ // its a direct value-to-stack?
-            self.stack.push(code);
+            self.push_stack_value(code);
         }
     }
       
