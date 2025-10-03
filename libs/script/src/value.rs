@@ -159,7 +159,9 @@ impl Value{
     pub const OI_LET_TYPED_NIL:u64 = 79;pub const OP_LET_TYPED_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED_NIL);
     pub const OI_LET_TYPED:u64 = 80;pub const OP_LET_TYPED: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED);
     pub const OI_LET_DYN:u64 = 81;pub const OP_LET_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN);
-        
+    
+    pub const OI_ID_AS_VAR:u64 = 82;pub const OP_ID_AS_VAR: Value = Value(Self::TYPE_OPCODE | Self::OI_ID_AS_VAR);
+            
     // TODO: make this behave like javascript as much as is sensible
     
     pub const fn from_f64(val:f64)->Self{
@@ -394,7 +396,8 @@ impl fmt::Display for Value {
                 Self::OP_LET_TYPED_NIL=> return write!(f, "<let typed nil>"),
                 Self::OP_LET_TYPED => return write!(f, "<let typed>"),
                 Self::OP_LET_DYN => return write!(f, "<let dyn>"),
-                
+                Self::OP_ID_AS_VAR => return write!(f, "<@>"),
+                                
                 _=>return write!(f, "OP?")
             }
         }
