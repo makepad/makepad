@@ -37,7 +37,7 @@ pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
     let code = "
-        let x = 1
+        let x = {key:43}
         let t = x + 2;
     ";
     
