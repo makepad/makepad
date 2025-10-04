@@ -15,7 +15,7 @@ enum State{
     
     EscapedId,
     
-    FnArgList(usize),
+    FnArgList,
     FnArgMaybeType,
     FnArgType,
     FnBody(usize),
@@ -32,8 +32,10 @@ enum State{
     EndBareSquare,
     EndProto,
     EndFrag,
-            
-    Call,
+    
+    CallMaybeDo,
+    EmitCall,
+    EndCall,
     ArrayIndex,
     
     For,
@@ -335,31 +337,32 @@ impl ScriptParser{
                 }
                 self.state.push(State::EmitFnArgDyn);
             }
-            State::FnArgList(fn_slot)=>{
+            State::FnArgList=>{
                 if id != id!(){ // ident
                     self.code.push(id.into());
-                    self.state.push(State::FnArgList(fn_slot));
+                    self.state.push(State::FnArgList);
                     self.state.push(State::FnArgMaybeType);
                     return 1
                 }
                 if op == id!(|){
+                    let fn_slot = self.code.len();
+                    self.code.push(Value::NIL);
                     self.state.push(State::FnBody(fn_slot));
                     return 1
                 }
                 // unexpected token, but just stay in the arg list mode
                 println!("Unexpected token in function argument list {:?}", tok);
-                self.state.push(State::FnArgList(fn_slot));
+                self.state.push(State::FnArgList);
                 return 1
             }
             State::FnBody(fn_slot)=>{
+                self.code.push(Value::OP_END_FN);
                 if tok.is_open_curly(){ // function body
-                    self.code.push(Value::OP_BEGIN_FN_BLOCK);
                     self.state.push(State::EndFnBlock(fn_slot));
                     self.state.push(State::BeginStmt);
                     return 1
                 }
                 else{ // function body is expression
-                    self.code.push(Value::OP_FN_EXPR);
                     self.state.push(State::EndFnExpr(fn_slot));
                     self.state.push(State::BeginExpr);
                 }
@@ -380,7 +383,7 @@ impl ScriptParser{
                 // we have to write the function 'jump' at the beginning
             }
             State::EndFnBlock(fn_slot)=>{
-                self.code.push(Value::OP_END_FN_BLOCK);
+                self.code.push(Value::OP_RETURN_NIL);
                 self.code[fn_slot] = (self.code.len() as f64).into();
                 if tok.is_close_curly() {
                     return 1
@@ -439,10 +442,26 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::Call=>{
-                // expect )
+            State::EmitCall=>{
                 self.code.push(Value::OP_END_CALL);
                 self.state.push(State::EndExpr);
+            }
+            State::CallMaybeDo=>{
+                if id == id!(do){
+                    println!("DO");
+                    self.state.push(State::EmitCall);
+                    self.state.push(State::BeginExpr);
+                    return 1
+                }
+                else{
+                    self.code.push(Value::OP_END_CALL);
+                    self.state.push(State::EndExpr);
+                    return 0
+                }
+            }
+            State::EndCall=>{
+                // expect )
+                self.state.push(State::CallMaybeDo);
                 if tok.is_close_round() {
                     return 1
                 }
@@ -527,7 +546,7 @@ impl ScriptParser{
                         }
                     }
                     self.code.push(Value::OP_BEGIN_CALL);
-                    self.state.push(State::Call);
+                    self.state.push(State::EndCall);
                     self.state.push(State::BeginStmt);
                     return 1
                 }
@@ -554,7 +573,7 @@ impl ScriptParser{
                     return 1
                 }
                 if tok.is_open_square(){
-                    self.code.push(Value::OP_BEGIN_BARE);
+                    self.code.push(Value::OP_BEGIN_ARRAY);
                     self.state.push(State::EndBareSquare);
                     self.state.push(State::BeginStmt);
                     return 1
@@ -603,10 +622,8 @@ impl ScriptParser{
                     return 1
                 }
                 if op == id!(|){
-                    let fn_slot = self.code.len();
-                    self.code.push(Value::NIL);
                     self.code.push(Value::OP_BEGIN_FN);
-                    self.state.push(State::FnArgList(fn_slot));
+                    self.state.push(State::FnArgList);
                     return 1
                 }
                 if op == id!(.){
@@ -650,14 +667,14 @@ impl ScriptParser{
                 return 0;
             }
             State::EndStmt=>{
+                // in a function call we need the 
                 if let Some(code) = self.code.last_mut(){
                     if code.is_assign_opcode(){
-                        code.set_opcode_arg(1);
+                        code.set_opcode_arg(Value::IA_ASSIGN_IS_STATEMENT);
                         self.state.push(State::BeginStmt);
                         return 0;
                     }
                     if code.is_let_opcode(){
-                        code.set_opcode_arg(1);
                         self.state.push(State::BeginStmt);
                         return 0;
                     }
