@@ -38,13 +38,10 @@ pub fn test(){
     use crate::interpreter::*;
     
     let code = "
-        let va = [@prop1, @prop2, @prop3];
-        .z = {prop:@prop6},
-        .z[.z.prop] = 5,
-        $thing.prop();
-        let x = z{key:43}
-        let t = x + 2;
-        $thing.prop = 10.0;
+        let x = |t| t+1
+        let r = x(t:2)
+        
+        ;
     ";
     
     let mut interp = ScriptInterpreter::new();
