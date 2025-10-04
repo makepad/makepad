@@ -11,7 +11,7 @@ pub struct Field{
     
 #[derive(Default)]
 pub struct Object{
-    pub tag: HeapTag,
+    pub tag: ObjectTag,
     pub proto: Value,
     pub fields: SmallVec<[Field;2]>
 }

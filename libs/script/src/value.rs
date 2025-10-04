@@ -11,7 +11,6 @@ impl Default for Value{
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct ObjectPtr{
-    pub zone: u8,
     pub index: u32    
 }
 
@@ -23,7 +22,6 @@ impl From<ObjectPtr> for Value{
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct StringPtr{
-    pub zone: u8,
     pub index: u32    
 }
 
@@ -63,6 +61,7 @@ impl Value{
     pub const TYPE_COLOR: u64 = 0xFFFF_0400_0000_0000;
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
     pub const TYPE_OBJECT: u64 = 0xFFFF_0600_0000_0000;
+    pub const TYPE_INSTRUCTION: u64 = 0xFFFF_0700_0000_0000;
     
     pub const TYPE_INLINE_STRING_0: u64 = 0xFFFF_0800_0000_0000;
     pub const TYPE_INLINE_STRING_1: u64 = 0xFFFF_0900_0000_0000;
@@ -77,7 +76,7 @@ impl Value{
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
     
     // opcodes
-    pub const TYPE_OPCODE: u64 = 0xFFFF_0700_0000_0000;
+    pub const TYPE_OPCODE: u64 = 0xFFFF_1000_0000_0000;
     pub const OI_NOP: u64 = 0;pub const OP_NOP: Value = Value(Self::TYPE_OPCODE | Self::OI_NOP);
     
     pub const OI_NOT:u64 = 1;pub const OP_NOT: Value = Value(Self::TYPE_OPCODE | Self::OI_NOT<<32);
@@ -103,6 +102,8 @@ impl Value{
     pub const OI_LOGIC_AND:u64 = 20;pub const OP_LOGIC_AND: Value = Value(Self::TYPE_OPCODE | Self::OI_LOGIC_AND<<32);
     pub const OI_LOGIC_OR:u64 = 21;pub const OP_LOGIC_OR: Value = Value(Self::TYPE_OPCODE | Self::OI_LOGIC_OR<<32);
     
+    pub const IA_ASSIGN_IS_STATEMENT:u64 = 1;
+        
     pub const IO_ASSIGN_FIRST:u64 = 22;
     
     pub const OI_ASSIGN_ME:u64 = 22;pub const OP_ASSIGN_ME: Value = Value(Self::TYPE_OPCODE | Self::OI_ASSIGN_ME<<32);
@@ -152,33 +153,38 @@ impl Value{
     pub const OI_END_PROTO:u64 = 60;pub const OP_END_PROTO: Value = Value(Self::TYPE_OPCODE | Self::OI_END_PROTO<<32);
     pub const OI_BEGIN_BARE:u64 = 61;pub const OP_BEGIN_BARE: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_BARE<<32);
     pub const OI_END_BARE:u64 = 62;pub const OP_END_BARE: Value = Value(Self::TYPE_OPCODE | Self::OI_END_BARE<<32);
-    pub const OI_BEGIN_CALL:u64 = 63;pub const OP_BEGIN_CALL: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_CALL<<32);
-    pub const OI_END_CALL:u64 = 64;pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | Self::OI_END_CALL<<32);
-    pub const OI_BEGIN_FRAG:u64 = 65;pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FRAG<<32);
-    pub const OI_END_FRAG:u64 = 66;pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | Self::OI_END_FRAG<<32);
+    pub const OI_BEGIN_ARRAY:u64 = 63;pub const OP_BEGIN_ARRAY: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_ARRAY<<32);
+    pub const OI_END_ARRAY:u64 = 64;pub const OP_END_ARRAY: Value = Value(Self::TYPE_OPCODE | Self::OI_END_ARRAY<<32);
+    pub const OI_BEGIN_CALL:u64 = 65;pub const OP_BEGIN_CALL: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_CALL<<32);
+    pub const OI_END_CALL:u64 = 66;pub const OP_END_CALL: Value = Value(Self::TYPE_OPCODE | Self::OI_END_CALL<<32);
+    pub const OI_BEGIN_FRAG:u64 = 67;pub const OP_BEGIN_FRAG: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FRAG<<32);
+    pub const OI_END_FRAG:u64 = 68;pub const OP_END_FRAG: Value = Value(Self::TYPE_OPCODE | Self::OI_END_FRAG<<32);
     
-    pub const OI_BEGIN_FN:u64 = 67;pub const OP_BEGIN_FN: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FN<<32);
-    pub const OI_FN_ARG_DYN:u64 = 68;pub const OP_FN_ARG_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_ARG_DYN<<32);
-    pub const OI_FN_ARG_TYPED:u64 = 69;pub const OP_FN_ARG_TYPED: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_ARG_TYPED<<32);
-    pub const OI_FN_EXPR:u64 = 70;pub const OP_FN_EXPR: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_EXPR<<32);
-    pub const OI_BEGIN_FN_BLOCK:u64 = 71;pub const OP_BEGIN_FN_BLOCK: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FN_BLOCK<<32);
-    pub const OI_END_FN_BLOCK:u64 = 72;pub const OP_END_FN_BLOCK: Value = Value(Self::TYPE_OPCODE | Self::OI_END_FN_BLOCK<<32);
+    pub const OI_BEGIN_FN:u64 = 69;pub const OP_BEGIN_FN: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FN<<32);
+    pub const OI_FN_ARG_DYN_NIL:u64 = 70;pub const OP_FN_ARG_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_ARG_DYN_NIL<<32);
+    pub const OI_FN_ARG_TYPED_NIL:u64 = 71;pub const OP_FN_ARG_TYPED: Value = Value(Self::TYPE_OPCODE | Self::OI_FN_ARG_TYPED_NIL<<32);
+    pub const OI_END_FN:u64 = 72;pub const OP_END_FN: Value = Value(Self::TYPE_OPCODE | Self::OI_END_FN<<32);
     pub const OI_RETURN:u64=73; pub const OP_RETURN:  Value = Value(Self::TYPE_OPCODE | Self::OI_RETURN<<32);
-    
-    pub const OI_FIELD:u64 = 74;pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_FIELD<<32);
-    pub const OI_ARRAY_INDEX:u64 = 75;pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | Self::OI_ARRAY_INDEX<<32);
+    pub const OI_RETURN_NIL:u64=74; pub const OP_RETURN_NIL:  Value = Value(Self::TYPE_OPCODE | Self::OI_RETURN_NIL<<32);
+    /*    
+    pub const OI_BEGIN_FN_BLOCK:u64 = 73;pub const OP_BEGIN_FN_BLOCK: Value = Value(Self::TYPE_OPCODE | Self::OI_BEGIN_FN_BLOCK<<32);
+    pub const OI_END_FN_BLOCK:u64 = 74;pub const OP_END_FN_BLOCK: Value = Value(Self::TYPE_OPCODE | Self::OI_END_FN_BLOCK<<32);
+    */
+            
+    pub const OI_FIELD:u64 = 76;pub const OP_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_FIELD<<32);
+    pub const OI_ARRAY_INDEX:u64 = 77;pub const OP_ARRAY_INDEX: Value = Value(Self::TYPE_OPCODE | Self::OI_ARRAY_INDEX<<32);
     // prototypically inherit the chain for deep prototype fields
-    pub const OI_PROTO_FIELD:u64 = 76;pub const OP_PROTO_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_PROTO_FIELD<<32);
-    pub const OI_POP_TO_ME:u64 = 77;pub const OP_POP_TO_ME: Value = Value(Self::TYPE_OPCODE | Self::OI_POP_TO_ME<<32);
+    pub const OI_PROTO_FIELD:u64 = 78;pub const OP_PROTO_FIELD: Value = Value(Self::TYPE_OPCODE | Self::OI_PROTO_FIELD<<32);
+    pub const OI_POP_TO_ME:u64 = 79;pub const OP_POP_TO_ME: Value = Value(Self::TYPE_OPCODE | Self::OI_POP_TO_ME<<32);
     
-    pub const OI_LET_FIRST: u64 = 78;
-    pub const OI_LET_DYN_NIL:u64 = 78;pub const OP_LET_DYN_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN_NIL<<32);
-    pub const OI_LET_TYPED_NIL:u64 = 79;pub const OP_LET_TYPED_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED_NIL<<32);
-    pub const OI_LET_TYPED:u64 = 80;pub const OP_LET_TYPED: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED<<32);
-    pub const OI_LET_DYN:u64 = 81;pub const OP_LET_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN<<32);
-    pub const OI_LET_LAST: u64 = 81;
+    pub const OI_LET_FIRST: u64 = 80;
+    pub const OI_LET_DYN_NIL:u64 = 81;pub const OP_LET_DYN_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN_NIL<<32);
+    pub const OI_LET_TYPED_NIL:u64 = 82;pub const OP_LET_TYPED_NIL: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED_NIL<<32);
+    pub const OI_LET_TYPED:u64 = 83;pub const OP_LET_TYPED: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_TYPED<<32);
+    pub const OI_LET_DYN:u64 = 84;pub const OP_LET_DYN: Value = Value(Self::TYPE_OPCODE | Self::OI_LET_DYN<<32);
+    pub const OI_LET_LAST: u64 = 84;
         
-    pub const OI_SEARCH_TREE:u64 = 82;pub const OP_SEARCH_TREE: Value = Value(Self::TYPE_OPCODE | Self::OI_SEARCH_TREE<<32);
+    pub const OI_SEARCH_TREE:u64 = 85;pub const OP_SEARCH_TREE: Value = Value(Self::TYPE_OPCODE | Self::OI_SEARCH_TREE<<32);
         
     // TODO: make this behave like javascript as much as is sensible
     
@@ -192,7 +198,7 @@ impl Value{
     }
     
     pub fn from_object(ptr: ObjectPtr)->Self{
-         Self(((ptr.zone as u64) << 32) | ptr.index as u64 | Self::TYPE_OBJECT)
+         Self(ptr.index as u64 | Self::TYPE_OBJECT)
     }
         
     pub const fn from_bool(val: bool)->Self{
@@ -213,7 +219,7 @@ impl Value{
     }
         
     pub fn from_string(ptr: StringPtr)->Self{
-         Self(((ptr.zone as u64) << 32) | ptr.index as u64 | Self::TYPE_STRING)
+         Self(ptr.index as u64 | Self::TYPE_STRING)
     }
     
     pub fn from_inline_string(str: &str)->Option<Self>{
@@ -298,7 +304,6 @@ impl Value{
     pub fn as_object(&self)->Option<ObjectPtr>{
         if self.is_object(){
             return Some(ObjectPtr{
-                zone: ((self.0 &0xff_0000_0000) >>32) as u8,
                 index: (self.0 & 0xffff_ffff) as u32
             })
         }
@@ -337,7 +342,6 @@ impl Value{
     pub fn as_string(&self)->Option<StringPtr>{
         if self.is_string(){
             return Some(StringPtr{
-                zone: ((self.0 & 0xff_0000_0000) >>32) as u8,
                 index: (self.0 & 0xffff_ffff) as u32
             })
         }
@@ -409,8 +413,8 @@ impl fmt::Display for Value {
             }){
             return r;
         }
-        if let Some(_) = self.as_object(){
-            return write!(f, "[Object]")
+        if let Some(ptr) = self.as_object(){
+            return write!(f, "[Object:{}]",ptr.index)
         }
         if self.is_nil(){
             return write!(f, "nil")
@@ -485,13 +489,12 @@ impl fmt::Display for Value {
                 Self::OI_END_FRAG => return write!(f, ")"),
                 
                 Self::OI_BEGIN_FN=> return write!(f, "<fn>|"),
-                Self::OI_FN_ARG_DYN=> return write!(f, "<arg dyn nil>"),
-                Self::OI_FN_ARG_TYPED=> return write!(f, "<arg typed nil>"),
-                Self::OI_FN_EXPR=> return write!(f, "|<fnexpr>"),
-                Self::OI_BEGIN_FN_BLOCK=> return write!(f, "|<fnblock>{{"),
-                Self::OI_END_FN_BLOCK=> return write!(f, "}}"),
+                Self::OI_FN_ARG_DYN_NIL=> return write!(f, "<arg dyn nil>"),
+                Self::OI_FN_ARG_TYPED_NIL=> return write!(f, "<arg typed nil>"),
+                Self::OI_END_FN=> return write!(f, "|<fnbody>"),
                 Self::OI_RETURN=> return write!(f, "<return>"),
-                                
+                Self::OI_RETURN_NIL=> return write!(f, "<return nil>"),
+                                                
                 Self::OI_FIELD => return write!(f, "."),
                 Self::OI_ARRAY_INDEX => return write!(f, "[]"),
                                 
