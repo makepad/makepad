@@ -98,14 +98,11 @@ impl ScriptThread{
     
     pub fn pop_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
         let val = self.stack.pop().unwrap();
-        if let Some(local) = val.as_local(){
-            return self.resolve_local(local, heap)
-        }
         if let Some(id) = val.as_id(){
             if val.is_escaped_id(){
                 return val
             }
-            return self.resolve_id(id, heap)
+            return self.resolve(id, heap)
         }
         val    
     }
@@ -118,15 +115,8 @@ impl ScriptThread{
         self.stack.push(value);
     }
     
-    pub fn resolve_local(&self, local:LocalPtr, heap:&ScriptHeap)->Value{
-        if let Some(call) = self.calls.last(){
-            return heap.object_value_from_ptr(call.scope, local)
-        }
-        Value::NIL
-    }
-    
     // lets resolve an id to a Value
-    pub fn resolve_id(&self, id: Id, heap:&ScriptHeap)->Value{
+    pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
         if id == id!(me){
             if let Some(me) = self.mes.last(){
                 return (*me).object.into()
@@ -152,11 +142,8 @@ impl ScriptThread{
                                 (Value::NIL, value)
                             }
                             else{
-                                (value, self.resolve_id(id, heap))
+                                (value, self.resolve(id, heap))
                             }
-                        }
-                        else if let Some(local) = value.as_local(){
-                            (Value::NIL, self.resolve_local(local, heap))
                         }
                         else{
                             (Value::NIL, value)
@@ -376,7 +363,7 @@ impl ScriptThread{
             }
             Opcode::CALL_ARGS=>{
                 let fnobj = self.pop_stack_resolved(heap);
-                let scope = heap.clone_object(fnobj);
+                let scope = heap.new_object_with_proto(fnobj);
                                 
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
@@ -389,7 +376,7 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                if let Some(jump_to) = heap.get_object_is_fn(scope){
+                if let Some(jump_to) = heap.get_parent_object_is_fn(scope){
                     let call = CallFrame{
                         scope,
                         mes_base: self.mes.len(),
