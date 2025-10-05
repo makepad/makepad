@@ -27,6 +27,7 @@ pub struct StringPtr{
     pub index: u32    
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub struct LocalPtr{
     pub rel: u16,
     pub index: u16
@@ -109,7 +110,7 @@ impl Value{
     }
     
     pub fn from_local(local:LocalPtr)->Self{
-        Self((local.rel as u64) << 16 | (local.index as u64) << 16 | Self::TYPE_LOCAL)
+        Self((local.rel as u64) << 16 | (local.index as u64) | Self::TYPE_LOCAL)
     }
             
     pub const fn from_bool(val: bool)->Self{
@@ -346,6 +347,9 @@ impl fmt::Display for Value {
         if let Some(_) = self.as_string(){
             return write!(f, "[String]")
         }
+        if let Some(v) = self.as_local(){
+            return write!(f, "{:?}", v);
+        }
         if let Some(r) = self.as_inline_string(|s|{
                 write!(f, "{s}")
             }){
@@ -361,5 +365,18 @@ impl fmt::Display for Value {
             return write!(f, "{opcode}{args}")
         }
         write!(f, "?{:08x}", self.0)
+    }
+}
+
+impl fmt::Debug for LocalPtr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+
+impl fmt::Display for LocalPtr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "[{}:{}]", self.rel, self.index)
     }
 }
