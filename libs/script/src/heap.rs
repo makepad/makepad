@@ -438,7 +438,7 @@ impl ScriptHeap{
     pub fn object_value(&self, set_ptr:ObjectPtr, key:Value)->Value{
         let mut ptr = set_ptr;
         loop{
-            let object = unsafe{self.objects.get_unchecked(ptr.index as usize)};
+            let object = &self.objects[ptr.index as usize];
             for field in object.fields.iter().rev(){
                 if field.key == key{
                     return field.value
@@ -452,6 +452,20 @@ impl ScriptHeap{
             }
         }
         Value::NIL
+    }
+    
+    pub fn object_value_from_ptr(&self, set_ptr:ObjectPtr, local:LocalPtr)->Value{
+        let mut ptr = set_ptr;
+        let mut rel = local.rel as usize;
+        while rel >0{
+            let object = &self.objects[ptr.index as usize];
+            if let Some(next_ptr) = object.proto.as_object(){
+                ptr = next_ptr
+            }
+            rel -= 1            
+        }
+        let object = &self.objects[ptr.index as usize];
+        return object.fields[local.index as usize].value
     }
     
     pub fn push_object_value(&mut self, set_ptr:ObjectPtr, key: Value, value:Value){

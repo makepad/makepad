@@ -34,7 +34,7 @@ enum State{
     EmitFnArgDyn,
     
     EmitUnary(Id),
-    EmitOp(Id, Option<Id>),
+    EmitOp(Id),
     EmitFieldAssign(Id),
     EmitIndexAssign(Id),
     EndBare,
@@ -159,7 +159,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_opcode(op:Id)->Opcode{
+    fn operator_to_opcode(op:Id)->Value{
         match op{
             id!(*) => Opcode::MUL,
             id!(/) => Opcode::DIV,
@@ -195,14 +195,14 @@ impl State{
             id!(?=)  => Opcode::ASSIGN_IFNIL,
             id!(.)  => Opcode::FIELD,
             _=> Opcode::NOP,
-        }
+        }.into()
     }
     
     fn is_heq_prio(&self, other:State)->bool{
         match self{
-            Self::EmitOp(op1,_)=>{
+            Self::EmitOp(op1)=>{
                 match other{
-                    Self::EmitOp(op2,_)=>{
+                    Self::EmitOp(op2)=>{
                         if Self::is_assign_operator(*op1) && Self::is_assign_operator(op2){
                             return false
                         }
@@ -405,34 +405,8 @@ impl ScriptParser{
             State::EmitIndexAssign(what_op)=>{
                 self.code.push(State::operator_to_index_assign(what_op));
             }
-            State::EmitOp(what_op, postfix_id)=>{
-                // lets see if the last 2 values are id op num
-                if let Some(last) = self.code.last(){
-                    if let Some(v) = last.as_f64(){
-                        if v >= 0.0 && v.fract() == 0.0{
-                            let v = v as u64;
-                            if v < OpcodeArgs::MAX_U32 as u64{
-                                self.code.pop();
-                                self.code.push(Value::from_opcode_args(
-                                    State::operator_to_opcode(what_op),
-                                    OpcodeArgs::from_u32(v as u32)
-                                    .set_postfix_id(postfix_id.is_some())
-                                ));
-                                if let Some(postfix_id) = postfix_id{
-                                    self.code.push(postfix_id.into())
-                                }
-                                return 0
-                            }
-                        }
-                    }
-                }
-                self.code.push(Value::from_opcode_args(
-                    State::operator_to_opcode(what_op),
-                    OpcodeArgs::NONE.set_postfix_id(postfix_id.is_some()
-                )));
-                if let Some(postfix_id) = postfix_id{
-                    self.code.push(postfix_id.into())
-                }
+            State::EmitOp(what_op)=>{
+                self.code.push(State::operator_to_opcode(what_op));
                 return 0
             }
             State::EmitUnary(what_op)=>{
@@ -520,7 +494,7 @@ impl ScriptParser{
                         println!("{:?}", self.code);
                     }*/
                     
-                    let next_state = State::EmitOp(op, None);
+                    let next_state = State::EmitOp(op);
                     // check if we have a ..[] = 
                     if Some(&Opcode::ARRAY_INDEX.into()) == self.code.last(){
                         if State::is_assign_operator(op){
@@ -531,7 +505,7 @@ impl ScriptParser{
                         }
                     }
                     if let Some(last) = self.state.pop(){
-                        if let State::EmitOp(id!(.),_) = last{
+                        if let State::EmitOp(id!(.)) = last{
                             if State::is_assign_operator(op){
                                 for pair in self.code.rchunks_mut(2){
                                     if pair[0] == Opcode::FIELD.into() && pair[1].is_id(){
@@ -547,7 +521,7 @@ impl ScriptParser{
                             }
                         }
                         if last.is_heq_prio(next_state){
-                            self.state.push(State::EmitOp(op,None));
+                            self.state.push(State::EmitOp(op));
                             self.state.push(State::BeginExpr);
                             self.state.push(last);
                             return 1
@@ -556,22 +530,14 @@ impl ScriptParser{
                             self.state.push(last);
                         }
                     }
-                    if let Some(last) = self.code.last(){
-                        if let Some(id) = last.as_id(){
-                            self.code.pop();
-                            self.state.push(State::EmitOp(op,Some(id)));
-                            self.state.push(State::BeginExpr);
-                            return 1
-                        }
-                    }
-                    self.state.push(State::EmitOp(op,None));
+                    self.state.push(State::EmitOp(op));
                     self.state.push(State::BeginExpr);
                     return 1
                 }
                 
                 if tok.is_open_curly() {
                     for state in self.state.iter().rev(){
-                        if let State::EmitOp(_,_) = state{}
+                        if let State::EmitOp(_) = state{}
                         else if let State::IfTest = state{
                             return 0
                         }
@@ -586,8 +552,8 @@ impl ScriptParser{
                 }
                 if tok.is_open_round(){ 
                     if let Some(last) = self.state.pop(){
-                        if let State::EmitOp(id!(.),_) = last{
-                            self.code.push(Opcode::FIELD.into());
+                        if let State::EmitOp(id!(.)) = last{
+                            self.code.push(State::operator_to_opcode(id!(.)));
                         }
                         else{
                             self.state.push(last);
@@ -600,8 +566,8 @@ impl ScriptParser{
                 }
                 if tok.is_open_square(){
                     if let Some(last) = self.state.pop(){
-                        if let State::EmitOp(id!(.),_) = last{
-                            self.code.push(Opcode::FIELD.into());
+                        if let State::EmitOp(id!(.)) = last{
+                            self.code.push(State::operator_to_opcode(id!(.)));
                         }
                         else{
                             self.state.push(last);
@@ -765,7 +731,7 @@ impl ScriptParser{
                 }
                 if op == id!(.){
                     self.code.push(id!(me).into());
-                    self.state.push(State::EmitOp(op,None));
+                    self.state.push(State::EmitOp(op));
                     self.state.push(State::BeginExpr);
                     return 1
                 }
