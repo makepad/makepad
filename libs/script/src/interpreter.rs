@@ -377,6 +377,21 @@ impl ScriptThread{
                 self.ip = call.return_ip;
                 self.stack.push(value);
             }
+            Opcode::IF_TEST=>{
+                let test = self.pop_stack_resolved(heap);
+                let test = heap.cast_to_bool(test);
+                if test {
+                    // continue
+                    self.ip += 1
+                }
+                else{ // jump to else
+                    self.ip += args.to_u32() as usize;
+                }
+            }
+            Opcode::IF_ELSE =>{ // we are running into an else
+                println!("RAN INTO ELSE");
+                self.ip += args.to_u32() as usize;
+            }
             _=>{
                 self.ip += 1;
                 // unknown instruction

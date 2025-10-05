@@ -239,7 +239,7 @@ impl ScriptTokenizer{
         let mut iter = new_chars.chars();
         
         fn is_operator(c:char)->bool{
-            c == '!' || c == '^' || c == '&' || c == '*' || c == '+' || c == '-'|| c == '|' || c == '?' || c == ':' || c == '=' || c == '@' || c=='>' || c=='<' || c == '.' || c== ',' || c == ';'
+            c == '!' || c == '^' || c == '&' || c == '*' || c == '+' || c == '-'|| c == '|' || c == '?' || c == ':' || c == '=' || c == '@' || c=='>' || c=='<' || c == '.' || c== ',' || c == ';' ||  c == '/'
         }
         fn is_block(c:char)->Option<ScriptToken>{
             match c{
