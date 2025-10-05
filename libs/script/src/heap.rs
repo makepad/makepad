@@ -247,6 +247,12 @@ impl ScriptHeap{
         }
     }
     
+    pub fn free_object(&mut self, ptr:ObjectPtr){
+        let obj = &mut self.objects[ptr.index as usize];
+        obj.clear();
+        self.objects_free.push(ptr.index as usize);
+    }
+    
     
     pub fn null_string(&self)->StringPtr{
         StringPtr{index: 0}
