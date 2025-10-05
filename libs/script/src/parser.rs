@@ -50,6 +50,7 @@ enum State{
     For,
     ForIdent,
     ForRange,
+    Return,
     
     Let,
     LetDynOrTyped,
@@ -409,6 +410,10 @@ impl ScriptParser{
                 self.code.push(State::operator_to_opcode(what_op));
                 return 0
             }
+            State::Return=>{
+                self.code.push(Opcode::RETURN.into());
+                return 0
+            }
             State::EmitUnary(what_op)=>{
                 self.code.push(State::operator_to_unary(what_op));
                 return 0
@@ -747,6 +752,12 @@ impl ScriptParser{
                     self.state.push(State::EndStmt);
                     self.state.push(State::Let);
                     return 1
+                }
+                else if id == id!(return){
+                    self.state.push(State::EndStmt);
+                    self.state.push(State::Return);
+                    self.state.push(State::BeginExpr);
+                    return 1;
                 }
                 if op == id!(;) || op == id!(,){ // just eat it
                     // we can pop all operator emits
