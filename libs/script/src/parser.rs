@@ -216,17 +216,13 @@ impl State{
     }
 }
 
-#[derive(Default)]
-struct ScriptLocals{
-    slots: Vec<Id>,
-}
+
 
 pub struct ScriptParser{
     pub index: usize,
     pub tok: ScriptTokenizer,
     pub code: Vec<Value>,
     state: Vec<State>,
-    locals: Vec<ScriptLocals>,
     opstack: Vec<Id>
 }
 
@@ -234,7 +230,6 @@ impl Default for ScriptParser{
     fn default()->Self{
         Self{
             index: 0,
-            locals: vec![Default::default()],
             tok: Default::default(),
             code: Default::default(),
             opstack: Default::default(),
@@ -266,8 +261,6 @@ impl ScriptParser{
                 if id != id!(){ // lets expect an assignment expression
                     // push the id on to the stack
                     self.code.push(id.into());
-                    let locals = self.locals.last_mut().unwrap();
-                    locals.slots.push(id);
                     self.state.push(State::LetDynOrTyped);
                     return 1
                 }
@@ -354,8 +347,6 @@ impl ScriptParser{
             State::FnArgList=>{
                 if id != id!(){ // ident
                     self.code.push(id.into());
-                    let locals = self.locals.last_mut().unwrap();
-                    locals.slots.push(id);
                     self.state.push(State::FnArgList);
                     self.state.push(State::FnArgMaybeType);
                     return 1
@@ -380,7 +371,6 @@ impl ScriptParser{
                 else{ // function body is expression
                     self.state.push(State::EndFnExpr(fn_slot));
                     self.state.push(State::BeginExpr);
-                    return 0
                 }
             }
             State::EscapedId=>{
@@ -396,12 +386,10 @@ impl ScriptParser{
             State::EndFnExpr(fn_slot)=>{
                 self.code.push(Opcode::RETURN.into());
                 self.code[fn_slot as usize] = Value::from_opcode_args(Opcode::FN_BODY, OpcodeArgs::from_u32(self.code.len() as u32 -fn_slot));
-                self.locals.pop();
             }
             State::EndFnBlock(fn_slot)=>{
                 self.code.push(Value::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL));
                 self.code[fn_slot as usize ] = Value::from_opcode_args(Opcode::FN_BODY, OpcodeArgs::from_u32(self.code.len() as u32 -fn_slot));
-                self.locals.pop();
                 if tok.is_close_curly() {
                     return 1
                 }
@@ -465,6 +453,7 @@ impl ScriptParser{
             }
             State::CallMaybeDo=>{
                 if id == id!(do){
+                    println!("DO");
                     self.state.push(State::EmitCall);
                     self.state.push(State::BeginExpr);
                     return 1
@@ -477,7 +466,6 @@ impl ScriptParser{
             }
             State::EndCall=>{
                 // expect )
-                //self.locals.pop();
                 self.state.push(State::CallMaybeDo);
                 if tok.is_close_round() {
                     return 1
@@ -532,14 +520,6 @@ impl ScriptParser{
                                 return 1
                             }
                         }
-                        if op == id!(:){ // backpatch and make sure a local ref becomes an id again
-                            if let Some(code) = self.code.last(){
-                                if let Some(local) = code.as_local(){
-                                    let id = self.locals[self.locals.len() - local.rel as usize - 1].slots[local.index as usize];
-                                    *self.code.last_mut().unwrap() = id.into();
-                                }
-                            }
-                        }
                         if last.is_heq_prio(next_state){
                             self.state.push(State::EmitOp(op));
                             self.state.push(State::BeginExpr);
@@ -580,7 +560,6 @@ impl ScriptParser{
                         }
                     }
                     self.code.push(Opcode::CALL_ARGS.into());
-                    //self.locals.push(Default::default());
                     self.state.push(State::EndCall);
                     self.state.push(State::BeginStmt);
                     return 1
@@ -714,30 +693,12 @@ impl ScriptParser{
                     return 1;
                 }
                 if id != id!(){
+                    self.code.push(Value::from_id(id));
                     if starts_with_ds{
-                        self.code.push(Value::from_id(id));
                         self.code.push(Opcode::SEARCH_TREE.into());
-                        self.state.push(State::EndExpr);
-                        return 1
                     }
-                    else{
-                        // try to resolve the identifier on the locals stack
-                        for (rel, level) in self.locals.iter().rev().enumerate(){
-                            for (index, item) in level.slots.iter().enumerate(){
-                                if *item == id{
-                                    self.code.push(Value::from_local(LocalPtr{
-                                        rel: rel as u16,
-                                        index: index as u16
-                                    }));
-                                    self.state.push(State::EndExpr);
-                                    return 1
-                                }
-                            }
-                        }
-                        self.code.push(Value::from_id(id));
-                        self.state.push(State::EndExpr);
-                        return 1
-                    }
+                    self.state.push(State::EndExpr);
+                    return 1
                 }
                 if let Some(v) = tok.maybe_color(){
                     self.code.push(Value::from_color(v));
@@ -765,7 +726,6 @@ impl ScriptParser{
                 }
                 if op == id!(|){
                     self.code.push(Opcode::FN_ARGS.into());
-                    self.locals.push(Default::default());
                     self.state.push(State::FnArgList);
                     return 1
                 }
