@@ -10,7 +10,7 @@ impl OpcodeArgs{
     pub const TYPE_BOOL:u32 =  3 <<28;
     pub const TYPE_MASK: u32 = 3 <<28;
     pub const STATEMENT_FLAG:u32 =  1 <<30;
-    pub const ID_NEXT_FLAG:u32 =  1 <<31;
+    pub const POSTFIX_ID_FLAG:u32 =  1 <<31;
         
     pub const MAX_U32: u32 = (1<<28) - 1;
         
@@ -35,6 +35,19 @@ impl OpcodeArgs{
         
     pub fn is_statement(&self)->bool{
         self.0 & Self::STATEMENT_FLAG != 0
+    }
+    
+    pub fn set_postfix_id(self, set:bool)->Self{
+        if set{
+            Self(self.0 | Self::POSTFIX_ID_FLAG)
+        }
+        else{
+            self
+        }
+    }
+    
+    pub fn is_postfix_id(&self)->bool{
+        self.0 & Self::POSTFIX_ID_FLAG != 0
     }
         
     pub fn is_nil(&self)->bool{
@@ -183,6 +196,9 @@ impl fmt::Display for OpcodeArgs {
             Self::TYPE_NUMBER=>{write!(f,"({})",self.to_u32()).ok();},
             _=>{}
         };
+        if self.is_postfix_id(){
+            write!(f,"<pid>").ok();
+        }
         if self.is_statement(){
             write!(f,"<Stmt>")
         }
