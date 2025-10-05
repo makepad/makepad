@@ -376,7 +376,7 @@ impl ScriptThread{
             }
             Opcode::CALL_ARGS=>{
                 let fnobj = self.pop_stack_resolved(heap);
-                let scope = heap.new_object_with_proto(fnobj);
+                let scope = heap.clone_object(fnobj);
                                 
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
@@ -389,7 +389,7 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                if let Some(jump_to) = heap.get_parent_object_is_fn(scope){
+                if let Some(jump_to) = heap.get_object_is_fn(scope){
                     let call = CallFrame{
                         scope,
                         mes_base: self.mes.len(),
