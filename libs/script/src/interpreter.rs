@@ -399,7 +399,9 @@ impl ScriptThread{
                     self.pop_stack_resolved(heap)
                 };
                 let call = self.calls.pop().unwrap();
-                heap.free_object(call.scope);
+                // we need to check if the scope was hooked by a closure
+                
+                heap.free_object_if_unreffed(call.scope);
                 self.stack.truncate(call.stack_base);
                 self.mes.truncate(call.mes_base);
                 self.ip = call.return_ip;

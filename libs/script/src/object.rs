@@ -13,7 +13,7 @@ pub struct Field{
 pub struct Object{
     pub tag: ObjectTag,
     pub proto: Value,
-    pub fields: SmallVec<[Field;2]>
+    pub fields: Vec<Field>
 }
 
 impl Object{

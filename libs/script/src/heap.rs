@@ -1,8 +1,6 @@
 use std::fmt::Write;
 use crate::value::*;
 use crate::object::*;
-use crate::id::*;
-use makepad_script_derive::*;
 
 #[derive(Default)]
 pub struct ObjectTag(u64);
@@ -12,6 +10,7 @@ impl ObjectTag{
     const ALLOCED:u64 = 0x2;
     const DEEP:u64 = 0x4;
     const FN: u64 = 0x8;
+    const REFFED: u64 = 0x10;
     
     pub fn set_fn(&mut self, val: u32){
         self.0 |= ((val as u64)<<32) | Self::FN
@@ -27,6 +26,14 @@ impl ObjectTag{
         
     pub fn set_deep(&mut self){
         self.0 |= Self::DEEP
+    }
+    
+    pub fn set_reffed(&mut self){
+        self.0 |= Self::REFFED
+    }
+    
+    pub fn is_reffed(&self)->bool{
+        self.0 & Self::REFFED != 0
     }
     
     pub fn clear_deep(&mut self){
@@ -247,12 +254,13 @@ impl ScriptHeap{
         }
     }
     
-    pub fn free_object(&mut self, ptr:ObjectPtr){
+    pub fn free_object_if_unreffed(&mut self, ptr:ObjectPtr){
         let obj = &mut self.objects[ptr.index as usize];
-        obj.clear();
-        self.objects_free.push(ptr.index as usize);
+        if !obj.tag.is_reffed(){
+            obj.clear();
+            self.objects_free.push(ptr.index as usize);
+        }
     }
-    
     
     pub fn null_string(&self)->StringPtr{
         StringPtr{index: 0}
@@ -405,7 +413,9 @@ impl ScriptHeap{
             
     pub fn new_object_with_proto(&mut self, proto:Value)->ObjectPtr{
         let deep = if let Some(ptr) = proto.as_object(){
-            self.objects[ptr.index as usize].tag.is_deep()
+            let object = &mut self.objects[ptr.index as usize];
+            object.tag.set_reffed();
+            object.tag.is_deep()
         }
         else{
             false
@@ -439,9 +449,6 @@ impl ScriptHeap{
         let mut ptr = set_ptr;
         loop{
             let object = &self.objects[ptr.index as usize];
-            if key == id!(proto).to_value(){
-                return object.proto
-            }
             for field in object.fields.iter().rev(){
                 if field.key == key{
                     return field.value
@@ -512,7 +519,7 @@ impl ScriptHeap{
                
     pub fn set_object_value(&mut self, set_ptr:ObjectPtr, key:Value, value:Value){
         let object = &mut self.objects[set_ptr.index as usize];
-        
+                
         if key.is_nil(){ // array like push
             object.fields.push(Field{
                 key,
