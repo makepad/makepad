@@ -438,10 +438,7 @@ impl ScriptHeap{
     pub fn object_value(&self, set_ptr:ObjectPtr, key:Value)->Value{
         let mut ptr = set_ptr;
         loop{
-            let object = &self.objects[ptr.index as usize];
-            if key == id!(proto).to_value(){
-                return object.proto
-            }
+            let object = unsafe{self.objects.get_unchecked(ptr.index as usize)};
             for field in object.fields.iter().rev(){
                 if field.key == key{
                     return field.value
