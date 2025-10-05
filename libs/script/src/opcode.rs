@@ -154,6 +154,7 @@ impl Opcode{
                 
     pub const SEARCH_TREE:Self = Self(85);
     pub const STRING_STREAM:Self = Self(86);
+    pub const LOG: Self = Self(87);
 }
 
 
@@ -275,6 +276,8 @@ impl fmt::Display for Opcode {
             Self::LET_DYN => return write!(f, "let"),
                                         
             Self::SEARCH_TREE => return write!(f, "$"),
+            Self::STRING_STREAM => return write!(f, "<STRINGSTREAM>"),
+            Self::LOG => return write!(f, "~"),
             _=>return write!(f, "OP{}",self.0)
         }
     }

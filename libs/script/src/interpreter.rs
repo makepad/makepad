@@ -109,6 +109,17 @@ impl ScriptThread{
         val    
     }
     
+    pub fn peek_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
+        let val = self.stack.last().unwrap();
+        if let Some(id) = val.as_id(){
+            if val.is_escaped_id(){
+                return *val
+            }
+            return self.resolve(id, heap)
+        }
+        *val    
+    }
+    
     pub fn pop_stack_value(&mut self)->Value{
         self.stack.pop().unwrap()
     }
@@ -167,6 +178,11 @@ impl ScriptThread{
                         }
                     }
                 }
+                self.ip += 1;
+            }
+            Opcode::LOG=>{
+                let value = self.peek_stack_resolved(heap);
+                println!("{:?}", value);
                 self.ip += 1;
             }
             Opcode::NOT=>{
