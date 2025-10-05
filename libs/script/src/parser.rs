@@ -6,7 +6,7 @@ use crate::value::*;
 use crate::opcode::*;
 use makepad_script_derive::*;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Eq, PartialEq)]
 enum State{
     #[default]
     BeginStmt,
@@ -17,8 +17,9 @@ enum State{
     EscapedId,
     
     IfTest,
-    IfBodyExpr(usize),
-    IfBodyBlock(usize),
+    IfTrueExpr(usize),
+    IfTrueBlock(usize),
+    IfMaybeElse(bool),
     IfElse(usize),
     IfElseExpr(usize),
     IfElseBlock(usize),
@@ -39,7 +40,7 @@ enum State{
     EndBare,
     EndBareSquare,
     EndProto,
-    EndFrag,
+    EndRound,
     
     CallMaybeDo,
     EmitCall,
@@ -308,15 +309,15 @@ impl ScriptParser{
             State::EmitLetTyped=>{
                 self.code.push(Opcode::LET_TYPED.into());
             }
-            State::EndFrag=>{
+            State::EndRound=>{
                 // we expect a ) here
-                self.code.push(Opcode::END_FRAG.into());
+                //self.code.push(Opcode::END_FRAG.into());
                 if tok.is_close_round(){
                     self.state.push(State::EndExpr);
                     return 1
                 }
                 else{
-                    println!("PARSE ERROR")
+                    println!("Expected )")
                 }
             }
             State::EmitFnArgTyped=>{
@@ -534,7 +535,16 @@ impl ScriptParser{
                     return 1
                 }
                 
-                if tok.is_open_curly(){
+                if tok.is_open_curly() {
+                    for state in self.state.iter().rev(){
+                        if let State::EmitOp(_) = state{}
+                        else if let State::IfTest = state{
+                            return 0
+                        }
+                        else{
+                            break;
+                        }
+                    }
                     self.code.push(Opcode::BEGIN_PROTO.into());
                     self.state.push(State::EndProto);
                     self.state.push(State::BeginStmt);
@@ -571,26 +581,79 @@ impl ScriptParser{
             }
             State::IfTest=>{
                 let if_start = self.code.len();
-                self.code.push(Opcode::IF_TEST.into());
+                self.code.push(Opcode::NOP.into());
                 if tok.is_open_curly(){
-                    self.state.push(State::IfBodyBlock(if_start));
+                    self.state.push(State::IfTrueBlock(if_start));
                     self.state.push(State::BeginStmt);
                     return 1
                 }
-                self.state.push(State::IfBodyExpr(if_start));
+                if id == id!(else){ 
+                    println!("Unexpected else, use {{}} to disambiguate");
+                    return 1
+                }
+                self.state.push(State::IfTrueExpr(if_start));
                 self.state.push(State::BeginExpr);
-                return 1
+                return 0
             }
-            State::IfBodyExpr(_if_start)=>{
+            State::IfTrueExpr(if_start)=>{
+                self.code[if_start] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32((self.code.len()-if_start) as u32));
+                self.state.push(State::IfMaybeElse(false));
+                return 0
             }
-            State::IfBodyBlock(_if_start)=>{
+            State::IfTrueBlock(if_start)=>{
+                if tok.is_close_curly() {
+                    if Some(&Opcode::POP_TO_ME.into()) == self.code.last(){
+                        self.code.pop();
+                    }
+                    self.code[if_start] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32((self.code.len()-if_start) as u32));
+                    self.state.push(State::IfMaybeElse(true));
+                    return 1
+                }
+                else {
+                    self.state.push(State::EndExpr);
+                    println!("Expected }} not found");
+                    return 0
+                }
             }
-            State::IfElse(_if_start)=>{
-                
+            State::IfMaybeElse(was_block)=>{
+                if id == id!(else){
+                    let else_start = self.code.len();
+                    self.code.push(Opcode::NOP.into());
+                    self.state.push(State::IfElse(else_start));
+                    return 1
+                }
+                if was_block{ // allow expression to chain
+                    self.state.push(State::EndExpr)
+                }
             }
-            State::IfElseExpr(_if_start)=>{
+            State::IfElse(else_start)=>{
+                if tok.is_open_curly(){
+                    self.state.push(State::IfElseBlock(else_start));
+                    self.state.push(State::BeginStmt);
+                    return 1
+                }
+                self.state.push(State::IfElseExpr(else_start));
+                self.state.push(State::BeginExpr);
+                return 0
             }
-            State::IfElseBlock(_if_start)=>{
+            State::IfElseExpr(else_start)=>{
+                self.code[else_start] = Value::from_opcode_args(Opcode::IF_ELSE, OpcodeArgs::from_u32((self.code.len()-else_start) as u32));
+                return 0
+            }
+            State::IfElseBlock(else_start)=>{
+                if tok.is_close_curly() {
+                    if Some(&Opcode::POP_TO_ME.into()) == self.code.last(){
+                        self.code.pop();
+                    }
+                    self.code[else_start] = Value::from_opcode_args(Opcode::IF_ELSE, OpcodeArgs::from_u32((self.code.len()-else_start) as u32));
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
+                else {
+                    self.state.push(State::EndExpr);
+                    println!("Expected }} not found");
+                    return 0
+                }
             }
             State::BeginExpr=>{
                 if tok.is_open_curly(){
@@ -606,8 +669,8 @@ impl ScriptParser{
                     return 1
                 }
                 if tok.is_open_round(){
-                    self.code.push(Opcode::BEGIN_FRAG.into());
-                    self.state.push(State::EndFrag);
+                    //self.code.push(Opcode::BEGIN_FRAG.into());
+                    self.state.push(State::EndRound);
                     self.state.push(State::BeginExpr);
                     return 1
                 }
@@ -619,6 +682,7 @@ impl ScriptParser{
                 if id == id!(if){ // do if as an expression
                     self.state.push(State::IfTest);
                     self.state.push(State::BeginExpr);
+                    return 1
                 }
                 if id != id!(){
                     self.code.push(Value::from_id(id));
@@ -669,12 +733,6 @@ impl ScriptParser{
                     self.state.push(State::EndStmt);
                     self.state.push(State::For);
                     self.state.push(State::ForIdent);
-                    return 1
-                }
-                else if id == id!(if){
-                    self.state.push(State::EndStmt);
-                    self.state.push(State::IfTest);
-                    self.state.push(State::BeginExpr);
                     return 1
                 }
                 else if id == id!(let){
