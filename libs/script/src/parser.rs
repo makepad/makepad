@@ -159,7 +159,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_opcode(op:Id)->Value{
+    fn operator_to_opcode(op:Id)->Opcode{
         match op{
             id!(*) => Opcode::MUL,
             id!(/) => Opcode::DIV,
@@ -195,7 +195,7 @@ impl State{
             id!(?=)  => Opcode::ASSIGN_IFNIL,
             id!(.)  => Opcode::FIELD,
             _=> Opcode::NOP,
-        }.into()
+        }
     }
     
     fn is_heq_prio(&self, other:State)->bool{
@@ -406,7 +406,23 @@ impl ScriptParser{
                 self.code.push(State::operator_to_index_assign(what_op));
             }
             State::EmitOp(what_op)=>{
-                self.code.push(State::operator_to_opcode(what_op));
+                // lets see if the last 2 values are id op num
+                if let Some(last) = self.code.last(){
+                    if let Some(v) = last.as_f64(){
+                        if v >= 0.0 && v.fract() == 0.0{
+                            let v = v as u64;
+                            if v < OpcodeArgs::MAX_U32 as u64{
+                                self.code.pop();
+                                self.code.push(Value::from_opcode_args(
+                                    State::operator_to_opcode(what_op),
+                                    OpcodeArgs::from_u32(v as u32)
+                                ));
+                                return 0
+                            }
+                        }
+                    }
+                }
+                self.code.push(State::operator_to_opcode(what_op).into());
                 return 0
             }
             State::EmitUnary(what_op)=>{
@@ -553,7 +569,7 @@ impl ScriptParser{
                 if tok.is_open_round(){ 
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp(id!(.)) = last{
-                            self.code.push(State::operator_to_opcode(id!(.)));
+                            self.code.push(Opcode::FIELD.into());
                         }
                         else{
                             self.state.push(last);
@@ -567,7 +583,7 @@ impl ScriptParser{
                 if tok.is_open_square(){
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp(id!(.)) = last{
-                            self.code.push(State::operator_to_opcode(id!(.)));
+                            self.code.push(Opcode::FIELD.into());
                         }
                         else{
                             self.state.push(last);
