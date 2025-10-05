@@ -17,19 +17,19 @@ enum State{
     EscapedId,
     
     IfTest,
-    IfTrueExpr(usize),
-    IfTrueBlock(usize),
-    IfMaybeElse(bool),
-    IfElse(usize),
-    IfElseExpr(usize),
-    IfElseBlock(usize),
+    IfTrueExpr(u32),
+    IfTrueBlock(u32),
+    IfMaybeElse(u32, bool),
+    IfElse(u32),
+    IfElseExpr(u32),
+    IfElseBlock(u32),
     
     FnArgList,
     FnArgMaybeType,
     FnArgType,
     FnBody,
-    EndFnBlock(usize),
-    EndFnExpr(usize),
+    EndFnBlock(u32),
+    EndFnExpr(u32),
     EmitFnArgTyped,
     EmitFnArgDyn,
     
@@ -361,7 +361,7 @@ impl ScriptParser{
                 return 1
             }
             State::FnBody=>{
-                let fn_slot = self.code.len();
+                let fn_slot = self.code.len() as _ ;
                 self.code.push(Opcode::NOP.into());
                 if tok.is_open_curly(){ // function body
                     self.state.push(State::EndFnBlock(fn_slot));
@@ -385,11 +385,11 @@ impl ScriptParser{
             }
             State::EndFnExpr(fn_slot)=>{
                 self.code.push(Opcode::RETURN.into());
-                self.code[fn_slot] = Value::from_opcode_args(Opcode::FN_BODY, OpcodeArgs::from_u32((self.code.len()-fn_slot) as u32));
+                self.code[fn_slot as usize] = Value::from_opcode_args(Opcode::FN_BODY, OpcodeArgs::from_u32(self.code.len() as u32 -fn_slot));
             }
             State::EndFnBlock(fn_slot)=>{
                 self.code.push(Value::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL));
-                self.code[fn_slot] = Value::from_opcode_args(Opcode::FN_BODY, OpcodeArgs::from_u32((self.code.len()-fn_slot) as u32));
+                self.code[fn_slot as usize ] = Value::from_opcode_args(Opcode::FN_BODY, OpcodeArgs::from_u32(self.code.len() as u32 -fn_slot));
                 if tok.is_close_curly() {
                     return 1
                 }
@@ -580,7 +580,7 @@ impl ScriptParser{
                 return 0
             }
             State::IfTest=>{
-                let if_start = self.code.len();
+                let if_start = self.code.len() as _ ;
                 self.code.push(Opcode::NOP.into());
                 if tok.is_open_curly(){
                     self.state.push(State::IfTrueBlock(if_start));
@@ -596,8 +596,7 @@ impl ScriptParser{
                 return 0
             }
             State::IfTrueExpr(if_start)=>{
-                self.code[if_start] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32((self.code.len()-if_start) as u32));
-                self.state.push(State::IfMaybeElse(false));
+                self.state.push(State::IfMaybeElse(if_start, false));
                 return 0
             }
             State::IfTrueBlock(if_start)=>{
@@ -605,8 +604,7 @@ impl ScriptParser{
                     if Some(&Opcode::POP_TO_ME.into()) == self.code.last(){
                         self.code.pop();
                     }
-                    self.code[if_start] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32((self.code.len()-if_start) as u32));
-                    self.state.push(State::IfMaybeElse(true));
+                    self.state.push(State::IfMaybeElse(if_start, true));
                     return 1
                 }
                 else {
@@ -615,13 +613,15 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::IfMaybeElse(was_block)=>{
+            State::IfMaybeElse(if_start, was_block)=>{
                 if id == id!(else){
-                    let else_start = self.code.len();
+                    let else_start = self.code.len() as u32;
                     self.code.push(Opcode::NOP.into());
+                    self.code[if_start as usize] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32(self.code.len() as u32 -if_start));
                     self.state.push(State::IfElse(else_start));
                     return 1
                 }
+                self.code[if_start as usize] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32((self.code.len() as u32 -if_start) as u32));
                 if was_block{ // allow expression to chain
                     self.state.push(State::EndExpr)
                 }
@@ -637,7 +637,7 @@ impl ScriptParser{
                 return 0
             }
             State::IfElseExpr(else_start)=>{
-                self.code[else_start] = Value::from_opcode_args(Opcode::IF_ELSE, OpcodeArgs::from_u32((self.code.len()-else_start) as u32));
+                self.code[else_start as usize ] = Value::from_opcode_args(Opcode::IF_ELSE, OpcodeArgs::from_u32(self.code.len() as u32 -else_start));
                 return 0
             }
             State::IfElseBlock(else_start)=>{
@@ -645,7 +645,7 @@ impl ScriptParser{
                     if Some(&Opcode::POP_TO_ME.into()) == self.code.last(){
                         self.code.pop();
                     }
-                    self.code[else_start] = Value::from_opcode_args(Opcode::IF_ELSE, OpcodeArgs::from_u32((self.code.len()-else_start) as u32));
+                    self.code[else_start as usize ] = Value::from_opcode_args(Opcode::IF_ELSE, OpcodeArgs::from_u32(self.code.len() as u32 - else_start));
                     self.state.push(State::EndExpr);
                     return 1
                 }
@@ -683,6 +683,14 @@ impl ScriptParser{
                     self.state.push(State::IfTest);
                     self.state.push(State::BeginExpr);
                     return 1
+                }
+                if id == id!(true){
+                    self.code.push(Value::from_bool(true));
+                    return 1;
+                }
+                if id == id!(false){
+                    self.code.push(Value::from_bool(false));
+                    return 1;
                 }
                 if id != id!(){
                     self.code.push(Value::from_id(id));

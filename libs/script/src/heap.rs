@@ -334,6 +334,37 @@ impl ScriptHeap{
         }
     }
     
+    pub fn cast_to_bool(&self, v:Value)->bool{
+        if let Some(b) = v.as_bool(){
+            return b
+        }
+        if v.is_nil(){
+            return false
+        }
+        if let Some(v) = v.as_f64(){
+            return v != 0.0
+        }
+        if v.inline_string_not_empty(){
+            return true
+        }
+        if let Some(v) = v.as_string(){
+            return self.string(v).len() != 0
+        }
+        if let Some(_v) = v.as_id(){
+            return true
+        }
+        if let Some(_v) = v.as_object(){
+            return true
+        }
+        if let Some(_v) = v.as_color(){
+            return true
+        }
+        if v.is_opcode(){
+            return true
+        }
+        false
+    }
+    
     pub fn new_string_from_str(&mut self,value:&str)->StringPtr{
         self.new_string_with(|_,out|{
             out.push_str(value);
