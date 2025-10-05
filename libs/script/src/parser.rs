@@ -154,6 +154,7 @@ impl State{
     
     fn operator_to_unary(op:Id)->Value{
         match op{
+            id!(~)=> Opcode::LOG,
             id!(!)=> Opcode::NOT,
             id!(-)=> Opcode::NEG,
             _=>Opcode::NOP
@@ -542,6 +543,7 @@ impl ScriptParser{
                 if tok.is_open_curly() {
                     for state in self.state.iter().rev(){
                         if let State::EmitOp(_) = state{}
+                        else if let State::EmitUnary(_) = state{}
                         else if let State::IfTest = state{
                             return 0
                         }
@@ -719,7 +721,7 @@ impl ScriptParser{
                     }
                     return 1
                 }
-                if op == id!(-) || op == id!(!) {
+                if op == id!(-) || op == id!(!) || op == id!(~){
                     self.state.push(State::EmitUnary(op));
                     self.state.push(State::BeginExpr);
                     return 1
