@@ -516,6 +516,21 @@ impl ScriptHeap{
             None
         }
     }   
+    
+    pub fn push_fn_arg(&mut self, top_ptr:ObjectPtr, value:Value){
+        let object = &self.objects[top_ptr.index as usize];
+        let index = object.fields.len();
+        if let Some(ptr) = object.proto.as_object(){
+            let object = &self.objects[ptr.index as usize];
+            if let Some(field) = object.fields.get(index){
+                let key = field.key;
+                self.objects[top_ptr.index as usize].fields.push(Field{
+                    key,
+                    value
+                })
+            }
+        }
+    }
                
     pub fn set_object_value(&mut self, set_ptr:ObjectPtr, key:Value, value:Value){
         let object = &mut self.objects[set_ptr.index as usize];

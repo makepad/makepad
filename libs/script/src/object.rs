@@ -1,5 +1,4 @@
 
-use smallvec::*;
 use crate::value::*;
 use crate::heap::*;
 
