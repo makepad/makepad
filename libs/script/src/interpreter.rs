@@ -7,6 +7,7 @@ use crate::heap::*;
 pub struct CallFrame{
     pub scope: ObjectPtr,
     pub stack_base: usize,
+    pub mes_base: usize,
     pub return_ip: usize,
 }
 
@@ -117,9 +118,9 @@ impl ScriptThread{
         Value::NIL
     }
     
-    pub fn opcode(&mut self,index: u64, args:u64, _parser: &ScriptParser, heap:&mut ScriptHeap){
-        match index{
-            Value::OI_POP_TO_ME=>{
+    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap){
+        match opcode{
+            Opcode::POP_TO_ME=>{
                 let value = self.stack.pop().unwrap();
                 if let Some(me) = self.mes.last(){
                     if me.emit_nils || !value.is_nil(){
@@ -146,28 +147,27 @@ impl ScriptThread{
                 }
                 self.ip += 1;
             }
-            Value::OI_NOT=>{
+            Opcode::NOT=>{
                 let v = heap.cast_to_f64(self.pop_stack_resolved(heap)) as u64;
                 self.push_stack_value(Value::from_f64((!v) as f64));
                 self.ip += 1;
             },
-            Value::OI_NEG=>{
+            Opcode::NEG=>{
                 let v = heap.cast_to_f64(self.pop_stack_resolved(heap));
                 self.push_stack_value(Value::from_f64(-v));
                 self.ip += 1;
             },
-            Value::OI_MUL=>f64_op_impl!(self, heap, *),
-            Value::OI_DIV=>f64_op_impl!(self, heap, /),
-            Value::OI_MOD=>f64_op_impl!(self, heap, %),
-            Value::OI_ADD=>f64_op_impl!(self, heap, +),
-            Value::OI_SUB=>f64_op_impl!(self, heap, -),
-            Value::OI_SHL=>fu64_op_impl!(self, heap, >>),
-            Value::OI_SHR=>fu64_op_impl!(self, heap, <<),
-            Value::OI_AND=>fu64_op_impl!(self, heap,&),
-            Value::OI_OR=>fu64_op_impl!(self, heap, |),
-            Value::OI_XOR=>fu64_op_impl!(self, heap, ^),
-
-            Value::OI_CONCAT=>{
+            Opcode::MUL=>f64_op_impl!(self, heap, *),
+            Opcode::DIV=>f64_op_impl!(self, heap, /),
+            Opcode::MOD=>f64_op_impl!(self, heap, %),
+            Opcode::ADD=>f64_op_impl!(self, heap, +),
+            Opcode::SUB=>f64_op_impl!(self, heap, -),
+            Opcode::SHL=>fu64_op_impl!(self, heap, >>),
+            Opcode::SHR=>fu64_op_impl!(self, heap, <<),
+            Opcode::AND=>fu64_op_impl!(self, heap,&),
+            Opcode::OR=>fu64_op_impl!(self, heap, |),
+            Opcode::XOR=>fu64_op_impl!(self, heap, ^),
+            Opcode::CONCAT=>{
                 let op1 = self.pop_stack_resolved(heap);
                 let op2 = self.pop_stack_resolved(heap);
                 let ptr = heap.new_string_with(|heap, out|{
@@ -177,18 +177,18 @@ impl ScriptThread{
                 self.push_stack_value(ptr.into());
                 self.ip += 1;
             }
-            Value::OI_ASSIGN_ME=>{
+            Opcode::ASSIGN_ME=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
                 if let Some(me) = self.mes.last(){
                     heap.set_object_value(me.object, field, value);
                 }
-                if args != Value::IA_ASSIGN_IS_STATEMENT{
+                if !args.is_statement(){
                     self.push_stack_value(Value::NIL);
                 }
                 self.ip += 1;
             }
-            Value::OI_FIELD=>{
+            Opcode::FIELD=>{
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
@@ -199,7 +199,7 @@ impl ScriptThread{
                 }
                 self.ip += 1;
             }
-            Value::OI_PROTO_FIELD=>{ // implement proto field!
+            Opcode::PROTO_FIELD=>{ // implement proto field!
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
@@ -210,121 +210,130 @@ impl ScriptThread{
                 }
                 self.ip += 1;
             }
-            Value::OI_ASSIGN_INDEX=>{
+            Opcode::ASSIGN_INDEX=>{
                 let value = self.pop_stack_resolved(heap);
                 let index = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
                     heap.set_object_value(obj, index, value);
                 }
-                if args != Value::IA_ASSIGN_IS_STATEMENT{
+                if !args.is_statement(){
                     self.push_stack_value(Value::NIL);
                 }
                 self.ip += 1;
             }
-            Value::OI_ASSIGN_FIELD=>{
+            Opcode::ASSIGN_FIELD=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
                     heap.set_object_value(obj, field, value);
                 }
-                if args != Value::IA_ASSIGN_IS_STATEMENT{
+                if !args.is_statement(){
                     self.push_stack_value(Value::NIL);
                 }
                 self.ip += 1;
             }
-            Value::OI_BEGIN_PROTO=>{
+            Opcode::BEGIN_PROTO=>{
                 let proto = self.pop_stack_resolved(heap);
                 let me = heap.new_object_with_proto(proto);
                 self.mes.push(ScriptMe::no_nil(me));
                 self.ip += 1;
             }
-            Value::OI_END_PROTO=>{
+            Opcode::END_PROTO=>{
                 let me = self.mes.pop().unwrap();
                 self.push_stack_value(me.object.into());
                 self.ip += 1;
             }
-            Value::OI_BEGIN_BARE=>{ // bare object
+            Opcode::BEGIN_BARE=>{ // bare object
                 let me = heap.new_object();
                 self.mes.push(ScriptMe::no_nil(me));
                 self.ip += 1;
             }
-            Value::OI_END_BARE=>{
+            Opcode::END_BARE=>{
                 let me = self.mes.pop().unwrap();
                 self.push_stack_value(me.object.into());
                 self.ip += 1;
             }
-            Value::OI_BEGIN_ARRAY=>{
+            Opcode::BEGIN_ARRAY=>{
                 let me = heap.new_object();
                 self.mes.push(ScriptMe::emit_nil(me));
                 self.ip += 1;
             }
-            Value::OI_END_ARRAY=>{
+            Opcode::END_ARRAY=>{
                 let me = self.mes.pop().unwrap();
                 self.push_stack_value(me.object.into());
                 self.ip += 1;
             }
-            Value::OI_LET_DYN=>{
-                let value = self.pop_stack_resolved(heap);
+            Opcode::LET_DYN=>{
+                let value = if args.is_nil(){
+                    Value::NIL
+                }
+                else{
+                    self.pop_stack_resolved(heap)
+                };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 let call = self.calls.last_mut().unwrap();
                 heap.push_object_value(call.scope, id.into(), value);
                 self.ip += 1;
             }
-            Value::OI_LET_DYN_NIL=>{
-                let id = self.pop_stack_value().as_id().unwrap_or(id!());
-                let call = self.calls.last_mut().unwrap();
-                heap.push_object_value(call.scope, id.into(), Value::NIL);
-                self.ip += 1;
-            }
-            Value::OI_LET_TYPED=>{
-                let value = self.pop_stack_resolved(heap);
+            Opcode::LET_TYPED=>{
+                let value = if args.is_nil(){
+                    Value::NIL
+                }
+                else{
+                    self.pop_stack_resolved(heap)
+                };
                 let _ty = self.pop_stack_value();
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 let call = self.calls.last_mut().unwrap();
                 heap.push_object_value(call.scope, id.into(), value);
                 self.ip += 1;
             }
-            Value::OI_LET_TYPED_NIL=>{
-                let _ty = self.pop_stack_value();
-                let id = self.pop_stack_value().as_id().unwrap_or(id!());
-                let call = self.calls.last_mut().unwrap();
-                heap.push_object_value(call.scope, id.into(), Value::NIL);
+            Opcode::SEARCH_TREE=>{
                 self.ip += 1;
             }
-            Value::OI_SEARCH_TREE=>{
-                self.ip += 1;
-            }
-            Value::OI_FN_ARG_DYN_NIL=>{
+            Opcode::FN_ARG_DYN=>{
+                let value = if args.is_nil(){
+                    Value::NIL
+                }
+                else{
+                    self.pop_stack_resolved(heap)
+                };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 if let Some(me) = self.mes.last(){
-                    heap.set_object_value_top(me.object, id.into(), Value::NIL);
+                    heap.set_object_value_top(me.object, id.into(), value);
                 }
                 self.ip += 1;                
             }
-            Value::OI_FN_ARG_TYPED_NIL=>{
+            Opcode::FN_ARG_TYPED=>{
+                let value = if args.is_nil(){
+                    Value::NIL
+                }
+                else{
+                    self.pop_stack_resolved(heap)
+                };
                 let _ty = self.pop_stack_value().as_id().unwrap_or(id!());
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 if let Some(me) = self.mes.last(){
-                    heap.set_object_value_top(me.object, id.into(), Value::NIL);
+                    heap.set_object_value_top(me.object, id.into(), value);
                 }
                 self.ip += 1;
             }
-            Value::OI_BEGIN_FN=>{
+            Opcode::FN_ARGS=>{
                 let call = self.calls.last_mut().unwrap();
                 let me = heap.new_object_with_proto(call.scope.into());
                 self.mes.push(ScriptMe::no_nil(me));
                 self.ip += 1;
             }
-            Value::OI_END_FN=>{ // alright we have all the args now we get an expression
+            Opcode::FN_BODY=>{ // alright we have all the args now we get an expression
                 let jump_over_fn = self.pop_stack_value().as_f64().unwrap_or(0.0) as usize;
                 let me = self.mes.pop().unwrap();
                 heap.set_object_is_fn(me.object, (self.ip + 1) as u32);
-                self.ip = jump_over_fn;
+                self.ip += jump_over_fn;
                 self.stack.push(me.object.into());
             }
-            Value::OI_BEGIN_CALL=>{
+            Opcode::CALL_ARGS=>{
                 let fnobj = self.pop_stack_resolved(heap);
                 let scope = heap.new_object_with_proto(fnobj);
                                 
@@ -333,7 +342,7 @@ impl ScriptThread{
                 self.mes.push(ScriptMe::fn_call(scope));
                 self.ip += 1;
             }
-            Value::OI_END_CALL=>{
+            Opcode::CALL_EXEC=>{
                 // ok so now we have all our args on 'mes'
                 let me = self.mes.pop().unwrap();
                 let scope = me.object;
@@ -342,6 +351,7 @@ impl ScriptThread{
                 if let Some(jump_to) = heap.get_parent_object_is_fn(scope){
                     let call = CallFrame{
                         scope,
+                        mes_base: self.mes.len(),
                         stack_base: self.stack.len(),
                         return_ip: self.ip + 1,
                     };
@@ -353,10 +363,16 @@ impl ScriptThread{
                     self.ip += 1;
                 }
             }
-            Value::OI_RETURN=>{
-                let value = self.pop_stack_resolved(heap);
+            Opcode::RETURN=>{
+                let value = if args.is_nil(){
+                    Value::NIL
+                }
+                else{
+                    self.pop_stack_resolved(heap)
+                };
                 let call = self.calls.pop().unwrap();
                 self.stack.truncate(call.stack_base);
+                self.mes.truncate(call.mes_base);
                 self.ip = call.return_ip;
                 self.stack.push(value);
             }
@@ -372,6 +388,7 @@ impl ScriptThread{
                 
         let call = CallFrame{
             scope,
+            mes_base: 0,
             stack_base: 0,
             return_ip: 0,
         };
@@ -380,8 +397,8 @@ impl ScriptThread{
         self.ip = 0;
         while self.ip < parser.code.len(){
             let code = parser.code[self.ip];
-            if let Some((index, args)) = code.as_opcode_index(){
-                self.opcode(index, args, parser, heap);
+            if let Some((opcode, args)) = code.as_opcode(){
+                self.opcode(opcode, args, parser, heap);
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(code);
