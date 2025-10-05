@@ -7,8 +7,11 @@ impl OpcodeArgs{
     pub const TYPE_NONE: u32 = 0;
     pub const TYPE_NIL:u32 =  1 <<28;
     pub const TYPE_NUMBER:u32 =  2 <<28;
-    pub const TYPE_MASK: u32 = 7 <<28;
-    pub const STATEMENT_FLAG:u32 =  1 <<31;
+    pub const TYPE_BOOL:u32 =  3 <<28;
+    pub const TYPE_MASK: u32 = 3 <<28;
+    pub const STATEMENT_FLAG:u32 =  1 <<30;
+    pub const ID_NEXT_FLAG:u32 =  1 <<31;
+        
     pub const MAX_U32: u32 = (1<<28) - 1;
         
     pub const NONE: Self = Self(0);
@@ -40,6 +43,15 @@ impl OpcodeArgs{
         
     pub fn is_u32(&self)->bool{
         self.0 & Self::TYPE_MASK == Self::TYPE_NUMBER
+    }
+    
+    pub fn as_u32(&self)->Option<u32>{
+        if self.0 & Self::TYPE_MASK == Self::TYPE_NUMBER{
+            Some(self.to_u32())
+        }
+        else{
+            None
+        }
     }
 }
 
