@@ -1,8 +1,10 @@
 use std::fmt::Write;
 use crate::value::*;
 use crate::object::*;
+use crate::id::*;
+use makepad_script_derive::*;
 
-#[derive(Default, Copy, Clone, Debug)]
+#[derive(Default)]
 pub struct ObjectTag(u64);
 
 impl ObjectTag{
@@ -425,37 +427,6 @@ impl ScriptHeap{
         }
     }
     
-    pub fn clone_object(&mut self, object:Value)->ObjectPtr{
-        if let Some(ptr) = object.as_object(){
-            if let Some(index) = self.objects_free.pop(){
-                let index2 =  ptr.index as usize;
-                let (object, object2) = if index > index2 {
-                    let (slicea, sliceb) = self.objects.split_at_mut(index);
-                    (&mut sliceb[0], &slicea[index2])
-                } else{
-                    let (slicea, sliceb) = self.objects.split_at_mut(index2);
-                    (&mut slicea[index], &sliceb[0])
-                };
-                object.tag = object2.tag;
-                object.proto = object2.proto;
-                object.fields = object2.fields.clone();
-                ObjectPtr{index: index as _}
-            }
-            else{
-                let index = self.objects.len();
-                let object2 = &self.objects[ptr.index as usize];
-                let mut object = Object::with_proto(object2.proto);
-                object.tag = object2.tag;
-                object.fields = object2.fields.clone();
-                self.objects.push(object);
-                ObjectPtr{index: index as _}
-            }
-        }
-        else{
-            panic!()
-        }
-    }
-    
     pub fn set_object_deep(&mut self, ptr:ObjectPtr){
          self.objects[ptr.index as usize].tag.set_deep()
     }
@@ -467,8 +438,10 @@ impl ScriptHeap{
     pub fn object_value(&self, set_ptr:ObjectPtr, key:Value)->Value{
         let mut ptr = set_ptr;
         loop{
-            //let object = &self.objects[ptr.index as usize];
-            let object = unsafe{self.objects.get_unchecked(ptr.index as usize)};
+            let object = &self.objects[ptr.index as usize];
+            if key == id!(proto).to_value(){
+                return object.proto
+            }
             for field in object.fields.iter().rev(){
                 if field.key == key{
                     return field.value
@@ -482,22 +455,6 @@ impl ScriptHeap{
             }
         }
         Value::NIL
-    }
-    
-    pub fn object_value_from_ptr(&self, set_ptr:ObjectPtr, local:LocalPtr)->Value{
-        let mut ptr = set_ptr;
-        let mut rel = local.rel as usize;
-        while rel >0{
-            //let object = &self.objects[ptr.index as usize];
-            let object = unsafe{self.objects.get_unchecked(ptr.index as usize)};
-            if let Some(next_ptr) = object.proto.as_object(){
-                ptr = next_ptr
-            }
-            rel -= 1            
-        }
-        //let object = &self.objects[ptr.index as usize];
-        let object = unsafe{self.objects.get_unchecked(ptr.index as usize)};
-        return unsafe{object.fields.get_unchecked(local.index as usize)}.value
     }
     
     pub fn push_object_value(&mut self, set_ptr:ObjectPtr, key: Value, value:Value){

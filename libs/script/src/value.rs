@@ -27,12 +27,6 @@ pub struct StringPtr{
     pub index: u32    
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub struct LocalPtr{
-    pub rel: u16,
-    pub index: u16
-}
-
 impl From<StringPtr> for Value{
     fn from(v:StringPtr) -> Self{
         Value::from_string(v)
@@ -73,7 +67,7 @@ impl Value{
     pub const TYPE_COLOR: u64 = 0xFFFF_0400_0000_0000;
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
     pub const TYPE_OBJECT: u64 = 0xFFFF_0600_0000_0000;
-    pub const TYPE_LOCAL: u64 = 0xFFFF_0700_0000_0000;
+    pub const TYPE_INSTRUCTION: u64 = 0xFFFF_0700_0000_0000;
     
     pub const TYPE_INLINE_STRING_0: u64 = 0xFFFF_0800_0000_0000;
     pub const TYPE_INLINE_STRING_1: u64 = 0xFFFF_0900_0000_0000;
@@ -108,11 +102,7 @@ impl Value{
     pub fn from_object(ptr: ObjectPtr)->Self{
          Self(ptr.index as u64 | Self::TYPE_OBJECT)
     }
-    
-    pub fn from_local(local:LocalPtr)->Self{
-        Self((local.rel as u64) << 16 | (local.index as u64) | Self::TYPE_LOCAL)
-    }
-            
+        
     pub const fn from_bool(val: bool)->Self{
         if val{Self::TRUE}
         else{Self::FALSE}
@@ -193,18 +183,6 @@ impl Value{
         }
         None
     }
-    
-    pub fn as_local(&self)->Option<LocalPtr>{
-        if self.is_local(){
-            Some(LocalPtr{
-                rel: ((self.0 >> 16)&0xffff) as u16,
-                index: ((self.0)&0xffff) as u16
-            })
-        }
-        else{
-            None
-        }
-    }
         
     pub fn as_f64(&self)->Option<f64>{
         if self.is_f64(){
@@ -273,6 +251,7 @@ impl Value{
         }
     }
         
+        
     pub fn as_string(&self)->Option<StringPtr>{
         if self.is_string(){
             return Some(StringPtr{
@@ -303,10 +282,6 @@ impl Value{
     
     pub fn is_color(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_COLOR
-    }
-    
-    pub fn is_local(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_LOCAL
     }
     
     pub fn is_id(&self)->bool{
@@ -347,9 +322,6 @@ impl fmt::Display for Value {
         if let Some(_) = self.as_string(){
             return write!(f, "[String]")
         }
-        if let Some(v) = self.as_local(){
-            return write!(f, "{:?}", v);
-        }
         if let Some(r) = self.as_inline_string(|s|{
                 write!(f, "{s}")
             }){
@@ -365,18 +337,5 @@ impl fmt::Display for Value {
             return write!(f, "{opcode}{args}")
         }
         write!(f, "?{:08x}", self.0)
-    }
-}
-
-impl fmt::Debug for LocalPtr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
-
-
-impl fmt::Display for LocalPtr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "[{}:{}]", self.rel, self.index)
     }
 }
