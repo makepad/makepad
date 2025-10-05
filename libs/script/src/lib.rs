@@ -39,8 +39,10 @@ pub fn test(){
     use crate::interpreter::*;
     
     let code = "
-        let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
-        fib(47);
+        let x = true
+        if x 1 else 2;
+        // let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
+       // fib(47);
     ";
     
     let mut interp = ScriptInterpreter::new();

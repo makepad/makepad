@@ -173,6 +173,10 @@ impl Value{
         }
     }
     
+    pub fn inline_string_not_empty(&self)->bool{
+        self.0 >= Self::TYPE_INLINE_STRING_1  && self.0 <= Self::TYPE_INLINE_STRING_END
+    }
+    
     pub fn as_bool(&self)->Option<bool>{
         if self.is_bool(){
             return Some(*self == Self::TRUE)
