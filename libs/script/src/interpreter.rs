@@ -52,21 +52,9 @@ impl ScriptInterpreter{
 }
 
 macro_rules! f64_op_impl{
-    ($obj:ident, $heap:ident, $parser:ident, $args:ident, $op:tt)=>{{
-        let op2 = if let Some(imm) = $args.as_u32(){
-            Value::from_f64(imm as f64)
-        }
-        else{
-            $obj.pop_stack_resolved($heap)
-        };
-        let op1 = if $args.is_postfix_id(){
-            $obj.ip += 1;
-            let id = $parser.code[$obj.ip].as_id().unwrap();
-            $obj.resolve(id, $heap)
-        }
-        else{
-            $obj.pop_stack_resolved($heap)
-        };
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let op2 = $obj.pop_stack_resolved($heap);
+        let op1 = $obj.pop_stack_resolved($heap);
         let v1 = $heap.cast_to_f64(op1);
         let v2 = $heap.cast_to_f64(op2);
         $obj.stack.push(Value::from_f64(v1 $op v2));
@@ -75,21 +63,9 @@ macro_rules! f64_op_impl{
 }
 
 macro_rules! f64_cmp_impl{
-    ($obj:ident, $heap:ident, $parser:ident, $args:ident, $op:tt)=>{{
-        let op2 = if let Some(imm) = $args.as_u32(){
-            Value::from_f64(imm as f64)
-        }
-        else{
-            $obj.pop_stack_resolved($heap)
-        };
-        let op1 = if $args.is_postfix_id(){
-            $obj.ip += 1;
-            let id = $parser.code[$obj.ip].as_id().unwrap();
-            $obj.resolve(id, $heap)
-        }
-        else{
-             $obj.pop_stack_resolved($heap)
-        };
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let op2 = $obj.pop_stack_resolved($heap);
+        let op1 = $obj.pop_stack_resolved($heap);
         let v1 = $heap.cast_to_f64(op1);
         let v2 = $heap.cast_to_f64(op2);
         $obj.stack.push(Value::from_bool(v1 $op v2));
@@ -99,21 +75,9 @@ macro_rules! f64_cmp_impl{
 
 
 macro_rules! fu64_op_impl{
-    ($obj:ident, $heap:ident, $parser:ident, $args:ident, $op:tt)=>{{
-        let op2 = if let Some(imm) = $args.as_u32(){
-            Value::from_f64(imm as f64)
-        }
-        else{
-            $obj.pop_stack_resolved($heap)
-        };
-        let op1 = if $args.is_postfix_id(){
-            $obj.ip += 1;
-            let id = $parser.code[$obj.ip].as_id().unwrap();
-            $obj.resolve(id, $heap)
-        }
-        else{
-            $obj.pop_stack_resolved($heap)
-        };
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let op2 = $obj.pop_stack_resolved($heap);
+        let op1 = $obj.pop_stack_resolved($heap);
         let v1 = $heap.cast_to_f64(op1) as u64;
         let v2 = $heap.cast_to_f64(op2) as u64;
         $obj.stack.push(Value::from_f64((v1 $op v2) as f64));
@@ -134,11 +98,14 @@ impl ScriptThread{
     
     pub fn pop_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
         let val = self.stack.pop().unwrap();
+        if let Some(local) = val.as_local(){
+            return self.resolve_local(local, heap)
+        }
         if let Some(id) = val.as_id(){
             if val.is_escaped_id(){
                 return val
             }
-            return self.resolve(id, heap)
+            return self.resolve_id(id, heap)
         }
         val    
     }
@@ -151,8 +118,15 @@ impl ScriptThread{
         self.stack.push(value);
     }
     
+    pub fn resolve_local(&self, local:LocalPtr, heap:&ScriptHeap)->Value{
+        if let Some(call) = self.calls.last(){
+            return heap.object_value_from_ptr(call.scope, local)
+        }
+        Value::NIL
+    }
+    
     // lets resolve an id to a Value
-    pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
+    pub fn resolve_id(&self, id: Id, heap:&ScriptHeap)->Value{
         if id == id!(me){
             if let Some(me) = self.mes.last(){
                 return (*me).object.into()
@@ -167,7 +141,7 @@ impl ScriptThread{
         Value::NIL
     }
     
-    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, parser: &ScriptParser, heap:&mut ScriptHeap){
+    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap){
         match opcode{
             Opcode::POP_TO_ME=>{
                 let value = self.stack.pop().unwrap();
@@ -178,14 +152,18 @@ impl ScriptThread{
                                 (Value::NIL, value)
                             }
                             else{
-                                (value, self.resolve(id, heap))
+                                (value, self.resolve_id(id, heap))
                             }
+                        }
+                        else if let Some(local) = value.as_local(){
+                            (Value::NIL, self.resolve_local(local, heap))
                         }
                         else{
                             (Value::NIL, value)
                         };
                         if me.emit_nils || !value.is_nil(){
                             if me.is_call{
+                                println!("Call argument");
                             }
                             else{
                                 heap.push_object_value(me.object, key, value);
@@ -212,23 +190,23 @@ impl ScriptThread{
                 self.ip += 1;
             },
             
-            Opcode::MUL=>f64_op_impl!(self, heap, parser, args, *),
-            Opcode::DIV=>f64_op_impl!(self, heap, parser, args,  /),
-            Opcode::MOD=>f64_op_impl!(self, heap, parser, args, %),
-            Opcode::ADD=>f64_op_impl!(self, heap, parser, args, +),
-            Opcode::SUB=>f64_op_impl!(self, heap, parser, args, -),
-            Opcode::SHL=>fu64_op_impl!(self, heap, parser, args, >>),
-            Opcode::SHR=>fu64_op_impl!(self, heap, parser, args, <<),
-            Opcode::AND=>fu64_op_impl!(self, heap, parser, args, &),
-            Opcode::OR=>fu64_op_impl!(self, heap, parser, args, |),
-            Opcode::XOR=>fu64_op_impl!(self, heap, parser, args, ^),
+            Opcode::MUL=>f64_op_impl!(self, heap, *),
+            Opcode::DIV=>f64_op_impl!(self, heap, /),
+            Opcode::MOD=>f64_op_impl!(self, heap, %),
+            Opcode::ADD=>f64_op_impl!(self, heap, +),
+            Opcode::SUB=>f64_op_impl!(self, heap, -),
+            Opcode::SHL=>fu64_op_impl!(self, heap, >>),
+            Opcode::SHR=>fu64_op_impl!(self, heap, <<),
+            Opcode::AND=>fu64_op_impl!(self, heap,&),
+            Opcode::OR=>fu64_op_impl!(self, heap, |),
+            Opcode::XOR=>fu64_op_impl!(self, heap, ^),
             
-            Opcode::EQ=>f64_cmp_impl!(self, heap, parser, args, ==),
-            Opcode::NEQ=>f64_cmp_impl!(self, heap, parser, args, !=),
-            Opcode::LT=>f64_cmp_impl!(self, heap, parser, args, <),
-            Opcode::GT=>f64_cmp_impl!(self, heap, parser, args, >),
-            Opcode::LEQ=>f64_cmp_impl!(self, heap, parser, args, <=),
-            Opcode::GEQ=>f64_cmp_impl!(self, heap, parser, args, >=),
+            Opcode::EQ=>f64_cmp_impl!(self, heap, ==),
+            Opcode::NEQ=>f64_cmp_impl!(self, heap, !=),
+            Opcode::LT=>f64_cmp_impl!(self, heap, <),
+            Opcode::GT=>f64_cmp_impl!(self, heap, >),
+            Opcode::LEQ=>f64_cmp_impl!(self, heap, <=),
+            Opcode::GEQ=>f64_cmp_impl!(self, heap, >=),
             
             Opcode::CONCAT=>{
                 let op1 = self.pop_stack_resolved(heap);
@@ -241,21 +219,8 @@ impl ScriptThread{
                 self.ip += 1;
             }
             Opcode::ASSIGN_ME=>{
-                let value = if let Some(imm) = args.as_u32(){
-                    Value::from_f64(imm as f64)
-                }
-                else{
-                    self.pop_stack_resolved(heap)
-                };
-                
-                let field = if args.is_postfix_id(){
-                    self.ip += 1;
-                    parser.code[self.ip]
-                }
-                else{
-                   self.pop_stack_value()
-                };
-                
+                let value = self.pop_stack_resolved(heap);
+                let field = self.pop_stack_value();
                 if let Some(me) = self.mes.last(){
                     heap.set_object_value(me.object, field, value);
                 }
