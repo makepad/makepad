@@ -42,7 +42,7 @@ pub fn test(){
     
     let code = "
         let fib = |n| if n <= 1 n else fib(n:n - 1) + fib(n:n - 2)
-        fib(n:47);
+        fib(n:38);
     ";
     
     
