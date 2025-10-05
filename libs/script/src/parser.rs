@@ -15,10 +15,17 @@ enum State{
     
     EscapedId,
     
+    IfTest,
+    IfBodyExpr(usize),
+    IfBodyBlock(usize),
+    IfElse(usize),
+    IfElseExpr(usize),
+    IfElseBlock(usize),
+    
     FnArgList,
     FnArgMaybeType,
     FnArgType,
-    FnBody(usize),
+    FnBody,
     EndFnBlock(usize),
     EndFnExpr(usize),
     EmitFnArgTyped,
@@ -41,7 +48,6 @@ enum State{
     For,
     ForIdent,
     ForRange,
-    If,
     
     Let,
     LetDynOrTyped,
@@ -109,85 +115,85 @@ impl State{
     
     fn operator_to_field_assign(op:Id)->Value{
         match op{
-            id!(=) => Value::OP_ASSIGN_FIELD,
-            id!(+=) => Value::OP_ASSIGN_FIELD_ADD,
-            id!(-=) => Value::OP_ASSIGN_FIELD_SUB,
-            id!(*=) => Value::OP_ASSIGN_FIELD_MUL,
-            id!(/=) => Value::OP_ASSIGN_FIELD_DIV,
-            id!(%=) => Value::OP_ASSIGN_FIELD_MOD, 
-            id!(&=) => Value::OP_ASSIGN_FIELD_AND,
-            id!(|=) => Value::OP_ASSIGN_FIELD_OR,
-            id!(^=) => Value::OP_ASSIGN_FIELD_XOR,
-            id!(<<=) => Value::OP_ASSIGN_FIELD_SHL,
-            id!(>>=) => Value::OP_ASSIGN_FIELD_SHR,
-            id!(?=) => Value::OP_ASSIGN_FIELD_IFNIL,
-            _=>Value::OP_NOP,
-        }
+            id!(=) => Opcode::ASSIGN_FIELD,
+            id!(+=) => Opcode::ASSIGN_FIELD_ADD,
+            id!(-=) => Opcode::ASSIGN_FIELD_SUB,
+            id!(*=) => Opcode::ASSIGN_FIELD_MUL,
+            id!(/=) => Opcode::ASSIGN_FIELD_DIV,
+            id!(%=) => Opcode::ASSIGN_FIELD_MOD, 
+            id!(&=) => Opcode::ASSIGN_FIELD_AND,
+            id!(|=) => Opcode::ASSIGN_FIELD_OR,
+            id!(^=) => Opcode::ASSIGN_FIELD_XOR,
+            id!(<<=) => Opcode::ASSIGN_FIELD_SHL,
+            id!(>>=) => Opcode::ASSIGN_FIELD_SHR,
+            id!(?=) => Opcode::ASSIGN_FIELD_IFNIL,
+            _=>Opcode::NOP,
+        }.into()
     }
     
     fn operator_to_index_assign(op:Id)->Value{
         match op{
-            id!(=) => Value::OP_ASSIGN_INDEX,
-            id!(+=) => Value::OP_ASSIGN_INDEX_ADD,
-            id!(-=) => Value::OP_ASSIGN_INDEX_SUB,
-            id!(*=) => Value::OP_ASSIGN_INDEX_MUL,
-            id!(/=) => Value::OP_ASSIGN_INDEX_DIV,
-            id!(%=) => Value::OP_ASSIGN_INDEX_MOD, 
-            id!(&=) => Value::OP_ASSIGN_INDEX_AND,
-            id!(|=) => Value::OP_ASSIGN_INDEX_OR,
-            id!(^=) => Value::OP_ASSIGN_INDEX_XOR,
-            id!(<<=) => Value::OP_ASSIGN_INDEX_SHL,
-            id!(>>=) => Value::OP_ASSIGN_INDEX_SHR,
-            id!(?=) => Value::OP_ASSIGN_INDEX_IFNIL,
-            _=>Value::OP_NOP,
-        }
+            id!(=) => Opcode::ASSIGN_INDEX,
+            id!(+=) => Opcode::ASSIGN_INDEX_ADD,
+            id!(-=) => Opcode::ASSIGN_INDEX_SUB,
+            id!(*=) => Opcode::ASSIGN_INDEX_MUL,
+            id!(/=) => Opcode::ASSIGN_INDEX_DIV,
+            id!(%=) => Opcode::ASSIGN_INDEX_MOD, 
+            id!(&=) => Opcode::ASSIGN_INDEX_AND,
+            id!(|=) => Opcode::ASSIGN_INDEX_OR,
+            id!(^=) => Opcode::ASSIGN_INDEX_XOR,
+            id!(<<=) => Opcode::ASSIGN_INDEX_SHL,
+            id!(>>=) => Opcode::ASSIGN_INDEX_SHR,
+            id!(?=) => Opcode::ASSIGN_INDEX_IFNIL,
+            _=>Opcode::NOP,
+        }.into()
     }
     
     fn operator_to_unary(op:Id)->Value{
         match op{
-            id!(!)=> Value::OP_NOT,
-            id!(-)=> Value::OP_NEG,
-            _=>Value::OP_NOP
-        }
+            id!(!)=> Opcode::NOT,
+            id!(-)=> Opcode::NEG,
+            _=>Opcode::NOP
+        }.into()
     }
     
     fn operator_to_opcode(op:Id)->Value{
         match op{
-            id!(*) => Value::OP_MUL,
-            id!(/) => Value::OP_DIV,
-            id!(%) => Value::OP_MOD,
-            id!(+) => Value::OP_ADD,
-            id!(-) => Value::OP_SUB,
-            id!(<<) => Value::OP_SHL,
-            id!(>>) => Value::OP_SHR,
-            id!(&)  => Value::OP_AND,
-            id!(^) => Value::OP_XOR,
-            id!(|)  => Value::OP_OR,
-            id!(++)  => Value::OP_CONCAT,
-            id!(==) => Value::OP_EQ,
-            id!(!=) => Value::OP_NEQ,
-            id!(<) => Value::OP_LT,
-            id!(>) => Value::OP_GT,
-            id!(<=) => Value::OP_LEQ,
-            id!(>=) => Value::OP_GEQ,
-            id!(&&) => Value::OP_LOGIC_AND,
-            id!(||)  => Value::OP_LOGIC_OR,
-            id!(:) => Value::OP_ASSIGN_ME,
-            id!(=) => Value::OP_ASSIGN,
-            id!(+=) => Value::OP_ASSIGN_ADD,
-            id!(-=) => Value::OP_ASSIGN_SUB,
-            id!(*=) => Value::OP_ASSIGN_MUL,
-            id!(/=) => Value::OP_ASSIGN_DIV,
-            id!(%=) => Value::OP_ASSIGN_MOD,
-            id!(&=) => Value::OP_ASSIGN_AND,
-            id!(|=) => Value::OP_ASSIGN_OR,
-            id!(^=) => Value::OP_ASSIGN_XOR,
-            id!(<<=) => Value::OP_ASSIGN_SHL,
-            id!(>>=)  => Value::OP_ASSIGN_SHR,
-            id!(?=)  => Value::OP_ASSIGN_IFNIL,
-            id!(.)  => Value::OP_FIELD,
-            _=> Value::OP_NOP,
-        }
+            id!(*) => Opcode::MUL,
+            id!(/) => Opcode::DIV,
+            id!(%) => Opcode::MOD,
+            id!(+) => Opcode::ADD,
+            id!(-) => Opcode::SUB,
+            id!(<<) => Opcode::SHL,
+            id!(>>) => Opcode::SHR,
+            id!(&)  => Opcode::AND,
+            id!(^) => Opcode::XOR,
+            id!(|)  => Opcode::OR,
+            id!(++)  => Opcode::CONCAT,
+            id!(==) => Opcode::EQ,
+            id!(!=) => Opcode::NEQ,
+            id!(<) => Opcode::LT,
+            id!(>) => Opcode::GT,
+            id!(<=) => Opcode::LEQ,
+            id!(>=) => Opcode::GEQ,
+            id!(&&) => Opcode::LOGIC_AND,
+            id!(||)  => Opcode::LOGIC_OR,
+            id!(:) => Opcode::ASSIGN_ME,
+            id!(=) => Opcode::ASSIGN,
+            id!(+=) => Opcode::ASSIGN_ADD,
+            id!(-=) => Opcode::ASSIGN_SUB,
+            id!(*=) => Opcode::ASSIGN_MUL,
+            id!(/=) => Opcode::ASSIGN_DIV,
+            id!(%=) => Opcode::ASSIGN_MOD,
+            id!(&=) => Opcode::ASSIGN_AND,
+            id!(|=) => Opcode::ASSIGN_OR,
+            id!(^=) => Opcode::ASSIGN_XOR,
+            id!(<<=) => Opcode::ASSIGN_SHL,
+            id!(>>=)  => Opcode::ASSIGN_SHR,
+            id!(?=)  => Opcode::ASSIGN_IFNIL,
+            id!(.)  => Opcode::FIELD,
+            _=> Opcode::NOP,
+        }.into()
     }
     
     fn is_heq_prio(&self, other:State)->bool{
@@ -249,7 +255,6 @@ impl ScriptParser{
             State::For=>{}
             State::ForIdent=>{}
             State::ForRange=>{}
-            State::If=>{}
             State::Let=>{
                 if id != id!(){ // lets expect an assignment expression
                     // push the id on to the stack
@@ -272,7 +277,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{
-                    self.code.push(Value::OP_LET_DYN_NIL);
+                    self.code.push(Value::from_opcode_args(Opcode::LET_DYN, OpcodeArgs::NIL));
                 }
             }
             State::LetType=>{
@@ -293,18 +298,18 @@ impl ScriptParser{
                     return 1
                 }
                 else{
-                    self.code.push(Value::OP_LET_TYPED_NIL);
+                    self.code.push(Value::from_opcode_args(Opcode::LET_TYPED, OpcodeArgs::NIL));
                 }
             }
             State::EmitLetDyn=>{
-                self.code.push(Value::OP_LET_DYN);
+                self.code.push(Opcode::LET_DYN.into());
             }
             State::EmitLetTyped=>{
-                self.code.push(Value::OP_LET_TYPED);
+                self.code.push(Opcode::LET_TYPED.into());
             }
             State::EndFrag=>{
                 // we expect a ) here
-                self.code.push(Value::OP_END_FRAG);
+                self.code.push(Opcode::END_FRAG.into());
                 if tok.is_close_round(){
                     self.state.push(State::EndExpr);
                     return 1
@@ -314,10 +319,10 @@ impl ScriptParser{
                 }
             }
             State::EmitFnArgTyped=>{
-                self.code.push(Value::OP_FN_ARG_TYPED);
+                self.code.push(Value::from_opcode_args(Opcode::FN_ARG_TYPED, OpcodeArgs::NIL));
             }
             State::EmitFnArgDyn=>{
-                self.code.push(Value::OP_FN_ARG_DYN);
+                self.code.push(Value::from_opcode_args(Opcode::FN_ARG_DYN, OpcodeArgs::NIL));
             }
             State::FnArgType=>{
                 if id != id!(){
@@ -345,9 +350,7 @@ impl ScriptParser{
                     return 1
                 }
                 if op == id!(|){
-                    let fn_slot = self.code.len();
-                    self.code.push(Value::NIL);
-                    self.state.push(State::FnBody(fn_slot));
+                    self.state.push(State::FnBody);
                     return 1
                 }
                 // unexpected token, but just stay in the arg list mode
@@ -355,8 +358,9 @@ impl ScriptParser{
                 self.state.push(State::FnArgList);
                 return 1
             }
-            State::FnBody(fn_slot)=>{
-                self.code.push(Value::OP_END_FN);
+            State::FnBody=>{
+                let fn_slot = self.code.len();
+                self.code.push(Opcode::NOP.into());
                 if tok.is_open_curly(){ // function body
                     self.state.push(State::EndFnBlock(fn_slot));
                     self.state.push(State::BeginStmt);
@@ -378,13 +382,12 @@ impl ScriptParser{
                 }
             }
             State::EndFnExpr(fn_slot)=>{
-                self.code.push(Value::OP_RETURN);
-                self.code[fn_slot] = (self.code.len() as f64).into();
-                // we have to write the function 'jump' at the beginning
+                self.code.push(Opcode::RETURN.into());
+                self.code[fn_slot] = Value::from_opcode_args(Opcode::FN_BODY, OpcodeArgs::from_u32((self.code.len()-fn_slot) as u32));
             }
             State::EndFnBlock(fn_slot)=>{
-                self.code.push(Value::OP_RETURN_NIL);
-                self.code[fn_slot] = (self.code.len() as f64).into();
+                self.code.push(Value::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL));
+                self.code[fn_slot] = Value::from_opcode_args(Opcode::FN_BODY, OpcodeArgs::from_u32((self.code.len()-fn_slot) as u32));
                 if tok.is_close_curly() {
                     return 1
                 }
@@ -409,7 +412,7 @@ impl ScriptParser{
                 return 0
             }
             State::EndBareSquare=>{
-                self.code.push(Value::OP_END_BARE);
+                self.code.push(Opcode::END_BARE.into());
                 self.state.push(State::EndExpr);
                 if tok.is_close_square() {
                     return 1
@@ -420,7 +423,7 @@ impl ScriptParser{
                 }
             }
             State::EndBare=>{
-                self.code.push(Value::OP_END_BARE);
+                self.code.push(Opcode::END_BARE.into());
                 self.state.push(State::EndExpr);
                 if tok.is_close_curly() {
                     return 1
@@ -432,7 +435,7 @@ impl ScriptParser{
             }
             // emit the create prototype instruction
             State::EndProto=>{
-                self.code.push(Value::OP_END_PROTO);
+                self.code.push(Opcode::END_PROTO.into());
                 self.state.push(State::EndExpr);
                 if tok.is_close_curly() {
                     return 1
@@ -443,7 +446,7 @@ impl ScriptParser{
                 }
             }
             State::EmitCall=>{
-                self.code.push(Value::OP_END_CALL);
+                self.code.push(Opcode::CALL_EXEC.into());
                 self.state.push(State::EndExpr);
             }
             State::CallMaybeDo=>{
@@ -454,7 +457,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{
-                    self.code.push(Value::OP_END_CALL);
+                    self.code.push(Opcode::CALL_EXEC.into());
                     self.state.push(State::EndExpr);
                     return 0
                 }
@@ -471,7 +474,7 @@ impl ScriptParser{
                 }
             }
             State::ArrayIndex=>{
-                self.code.push(Value::OP_ARRAY_INDEX);
+                self.code.push(Opcode::ARRAY_INDEX.into());
                 self.state.push(State::EndExpr);
                 if tok.is_close_square() {
                     return 1
@@ -491,7 +494,7 @@ impl ScriptParser{
                     
                     let next_state = State::EmitOp(op);
                     // check if we have a ..[] = 
-                    if let Some(&Value::OP_ARRAY_INDEX) = self.code.last(){
+                    if Some(&Opcode::ARRAY_INDEX.into()) == self.code.last(){
                         if State::is_assign_operator(op){
                             self.code.pop();
                             self.state.push(State::EmitIndexAssign(op));
@@ -503,8 +506,8 @@ impl ScriptParser{
                         if let State::EmitOp(id!(.)) = last{
                             if State::is_assign_operator(op){
                                 for pair in self.code.rchunks_mut(2){
-                                    if pair[0] == Value::OP_FIELD && pair[1].is_id(){
-                                        pair[0] = Value::OP_PROTO_FIELD
+                                    if pair[0] == Opcode::FIELD.into() && pair[1].is_id(){
+                                        pair[0] = Opcode::PROTO_FIELD.into()
                                     }
                                     else{
                                         break
@@ -531,7 +534,7 @@ impl ScriptParser{
                 }
                 
                 if tok.is_open_curly(){
-                    self.code.push(Value::OP_BEGIN_PROTO);
+                    self.code.push(Opcode::BEGIN_PROTO.into());
                     self.state.push(State::EndProto);
                     self.state.push(State::BeginStmt);
                     return 1
@@ -545,7 +548,7 @@ impl ScriptParser{
                             self.state.push(last);
                         }
                     }
-                    self.code.push(Value::OP_BEGIN_CALL);
+                    self.code.push(Opcode::CALL_ARGS.into());
                     self.state.push(State::EndCall);
                     self.state.push(State::BeginStmt);
                     return 1
@@ -565,21 +568,44 @@ impl ScriptParser{
                 }
                 return 0
             }
+            State::IfTest=>{
+                let if_start = self.code.len();
+                self.code.push(Opcode::IF_TEST.into());
+                if tok.is_open_curly(){
+                    self.state.push(State::IfBodyBlock(if_start));
+                    self.state.push(State::BeginStmt);
+                    return 1
+                }
+                self.state.push(State::IfBodyExpr(if_start));
+                self.state.push(State::BeginExpr);
+                return 1
+            }
+            State::IfBodyExpr(_if_start)=>{
+            }
+            State::IfBodyBlock(_if_start)=>{
+            }
+            State::IfElse(_if_start)=>{
+                
+            }
+            State::IfElseExpr(_if_start)=>{
+            }
+            State::IfElseBlock(_if_start)=>{
+            }
             State::BeginExpr=>{
                 if tok.is_open_curly(){
-                    self.code.push(Value::OP_BEGIN_BARE);
+                    self.code.push(Opcode::BEGIN_BARE.into());
                     self.state.push(State::EndBare);
                     self.state.push(State::BeginStmt);
                     return 1
                 }
                 if tok.is_open_square(){
-                    self.code.push(Value::OP_BEGIN_ARRAY);
+                    self.code.push(Opcode::BEGIN_ARRAY.into());
                     self.state.push(State::EndBareSquare);
                     self.state.push(State::BeginStmt);
                     return 1
                 }
                 if tok.is_open_round(){
-                    self.code.push(Value::OP_BEGIN_FRAG);
+                    self.code.push(Opcode::BEGIN_FRAG.into());
                     self.state.push(State::EndFrag);
                     self.state.push(State::BeginExpr);
                     return 1
@@ -589,10 +615,14 @@ impl ScriptParser{
                     self.state.push(State::EndExpr);
                     return 1
                 }
+                if id == id!(if){ // do if as an expression
+                    self.state.push(State::IfTest);
+                    self.state.push(State::BeginExpr);
+                }
                 if id != id!(){
                     self.code.push(Value::from_id(id));
                     if starts_with_ds{
-                        self.code.push(Value::OP_SEARCH_TREE);
+                        self.code.push(Opcode::SEARCH_TREE.into());
                     }
                     self.state.push(State::EndExpr);
                     return 1
@@ -622,7 +652,7 @@ impl ScriptParser{
                     return 1
                 }
                 if op == id!(|){
-                    self.code.push(Value::OP_BEGIN_FN);
+                    self.code.push(Opcode::FN_ARGS.into());
                     self.state.push(State::FnArgList);
                     return 1
                 }
@@ -642,7 +672,7 @@ impl ScriptParser{
                 }
                 else if id == id!(if){
                     self.state.push(State::EndStmt);
-                    self.state.push(State::If);
+                    self.state.push(State::IfTest);
                     self.state.push(State::BeginExpr);
                     return 1
                 }
@@ -670,7 +700,7 @@ impl ScriptParser{
                 // in a function call we need the 
                 if let Some(code) = self.code.last_mut(){
                     if code.is_assign_opcode(){
-                        code.set_opcode_arg(Value::IA_ASSIGN_IS_STATEMENT);
+                        code.set_opcode_is_statement();
                         self.state.push(State::BeginStmt);
                         return 0;
                     }
@@ -680,7 +710,7 @@ impl ScriptParser{
                     }
                 }
                 // otherwise pop to me
-                self.code.push(Value::OP_POP_TO_ME);
+                self.code.push(Opcode::POP_TO_ME.into());
                 self.state.push(State::BeginStmt);
                 return 0
             }
