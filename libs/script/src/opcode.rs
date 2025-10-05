@@ -1,7 +1,7 @@
 use std::fmt;
 
 #[derive(Copy, Clone, PartialEq, Eq, Default)]
-pub struct OpcodeArgs(pub u32);
+pub struct OpcodeArgs(pub(crate) u32);
 
 impl OpcodeArgs{
     pub const TYPE_NONE: u32 = 0;
@@ -11,8 +11,8 @@ impl OpcodeArgs{
     pub const STATEMENT_FLAG:u32 =  1 <<31;
     pub const MAX_U32: u32 = (1<<28) - 1;
         
-    pub const NONE: OpcodeArgs = OpcodeArgs(0);
-    pub const NIL: OpcodeArgs = OpcodeArgs(Self::TYPE_NIL);
+    pub const NONE: Self = Self(0);
+    pub const NIL: Self = Self(Self::TYPE_NIL);
     
     pub fn raw(&self)->u32{
         self.0
@@ -45,7 +45,7 @@ impl OpcodeArgs{
 
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd)]
-pub struct Opcode(pub u8);
+pub struct Opcode(pub(crate) u8);
 impl Opcode{
         
     pub fn raw(&self)->u8{
