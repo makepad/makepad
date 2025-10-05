@@ -453,7 +453,6 @@ impl ScriptParser{
             }
             State::CallMaybeDo=>{
                 if id == id!(do){
-                    println!("DO");
                     self.state.push(State::EmitCall);
                     self.state.push(State::BeginExpr);
                     return 1
