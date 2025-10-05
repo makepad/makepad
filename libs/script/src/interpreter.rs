@@ -3,6 +3,7 @@ use crate::id::*;
 use crate::parser::ScriptParser;
 use crate::value::*;
 use crate::heap::*;
+use crate::opcode::*;
 
 pub struct CallFrame{
     pub scope: ObjectPtr,
