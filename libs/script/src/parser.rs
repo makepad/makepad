@@ -3,6 +3,7 @@ use crate::tokenizer::*;
 use crate::id::*;
 use crate::heap::*;
 use crate::value::*;
+use crate::opcode::*;
 use makepad_script_derive::*;
 
 #[derive(Default, Debug)]
