@@ -38,18 +38,20 @@ pub fn test(){
     use crate::parser::*;
     use crate::interpreter::*;
     
+    let time = std::time::Instant::now();
+    
     let code = "
-        let x = true
-        if x 1 else 2;
-        // let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
-       // fib(47);
+        let fib = |n| if n <= 1 n else fib(n:n - 1) + fib(n:n - 2)
+        fib(n:10);
     ";
+    
     
     let mut interp = ScriptInterpreter::new();
     let mut parser = ScriptParser::default();
     parser.parse(&code, &mut interp.heap);
     parser.tok.dump_tokens(&interp.heap);
     interp.run(&parser);
+    println!("{:?}", time.elapsed().as_secs_f64());
 }
 /*
 pub const OP_(\w+): Value = Value\(Self::TYPE_OPCODE \| (\d+)\);
