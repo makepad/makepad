@@ -8,6 +8,7 @@ pub mod colorhex;
 pub mod parser;
 pub mod interpreter;
 pub mod heap;
+pub mod opcode;
 
 // 'locals'
 //
