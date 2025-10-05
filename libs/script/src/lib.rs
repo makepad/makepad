@@ -41,8 +41,8 @@ pub fn test(){
     let time = std::time::Instant::now();
     
     let code = "
-        let fib = |n| if n <= 1 n else fib(n:n - 1) + fib(n:n - 2)
-        fib(n:38);
+        let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
+        fib(38);
     ";
     
     

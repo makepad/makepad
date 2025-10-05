@@ -150,7 +150,7 @@ impl ScriptThread{
                         };
                         if me.emit_nils || !value.is_nil(){
                             if me.is_call{
-                                println!("Call argument");
+                                heap.push_fn_arg(me.object, value);
                             }
                             else{
                                 heap.push_object_value(me.object, key, value);
