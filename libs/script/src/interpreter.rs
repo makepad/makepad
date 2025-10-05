@@ -13,15 +13,17 @@ pub struct CallFrame{
 }
 
 pub struct ScriptMe{
-    emit_nils: bool,
-    is_call: bool,
+    ty: u32,
     object: ObjectPtr,
 }
 
 impl ScriptMe{
-    fn emit_nil(object:ObjectPtr)->Self{Self{emit_nils: true, is_call: false, object}}
-    fn no_nil(object:ObjectPtr)->Self{Self{emit_nils: false, is_call: false, object}}
-    fn fn_call(object:ObjectPtr)->Self{Self{emit_nils: true, is_call: true, object}}
+    const ARRAY: u32 = 1;
+    const CALL: u32 = 2;
+    const OBJ: u32 = 3;
+    fn object(object:ObjectPtr)->Self{Self{object, ty: Self::OBJ}}
+    fn array(object:ObjectPtr)->Self{Self{object, ty: Self::ARRAY}}
+    fn call(object:ObjectPtr)->Self{Self{object, ty: Self::CALL}}
 }
 
 pub struct ScriptThread{
@@ -136,26 +138,25 @@ impl ScriptThread{
             Opcode::POP_TO_ME=>{
                 let value = self.stack.pop().unwrap();
                 if let Some(me) = self.mes.last(){
-                    if me.emit_nils || !value.is_nil(){
-                        let (key, value) = if let Some(id) = value.as_id(){
-                            if value.is_escaped_id(){
-                                (Value::NIL, value)
-                            }
-                            else{
-                                (value, self.resolve(id, heap))
-                            }
+                    let (key, value) = if let Some(id) = value.as_id(){
+                        if value.is_escaped_id(){
+                            (Value::NIL, value)
+                        }
+                        else if me.ty == ScriptMe::ARRAY{
+                            (Value::NIL, self.resolve(id, heap))
                         }
                         else{
-                            (Value::NIL, value)
-                        };
-                        if me.emit_nils || !value.is_nil(){
-                            if me.is_call{
-                                heap.push_fn_arg(me.object, value);
-                            }
-                            else{
-                                heap.push_object_value(me.object, key, value);
-                            }
+                            (value, self.resolve(id, heap))
                         }
+                    }
+                    else{
+                        (Value::NIL, value)
+                    };
+                    if me.ty == ScriptMe::CALL{
+                        heap.push_fn_arg(me.object, value);
+                    }
+                    else if !value.is_nil() || me.ty == ScriptMe::ARRAY{
+                        heap.push_object_value(me.object, key, value);
                     }
                 }
                 self.ip += 1;
@@ -265,7 +266,7 @@ impl ScriptThread{
             Opcode::BEGIN_PROTO=>{
                 let proto = self.pop_stack_resolved(heap);
                 let me = heap.new_object_with_proto(proto);
-                self.mes.push(ScriptMe::no_nil(me));
+                self.mes.push(ScriptMe::object(me));
                 self.ip += 1;
             }
             Opcode::END_PROTO=>{
@@ -275,7 +276,7 @@ impl ScriptThread{
             }
             Opcode::BEGIN_BARE=>{ // bare object
                 let me = heap.new_object();
-                self.mes.push(ScriptMe::no_nil(me));
+                self.mes.push(ScriptMe::object(me));
                 self.ip += 1;
             }
             Opcode::END_BARE=>{
@@ -285,7 +286,7 @@ impl ScriptThread{
             }
             Opcode::BEGIN_ARRAY=>{
                 let me = heap.new_object();
-                self.mes.push(ScriptMe::emit_nil(me));
+                self.mes.push(ScriptMe::array(me));
                 self.ip += 1;
             }
             Opcode::END_ARRAY=>{
@@ -351,7 +352,7 @@ impl ScriptThread{
             Opcode::FN_ARGS=>{
                 let call = self.calls.last_mut().unwrap();
                 let me = heap.new_object_with_proto(call.scope.into());
-                self.mes.push(ScriptMe::no_nil(me));
+                self.mes.push(ScriptMe::object(me));
                 self.ip += 1;
             }
             Opcode::FN_BODY=>{ // alright we have all the args now we get an expression
@@ -367,7 +368,7 @@ impl ScriptThread{
                                 
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
-                self.mes.push(ScriptMe::fn_call(scope));
+                self.mes.push(ScriptMe::call(scope));
                 self.ip += 1;
             }
             Opcode::CALL_EXEC=>{
@@ -437,7 +438,7 @@ impl ScriptThread{
             stack_base: 0,
             return_ip: 0,
         };
-        self.mes.push(ScriptMe::no_nil(global));
+        self.mes.push(ScriptMe::object(global));
         self.calls.push(call);
         self.ip = 0;
         while self.ip < parser.code.len(){
