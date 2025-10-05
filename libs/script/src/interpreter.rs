@@ -53,8 +53,8 @@ impl ScriptInterpreter{
 
 macro_rules! f64_op_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
-        let op1 = $obj.pop_stack_resolved($heap);
         let op2 = $obj.pop_stack_resolved($heap);
+        let op1 = $obj.pop_stack_resolved($heap);
         let v1 = $heap.cast_to_f64(op1);
         let v2 = $heap.cast_to_f64(op2);
         $obj.stack.push(Value::from_f64(v1 $op v2));
@@ -62,10 +62,22 @@ macro_rules! f64_op_impl{
     }}
 }
 
+macro_rules! f64_cmp_impl{
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let op2 = $obj.pop_stack_resolved($heap);
+        let op1 = $obj.pop_stack_resolved($heap);
+        let v1 = $heap.cast_to_f64(op1);
+        let v2 = $heap.cast_to_f64(op2);
+        $obj.stack.push(Value::from_bool(v1 $op v2));
+        $obj.ip += 1;
+    }}
+}
+
+
 macro_rules! fu64_op_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
-        let op1 = $obj.pop_stack_resolved($heap);
         let op2 = $obj.pop_stack_resolved($heap);
+        let op1 = $obj.pop_stack_resolved($heap);
         let v1 = $heap.cast_to_f64(op1) as u64;
         let v2 = $heap.cast_to_f64(op2) as u64;
         $obj.stack.push(Value::from_f64((v1 $op v2) as f64));
@@ -149,15 +161,22 @@ impl ScriptThread{
                 self.ip += 1;
             }
             Opcode::NOT=>{
-                let v = heap.cast_to_f64(self.pop_stack_resolved(heap)) as u64;
-                self.push_stack_value(Value::from_f64((!v) as f64));
-                self.ip += 1;
+                let value = self.pop_stack_resolved(heap);
+                if let Some(v) = value.as_f64(){
+                    self.push_stack_value(Value::from_f64(!(v as u64) as f64));
+                    self.ip += 1;
+                }
+                else{
+                    let v = heap.cast_to_bool(value);
+                    self.push_stack_value(Value::from_bool(!v));
+                }
             },
             Opcode::NEG=>{
                 let v = heap.cast_to_f64(self.pop_stack_resolved(heap));
                 self.push_stack_value(Value::from_f64(-v));
                 self.ip += 1;
             },
+            
             Opcode::MUL=>f64_op_impl!(self, heap, *),
             Opcode::DIV=>f64_op_impl!(self, heap, /),
             Opcode::MOD=>f64_op_impl!(self, heap, %),
@@ -168,6 +187,14 @@ impl ScriptThread{
             Opcode::AND=>fu64_op_impl!(self, heap,&),
             Opcode::OR=>fu64_op_impl!(self, heap, |),
             Opcode::XOR=>fu64_op_impl!(self, heap, ^),
+            
+            Opcode::EQ=>f64_cmp_impl!(self, heap, ==),
+            Opcode::NEQ=>f64_cmp_impl!(self, heap, !=),
+            Opcode::LT=>f64_cmp_impl!(self, heap, <),
+            Opcode::GT=>f64_cmp_impl!(self, heap, >),
+            Opcode::LEQ=>f64_cmp_impl!(self, heap, <=),
+            Opcode::GEQ=>f64_cmp_impl!(self, heap, >=),
+            
             Opcode::CONCAT=>{
                 let op1 = self.pop_stack_resolved(heap);
                 let op2 = self.pop_stack_resolved(heap);
@@ -328,10 +355,10 @@ impl ScriptThread{
                 self.ip += 1;
             }
             Opcode::FN_BODY=>{ // alright we have all the args now we get an expression
-                let jump_over_fn = self.pop_stack_value().as_f64().unwrap_or(0.0) as usize;
+                let jump_over_fn = args.to_u32();
                 let me = self.mes.pop().unwrap();
                 heap.set_object_is_fn(me.object, (self.ip + 1) as u32);
-                self.ip += jump_over_fn;
+                self.ip += jump_over_fn as usize;
                 self.stack.push(me.object.into());
             }
             Opcode::CALL_ARGS=>{
@@ -388,8 +415,7 @@ impl ScriptThread{
                     self.ip += args.to_u32() as usize;
                 }
             }
-            Opcode::IF_ELSE =>{ // we are running into an else
-                println!("RAN INTO ELSE");
+            Opcode::IF_ELSE =>{ // we are running into an else jump over it
                 self.ip += args.to_u32() as usize;
             }
             _=>{
