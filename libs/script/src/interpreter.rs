@@ -90,6 +90,18 @@ macro_rules! fu64_op_impl{
 
 impl ScriptThread{
     
+    const SYSTEM_OBJECT_METHODS: [(Id,fn(t:&mut ScriptThread));1] = [
+        // len
+        (id!(len),|t|{
+            
+        })
+    ];
+    
+    fn look_up_system_method()->Value{
+        Value::NIL
+    }
+    
+    
     pub fn new()->Self{
         Self{
             stack_limit: 1_000_000,
@@ -108,12 +120,12 @@ impl ScriptThread{
                 }
                 return self.resolve(id, heap)
             }
-            val    
+            return val    
         }
-        else{
-            println!("STACK UNDERFLOW");
+        //else{ this slows down execution by 10%? weird
+        //    println!("STACK UNDERFLOW");
             Value::NIL
-        }
+       // }
     }
     
     pub fn peek_stack_pair(&mut self, heap:&ScriptHeap)->(Value,Value){
@@ -124,17 +136,17 @@ impl ScriptThread{
                 }
                 return (*val, self.resolve(id, heap))
             }
-            (*val,*val)    
+            return (*val,*val)    
         }
         else{
-            println!("STACK UNDERFLOW");
+           println!("STACK UNDERFLOW");
             (Value::NIL, Value::NIL)
         }
     }
     
     pub fn pop_stack_value(&mut self)->Value{
         if let Some(value) = self.stack.pop(){
-            value
+            return value
         }
         else{
             println!("STACK UNDERFLOW");
@@ -427,12 +439,28 @@ impl ScriptThread{
                 // alright so now we look up the method on this
                 println!("LOOKING UP METHOD{}", method);
                 let fnobj = if let Some(obj) = this.as_object(){
-                    heap.object_value(obj, method)
+                    heap.object_method(obj, method)
                 }
                 else{ // we're calling a method on some other thing
                     Value::NIL
                 };
-                let scope = heap.new_object_with_proto(fnobj);
+                let scope = if fnobj == Value::NIL{ // ok look up the method on the system api
+                    // lets check if our object has a foreign baseclass
+                    
+                    
+                    let scope = heap.new_object();
+                    
+                    //if this.is_object(){
+                    //    SYSTEM_OBJECT_METHODS
+                   //}
+                    //for (name,_) in 
+                    heap.set_object_is_system_fn(scope, 0);
+                    heap.set_object_value(scope, id!(this).into(), this);
+                    scope
+                }
+                else{
+                    heap.new_object_with_proto(fnobj)
+                };
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
                 heap.set_object_value(scope, id!(this).into(), this);
@@ -444,7 +472,7 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                if let Some(jump_to) = heap.get_parent_object_is_fn(scope){
+                if let Some((jump_to, is_system)) = heap.get_parent_object_is_fn(scope){
                     let call = CallFrame{
                         scope,
                         mes_base: self.mes.len(),
@@ -474,7 +502,7 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                if let Some(jump_to) = heap.get_parent_object_is_fn(scope){
+                if let Some((jump_to, is_system)) = heap.get_parent_object_is_fn(scope){
                     let call = CallFrame{
                         scope,
                         mes_base: self.mes.len(),
