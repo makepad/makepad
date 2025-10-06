@@ -67,8 +67,7 @@ pub fn test(){
     let time = std::time::Instant::now();
     
     let code = "
-    
-        let View = {@view}
+        /*let View = {@view}
         let Window = {@window}
         let Button = {@button}
         let MyWindow = Window{
@@ -80,8 +79,8 @@ pub fn test(){
             body:+{
                 Button{}
             }
-        };
-        /*
+        };*/
+        
         let fib = |n|{
             return if(n <= 1){
                 n
@@ -89,7 +88,7 @@ pub fn test(){
             else {
                 fib(n - 1) + fib(n - 2)
             }
-        }*/
+        }
         ~fib(38);
     ";
     
