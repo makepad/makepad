@@ -40,7 +40,7 @@ pub fn test(){
     
     let time = std::time::Instant::now();
     
-/*    let code = "
+    let _code = "
         let fib = |n|{
             return if(n <= 1){
                 n
@@ -49,11 +49,12 @@ pub fn test(){
                 fib(n - 1) + fib(n - 2)
             }
         }
-        ~fib(47);
-    "*/
+        ~fib(38);
+    ";
+    
     let code = "
         let x = [1 2 3]
-        x.len = + || ~'inlog'
+        //x.len = || ~'inlog'
         x.len();
     ";
     
