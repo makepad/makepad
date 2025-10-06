@@ -10,9 +10,9 @@ use makepad_script_derive::*;
 enum State{
     #[default]
     BeginStmt,
-    BeginExpr,
+    BeginExpr(bool),
     EndExpr,
-    EndStmt,
+    EndStmt(usize),
     
     EscapedId,
     
@@ -42,9 +42,9 @@ enum State{
     EndProto,
     EndRound,
     
-    CallMaybeDo,
-    EmitCall,
-    EndCall,
+    CallMaybeDo(bool),
+    EmitCall(bool),
+    EndCall(bool),
     ArrayIndex,
     
     For,
@@ -157,6 +157,7 @@ impl State{
             id!(~)=> Opcode::LOG,
             id!(!)=> Opcode::NOT,
             id!(-)=> Opcode::NEG,
+            id!(+)=> Opcode::NOP,
             _=>Opcode::NOP
         }.into()
     }
@@ -273,7 +274,7 @@ impl ScriptParser{
             State::LetDynOrTyped=>{
                 if op == id!(=){ // assignment following
                     self.state.push(State::EmitLetDyn);
-                    self.state.push(State::BeginExpr);
+                    self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 else if op == id!(:){ // type following
@@ -298,7 +299,7 @@ impl ScriptParser{
             State::LetTypedAssign=>{
                 if op == id!(=){ // assignment following
                     self.state.push(State::EmitLetTyped);
-                    self.state.push(State::BeginExpr);
+                    self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 else{
@@ -372,7 +373,7 @@ impl ScriptParser{
                 }
                 else{ // function body is expression
                     self.state.push(State::EndFnExpr(fn_slot));
-                    self.state.push(State::BeginExpr);
+                    self.state.push(State::BeginExpr(true));
                 }
             }
             State::EscapedId=>{
@@ -420,7 +421,7 @@ impl ScriptParser{
                 return 0
             }
             State::EndBareSquare=>{
-                self.code.push(Opcode::END_BARE.into());
+                self.code.push(Opcode::END_ARRAY.into());
                 self.state.push(State::EndExpr);
                 if tok.is_close_square() {
                     return 1
@@ -453,25 +454,35 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::EmitCall=>{
-                self.code.push(Opcode::CALL_EXEC.into());
-                self.state.push(State::EndExpr);
-            }
-            State::CallMaybeDo=>{
-                if id == id!(do){
-                    self.state.push(State::EmitCall);
-                    self.state.push(State::BeginExpr);
-                    return 1
+            State::EmitCall(is_method)=>{
+                if is_method{
+                    self.code.push(Opcode::METHOD_CALL_EXEC.into());
                 }
                 else{
                     self.code.push(Opcode::CALL_EXEC.into());
+                }
+                self.state.push(State::EndExpr);
+            }
+            State::CallMaybeDo(is_method)=>{
+                if id == id!(do){
+                    self.state.push(State::EmitCall(is_method));
+                    self.state.push(State::BeginExpr(true));
+                    return 1
+                }
+                else{
+                    if is_method{
+                        self.code.push(Opcode::METHOD_CALL_EXEC.into());
+                    }
+                    else{
+                        self.code.push(Opcode::CALL_EXEC.into());
+                    }
                     self.state.push(State::EndExpr);
                     return 0
                 }
             }
-            State::EndCall=>{
+            State::EndCall(is_method)=>{
                 // expect )
-                self.state.push(State::CallMaybeDo);
+                self.state.push(State::CallMaybeDo(is_method));
                 if tok.is_close_round() {
                     return 1
                 }
@@ -505,7 +516,7 @@ impl ScriptParser{
                         if State::is_assign_operator(op){
                             self.code.pop();
                             self.state.push(State::EmitIndexAssign(op));
-                            self.state.push(State::BeginExpr);
+                            self.state.push(State::BeginExpr(true));
                             return 1
                         }
                     }
@@ -521,13 +532,13 @@ impl ScriptParser{
                                     }
                                 }
                                 self.state.push(State::EmitFieldAssign(op));
-                                self.state.push(State::BeginExpr);
+                                self.state.push(State::BeginExpr(true));
                                 return 1
                             }
                         }
                         if last.is_heq_prio(next_state){
                             self.state.push(State::EmitOp(op));
-                            self.state.push(State::BeginExpr);
+                            self.state.push(State::BeginExpr(true));
                             self.state.push(last);
                             return 1
                         }
@@ -536,7 +547,7 @@ impl ScriptParser{
                         }
                     }
                     self.state.push(State::EmitOp(op));
-                    self.state.push(State::BeginExpr);
+                    self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 
@@ -559,15 +570,19 @@ impl ScriptParser{
                 if tok.is_open_round(){ 
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp(id!(.)) = last{
-                            self.code.push(State::operator_to_opcode(id!(.)));
+                            //self.code.push(State::operator_to_opcode(id!(.)));
+                            self.code.push(Opcode::METHOD_CALL_ARGS.into());
+                            self.state.push(State::EndCall(false));
+                            self.state.push(State::BeginStmt);
+                                                        
                         }
                         else{
                             self.state.push(last);
+                            self.code.push(Opcode::CALL_ARGS.into());
+                            self.state.push(State::EndCall(false));
+                            self.state.push(State::BeginStmt);
                         }
                     }
-                    self.code.push(Opcode::CALL_ARGS.into());
-                    self.state.push(State::EndCall);
-                    self.state.push(State::BeginStmt);
                     return 1
                 }
                 if tok.is_open_square(){
@@ -580,7 +595,7 @@ impl ScriptParser{
                         }
                     }
                     self.state.push(State::ArrayIndex);
-                    self.state.push(State::BeginExpr);
+                    self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 return 0
@@ -598,7 +613,7 @@ impl ScriptParser{
                     return 1
                 }
                 self.state.push(State::IfTrueExpr(if_start));
-                self.state.push(State::BeginExpr);
+                self.state.push(State::BeginExpr(true));
                 return 0
             }
             State::IfTrueExpr(if_start)=>{
@@ -639,7 +654,7 @@ impl ScriptParser{
                     return 1
                 }
                 self.state.push(State::IfElseExpr(else_start));
-                self.state.push(State::BeginExpr);
+                self.state.push(State::BeginExpr(true));
                 return 0
             }
             State::IfElseExpr(else_start)=>{
@@ -661,7 +676,7 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::BeginExpr=>{
+            State::BeginExpr(required)=>{
                 if tok.is_open_curly(){
                     self.code.push(Opcode::BEGIN_BARE.into());
                     self.state.push(State::EndBare);
@@ -677,7 +692,7 @@ impl ScriptParser{
                 if tok.is_open_round(){
                     //self.code.push(Opcode::BEGIN_FRAG.into());
                     self.state.push(State::EndRound);
-                    self.state.push(State::BeginExpr);
+                    self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 if let Some(v) = tok.maybe_number(){
@@ -687,7 +702,7 @@ impl ScriptParser{
                 }
                 if id == id!(if){ // do if as an expression
                     self.state.push(State::IfTest);
-                    self.state.push(State::BeginExpr);
+                    self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 if id == id!(true){
@@ -721,13 +736,18 @@ impl ScriptParser{
                     }
                     return 1
                 }
-                if op == id!(-) || op == id!(!) || op == id!(~){
+                if op == id!(-) || op == id!(+) || op == id!(!) || op == id!(~){
                     self.state.push(State::EmitUnary(op));
-                    self.state.push(State::BeginExpr);
+                    self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 if op == id!(@){
                     self.state.push(State::EscapedId);
+                    return 1
+                }
+                if op == id!(||){
+                    self.code.push(Opcode::FN_ARGS.into());
+                    self.state.push(State::FnBody);
                     return 1
                 }
                 if op == id!(|){
@@ -738,27 +758,31 @@ impl ScriptParser{
                 if op == id!(.){
                     self.code.push(id!(me).into());
                     self.state.push(State::EmitOp(op));
-                    self.state.push(State::BeginExpr);
+                    self.state.push(State::BeginExpr(true));
                     return 1
+                }
+                if required{
+                    println!("Expected expression after {:?} found {:?}", self.state, tok);
+                    self.code.push(Value::NIL);
                 }
             }
             State::BeginStmt => {
                 if id == id!(for){
-                    self.state.push(State::EndStmt);
+                    self.state.push(State::EndStmt(self.index));
                     self.state.push(State::For);
                     self.state.push(State::ForIdent);
                     return 1
                 }
                 else if id == id!(let){
                     // we have to have an identifier after let
-                    self.state.push(State::EndStmt);
+                    self.state.push(State::EndStmt(self.index));
                     self.state.push(State::Let);
                     return 1
                 }
                 else if id == id!(return){
-                    self.state.push(State::EndStmt);
+                    self.state.push(State::EndStmt(self.index));
                     self.state.push(State::Return);
-                    self.state.push(State::BeginExpr);
+                    self.state.push(State::BeginExpr(false));
                     return 1;
                 }
                 if op == id!(;) || op == id!(,){ // just eat it
@@ -771,11 +795,16 @@ impl ScriptParser{
                     return 0
                 }
                 // lets do an expression statement as fallthrough
-                self.state.push(State::EndStmt);
-                self.state.push(State::BeginExpr);
+                self.state.push(State::EndStmt(self.index));
+                self.state.push(State::BeginExpr(false));
                 return 0;
             }
-            State::EndStmt=>{
+            State::EndStmt(last)=>{
+                if last == self.index{
+                    println!("Tokenizer stuck on character {:?}, skipping", tok);
+                    self.state.push(State::BeginStmt);
+                    return 1
+                }
                 // in a function call we need the 
                 if let Some(code) = self.code.last_mut(){
                     if code.is_assign_opcode(){
@@ -801,8 +830,20 @@ impl ScriptParser{
         self.tok.tokenize(new_code, heap);
         
         // wait for the tokens to be consumed
+        let mut steps_zero = 0;
         while self.index < self.tok.tokens.len() && self.state.len()>0{
             let step = self.handle(heap);
+            if step == 0{
+                steps_zero += 1;
+            }
+            else{
+                steps_zero = 0;
+            }
+           // println!("{:?} {:?}", self.code, self.state);
+            if self.state.len()<=1 && steps_zero > 1000{
+                println!("Tokenizer stuck {:?} {} {:?}", self.state, step, self.tok.tokens[self.index]);
+                break;
+            }
             self.index += step;
         }
         
