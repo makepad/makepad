@@ -6,15 +6,20 @@ use crate::object::*;
 pub struct ObjectTag(u64);
 
 impl ObjectTag{
-    const MARK:u64 = 0x1;
-    const ALLOCED:u64 = 0x2;
-    const DEEP:u64 = 0x4;
-    const FN: u64 = 0x8;
-    const SYSTEM_FN: u64 = 0x10;
-    const REFFED: u64 = 0x20;
-    const SLOW_METHOD: u64 = 0x40;
+    pub const MARK:u64 = 0x1;
+    pub const ALLOCED:u64 = 0x2;
+    pub const DEEP:u64 = 0x4;
+    pub const FN: u64 = 0x8;
+    pub const SYSTEM_FN: u64 = 0x10;
+    pub const REFFED: u64 = 0x20;
+    pub const SLOW_METHOD: u64 = 0x40;
+    pub const MAP: u64 = 0x80;
     
     const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::SLOW_METHOD;
+    
+    pub fn set_flags(&mut self, flags:u64){
+        self.0 |= flags
+    }
     
     pub fn set_fn(&mut self, val: u32){
         self.0 |= ((val as u64)<<32) | Self::FN
@@ -39,6 +44,19 @@ impl ObjectTag{
     pub fn set_proto_fwd(&mut self, fwd:u64){
         self.0 |= fwd
     }
+    
+    pub fn set_map(&mut self){
+        self.0 |= Self::MAP
+    }
+    
+    pub fn clear_map(&mut self){
+        self.0 &= !Self::MAP
+    }
+    
+    pub fn is_map(&self)->bool{
+        self.0 & Self::MAP != 0
+    }
+    
     
     pub fn is_fn(&self)->bool{
         self.0 & Self::FN != 0
@@ -167,32 +185,15 @@ impl ScriptHeap{
         }
     }
     
-    pub fn new_object(&mut self)->ObjectPtr{
+    pub fn new_object(&mut self, flags: u64)->ObjectPtr{
         if let Some(index) = self.objects_free.pop(){
-            self.objects[index].tag.set_alloced();
+            self.objects[index].tag.set_flags(flags | ObjectTag::ALLOCED);
             ObjectPtr{index: index as _}
         }
         else{
             let index = self.objects.len();
             let mut object = Object::default();
-            object.tag.set_alloced();
-            self.objects.push(object);
-            ObjectPtr{index: index as _}
-        }
-    }
-        
-    pub fn new_deep_object(&mut self)->ObjectPtr{
-        if let Some(index) = self.objects_free.pop(){
-            let object = &mut self.objects[index];
-            object.tag.set_alloced();
-            object.tag.set_deep();
-            ObjectPtr{index: index as _}
-        }
-        else{
-            let index = self.objects.len();
-            let mut object = Object::default();
-            object.tag.set_alloced();
-            object.tag.set_deep();
+            object.tag.set_flags(flags | ObjectTag::ALLOCED);
             self.objects.push(object);
             ObjectPtr{index: index as _}
         }
@@ -467,6 +468,14 @@ impl ScriptHeap{
          self.objects[ptr.index as usize].tag.set_deep()
     }
     
+    pub fn set_object_map(&mut self, ptr:ObjectPtr){
+        self.objects[ptr.index as usize].tag.set_map()
+    }
+    
+    pub fn clear_object_map(&mut self, ptr:ObjectPtr){
+        self.objects[ptr.index as usize].tag.clear_map()
+    }
+        
     pub fn set_object_system_fn(&mut self, ptr:ObjectPtr, val:u32){
         self.objects[ptr.index as usize].tag.set_system_fn(val)
     }
@@ -489,9 +498,16 @@ impl ScriptHeap{
         let mut ptr = set_ptr;
         loop{
             let object = &self.objects[ptr.index as usize];
-            for field in object.fields.iter().rev(){
-                if field.key == key{
-                    return field.value
+            if object.tag.is_map(){
+                if let Some(value) = object.map.get(&key){
+                    return *value
+                }
+            }
+            else{
+                for field in object.fields.iter().rev(){
+                    if field.key == key{
+                        return field.value
+                    }
                 }
             }
             if let Some(next_ptr) = object.proto.as_object(){
@@ -506,24 +522,35 @@ impl ScriptHeap{
     
     pub fn push_object_value(&mut self, set_ptr:ObjectPtr, key: Value, value:Value){
         let object = &mut self.objects[set_ptr.index as usize];
-        object.fields.push(Field{
-            key,
-            value
-        });
+        if object.tag.is_map(){
+            object.map.insert(key, value);
+        }
+        else{
+            object.fields.push(Field{
+                key,
+                value
+            });
+        }
     }
     
     pub fn set_object_value_top(&mut self, set_ptr:ObjectPtr, key:Value, value:Value){
         let object = &mut self.objects[set_ptr.index as usize];
-        for field in object.fields.iter_mut().rev(){
-            if field.key == key{
-                field.value = value;
-                return
-            }
+        
+        if object.tag.is_map(){
+            object.map.insert(key, value);
         }
-        object.fields.push(Field{
-            key,
-            value
-        });
+        else{
+            for field in object.fields.iter_mut().rev(){
+                if field.key == key{
+                    field.value = value;
+                    return
+                }
+            }
+            object.fields.push(Field{
+                key,
+                value
+            });
+        }
     }
     
     pub fn set_object_is_fn(&mut self, ptr: ObjectPtr, ip: u32){
@@ -590,10 +617,15 @@ impl ScriptHeap{
         let object = &mut self.objects[set_ptr.index as usize];
         
         if key.is_nil(){ // array like push
-            object.fields.push(Field{
-                key,
-                value
-            });
+            if object.tag.is_map(){
+                object.map.insert(key, value);
+            }
+            else{
+                object.fields.push(Field{
+                    key,
+                    value
+                });
+            }
             if slow_method{
                 object.tag.set_slow_method();
             }
@@ -606,13 +638,24 @@ impl ScriptHeap{
             // scan up the chain to set the proto value
             loop{
                 let object = &mut self.objects[ptr.index as usize];
-                for field in object.fields.iter_mut().rev(){
-                    if field.key == key{
-                        field.value = value;
+                if object.tag.is_map(){
+                    if object.map.get(&key).is_some(){
+                        object.map.insert(key, value);
                         if slow_method{
                             object.tag.set_slow_method();
                         }
                         return
+                    }
+                }
+                else{
+                    for field in object.fields.iter_mut().rev(){
+                        if field.key == key{
+                            field.value = value;
+                            if slow_method{
+                                object.tag.set_slow_method();
+                            }
+                            return
+                        }
                     }
                 }
                 if let Some(next_ptr) = object.proto.as_object(){
@@ -634,17 +677,21 @@ impl ScriptHeap{
             return
         }
         
-        for field in object.fields.iter_mut().rev(){
-            if field.key == key{
-                field.value = value;
-                return
-            }
+        if object.tag.is_map(){
+            object.map.insert(key, value);
         }
-        
-        object.fields.push(Field{
-            key,
-            value
-        });
+        else{
+            for field in object.fields.iter_mut().rev(){
+                if field.key == key{
+                    field.value = value;
+                    return
+                }
+            }
+            object.fields.push(Field{
+                key,
+                value
+            });
+        }
     }
     
     pub fn print_object(&self, set_ptr:ObjectPtr, deep:bool){
