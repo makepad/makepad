@@ -45,7 +45,7 @@ impl ScriptInterpreter{
         let mut heap = ScriptHeap::new();
         Self{
             threads: vec![ScriptThread::new()],
-            global: heap.new_object(ObjectTag::MAP),
+            global: heap.new_object(0),
             heap: heap,
         }
     }
@@ -410,7 +410,7 @@ impl ScriptThread{
                 };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 if let Some(me) = self.mes.last(){
-                    heap.set_object_value_top(me.object, id.into(), value);
+                    heap.set_object_value(me.object, id.into(), value);
                 }
                 self.ip += 1;                
             }
@@ -424,15 +424,15 @@ impl ScriptThread{
                 let _ty = self.pop_stack_value().as_id().unwrap_or(id!());
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 if let Some(me) = self.mes.last(){
-                    heap.set_object_value_top(me.object, id.into(), value);
+                    heap.set_object_value(me.object, id.into(), value);
                 }
                 self.ip += 1;
             }
             Opcode::FN_ARGS=>{
                 let call = self.calls.last_mut().unwrap();
                 let me = heap.new_object_with_proto(call.scope.into());
-                // we should set this as fields
-                heap.clear_object_map(me);
+                // we should set this as a forced vec
+                heap.set_object_type(me, ObjectTag::TYPE_VEC);
                 
                 self.mes.push(ScriptMe::object(me));
                 self.ip += 1;
@@ -447,24 +447,14 @@ impl ScriptThread{
             Opcode::METHOD_CALL_ARGS=>{
                 let method =  self.pop_stack_value();
                 let this = self.pop_stack_resolved(heap);
-                // alright so now we look up the method on this
-                println!("LOOKING UP METHOD{}", method);
                 let fnobj = if let Some(obj) = this.as_object(){
-                    heap.object_method(obj, method)
+                    heap.object_value(obj, method)
                 }
                 else{ // we're calling a method on some other thing
                     Value::NIL
                 };
-                let scope = if fnobj == Value::NIL{ // ok look up the method on the system api
-                    // lets check if our object has a foreign baseclass
-                    
-                    
-                    let scope = heap.new_object(ObjectTag::MAP);
-                    
-                    //if this.is_object(){
-                    //    SYSTEM_OBJECT_METHODS
-                   //}
-                    //for (name,_) in 
+                let scope = if fnobj == Value::NIL{ 
+                    let scope = heap.new_object(0);
                     heap.set_object_is_system_fn(scope, 0);
                     heap.set_object_value(scope, id!(this).into(), this);
                     scope
@@ -472,7 +462,7 @@ impl ScriptThread{
                 else{
                     heap.new_object_with_proto(fnobj)
                 };
-                heap.set_object_map(scope);
+                //heap.set_object_map(scope);
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
                 heap.set_object_value(scope, id!(this).into(), this);
@@ -567,8 +557,7 @@ impl ScriptThread{
     }
       
     pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, global:ObjectPtr){
-        let scope = heap.new_object(ObjectTag::DEEP);//|ObjectTag::MAP);
-                
+        let scope = heap.new_object(ObjectTag::DEEP);
         let call = CallFrame{
             scope,
             mes_base: 0,
