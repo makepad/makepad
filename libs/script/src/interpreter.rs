@@ -14,16 +14,17 @@ pub struct CallFrame{
 
 pub struct ScriptMe{
     ty: u32,
+    argc: u32,
     object: ObjectPtr,
 }
-
+ 
 impl ScriptMe{
     const ARRAY: u32 = 1;
     const CALL: u32 = 2;
     const OBJ: u32 = 3;
-    fn object(object:ObjectPtr)->Self{Self{object, ty: Self::OBJ}}
-    fn array(object:ObjectPtr)->Self{Self{object, ty: Self::ARRAY}}
-    fn call(object:ObjectPtr)->Self{Self{object, ty: Self::CALL}}
+    fn object(object:ObjectPtr)->Self{Self{object, ty: Self::OBJ, argc:0}}
+    fn array(object:ObjectPtr)->Self{Self{object, ty: Self::ARRAY, argc:0}}
+    fn call(object:ObjectPtr)->Self{Self{object, ty: Self::CALL, argc:0}}
 }
 
 pub struct ScriptThread{
@@ -45,7 +46,7 @@ impl ScriptInterpreter{
         let mut heap = ScriptHeap::new();
         Self{
             threads: vec![ScriptThread::new()],
-            global: heap.new_object(),
+            global: heap.new_object(ObjectTag::MAP),
             heap: heap,
         }
     }
@@ -346,7 +347,7 @@ impl ScriptThread{
                 self.ip += 1;
             }
             Opcode::BEGIN_BARE=>{ // bare object
-                let me = heap.new_object();
+                let me = heap.new_object(0);
                 self.mes.push(ScriptMe::object(me));
                 self.ip += 1;
             }
@@ -356,7 +357,7 @@ impl ScriptThread{
                 self.ip += 1;
             }
             Opcode::BEGIN_ARRAY=>{
-                let me = heap.new_object();
+                let me = heap.new_object(0);
                 self.mes.push(ScriptMe::array(me));
                 self.ip += 1;
             }
@@ -423,6 +424,9 @@ impl ScriptThread{
             Opcode::FN_ARGS=>{
                 let call = self.calls.last_mut().unwrap();
                 let me = heap.new_object_with_proto(call.scope.into());
+                // we should set this as fields
+                heap.clear_object_map(me);
+                
                 self.mes.push(ScriptMe::object(me));
                 self.ip += 1;
             }
@@ -448,7 +452,7 @@ impl ScriptThread{
                     // lets check if our object has a foreign baseclass
                     
                     
-                    let scope = heap.new_object();
+                    let scope = heap.new_object(ObjectTag::MAP);
                     
                     //if this.is_object(){
                     //    SYSTEM_OBJECT_METHODS
@@ -461,6 +465,7 @@ impl ScriptThread{
                 else{
                     heap.new_object_with_proto(fnobj)
                 };
+                heap.set_object_map(scope);
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
                 heap.set_object_value(scope, id!(this).into(), this);
@@ -555,7 +560,7 @@ impl ScriptThread{
     }
       
     pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, global:ObjectPtr){
-        let scope = heap.new_deep_object();
+        let scope = heap.new_object(ObjectTag::MAP|ObjectTag::DEEP);
                 
         let call = CallFrame{
             scope,

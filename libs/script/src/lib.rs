@@ -9,6 +9,7 @@ pub mod parser;
 pub mod interpreter;
 pub mod heap;
 pub mod opcode;
+pub mod interop;
 
 // 'locals'
 //
@@ -33,14 +34,67 @@ on_click: ||{
     call => instructions
 }*/
 
+pub struct RustTest{
+    prop: f64    
+}
+
+use crate::interop::*;
+use crate::parser::*;
+use crate::interpreter::*;
+use crate::value::*;
+use crate::id::*;
+
+impl ScriptCall for RustTest{
+    // deserialize self from obj?
+    fn update_fields(&mut self, obj: ObjectPtr){
+    }
+    
+    fn call_method(&mut self,ctx:&ScriptContext, method: Id, args: ObjectPtr)->Value{
+        match method{
+            id!(on_click)=>{
+                return Value::NIL
+            }
+            _=>{// unknown call
+                return Value::NIL
+            }
+        }
+    }
+}
+
 // object string float vec2 vec3 vec4 bool color nil true false
 pub fn test(){
-    use crate::parser::*;
-    use crate::interpreter::*;
     
     let time = std::time::Instant::now();
     
-    let _code = "
+    let code = "
+        let object = {
+            1
+            2
+            3
+        }
+        let object2 = object{
+            4 
+            5
+            6
+        }
+        
+        let MyWindow = Window{
+            Button{}
+            body: View{
+            }
+        }
+        
+        MyWindow{
+            // how do we make this thing go in th ebody
+            Thing{
+            }
+        }
+        
+        
+        // its nicer if you never have to worry
+        let map = map{
+        }
+        
         let fib = |n|{
             return if(n <= 1){
                 n
@@ -52,7 +106,7 @@ pub fn test(){
         ~fib(38);
     ";
     
-    let code = "
+    let _code = "
         let x = [1 2 3]
         //x.len = || ~'inlog'
         x.len();
@@ -62,7 +116,9 @@ pub fn test(){
     let mut parser = ScriptParser::default();
     parser.parse(&code, &mut interp.heap);
     parser.tok.dump_tokens(&interp.heap);
+    
     interp.run(&parser);
+    
     println!("{:?}", time.elapsed().as_secs_f64());
 }
 /*
