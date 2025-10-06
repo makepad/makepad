@@ -14,7 +14,6 @@ pub struct CallFrame{
 
 pub struct ScriptMe{
     ty: u32,
-    argc: u32,
     object: ObjectPtr,
 }
  
@@ -22,9 +21,9 @@ impl ScriptMe{
     const ARRAY: u32 = 1;
     const CALL: u32 = 2;
     const OBJ: u32 = 3;
-    fn object(object:ObjectPtr)->Self{Self{object, ty: Self::OBJ, argc:0}}
-    fn array(object:ObjectPtr)->Self{Self{object, ty: Self::ARRAY, argc:0}}
-    fn call(object:ObjectPtr)->Self{Self{object, ty: Self::CALL, argc:0}}
+    fn object(object:ObjectPtr)->Self{Self{object, ty: Self::OBJ}}
+    fn array(object:ObjectPtr)->Self{Self{object, ty: Self::ARRAY}}
+    fn call(object:ObjectPtr)->Self{Self{object, ty: Self::CALL}}
 }
 
 pub struct ScriptThread{
@@ -91,16 +90,6 @@ macro_rules! fu64_op_impl{
 
 impl ScriptThread{
     
-    const SYSTEM_OBJECT_METHODS: [(Id,fn(t:&mut ScriptThread));1] = [
-        // len
-        (id!(len),|t|{
-            
-        })
-    ];
-    
-    fn look_up_system_method()->Value{
-        Value::NIL
-    }
     
     
     pub fn new()->Self{
@@ -142,6 +131,16 @@ impl ScriptThread{
         else{
            println!("STACK UNDERFLOW");
             (Value::NIL, Value::NIL)
+        }
+    }
+    
+    pub fn peek_stack_value(&mut self)->Value{
+        if let Some(value) = self.stack.last(){
+            return *value
+        }
+        else{
+            println!("STACK UNDERFLOW");
+            Value::NIL
         }
     }
     
@@ -341,6 +340,14 @@ impl ScriptThread{
                 self.mes.push(ScriptMe::object(me));
                 self.ip += 1;
             }
+            Opcode::BEGIN_PROTO_ME=>{
+                let field = self.peek_stack_value();
+                let me = self.mes.last().unwrap();
+                let proto = heap.object_value(me.object, field);
+                let me = heap.new_object_with_proto(proto);
+                self.mes.push(ScriptMe::object(me));
+                self.ip += 1;
+            }
             Opcode::END_PROTO=>{
                 let me = self.mes.pop().unwrap();
                 self.push_stack_value(me.object.into());
@@ -477,7 +484,7 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                if let Some((jump_to, is_system)) = heap.get_parent_object_is_fn(scope){
+                if let Some((jump_to, _is_system)) = heap.get_parent_object_is_fn(scope){
                     let call = CallFrame{
                         scope,
                         mes_base: self.mes.len(),
@@ -507,7 +514,7 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                if let Some((jump_to, is_system)) = heap.get_parent_object_is_fn(scope){
+                if let Some((jump_to, _is_system)) = heap.get_parent_object_is_fn(scope){
                     let call = CallFrame{
                         scope,
                         mes_base: self.mes.len(),
@@ -560,7 +567,7 @@ impl ScriptThread{
     }
       
     pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, global:ObjectPtr){
-        let scope = heap.new_object(ObjectTag::MAP|ObjectTag::DEEP);
+        let scope = heap.new_object(ObjectTag::DEEP);//|ObjectTag::MAP);
                 
         let call = CallFrame{
             scope,

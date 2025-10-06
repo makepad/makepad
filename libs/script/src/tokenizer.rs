@@ -357,8 +357,8 @@ impl ScriptTokenizer{
                         self.state = State::BlockComment(0);
                     }
                     else if // break up operator sequence
-                    (c == ':' && self.temp.len() > 0 && self.temp.chars().last() != Some(':')) ||
-                    (c != ':' && self.temp.len() > 0 && self.temp.chars().last() == Some(':')) ||
+                    //(c == ':' && self.temp.len() > 0 && self.temp.chars().last() != Some(':')) ||
+                    (c == '.' && self.temp.len() > 0 && self.temp.chars().last() != Some('.')) ||
                     (c == '-' && self.temp.len() > 0 && self.temp.chars().last() != Some('-')) ||
                     (c == '+' && self.temp.len() > 0 && self.temp.chars().last() != Some('+'))
                     {
