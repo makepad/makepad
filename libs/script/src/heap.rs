@@ -6,16 +6,31 @@ use crate::object::*;
 pub struct ObjectTag(u64);
 
 impl ObjectTag{
-    pub const MARK:u64 = 0x1;
-    pub const ALLOCED:u64 = 0x2;
-    pub const DEEP:u64 = 0x4;
-    pub const FN: u64 = 0x8;
-    pub const SYSTEM_FN: u64 = 0x10;
-    pub const REFFED: u64 = 0x20;
-    pub const SLOW_METHOD: u64 = 0x40;
-    pub const MAP: u64 = 0x80;
+    pub const MARK:u64 = 0x100;
+    pub const ALLOCED:u64 = 0x200;
+    pub const DEEP:u64 = 0x400;
+    pub const FN: u64 = 0x800;
+    pub const SYSTEM_FN: u64 = 0x1000;
+    pub const REFFED: u64 = 0x2000;
     
-    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::SLOW_METHOD;
+    pub const TYPE_MASK: u64 = 0x0f;
+    pub const TYPE_AUTO: u64 = 0x0;
+    pub const TYPE_VEC: u64 = 0x01;
+    pub const TYPE_MAP: u64 = 0x02;
+    pub const TYPE_TYPED: u64 = 0x03;
+    pub const TYPE_VALUE:u64 = 0x03;
+    pub const TYPE_U8: u64 = 0x04;
+    pub const TYPE_U16: u64 = 0x05;
+    pub const TYPE_U32: u64 = 0x6;
+    pub const TYPE_U64: u64 = 0x07;
+    pub const TYPE_I8: u64 = 0x08;
+    pub const TYPE_I16: u64 = 0x09;
+    pub const TYPE_I32: u64 = 0x0A;
+    pub const TYPE_I64: u64 = 0x0B;
+    pub const TYPE_F32: u64 = 0x0C;
+    pub const TYPE_F64: u64 = 0x0D;
+                
+    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK;
     
     pub fn set_flags(&mut self, flags:u64){
         self.0 |= flags
@@ -45,18 +60,14 @@ impl ObjectTag{
         self.0 |= fwd
     }
     
-    pub fn set_map(&mut self){
-        self.0 |= Self::MAP
+    pub fn set_type(&mut self, ty:u64){
+        self.0 &= !Self::TYPE_MASK;
+        self.0 |= ty & Self::TYPE_MASK;
     }
     
-    pub fn clear_map(&mut self){
-        self.0 &= !Self::MAP
+    pub fn get_type(&self)->u64{
+        return self.0 & Self::TYPE_MASK
     }
-    
-    pub fn is_map(&self)->bool{
-        self.0 & Self::MAP != 0
-    }
-    
     
     pub fn is_fn(&self)->bool{
         self.0 & Self::FN != 0
@@ -64,14 +75,6 @@ impl ObjectTag{
         
     pub fn set_deep(&mut self){
         self.0 |= Self::DEEP
-    }
-    
-    pub fn set_slow_method(&mut self){
-        self.0 |= Self::SLOW_METHOD
-    }
-    
-    pub fn is_slow_method(&self)->bool{
-        return self.0 & Self::SLOW_METHOD != 0
     }
     
     pub fn set_reffed(&mut self){
@@ -222,38 +225,34 @@ impl ScriptHeap{
             return;
         }
         obj.tag.set_mark();
-        if obj.tag.is_map(){
-            for (key, value) in &obj.map{
-                if let Some(ptr) = key.as_object(){
-                    self.mark_vec.push(ptr.index as usize);
-                }
-                else if let Some(ptr) = key.as_string(){
-                    self.strings[ptr.index as usize].tag.set_mark();
-                }
-                if let Some(ptr) = value.as_object(){
-                    self.mark_vec.push(ptr.index as usize);
-                }
-                else if let Some(ptr) = value.as_string(){
-                    self.strings[ptr.index as usize].tag.set_mark();
-                }
+        for (key, value) in &obj.map{
+            if let Some(ptr) = key.as_object(){
+                self.mark_vec.push(ptr.index as usize);
+            }
+            else if let Some(ptr) = key.as_string(){
+                self.strings[ptr.index as usize].tag.set_mark();
+            }
+            if let Some(ptr) = value.as_object(){
+                self.mark_vec.push(ptr.index as usize);
+            }
+            else if let Some(ptr) = value.as_string(){
+                self.strings[ptr.index as usize].tag.set_mark();
             }
         }
-        else{
-            let len = obj.vec.len();
-            for i in 0..len{
-                let field = &self.objects[index].vec[i];
-                if let Some(ptr) = field.key.as_object(){
-                    self.mark_vec.push(ptr.index as usize);
-                }
-                else if let Some(ptr) = field.key.as_string(){
-                    self.strings[ptr.index as usize].tag.set_mark();
-                }
-                if let Some(ptr) = field.value.as_object(){
-                    self.mark_vec.push(ptr.index as usize);
-                }
-                else if let Some(ptr) = field.value.as_string(){
-                    self.strings[ptr.index as usize].tag.set_mark();
-                }
+        let len = obj.vec.len();
+        for i in 0..len{
+            let field = &self.objects[index].vec[i];
+            if let Some(ptr) = field.key.as_object(){
+                self.mark_vec.push(ptr.index as usize);
+            }
+            else if let Some(ptr) = field.key.as_string(){
+                self.strings[ptr.index as usize].tag.set_mark();
+            }
+            if let Some(ptr) = field.value.as_object(){
+                self.mark_vec.push(ptr.index as usize);
+            }
+            else if let Some(ptr) = field.value.as_string(){
+                self.strings[ptr.index as usize].tag.set_mark();
             }
         }
     }
@@ -459,24 +458,34 @@ impl ScriptHeap{
     }
             
     pub fn new_object_with_proto(&mut self, proto:Value)->ObjectPtr{
-        let proto_fwd = if let Some(ptr) = proto.as_object(){
+        let (proto_fwd, proto_index) = if let Some(ptr) = proto.as_object(){
             let object = &mut self.objects[ptr.index as usize];
             object.tag.set_reffed();
-            object.tag.proto_fwd()
+            (object.tag.proto_fwd(), ptr.index as usize)
         }
         else{
-            0
+            return self.new_object(0)
         };
+        
         if let Some(index) = self.objects_free.pop(){
-            let object = &mut self.objects[index];
+            let (object, proto_object) = if index > proto_index{
+                let (o1, o2) = self.objects.split_at_mut(index);
+                (&mut o2[0], &mut o1[proto_index])                    
+            }else{
+                let (o1, o2) = self.objects.split_at_mut(proto_index);
+                (&mut o1[index], &mut o2[0])                    
+            };
             object.tag.set_proto_fwd(proto_fwd);
             object.proto = proto;
+            object.vec.extend_from_slice(&proto_object.vec);
             ObjectPtr{index: index as _}
         }
         else{
             let index = self.objects.len();
             let mut object = Object::with_proto(proto);
             object.tag.set_proto_fwd(proto_fwd);
+            let proto_object = &self.objects[proto_index];
+            object.vec.extend_from_slice(&proto_object.vec);
             self.objects.push(object);
             ObjectPtr{index: index as _}
         }
@@ -486,14 +495,10 @@ impl ScriptHeap{
          self.objects[ptr.index as usize].tag.set_deep()
     }
     
-    pub fn set_object_map(&mut self, ptr:ObjectPtr){
-        self.objects[ptr.index as usize].tag.set_map()
+    pub fn set_object_type(&mut self, ptr:ObjectPtr, ty: u64){
+        self.objects[ptr.index as usize].tag.set_type(ty)
     }
     
-    pub fn clear_object_map(&mut self, ptr:ObjectPtr){
-        self.objects[ptr.index as usize].tag.clear_map()
-    }
-        
     pub fn set_object_system_fn(&mut self, ptr:ObjectPtr, val:u32){
         self.objects[ptr.index as usize].tag.set_system_fn(val)
     }
@@ -502,31 +507,57 @@ impl ScriptHeap{
         self.objects[ptr.index as usize].tag.clear_deep()
     }
     
-    pub fn object_method(&self, ptr:ObjectPtr, key:Value)->Value{
+    pub fn object_value_index(&self, ptr: ObjectPtr, index: Value)->Value{
         let object = &self.objects[ptr.index as usize];
-        if object.tag.is_slow_method(){
-            return self.object_value(ptr, key)
-        }        
-        else{
-            Value::NIL
-        }
-    }
-    
-    pub fn object_value(&self, set_ptr:ObjectPtr, key:Value)->Value{
-        let mut ptr = set_ptr;
-        loop{
-            let object = &self.objects[ptr.index as usize];
-            if object.tag.is_map(){
-                if let Some(value) = object.map.get(&key){
-                    return *value
-                }
+        
+        let ty = object.tag.get_type();
+        // most used path
+        if ty == ObjectTag::TYPE_AUTO || ty == ObjectTag::TYPE_VEC{
+            let index = index.as_f64().unwrap_or(0.0) as usize;
+            if let Some(field) = object.vec.get(index){
+                return field.value
             }
             else{
+                return Value::NIL
+            }
+        }
+        if ty >= ObjectTag::TYPE_TYPED{ // typed array
+            //todo IMPLEMENT IT
+        }
+        if ty == ObjectTag::TYPE_MAP{
+            if let Some(value) = object.map.get(&index){
+                return *value
+            }
+            else{
+                return Value::NIL
+            }
+        }
+        Value::NIL
+    }
+    
+    pub fn object_value_prefixed(&self, ptr: ObjectPtr, key: Value)->Value{
+        let object = &self.objects[ptr.index as usize];
+        for field in object.vec.iter().rev(){
+            if field.key == key{
+                return field.value
+            }
+        }
+        return Value::NIL
+    }
+    
+    pub fn object_value_deep(&self, ptr:ObjectPtr, key: Value)->Value{
+        let mut ptr = ptr;
+        loop{
+            let object = &self.objects[ptr.index as usize];
+            if object.tag.get_type() == ObjectTag::TYPE_VEC{
                 for field in object.vec.iter().rev(){
                     if field.key == key{
                         return field.value
                     }
                 }
+            }
+            if let Some(value) = object.map.get(&key){
+                return *value
             }
             if let Some(next_ptr) = object.proto.as_object(){
                 ptr = next_ptr
@@ -538,26 +569,102 @@ impl ScriptHeap{
         Value::NIL
     }
     
-    pub fn push_object_value(&mut self, set_ptr:ObjectPtr, key: Value, value:Value){
-        let object = &mut self.objects[set_ptr.index as usize];
-        if object.tag.is_map(){
-            object.map.insert(key, value);
+    pub fn object_value(&self, ptr:ObjectPtr, key:Value)->Value{
+        // hard array index
+        if key.is_f64(){
+            return self.object_value_index(ptr, key)
         }
-        else{
-            object.vec.push(Field{
-                key,
+        if let Some(id) = key.as_id(){
+            if id.is_prefixed(){
+                return self.object_value_prefixed(ptr, key)
+            }
+             // scan prototype chain for id
+             return self.object_value_deep(ptr, key)
+        }
+        if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
+            return self.object_value_deep(ptr, key)
+        }
+        // TODO implement string lookup
+        Value::NIL
+    }
+    
+    pub fn set_object_value_index(&mut self, ptr: ObjectPtr, index:Value, value: Value){
+        // alright so. now what.
+        let object = &mut self.objects[ptr.index as usize];
+        let ty = object.tag.get_type();
+        if ty == ObjectTag::TYPE_AUTO || ty == ObjectTag::TYPE_VEC{
+            let index = index.as_f64().unwrap_or(0.0) as usize;
+            if object.vec.len() > index{
+                object.vec.resize(index + 1, Field::default());
+            }
+            object.vec[index] = Field{
+                key: Value::NIL,
                 value
-            });
+            };
+        }
+        if ty == ObjectTag::TYPE_MAP{
+            object.map.insert(index, value);
+            return
+        }
+        if ty >= ObjectTag::TYPE_TYPED{ // typed array
+            //todo IMPLEMENT IT
+            return
         }
     }
     
-    pub fn set_object_value_top(&mut self, set_ptr:ObjectPtr, key:Value, value:Value){
-        let object = &mut self.objects[set_ptr.index as usize];
-        
-        if object.tag.is_map(){
-            object.map.insert(key, value);
+    pub fn set_object_value_prefixed(&mut self, ptr: ObjectPtr, key: Value, value: Value){
+        let object = &mut self.objects[ptr.index as usize];
+        for field in object.vec.iter_mut().rev(){
+            if field.key == key{
+                field.value = value;
+                return
+            }
+        }
+        // just append it
+        object.vec.push(Field{
+            key,
+            value
+        })
+    }
+    
+    pub fn set_object_value_deep(&mut self, ptr:ObjectPtr, key: Value, set_value: Value){
+        let mut ptr = ptr;
+        loop{
+            let object = &mut self.objects[ptr.index as usize];
+            if object.tag.get_type() == ObjectTag::TYPE_VEC{
+                for field in object.vec.iter_mut().rev(){
+                    if field.key == key{
+                        field.value = set_value;
+                    }
+                }
+            }
+            if let Some(value) = object.map.get_mut(&key){
+                *value = set_value;
+                return
+            }
+            if let Some(next_ptr) = object.proto.as_object(){
+                ptr = next_ptr
+            }
+            else{
+                break;
+            }
+        }
+        // alright nothing found
+        let object = &mut self.objects[ptr.index as usize];
+        if object.tag.get_type() == ObjectTag::TYPE_VEC{
+            object.vec.push(Field{
+                key,
+                value: set_value
+            })
         }
         else{
+            object.map.insert(key, set_value);
+        }
+    }
+    
+    pub fn set_object_value_shallow(&mut self, ptr:ObjectPtr, key:Value, value:Value){
+        let object = &mut self.objects[ptr.index as usize];
+        if object.tag.get_type() == ObjectTag::TYPE_VEC{
             for field in object.vec.iter_mut().rev(){
                 if field.key == key{
                     field.value = value;
@@ -568,7 +675,46 @@ impl ScriptHeap{
                 key,
                 value
             });
+            return
         }
+        object.map.insert(key, value);
+    }
+    
+    pub fn set_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
+        if key.is_f64(){ // use vector
+            return self.set_object_value_index(ptr, key, value);
+        }
+        if let Some(id) = key.as_id(){
+            if id.is_prefixed(){
+                return self.set_object_value_prefixed(ptr, key, value)
+            }
+            // scan prototype chain for id
+            let object = &self.objects[ptr.index as usize];
+            if !object.tag.is_deep(){
+                return self.set_object_value_shallow(ptr, key, value);
+            }
+            else{
+                return self.set_object_value_deep(ptr, key, value)
+            }
+        }
+        if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
+            let object = &mut self.objects[ptr.index as usize];
+            if !object.tag.is_deep(){
+                return self.set_object_value_shallow(ptr, key, value);
+            }
+            else{
+                return self.set_object_value_deep(ptr, key, value)
+            }
+        }
+        println!("Cant set object value with key {:?}", key);
+    }
+    
+    pub fn push_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
+        let object = &mut self.objects[ptr.index as usize];
+        object.vec.push(Field{
+            key,
+            value
+        })
     }
     
     pub fn set_object_is_fn(&mut self, ptr: ObjectPtr, ip: u32){
@@ -622,96 +768,6 @@ impl ScriptHeap{
         }
     }
     
-    pub fn set_object_value(&mut self, set_ptr:ObjectPtr, key:Value, value:Value){
-        let slow_method = if let Some(ptr) = value.as_object(){
-            let object = &self.objects[ptr.index as usize];
-            if object.tag.is_fn(){
-                true
-            }
-            else{false}
-        }
-        else{false};
-                
-        let object = &mut self.objects[set_ptr.index as usize];
-        
-        if key.is_nil(){ // array like push
-            if object.tag.is_map(){
-                object.map.insert(key, value);
-            }
-            else{
-                object.vec.push(Field{
-                    key,
-                    value
-                });
-            }
-            if slow_method{
-                object.tag.set_slow_method();
-            }
-            return
-        }
-        
-        // deep objects do value mutations on their prototypes
-        if object.tag.is_deep(){
-            let mut ptr = set_ptr;
-            // scan up the chain to set the proto value
-            loop{
-                let object = &mut self.objects[ptr.index as usize];
-                if object.tag.is_map(){
-                    if object.map.get(&key).is_some(){
-                        object.map.insert(key, value);
-                        if slow_method{
-                            object.tag.set_slow_method();
-                        }
-                        return
-                    }
-                }
-                else{
-                    for field in object.vec.iter_mut().rev(){
-                        if field.key == key{
-                            field.value = value;
-                            if slow_method{
-                                object.tag.set_slow_method();
-                            }
-                            return
-                        }
-                    }
-                }
-                if let Some(next_ptr) = object.proto.as_object(){
-                    ptr = next_ptr
-                }
-                else{
-                    break;
-                }
-            }
-            // append to current object
-            let object = &mut self.objects[set_ptr.index as usize];
-            object.vec.push(Field{
-                key,
-                value
-            });
-            if slow_method{
-                object.tag.set_slow_method();
-            }
-            return
-        }
-        
-        if object.tag.is_map(){
-            object.map.insert(key, value);
-        }
-        else{
-            for field in object.vec.iter_mut().rev(){
-                if field.key == key{
-                    field.value = value;
-                    return
-                }
-            }
-            object.vec.push(Field{
-                key,
-                value
-            });
-        }
-    }
-    
     pub fn print_key_value(&self, key:Value, value:Value, deep:bool, str:&mut String){
         if let Some(obj) = value.as_object(){
             if !key.is_nil(){
@@ -745,19 +801,15 @@ impl ScriptHeap{
         let mut first = true;
         loop{
             let object = &self.objects[ptr.index as usize];
-            if object.tag.is_map(){
-                for (key, value) in &object.map{
-                    if !first{print!(",")}
-                    self.print_key_value(*key, *value, deep, &mut str);
-                    first = false;
-                }
+            for (key, value) in &object.map{
+                if !first{print!(",")}
+                self.print_key_value(*key, *value, deep, &mut str);
+                first = false;
             }
-            else{
-                for field in object.vec.iter(){
-                    if !first{print!(",")}
-                    self.print_key_value(field.key, field.value, deep, &mut str);
-                    first = false;
-                }
+            for field in object.vec.iter(){
+                if !first{print!(",")}
+                self.print_key_value(field.key, field.value, deep, &mut str);
+                first = false;
             }
             if let Some(next_ptr) = object.proto.as_object(){
                 if !deep{

@@ -299,6 +299,10 @@ impl Value{
         self.0 >= Self::TYPE_ID
     }
     
+    pub fn is_prefixed_id(&self)->bool{
+        self.0 >= Self::TYPE_ID && self.0 & Id::PREFIXED != 0
+    }
+        
     pub fn is_opcode(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_OPCODE
     }
