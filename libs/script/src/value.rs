@@ -2,7 +2,7 @@ use crate::id::Id;
 use crate::opcode::*;
 use std::fmt;
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
 pub struct Value(u64);
 
 impl Default for Value{
@@ -67,7 +67,7 @@ impl Value{
     pub const TYPE_COLOR: u64 = 0xFFFF_0400_0000_0000;
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
     pub const TYPE_OBJECT: u64 = 0xFFFF_0600_0000_0000;
-    pub const TYPE_INSTRUCTION: u64 = 0xFFFF_0700_0000_0000;
+    pub const TYPE_FACTORY: u64 = 0xFFFF_0700_0000_0000;
     
     pub const TYPE_INLINE_STRING_0: u64 = 0xFFFF_0800_0000_0000;
     pub const TYPE_INLINE_STRING_1: u64 = 0xFFFF_0900_0000_0000;
@@ -110,6 +110,10 @@ impl Value{
     
     pub const fn from_color(val: u32)->Self{
         Self(val as u64|Self::TYPE_COLOR)
+    }
+    
+    pub const fn from_factory(val: u32)->Self{
+        Self(val as u64|Self::TYPE_FACTORY)
     }
     
     pub const fn from_id(val: Id)->Self{
@@ -268,6 +272,13 @@ impl Value{
         None
     }
     
+    pub fn as_factory(&self)->Option<u32>{
+        if self.is_factory(){
+            return Some((self.0&0xffff_ffff) as u32)
+        }
+        None
+    }
+    
     pub fn is_f64(&self)->bool{
         self.0 <= Self::TYPE_NAN
     }
@@ -299,6 +310,10 @@ impl Value{
     pub fn is_object(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
     }
+    
+    pub fn is_factory(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_FACTORY
+    }
 }
 
 impl fmt::Debug for Value {
@@ -329,6 +344,9 @@ impl fmt::Display for Value {
         }
         if let Some(ptr) = self.as_object(){
             return write!(f, "[Object:{}]",ptr.index)
+        }
+        if let Some(index) = self.as_factory(){
+            return write!(f, "[Factory:{}]",index)
         }
         if self.is_nil(){
             return write!(f, "nil")
