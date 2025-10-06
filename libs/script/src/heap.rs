@@ -10,7 +10,11 @@ impl ObjectTag{
     const ALLOCED:u64 = 0x2;
     const DEEP:u64 = 0x4;
     const FN: u64 = 0x8;
-    const REFFED: u64 = 0x10;
+    const SYSTEM_FN: u64 = 0x10;
+    const REFFED: u64 = 0x20;
+    const SLOW_METHOD: u64 = 0x40;
+    
+    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::SLOW_METHOD;
     
     pub fn set_fn(&mut self, val: u32){
         self.0 |= ((val as u64)<<32) | Self::FN
@@ -20,12 +24,36 @@ impl ObjectTag{
         (self.0 >> 32) as u32
     }
     
+    pub fn set_system_fn(&mut self, val: u32){
+        self.0 |= Self::SYSTEM_FN | ((val as u64)<<32)
+    }
+        
+    pub fn is_system_fn(&self)->bool{
+        self.0 & Self::SYSTEM_FN != 0
+    }
+    
+    pub fn proto_fwd(&self)->u64{
+        self.0 & Self::PROTO_FWD
+    }
+    
+    pub fn set_proto_fwd(&mut self, fwd:u64){
+        self.0 |= fwd
+    }
+    
     pub fn is_fn(&self)->bool{
         self.0 & Self::FN != 0
     }
         
     pub fn set_deep(&mut self){
         self.0 |= Self::DEEP
+    }
+    
+    pub fn set_slow_method(&mut self){
+        self.0 |= Self::SLOW_METHOD
+    }
+    
+    pub fn is_slow_method(&self)->bool{
+        return self.0 & Self::SLOW_METHOD != 0
     }
     
     pub fn set_reffed(&mut self){
@@ -412,26 +440,24 @@ impl ScriptHeap{
     }
             
     pub fn new_object_with_proto(&mut self, proto:Value)->ObjectPtr{
-        let deep = if let Some(ptr) = proto.as_object(){
+        let proto_fwd = if let Some(ptr) = proto.as_object(){
             let object = &mut self.objects[ptr.index as usize];
             object.tag.set_reffed();
-            object.tag.is_deep()
+            object.tag.proto_fwd()
         }
         else{
-            false
+            0
         };
         if let Some(index) = self.objects_free.pop(){
             let object = &mut self.objects[index];
-            object.tag.set_alloced();
-            if deep{object.tag.set_deep()}
+            object.tag.set_proto_fwd(proto_fwd);
             object.proto = proto;
             ObjectPtr{index: index as _}
         }
         else{
             let index = self.objects.len();
             let mut object = Object::with_proto(proto);
-            object.tag.set_alloced();
-            if deep{object.tag.set_deep()}
+            object.tag.set_proto_fwd(proto_fwd);
             self.objects.push(object);
             ObjectPtr{index: index as _}
         }
@@ -440,9 +466,23 @@ impl ScriptHeap{
     pub fn set_object_deep(&mut self, ptr:ObjectPtr){
          self.objects[ptr.index as usize].tag.set_deep()
     }
+    
+    pub fn set_object_system_fn(&mut self, ptr:ObjectPtr, val:u32){
+        self.objects[ptr.index as usize].tag.set_system_fn(val)
+    }
         
     pub fn clear_object_deep(&mut self, ptr:ObjectPtr){
         self.objects[ptr.index as usize].tag.clear_deep()
+    }
+    
+    pub fn object_method(&self, ptr:ObjectPtr, key:Value)->Value{
+        let object = &self.objects[ptr.index as usize];
+        if object.tag.is_slow_method(){
+            return self.object_value(ptr, key)
+        }        
+        else{
+            Value::NIL
+        }
     }
     
     pub fn object_value(&self, set_ptr:ObjectPtr, key:Value)->Value{
@@ -490,6 +530,11 @@ impl ScriptHeap{
         let object = &mut self.objects[ptr.index as usize];
         object.tag.set_fn(ip);
     }
+    
+    pub fn set_object_is_system_fn(&mut self, ptr: ObjectPtr, ip: u32){
+        let object = &mut self.objects[ptr.index as usize];
+        object.tag.set_system_fn(ip);
+    }
         
     pub fn get_object_is_fn(&self, ptr: ObjectPtr,)->Option<u32>{
         let object = &self.objects[ptr.index as usize];
@@ -501,12 +546,12 @@ impl ScriptHeap{
         }
     }
     
-    pub fn get_parent_object_is_fn(&self, ptr: ObjectPtr,)->Option<u32>{
+    pub fn get_parent_object_is_fn(&self, ptr: ObjectPtr,)->Option<(u32, bool)>{
         let object = &self.objects[ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             let object = &self.objects[ptr.index as usize];
             if object.tag.is_fn(){
-                Some(object.tag.get_fn())
+                Some((object.tag.get_fn(), object.tag.is_system_fn()))
             }
             else{
                 None
@@ -531,15 +576,27 @@ impl ScriptHeap{
             }
         }
     }
-               
+    
     pub fn set_object_value(&mut self, set_ptr:ObjectPtr, key:Value, value:Value){
-        let object = &mut self.objects[set_ptr.index as usize];
+        let slow_method = if let Some(ptr) = value.as_object(){
+            let object = &self.objects[ptr.index as usize];
+            if object.tag.is_fn(){
+                true
+            }
+            else{false}
+        }
+        else{false};
                 
+        let object = &mut self.objects[set_ptr.index as usize];
+        
         if key.is_nil(){ // array like push
             object.fields.push(Field{
                 key,
                 value
             });
+            if slow_method{
+                object.tag.set_slow_method();
+            }
             return
         }
         
@@ -552,6 +609,9 @@ impl ScriptHeap{
                 for field in object.fields.iter_mut().rev(){
                     if field.key == key{
                         field.value = value;
+                        if slow_method{
+                            object.tag.set_slow_method();
+                        }
                         return
                     }
                 }
@@ -568,6 +628,9 @@ impl ScriptHeap{
                 key,
                 value
             });
+            if slow_method{
+                object.tag.set_slow_method();
+            }
             return
         }
         
