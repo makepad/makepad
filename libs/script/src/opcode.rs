@@ -129,9 +129,9 @@ impl Opcode{
     pub const END_ARRAY:Self = Self(64);
     pub const CALL_ARGS:Self = Self(65);
     pub const CALL_EXEC:Self = Self(66);
-    pub const BEGIN_FRAG:Self = Self(67);
-    pub const END_FRAG:Self = Self(68);
-            
+    pub const METHOD_CALL_ARGS:Self = Self(67);
+    pub const METHOD_CALL_EXEC:Self = Self(68);
+                
     pub const FN_ARGS:Self = Self(69);
     pub const FN_ARG_DYN:Self = Self(70);
     pub const FN_ARG_TYPED:Self = Self(71);
@@ -252,10 +252,14 @@ impl fmt::Display for Opcode {
             Self::END_PROTO => return write!(f, "}}"),
             Self::BEGIN_BARE => return write!(f, "<bare>{{"),
             Self::END_BARE => return write!(f, "}}"),
+            
+            Self::METHOD_CALL_ARGS => return write!(f, "<methodcall>("),
+            Self::METHOD_CALL_EXEC => return write!(f, ")"),
             Self::CALL_ARGS => return write!(f, "<call>("),
             Self::CALL_EXEC => return write!(f, ")"),
-            Self::BEGIN_FRAG => return write!(f, "<frag>("),
-            Self::END_FRAG => return write!(f, ")"),
+            
+            Self::BEGIN_ARRAY => return write!(f, "["),
+            Self::END_ARRAY => return write!(f, "]"),
                                         
             Self::FN_ARGS=> return write!(f, "<fn>|"),
             Self::FN_ARG_DYN=> return write!(f, "fnarg"),
