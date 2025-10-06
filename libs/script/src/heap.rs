@@ -222,20 +222,38 @@ impl ScriptHeap{
             return;
         }
         obj.tag.set_mark();
-        let len = obj.fields.len();
-        for i in 0..len{
-            let field = &self.objects[index].fields[i];
-            if let Some(ptr) = field.key.as_object(){
-                self.mark_vec.push(ptr.index as usize);
+        if obj.tag.is_map(){
+            for (key, value) in &obj.map{
+                if let Some(ptr) = key.as_object(){
+                    self.mark_vec.push(ptr.index as usize);
+                }
+                else if let Some(ptr) = key.as_string(){
+                    self.strings[ptr.index as usize].tag.set_mark();
+                }
+                if let Some(ptr) = value.as_object(){
+                    self.mark_vec.push(ptr.index as usize);
+                }
+                else if let Some(ptr) = value.as_string(){
+                    self.strings[ptr.index as usize].tag.set_mark();
+                }
             }
-            else if let Some(ptr) = field.key.as_string(){
-                self.strings[ptr.index as usize].tag.set_mark();
-            }
-            if let Some(ptr) = field.value.as_object(){
-                self.mark_vec.push(ptr.index as usize);
-            }
-            else if let Some(ptr) = field.value.as_string(){
-                self.strings[ptr.index as usize].tag.set_mark();
+        }
+        else{
+            let len = obj.fields.len();
+            for i in 0..len{
+                let field = &self.objects[index].fields[i];
+                if let Some(ptr) = field.key.as_object(){
+                    self.mark_vec.push(ptr.index as usize);
+                }
+                else if let Some(ptr) = field.key.as_string(){
+                    self.strings[ptr.index as usize].tag.set_mark();
+                }
+                if let Some(ptr) = field.value.as_object(){
+                    self.mark_vec.push(ptr.index as usize);
+                }
+                else if let Some(ptr) = field.value.as_string(){
+                    self.strings[ptr.index as usize].tag.set_mark();
+                }
             }
         }
     }
