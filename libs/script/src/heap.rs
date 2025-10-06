@@ -239,9 +239,9 @@ impl ScriptHeap{
             }
         }
         else{
-            let len = obj.fields.len();
+            let len = obj.vec.len();
             for i in 0..len{
-                let field = &self.objects[index].fields[i];
+                let field = &self.objects[index].vec[i];
                 if let Some(ptr) = field.key.as_object(){
                     self.mark_vec.push(ptr.index as usize);
                 }
@@ -522,7 +522,7 @@ impl ScriptHeap{
                 }
             }
             else{
-                for field in object.fields.iter().rev(){
+                for field in object.vec.iter().rev(){
                     if field.key == key{
                         return field.value
                     }
@@ -544,7 +544,7 @@ impl ScriptHeap{
             object.map.insert(key, value);
         }
         else{
-            object.fields.push(Field{
+            object.vec.push(Field{
                 key,
                 value
             });
@@ -558,13 +558,13 @@ impl ScriptHeap{
             object.map.insert(key, value);
         }
         else{
-            for field in object.fields.iter_mut().rev(){
+            for field in object.vec.iter_mut().rev(){
                 if field.key == key{
                     field.value = value;
                     return
                 }
             }
-            object.fields.push(Field{
+            object.vec.push(Field{
                 key,
                 value
             });
@@ -609,12 +609,12 @@ impl ScriptHeap{
     
     pub fn push_fn_arg(&mut self, top_ptr:ObjectPtr, value:Value){
         let object = &self.objects[top_ptr.index as usize];
-        let index = object.fields.len();
+        let index = object.vec.len();
         if let Some(ptr) = object.proto.as_object(){
             let object = &self.objects[ptr.index as usize];
-            if let Some(field) = object.fields.get(index){
+            if let Some(field) = object.vec.get(index){
                 let key = field.key;
-                self.objects[top_ptr.index as usize].fields.push(Field{
+                self.objects[top_ptr.index as usize].vec.push(Field{
                     key,
                     value
                 })
@@ -639,7 +639,7 @@ impl ScriptHeap{
                 object.map.insert(key, value);
             }
             else{
-                object.fields.push(Field{
+                object.vec.push(Field{
                     key,
                     value
                 });
@@ -666,7 +666,7 @@ impl ScriptHeap{
                     }
                 }
                 else{
-                    for field in object.fields.iter_mut().rev(){
+                    for field in object.vec.iter_mut().rev(){
                         if field.key == key{
                             field.value = value;
                             if slow_method{
@@ -685,7 +685,7 @@ impl ScriptHeap{
             }
             // append to current object
             let object = &mut self.objects[set_ptr.index as usize];
-            object.fields.push(Field{
+            object.vec.push(Field{
                 key,
                 value
             });
@@ -699,16 +699,41 @@ impl ScriptHeap{
             object.map.insert(key, value);
         }
         else{
-            for field in object.fields.iter_mut().rev(){
+            for field in object.vec.iter_mut().rev(){
                 if field.key == key{
                     field.value = value;
                     return
                 }
             }
-            object.fields.push(Field{
+            object.vec.push(Field{
                 key,
                 value
             });
+        }
+    }
+    
+    pub fn print_key_value(&self, key:Value, value:Value, deep:bool, str:&mut String){
+        if let Some(obj) = value.as_object(){
+            if !key.is_nil(){
+                str.clear();self.cast_to_string(key, str);
+                print!("{}:", str);
+            }
+            let object = &self.objects[obj.index as usize];
+            if object.tag.is_fn(){
+                print!("Fn");
+                self.print_object(obj,false);
+            }
+            else{
+                self.print_object(obj, deep);
+            }
+        }
+        else{
+            if !key.is_nil(){
+                str.clear();self.cast_to_string(key, str);
+                print!("{}:",str);
+            }
+            str.clear();self.cast_to_string(value, str);
+            print!("{}",str);
         }
     }
     
@@ -720,31 +745,19 @@ impl ScriptHeap{
         let mut first = true;
         loop{
             let object = &self.objects[ptr.index as usize];
-            for field in object.fields.iter(){
-                if !first{print!(",")}
-                if let Some(obj) = field.value.as_object(){
-                    if !field.key.is_nil(){
-                        str.clear();self.cast_to_string(field.key, &mut str);
-                        print!("{}:", str);
-                    }
-                    let object = &self.objects[obj.index as usize];
-                    if object.tag.is_fn(){
-                        print!("Fn");
-                        self.print_object(obj,false);
-                    }
-                    else{
-                        self.print_object(obj, deep);
-                    }
+            if object.tag.is_map(){
+                for (key, value) in &object.map{
+                    if !first{print!(",")}
+                    self.print_key_value(*key, *value, deep, &mut str);
+                    first = false;
                 }
-                else{
-                    if !field.key.is_nil(){
-                        str.clear();self.cast_to_string(field.key, &mut str);
-                        print!("{}:",str);
-                    }
-                    str.clear();self.cast_to_string(field.value, &mut str);
-                    print!("{}",str);
+            }
+            else{
+                for field in object.vec.iter(){
+                    if !first{print!(",")}
+                    self.print_key_value(field.key, field.value, deep, &mut str);
+                    first = false;
                 }
-                first = false;
             }
             if let Some(next_ptr) = object.proto.as_object(){
                 if !deep{

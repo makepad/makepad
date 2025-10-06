@@ -35,7 +35,7 @@ on_click: ||{
 }*/
 
 pub struct RustTest{
-    prop: f64    
+    _prop: f64    
 }
 
 use crate::interop::*;
@@ -46,10 +46,10 @@ use crate::id::*;
 
 impl ScriptCall for RustTest{
     // deserialize self from obj?
-    fn update_fields(&mut self, obj: ObjectPtr){
+    fn update_fields(&mut self, _obj: ObjectPtr){
     }
     
-    fn call_method(&mut self,ctx:&ScriptContext, method: Id, args: ObjectPtr)->Value{
+    fn call_method(&mut self,_ctx:&ScriptContext, method: Id, _args: ObjectPtr)->Value{
         match method{
             id!(on_click)=>{
                 return Value::NIL
@@ -67,34 +67,21 @@ pub fn test(){
     let time = std::time::Instant::now();
     
     let code = "
-        let object = {
-            1
-            2
-            3
-        }
-        let object2 = object{
-            4 
-            5
-            6
-        }
-        
+    
+        let View = {@view}
+        let Window = {@window}
+        let Button = {@button}
         let MyWindow = Window{
-            Button{}
             body: View{
             }
         }
         
-        MyWindow{
-            // how do we make this thing go in th ebody
-            Thing{
+        let x = MyWindow{
+            body:+{
+                Button{}
             }
-        }
-        
-        
-        // its nicer if you never have to worry
-        let map = map{
-        }
-        
+        };
+        /*
         let fib = |n|{
             return if(n <= 1){
                 n
@@ -102,7 +89,7 @@ pub fn test(){
             else {
                 fib(n - 1) + fib(n - 2)
             }
-        }
+        }*/
         ~fib(38);
     ";
     
