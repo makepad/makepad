@@ -46,6 +46,7 @@ impl ScriptToken{
     pub fn is_color(&self)->bool{match self{ScriptToken::Color(_)=>true,_=>false}}
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct ScriptTokenPos{
     pub token: ScriptToken,
     pos: usize
