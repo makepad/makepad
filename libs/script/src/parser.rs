@@ -552,6 +552,7 @@ impl ScriptParser{
                 }
                 
                 if tok.is_open_curly() {
+                    
                     for state in self.state.iter().rev(){
                         if let State::EmitOp(_) = state{}
                         else if let State::EmitUnary(_) = state{}
@@ -562,6 +563,7 @@ impl ScriptParser{
                             break;
                         }
                     }
+                    
                     self.code.push(Opcode::BEGIN_PROTO.into());
                     self.state.push(State::EndProto);
                     self.state.push(State::BeginStmt);
@@ -678,6 +680,19 @@ impl ScriptParser{
             }
             State::BeginExpr(required)=>{
                 if tok.is_open_curly(){
+                    if let Some(State::EmitUnary(id!(+))) = self.state.last(){
+                        self.state.pop();
+                        if let Some(State::EmitOp(id!(:))) = self.state.last(){
+                            // ok so we need to emit BEGIN_PROTO_ME
+                            self.code.push(Opcode::BEGIN_PROTO_ME.into());
+                            self.state.push(State::EndBare);
+                            self.state.push(State::BeginStmt);
+                            return 1
+                        }
+                        else{
+                            println!("Found +{{ protoinherit. Left hand side must be field:")
+                        }
+                    }
                     self.code.push(Opcode::BEGIN_BARE.into());
                     self.state.push(State::EndBare);
                     self.state.push(State::BeginStmt);
