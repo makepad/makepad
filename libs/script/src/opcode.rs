@@ -122,39 +122,40 @@ impl Opcode{
     pub const ASSIGN_LAST:Self = Self(58);
             
     pub const BEGIN_PROTO:Self = Self(59);
-    pub const END_PROTO:Self = Self(60);
-    pub const BEGIN_BARE:Self = Self(61);
-    pub const END_BARE:Self = Self(62);
-    pub const BEGIN_ARRAY:Self = Self(63);
-    pub const END_ARRAY:Self = Self(64);
-    pub const CALL_ARGS:Self = Self(65);
-    pub const CALL_EXEC:Self = Self(66);
-    pub const METHOD_CALL_ARGS:Self = Self(67);
-    pub const METHOD_CALL_EXEC:Self = Self(68);
+    pub const BEGIN_PROTO_ME:Self = Self(60);
+    pub const END_PROTO:Self = Self(61);
+    pub const BEGIN_BARE:Self = Self(62);
+    pub const END_BARE:Self = Self(63);
+    pub const BEGIN_ARRAY:Self = Self(64);
+    pub const END_ARRAY:Self = Self(65);
+    pub const CALL_ARGS:Self = Self(66);
+    pub const CALL_EXEC:Self = Self(67);
+    pub const METHOD_CALL_ARGS:Self = Self(68);
+    pub const METHOD_CALL_EXEC:Self = Self(69);
                 
-    pub const FN_ARGS:Self = Self(69);
-    pub const FN_ARG_DYN:Self = Self(70);
-    pub const FN_ARG_TYPED:Self = Self(71);
-    pub const FN_BODY:Self = Self(72);
-    pub const RETURN:Self = Self(73);
+    pub const FN_ARGS:Self = Self(70);
+    pub const FN_ARG_DYN:Self = Self(71);
+    pub const FN_ARG_TYPED:Self = Self(72);
+    pub const FN_BODY:Self = Self(73);
+    pub const RETURN:Self = Self(74);
             
-    pub const IF_TEST:Self = Self(74);
-    pub const IF_ELSE:Self = Self(75);
+    pub const IF_TEST:Self = Self(75);
+    pub const IF_ELSE:Self = Self(76);
         
-    pub const FIELD:Self = Self(76);
-    pub const ARRAY_INDEX:Self = Self(77);
+    pub const FIELD:Self = Self(77);
+    pub const ARRAY_INDEX:Self = Self(78);
     // prototypically inherit the chain for deep prototype fields
-    pub const PROTO_FIELD:Self = Self(78);
-    pub const POP_TO_ME:Self = Self(79);
+    pub const PROTO_FIELD:Self = Self(79);
+    pub const POP_TO_ME:Self = Self(80);
             
-    pub const LET_FIRST:Self = Self(80);
-    pub const LET_TYPED:Self = Self(83);
-    pub const LET_DYN:Self = Self(84);
-    pub const LET_LAST:Self = Self(84);
+    pub const LET_FIRST:Self = Self(82);
+    pub const LET_TYPED:Self = Self(82);
+    pub const LET_DYN:Self = Self(83);
+    pub const LET_LAST:Self = Self(83);
                 
-    pub const SEARCH_TREE:Self = Self(85);
-    pub const STRING_STREAM:Self = Self(86);
-    pub const LOG: Self = Self(87);
+    pub const SEARCH_TREE:Self = Self(84);
+    pub const STRING_STREAM:Self = Self(85);
+    pub const LOG: Self = Self(86);
 }
 
 
@@ -249,6 +250,7 @@ impl fmt::Display for Opcode {
             Self::ASSIGN_INDEX_IFNIL => return write!(f, "[]?="),
                                         
             Self::BEGIN_PROTO => return write!(f, "<proto>{{"),
+            Self::BEGIN_PROTO_ME => return write!(f, "<protome>{{"),
             Self::END_PROTO => return write!(f, "}}"),
             Self::BEGIN_BARE => return write!(f, "<bare>{{"),
             Self::END_BARE => return write!(f, "}}"),
