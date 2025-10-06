@@ -3,6 +3,9 @@ use crate::heap::*;
 use crate::value::*;
 use crate::id::*;
 
+// cx needs to be available for heap allocations 
+
+
 pub struct ScriptContext<'a>{
     pub thread: &'a mut ScriptThread,
     pub heap: & 'a mut ScriptHeap
