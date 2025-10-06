@@ -172,12 +172,13 @@ impl Cx {
                 event_flow
             }
         }));
-        // lets set our signal poll timer
-        // final bit of initflow
-        with_macos_app(|app| app.start_timer(0, 0.008, true));
-        
+
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
+        // Start timer if there's initial work after startup
+        if cx.borrow().need_redrawing() {
+            cx.borrow_mut().ensure_timer0_started();
+        }
         MacosApp::event_loop();
     }
     
@@ -230,7 +231,21 @@ impl Cx {
             self.call_event_handler(&Event::NetworkResponses(out))
         }
     }
-    
+
+    fn ensure_timer0_started(&mut self) {
+        if !self.os.timer0_armed {
+            with_macos_app(|app| app.start_timer(0, 0.008, true));
+            self.os.timer0_armed = true;
+        }
+    }
+
+    fn ensure_timer0_stopped(&mut self) {
+        if self.os.timer0_armed {
+            with_macos_app(|app| app.stop_timer(0));
+            self.os.timer0_armed = false;
+        }
+    }
+
     fn cocoa_event_callback(
         &mut self,
         event: MacosEvent,
@@ -251,21 +266,31 @@ impl Cx {
             MacosEvent::KeyUp(_) |
             MacosEvent::TextInput(_) => {
                 self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
+                self.ensure_timer0_started();
             }
             MacosEvent::Timer(te) => {
                 if te.timer_id == 0 {
+                    let mut needs_timer = false;
+
                     if self.screenshot_requests.len()>0{
                         self.repaint_windows();
+                        needs_timer = true;
                     }
                     if self.os.keep_alive_counter>0 {
                         self.os.keep_alive_counter -= 1;
-                        self.repaint_windows();
+                        needs_timer = true;
                     }
-                    
+
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
+                        needs_timer = true;
+                    }
+
+                    // Check if we still need the timer
+                    if !needs_timer && !self.need_redrawing() && self.new_next_frames.len() == 0 && !self.demo_time_repaint {
+                        self.ensure_timer0_stopped();
                     }
                     if SignalToUI::check_and_clear_action_signal() {
                         self.handle_action_receiver();
@@ -341,15 +366,23 @@ impl Cx {
                 }
             }
             MacosEvent::Paint => {
-                if self.new_next_frames.len() != 0 {
+                let has_next_frames = self.new_next_frames.len() != 0;
+                let needs_redrawing = self.need_redrawing();
+
+                if has_next_frames {
                     self.call_next_frame_event(with_macos_app(|app| app.time_now()));
                 }
-                if self.need_redrawing() {
+                if needs_redrawing {
                     self.call_draw_event();
                     self.mtl_compile_shaders(&metal_cx);
                 }
+
+                // Start timer if we have work
+                if has_next_frames || needs_redrawing || self.screenshot_requests.len() > 0 || self.os.keep_alive_counter > 0 || self.demo_time_repaint {
+                    self.ensure_timer0_started();
+                }
+
                 // ok here we send out to all our childprocesses
-                //self.demo_time_repaint = false;
                 self.handle_repaint(metal_windows, metal_cx);
                 
             }
@@ -435,13 +468,21 @@ impl Cx {
                 self.call_event_handler(&Event::MacosMenuCommand(e))
             }
         }
-        
-        //if self.any_passes_dirty() || self.need_redrawing()/* || self.new_next_frames.len() != 0*/ || paint_dirty {
-        // the timer is the primary wait flow   
-        EventFlow::Poll
-        //} else {
-         //   EventFlow::Wait
-       // }
+
+        // Determine the event flow based on whether we have work to do
+        if self.any_passes_dirty() ||
+           self.need_redrawing() ||
+           self.new_next_frames.len() != 0 ||
+           self.os.keep_alive_counter > 0 ||
+           self.screenshot_requests.len() > 0 ||
+           self.demo_time_repaint ||
+           self.os.timer0_armed {
+            // We have work to do or timer is running
+            EventFlow::Poll
+        } else {
+            // No work pending and timer is stopped - we can wait
+            EventFlow::Wait
+        }
     }
     
     fn dpi_override_scale(&self, pos:&mut DVec2, window_id:WindowId){
@@ -601,6 +642,7 @@ impl CxOsApi for Cx {
             self.live_registry.borrow_mut().package_root = Some(item.to_string());
         }
         self.live_expand();
+        #[cfg(debug_assertions)]
         if !Self::has_studio_web_socket() {
             self.start_disk_live_file_watcher(100);
         }
@@ -642,7 +684,10 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
+    /// For how long to keep the timer alive when the app is idle
     pub (crate) keep_alive_counter: usize,
+    /// Indicates wether the main timer is armed
+    pub (crate) timer0_armed: bool,
     pub (crate) media: CxAppleMedia,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
