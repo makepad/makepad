@@ -27,6 +27,7 @@ impl ScriptMe{
 }
 
 pub struct ScriptThread{
+    stack_limit: usize,
     stack: Vec<Value>,
     calls: Vec<CallFrame>,
     mes: Vec<ScriptMe>,
@@ -91,6 +92,7 @@ impl ScriptThread{
     
     pub fn new()->Self{
         Self{
+            stack_limit: 1_000_000,
             stack: vec![],
             calls: vec![],
             mes: vec![],
@@ -99,33 +101,54 @@ impl ScriptThread{
     }
     
     pub fn pop_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
-        let val = self.stack.pop().unwrap();
-        if let Some(id) = val.as_id(){
-            if val.is_escaped_id(){
-                return val
+        if let Some(val) = self.stack.pop(){
+            if let Some(id) = val.as_id(){
+                if val.is_escaped_id(){
+                    return val
+                }
+                return self.resolve(id, heap)
             }
-            return self.resolve(id, heap)
+            val    
         }
-        val    
+        else{
+            println!("STACK UNDERFLOW");
+            Value::NIL
+        }
     }
     
-    pub fn peek_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
-        let val = self.stack.last().unwrap();
-        if let Some(id) = val.as_id(){
-            if val.is_escaped_id(){
-                return *val
+    pub fn peek_stack_pair(&mut self, heap:&ScriptHeap)->(Value,Value){
+        if let Some(val) = self.stack.last(){
+            if let Some(id) = val.as_id(){
+                if val.is_escaped_id(){
+                    return (*val,*val)
+                }
+                return (*val, self.resolve(id, heap))
             }
-            return self.resolve(id, heap)
+            (*val,*val)    
         }
-        *val    
+        else{
+            println!("STACK UNDERFLOW");
+            (Value::NIL, Value::NIL)
+        }
     }
     
     pub fn pop_stack_value(&mut self)->Value{
-        self.stack.pop().unwrap()
+        if let Some(value) = self.stack.pop(){
+            value
+        }
+        else{
+            println!("STACK UNDERFLOW");
+            Value::NIL
+        }
     }
     
     pub fn push_stack_value(&mut self, value:Value){
-        self.stack.push(value);
+        if self.stack.len() > self.stack_limit{
+            println!("STACK OVERFLOW")
+        }
+        else{
+            self.stack.push(value);
+        }
     }
     
     pub fn call_has_me(&self)->bool{
@@ -181,8 +204,20 @@ impl ScriptThread{
                 self.ip += 1;
             }
             Opcode::LOG=>{
-                let value = self.peek_stack_resolved(heap);
-                println!("{:?}", value);
+                let value = self.peek_stack_pair(heap);
+                if value.1 != Value::NIL{
+                    if let Some(obj) = value.1.as_object(){
+                        print!("Log :");
+                        heap.print_object(obj, true);
+                        println!("");
+                    }
+                    else{
+                        println!("Log: {:?}", value.1);
+                    }
+                }
+                else{
+                    println!("Log: {}:{}", value.0,value.1)
+                }
                 self.ip += 1;
             }
             Opcode::NOT=>{
@@ -386,10 +421,48 @@ impl ScriptThread{
                 self.ip += jump_over_fn as usize;
                 self.stack.push(me.object.into());
             }
+            Opcode::METHOD_CALL_ARGS=>{
+                let method =  self.pop_stack_value();
+                let this = self.pop_stack_resolved(heap);
+                // alright so now we look up the method on this
+                println!("LOOKING UP METHOD{}", method);
+                let fnobj = if let Some(obj) = this.as_object(){
+                    heap.object_value(obj, method)
+                }
+                else{ // we're calling a method on some other thing
+                    Value::NIL
+                };
+                let scope = heap.new_object_with_proto(fnobj);
+                // set the args object to not write into the prototype
+                heap.clear_object_deep(scope);
+                heap.set_object_value(scope, id!(this).into(), this);
+                self.mes.push(ScriptMe::call(scope));
+                self.ip += 1;
+            }
+            Opcode::METHOD_CALL_EXEC=>{
+                let me = self.mes.pop().unwrap();
+                let scope = me.object;
+                // set the scope back to 'deep' so values can be written again
+                heap.set_object_deep(scope);
+                if let Some(jump_to) = heap.get_parent_object_is_fn(scope){
+                    let call = CallFrame{
+                        scope,
+                        mes_base: self.mes.len(),
+                        stack_base: self.stack.len(),
+                        return_ip: self.ip + 1,
+                    };
+                    self.calls.push(call);
+                    self.ip = jump_to as _;
+                }
+                else{
+                    self.stack.push(Value::NIL);
+                    self.ip += 1;
+                }
+            }
             Opcode::CALL_ARGS=>{
                 let fnobj = self.pop_stack_resolved(heap);
                 let scope = heap.new_object_with_proto(fnobj);
-                                
+                
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
                 self.mes.push(ScriptMe::call(scope));
