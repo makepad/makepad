@@ -206,7 +206,7 @@ impl ScriptThread{
                             (Value::NIL, value)
                         };
                         if me.ty == ScriptMe::CALL{
-                            heap.push_fn_arg(me.object, value);
+                            //heap.push_fn_arg(me.object, value);
                         }
                         else if !value.is_nil() || me.ty == ScriptMe::ARRAY{
                             heap.push_object_value(me.object, key, value);
@@ -432,7 +432,7 @@ impl ScriptThread{
                 let call = self.calls.last_mut().unwrap();
                 let me = heap.new_object_with_proto(call.scope.into());
                 // we should set this as a forced vec
-                heap.set_object_type(me, ObjectTag::TYPE_VEC);
+                heap.set_object_type(me, ObjectType::VEC);
                 
                 self.mes.push(ScriptMe::object(me));
                 self.ip += 1;
