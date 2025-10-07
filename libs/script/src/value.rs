@@ -52,44 +52,97 @@ impl From<Opcode> for Value{
 }
 // NaN box value
 
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct ValueType(u8);
+impl ValueType{
+    pub const NAN: Self = Self(0x01);
+    pub const BOOL: Self = Self(0x02);
+    pub const NIL: Self = Self(0x03);
+    pub const COLOR: Self = Self(0x04);
+    pub const STRING: Self = Self(0x05);
+    pub const OBJECT: Self = Self(0x06);
+    pub const FACTORY: Self = Self(0x07);
+    pub const OPCODE: Self = Self(0x08);
+    pub const ID_INDEX_HOLE: Self = Self(0x09);
+    pub const INLINE_STRING_0: Self = Self(0x0A);
+    pub const INLINE_STRING_1: Self = Self(0x0B);
+    pub const INLINE_STRING_2: Self = Self(0x0C);
+    pub const INLINE_STRING_3: Self = Self(0x0D);
+    pub const INLINE_STRING_4: Self = Self(0x0E);
+    pub const INLINE_STRING_5: Self = Self(0x0F);
+    pub const INLINE_STRING_END: Self = Self(0x10);
+    pub const ID: Self = Self(0x80);
+    
+    pub const fn to_u64(&self)->u64{ ((self.0 as u64) << 40) | 0xFFFF_0000_0000_0000 }
+    pub const fn from_u64(val:u64)->Self{
+        let val = ((val>>40)&0xff) as u8;
+        if val > Self::ID.0{
+            return Self::ID
+        }
+        Self(val)
+    }
+    
+    pub const fn to_index(&self)->usize{
+        if self.0 > Self::ID_INDEX_HOLE.0{
+            if self.0 >= Self::ID.0{
+                return (Self::ID_INDEX_HOLE.0 as usize) - 1
+            }
+            else{
+                Self::STRING.0 as usize - 1
+            }
+        }
+        else if self.0 > 0{
+            (self.0) as usize - 1
+        }
+        else{
+            0
+        }
+    }
+}
+
+
 impl Value{
     pub const TYPE_MASK: u64 = 0xFFFF_FF00_0000_0000;
         
-    pub const TYPE_NAN: u64 = 0xFFFF_0100_0000_0000;
+    pub const TYPE_NAN: u64 = ValueType::NAN.to_u64();
     pub const NAN: Value = Value( Self::TYPE_NAN);
     
-    pub const TYPE_BOOL: u64 = 0xFFFF_0200_0000_0000;
+    pub const TYPE_BOOL: u64 = ValueType::BOOL.to_u64();
     pub const FALSE: Value = Value( Self::TYPE_BOOL | 0x0000_0000);
     pub const TRUE: Value = Value(Self::TYPE_BOOL | 0x0000_0001);
     
-    pub const TYPE_NIL: u64 = 0xFFFF_0300_0000_0000;
+    pub const TYPE_NIL: u64 = ValueType::NIL.to_u64();
     pub const NIL: Value = Value(Self::TYPE_NIL);
     
-    pub const TYPE_COLOR: u64 = 0xFFFF_0400_0000_0000;
-    pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
-    pub const TYPE_OBJECT: u64 = 0xFFFF_0600_0000_0000;
-    pub const TYPE_FACTORY: u64 = 0xFFFF_0700_0000_0000;
+    pub const TYPE_COLOR: u64 = ValueType::COLOR.to_u64();
+    pub const TYPE_STRING: u64 = ValueType::STRING.to_u64();
+    pub const TYPE_OBJECT: u64 = ValueType::OBJECT.to_u64();
+    pub const TYPE_FACTORY: u64 = ValueType::FACTORY.to_u64();
     
-    pub const TYPE_INLINE_STRING_0: u64 = 0xFFFF_0800_0000_0000;
-    pub const TYPE_INLINE_STRING_1: u64 = 0xFFFF_0900_0000_0000;
-    pub const TYPE_INLINE_STRING_2: u64 = 0xFFFF_0A00_0000_0000;
-    pub const TYPE_INLINE_STRING_3: u64 = 0xFFFF_0B00_0000_0000;
-    pub const TYPE_INLINE_STRING_4: u64 = 0xFFFF_0C00_0000_0000;
-    pub const TYPE_INLINE_STRING_5: u64 = 0xFFFF_0D00_0000_0000;
-    pub const TYPE_INLINE_STRING_END: u64 = 0xFFFF_0E00_0000_0000;
+    pub const TYPE_INLINE_STRING_0: u64 = ValueType::INLINE_STRING_0.to_u64();
+    pub const TYPE_INLINE_STRING_1: u64 = ValueType::INLINE_STRING_1.to_u64();
+    pub const TYPE_INLINE_STRING_2: u64 = ValueType::INLINE_STRING_2.to_u64();
+    pub const TYPE_INLINE_STRING_3: u64 = ValueType::INLINE_STRING_3.to_u64();
+    pub const TYPE_INLINE_STRING_4: u64 = ValueType::INLINE_STRING_4.to_u64();
+    pub const TYPE_INLINE_STRING_5: u64 = ValueType::INLINE_STRING_5.to_u64();
+    pub const TYPE_INLINE_STRING_END: u64 = ValueType::INLINE_STRING_END.to_u64();
     
-    pub const TYPE_ID: u64 = 0xFFFF_8000_0000_0000;
+    pub const TYPE_ID: u64 = ValueType::ID.to_u64();
     
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
     
     // opcodes
-    pub const TYPE_OPCODE: u64 = 0xFFFF_1000_0000_0000;
+    pub const TYPE_OPCODE: u64 = ValueType::OPCODE.to_u64();
     
     pub const fn from_opcode(op:Opcode)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32)}
     
     pub const fn from_opcode_args(op:Opcode, args:OpcodeArgs)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32 | (args.0 as u64))}
         
     // TODO: make this behave like javascript as much as is sensible
+    
+    pub const fn value_type(&self)->ValueType{
+        ValueType::from_u64(self.0 & Self::TYPE_MASK)
+    }
     
     pub const fn from_f64(val:f64)->Self{
         if val.is_nan(){
