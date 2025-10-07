@@ -421,7 +421,6 @@ impl ScriptHeap{
     
     pub fn object_value(&self, ptr:ObjectPtr, key:Value)->Value{
         // hard array index
-        println!("GETTING INDEX {}", key);
         if key.is_index(){
             return self.object_value_index(ptr, key)
         }
