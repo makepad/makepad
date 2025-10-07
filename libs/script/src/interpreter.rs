@@ -5,6 +5,7 @@ use crate::value::*;
 use crate::heap::*;
 use crate::opcode::*;
 use crate::object::*;
+use crate::interop::*;
 
 pub struct CallFrame{
     pub scope: ObjectPtr,
@@ -27,6 +28,8 @@ impl ScriptMe{
     fn call(object:ObjectPtr)->Self{Self{object, ty: Self::CALL}}
 }
 
+pub struct ScriptThreadId(pub usize);
+
 pub struct ScriptThread{
     stack_limit: usize,
     stack: Vec<Value>,
@@ -34,24 +37,47 @@ pub struct ScriptThread{
     mes: Vec<ScriptMe>,
     pub ip: usize
 }
-    
-pub struct ScriptInterpreter{
+
+pub struct Script{
+    pub sys_fns: SystemFns,
+    pub parser: ScriptParser,
     pub threads: Vec<ScriptThread>,
     pub heap: ScriptHeap,
     pub global: ObjectPtr,
 }
 
-impl ScriptInterpreter{
+impl Script{
     pub fn new()->Self{
         let mut heap = ScriptHeap::new();
+        let mut sys_fns = SystemFns::default();
+        
+        sys_fns.add(ValueType::NAN, id!(ty), |_, _|{id!(nan).into()});
+        sys_fns.add(ValueType::BOOL, id!(ty), |_, _|{id!(bool).into()});
+        sys_fns.add(ValueType::NIL, id!(ty), |_, _|{id!(nil).into()});
+        sys_fns.add(ValueType::COLOR, id!(ty), |_, _|{id!(color).into()});
+        sys_fns.add(ValueType::STRING, id!(ty), |_, _|{id!(string).into()});
+        sys_fns.add(ValueType::OBJECT, id!(ty), |_, _|{id!(object).into()});
+        sys_fns.add(ValueType::FACTORY, id!(ty), |_, _|{id!(factory).into()});
+        sys_fns.add(ValueType::OPCODE, id!(ty), |_, _|{id!(opcode).into()});
+        sys_fns.add(ValueType::ID, id!(ty), |_, _|{id!(id).into()});
+        
         Self{
+            sys_fns ,
+            parser: Default::default(),
             threads: vec![ScriptThread::new()],
             global: heap.new_object(0),
             heap: heap,
         }
     }
-    pub fn run(&mut self, parser: &ScriptParser){
-        self.threads[0].run(parser, &mut self.heap, self.global)
+    
+    pub fn parse(&mut self, code:&str){
+        self.parser.parse(code, &mut self.heap);
+        self.parser.tok.dump_tokens(&self.heap);
+    }
+    
+    pub fn run(&mut self, code: &str){
+        self.parse(code);
+        self.threads[0].run(&self.parser, &mut self.heap, self.global, &self.sys_fns)
     }
 }
 
@@ -90,8 +116,6 @@ macro_rules! fu64_op_impl{
 } 
 
 impl ScriptThread{
-    
-    
     
     pub fn new()->Self{
         Self{
@@ -176,7 +200,7 @@ impl ScriptThread{
         Value::NIL
     }
     
-    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap){
+    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap, sys_fns:&SystemFns){
         match opcode{
             
             Opcode::NOT=>{
@@ -342,6 +366,7 @@ impl ScriptThread{
                     Value::NIL
                 };
                 let scope = if fnobj == Value::NIL{ 
+                    println!("System fn");
                     let scope = heap.new_object(0);
                     heap.set_object_is_system_fn(scope, 0);
                     heap.set_object_value(scope, id!(this).into(), this);
@@ -580,7 +605,7 @@ impl ScriptThread{
         }
     }
       
-    pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, global:ObjectPtr){
+    pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, global:ObjectPtr, sys_fns:&SystemFns){
         let scope = heap.new_object(ObjectTag::DEEP);
         heap.set_object_type(scope, ObjectType::VEC2);
         let call = CallFrame{
@@ -595,7 +620,7 @@ impl ScriptThread{
         while self.ip < parser.code.len(){
             let code = parser.code[self.ip];
             if let Some((opcode, args)) = code.as_opcode(){
-                self.opcode(opcode, args, parser, heap);
+                self.opcode(opcode, args, parser, heap, sys_fns);
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(code);
