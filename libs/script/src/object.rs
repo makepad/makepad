@@ -9,7 +9,7 @@ pub struct Field{
     pub value: Value
 }
     
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Object{
     pub tag: ObjectTag,
     pub proto: Value,
