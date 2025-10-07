@@ -128,6 +128,7 @@ impl Opcode{
     pub const END_BARE:Self = Self(63);
     pub const BEGIN_ARRAY:Self = Self(64);
     pub const END_ARRAY:Self = Self(65);
+    
     pub const CALL_ARGS:Self = Self(66);
     pub const CALL_EXEC:Self = Self(67);
     pub const METHOD_CALL_ARGS:Self = Self(68);
