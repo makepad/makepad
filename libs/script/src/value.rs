@@ -64,6 +64,7 @@ impl Value{
     
     pub const TYPE_NIL: u64 = 0xFFFF_0300_0000_0000;
     pub const NIL: Value = Value(Self::TYPE_NIL);
+    
     pub const TYPE_COLOR: u64 = 0xFFFF_0400_0000_0000;
     pub const TYPE_STRING: u64 = 0xFFFF_0500_0000_0000;
     pub const TYPE_OBJECT: u64 = 0xFFFF_0600_0000_0000;
@@ -194,6 +195,16 @@ impl Value{
         }
         None    
     }
+    
+    pub fn as_index(&self)->usize{
+        if let Some(f) = self.as_f64(){
+            return f as usize
+        }
+        if let Some(b) = self.as_bool(){
+            return if b{1} else{0}
+        }
+        0
+    }
         
     pub fn as_id(&self)->Option<Id>{
         if self.is_id(){
@@ -281,6 +292,10 @@ impl Value{
     
     pub fn is_f64(&self)->bool{
         self.0 <= Self::TYPE_NAN
+    }
+    
+    pub fn is_index(&self)->bool{
+        self.0 <= Self::TYPE_NIL
     }
     
     pub fn is_bool(&self)->bool{
