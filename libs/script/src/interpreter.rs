@@ -617,16 +617,25 @@ impl ScriptThread{
         self.mes.push(ScriptMe::object(global));
         self.calls.push(call);
         self.ip = 0;
+        let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         while self.ip < parser.code.len(){
             let code = parser.code[self.ip];
             if let Some((opcode, args)) = code.as_opcode(){
+                let dt = std::time::Instant::now();
                 self.opcode(opcode, args, parser, heap, sys_fns);
+                if let Some(t) = profile.get(&opcode){
+                    profile.insert(opcode, t + dt.elapsed().as_secs_f64());
+                }
+                else{
+                    profile.insert(opcode, dt.elapsed().as_secs_f64());
+                }
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(code);
                 self.ip += 1;
             }
         }
+        println!("{:?}", profile);
         // lets have a look at our scope
         let call = self.calls.pop().unwrap();
         print!("Scope:");
