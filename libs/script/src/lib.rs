@@ -39,7 +39,6 @@ pub struct RustTest{
 }
 
 use crate::interop::*;
-use crate::parser::*;
 use crate::interpreter::*;
 use crate::value::*;
 use crate::id::*;
@@ -49,7 +48,7 @@ impl ScriptCall for RustTest{
     fn update_fields(&mut self, _obj: ObjectPtr){
     }
     
-    fn call_method(&mut self,_ctx:&ScriptContext, method: Id, _args: ObjectPtr)->Value{
+    fn call_method(&mut self,_scx:&ScriptCx, method: Id, _args: ObjectPtr)->Value{
         match method{
             id!(on_click)=>{
                 return Value::NIL
@@ -67,6 +66,7 @@ pub fn test(){
     let time = std::time::Instant::now();
     
     let code = "
+    /*
         let View = {@view}
         let Window = {@window}
         let Button = {@button}
@@ -75,10 +75,10 @@ pub fn test(){
                 View{@myview}
             }
         }
-        ~x.body[1]
+        //~x.body.ty()
         
         ;
-        /*
+      */  
         let fib = |n|{
             return if(n <= 1){
                 n
@@ -87,7 +87,7 @@ pub fn test(){
                 fib(n - 1) + fib(n - 2)
             }
         }
-        ~fib(38);*/
+        ~fib(38);
     ";
     
     let _code = "
@@ -96,12 +96,8 @@ pub fn test(){
         x.len();
     ";
     
-    let mut interp = ScriptInterpreter::new();
-    let mut parser = ScriptParser::default();
-    parser.parse(&code, &mut interp.heap);
-    parser.tok.dump_tokens(&interp.heap);
-    
-    interp.run(&parser);
+    let mut interp = Script::new();
+    interp.run(&code);
     
     println!("{:?}", time.elapsed().as_secs_f64());
 }
