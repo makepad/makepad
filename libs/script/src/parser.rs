@@ -575,7 +575,7 @@ impl ScriptParser{
                         if let State::EmitOp(id!(.)) = last{
                             //self.code.push(State::operator_to_opcode(id!(.)));
                             self.code.push(Opcode::METHOD_CALL_ARGS.into());
-                            self.state.push(State::EndCall(false));
+                            self.state.push(State::EndCall(true));
                             self.state.push(State::BeginStmt);
                                                         
                         }
