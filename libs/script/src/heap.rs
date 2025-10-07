@@ -1,19 +1,66 @@
 use std::fmt::Write;
 use crate::value::*;
 use crate::object::*;
+use std::fmt;
 
 #[derive(Default)]
 pub struct ObjectTag(u64);
 
-#[derive(Copy,Clone,Eq,PartialEq)]
+#[derive(Copy,Clone,Eq,PartialEq, Ord, PartialOrd)]
 pub struct ObjectType(u8);
+
+impl fmt::Debug for ObjectType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl fmt::Display for ObjectType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self{
+            Self::AUTO=>write!(f, "AUTO"),
+            Self::VEC=>write!(f, "VEC"),
+            Self::MAP=>write!(f, "MAP"),
+            Self::SINGLE=>write!(f, "SINGLE"),
+            Self::U8=>write!(f, "U8"),
+            Self::U16=>write!(f, "U16"),
+            Self::U32=>write!(f, "U32"),
+            Self::I8=>write!(f, "I8"),
+            Self::I16=>write!(f, "I16"),
+            Self::I32=>write!(f, "I32"),
+            Self::F32=>write!(f, "F32"),
+            Self::F64=>write!(f, "F64"),
+            _=>write!(f, "?ObjectType"),
+        }
+    }
+}
 
 impl ObjectType{
     pub const AUTO: Self = Self(0);
     pub const VEC: Self = Self(1);
     pub const MAP: Self = Self(2);
-    pub const VALUE:Self = Self(3);
+    pub const SINGLE:Self = Self(3);
     
+    pub fn uses_paired_vec(&self)->bool{
+        *self <= Self::VEC
+    }
+    
+    pub fn is_auto(&self)->bool{
+        *self == Self::AUTO
+    }
+    
+    pub fn is_single(&self)->bool{
+        *self == Self::SINGLE
+    }
+        
+    pub fn is_vec(&self)->bool{
+        *self == Self::VEC
+    }
+    
+    pub fn is_map(&self)->bool{
+        *self == Self::MAP
+    }
+        
     pub fn has_paired_vec(&self)->bool{
         return self.0 <= 2
     }
@@ -29,13 +76,12 @@ impl ObjectType{
     pub const U8: Self = Self(4);
     pub const U16: Self = Self(5);
     pub const U32: Self = Self(6);
-    pub const U64: Self = Self(7);
-    pub const I8: Self = Self(8);
-    pub const I16: Self = Self(9);
-    pub const I32: Self = Self(10);
-    pub const I64: Self = Self(11);
-    pub const F32: Self = Self(12);
-    pub const F64: Self = Self(13);
+    pub const I8: Self = Self(7);
+    pub const I16: Self = Self(8);
+    pub const I32: Self = Self(9);
+    pub const F32: Self = Self(10);
+    pub const F64: Self = Self(11);
+    // cant really use these
 }
 
 impl ObjectTag{
@@ -136,6 +182,26 @@ impl ObjectTag{
     }
 }
 
+
+impl fmt::Debug for ObjectTag {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl fmt::Display for ObjectTag {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ObjectType(").ok();
+        write!(f, "{}|",self.get_type()).ok();
+        if self.is_marked(){write!(f,"MARK|").ok();}
+        if self.is_alloced(){write!(f,"ALLOCED|").ok();}
+        if self.is_deep(){write!(f,"DEEP|").ok();}
+        if self.is_fn(){write!(f,"FN({})|", self.get_fn()).ok();}
+        if self.is_system_fn(){write!(f,"SYSTEM_FN({})|", self.get_fn()).ok();}
+        if self.is_reffed(){write!(f,"REFFED").ok();}
+        write!(f, ")")
+    }
+}
 
 #[derive(Default)]
 pub struct StringTag(u64);
@@ -492,7 +558,10 @@ impl ScriptHeap{
             };
             object.tag.set_proto_fwd(proto_fwd);
             object.proto = proto;
-            object.vec.extend_from_slice(&proto_object.vec);
+            // only copy vec if we are 'auto' otherwise we proto inherit normally
+            if proto_object.tag.get_type().is_auto(){
+                object.vec.extend_from_slice(&proto_object.vec);
+            }
             ObjectPtr{index: index as _}
         }
         else{
@@ -500,7 +569,9 @@ impl ScriptHeap{
             let mut object = Object::with_proto(proto);
             object.tag.set_proto_fwd(proto_fwd);
             let proto_object = &self.objects[proto_index];
-            object.vec.extend_from_slice(&proto_object.vec);
+            if proto_object.tag.get_type().is_auto(){
+                object.vec.extend_from_slice(&proto_object.vec);
+            }
             self.objects.push(object);
             ObjectPtr{index: index as _}
         }
@@ -527,9 +598,18 @@ impl ScriptHeap{
         
         let ty = object.tag.get_type();
         // most used path
-        if ty == ObjectType::AUTO || ty == ObjectType::VEC{
-            let index = index.as_f64().unwrap_or(0.0) as usize;
+        if ty.uses_paired_vec(){
+            let index = index.as_index();
             if let Some(value) = object.vec.get(index * 2){
+                return *value
+            }
+            else{
+                return Value::NIL
+            }
+        }
+        if ty.is_single(){
+            let index = index.as_index();
+            if let Some(value) = object.vec.get(index){
                 return *value
             }
             else{
@@ -539,7 +619,7 @@ impl ScriptHeap{
         if ty.is_typed(){ // typed access to the vec
             //todo IMPLEMENT IT
         }
-        if ty == ObjectType::MAP{
+        if ty.is_map(){
             if let Some(value) = object.map.get(&index){
                 return *value
             }
@@ -564,7 +644,7 @@ impl ScriptHeap{
         let mut ptr = ptr;
         loop{
             let object = &self.objects[ptr.index as usize];
-            if object.tag.get_type() == ObjectType::VEC{
+            if object.tag.get_type().is_vec(){
                 for chunk in object.vec.rchunks(2){
                     if chunk[0] == key{
                         return chunk[1]
@@ -586,7 +666,7 @@ impl ScriptHeap{
     
     pub fn object_value(&self, ptr:ObjectPtr, key:Value)->Value{
         // hard array index
-        if key.is_f64(){
+        if key.is_index(){
             return self.object_value_index(ptr, key)
         }
         if let Some(id) = key.as_id(){
@@ -607,20 +687,45 @@ impl ScriptHeap{
         // alright so. now what.
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
-        if ty == ObjectType::AUTO || ty == ObjectType::VEC{
-            let index = (index.as_f64().unwrap_or(0.0) as usize) * 2;
+        if ty.uses_paired_vec(){
+            let index = index.as_index() * 2;
             if index + 1 >= object.vec.len(){
                 object.vec.resize(index + 2, Value::NIL);
             }
-            object.vec[index+1] = Value::NIL; 
+            object.vec[index] = Value::NIL;
+            object.vec[index+1] = value; 
+            return 
+        }
+        if ty.is_single(){
+            let index = index.as_index();
+            if index>= object.vec.len(){
+                object.vec.resize(index, Value::NIL);
+            }
+            object.vec[index] = value;
+            return 
         }
         if ty == ObjectType::MAP{
             object.map.insert(index, value);
             return
         }
         if ty.is_typed(){ // typed array
+            println!("Implement typed array set value");
             //todo IMPLEMENT IT
             return
+        }
+    }
+    
+    pub fn object_push_value(&mut self, ptr: ObjectPtr, value: Value){
+        let object = &mut self.objects[ptr.index as usize];
+        let ty = object.tag.get_type();
+        if ty.has_paired_vec(){
+            object.vec.extend_from_slice(&[Value::NIL, value]);
+        }
+        else if ty.is_typed(){
+            println!("IMPLEMENT TYPED PUSH VALUE")
+        }
+        else{
+            object.vec.push(value);
         }
     }
     
@@ -640,7 +745,7 @@ impl ScriptHeap{
         let mut ptr = ptr;
         loop{
             let object = &mut self.objects[ptr.index as usize];
-            if object.tag.get_type() == ObjectType::VEC{
+            if object.tag.get_type().is_vec(){
                 for chunk in object.vec.rchunks_mut(2){
                     if chunk[0] == key{
                         chunk[1] = value;
@@ -661,7 +766,7 @@ impl ScriptHeap{
         }
         // alright nothing found
         let object = &mut self.objects[ptr.index as usize];
-        if object.tag.get_type() == ObjectType::VEC{
+        if object.tag.get_type().is_vec(){
             object.vec.extend_from_slice(&[key, value]);
         }
         else{
@@ -671,7 +776,7 @@ impl ScriptHeap{
     
     pub fn set_object_value_shallow(&mut self, ptr:ObjectPtr, key:Value, value:Value){
         let object = &mut self.objects[ptr.index as usize];
-        if object.tag.get_type() == ObjectType::VEC{
+        if object.tag.get_type().is_vec(){
             for chunk in object.vec.rchunks_mut(2){
                 if chunk[0] == key{
                     chunk[1] = value;
@@ -685,7 +790,7 @@ impl ScriptHeap{
     }
     
     pub fn set_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
-        if key.is_f64(){ // use vector
+        if key.is_index(){ // use vector
             return self.set_object_value_index(ptr, key, value);
         }
         if let Some(id) = key.as_id(){
@@ -753,21 +858,18 @@ impl ScriptHeap{
             None
         }
     }   
-    /*
+    
     pub fn push_fn_arg(&mut self, top_ptr:ObjectPtr, value:Value){
         let object = &self.objects[top_ptr.index as usize];
         let index = object.vec.len();
         if let Some(ptr) = object.proto.as_object(){
             let object = &self.objects[ptr.index as usize];
-            if let Some(field) = object.vec.get(index){
-                let key = field.key;
-                self.objects[top_ptr.index as usize].vec.push(Field{
-                    key,
-                    value
-                })
+            if let Some(key) = object.vec.get(index*2){
+                let key = *key;
+                self.objects[top_ptr.index as usize].vec.extend_from_slice(&[key, value]);
             }
         }
-    }*/
+    }
     
     pub fn print_key_value(&self, key:Value, value:Value, deep:bool, str:&mut String){
         if let Some(obj) = value.as_object(){
