@@ -50,16 +50,16 @@ impl Script{
     pub fn new()->Self{
         let mut heap = ScriptHeap::new();
         let mut sys_fns = SystemFns::default();
-        
-        sys_fns.add(ValueType::NAN, id!(ty), |_, _|{id!(nan).into()});
-        sys_fns.add(ValueType::BOOL, id!(ty), |_, _|{id!(bool).into()});
-        sys_fns.add(ValueType::NIL, id!(ty), |_, _|{id!(nil).into()});
-        sys_fns.add(ValueType::COLOR, id!(ty), |_, _|{id!(color).into()});
-        sys_fns.add(ValueType::STRING, id!(ty), |_, _|{id!(string).into()});
-        sys_fns.add(ValueType::OBJECT, id!(ty), |_, _|{id!(object).into()});
-        sys_fns.add(ValueType::FACTORY, id!(ty), |_, _|{id!(factory).into()});
-        sys_fns.add(ValueType::OPCODE, id!(ty), |_, _|{id!(opcode).into()});
-        sys_fns.add(ValueType::ID, id!(ty), |_, _|{id!(id).into()});
+        let h = &mut heap;
+        sys_fns.inline(h, &[], ValueType::NAN, id!(ty), |_, _|{id!(nan).into()});
+        sys_fns.inline(h, &[], ValueType::BOOL, id!(ty), |_, _|{id!(bool).into()});
+        sys_fns.inline(h, &[], ValueType::NIL, id!(ty), |_, _|{id!(nil).into()});
+        sys_fns.inline(h, &[], ValueType::COLOR, id!(ty), |_, _|{id!(color).into()});
+        sys_fns.inline(h, &[], ValueType::STRING, id!(ty), |_, _|{id!(string).into()});
+        sys_fns.inline(h, &[], ValueType::OBJECT, id!(ty), |_, _|{id!(object).into()});
+        sys_fns.inline(h, &[], ValueType::FACTORY, id!(ty), |_, _|{id!(factory).into()});
+        sys_fns.inline(h, &[], ValueType::OPCODE, id!(ty), |_, _|{id!(opcode).into()});
+        sys_fns.inline(h, &[], ValueType::ID, id!(ty), |_, _|{id!(id).into()});
         
         Self{
             sys_fns ,
@@ -114,6 +114,11 @@ macro_rules! fu64_op_impl{
         $obj.ip += 1;
     }}
 } 
+
+enum RustCall{
+    SysCall(usize),
+    RustCall
+}
 
 impl ScriptThread{
     
@@ -200,7 +205,7 @@ impl ScriptThread{
         Value::NIL
     }
     
-    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap, sys_fns:&SystemFns){
+    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap, sys_fns:&SystemFns)->Option<RustCall>{
         match opcode{
             
             Opcode::NOT=>{
@@ -365,12 +370,19 @@ impl ScriptThread{
                 else{ // we're calling a method on some other thing
                     Value::NIL
                 };
-                let scope = if fnobj == Value::NIL{ 
-                    println!("System fn");
-                    let scope = heap.new_object(0);
-                    heap.set_object_is_system_fn(scope, 0);
-                    heap.set_object_value(scope, id!(this).into(), this);
-                    scope
+                let scope = if fnobj == Value::NIL{
+                    // lets take the type
+                    let type_index = this.value_type().to_index();
+                    let method = method.as_id().unwrap_or(id!());
+                    let sys_fn = &sys_fns.type_table[type_index];
+                    
+                    if let Some(sys_fn) = sys_fn.get(&method){
+                        let scope = heap.new_object_with_proto(sys_fn.arg_obj);
+                        scope
+                    }
+                    else{ // fn not found
+                        heap.new_object(0)
+                    }
                 }
                 else{
                     heap.new_object_with_proto(fnobj)
@@ -387,15 +399,27 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                if let Some((jump_to, _is_system)) = heap.get_parent_object_is_fn(scope){
-                    let call = CallFrame{
-                        scope,
-                        mes_base: self.mes.len(),
-                        stack_base: self.stack.len(),
-                        return_ip: self.ip + 1,
-                    };
-                    self.calls.push(call);
-                    self.ip = jump_to as _;
+                                    
+                if let Some((jump_to, is_system)) = heap.get_parent_object_is_fn(scope){
+                    if is_system{
+                        let ret = match &sys_fns.fn_table[jump_to as usize]{
+                            SystemFnEntry::Inline{fn_ptr}=>{
+                                fn_ptr(heap, scope)
+                            }
+                        };
+                        self.stack.push(ret);
+                        self.ip += 1;
+                    }
+                    else{
+                        let call = CallFrame{
+                            scope,
+                            mes_base: self.mes.len(),
+                            stack_base: self.stack.len(),
+                            return_ip: self.ip + 1,
+                        };
+                        self.calls.push(call);
+                        self.ip = jump_to as _;
+                    }
                 }
                 else{
                     self.stack.push(Value::NIL);
@@ -605,6 +629,7 @@ impl ScriptThread{
                 // unknown instruction
             }
         }
+        None
     }
       
     pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, global:ObjectPtr, sys_fns:&SystemFns){
@@ -624,7 +649,15 @@ impl ScriptThread{
             let code = parser.code[self.ip];
             if let Some((opcode, args)) = code.as_opcode(){
                 //let dt = std::time::Instant::now();
-                self.opcode(opcode, args, parser, heap, sys_fns);
+                if let Some(rust_call) = self.opcode(opcode, args, parser, heap, sys_fns){
+                    match rust_call{
+                        RustCall::SysCall(sys_id)=>{
+                        }
+                        RustCall::RustCall=>{
+                        }
+                    }
+                    self.stack.push(Value::NIL)
+                }
                 //if let Some(t) = profile.get(&opcode){
                  //   profile.insert(opcode, t + dt.elapsed().as_secs_f64());
                 //}

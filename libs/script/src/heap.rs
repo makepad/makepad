@@ -601,7 +601,7 @@ impl ScriptHeap{
         let object = &self.objects[ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             let object = &self.objects[ptr.index as usize];
-            if object.tag.is_fn(){
+            if object.tag.is_fn() || object.tag.is_system_fn(){
                 Some((object.tag.get_fn(), object.tag.is_system_fn()))
             }
             else{
@@ -622,6 +622,9 @@ impl ScriptHeap{
                 let key = *key;
                 self.objects[top_ptr.index as usize].vec.extend_from_slice(&[key, value]);
             }
+        }
+        else{ // system functions dont have named args
+            
         }
     }
     

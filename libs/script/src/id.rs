@@ -34,6 +34,15 @@ impl IdToString {
             };
             // pre-seed list for debugging purposes
             let fill = [
+                "nan",
+                "bool",
+                "nil",
+                "color",
+                "string",
+                "object",
+                "factory",
+                "opcode",
+                "id",
                 "default",
                 "true",
                 "false",
