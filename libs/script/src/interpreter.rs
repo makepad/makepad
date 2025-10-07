@@ -626,11 +626,6 @@ impl ScriptThread{
                 //let dt = std::time::Instant::now();
                 self.opcode(opcode, args, parser, heap, sys_fns);
                 //if let Some(t) = profile.get(&opcode){
-                 //   profile.insert(opcode, t + dt.elapsed().as_secs_f64());
-                //}
-                //else{
-                //    profile.insert(opcode, dt.elapsed().as_secs_f64());
-                //}
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(code);
