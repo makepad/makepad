@@ -66,7 +66,6 @@ pub fn test(){
     let time = std::time::Instant::now();
     
     let code = "
-    /*
         let View = {@view}
         let Window = {@window}
         let Button = {@button}
@@ -75,10 +74,10 @@ pub fn test(){
                 View{@myview}
             }
         }
-        //~x.body.ty()
+        ~x.ty()
         
         ;
-      */  
+      
         let fib = |n|{
             return if(n <= 1){
                 n
