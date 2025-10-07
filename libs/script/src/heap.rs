@@ -83,10 +83,16 @@ impl ScriptHeap{
             let object = &self.objects[index];
             if object.tag.get_type().is_gc(){
                 let field = &object.vec[i];
-                if let Some(ptr) = field.as_object(){
+                if let Some(ptr) = field.key.as_object(){
                     self.mark_vec.push(ptr.index as usize);
                 }
-                else if let Some(ptr) = field.as_string(){
+                else if let Some(ptr) = field.key.as_string(){
+                    self.strings[ptr.index as usize].tag.set_mark();
+                }
+                if let Some(ptr) = field.value.as_object(){
+                    self.mark_vec.push(ptr.index as usize);
+                }
+                else if let Some(ptr) = field.value.as_string(){
                     self.strings[ptr.index as usize].tag.set_mark();
                 }
             }
@@ -304,6 +310,7 @@ impl ScriptHeap{
         };
         
         if let Some(index) = self.objects_free.pop(){
+            
             let (object, proto_object) = if index > proto_index{
                 let (o1, o2) = self.objects.split_at_mut(index);
                 (&mut o2[0], &mut o1[proto_index])                    
@@ -355,8 +362,8 @@ impl ScriptHeap{
         // most used path
         if ty.uses_vec2(){
             let index = index.as_index();
-            if let Some(value) = object.vec.get(index * 2 + 1){
-                return *value
+            if let Some(field) = object.vec.get(index){
+                return field.value
             }
             else{
                 return Value::NIL
@@ -364,8 +371,8 @@ impl ScriptHeap{
         }
         if ty.is_vec1(){
             let index = index.as_index();
-            if let Some(value) = object.vec.get(index){
-                return *value
+            if let Some(field) = object.vec.get(index){
+                return field.value
             }
             else{
                 return Value::NIL
@@ -387,9 +394,9 @@ impl ScriptHeap{
     
     pub fn object_value_prefixed(&self, ptr: ObjectPtr, key: Value)->Value{
         let object = &self.objects[ptr.index as usize];
-        for chunk in object.vec.rchunks(2){
-            if chunk[0] == key{
-                return chunk[1]
+        for field in object.vec.iter().rev(){
+            if field.key == key{
+                return field.value
             }
         }
         return Value::NIL
@@ -400,9 +407,9 @@ impl ScriptHeap{
         loop{
             let object = &self.objects[ptr.index as usize];
             if object.tag.get_type().is_vec2(){
-                for chunk in object.vec.rchunks(2){
-                    if chunk[0] == key{
-                        return chunk[1]
+                for field in object.vec.iter().rev(){
+                    if field.key  == key{
+                        return field.value
                     }
                 }
             }
@@ -423,12 +430,11 @@ impl ScriptHeap{
     }
     
     pub fn object_value(&self, ptr:ObjectPtr, key:Value)->Value{
-        // hard array index
         if key.is_id(){
             return self.object_value_deep(ptr, key)
         }
         if key.is_index(){
-            return self.object_value_index(ptr, key)
+             return self.object_value_index(ptr, key)
         }
         if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             return self.object_value_deep(ptr, key)
@@ -442,20 +448,19 @@ impl ScriptHeap{
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
         if ty.uses_vec2(){
-            let index = index.as_index() * 2;
-            if index + 1 >= object.vec.len(){
-                object.vec.resize(index + 2, Value::NIL);
+            let index = index.as_index();
+            if index >= object.vec.len(){
+                object.vec.resize(index + 1, Default::default());
             }
-            object.vec[index] = Value::NIL;
-            object.vec[index+1] = value; 
+            object.vec[index] = Field{key:Value::NIL, value};
             return 
         }
         if ty.is_vec1(){
             let index = index.as_index();
             if index>= object.vec.len(){
-                object.vec.resize(index, Value::NIL);
+                object.vec.resize(index, Default::default());
             }
-            object.vec[index] = value;
+            object.vec[index] = Field{key:Value::NIL, value};
             return 
         }
         if ty == ObjectType::BTREE{
@@ -473,26 +478,26 @@ impl ScriptHeap{
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
         if ty.has_paired_vec(){
-            object.vec.extend_from_slice(&[Value::NIL, value]);
+            object.vec.push(Field{key:Value::NIL, value});
         }
         else if ty.is_typed(){
             println!("IMPLEMENT TYPED PUSH VALUE")
         }
         else{
-            object.vec.push(value);
+            object.vec.push(Field{key:Value::NIL, value});
         }
     }
     
     pub fn set_object_value_prefixed(&mut self, ptr: ObjectPtr, key: Value, value: Value){
         let object = &mut self.objects[ptr.index as usize];
-        for chunk in object.vec.rchunks_mut(2){
-            if chunk[0] == key{
-                chunk[1] = value;
+        for field in object.vec.iter_mut().rev(){
+            if field.key == key{
+                field.value = value;
                 return
             }
         }
         // just append it
-        object.vec.extend_from_slice(&[key, value]);
+        object.vec.push(Field{key, value});
     }
     
     pub fn set_object_value_deep(&mut self, ptr:ObjectPtr, key: Value, value: Value){
@@ -500,9 +505,9 @@ impl ScriptHeap{
         loop{
             let object = &mut self.objects[ptr.index as usize];
             if object.tag.get_type().is_vec2(){
-                for chunk in object.vec.rchunks_mut(2){
-                    if chunk[0] == key{
-                        chunk[1] = value;
+                for field in object.vec.iter_mut().rev(){
+                    if field.key == key{
+                        field.value = value;
                         return
                     }
                 }
@@ -521,7 +526,7 @@ impl ScriptHeap{
         // alright nothing found
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.get_type().is_vec2(){
-            object.vec.extend_from_slice(&[key, value]);
+            object.vec.push(Field{key, value});
         }
         else{
             object.map.insert(key, value);
@@ -531,13 +536,13 @@ impl ScriptHeap{
     pub fn set_object_value_shallow(&mut self, ptr:ObjectPtr, key:Value, value:Value){
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.get_type().is_vec2(){
-            for chunk in object.vec.rchunks_mut(2){
-                if chunk[0] == key{
-                    chunk[1] = value;
+            for field in object.vec.iter_mut().rev(){
+                if field.key == key{
+                    field.value = value;
                     return
                 }
             }
-            object.vec.extend_from_slice(&[key, value]);
+            object.vec.push(Field{key, value});
             return
         }
         object.map.insert(key, value);
@@ -574,7 +579,7 @@ impl ScriptHeap{
     
     pub fn push_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
         let object = &mut self.objects[ptr.index as usize];
-        object.vec.extend_from_slice(&[key, value]);
+        object.vec.push(Field{key, value});
     }
     
     pub fn set_object_is_fn(&mut self, ptr: ObjectPtr, ip: u32){
@@ -618,9 +623,9 @@ impl ScriptHeap{
         let index = object.vec.len();
         if let Some(ptr) = object.proto.as_object(){
             let object = &self.objects[ptr.index as usize];
-            if let Some(key) = object.vec.get(index*2){
-                let key = *key;
-                self.objects[top_ptr.index as usize].vec.extend_from_slice(&[key, value]);
+            if let Some(field) = object.vec.get(index){
+                let key = field.key;
+                self.objects[top_ptr.index as usize].vec.push(Field{key,value});
             }
         }
     }
@@ -664,9 +669,9 @@ impl ScriptHeap{
                 first = false;
             }
             if object.tag.get_type().has_paired_vec(){
-                for chunk in object.vec.chunks(2){
+                for field in object.vec.iter(){
                     if !first{print!(",")}
-                    self.print_key_value(chunk[0], chunk[1], deep, &mut str);
+                    self.print_key_value(field.key, field.value, deep, &mut str);
                     first = false;
                 }
             }
