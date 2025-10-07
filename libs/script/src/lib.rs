@@ -10,7 +10,7 @@ pub mod interpreter;
 pub mod heap;
 pub mod opcode;
 pub mod interop;
-
+pub mod string;
 // 'locals'
 //
 // locals
@@ -67,20 +67,18 @@ pub fn test(){
     let time = std::time::Instant::now();
     
     let code = "
-        /*let View = {@view}
+        let View = {@view}
         let Window = {@window}
         let Button = {@button}
-        let MyWindow = Window{
+        let x = Window{
             body: View{
+                View{@myview}
             }
         }
+        ~x.body[1]
         
-        let x = MyWindow{
-            body:+{
-                Button{}
-            }
-        };*/
-        
+        ;
+        /*
         let fib = |n|{
             return if(n <= 1){
                 n
@@ -89,7 +87,7 @@ pub fn test(){
                 fib(n - 1) + fib(n - 2)
             }
         }
-        ~fib(38);
+        ~fib(38);*/
     ";
     
     let _code = "
