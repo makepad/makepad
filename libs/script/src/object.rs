@@ -201,18 +201,12 @@ impl fmt::Display for ObjectTag {
     }
 }
 
-#[derive(Default, Debug, Copy, Clone)]
-pub struct Field{
-    pub key: Value,
-    pub value: Value
-}
-
 #[derive(Default, Debug)]
 pub struct Object{
     pub tag: ObjectTag,
     pub proto: Value,
     pub map: BTreeMap<Value, Value>,
-    pub vec: Vec<Field>
+    pub vec: Vec<Value>
 }
 
 impl Object{
@@ -222,11 +216,11 @@ impl Object{
         if !ty_now.is_gc() && ty_new.is_gc(){
             self.vec.clear();
         }
-        /*if !ty_now.has_paired_vec() && ty_new.has_paired_vec(){
+        if !ty_now.has_paired_vec() && ty_new.has_paired_vec(){
             if self.vec.len() & 1 != 0{
                 self.vec.push(Value::NIL)
             }
-        }*/
+        }
         self.tag.set_type_unchecked(ty_new)
     }
     //const DONT_RECYCLE_WHEN: usize = 1000;
