@@ -520,10 +520,12 @@ impl ScriptThread{
                 let value = self.stack.pop().unwrap();
                 if let Some(me) = self.mes.last(){
                     if self.call_has_me(){
+                        
                         let value = if let Some(id) = value.as_id(){
                             if value.is_escaped_id(){ value }
                             else{self.resolve(id, heap)}
                         }else{value};
+                        
                         if !value.is_nil() || me.ty != ScriptMe::OBJ{
                             if me.ty == ScriptMe::CALL{
                                 heap.push_fn_arg(me.object, value);       
@@ -607,7 +609,7 @@ impl ScriptThread{
       
     pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, global:ObjectPtr, sys_fns:&SystemFns){
         let scope = heap.new_object(ObjectTag::DEEP);
-        heap.set_object_type(scope, ObjectType::VEC2);
+        //heap.set_object_type(scope, ObjectType::VEC2);
         let call = CallFrame{
             scope,
             mes_base: 0,
@@ -617,25 +619,25 @@ impl ScriptThread{
         self.mes.push(ScriptMe::object(global));
         self.calls.push(call);
         self.ip = 0;
-        let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
+        //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         while self.ip < parser.code.len(){
             let code = parser.code[self.ip];
             if let Some((opcode, args)) = code.as_opcode(){
-                let dt = std::time::Instant::now();
+                //let dt = std::time::Instant::now();
                 self.opcode(opcode, args, parser, heap, sys_fns);
-                if let Some(t) = profile.get(&opcode){
-                    profile.insert(opcode, t + dt.elapsed().as_secs_f64());
-                }
-                else{
-                    profile.insert(opcode, dt.elapsed().as_secs_f64());
-                }
+                //if let Some(t) = profile.get(&opcode){
+                 //   profile.insert(opcode, t + dt.elapsed().as_secs_f64());
+                //}
+                //else{
+                //    profile.insert(opcode, dt.elapsed().as_secs_f64());
+                //}
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(code);
                 self.ip += 1;
             }
         }
-        println!("{:?}", profile);
+        //println!("{:?}", profile);
         // lets have a look at our scope
         let call = self.calls.pop().unwrap();
         print!("Scope:");

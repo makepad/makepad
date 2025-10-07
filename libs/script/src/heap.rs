@@ -416,20 +416,19 @@ impl ScriptHeap{
                 break;
             }
         }
+        if key.is_prefixed_id(){
+            return self.object_value_prefixed(ptr, key)
+        }
         Value::NIL
     }
     
     pub fn object_value(&self, ptr:ObjectPtr, key:Value)->Value{
         // hard array index
+        if key.is_id(){
+            return self.object_value_deep(ptr, key)
+        }
         if key.is_index(){
             return self.object_value_index(ptr, key)
-        }
-        if let Some(id) = key.as_id(){
-            if id.is_prefixed(){
-                return self.object_value_prefixed(ptr, key)
-            }
-             // scan prototype chain for id
-             return self.object_value_deep(ptr, key)
         }
         if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             return self.object_value_deep(ptr, key)
