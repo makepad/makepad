@@ -44,7 +44,7 @@ impl OpcodeArgs{
 }
 
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Opcode(pub(crate) u8);
 impl Opcode{
         
