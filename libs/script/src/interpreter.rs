@@ -191,25 +191,17 @@ impl ScriptThread{
                 let value = self.stack.pop().unwrap();
                 if let Some(me) = self.mes.last(){
                     if self.call_has_me(){
-                        let (key, value) = if let Some(id) = value.as_id(){
-                            if value.is_escaped_id(){
-                                (Value::NIL, value)
-                            }
-                            else if me.ty == ScriptMe::ARRAY{
-                                (Value::NIL, self.resolve(id, heap))
+                        let value = if let Some(id) = value.as_id(){
+                            if value.is_escaped_id(){ value }
+                            else{self.resolve(id, heap)}
+                        }else{value};
+                        if !value.is_nil() || me.ty != ScriptMe::OBJ{
+                            if me.ty == ScriptMe::CALL{
+                                heap.push_fn_arg(me.object, value);       
                             }
                             else{
-                                (value, self.resolve(id, heap))
+                                heap.object_push_value(me.object, value);       
                             }
-                        }
-                        else{
-                            (Value::NIL, value)
-                        };
-                        if me.ty == ScriptMe::CALL{
-                            //heap.push_fn_arg(me.object, value);
-                        }
-                        else if !value.is_nil() || me.ty == ScriptMe::ARRAY{
-                            heap.push_object_value(me.object, key, value);
                         }
                     }
                 }
@@ -382,7 +374,7 @@ impl ScriptThread{
                 };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 let call = self.calls.last_mut().unwrap();
-                heap.push_object_value(call.scope, id.into(), value);
+                heap.set_object_value(call.scope, id.into(), value);
                 self.ip += 1;
             }
             Opcode::LET_TYPED=>{
@@ -395,7 +387,7 @@ impl ScriptThread{
                 let _ty = self.pop_stack_value();
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 let call = self.calls.last_mut().unwrap();
-                heap.push_object_value(call.scope, id.into(), value);
+                heap.set_object_value(call.scope, id.into(), value);
                 self.ip += 1;
             }
             Opcode::SEARCH_TREE=>{
@@ -431,15 +423,18 @@ impl ScriptThread{
             Opcode::FN_ARGS=>{
                 let call = self.calls.last_mut().unwrap();
                 let me = heap.new_object_with_proto(call.scope.into());
-                // we should set this as a forced vec
-                heap.set_object_type(me, ObjectType::VEC);
                 
+                // set it to a vec type to ensure ordered inserts
+                heap.set_object_type(me, ObjectType::VEC);
+                heap.clear_object_deep(me);
+                                
                 self.mes.push(ScriptMe::object(me));
                 self.ip += 1;
             }
             Opcode::FN_BODY=>{ // alright we have all the args now we get an expression
                 let jump_over_fn = args.to_u32();
                 let me = self.mes.pop().unwrap();
+                
                 heap.set_object_is_fn(me.object, (self.ip + 1) as u32);
                 self.ip += jump_over_fn as usize;
                 self.stack.push(me.object.into());
@@ -492,7 +487,6 @@ impl ScriptThread{
             Opcode::CALL_ARGS=>{
                 let fnobj = self.pop_stack_resolved(heap);
                 let scope = heap.new_object_with_proto(fnobj);
-                
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
                 self.mes.push(ScriptMe::call(scope));
