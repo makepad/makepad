@@ -197,6 +197,7 @@ impl State{
             id!(>>=)  => Opcode::ASSIGN_SHR,
             id!(?=)  => Opcode::ASSIGN_IFNIL,
             id!(.)  => Opcode::FIELD,
+            id!(me.) => Opcode::ME_FIELD,
             _=> Opcode::NOP,
         }.into()
     }
@@ -771,8 +772,7 @@ impl ScriptParser{
                     return 1
                 }
                 if op == id!(.){
-                    self.code.push(id!(me).into());
-                    self.state.push(State::EmitOp(op));
+                    self.state.push(State::EmitOp(id!(me.)));
                     self.state.push(State::BeginExpr(true));
                     return 1
                 }

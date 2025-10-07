@@ -169,17 +169,7 @@ impl ScriptThread{
     
     // lets resolve an id to a Value
     pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
-        if id == id!(me){
-            if let Some(me) = self.mes.last(){
-                if self.call_has_me(){
-                    return (*me).object.into()
-                }
-            }
-        }
-        else if let Some(call) = self.calls.last(){
-            if id == id!(scope){
-                return (call.scope).into()
-            }
+        if let Some(call) = self.calls.last(){
             return heap.object_value(call.scope, id.into())
         }
         Value::NIL
@@ -285,6 +275,16 @@ impl ScriptThread{
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
                     self.push_stack_value(heap.object_value(obj, field))
+                }
+                else{
+                    self.push_stack_value(Value::NIL);
+                }
+                self.ip += 1;
+            }
+            Opcode::ME_FIELD=>{
+                let field = self.pop_stack_value();
+                if let Some(me) = self.mes.last(){
+                    self.push_stack_value(heap.object_value(me.object, field))
                 }
                 else{
                     self.push_stack_value(Value::NIL);
