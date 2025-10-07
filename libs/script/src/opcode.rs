@@ -143,10 +143,11 @@ impl Opcode{
     pub const IF_ELSE:Self = Self(76);
         
     pub const FIELD:Self = Self(77);
-    pub const ARRAY_INDEX:Self = Self(78);
+    pub const ME_FIELD:Self = Self(78);
+    pub const ARRAY_INDEX:Self = Self(79);
     // prototypically inherit the chain for deep prototype fields
-    pub const PROTO_FIELD:Self = Self(79);
-    pub const POP_TO_ME:Self = Self(80);
+    pub const PROTO_FIELD:Self = Self(80);
+    pub const POP_TO_ME:Self = Self(81);
             
     pub const LET_FIRST:Self = Self(82);
     pub const LET_TYPED:Self = Self(82);
@@ -273,6 +274,7 @@ impl fmt::Display for Opcode {
             Self::IF_ELSE => return write!(f, "else"),
                                                                                     
             Self::FIELD => return write!(f, "."),
+            Self::ME_FIELD => return write!(f, "me."),
             Self::ARRAY_INDEX => return write!(f, "[]"),
                                                         
             Self::PROTO_FIELD=> return write!(f, "<proto>."),
