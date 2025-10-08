@@ -76,88 +76,95 @@ impl Opcode{
     pub const LOGIC_AND:Self = Self(20);
     pub const LOGIC_OR:Self = Self(21);
             
-    pub const ASSIGN_FIRST:Self = Self(22);
-            
-    pub const ASSIGN_ME:Self = Self(22);
-    pub const ASSIGN:Self = Self(23);
-    pub const ASSIGN_ADD:Self = Self(24);
-    pub const ASSIGN_SUB:Self = Self(25);
-    pub const ASSIGN_MUL:Self = Self(26);
-    pub const ASSIGN_DIV:Self = Self(27);
-    pub const ASSIGN_MOD:Self = Self(28);
-    pub const ASSIGN_AND:Self = Self(29);
-    pub const ASSIGN_OR:Self = Self(30);
-    pub const ASSIGN_XOR:Self = Self(31);
-    pub const ASSIGN_SHL:Self = Self(32);
-    pub const ASSIGN_SHR:Self = Self(33);
-    pub const ASSIGN_IFNIL:Self = Self(34);
-            
-    pub const ASSIGN_FIELD:Self = Self(35);
-    pub const ASSIGN_FIELD_ADD:Self = Self(36);
-    pub const ASSIGN_FIELD_SUB:Self = Self(37);
-    pub const ASSIGN_FIELD_MUL:Self = Self(38);
-    pub const ASSIGN_FIELD_DIV:Self = Self(39);
-    pub const ASSIGN_FIELD_MOD:Self = Self(40);
-    pub const ASSIGN_FIELD_AND:Self = Self(41);
-    pub const ASSIGN_FIELD_OR:Self = Self(42);
-    pub const ASSIGN_FIELD_XOR:Self = Self(43);
-    pub const ASSIGN_FIELD_SHL:Self = Self(44);
-    pub const ASSIGN_FIELD_SHR:Self = Self(45);
-            
-    pub const ASSIGN_FIELD_IFNIL:Self = Self(46);
-                
-    pub const ASSIGN_INDEX:Self = Self(47);
-    pub const ASSIGN_INDEX_ADD:Self = Self(48);
-    pub const ASSIGN_INDEX_SUB:Self = Self(49);
-    pub const ASSIGN_INDEX_MUL:Self = Self(50);
-    pub const ASSIGN_INDEX_DIV:Self = Self(51);
-    pub const ASSIGN_INDEX_MOD:Self = Self(52);
-    pub const ASSIGN_INDEX_AND:Self = Self(53);
-    pub const ASSIGN_INDEX_OR:Self = Self(54);
-    pub const ASSIGN_INDEX_XOR:Self = Self(55);
-    pub const ASSIGN_INDEX_SHL:Self = Self(56);
-    pub const ASSIGN_INDEX_SHR:Self = Self(57);
-    pub const ASSIGN_INDEX_IFNIL:Self = Self(58);    
-            
-    pub const ASSIGN_LAST:Self = Self(58);
-            
-    pub const BEGIN_PROTO:Self = Self(59);
-    pub const BEGIN_PROTO_ME:Self = Self(60);
-    pub const END_PROTO:Self = Self(61);
-    pub const BEGIN_BARE:Self = Self(62);
-    pub const END_BARE:Self = Self(63);
-    pub const BEGIN_ARRAY:Self = Self(64);
-    pub const END_ARRAY:Self = Self(65);
-    
-    pub const CALL_ARGS:Self = Self(66);
-    pub const CALL_EXEC:Self = Self(67);
-    pub const METHOD_CALL_ARGS:Self = Self(68);
-    pub const METHOD_CALL_EXEC:Self = Self(69);
-                
-    pub const FN_ARGS:Self = Self(70);
-    pub const FN_ARG_DYN:Self = Self(71);
-    pub const FN_ARG_TYPED:Self = Self(72);
-    pub const FN_BODY:Self = Self(73);
-    pub const RETURN:Self = Self(74);
-            
-    pub const IF_TEST:Self = Self(75);
-    pub const IF_ELSE:Self = Self(76);
+    pub const ASSIGN_FIRST:Self = Self(23);
+    pub const ASSIGN_ME:Self = Self(23);
+    pub const ASSIGN_ME_BEFORE:Self = Self(24);
+    pub const ASSIGN_ME_AFTER:Self = Self(25);
+    pub const ASSIGN_ME_BEGIN:Self = Self(26);
         
-    pub const FIELD:Self = Self(77);
-    pub const ME_FIELD:Self = Self(78);
-    pub const ARRAY_INDEX:Self = Self(79);
-    // prototypically inherit the chain for deep prototype fields
-    pub const PROTO_FIELD:Self = Self(80);
-    pub const POP_TO_ME:Self = Self(81);
+    pub const ASSIGN:Self = Self(27);
+    pub const ASSIGN_ADD:Self = Self(28);
+    pub const ASSIGN_SUB:Self = Self(29);
+    pub const ASSIGN_MUL:Self = Self(30);
+    pub const ASSIGN_DIV:Self = Self(31);
+    pub const ASSIGN_MOD:Self = Self(32);
+    pub const ASSIGN_AND:Self = Self(33);
+    pub const ASSIGN_OR:Self = Self(34);
+    pub const ASSIGN_XOR:Self = Self(35);
+    pub const ASSIGN_SHL:Self = Self(36);
+    pub const ASSIGN_SHR:Self = Self(37);
+    pub const ASSIGN_IFNIL:Self = Self(38);
             
-    pub const LET_FIRST:Self = Self(82);
-    pub const LET_TYPED:Self = Self(82);
-    pub const LET_DYN:Self = Self(83);
-    pub const LET_LAST:Self = Self(83);
+    pub const ASSIGN_FIELD:Self = Self(39);
+    pub const ASSIGN_FIELD_ADD:Self = Self(40);
+    pub const ASSIGN_FIELD_SUB:Self = Self(41);
+    pub const ASSIGN_FIELD_MUL:Self = Self(42);
+    pub const ASSIGN_FIELD_DIV:Self = Self(43);
+    pub const ASSIGN_FIELD_MOD:Self = Self(44);
+    pub const ASSIGN_FIELD_AND:Self = Self(45);
+    pub const ASSIGN_FIELD_OR:Self = Self(46);
+    pub const ASSIGN_FIELD_XOR:Self = Self(47);
+    pub const ASSIGN_FIELD_SHL:Self = Self(48);
+    pub const ASSIGN_FIELD_SHR:Self = Self(49);
+            
+    pub const ASSIGN_FIELD_IFNIL:Self = Self(50);
                 
-    pub const SEARCH_TREE:Self = Self(84);
-    pub const STRING_STREAM:Self = Self(85);
-    pub const LOG: Self = Self(86);
+    pub const ASSIGN_INDEX:Self = Self(51);
+    pub const ASSIGN_INDEX_ADD:Self = Self(52);
+    pub const ASSIGN_INDEX_SUB:Self = Self(53);
+    pub const ASSIGN_INDEX_MUL:Self = Self(54);
+    pub const ASSIGN_INDEX_DIV:Self = Self(55);
+    pub const ASSIGN_INDEX_MOD:Self = Self(56);
+    pub const ASSIGN_INDEX_AND:Self = Self(57);
+    pub const ASSIGN_INDEX_OR:Self = Self(58);
+    pub const ASSIGN_INDEX_XOR:Self = Self(59);
+    pub const ASSIGN_INDEX_SHL:Self = Self(60);
+    pub const ASSIGN_INDEX_SHR:Self = Self(61);
+    pub const ASSIGN_INDEX_IFNIL:Self = Self(62);    
+            
+    pub const ASSIGN_LAST:Self = Self(62);
+            
+    pub const BEGIN_PROTO:Self = Self(63);
+    pub const BEGIN_PROTO_ME:Self = Self(64);
+    pub const END_PROTO:Self = Self(65);
+    pub const BEGIN_BARE:Self = Self(66);
+    pub const END_BARE:Self = Self(67);
+    pub const BEGIN_ARRAY:Self = Self(68);
+    pub const END_ARRAY:Self = Self(69);
+    
+    pub const CALL_ARGS:Self = Self(70);
+    pub const CALL_EXEC:Self = Self(71);
+    pub const METHOD_CALL_ARGS:Self = Self(72);
+    pub const METHOD_CALL_EXEC:Self = Self(73);
+                
+    pub const FN_ARGS:Self = Self(74);
+    pub const FN_ARG_DYN:Self = Self(75);
+    pub const FN_ARG_TYPED:Self = Self(76);
+    pub const FN_BODY:Self = Self(77);
+    pub const RETURN:Self = Self(78);
+            
+    pub const IF_TEST:Self = Self(79);
+    pub const IF_ELSE:Self = Self(80);
+        
+    pub const FIELD:Self = Self(81);
+    pub const ME_FIELD:Self = Self(82);
+    pub const ARRAY_INDEX:Self = Self(83);
+    // prototypically inherit the chain for deep prototype fields
+    pub const PROTO_FIELD:Self = Self(84);
+    pub const POP_TO_ME:Self = Self(85);
+            
+    pub const LET_FIRST:Self = Self(86);
+    pub const LET_TYPED:Self = Self(87);
+    pub const LET_DYN:Self = Self(88);
+    pub const LET_LAST:Self = Self(89);
+                
+    pub const SEARCH_TREE:Self = Self(90);
+    pub const STRING_STREAM:Self = Self(91);
+    pub const LOG: Self = Self(92);
+    
+    pub const THIS: Self = Self(93);
+    pub const ME: Self = Self(94);
+    pub const DELETE: Self = Self(95);
 }
 
 
@@ -279,14 +286,16 @@ impl fmt::Display for Opcode {
             Self::ARRAY_INDEX => return write!(f, "[]"),
                                                         
             Self::PROTO_FIELD=> return write!(f, "<proto>."),
-            Self::POP_TO_ME=> return write!(f, "<me>"),
+            Self::POP_TO_ME=> return write!(f, "me="),
                         
             Self::LET_TYPED => return write!(f, "let_ty"),
             Self::LET_DYN => return write!(f, "let"),
                                         
             Self::SEARCH_TREE => return write!(f, "$"),
             Self::STRING_STREAM => return write!(f, "<STRINGSTREAM>"),
-            Self::LOG => return write!(f, "~"),
+            Self::LOG => return write!(f, "log()"),
+            Self::THIS => return write!(f, "this"),
+            Self::ME => return write!(f, "me"),
             _=>return write!(f, "OP{}",self.0)
         }
     }
