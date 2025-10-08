@@ -11,6 +11,7 @@ pub mod heap;
 pub mod opcode;
 pub mod interop;
 pub mod string;
+pub mod sys_fns;
 // 'locals'
 //
 // locals
