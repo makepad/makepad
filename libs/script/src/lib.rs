@@ -66,20 +66,27 @@ pub fn test(){
     let time = std::time::Instant::now();
     
     let code = "
-        let View = {@view}
-        let Window = {@window}
-        let Button = {@button}
-        let x = Window{
-            body: View{
-                View{@myview}
-            }
-        }
-        ~x.z.ty()
-        
-        ;
-      
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let x={a,b,c};
+        ~x.b;
     ";
-    
+        
+    let _code = "
+    let View = {@view}
+    let Window = {@window}
+    let Button = {@button}
+    let x = Window{
+        body: View{
+            View{@myview}
+        }
+    }
+    ~x.z.ty()
+            
+    ;
+          
+    ";
     let _code = "
         let fib = |n|{
             return if(n <= 1){

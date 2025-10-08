@@ -346,7 +346,7 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                if let Some((jump_to, _is_system)) = heap.get_parent_object_is_fn(scope){
+                if let Some((jump_to, _is_system)) = heap.parent_object_as_fn(scope){
                     let call = CallFrame{
                         scope,
                         mes_base: self.mes.len(),
@@ -365,7 +365,7 @@ impl ScriptThread{
                 let method =  self.pop_stack_value();
                 let this = self.pop_stack_resolved(heap);
                 let fnobj = if let Some(obj) = this.as_object(){
-                    heap.object_value(obj, method)
+                    heap.object_method(obj, method)
                 }
                 else{ // we're calling a method on some other thing
                     Value::NIL
@@ -400,7 +400,7 @@ impl ScriptThread{
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
                                     
-                if let Some((jump_to, is_system)) = heap.get_parent_object_is_fn(scope){
+                if let Some((jump_to, is_system)) = heap.parent_object_as_fn(scope){
                     if is_system{
                         let ret = match &sys_fns.fn_table[jump_to as usize]{
                             SystemFnEntry::Inline{fn_ptr}=>{
@@ -545,17 +545,20 @@ impl ScriptThread{
                 if let Some(me) = self.mes.last(){
                     if self.call_has_me(){
                         
-                        let value = if let Some(id) = value.as_id(){
-                            if value.is_escaped_id(){ value }
-                            else{self.resolve(id, heap)}
-                        }else{value};
+                        let (key, value) = if let Some(id) = value.as_id(){
+                            if value.is_escaped_id(){ (Value::NIL, value) }
+                            else{(value, self.resolve(id, heap))}
+                        }else{(Value::NIL,value)};
                         
                         if !value.is_nil() || me.ty != ScriptMe::OBJ{
                             if me.ty == ScriptMe::CALL{
                                 heap.push_fn_arg(me.object, value);       
                             }
+                            else if me.ty == ScriptMe::OBJ{
+                                heap.object_push_value(me.object, key, value);       
+                            }
                             else{
-                                heap.object_push_value(me.object, value);       
+                                heap.object_push_value(me.object, Value::NIL, value);       
                             }
                         }
                     }
