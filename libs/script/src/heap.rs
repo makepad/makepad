@@ -1,3 +1,5 @@
+use makepad_script_derive::*;
+use crate::id::*;
 use std::fmt::Write;
 use crate::value::*;
 use crate::object::*;
@@ -600,11 +602,20 @@ impl ScriptHeap{
         println!("Cant set object value with key {:?}", key);
     }
     
-    pub fn set_object_this(&mut self, ptr:ObjectPtr, this:Value){
+    pub fn set_fn_this(&mut self, ptr:ObjectPtr, this:Value){
         let object = &mut self.objects[ptr.index as usize];
-        object.this = this
+        object.map.insert(id!(this).into(), this);
     }
     
+    pub fn fn_this(&mut self, ptr:ObjectPtr)->Value{
+        let object = &mut self.objects[ptr.index as usize];
+        if let Some(value) = object.map.get(&id!(this).into()){
+            return *value
+        }
+        Value::NIL
+    }
+        
+        
     pub fn push_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
         let object = &mut self.objects[ptr.index as usize];
         object.vec.extend_from_slice(&[key, value]);
@@ -636,12 +647,12 @@ impl ScriptHeap{
     }
     
     
-    pub fn parent_object_as_fn(&self, ptr: ObjectPtr,)->Option<(u32, bool, Value)>{
+    pub fn parent_object_as_fn(&self, ptr: ObjectPtr,)->Option<(u32, bool)>{
         let object = &self.objects[ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             let fn_object = &self.objects[ptr.index as usize];
             if fn_object.tag.is_fn() || fn_object.tag.is_system_fn(){
-                Some((fn_object.tag.get_fn(), fn_object.tag.is_system_fn(), object.this))
+                Some((fn_object.tag.get_fn(), fn_object.tag.is_system_fn()))
             }
             else{
                 None
