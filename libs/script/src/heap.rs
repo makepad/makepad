@@ -476,6 +476,17 @@ impl ScriptHeap{
         }
     }
     
+    pub fn push_object_vec_into_object_vec(&mut self, target:ObjectPtr, source:ObjectPtr){
+        let (target, source) = if target.index > source.index{
+            let (o1, o2) = self.objects.split_at_mut(target.index as _);
+            (&mut o2[0], &mut o1[source.index as usize])                    
+        }else{
+            let (o1, o2) = self.objects.split_at_mut(source.index as _);
+            (&mut o1[target.index as usize], &mut o2[0])                    
+        };
+        target.push_vec_from_other(source);
+    }
+    
     pub fn object_push_value(&mut self, ptr: ObjectPtr, key: Value, value: Value){
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
@@ -589,6 +600,11 @@ impl ScriptHeap{
         println!("Cant set object value with key {:?}", key);
     }
     
+    pub fn set_object_this(&mut self, ptr:ObjectPtr, this:Value){
+        let object = &mut self.objects[ptr.index as usize];
+        object.this = this
+    }
+    
     pub fn push_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
         let object = &mut self.objects[ptr.index as usize];
         object.vec.extend_from_slice(&[key, value]);
@@ -620,12 +636,12 @@ impl ScriptHeap{
     }
     
     
-    pub fn parent_object_as_fn(&self, ptr: ObjectPtr,)->Option<(u32, bool)>{
+    pub fn parent_object_as_fn(&self, ptr: ObjectPtr,)->Option<(u32, bool, Value)>{
         let object = &self.objects[ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
-            let object = &self.objects[ptr.index as usize];
-            if object.tag.is_fn() || object.tag.is_system_fn(){
-                Some((object.tag.get_fn(), object.tag.is_system_fn()))
+            let fn_object = &self.objects[ptr.index as usize];
+            if fn_object.tag.is_fn() || fn_object.tag.is_system_fn(){
+                Some((fn_object.tag.get_fn(), fn_object.tag.is_system_fn(), object.this))
             }
             else{
                 None
@@ -645,9 +661,9 @@ impl ScriptHeap{
                 let key = *key;
                 self.objects[top_ptr.index as usize].vec.extend_from_slice(&[key, value]);
             }
-        }
-        else{ // system functions dont have named args
-            
+            else{
+                self.objects[top_ptr.index as usize].vec.extend_from_slice(&[Value::NIL, value]);
+            }
         }
     }
     

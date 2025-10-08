@@ -69,8 +69,9 @@ pub fn test(){
         let a = 1;
         let b = 2;
         let c = 3;
-        let x={a,b,c};
-        ~x.b;
+        let x={a,b,c,c:1.0};
+        x.push(10);
+        ~x[0];
     ";
         
     let _code = "
