@@ -213,7 +213,6 @@ impl fmt::Display for ObjectTag {
 #[derive(Default, Debug)]
 pub struct Object{
     pub tag: ObjectTag,
-    pub this: Value,
     pub proto: Value,
     pub map: BTreeMap<Value, Value>,
     pub vec: Vec<Value>

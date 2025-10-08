@@ -89,7 +89,7 @@ pub fn test(){
     ;
           
     ";
-    let _code = "
+    let code = "
         let fib = |n|{
             return if(n <= 1){
                 n
