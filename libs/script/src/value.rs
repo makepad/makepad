@@ -55,6 +55,7 @@ impl From<Opcode> for Value{
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ValueType(u8);
 impl ValueType{
+    pub const F64: Self = Self(0);
     pub const NAN: Self = Self(0x01);
     pub const BOOL: Self = Self(0x02);
     pub const NIL: Self = Self(0x03);
@@ -85,14 +86,14 @@ impl ValueType{
     pub const fn to_index(&self)->usize{
         if self.0 > Self::ID_INDEX_HOLE.0{
             if self.0 >= Self::ID.0{
-                return (Self::ID_INDEX_HOLE.0 as usize) - 1
+                return Self::ID_INDEX_HOLE.0 as usize
             }
             else{
-                Self::STRING.0 as usize - 1
+                Self::STRING.0 as usize 
             }
         }
         else if self.0 > 0{
-            (self.0) as usize - 1
+            (self.0) as usize 
         }
         else{
             0
@@ -111,6 +112,7 @@ impl fmt::Debug for ValueType {
 impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self{
+            Self::F64=>write!(f,"F64"),
             Self::NAN=>write!(f,"NAN"),
             Self::BOOL=>write!(f,"BOOL"),
             Self::NIL=>write!(f,"NIL"),
@@ -171,6 +173,9 @@ impl Value{
     // TODO: make this behave like javascript as much as is sensible
     
     pub const fn value_type(&self)->ValueType{
+        if self.is_non_nan_f64(){
+            return ValueType::F64
+        }
         ValueType::from_u64(self.0 & Self::TYPE_MASK)
     }
     
@@ -265,21 +270,21 @@ impl Value{
         self.0 >= Self::TYPE_INLINE_STRING_1  && self.0 <= Self::TYPE_INLINE_STRING_END
     }
     
-    pub fn as_bool(&self)->Option<bool>{
+    pub const fn as_bool(&self)->Option<bool>{
         if self.is_bool(){
-            return Some(*self == Self::TRUE)
+            return Some(self.0 == Self::TRUE.0)
         }
         None
     }
         
-    pub fn as_f64(&self)->Option<f64>{
+    pub const fn as_f64(&self)->Option<f64>{
         if self.is_f64(){
             return Some(f64::from_bits(self.0))
         }
         None    
     }
     
-    pub fn as_index(&self)->usize{
+    pub const fn as_index(&self)->usize{
         if let Some(f) = self.as_f64(){
             return f as usize
         }
@@ -289,23 +294,23 @@ impl Value{
         0
     }
         
-    pub fn as_id(&self)->Option<Id>{
+    pub const fn as_id(&self)->Option<Id>{
         if self.is_id(){
             return Some(Id(self.0&0x0000_3fff_ffff_ffff))
         }
         None
     }
     
-    pub fn is_inline_string(&self)->bool{
+    pub const fn is_inline_string(&self)->bool{
         self.0 >= Self::TYPE_INLINE_STRING_0  && self.0 < Self::TYPE_INLINE_STRING_END
     }
     
-    pub fn is_escaped_id(&self)->bool{
+    pub const fn is_escaped_id(&self)->bool{
         self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
     }
         
         
-    pub fn as_object(&self)->Option<ObjectPtr>{
+    pub const fn as_object(&self)->Option<ObjectPtr>{
         if self.is_object(){
             return Some(ObjectPtr{
                 index: (self.0 & 0xffff_ffff) as u32
@@ -314,43 +319,43 @@ impl Value{
         None
     }
         
-    pub fn as_opcode(&self)->Option<(Opcode,OpcodeArgs)>{
+    pub const fn as_opcode(&self)->Option<(Opcode,OpcodeArgs)>{
         if self.is_opcode(){
             return Some((Opcode(((self.0>>32) & 0xff) as u8),OpcodeArgs((self.0 & 0xffff_ffff) as u32)))
         }
         None
     }
     
-    pub fn is_assign_opcode(&self)->bool{
+    pub const fn is_assign_opcode(&self)->bool{
         if self.is_opcode(){
             let code = Opcode(((self.0>>32) & 0xff) as u8);
-            return code >= Opcode::ASSIGN_FIRST && code <= Opcode::ASSIGN_LAST
+            return code.0 >= Opcode::ASSIGN_FIRST.0 && code.0 <= Opcode::ASSIGN_LAST.0
         }
         false
     }
     
-    pub fn is_let_opcode(&self)->bool{
+    pub const fn is_let_opcode(&self)->bool{
         if self.is_opcode(){
             let code = Opcode(((self.0>>32) & 0xff) as u8);
-            return code >= Opcode::LET_FIRST && code <= Opcode::LET_LAST
+            return code.0 >= Opcode::LET_FIRST.0 && code.0 <= Opcode::LET_LAST.0
         }
         false
     }
     
-    pub fn set_opcode_arg(&mut self, args:OpcodeArgs){
+    pub const fn set_opcode_arg(&mut self, args:OpcodeArgs){
         if self.is_opcode(){
             self.0 |= args.0 as u64;
         }
     }
     
-    pub fn set_opcode_is_statement(&mut self){
+    pub const fn set_opcode_is_statement(&mut self){
         if self.is_opcode(){
             self.0 |= OpcodeArgs::STATEMENT_FLAG as u64;
         }
     }
         
         
-    pub fn as_string(&self)->Option<StringPtr>{
+    pub const fn as_string(&self)->Option<StringPtr>{
         if self.is_string(){
             return Some(StringPtr{
                 index: (self.0 & 0xffff_ffff) as u32
@@ -359,61 +364,69 @@ impl Value{
         None
     }
         
-    pub fn as_color(&self)->Option<u32>{
+    pub const fn as_color(&self)->Option<u32>{
         if self.is_color(){
             return Some((self.0&0xffff_ffff) as u32)
         }
         None
     }
     
-    pub fn as_factory(&self)->Option<u32>{
+    pub const fn as_factory(&self)->Option<u32>{
         if self.is_factory(){
             return Some((self.0&0xffff_ffff) as u32)
         }
         None
     }
     
-    pub fn is_f64(&self)->bool{
+    pub const fn is_f64(&self)->bool{
         self.0 <= Self::TYPE_NAN
     }
     
-    pub fn is_index(&self)->bool{
+    pub const fn is_non_nan_f64(&self)->bool{
+        self.0 < Self::TYPE_NAN
+    }
+    
+    pub const fn is_index(&self)->bool{
         self.0 <= Self::TYPE_NIL
     }
     
-    pub fn is_bool(&self)->bool{
+    pub const fn is_bool(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_BOOL
     }
     
-    pub fn is_nil(&self)->bool{
+    pub const fn is_nil(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_NIL
     }
     
-    pub fn is_color(&self)->bool{
+    pub const fn is_color(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_COLOR
     }
     
-    pub fn is_id(&self)->bool{
+    pub const fn is_id(&self)->bool{
         self.0 >= Self::TYPE_ID
     }
     
-    pub fn is_prefixed_id(&self)->bool{
+    pub const fn is_prefixed_id(&self)->bool{
         self.0 >= Self::TYPE_ID && self.0 & Id::PREFIXED != 0
     }
-        
-    pub fn is_opcode(&self)->bool{
+    
+    pub const fn is_unprefixed_id(&self)->bool{
+        self.0 >= Self::TYPE_ID && self.0 & Id::PREFIXED == 0
+    }
+            
+    pub const fn is_opcode(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_OPCODE
     }
     
-    pub fn is_string(&self)->bool{
+    pub const fn is_string(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_STRING
     }
     
-    pub fn is_object(&self)->bool{
+    pub const fn is_object(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
     }
     
-    pub fn is_factory(&self)->bool{
+    pub const fn is_factory(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_FACTORY
     }
 }
