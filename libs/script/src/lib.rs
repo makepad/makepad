@@ -74,10 +74,13 @@ pub fn test(){
                 View{@myview}
             }
         }
-        ~x.ty()
+        ~x.z.ty()
         
         ;
       
+    ";
+    
+    let _code = "
         let fib = |n|{
             return if(n <= 1){
                 n
@@ -87,12 +90,6 @@ pub fn test(){
             }
         }
         ~fib(38);
-    ";
-    
-    let _code = "
-        let x = [1 2 3]
-        //x.len = || ~'inlog'
-        x.len();
     ";
     
     let mut interp = Script::new();
