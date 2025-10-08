@@ -50,24 +50,7 @@ impl Script{
     pub fn new()->Self{
         let mut heap = ScriptHeap::new();
         let mut sys_fns = SystemFns::default();
-        let h = &mut heap;
-        sys_fns.inline(h, &[], ValueType::NAN, id!(ty), |_, _, _|{id!(nan).into()});
-        sys_fns.inline(h, &[], ValueType::BOOL, id!(ty), |_, _, _|{id!(bool).into()});
-        sys_fns.inline(h, &[], ValueType::NIL, id!(ty), |_, _, _|{id!(nil).into()});
-        sys_fns.inline(h, &[], ValueType::COLOR, id!(ty), |_, _, _|{id!(color).into()});
-        sys_fns.inline(h, &[], ValueType::STRING, id!(ty), |_, _, _|{id!(string).into()});
-        sys_fns.inline(h, &[], ValueType::OBJECT, id!(ty), |_, _, _|{id!(object).into()});
-        sys_fns.inline(h, &[], ValueType::FACTORY, id!(ty), |_, _, _|{id!(factory).into()});
-        sys_fns.inline(h, &[], ValueType::OPCODE, id!(ty), |_, _, _|{id!(opcode).into()});
-        sys_fns.inline(h, &[], ValueType::ID, id!(ty), |_, _, _|{id!(id).into()});
-        
-        sys_fns.inline(h, &[], ValueType::OBJECT, id!(push), |heap, this, args|{
-            let this = this.as_object().unwrap();
-            heap.push_object_vec_into_object_vec(this, args);
-            Value::NIL
-        });
-                
-                
+        crate::sys_fns::build_sys_fns(&mut sys_fns, &mut heap);
         Self{
             sys_fns ,
             parser: Default::default(),
