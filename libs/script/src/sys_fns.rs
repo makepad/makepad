@@ -20,5 +20,11 @@ pub fn build_sys_fns(sys_fns:&mut SystemFns, h:&mut ScriptHeap){
         heap.push_object_vec_into_object_vec(this, args);
         Value::NIL
     });
+    
+    sys_fns.inline(h, &[], ValueType::OBJECT, id!(extend), |heap, args|{
+        let this = heap.fn_this(args).as_object().unwrap();
+        heap.push_object_vec_of_vec_into_object_vec(this, args);
+        Value::NIL
+    });
 }                
       

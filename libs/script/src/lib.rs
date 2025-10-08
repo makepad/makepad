@@ -71,7 +71,7 @@ pub fn test(){
         let b = 2;
         let c = 3;
         let x={a,b,c,c:1.0};
-        x.push(10);
+        x.extend([10,11,12,13,14]);
         ~x[0];
     ";
         
@@ -89,7 +89,7 @@ pub fn test(){
     ;
           
     ";
-    let code = "
+    let _code = "
         let fib = |n|{
             return if(n <= 1){
                 n
