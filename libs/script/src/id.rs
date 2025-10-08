@@ -161,6 +161,10 @@ impl Id {
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
+    
+    pub fn not_empty(&self)->bool{
+        self.0 != 0
+    }
         
     pub const fn to_value(self)->Value{
         Value::from_id(self)

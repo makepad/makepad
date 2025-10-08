@@ -272,7 +272,7 @@ impl ScriptThread{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
                 if let Some(me) = self.mes.last(){
-                    heap.insert_object_value_at(me.object, field, value, opcode == Opcode::ASSIGN_ME_BEGIN);
+                    heap.insert_object_value_begin(me.object, field, value);
                 }
                 if !args.is_statement(){
                     self.push_stack_value(Value::NIL);

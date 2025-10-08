@@ -45,9 +45,10 @@ enum State{
     EmitCall(bool),
     EndCall(bool),
     ArrayIndex,
+    Delete,
     
     For,
-    ForIdent,
+    ForIdent(usize),
     ForRange,
     Return,
     
@@ -261,11 +262,27 @@ impl ScriptParser{
         let op = tok.operator();
         let (id,starts_with_ds) = tok.identifier();
         match self.state.pop().unwrap(){
-            State::For=>{}
-            State::ForIdent=>{}
+            State::For=>{
+                
+                
+            }
+            State::ForIdent(_idents)=>{
+                // we push k and v
+                if id.not_empty(){
+                    if id == id!(in){
+                        
+                    }
+                    // ok we have an ident
+                    // then we might have another ident or a ,
+                    //for k,v in 
+                    
+                    println!("HERE")
+                }
+            }
             State::ForRange=>{}
+            State::Delete=>{}
             State::Let=>{
-                if id != id!(){ // lets expect an assignment expression
+                if id.not_empty(){ // lets expect an assignment expression
                     // push the id on to the stack
                     self.code.push(id.into());
                     self.state.push(State::LetDynOrTyped);
@@ -290,7 +307,7 @@ impl ScriptParser{
                 }
             }
             State::LetType=>{
-                if id != id!(){ // lets expect an assignment expression
+                if id.not_empty(){ // lets expect an assignment expression
                     // push the id on to the stack
                     self.code.push(id.into());
                     self.state.push(State::LetTypedAssign);
@@ -334,7 +351,7 @@ impl ScriptParser{
                 self.code.push(Value::from_opcode_args(Opcode::FN_ARG_DYN, OpcodeArgs::NIL));
             }
             State::FnArgType=>{
-                if id != id!(){
+                if id.not_empty(){
                     self.code.push(id.into());
                     self.state.push(State::EmitFnArgTyped);
                     return 1
@@ -352,7 +369,7 @@ impl ScriptParser{
                 self.state.push(State::EmitFnArgDyn);
             }
             State::FnArgList=>{
-                if id != id!(){ // ident
+                if id.not_empty(){ // ident
                     self.code.push(id.into());
                     self.state.push(State::FnArgList);
                     self.state.push(State::FnArgMaybeType);
@@ -381,7 +398,7 @@ impl ScriptParser{
                 }
             }
             State::EscapedId=>{
-                if id != id!(){ // ident
+                if id.not_empty(){ // ident
                     let value = Value::from_escaped_id(id);
                     self.code.push(value);
                     return 1
@@ -518,13 +535,10 @@ impl ScriptParser{
                 }
             }
             State::EndExpr=>{
+                if op == id!(~){ // its a hard prefix operator
+                    return 0
+                }
                 if State::operator_order(op) != 0{
-                    /*if State::is_assign_operator(op){
-                        // lets error on assignments in pure expression position
-                        println!("{:?}", self.state);
-                        println!("{:?}", self.code);
-                    }*/
-                    
                     let next_state = State::EmitOp(op);
                     // check if we have a ..[] = 
                     if Some(&Opcode::ARRAY_INDEX.into()) == self.code.last(){
@@ -759,7 +773,7 @@ impl ScriptParser{
                     self.code.push(Value::NIL);
                     return 1
                 }
-                if id != id!(){
+                if id.not_empty(){
                     self.code.push(Value::from_id(id));
                     if starts_with_ds{
                         self.code.push(Opcode::SEARCH_TREE.into());
@@ -818,7 +832,7 @@ impl ScriptParser{
                 if id == id!(for){
                     self.state.push(State::EndStmt(self.index));
                     self.state.push(State::For);
-                    self.state.push(State::ForIdent);
+                    //self.state.push(State::ForIdent);
                     return 1
                 }
                 if id == id!(let){
@@ -835,8 +849,13 @@ impl ScriptParser{
                 }
                 if id == id!(delete){
                     self.state.push(State::EndStmt(self.index));
-                    self.state.push(State::Return);
+                    self.state.push(State::Delete);
                     self.state.push(State::BeginExpr(true));
+                    return 1;
+                }
+                if id == id!(for){
+                    self.state.push(State::EndStmt(self.index));
+                    //self.state.push(State::ForIdent);
                     return 1;
                 }
                 if op == id!(;) || op == id!(,){ // just eat it
