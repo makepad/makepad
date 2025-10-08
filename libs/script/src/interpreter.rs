@@ -256,6 +256,30 @@ impl ScriptThread{
                 self.ip += 1;
             }
             
+            Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{
+                let value = self.pop_stack_resolved(heap);
+                let field = self.pop_stack_value();
+                if let Some(me) = self.mes.last(){
+                    heap.insert_object_value_at(me.object, field, value, opcode == Opcode::ASSIGN_ME_BEFORE);
+                }
+                if !args.is_statement(){
+                    self.push_stack_value(Value::NIL);
+                }
+                self.ip += 1;
+            }
+            
+            Opcode::ASSIGN_ME_BEGIN=>{
+                let value = self.pop_stack_resolved(heap);
+                let field = self.pop_stack_value();
+                if let Some(me) = self.mes.last(){
+                    heap.insert_object_value_at(me.object, field, value, opcode == Opcode::ASSIGN_ME_BEGIN);
+                }
+                if !args.is_statement(){
+                    self.push_stack_value(Value::NIL);
+                }
+                self.ip += 1;
+            }
+            
             Opcode::ASSIGN_INDEX=>{
                 let value = self.pop_stack_resolved(heap);
                 let index = self.pop_stack_value();
@@ -621,7 +645,26 @@ impl ScriptThread{
                 }
                 self.ip += 1;
             }
-                         
+            
+            Opcode::THIS=>{
+                // look up this on the scope
+                let call = self.calls.last_mut().unwrap();
+                let scope = call.scope;
+                self.push_stack_value(heap.fn_this(scope));
+                self.ip += 1;
+            }
+            
+            Opcode::ME=>{
+                if self.call_has_me(){
+                    let me = self.mes.last().unwrap();
+                    self.push_stack_value(heap.fn_this(me.object));
+                }
+                else{
+                    self.push_stack_value(Value::NIL);
+                }
+                self.ip += 1;
+            }
+                             
             opcode=>{
                 println!("UNDEFINED OPCODE {}", opcode);
                 self.ip += 1;

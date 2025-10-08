@@ -173,6 +173,9 @@ impl ScriptTokenizer{
     }
     
     fn emit_operator(&mut self){
+        if self.temp.len() == 0{
+            return
+        }
         let id = match Id::from_str_with_lut(&self.temp){
             Err(str)=>{
                 println!("--WARNING-- Id LUT collision between {} and {}", self.temp, str);
@@ -327,6 +330,13 @@ impl ScriptTokenizer{
                     }
                 }
                 State::Operator=>{
+                    
+                    // splice off prefix operator
+                    // all double character operators
+                    if self.temp == "~" || self.temp == "@"{
+                        self.emit_operator();
+                    }
+                        
                     // detect comments
                     if c.is_whitespace(){
                         self.emit_operator();
@@ -340,37 +350,6 @@ impl ScriptTokenizer{
                     else if c == '_' || c == '$' || c.is_alphabetic(){
                         self.emit_operator();
                         self.state = State::Identifier(c == '$');
-                        self.temp.push(c);
-                    }
-                    else if c == '/' && self.temp.chars().last() == Some('/'){
-                        self.temp.pop();
-                        if self.temp.len()>0{
-                            self.emit_operator();
-                        }
-                        self.state = State::LineComment;
-                    }
-                    else if c == '*' && self.temp.chars().last() == Some('/'){
-                        self.temp.pop();
-                        if self.temp.len()>0{
-                            self.emit_operator();
-                        }
-                        self.state = State::BlockComment(0);
-                    }
-                    else if // break up operator sequence
-                    //(c == ':' && self.temp.len() > 0 && self.temp.chars().last() != Some(':')) ||
-                    (c == '.' && self.temp.len() > 0 && self.temp.chars().last() != Some('.')) ||
-                    (c == '-' && self.temp.len() > 0 && self.temp.chars().last() != Some('-')) ||
-                    (c == '+' && self.temp.len() > 0 && self.temp.chars().last() != Some('+'))
-                    {
-                        self.emit_operator();
-                        self.temp.push(c);
-                    }
-                    else if (c == '!' || c == '^') && self.temp.len() > 0{
-                        self.emit_operator();
-                        self.temp.push(c);
-                    }
-                    else if (c == ',' || c == ';') && self.temp.len() > 0{
-                        self.emit_operator();
                         self.temp.push(c);
                     }
                     else if c == '#'{
@@ -396,6 +375,36 @@ impl ScriptTokenizer{
                     else{
                         self.emit_operator();
                         self.state = State::Whitespace;
+                    }
+                    
+                    if self.temp.len() == 2{
+                        match self.temp.as_str(){
+                            "/*"=>{
+                                self.state = State::BlockComment(0);
+                            },
+                            "//"=>{
+                                self.state = State::LineComment;
+                            },
+                            "==" | "!=" | ">:" | "<:" | "^:" | "+:" |
+                            "<=" | ">=" | "&&" | "||" | 
+                            "+=" | "-=" | "*=" | "/=" | 
+                            "%=" | "&=" | "|=" | "^=" =>{
+                                self.emit_operator();
+                            }
+                            _=>{ // lets keep going
+                            }
+                        }
+                    }
+                    if self.temp.len() == 3{ 
+                        match self.temp.as_str(){
+                            "<<=" | ">>=" =>{
+                                self.emit_operator();
+                            }
+                            _=>{
+                                println!("Tokenizer, invalid operator encountered: {}", self.temp);
+                                self.temp.clear();
+                            }
+                        }
                     }
                 }
                 State::EscapeInString(double)=>{
