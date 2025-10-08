@@ -71,31 +71,22 @@ pub fn test(){
         let Window = {@window}
         let Button = {@button}
         let x = Window{
-            $b1:Button{}
+            size: 1.0
+            $b1: Button{}
             $body: View{}
-            $b2:Button{}
+            $b2: Button{}
         }
-        let x = x{}
+        let x = x{};
+        for v in [1,2,3,4] ~v;
         ~x;
     ";
         
     let code = "
-       let x = || {
-           return;
-           1
-       }
-       ~x();
     ";
+    
     let _code = "
-        let fib = |n|{
-            return if(n <= 1){
-                n
-            }
-            else {
-                fib(n - 1) + fib(n - 2)
-            }
-        }
-        ~fib(38);
+        let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
+        ~fib(38)
     ";
     
     let mut interp = Script::new();
@@ -106,3 +97,24 @@ pub fn test(){
 /*
 pub const OP_(\w+): Value = Value\(Self::TYPE_OPCODE \| (\d+)\);
 pub const ID_$1:u64 = $2;pub const OP_$1: Value = Value(Self::TYPE_OPCODE | Self::ID_$1);*/
+/*
+let MyApp = App{
+    app_bar:+{
+        title: 'My home page'
+    }
+    body: +{
+        View{
+            height: 20
+            flow: Down
+            Label{text:'Hello world'}
+            Button{
+                let result = ai('tell me a poem')
+                text: result
+                on_click:||{
+                    ~'Click!
+                }
+            }
+        }
+    }
+}
+*/
