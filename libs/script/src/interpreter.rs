@@ -115,7 +115,7 @@ macro_rules! fu64_op_impl{
     }}
 } 
 
-enum RustCall{
+pub enum ScriptHook{
     SysCall(usize),
     RustCall
 }
@@ -148,19 +148,19 @@ impl ScriptThread{
        // }
     }
     
-    pub fn peek_stack_pair(&mut self, heap:&ScriptHeap)->(Value,Value){
+    pub fn peek_stack(&mut self, heap:&ScriptHeap)->Value{
         if let Some(val) = self.stack.last(){
             if let Some(id) = val.as_id(){
                 if val.is_escaped_id(){
-                    return (*val,*val)
+                    return *val
                 }
-                return (*val, self.resolve(id, heap))
+                return self.resolve(id, heap)
             }
-            return (*val,*val)    
+            return *val    
         }
         else{
            println!("STACK UNDERFLOW");
-            (Value::NIL, Value::NIL)
+            Value::NIL
         }
     }
     
@@ -205,7 +205,7 @@ impl ScriptThread{
         Value::NIL
     }
     
-    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap, sys_fns:&SystemFns)->Option<RustCall>{
+    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap, sys_fns:&SystemFns)->Option<ScriptHook>{
         match opcode{
             
             Opcode::NOT=>{
@@ -606,19 +606,19 @@ impl ScriptThread{
             }
                                   
             Opcode::LOG=>{
-                let value = self.peek_stack_pair(heap);
-                if value.1 != Value::NIL{
-                    if let Some(obj) = value.1.as_object(){
-                        print!("Log :");
+                let value = self.peek_stack(heap);
+                if value != Value::NIL{
+                    if let Some(obj) = value.as_object(){
+                        print!("Log OBJECT:");
                         heap.print_object(obj, true);
                         println!("");
                     }
                     else{
-                        println!("Log: {:?}", value.1);
+                        println!("Log {:?}: {:?}", value.value_type(), value);
                     }
                 }
                 else{
-                    println!("Log: {}:{}", value.0,value.1)
+                    println!("Log: NIL");
                 }
                 self.ip += 1;
             }
@@ -651,9 +651,9 @@ impl ScriptThread{
                 //let dt = std::time::Instant::now();
                 if let Some(rust_call) = self.opcode(opcode, args, parser, heap, sys_fns){
                     match rust_call{
-                        RustCall::SysCall(sys_id)=>{
+                        ScriptHook::SysCall(_sys_id)=>{
                         }
-                        RustCall::RustCall=>{
+                        ScriptHook::RustCall=>{
                         }
                     }
                     self.stack.push(Value::NIL)

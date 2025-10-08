@@ -101,6 +101,36 @@ impl ValueType{
 }
 
 
+impl fmt::Debug for ValueType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+
+impl fmt::Display for ValueType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self{
+            Self::NAN=>write!(f,"NAN"),
+            Self::BOOL=>write!(f,"BOOL"),
+            Self::NIL=>write!(f,"NIL"),
+            Self::COLOR=>write!(f,"COLOR"),
+            Self::STRING=>write!(f,"STRING"),
+            Self::OBJECT=>write!(f,"OBJECT"),
+            Self::FACTORY=>write!(f,"FACTORY"),
+            Self::OPCODE=>write!(f,"OPCODE"),
+            Self::INLINE_STRING_0=>write!(f,"ID"),
+            Self::INLINE_STRING_1=>write!(f,"ID"),
+            Self::INLINE_STRING_2=>write!(f,"ID"),
+            Self::INLINE_STRING_3=>write!(f,"ID"),
+            Self::INLINE_STRING_4=>write!(f,"ID"),
+            Self::INLINE_STRING_5=>write!(f,"ID"),
+            x if x.0 >= Self::ID.0=>write!(f,"NAN"),
+            _=>write!(f,"ValueType?")
+        }
+    }
+}
+
 impl Value{
     pub const TYPE_MASK: u64 = 0xFFFF_FF00_0000_0000;
         
