@@ -489,6 +489,22 @@ impl ScriptHeap{
         target.push_vec_from_other(source);
     }
     
+    pub fn push_object_vec_of_vec_into_object_vec(&mut self, target:ObjectPtr, source:ObjectPtr){
+        let len = self.objects[source.index as usize].vec.len();
+        for i in 0..len{
+            if let Some(source) = self.objects[source.index as usize].vec[i].as_object(){
+                let (target, source) = if target.index > source.index{
+                    let (o1, o2) = self.objects.split_at_mut(target.index as _);
+                    (&mut o2[0], &mut o1[source.index as usize])                    
+                }else{
+                    let (o1, o2) = self.objects.split_at_mut(source.index as _);
+                    (&mut o1[target.index as usize], &mut o2[0])                    
+                };
+                target.push_vec_from_other(source);
+            }
+        }
+    }
+    
     pub fn object_push_value(&mut self, ptr: ObjectPtr, key: Value, value: Value){
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
