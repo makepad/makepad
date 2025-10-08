@@ -72,6 +72,7 @@ pub fn test(){
         let c = 3;
         let x={a,b,c,c:1.0};
         x.extend([10,11,12,13,14]);
+        x.merge({d:1.0});
         ~x[0];
     ";
         
@@ -84,9 +85,7 @@ pub fn test(){
             View{@myview}
         }
     }
-    ~x.z.ty()
-            
-    ;
+    ~x.z.ty();
           
     ";
     let _code = "

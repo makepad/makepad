@@ -219,6 +219,10 @@ pub struct Object{
 }
 
 impl Object{
+    pub fn merge_map_from_other(&mut self, other:&Object){
+        self.map.extend(&other.map);
+    }
+     
     pub fn push_vec_from_other(&mut self, other:&Object){
         // alright lets go and push the vec from other
         let ty_self = self.tag.get_type();
