@@ -585,6 +585,12 @@ impl ScriptHeap{
         object.map.insert(key, value);
     }
     
+    pub fn insert_object_value_at(&mut self, _ptr:ObjectPtr, _key:Value, _value:Value, _before:bool){
+    }
+    
+    pub fn insert_object_begin_end(&mut self, _ptr:ObjectPtr, _key:Value, _value:Value, _begin:bool){
+    }
+    
     pub fn set_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
         if key.is_index(){ // use vector
             return self.set_object_value_index(ptr, key, value);

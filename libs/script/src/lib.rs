@@ -66,27 +66,25 @@ pub fn test(){
     
     let time = std::time::Instant::now();
     
-    let code = "
-        let a = 1;
-        let b = 2;
-        let c = 3;
-        let x={a,b,c,c:1.0};
-        x.extend([10,11,12,13,14]);
-        x.merge({d:1.0});
-        ~x[0];
+    let _code = "
+        let View = {@view}
+        let Window = {@window}
+        let Button = {@button}
+        let x = Window{
+            $b1:Button{}
+            $body: View{}
+            $b2:Button{}
+        }
+        let x = x{}
+        ~x;
     ";
         
-    let _code = "
-    let View = {@view}
-    let Window = {@window}
-    let Button = {@button}
-    let x = Window{
-        body: View{
-            View{@myview}
-        }
-    }
-    ~x.z.ty();
-          
+    let code = "
+       let x = || {
+           return;
+           1
+       }
+       ~x();
     ";
     let _code = "
         let fib = |n|{

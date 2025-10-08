@@ -121,13 +121,13 @@ impl fmt::Display for ValueType {
             Self::OBJECT=>write!(f,"OBJECT"),
             Self::FACTORY=>write!(f,"FACTORY"),
             Self::OPCODE=>write!(f,"OPCODE"),
-            Self::INLINE_STRING_0=>write!(f,"ID"),
-            Self::INLINE_STRING_1=>write!(f,"ID"),
-            Self::INLINE_STRING_2=>write!(f,"ID"),
-            Self::INLINE_STRING_3=>write!(f,"ID"),
-            Self::INLINE_STRING_4=>write!(f,"ID"),
-            Self::INLINE_STRING_5=>write!(f,"ID"),
-            x if x.0 >= Self::ID.0=>write!(f,"NAN"),
+            Self::INLINE_STRING_0=>write!(f,"INLINE_STRING_0"),
+            Self::INLINE_STRING_1=>write!(f,"INLINE_STRING_1"),
+            Self::INLINE_STRING_2=>write!(f,"INLINE_STRING_2"),
+            Self::INLINE_STRING_3=>write!(f,"INLINE_STRING_3"),
+            Self::INLINE_STRING_4=>write!(f,"INLINE_STRING_4"),
+            Self::INLINE_STRING_5=>write!(f,"INLINE_STRING_5"),
+            x if x.0 >= Self::ID.0=>write!(f,"ID"),
             _=>write!(f,"ValueType?")
         }
     }
