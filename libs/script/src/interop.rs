@@ -7,7 +7,7 @@ use crate::id::*;
 
 pub enum SystemFnEntry{
     Inline{
-        fn_ptr: Box<dyn Fn(&mut ScriptHeap, Value, ObjectPtr)->Value>
+        fn_ptr: Box<dyn Fn(&mut ScriptHeap, ObjectPtr)->Value>
     }
 }
 
@@ -18,7 +18,7 @@ pub struct SystemFnIndex{
 
 impl SystemFnEntry{
     pub fn inline<F>(f: F)->Self 
-        where F: Fn(&mut ScriptHeap, Value, ObjectPtr)->Value + 'static{
+        where F: Fn(&mut ScriptHeap, ObjectPtr)->Value + 'static{
         Self::Inline{fn_ptr:Box::new(f)}
     }
 }
@@ -31,7 +31,7 @@ pub struct SystemFns{
 
 impl SystemFns{
     pub fn inline<F>(&mut self, heap:&mut ScriptHeap, args:&[Id], index:ValueType, id:Id, f: F) 
-    where F: Fn(&mut ScriptHeap, Value, ObjectPtr)->Value + 'static{
+    where F: Fn(&mut ScriptHeap, ObjectPtr)->Value + 'static{
         let index = index.to_index();
         if index >= self.type_table.len(){
             self.type_table.resize_with(index + 1, || Default::default());

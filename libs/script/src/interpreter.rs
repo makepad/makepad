@@ -336,8 +336,9 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                if let Some((jump_to, _is_system, _this
-                )) = heap.parent_object_as_fn(scope){
+                heap.set_object_type(scope, ObjectType::AUTO);
+                                
+                if let Some((jump_to, _is_system)) = heap.parent_object_as_fn(scope){
                     let call = CallFrame{
                         scope,
                         mes_base: self.mes.len(),
@@ -382,8 +383,7 @@ impl ScriptThread{
                 //heap.set_object_map(scope);
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
-                heap.set_object_this(scope, this);
-                //self.push_stack_value(this);
+                heap.set_fn_this(scope, this);
                 self.mes.push(ScriptMe::call(scope));
                 self.ip += 1;
             }
@@ -393,12 +393,14 @@ impl ScriptThread{
                 //let this = self.peek_stack_value();
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                                    
-                if let Some((jump_to, is_system, this)) = heap.parent_object_as_fn(scope){
+                // set the heap back to a hashmap
+                heap.set_object_type(scope, ObjectType::AUTO);
+                
+                if let Some((jump_to, is_system)) = heap.parent_object_as_fn(scope){
                     if is_system{
                         let ret = match &sys_fns.fn_table[jump_to as usize]{
                             SystemFnEntry::Inline{fn_ptr}=>{
-                                fn_ptr(heap, this, scope)
+                                fn_ptr(heap, scope)
                             }
                         };
                         self.stack.push(ret);
