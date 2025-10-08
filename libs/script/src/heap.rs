@@ -489,7 +489,7 @@ impl ScriptHeap{
         target.push_vec_from_other(source);
     }
     
-    pub fn push_object_vec_of_vec_into_object_vec(&mut self, target:ObjectPtr, source:ObjectPtr){
+    pub fn push_object_vec_of_vec_into_object_vec(&mut self, target:ObjectPtr, source:ObjectPtr, map:bool){
         let len = self.objects[source.index as usize].vec.len();
         for i in 0..len{
             if let Some(source) = self.objects[source.index as usize].vec[i].as_object(){
@@ -501,6 +501,9 @@ impl ScriptHeap{
                     (&mut o1[target.index as usize], &mut o2[0])                    
                 };
                 target.push_vec_from_other(source);
+                if map{
+                    target.merge_map_from_other(source);
+                }
             }
         }
     }

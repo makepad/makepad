@@ -23,7 +23,13 @@ pub fn build_sys_fns(sys_fns:&mut SystemFns, h:&mut ScriptHeap){
     
     sys_fns.inline(h, &[], ValueType::OBJECT, id!(extend), |heap, args|{
         let this = heap.fn_this(args).as_object().unwrap();
-        heap.push_object_vec_of_vec_into_object_vec(this, args);
+        heap.push_object_vec_of_vec_into_object_vec(this, args, false);
+        Value::NIL
+    });
+    
+    sys_fns.inline(h, &[], ValueType::OBJECT, id!(merge), |heap, args|{
+        let this = heap.fn_this(args).as_object().unwrap();
+        heap.push_object_vec_of_vec_into_object_vec(this, args, true);
         Value::NIL
     });
 }                
