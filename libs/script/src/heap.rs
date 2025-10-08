@@ -395,19 +395,19 @@ impl ScriptHeap{
         return Value::NIL
     }
     
-    pub fn object_value_deep(&self, ptr:ObjectPtr, key: Value)->Value{
-        let mut ptr = ptr;
+    pub fn object_value_deep(&self, obj_ptr:ObjectPtr, key: Value)->Value{
+        let mut ptr = obj_ptr;
         loop{
             let object = &self.objects[ptr.index as usize];
-            if object.tag.get_type().is_vec2(){
+            if let Some(value) = object.map.get(&key){
+                return *value
+            }
+            if object.tag.get_type().has_paired_vec(){
                 for chunk in object.vec.rchunks(2){
                     if chunk[0] == key{
                         return chunk[1]
                     }
                 }
-            }
-            if let Some(value) = object.map.get(&key){
-                return *value
             }
             if let Some(next_ptr) = object.proto.as_object(){
                 ptr = next_ptr
@@ -416,10 +416,17 @@ impl ScriptHeap{
                 break;
             }
         }
-        if key.is_prefixed_id(){
-            return self.object_value_prefixed(ptr, key)
-        }
         Value::NIL
+    }
+    
+    pub fn object_method(&self, ptr:ObjectPtr, key:Value)->Value{
+        let object = &self.objects[ptr.index as usize];
+        if object.tag.has_methods(){
+            self.object_value(ptr, key)
+        }
+        else{
+            Value::NIL
+        }
     }
     
     pub fn object_value(&self, ptr:ObjectPtr, key:Value)->Value{
@@ -469,11 +476,14 @@ impl ScriptHeap{
         }
     }
     
-    pub fn object_push_value(&mut self, ptr: ObjectPtr, value: Value){
+    pub fn object_push_value(&mut self, ptr: ObjectPtr, key: Value, value: Value){
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
         if ty.has_paired_vec(){
-            object.vec.extend_from_slice(&[Value::NIL, value]);
+            object.vec.extend_from_slice(&[key, value]);
+            //if key.is_unprefixed_id() && !object.tag.get_type().is_vec2(){ 
+            //    object.map.insert(key, value);
+            //}
         }
         else if ty.is_typed(){
             println!("IMPLEMENT TYPED PUSH VALUE")
@@ -499,7 +509,7 @@ impl ScriptHeap{
         let mut ptr = ptr;
         loop{
             let object = &mut self.objects[ptr.index as usize];
-            if object.tag.get_type().is_vec2(){
+            if object.tag.get_type().has_paired_vec(){
                 for chunk in object.vec.rchunks_mut(2){
                     if chunk[0] == key{
                         chunk[1] = value;
@@ -548,6 +558,13 @@ impl ScriptHeap{
             return self.set_object_value_index(ptr, key, value);
         }
         if let Some(id) = key.as_id(){
+            // mark object as having methods
+            if let Some(obj) = value.as_object(){
+                if self.object_is_fn(obj){
+                    let object = &mut self.objects[ptr.index as usize];
+                    object.tag.set_has_methods();                    
+                }
+            }
             if id.is_prefixed(){
                 return self.set_object_value_prefixed(ptr, key, value)
             }
@@ -587,7 +604,7 @@ impl ScriptHeap{
         object.tag.set_system_fn(ip);
     }
         
-    pub fn get_object_is_fn(&self, ptr: ObjectPtr,)->Option<u32>{
+    pub fn get_object_as_fn(&self, ptr: ObjectPtr,)->Option<u32>{
         let object = &self.objects[ptr.index as usize];
         if object.tag.is_fn(){
             Some(object.tag.get_fn())
@@ -597,7 +614,13 @@ impl ScriptHeap{
         }
     }
     
-    pub fn get_parent_object_is_fn(&self, ptr: ObjectPtr,)->Option<(u32, bool)>{
+    pub fn object_is_fn(&self, ptr: ObjectPtr,)->bool{
+        let object = &self.objects[ptr.index as usize];
+        object.tag.is_fn()
+    }
+    
+    
+    pub fn parent_object_as_fn(&self, ptr: ObjectPtr,)->Option<(u32, bool)>{
         let object = &self.objects[ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             let object = &self.objects[ptr.index as usize];
