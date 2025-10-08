@@ -90,10 +90,11 @@ impl ObjectTag{
     pub const FN: u64 = 0x800;
     pub const SYSTEM_FN: u64 = 0x1000;
     pub const REFFED: u64 = 0x2000;
+    pub const HAS_METHODS: u64 = 0x4000;
         
     pub const TYPE_MASK: u64 = 0xff;
         
-    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK;
+    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::HAS_METHODS;
         
     pub fn set_flags(&mut self, flags:u64){
         self.0 |= flags
@@ -138,6 +139,14 @@ impl ObjectTag{
             
     pub fn set_deep(&mut self){
         self.0 |= Self::DEEP
+    }
+    
+    pub fn set_has_methods(&mut self){
+        self.0 |= Self::HAS_METHODS;
+    }
+    
+    pub fn has_methods(&self)->bool{
+        self.0 & Self::HAS_METHODS != 0
     }
         
     pub fn set_reffed(&mut self){
