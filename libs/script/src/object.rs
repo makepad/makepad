@@ -213,12 +213,37 @@ impl fmt::Display for ObjectTag {
 #[derive(Default, Debug)]
 pub struct Object{
     pub tag: ObjectTag,
+    pub this: Value,
     pub proto: Value,
     pub map: BTreeMap<Value, Value>,
     pub vec: Vec<Value>
 }
 
 impl Object{
+    pub fn push_vec_from_other(&mut self, other:&Object){
+        // alright lets go and push the vec from other
+        let ty_self = self.tag.get_type();
+        let ty_other = other.tag.get_type();
+        if ty_self.has_paired_vec() && ty_other.has_paired_vec(){
+            self.vec.extend_from_slice(&other.vec);
+            return
+        }
+        if ty_self.is_vec1() && ty_other.has_paired_vec(){
+            for chunk in other.vec.chunks(2){
+                self.vec.push(chunk[1])
+            }
+            return
+        }
+                
+        if ty_self.has_paired_vec() && ty_other.is_vec1(){
+            for value in &other.vec{
+                self.vec.extend_from_slice(&[Value::NIL, *value]);
+            }
+            return
+        }
+        println!("implement push_vec_from_other {} {}", ty_self, ty_other);
+    }
+    
     pub fn set_type(&mut self, ty_new:ObjectType){
         let ty_now = self.tag.get_type();
         // block flipping from raw data mode to gc'ed mode

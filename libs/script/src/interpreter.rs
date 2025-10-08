@@ -51,16 +51,23 @@ impl Script{
         let mut heap = ScriptHeap::new();
         let mut sys_fns = SystemFns::default();
         let h = &mut heap;
-        sys_fns.inline(h, &[], ValueType::NAN, id!(ty), |_, _|{id!(nan).into()});
-        sys_fns.inline(h, &[], ValueType::BOOL, id!(ty), |_, _|{id!(bool).into()});
-        sys_fns.inline(h, &[], ValueType::NIL, id!(ty), |_, _|{id!(nil).into()});
-        sys_fns.inline(h, &[], ValueType::COLOR, id!(ty), |_, _|{id!(color).into()});
-        sys_fns.inline(h, &[], ValueType::STRING, id!(ty), |_, _|{id!(string).into()});
-        sys_fns.inline(h, &[], ValueType::OBJECT, id!(ty), |_, _|{id!(object).into()});
-        sys_fns.inline(h, &[], ValueType::FACTORY, id!(ty), |_, _|{id!(factory).into()});
-        sys_fns.inline(h, &[], ValueType::OPCODE, id!(ty), |_, _|{id!(opcode).into()});
-        sys_fns.inline(h, &[], ValueType::ID, id!(ty), |_, _|{id!(id).into()});
+        sys_fns.inline(h, &[], ValueType::NAN, id!(ty), |_, _, _|{id!(nan).into()});
+        sys_fns.inline(h, &[], ValueType::BOOL, id!(ty), |_, _, _|{id!(bool).into()});
+        sys_fns.inline(h, &[], ValueType::NIL, id!(ty), |_, _, _|{id!(nil).into()});
+        sys_fns.inline(h, &[], ValueType::COLOR, id!(ty), |_, _, _|{id!(color).into()});
+        sys_fns.inline(h, &[], ValueType::STRING, id!(ty), |_, _, _|{id!(string).into()});
+        sys_fns.inline(h, &[], ValueType::OBJECT, id!(ty), |_, _, _|{id!(object).into()});
+        sys_fns.inline(h, &[], ValueType::FACTORY, id!(ty), |_, _, _|{id!(factory).into()});
+        sys_fns.inline(h, &[], ValueType::OPCODE, id!(ty), |_, _, _|{id!(opcode).into()});
+        sys_fns.inline(h, &[], ValueType::ID, id!(ty), |_, _, _|{id!(id).into()});
         
+        sys_fns.inline(h, &[], ValueType::OBJECT, id!(push), |heap, this, args|{
+            let this = this.as_object().unwrap();
+            heap.push_object_vec_into_object_vec(this, args);
+            Value::NIL
+        });
+                
+                
         Self{
             sys_fns ,
             parser: Default::default(),
@@ -148,7 +155,7 @@ impl ScriptThread{
        // }
     }
     
-    pub fn peek_stack(&mut self, heap:&ScriptHeap)->Value{
+    pub fn peek_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
         if let Some(val) = self.stack.last(){
             if let Some(id) = val.as_id(){
                 if val.is_escaped_id(){
@@ -346,7 +353,8 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                if let Some((jump_to, _is_system)) = heap.parent_object_as_fn(scope){
+                if let Some((jump_to, _is_system, _this
+                )) = heap.parent_object_as_fn(scope){
                     let call = CallFrame{
                         scope,
                         mes_base: self.mes.len(),
@@ -381,6 +389,7 @@ impl ScriptThread{
                         scope
                     }
                     else{ // fn not found
+                        println!("Method not found on object: {}()", method);
                         heap.new_object(0)
                     }
                 }
@@ -390,21 +399,23 @@ impl ScriptThread{
                 //heap.set_object_map(scope);
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
-                heap.set_object_value(scope, id!(this).into(), this);
+                heap.set_object_this(scope, this);
+                //self.push_stack_value(this);
                 self.mes.push(ScriptMe::call(scope));
                 self.ip += 1;
             }
             Opcode::METHOD_CALL_EXEC=>{
                 let me = self.mes.pop().unwrap();
                 let scope = me.object;
+                //let this = self.peek_stack_value();
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
                                     
-                if let Some((jump_to, is_system)) = heap.parent_object_as_fn(scope){
+                if let Some((jump_to, is_system, this)) = heap.parent_object_as_fn(scope){
                     if is_system{
                         let ret = match &sys_fns.fn_table[jump_to as usize]{
                             SystemFnEntry::Inline{fn_ptr}=>{
-                                fn_ptr(heap, scope)
+                                fn_ptr(heap, this, scope)
                             }
                         };
                         self.stack.push(ret);
@@ -414,7 +425,7 @@ impl ScriptThread{
                         let call = CallFrame{
                             scope,
                             mes_base: self.mes.len(),
-                            stack_base: self.stack.len(),
+                            stack_base: self.stack.len() - 1,
                             return_ip: self.ip + 1,
                         };
                         self.calls.push(call);
@@ -609,7 +620,7 @@ impl ScriptThread{
             }
                                   
             Opcode::LOG=>{
-                let value = self.peek_stack(heap);
+                let value = self.peek_stack_resolved(heap);
                 if value != Value::NIL{
                     if let Some(obj) = value.as_object(){
                         print!("Log OBJECT:");
