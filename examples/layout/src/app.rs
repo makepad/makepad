@@ -226,6 +226,49 @@ live_design!{
                             }
                         }
                     }
+                    <Label> {
+                        text: "Nested fits with relative minimal size. Both the parent and the grandparent view use a fit with a maximum of half the size of the outermost view, so the red square of size 300 is clipped.",
+                    }
+                    <View> {
+                        width: 400,
+                        height: 400,
+                        show_bg: true,
+                        draw_bg: {
+                            color: #CCC
+                        }
+                        <View> {
+                            width: Fit {
+                                max: Rel(0.5)
+                            },
+                            height: Fit {
+                                max: Rel(0.5)
+                            },
+                            show_bg: true,
+                            draw_bg: {
+                                color: #888
+                            }
+                            <View> {
+                                width: Fit {
+                                    max: Rel(0.5)
+                                },
+                                height: Fit {
+                                    max: Rel(0.5)
+                                },
+                                show_bg: true,
+                                draw_bg: {
+                                    color: #444
+                                }
+                                <View> {
+                                    width: 300.0,
+                                    height: 300.0,
+                                    show_bg: true,
+                                    draw_bg: {
+                                        color: #F00
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
