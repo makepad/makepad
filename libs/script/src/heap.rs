@@ -302,7 +302,9 @@ impl ScriptHeap{
             (object.tag.proto_fwd(), ptr.index as usize)
         }
         else{
-            return self.new_object(0)
+            let ptr = self.new_object(0);
+            self.objects[ptr.index as usize].proto = proto;
+            return ptr
         };
         
         if let Some(index) = self.objects_free.pop(){
@@ -444,6 +446,14 @@ impl ScriptHeap{
         }
         // TODO implement string lookup
         Value::NIL
+    }
+    
+    pub fn object_prototype(&self, ptr:ObjectPtr)->Value{
+        self.objects[ptr.index as usize].proto
+    }
+    
+    pub fn object(&self, ptr:ObjectPtr)->&Object{
+        &self.objects[ptr.index as usize]
     }
     
     pub fn set_object_value_index(&mut self, ptr: ObjectPtr, index:Value, value: Value){

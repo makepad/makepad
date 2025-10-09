@@ -15,6 +15,11 @@ enum State{
     
     EscapedId,
     
+    ForIdent(usize),
+    ForBody(usize),
+    ForExpr(usize),
+    ForBlock(usize),
+
     IfTest,
     IfTrueExpr(u32),
     IfTrueBlock(u32, bool),
@@ -47,9 +52,6 @@ enum State{
     ArrayIndex,
     Delete,
     
-    For,
-    ForIdent(usize),
-    ForRange,
     Return,
     
     Let,
@@ -262,24 +264,77 @@ impl ScriptParser{
         let op = tok.operator();
         let (id,starts_with_ds) = tok.identifier();
         match self.state.pop().unwrap(){
-            State::For=>{
-                
-                
-            }
-            State::ForIdent(_idents)=>{
+            State::ForIdent(idents)=>{
                 // we push k and v
                 if id.not_empty(){
                     if id == id!(in){
-                        
+                        // alright we move on to parsing the range expr
+                        self.state.push(State::ForBody(idents));
+                        self.state.push(State::BeginExpr(true));
+                        return 1
                     }
-                    // ok we have an ident
-                    // then we might have another ident or a ,
-                    //for k,v in 
-                    
-                    println!("HERE")
+                    else if idents < 3{
+                        self.code.push(id.into());
+                        self.state.push(State::ForIdent(idents + 1));
+                        return 1
+                    }
+                    else{
+                        println!("Too many identifiers in for");
+                        return 0
+                    }
+                }
+                if op == id!(,){ // eat the commas
+                    self.state.push(State::ForIdent(idents));
+                    return 1
+                }
+                println!("Unexpected state in parsing for");
+            }
+            State::ForBody(idents)=>{
+                // alright lets emit a for instruction
+                
+                let code_start = self.code.len();
+                if idents == 1{
+                    self.code.push(Opcode::FOR_1.into());
+                }
+                else if idents == 2{
+                    self.code.push(Opcode::FOR_2.into());
+                }
+                else if idents == 3{
+                    self.code.push(Opcode::FOR_3.into());
+                }
+                else{
+                    println!("Wrong number of identifiers for for loop {idents}");
+                    return 0
+                }
+                if tok.is_open_curly(){
+                    self.state.push(State::ForBlock(code_start));
+                    self.state.push(State::BeginStmt(false));
+                    return 1
+                }
+                else{
+                    self.state.push(State::ForExpr(code_start));
+                    self.state.push(State::BeginExpr(true));
                 }
             }
-            State::ForRange=>{}
+            State::ForExpr(code_start)=>{
+                self.code.push(Opcode::POP_TO_ME.into());
+                self.code.push(Opcode::FOR_END.into());
+                let jump_to = (self.code.len() - code_start) as _;
+                self.code[code_start].set_opcode_args(OpcodeArgs::from_u32(jump_to));
+                return 0
+            }
+            State::ForBlock(code_start)=>{
+                if tok.is_close_curly() {
+                    self.code.push(Opcode::FOR_END.into());
+                    let jump_to = (self.code.len() - code_start) as _;
+                    self.code[code_start].set_opcode_args(OpcodeArgs::from_u32(jump_to));
+                    return 1
+                }
+                else {
+                    println!("Expected }} not found in for");
+                    return 0
+                }
+            }
             State::Delete=>{}
             State::Let=>{
                 if id.not_empty(){ // lets expect an assignment expression
@@ -588,6 +643,9 @@ impl ScriptParser{
                         else if let State::IfTest = state{
                             return 0
                         }
+                        else if let State::ForBody(_) = state{
+                            return 0
+                        }
                         else{
                             break;
                         }
@@ -769,6 +827,10 @@ impl ScriptParser{
                     self.code.push(Opcode::THIS.into());
                     return 1
                 }
+                if id == id!(scope){
+                    self.code.push(Opcode::SCOPE.into());
+                    return 1
+                }                
                 if id == id!(nil){
                     self.code.push(Value::NIL);
                     return 1
@@ -802,6 +864,7 @@ impl ScriptParser{
                     return 1
                 }
                 if op == id!(@){
+                    self.state.push(State::EndExpr);
                     self.state.push(State::EscapedId);
                     return 1
                 }
@@ -831,8 +894,7 @@ impl ScriptParser{
             State::BeginStmt(last_was_semi) => {
                 if id == id!(for){
                     self.state.push(State::EndStmt(self.index));
-                    self.state.push(State::For);
-                    //self.state.push(State::ForIdent);
+                    self.state.push(State::ForIdent(0));
                     return 1
                 }
                 if id == id!(let){
@@ -886,6 +948,11 @@ impl ScriptParser{
                 }
                 // in a function call we need the 
                 if let Some(code) = self.code.last_mut(){
+                    if *code == Opcode::FOR_END.into(){
+                        code.set_opcode_is_statement();
+                        self.state.push(State::BeginStmt(false));
+                        return 0;
+                    }
                     if code.is_assign_opcode(){
                         code.set_opcode_is_statement();
                         self.state.push(State::BeginStmt(false));
