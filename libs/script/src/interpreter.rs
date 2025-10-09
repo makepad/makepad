@@ -7,10 +7,29 @@ use crate::opcode::*;
 use crate::object::*;
 use crate::interop::*;
 
+#[derive(Debug)]
+pub struct StackBases{
+    pub loops: usize,
+    pub stack: usize,
+    pub scope: usize,
+    pub mes: usize,
+}
+
+#[derive(Debug)]
+pub struct LoopFrame{
+    pub value_id: Id,
+    pub key_id: Option<Id>,
+    pub index_id: Option<Id>,
+    pub source: Value,
+    pub start_ip: usize,
+    pub index: f64,
+    pub end: f64,
+    pub step: f64,
+    pub bases: StackBases,
+}
+
 pub struct CallFrame{
-    pub scope: ObjectPtr,
-    pub stack_base: usize,
-    pub mes_base: usize,
+    pub bases: StackBases,
     pub return_ip: usize,
 }
 
@@ -32,6 +51,8 @@ pub struct ScriptThreadId(pub usize);
 
 pub struct ScriptThread{
     stack_limit: usize,
+    loops: Vec<LoopFrame>,
+    scopes: Vec<ObjectPtr>,
     stack: Vec<Value>,
     calls: Vec<CallFrame>,
     mes: Vec<ScriptMe>,
@@ -114,11 +135,36 @@ impl ScriptThread{
     
     pub fn new()->Self{
         Self{
+            scopes: vec![],
             stack_limit: 1_000_000,
+            loops: vec![],
             stack: vec![],
             calls: vec![],
             mes: vec![],
             ip: 0
+        }
+    }
+    
+    pub fn new_bases(&self)->StackBases{
+        StackBases{
+            loops: self.loops.len(),
+            stack: self.stack.len(),
+            scope: self.scopes.len(),
+            mes: self.mes.len()
+        }
+    }
+    
+    pub fn truncate_bases(&mut self, bases:StackBases, heap:&mut ScriptHeap){
+        self.loops.truncate(bases.loops);
+        self.stack.truncate(bases.stack);
+        self.free_unreffed_scopes(&bases, heap);
+        self.mes.truncate(bases.mes);
+    }
+    
+    pub fn free_unreffed_scopes(&mut self, bases:&StackBases, heap:&mut ScriptHeap){
+        while self.scopes.len() > bases.scope{
+            let scope = self.scopes.pop().unwrap();
+            heap.free_object_if_unreffed(scope);
         }
     }
     
@@ -184,15 +230,83 @@ impl ScriptThread{
     }
     
     pub fn call_has_me(&self)->bool{
-        self.mes.len() > self.calls.last().unwrap().mes_base
+        self.mes.len() > self.calls.last().unwrap().bases.mes
     }
     
     // lets resolve an id to a Value
     pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
-        if let Some(call) = self.calls.last(){
-            return heap.object_value(call.scope, id.into())
+        if let Some(scope) = self.scopes.last(){
+            return heap.object_value(*scope, id.into())
         }
         Value::NIL
+    }
+    
+    pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, jump:u32, source:Value, value_id:Id, key_id:Option<Id>, index_id:Option<Id>){
+        let v0 = Value::from_f64(0.0);
+        let (first_value, first_key, index, end, step) = if let Some(s) = source.as_f64(){
+            if s < 1.0{
+                self.ip += jump as usize;
+                return
+            }
+            (v0, v0, 0.0, s, 1.0)
+        }
+        else if let Some(obj) = source.as_object(){
+            let proto = heap.object_prototype(obj);
+            if let Some(id!(range)) = proto.as_id(){ // range object
+                let start = heap.object_value(obj, id!(start).into()).as_f64().unwrap_or(0.0);
+                let end = heap.object_value(obj, id!(end).into()).as_f64().unwrap_or(0.0);
+                let step = heap.object_value(obj, id!(step).into()).as_f64().unwrap_or(1.0);
+                let v = start.into();
+                if (start-end).abs() < 1.0{
+                    self.ip += jump as usize;
+                    return 
+                }
+                (v, v, start, end, step)
+            }
+            else{
+                let object = heap.object(obj);
+                if object.tag.get_type().uses_vec2() && object.vec.len() > 1{
+                    (object.vec[1], object.vec[0], 0.0, (object.vec.len() >> 1) as f64, 1.0)
+                }
+                else if object.tag.get_type().is_vec1() && object.vec.len() > 0{
+                    (object.vec[0], Value::NIL, 0.0, object.vec.len() as f64, 1.0)
+                }
+                else{
+                    self.ip += jump as usize;
+                    return
+                }
+            }
+        } else{
+            self.ip += jump as usize;
+            return
+        };
+                
+        self.ip += 1;
+        
+        self.loops.push(LoopFrame{
+            bases: self.new_bases(),
+            start_ip: self.ip,
+            value_id,
+            key_id,
+            index_id,
+            source,
+            index,
+            end,
+            step
+        });
+        // lets make a new scope object and set our first value
+        let scope = *self.scopes.last().unwrap();
+        let scope = heap.new_object_with_proto(scope.into());
+        self.scopes.push(scope);
+        // lets write our first value onto the scope
+        heap.set_object_value(scope, value_id.into(), first_value);
+        if let Some(key_id) = key_id{
+            heap.set_object_value(scope, key_id.into(), first_key);
+        }
+        if let Some(index_id) = index_id{
+            heap.set_object_value(scope, index_id.into(), first_key);
+        }
+        println!("BEGINNING FOR LOOP");
     }
     
     pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap, sys_fns:&SystemFns)->Option<ScriptHook>{
@@ -364,11 +478,10 @@ impl ScriptThread{
                                 
                 if let Some((jump_to, _is_system)) = heap.parent_object_as_fn(scope){
                     let call = CallFrame{
-                        scope,
-                        mes_base: self.mes.len(),
-                        stack_base: self.stack.len(),
+                        bases: self.new_bases(),
                         return_ip: self.ip + 1,
                     };
+                    self.scopes.push(scope);
                     self.calls.push(call);
                     self.ip = jump_to as _;
                 }
@@ -432,11 +545,10 @@ impl ScriptThread{
                     }
                     else{
                         let call = CallFrame{
-                            scope,
-                            mes_base: self.mes.len(),
-                            stack_base: self.stack.len() - 1,
+                            bases: self.new_bases(),
                             return_ip: self.ip + 1,
                         };
+                        self.scopes.push(scope);
                         self.calls.push(call);
                         self.ip = jump_to as _;
                     }
@@ -448,8 +560,8 @@ impl ScriptThread{
             }
                         
             Opcode::FN_ARGS=>{
-                let call = self.calls.last_mut().unwrap();
-                let me = heap.new_object_with_proto(call.scope.into());
+                let scope = *self.scopes.last_mut().unwrap();
+                let me = heap.new_object_with_proto(scope.into());
                                 
                 // set it to a vec type to ensure ordered inserts
                 heap.set_object_type(me, ObjectType::VEC2);
@@ -502,11 +614,9 @@ impl ScriptThread{
                     self.pop_stack_resolved(heap)
                 };
                 let call = self.calls.pop().unwrap();
-                // we need to check if the scope was hooked by a closure
+                self.free_unreffed_scopes(&call.bases, heap);
+                self.truncate_bases(call.bases, heap);
                 
-                heap.free_object_if_unreffed(call.scope);
-                self.stack.truncate(call.stack_base);
-                self.mes.truncate(call.mes_base);
                 self.ip = call.return_ip;
                 self.stack.push(value);
             }
@@ -606,8 +716,8 @@ impl ScriptThread{
                     self.pop_stack_resolved(heap)
                 };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
-                let call = self.calls.last_mut().unwrap();
-                heap.set_object_value(call.scope, id.into(), value);
+                let scope = *self.scopes.last_mut().unwrap();
+                heap.set_object_value(scope, id.into(), value);
                 self.ip += 1;
             }
             Opcode::LET_TYPED=>{
@@ -619,8 +729,8 @@ impl ScriptThread{
                 };
                 let _ty = self.pop_stack_value();
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
-                let call = self.calls.last_mut().unwrap();
-                heap.set_object_value(call.scope, id.into(), value);
+                let scope = *self.scopes.last_mut().unwrap();
+                heap.set_object_value(scope, id.into(), value);
                 self.ip += 1;
             } 
             
@@ -648,8 +758,7 @@ impl ScriptThread{
             
             Opcode::THIS=>{
                 // look up this on the scope
-                let call = self.calls.last_mut().unwrap();
-                let scope = call.scope;
+                let scope = *self.scopes.last_mut().unwrap();
                 self.push_stack_value(heap.fn_this(scope));
                 self.ip += 1;
             }
@@ -664,7 +773,60 @@ impl ScriptThread{
                 }
                 self.ip += 1;
             }
-                             
+            
+            Opcode::SCOPE=>{
+                let scope = *self.scopes.last_mut().unwrap();
+                self.push_stack_value(scope.into());
+                self.ip += 1;
+            }
+            
+            Opcode::FOR_1 =>{
+                let source = self.pop_stack_resolved(heap);
+                let value_id = self.pop_stack_value().as_id().unwrap();
+                self.begin_for_loop(heap, args.to_u32(), source, value_id, None, None);
+            }
+            Opcode::FOR_2 =>{
+                let source = self.pop_stack_resolved(heap);
+                let value_id = self.pop_stack_value().as_id().unwrap();
+                let key_id = self.pop_stack_value().as_id().unwrap();
+                self.begin_for_loop(heap, args.to_u32(), source, value_id,Some(key_id), None);
+            }
+            Opcode::FOR_3=>{
+                let source = self.pop_stack_resolved(heap);
+                let value_id = self.pop_stack_value().as_id().unwrap();
+                let key_id = self.pop_stack_value().as_id().unwrap();
+                let index_id = self.pop_stack_value().as_id().unwrap();
+                self.begin_for_loop(heap, args.to_u32(), source, value_id, Some(key_id), Some(index_id));
+            }
+            Opcode::FOR_END=>{
+                // alright lets take a look at our top loop thing
+                let lf = self.loops.last_mut().unwrap();
+                let next = lf.index + lf.step;
+                if next >= lf.end{ // terminate
+                    let lp = self.loops.pop().unwrap();
+                    self.truncate_bases(lp.bases, heap);
+                    self.ip += 1
+                }
+                else{
+                    let scope = self.scopes.last().unwrap();
+                    lf.index = next;
+                    self.ip = lf.start_ip;
+                    if let Some(obj) = lf.source.as_object(){
+                        let proto = heap.object_prototype(obj);
+                        if let Some(id!(range)) = proto.as_id(){
+                            heap.set_object_value(*scope, lf.value_id.into(), lf.index.into());
+                        }
+                        else{
+                            let object = heap.object(obj);
+                            if object.tag.get_type().uses_vec2() && object.vec.len() > 1{
+                            }
+                            else if object.tag.get_type().is_vec1() && object.vec.len() > 0{
+                            }
+                        }
+                    }
+                }
+            }
+            
             opcode=>{
                 println!("UNDEFINED OPCODE {}", opcode);
                 self.ip += 1;
@@ -678,19 +840,19 @@ impl ScriptThread{
         let scope = heap.new_object(ObjectTag::DEEP);
         //heap.set_object_type(scope, ObjectType::VEC2);
         let call = CallFrame{
-            scope,
-            mes_base: 0,
-            stack_base: 0,
+            bases: self.new_bases(),
             return_ip: 0,
         };
         self.mes.push(ScriptMe::object(global));
+        self.scopes.push(scope);
         self.calls.push(call);
         self.ip = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
+        let mut counter = 0;
+        
         while self.ip < parser.code.len(){
             let code = parser.code[self.ip];
             if let Some((opcode, args)) = code.as_opcode(){
-                //let dt = std::time::Instant::now();
                 if let Some(rust_call) = self.opcode(opcode, args, parser, heap, sys_fns){
                     match rust_call{
                         ScriptHook::SysCall(_sys_id)=>{
@@ -700,23 +862,20 @@ impl ScriptThread{
                     }
                     self.stack.push(Value::NIL)
                 }
-                //if let Some(t) = profile.get(&opcode){
-                 //   profile.insert(opcode, t + dt.elapsed().as_secs_f64());
-                //}
-                //else{
-                //    profile.insert(opcode, dt.elapsed().as_secs_f64());
-                //}
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(code);
                 self.ip += 1;
             }
+            counter += 1;
         }
         //println!("{:?}", profile);
         // lets have a look at our scope
-        let call = self.calls.pop().unwrap();
-        print!("Scope:");
-        heap.print_object(call.scope, true);
+        let _call = self.calls.pop().unwrap();
+        let scope = self.scopes.pop().unwrap();
+        
+        print!("Instructions {counter}\nScope:");
+        heap.print_object(scope, true);
         self.mes.pop();
         print!("\nGlobal:");
         heap.print_object(global, true);
