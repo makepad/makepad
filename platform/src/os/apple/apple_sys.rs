@@ -1169,6 +1169,7 @@ pub enum AudioObjectPropertySelector {
     DefaultInputDevice = four_char_as_u32("dIn "),
     DefaultOutputDevice = four_char_as_u32("dOut"),
     DeviceIsAlive = four_char_as_u32("livn"),
+    NominalSampleRate = four_char_as_u32("nsrt"),
 }
 
 #[repr(u32)]
@@ -1181,6 +1182,9 @@ pub enum AudioObjectPropertyScope {
 pub enum AVAudioSessionCategoryOption {
     AllowBluetooth = 0x4,
     DefaultToSpeaker = 0x8,
+    AllowBluetoothA2DP = 0x20,
+    AllowAirPlay = 0x40,
+    MixWithOthers = 0x1,
 }
 
 #[repr(u32)]
