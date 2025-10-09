@@ -277,6 +277,8 @@ pub struct Store {
     avg_level: f64a,
     #[live(0.3f64)]
     passthrough_volume: f64a,
+    #[live(0.0f64)]
+    input_sample_rate: f64a,
     #[rust]
     passthrough_enabled: Mutex<bool>,
     #[rust]
@@ -492,7 +494,7 @@ impl App {
     pub fn start_audio_test(&mut self, cx: &mut Cx) {
         self.ui
             .label(id!(status_label))
-            .set_text(cx, "Status: Starting audio capture...");
+            .set_text(cx, "Status: Setting up audio input...");
         self.ui.redraw(cx);
 
         let store = self.store.clone();
@@ -502,9 +504,17 @@ impl App {
         let mut update_counter = 0u32;
 
         // Audio input capture
-        cx.audio_input(0, move |_info, input_buffer| {
+        cx.audio_input(0, move |info, input_buffer| {
             frame_counter += input_buffer.frame_count as i64;
             callback_counter += 1;
+
+            // Store input sample rate for resampling
+            store.input_sample_rate.set(info.sample_rate);
+
+            // Force immediate UI update for first callback to test if we're getting called
+            if callback_counter == 1 {
+                audio_signal.set(); // Force immediate UI update to show we got our first callback
+            }
 
             // Calculate audio statistics from first channel only
             let channel_0 = input_buffer.channel(0);
@@ -570,13 +580,24 @@ impl App {
                 audio_signal.set();
             }
         });
+
+        // Update status to show callback is registered
+        self.ui
+            .label(id!(status_label))
+            .set_text(cx, "Status: Audio callback registered, waiting for data...");
+
+        self.ui.redraw(cx);
     }
 
     fn setup_passthrough_output(&mut self, cx: &mut Cx) {
         let store = self.store.clone();
+        let mut first_output = true;
 
         // Audio output callback for mic passthrough
-        cx.audio_output(0, move |_info, output_buffer| {
+        cx.audio_output(0, move |info, output_buffer| {
+            if first_output {
+                first_output = false;
+            }
             // Always start with silence
             output_buffer.zero();
 
@@ -593,29 +614,75 @@ impl App {
 
             // Get volume setting
             let volume = store.passthrough_volume.get() as f32;
+            let input_rate = store.input_sample_rate.get();
+            let output_rate = info.sample_rate;
 
             if let Ok(mut passthrough_audio) = store.passthrough_audio.try_lock() {
                 if !passthrough_audio.is_empty() {
                     let frame_count = output_buffer.frame_count();
                     let channel_count = output_buffer.channel_count();
-                    let samples_available = passthrough_audio.len().min(frame_count);
 
-                    // Fill each output channel with the same mono input data
-                    for frame_idx in 0..samples_available {
-                        let sample = passthrough_audio[frame_idx];
-                        // Apply volume scaling without extra reduction
-                        let scaled_sample = (sample * volume).clamp(-1.0, 1.0);
+                    // Check if we need to resample
+                    // When using bult-in speaker and microphone, in most systems the sample rate will be 48kHz for both
+                    // and no resampling is needed, the mic audio can be directly passed to the speaker.
+                    // However when using headphones, specially bluetooth ones, the mic sample rate can be quite different (e.g. 44.1kHz or 16kHz or others)
+                    let needs_resampling = (input_rate - output_rate).abs() > 1.0;
 
-                        // Write to all output channels (mono to stereo/multi-channel)
-                        for channel_idx in 0..channel_count {
-                            let channel = output_buffer.channel_mut(channel_idx);
-                            channel[frame_idx] = scaled_sample;
+                    if needs_resampling && input_rate > 0.0 {
+                        // Resample using linear interpolation
+                        let ratio = input_rate / output_rate;
+
+                        for frame_idx in 0..frame_count {
+                            let src_pos = frame_idx as f64 * ratio;
+                            let src_idx = src_pos as usize;
+
+                            let sample = if src_idx < passthrough_audio.len() {
+                                if src_idx + 1 < passthrough_audio.len() {
+                                    // Linear interpolation between two samples
+                                    let frac = (src_pos - src_idx as f64) as f32;
+                                    let s0 = passthrough_audio[src_idx];
+                                    let s1 = passthrough_audio[src_idx + 1];
+                                    s0 + (s1 - s0) * frac
+                                } else {
+                                    passthrough_audio[src_idx]
+                                }
+                            } else {
+                                break; // Not enough input samples
+                            };
+
+                            let scaled_sample = (sample * volume).clamp(-1.0, 1.0);
+
+                            // Write to all output channels
+                            for channel_idx in 0..channel_count {
+                                let channel = output_buffer.channel_mut(channel_idx);
+                                channel[frame_idx] = scaled_sample;
+                            }
                         }
-                    }
 
-                    // Remove consumed samples from the front of the buffer
-                    if samples_available > 0 {
-                        passthrough_audio.drain(..samples_available);
+                        // Calculate how many input samples were consumed
+                        let consumed = ((frame_count as f64 * ratio) as usize).min(passthrough_audio.len());
+                        if consumed > 0 {
+                            passthrough_audio.drain(..consumed);
+                        }
+                    } else {
+                        // No resampling needed - direct copy
+                        let samples_available = passthrough_audio.len().min(frame_count);
+
+                        for frame_idx in 0..samples_available {
+                            let sample = passthrough_audio[frame_idx];
+                            let scaled_sample = (sample * volume).clamp(-1.0, 1.0);
+
+                            // Write to all output channels (mono to stereo/multi-channel)
+                            for channel_idx in 0..channel_count {
+                                let channel = output_buffer.channel_mut(channel_idx);
+                                channel[frame_idx] = scaled_sample;
+                            }
+                        }
+
+                        // Remove consumed samples from the front of the buffer
+                        if samples_available > 0 {
+                            passthrough_audio.drain(..samples_available);
+                        }
                     }
                 }
             }
