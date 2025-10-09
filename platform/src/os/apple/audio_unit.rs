@@ -149,24 +149,65 @@ impl AudioUnitAccess {
     }
     
     #[cfg(target_os = "ios")]
+    fn update_ios_audio_route() {
+        unsafe {
+            let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
+            let current_route: ObjcId = msg_send![session, currentRoute];
+            let outputs: ObjcId = msg_send![current_route, outputs];
+            let count: usize = msg_send![outputs, count];
+
+            // Check if we have external audio (headphones, AirPods, Bluetooth)
+            let mut has_external_audio = false;
+            for i in 0..count {
+                let output: ObjcId = msg_send![outputs, objectAtIndex: i];
+                let port_type: ObjcId = msg_send![output, portType];
+                let port_type_str = nsstring_to_string(port_type);
+
+                // Check for external audio devices
+                if port_type_str == "BluetoothA2DPOutput"
+                    || port_type_str == "BluetoothHFP"
+                    || port_type_str == "BluetoothLE"
+                    || port_type_str == "HeadsetMic"
+                    || port_type_str == "Headphones"
+                    || port_type_str == "AirPlay" {
+                    has_external_audio = true;
+                    break;
+                }
+            }
+
+            let mut error: ObjcId = nil;
+            if has_external_audio {
+                // External audio connected - use default routing (no override)
+                let () = msg_send![session, overrideOutputAudioPort: 0u32 error: &mut error]; // AVAudioSessionPortOverrideNone
+            } else {
+                // No external audio - force speaker instead of earpiece
+                let () = msg_send![session, overrideOutputAudioPort: 1936747378u32 error: &mut error]; // AVAudioSessionPortOverrideSpeaker
+            }
+        }
+    }
+
+    #[cfg(target_os = "ios")]
     pub fn init_ios_access(){
         unsafe{
             let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
             let mut error: ObjcId = nil;
             let _success: bool = msg_send![
-                session, 
+                session,
                 setCategory:AVAudioSessionCategoryPlayAndRecord
                 withOptions:AVAudioSessionCategoryOption::DefaultToSpeaker as usize | AVAudioSessionCategoryOption::AllowBluetooth as usize
                 error:&mut error
             ];
-            // Use VideoChat mode for AEC/AGC/NS + loudspeaker routing (VoiceChat routes to earpiece)
-            let mode: ObjcId = str_to_nsstring("AVAudioSessionModeVideoChat");
+            // Use VoiceChat mode with VoiceProcessingIO for both input and output
+            // This provides AEC/AGC/NS with proper volume
+            let mode: ObjcId = str_to_nsstring("AVAudioSessionModeVoiceChat");
             let () = msg_send![session, setMode: mode error:&mut error];
-            // Prefer 48 kHz to avoid 48k↔44.1k drift on AirPods, however this might 
+            // Prefer 48 kHz to avoid 48k↔44.1k drift on AirPods, however this might
             // be overriden by the system or some other configuration.
             let () = msg_send![session, setPreferredSampleRate: 48000.0 error:&mut error];
             let () = msg_send![session, setPreferredIOBufferDuration:0.005 error:&mut error];
             let () = msg_send![session, setActive: true error: &mut error];
+            // Set initial audio route based on connected devices
+            Self::update_ios_audio_route();
         }
     }
         
@@ -334,6 +375,8 @@ impl AudioUnitAccess {
             let () = msg_send![audio_session, setActive: true error: &mut err];
         }
         let block = objc_block!(move | _note: ObjcId | {
+            #[cfg(target_os = "ios")]
+            AudioUnitAccess::update_ios_audio_route();
             device_change.set();
         });
         let () = unsafe {msg_send![
@@ -568,7 +611,7 @@ impl AudioUnitAccess {
             AudioUnitQuery::Output => {
                 AudioComponentDescription::new_all_manufacturers(
                     AudioUnitType::IO,
-                    AudioUnitSubType::RemoteIO, 
+                    AudioUnitSubType::VoiceProcessingIO,
                 )
             }
             #[cfg(target_os = "tvos")]

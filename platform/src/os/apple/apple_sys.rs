@@ -1275,6 +1275,10 @@ unsafe extern "system" fn(
     inClientData: *mut ()
 ) -> OSStatus>;
 
+// AVAudioSessionPortOverride values
+pub const AVAudioSessionPortOverrideNone: u64 = 0;
+pub const AVAudioSessionPortOverrideSpeaker: u64 = 1936747378; // 'spkr'
+
 #[link(name = "CoreAudio", kind = "framework")]
 extern "C" {
     pub static AVAudioSessionCategoryPlayAndRecord: ObjcId;
