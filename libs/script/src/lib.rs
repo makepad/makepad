@@ -98,9 +98,9 @@ pub fn test(){
         ~@finished;
     ";
     
-    let _code = "
+    let code = "
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
-        ~fib(34);
+        ~fib(38);
     ";
     let dt = std::time::Instant::now();
     let mut interp = Script::new();
