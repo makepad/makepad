@@ -326,6 +326,12 @@ impl Value{
         None
     }
     
+    pub const fn set_opcode_args(&mut self, args:OpcodeArgs){
+        if self.is_opcode(){
+            self.0 = (self.0 & 0xffff_ffff_0000_0000) | (args.0 as u64);
+        }
+    }
+    
     pub const fn is_assign_opcode(&self)->bool{
         if self.is_opcode(){
             let code = Opcode(((self.0>>32) & 0xff) as u8);
