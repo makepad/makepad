@@ -165,6 +165,14 @@ impl Opcode{
     pub const THIS: Self = Self(93);
     pub const ME: Self = Self(94);
     pub const DELETE: Self = Self(95);
+    pub const SCOPE: Self = Self(96);
+    
+    pub const FOR_1: Self = Self(97);
+    pub const FOR_2: Self = Self(98);
+    pub const FOR_3: Self = Self(99);
+    pub const FOR_END: Self = Self(100);
+    pub const BREAK: Self = Self(101);
+    pub const CONTINUE: Self = Self(102);
 }
 
 
@@ -296,6 +304,14 @@ impl fmt::Display for Opcode {
             Self::LOG => return write!(f, "log()"),
             Self::THIS => return write!(f, "this"),
             Self::ME => return write!(f, "me"),
+            Self::SCOPE => return write!(f, "scope"),
+            Self::FOR_1 => return write!(f, "for1"),
+            Self::FOR_2 => return write!(f, "for2"),
+            Self::FOR_3 => return write!(f, "for2"),
+            Self::FOR_END => return write!(f, "forend"),
+            Self::BREAK => return write!(f, "break"),
+            Self::CONTINUE => return write!(f, "continue"),
+            
             _=>return write!(f, "OP{}",self.0)
         }
     }

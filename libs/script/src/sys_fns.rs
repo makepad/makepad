@@ -27,7 +27,7 @@ pub fn build_sys_fns(sys_fns:&mut SystemFns, h:&mut ScriptHeap){
         Value::NIL
     });
     
-    sys_fns.inline(h, &[], ValueType::OBJECT, id!(merge), |heap, args|{
+    sys_fns.inline(h, &[], ValueType::OBJECT, id!(mixin), |heap, args|{
         let this = heap.fn_this(args).as_object().unwrap();
         heap.push_object_vec_of_vec_into_object_vec(this, args, true);
         Value::NIL
