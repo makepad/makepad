@@ -3,6 +3,7 @@ use {
         time::Instant,
         rc::Rc,
         cell::{RefCell},
+        sync::mpsc::{channel, Receiver, Sender},
     },
     crate::{
         makepad_objc_sys::objc_block,
@@ -23,6 +24,7 @@ use {
             metal::{MetalCx, DrawPassMode},
         },
         pass::{CxPassParent},
+        permission::PermissionResult,
         thread::SignalToUI,
         window::CxWindowPool,
         event::{
@@ -119,6 +121,12 @@ impl Cx {
         }
     }
 
+    pub(crate) fn handle_permission_events(&mut self) {
+        while let Ok(result) = self.os.permission_response.receiver.try_recv(){
+            self.call_event_handler(&Event::PermissionResult(result));
+        }
+    }
+
     fn ios_event_callback(
         &mut self,
         event: IosEvent,
@@ -157,6 +165,7 @@ impl Cx {
                         self.redraw_all();
                     }
                     self.handle_networking_events();
+                    self.handle_permission_events();
                 }
             }
             _ => ()
@@ -397,9 +406,10 @@ impl Cx {
     }
     
     fn ios_request_audio_permission(&mut self, permission: crate::permission::Permission, request_id: i32) {
+        let sender = self.os.permission_response.sender.clone();
         unsafe {
             let av_audio_session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
-            
+
             let completion_handler = objc_block!(move |granted: BOOL| {
                 let permission_result = crate::permission::PermissionResult {
                     permission,
@@ -410,10 +420,10 @@ impl Cx {
                         crate::permission::PermissionStatus::DeniedPermanent // iOS doesn't re-prompt
                     },
                 };
-                
-                IosApp::do_callback(IosEvent::PermissionResult(permission_result));
+
+                let _ = sender.send(permission_result);
             });
-            
+
             let () = msg_send![av_audio_session, requestRecordPermission: &completion_handler];
         }
     }
@@ -475,5 +485,20 @@ pub struct CxOs {
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) http_requests: AppleHttpRequests,
+    pub (crate) permission_response: PermissionResultChannel,
 }
 
+pub struct PermissionResultChannel {
+    pub receiver: Receiver<PermissionResult>,
+    pub sender: Sender<PermissionResult>,
+}
+
+impl Default for PermissionResultChannel {
+    fn default() -> Self {
+        let (sender, receiver) = channel();
+        Self {
+            sender,
+            receiver
+        }
+    }
+}
