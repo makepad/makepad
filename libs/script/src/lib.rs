@@ -89,9 +89,11 @@ pub fn test(){
     ";
     
     let code = "
-        let x = @range{start:1 end:10 step:1};
+        let x = @range{start:1 end:10000 step:1};
         for i in x{
-            Button{}
+            Button{
+                prop1:i
+            }
         }
         ~@finished;
     ";
