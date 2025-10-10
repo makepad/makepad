@@ -146,6 +146,15 @@ impl ScriptHeap{
         }
     }
     
+    pub fn new_object_if_reffed(&mut self, ptr:ObjectPtr)->ObjectPtr{
+        let obj = &self.objects[ptr.index as usize];
+        if obj.tag.is_reffed(){
+            let proto = obj.proto;
+            return self.new_object_with_proto(proto);
+        }
+        return ptr;
+    }
+    
     pub fn null_string(&self)->StringPtr{
         StringPtr{index: 0}
     }
