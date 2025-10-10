@@ -333,7 +333,7 @@ impl ScriptTokenizer{
                     
                     // splice off prefix operator
                     // all double character operators
-                    if self.temp == "~" || self.temp == "@"{
+                    if self.temp == "~" || self.temp == "@" || self.temp == ";" || self.temp == ","{
                         self.emit_operator();
                     }
                         
@@ -381,9 +381,11 @@ impl ScriptTokenizer{
                         match self.temp.as_str(){
                             "/*"=>{
                                 self.state = State::BlockComment(0);
+                                self.temp.clear();
                             },
                             "//"=>{
                                 self.state = State::LineComment;
+                                self.temp.clear();
                             },
                             "==" | "!=" | ">:" | "<:" | "^:" | "+:" |
                             "<=" | ">=" | "&&" | "||" | 

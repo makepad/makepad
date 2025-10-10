@@ -89,16 +89,12 @@ pub fn test(){
     ";
     
     let code = "
-        let x = @range{start:1 end:10000 step:1};
-        for i in x{
-            Button{
-                prop1:i
-            }
-        }
-        ~@finished;
+        //let x = @range{start:1 end:1000 step:1};
+        //~@finished;
+        for i,v in [1,2,3] {~v;~i;}
     ";
     
-    let code = "
+    let _code = "
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     ";

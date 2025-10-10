@@ -215,7 +215,8 @@ pub struct Object{
     pub tag: ObjectTag,
     pub proto: Value,
     pub map: BTreeMap<Value, Value>,
-    pub vec: Vec<Value>
+    pub vec: Vec<Value>,
+//    pub vec: smallvec::SmallVec<[Value;6]>
 }
 
 impl Object{
