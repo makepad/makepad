@@ -84,7 +84,7 @@ impl<T> LastVec<T>{
     }
     
     pub fn truncate(&mut self, len:usize){
-        self.vec.truncate(len);
+        self.vec.truncate(len.max(1));
     }
 }
 
@@ -749,15 +749,15 @@ impl ScriptThread{
             Opcode::FOR_2 =>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
-                let key_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, args.to_u32() as _, source, value_id,Some(key_id), None);
+                let index_id = self.pop_stack_value().as_id().unwrap();
+                self.begin_for_loop(heap, args.to_u32() as _, source, value_id,Some(index_id), None);
             }
             Opcode::FOR_3=>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
-                let key_id = self.pop_stack_value().as_id().unwrap();
                 let index_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, args.to_u32() as _, source, value_id, Some(key_id), Some(index_id));
+                let key_id = self.pop_stack_value().as_id().unwrap();
+                self.begin_for_loop(heap, args.to_u32() as _, source, value_id, Some(index_id), Some(key_id));
             }
             Opcode::FOR_END=>{
                 self.end_for_loop(heap);
@@ -771,7 +771,7 @@ impl ScriptThread{
         None
     }
         
-    pub fn begin_for_loop_inner(&mut self, heap:&mut ScriptHeap, jump:usize, source:Value, value_id:Id, key_id:Option<Id>, index_id:Option<Id>, first_value:Value, first_key:Value, index:f64){    
+    pub fn begin_for_loop_inner(&mut self, heap:&mut ScriptHeap, jump:usize, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>, first_value:Value, first_index:f64, first_key:Value){    
                                        
         self.ip += 1;
         self.loops.push(LoopFrame{
@@ -782,7 +782,7 @@ impl ScriptThread{
             jump,
             index_id,
             source,
-            index,
+            index: first_index,
         });
         // lets make a new scope object and set our first value
         let scope = *self.scopes.last();
@@ -794,15 +794,15 @@ impl ScriptThread{
             heap.set_object_value(new_scope, key_id.into(), first_key);
         }
         if let Some(index_id) = index_id{
-            heap.set_object_value(new_scope, index_id.into(), first_key);
+            heap.set_object_value(new_scope, index_id.into(), first_index.into());
         }
     }
             
-    pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, jump:usize, source:Value, value_id:Id, key_id:Option<Id>, index_id:Option<Id>){
+    pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, jump:usize, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>){
         let v0 = Value::from_f64(0.0);
         if let Some(s) = source.as_f64(){
             if s >= 1.0{
-                self.begin_for_loop_inner(heap, jump, source, value_id, key_id, index_id, v0, v0, 0.0);
+                self.begin_for_loop_inner(heap, jump, source, value_id, key_id, index_id, v0, 0.0, v0);
                 return
             }
         }
@@ -813,18 +813,18 @@ impl ScriptThread{
                 let end = heap.object_value(obj, id!(end).into()).as_f64().unwrap_or(0.0);
                 let v = start.into();
                 if (start-end).abs() >= 1.0{
-                    self.begin_for_loop_inner(heap, jump, source, value_id, key_id, index_id, v, v, start);
+                    self.begin_for_loop_inner(heap, jump, source, value_id, key_id, index_id, v, start, v);
                     return
                 }
             }
             else{
                 let object = heap.object(obj);
                 if object.tag.get_type().uses_vec2() && object.vec.len() > 1{
-                    self.begin_for_loop_inner(heap, jump, source, value_id, key_id, index_id, object.vec[1], object.vec[0], 0.0);
+                    self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, object.vec[1], 0.0, object.vec[0]);
                     return 
                 }
                 else if object.tag.get_type().is_vec1() && object.vec.len() > 0{
-                    self.begin_for_loop_inner(heap, jump, source, value_id, key_id, index_id, object.vec[0], Value::NIL, 0.0);                  
+                    self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, object.vec[0], 0.0, Value::NIL);                  
                     return 
                 }
             }
@@ -845,6 +845,7 @@ impl ScriptThread{
             self.ip = lf.start_ip;
             let scope = self.scopes.last();
             heap.set_object_value(*scope, lf.value_id.into(), lf.index.into());
+            return
         }
         else if let Some(obj) = lf.source.as_object(){
             let proto = heap.object_prototype(obj);
@@ -859,19 +860,55 @@ impl ScriptThread{
                 } 
                 heap.set_object_value(*scope, lf.value_id.into(), lf.index.into());
                 self.ip = lf.start_ip;
+                return
             }
             else{
                 let object = heap.object(obj);
-                if object.tag.get_type().uses_vec2() && object.vec.len() > 1{
+                if object.tag.get_type().uses_vec2(){
+                    let len = object.vec.len() >> 1;
+                    lf.index += 1.0;
+                    if lf.index >= len as f64{
+                        self.break_for_loop(heap);
+                        return
+                    }
+                    self.ip = lf.start_ip;
+                    let scope = self.scopes.pop();
+                    let value = object.vec[lf.index as usize * 2 + 1];
+                    let key = if let Some(key_id) = lf.key_id{
+                        object.vec[lf.index as usize * 2 + 1]
+                    }else{Value::NIL};
+                    let scope = heap.new_object_if_reffed(scope);
+                    heap.set_object_value(scope, lf.value_id.into(), value.into());
+                    if let Some(index_id) = lf.index_id{
+                        heap.set_object_value(scope, index_id.into(), lf.index.into());
+                    }
+                    if let Some(key_id) = lf.key_id{
+                        heap.set_object_value(scope, key_id.into(), lf.index.into());
+                    }
+                    self.scopes.push(scope);
+                    self.ip = lf.start_ip;
+                    return                    
                 }
                 else if object.tag.get_type().is_vec1() && object.vec.len() > 0{
+                    let len = object.vec.len();
+                    lf.index += 1.0;
+                    if lf.index >= len as f64{
+                        self.break_for_loop(heap);
+                        return
+                    }
+                    self.ip = lf.start_ip;
+                    let scope = self.scopes.pop();
+                    let value = object.vec[lf.index as usize];
+                    let scope = heap.new_object_if_reffed(scope);
+                    heap.set_object_value(scope, lf.value_id.into(), value.into());
+                    self.scopes.push(scope);
+                    self.ip = lf.start_ip;
+                    return                    
                 }
             }
         }
-        else{ // unknown state
-            println!("For end unknown state");
-            self.ip += 1;
-        }
+        println!("For end unknown state");
+        self.ip += 1;
     }
                 
     pub fn break_for_loop(&mut self, heap:&mut ScriptHeap){
@@ -911,8 +948,7 @@ impl ScriptThread{
         let _call = self.calls.last();
         let scope = self.scopes.last();
         
-        println!("Instructions {counter}");
-        println!("Allocated objects:{:?}", heap.objects.len());
+        println!("Instructions {counter} Allocated objects:{:?}", heap.objects.len());
         //heap.print_object(*scope, true);
         print!("\nGlobal:");
         //heap.print_object(global, true);
