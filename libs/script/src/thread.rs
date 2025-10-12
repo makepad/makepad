@@ -92,6 +92,17 @@ macro_rules! fu64_op_impl{
     }}
 } 
 
+macro_rules! bool_op_impl{
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let op2 = $obj.pop_stack_resolved($heap);
+        let op1 = $obj.pop_stack_resolved($heap);
+        let v1 = $heap.cast_to_bool(op1);
+        let v2 = $heap.cast_to_bool(op2);
+        $obj.stack.push(Value::from_bool((v1 $op v2)));
+        $obj.ip += 1;
+    }}
+} 
+
 pub enum ScriptHook{
     SysCall(usize),
     RustCall
@@ -249,6 +260,9 @@ impl ScriptThread{
             Opcode::GT=>f64_cmp_impl!(self, heap, >),
             Opcode::LEQ=>f64_cmp_impl!(self, heap, <=),
             Opcode::GEQ=>f64_cmp_impl!(self, heap, >=),
+            
+            Opcode::LOGIC_AND => bool_op_impl!(self, heap, &&),
+            Opcode::LOGIC_OR => bool_op_impl!(self, heap, ||),
             
             Opcode::CONCAT=>{
                 let op1 = self.pop_stack_resolved(heap);
