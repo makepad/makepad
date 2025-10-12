@@ -34,6 +34,16 @@ impl IdToString {
             };
             // pre-seed list for debugging purposes
             let fill = [
+                "start",
+                "end",
+                "sin",
+                "ty",
+                "step",
+                "import",
+                "extend",
+                "push",
+                "pop",
+                "number",
                 "nan",
                 "bool",
                 "nil",

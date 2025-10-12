@@ -404,7 +404,6 @@ impl ScriptThread{
                 else{ // we're calling a method on some other thing
                     Value::NIL
                 };
-                                
                 let scope = if fnobj == Value::NIL{
                     // lets take the type
                     let type_index = this.value_type().to_redux();
@@ -668,29 +667,32 @@ impl ScriptThread{
             Opcode::FOR_1 =>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, args.to_u32() as _, source, value_id, None, None);
+                self.begin_for_loop(heap, ctx, args.to_u32() as _, source, value_id, None, None);
             }
             Opcode::FOR_2 =>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
                 let index_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, args.to_u32() as _, source, value_id,Some(index_id), None);
+                self.begin_for_loop(heap, ctx, args.to_u32() as _, source, value_id,Some(index_id), None);
             }
             Opcode::FOR_3=>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
                 let index_id = self.pop_stack_value().as_id().unwrap();
                 let key_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, args.to_u32() as _, source, value_id, Some(index_id), Some(key_id));
+                self.begin_for_loop(heap, ctx, args.to_u32() as _, source, value_id, Some(index_id), Some(key_id));
             }
             Opcode::FOR_END=>{
-                self.end_for_loop(heap);
+                self.end_for_loop(heap, ctx);
             }
             Opcode::RANGE=>{
-                let _start = self.pop_stack_resolved(heap);
-                let _end = self.pop_stack_resolved(heap);
-                let _range = heap.new_object_with_proto(id!(range).into());
-                //heap.set_object_value(range, )
+                let end = self.pop_stack_resolved(heap);
+                let start = self.pop_stack_resolved(heap);
+                let range = heap.new_object_with_proto(ctx.builtins.range.into());
+                heap.set_object_value(range, id!(start).into(), start);
+                heap.set_object_value(range, id!(end).into(), end);
+                self.stack.push(range.into());
+                self.ip += 1;
             }
             Opcode::IS=>{
                 let rhs = self.pop_stack_value();
@@ -768,7 +770,7 @@ impl ScriptThread{
         }
     }
             
-    pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, jump:usize, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>){
+    pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx, jump:usize, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>){
         let v0 = Value::from_f64(0.0);
         if let Some(s) = source.as_f64(){
             if s >= 1.0{
@@ -777,8 +779,7 @@ impl ScriptThread{
             }
         }
         else if let Some(obj) = source.as_object(){
-            let proto = heap.object_prototype(obj);
-            if let Some(id!(range)) = proto.as_id(){ // range object
+            if heap.object_has_proto(obj, ctx.builtins.range.into()){ // range object
                 let start = heap.object_value(obj, id!(start).into()).as_f64().unwrap_or(0.0);
                 let end = heap.object_value(obj, id!(end).into()).as_f64().unwrap_or(0.0);
                 let v = start.into();
@@ -803,7 +804,7 @@ impl ScriptThread{
         self.ip += jump as usize;
     }
         
-    pub fn end_for_loop(&mut self, heap:&mut ScriptHeap){
+    pub fn end_for_loop(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx){
         // alright lets take a look at our top loop thing
         let lf = self.loops.last_mut().unwrap();
         if let Some(end) = lf.source.as_f64(){
@@ -818,8 +819,7 @@ impl ScriptThread{
             return
         }
         else if let Some(obj) = lf.source.as_object(){
-            let proto = heap.object_prototype(obj);
-            if let Some(id!(range)) = proto.as_id(){
+            if heap.object_has_proto(obj, ctx.builtins.range.into()){ // range object
                 let scope = self.scopes.last();
                 let end = heap.object_value(obj, id!(end).into()).as_f64().unwrap_or(0.0);
                 let step = heap.object_value(obj, id!(step).into()).as_f64().unwrap_or(1.0);
