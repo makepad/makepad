@@ -15,51 +15,51 @@ enum State{
     
     EscapedId,
     
-    ForIdent(usize),
-    ForBody(usize),
-    ForExpr(usize),
-    ForBlock(usize),
+    ForIdent{idents:usize, index:usize},
+    ForBody{idents:usize, index:usize},
+    ForExpr{code_start:usize},
+    ForBlock{code_start:usize},
 
-    IfTest,
-    IfTrueExpr(u32),
-    IfTrueBlock(u32, bool),
-    IfMaybeElse(u32, bool),
-    IfElse(u32),
-    IfElseExpr(u32),
-    IfElseBlock(u32, bool),
+    IfTest{index: usize},
+    IfTrueExpr{if_start:u32},
+    IfTrueBlock{if_start:u32, last_was_semi:bool},
+    IfMaybeElse{if_start:u32, was_block:bool},
+    IfElse{else_start:u32},
+    IfElseExpr{else_start:u32},
+    IfElseBlock{else_start:u32, last_was_semi:bool},
     
     FnArgList,
-    FnArgMaybeType,
-    FnArgType,
+    FnArgMaybeType{index:usize},
+    FnArgType{index:usize},
     FnBody,
-    EndFnBlock(u32, bool),
-    EndFnExpr(u32),
-    EmitFnArgTyped,
-    EmitFnArgDyn,
+    EndFnBlock{fn_slot:u32, last_was_semi:bool, index:usize},
+    EndFnExpr{fn_slot:u32, index:usize},
+    EmitFnArgTyped{index:usize},
+    EmitFnArgDyn{index:usize},
     
-    EmitUnary(Id),
-    EmitOp(Id),
-    EmitFieldAssign(Id),
-    EmitIndexAssign(Id),
+    EmitUnary{what_op:Id, index:usize},
+    EmitOp{what_op:Id, index:usize},
+    EmitFieldAssign{what_op:Id, index:usize},
+    EmitIndexAssign{what_op:Id, index:usize},
     EndBare,
     EndBareSquare,
     EndProto,
     EndRound,
     
-    CallMaybeDo(bool),
-    EmitCall(bool),
-    EndCall(bool),
+    CallMaybeDo{is_method:bool, index:usize},
+    EmitCall{is_method:bool, index:usize},
+    EndCall{is_method:bool, index:usize},
     ArrayIndex,
     Delete,
     
-    Return,
+    Return{index:usize},
     
-    Let,
-    LetDynOrTyped,
-    LetType,
-    LetTypedAssign,
-    EmitLetDyn,
-    EmitLetTyped
+    Let{index:usize},
+    LetDynOrTyped{index:usize},
+    LetType{index:usize},
+    LetTypedAssign{index:usize},
+    EmitLetDyn{index:usize},
+    EmitLetTyped{index:usize},
 }
 
 // we have a stack, and we have operations
@@ -214,9 +214,9 @@ impl State{
     
     fn is_heq_prio(&self, other:State)->bool{
         match self{
-            Self::EmitOp(op1)=>{
+            Self::EmitOp{what_op:op1,..}=>{
                 match other{
-                    Self::EmitOp(op2)=>{
+                    Self::EmitOp{what_op:op2,..}=>{
                         if Self::is_assign_operator(*op1) && Self::is_assign_operator(op2){
                             return false
                         }
@@ -236,6 +236,8 @@ pub struct ScriptParser{
     pub index: usize,
     pub tok: ScriptTokenizer,
     pub code: Vec<Value>,
+    pub source_map: Vec<Option<usize>>,
+    
     state: Vec<State>,
     opstack: Vec<Id>
 }
@@ -246,6 +248,7 @@ impl Default for ScriptParser{
             index: 0,
             tok: Default::default(),
             code: Default::default(),
+            source_map: Default::default(),
             opstack: Default::default(),
             state: vec![State::BeginStmt(false)],
         }
@@ -253,6 +256,32 @@ impl Default for ScriptParser{
 }
 
 impl ScriptParser{
+    fn code_len(&self)->usize{
+        self.code.len()
+    }
+    
+    fn code_last(&self)->Option<&Value>{
+        self.code.last()
+    }
+    
+    fn pop_code(&mut self){
+        self.code.pop();
+        self.source_map.pop();
+    }
+    
+    fn push_code(&mut self, code: Value, index: usize){
+        self.code.push(code);
+        self.source_map.push(Some(index));
+    }
+    
+    fn push_code_none(&mut self, code: Value){
+        self.code.push(code);
+        self.source_map.push(None);
+    }
+    
+    fn set_opcode_args(&mut self, index:usize, args: OpcodeArgs){
+        self.code[index].set_opcode_args(args);
+    }
     
     fn push_state(&mut self, state:State){
         self.state.push(state)
@@ -268,18 +297,18 @@ impl ScriptParser{
         let op = tok.operator();
         let (id,starts_with_ds) = tok.identifier();
         match self.state.pop().unwrap(){
-            State::ForIdent(idents)=>{
+            State::ForIdent{idents, index}=>{
                 // we push k and v
                 if id.not_empty(){
                     if id == id!(in){
                         // alright we move on to parsing the range expr
-                        self.state.push(State::ForBody(idents));
+                        self.state.push(State::ForBody{idents, index});
                         self.state.push(State::BeginExpr(true));
                         return 1
                     }
                     else if idents < 3{
-                        self.code.push(id.into());
-                        self.state.push(State::ForIdent(idents + 1));
+                        self.push_code(id.into(), self.index);
+                        self.state.push(State::ForIdent{idents: idents + 1, index});
                         return 1
                     }
                     else{
@@ -288,49 +317,49 @@ impl ScriptParser{
                     }
                 }
                 if op == id!(,){ // eat the commas
-                    self.state.push(State::ForIdent(idents));
+                    self.state.push(State::ForIdent{idents, index});
                     return 1
                 }
                 println!("Unexpected state in parsing for");
             }
-            State::ForBody(idents)=>{
+            State::ForBody{idents, index}=>{
                 // alright lets emit a for instruction
                 
-                let code_start = self.code.len();
+                let code_start = self.code_len();
                 if idents == 1{
-                    self.code.push(Opcode::FOR_1.into());
+                    self.push_code(Opcode::FOR_1.into(), index);
                 }
                 else if idents == 2{
-                    self.code.push(Opcode::FOR_2.into());
+                    self.push_code(Opcode::FOR_2.into(), index);
                 }
                 else if idents == 3{
-                    self.code.push(Opcode::FOR_3.into());
+                    self.push_code(Opcode::FOR_3.into(), index);
                 }
                 else{
                     println!("Wrong number of identifiers for for loop {idents}");
                     return 0
                 }
                 if tok.is_open_curly(){
-                    self.state.push(State::ForBlock(code_start));
+                    self.state.push(State::ForBlock{code_start});
                     return 1
                 }
                 else{
-                    self.state.push(State::ForExpr(code_start));
+                    self.state.push(State::ForExpr{code_start});
                     self.state.push(State::BeginExpr(true));
                 }
             }
-            State::ForExpr(code_start)=>{
-                self.code.push(Opcode::POP_TO_ME.into());
-                self.code.push(Opcode::FOR_END.into());
-                let jump_to = (self.code.len() - code_start) as _;
-                self.code[code_start].set_opcode_args(OpcodeArgs::from_u32(jump_to));
+            State::ForExpr{code_start}=>{
+                self.push_code_none(Opcode::POP_TO_ME.into());
+                self.push_code_none(Opcode::FOR_END.into());
+                let jump_to = (self.code_len() - code_start) as _;
+                self.set_opcode_args(code_start, OpcodeArgs::from_u32(jump_to));
                 return 0
             }
-            State::ForBlock(code_start)=>{
+            State::ForBlock{code_start}=>{
                 if tok.is_close_curly() {
-                    self.code.push(Opcode::FOR_END.into());
-                    let jump_to = (self.code.len() - code_start) as _;
-                    self.code[code_start].set_opcode_args(OpcodeArgs::from_u32(jump_to));
+                    self.push_code_none(Opcode::FOR_END.into());
+                    let jump_to = (self.code_len() - code_start) as _;
+                    self.set_opcode_args(code_start, OpcodeArgs::from_u32(jump_to));
                     return 1
                 }
                 else {
@@ -339,57 +368,57 @@ impl ScriptParser{
                 }
             }
             State::Delete=>{}
-            State::Let=>{
+            State::Let{index}=>{
                 if id.not_empty(){ // lets expect an assignment expression
                     // push the id on to the stack
-                    self.code.push(id.into());
-                    self.state.push(State::LetDynOrTyped);
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::LetDynOrTyped{index});
                     return 1
                 }
                 else{ // unknown
                     println!("Let expected identifier");
                 }
             }
-            State::LetDynOrTyped=>{
+            State::LetDynOrTyped{index}=>{
                 if op == id!(=){ // assignment following
-                    self.state.push(State::EmitLetDyn);
+                    self.state.push(State::EmitLetDyn{index});
                     self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 else if op == id!(:){ // type following
-                    self.state.push(State::LetType);
+                    self.state.push(State::LetType{index});
                     return 1
                 }
                 else{
-                    self.code.push(Value::from_opcode_args(Opcode::LET_DYN, OpcodeArgs::NIL));
+                    self.push_code(Value::from_opcode_args(Opcode::LET_DYN, OpcodeArgs::NIL), index);
                 }
             }
-            State::LetType=>{
+            State::LetType{index}=>{
                 if id.not_empty(){ // lets expect an assignment expression
                     // push the id on to the stack
-                    self.code.push(id.into());
-                    self.state.push(State::LetTypedAssign);
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::LetTypedAssign{index});
                     return 1
                 }
                 else{ // unknown
                     println!("Let type expected");
                 }
             }
-            State::LetTypedAssign=>{
+            State::LetTypedAssign{index}=>{
                 if op == id!(=){ // assignment following
-                    self.state.push(State::EmitLetTyped);
+                    self.state.push(State::EmitLetTyped{index});
                     self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 else{
-                    self.code.push(Value::from_opcode_args(Opcode::LET_TYPED, OpcodeArgs::NIL));
+                    self.push_code(Value::from_opcode_args(Opcode::LET_TYPED, OpcodeArgs::NIL), index);
                 }
             }
-            State::EmitLetDyn=>{
-                self.code.push(Opcode::LET_DYN.into());
+            State::EmitLetDyn{index}=>{
+                self.push_code(Opcode::LET_DYN.into(), index);
             }
-            State::EmitLetTyped=>{
-                self.code.push(Opcode::LET_TYPED.into());
+            State::EmitLetTyped{index}=>{
+                self.push_code(Opcode::LET_TYPED.into(), index);
             }
             State::EndRound=>{
                 // we expect a ) here
@@ -402,35 +431,35 @@ impl ScriptParser{
                     println!("Expected )")
                 }
             }
-            State::EmitFnArgTyped=>{
-                self.code.push(Value::from_opcode_args(Opcode::FN_ARG_TYPED, OpcodeArgs::NIL));
+            State::EmitFnArgTyped{index}=>{
+                self.push_code(Value::from_opcode_args(Opcode::FN_ARG_TYPED, OpcodeArgs::NIL), index);
             }
-            State::EmitFnArgDyn=>{
-                self.code.push(Value::from_opcode_args(Opcode::FN_ARG_DYN, OpcodeArgs::NIL));
+            State::EmitFnArgDyn{index}=>{
+                self.push_code(Value::from_opcode_args(Opcode::FN_ARG_DYN, OpcodeArgs::NIL), index);
             }
-            State::FnArgType=>{
+            State::FnArgType{index}=>{
                 if id.not_empty(){
-                    self.code.push(id.into());
-                    self.state.push(State::EmitFnArgTyped);
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::EmitFnArgTyped{index:self.index});
                     return 1
                 }
                 else{
-                    self.state.push(State::EmitFnArgDyn);
+                    self.state.push(State::EmitFnArgDyn{index});
                     println!("Argument type expected in function")
                 }
             }
-            State::FnArgMaybeType=>{
+            State::FnArgMaybeType{index}=>{
                 if op == id!(:){
-                    self.state.push(State::FnArgType);
+                    self.state.push(State::FnArgType{index});
                     return 1
                 }
-                self.state.push(State::EmitFnArgDyn);
+                self.state.push(State::EmitFnArgDyn{index});
             }
             State::FnArgList=>{
                 if id.not_empty(){ // ident
-                    self.code.push(id.into());
+                    self.push_code(id.into(), self.index);
                     self.state.push(State::FnArgList);
-                    self.state.push(State::FnArgMaybeType);
+                    self.state.push(State::FnArgMaybeType{index:self.index});
                     return 1
                 }
                 if op == id!(|){
@@ -443,43 +472,41 @@ impl ScriptParser{
                 return 1
             }
             State::FnBody=>{
-                let fn_slot = self.code.len() as _ ;
-                self.code.push(Opcode::NOP.into());
+                let fn_slot = self.code_len() as _ ;
+                self.push_code(Opcode::FN_BODY.into(), self.index);
                 if tok.is_open_curly(){ // function body
-                    self.state.push(State::EndFnBlock(fn_slot, false));
+                    self.state.push(State::EndFnBlock{fn_slot, last_was_semi:false, index:self.index});
                     self.state.push(State::BeginStmt(false));
                     return 1
                 }
                 else{ // function body is expression
-                    self.state.push(State::EndFnExpr(fn_slot));
+                    self.state.push(State::EndFnExpr{fn_slot, index:self.index});
                     self.state.push(State::BeginExpr(true));
                 }
             }
             State::EscapedId=>{
                 if id.not_empty(){ // ident
-                    let value = Value::from_escaped_id(id);
-                    self.code.push(value);
+                    self.push_code(id.escape(), self.index);
                     return 1
                 }
                 else{
                     println!("Expected identifier after @");
                 }
             }
-            State::EndFnExpr(fn_slot)=>{
-                self.code.push(Opcode::RETURN.into());
-                self.code[fn_slot as usize] = Value::from_opcode_args(Opcode::FN_BODY, OpcodeArgs::from_u32(self.code.len() as u32 -fn_slot));
+            State::EndFnExpr{fn_slot, index}=>{
+                self.push_code(Opcode::RETURN.into(), index);
+                self.set_opcode_args(fn_slot as _, OpcodeArgs::from_u32(self.code_len() as u32 -fn_slot));
             }
-            State::EndFnBlock(fn_slot, last_was_semi)=>{
+            State::EndFnBlock{fn_slot, last_was_semi, index}=>{
                 
-                if !last_was_semi && Some(&Opcode::POP_TO_ME.into()) == self.code.last(){
-                    self.code.pop();
-                    self.code.push(Opcode::RETURN.into());
+                if !last_was_semi && Some(&Opcode::POP_TO_ME.into()) == self.code_last(){
+                    self.pop_code();
+                    self.push_code(Opcode::RETURN.into(), index);
                 }
                 else{
-                    self.code.push(Value::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL));
+                    self.push_code(Value::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL), index);
                 }
-                self.code[fn_slot as usize ] = Value::from_opcode_args(Opcode::FN_BODY, OpcodeArgs::from_u32(self.code.len() as u32 -fn_slot));
-                
+                self.set_opcode_args(fn_slot as _, OpcodeArgs::from_u32(self.code_len() as u32 -fn_slot));
                 
                 if tok.is_close_curly() {
                     return 1
@@ -490,28 +517,26 @@ impl ScriptParser{
                 }
             }
             // alright we parsed a + b * c
-            State::EmitFieldAssign(what_op)=>{
-                self.code.push(State::operator_to_field_assign(what_op));
+            State::EmitFieldAssign{what_op, index}=>{
+                self.push_code(State::operator_to_field_assign(what_op), index);
             }
-            State::EmitIndexAssign(what_op)=>{
-                self.code.push(State::operator_to_index_assign(what_op));
+            State::EmitIndexAssign{what_op, index}=>{
+                self.push_code(State::operator_to_index_assign(what_op), index);
             }
-            State::EmitOp(what_op)=>{
-                self.code.push(State::operator_to_opcode(what_op));
+            State::EmitOp{what_op, index}=>{
+                self.push_code(State::operator_to_opcode(what_op), index);
                 return 0
             }
-            State::Return=>{
-                // eat a ; to do a nil
-                
-                self.code.push(Opcode::RETURN.into());
+            State::EmitUnary{what_op, index}=>{
+                self.push_code(State::operator_to_unary(what_op), index);
                 return 0
             }
-            State::EmitUnary(what_op)=>{
-                self.code.push(State::operator_to_unary(what_op));
+            State::Return{index}=>{
+                self.push_code(Opcode::RETURN.into(), index);
                 return 0
             }
             State::EndBareSquare=>{
-                self.code.push(Opcode::END_ARRAY.into());
+                self.push_code(Opcode::END_ARRAY.into(), self.index);
                 self.state.push(State::EndExpr);
                 if tok.is_close_square() {
                     return 1
@@ -522,7 +547,7 @@ impl ScriptParser{
                 }
             }
             State::EndBare=>{
-                self.code.push(Opcode::END_BARE.into());
+                self.push_code(Opcode::END_BARE.into(), self.index);
                 self.state.push(State::EndExpr);
                 if tok.is_close_curly() {
                     return 1
@@ -534,7 +559,7 @@ impl ScriptParser{
             }
             // emit the create prototype instruction
             State::EndProto=>{
-                self.code.push(Opcode::END_PROTO.into());
+                self.push_code(Opcode::END_PROTO.into(), self.index);
                 self.state.push(State::EndExpr);
                 if tok.is_close_curly() {
                     return 1
@@ -544,35 +569,35 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::EmitCall(is_method)=>{
+            State::EmitCall{is_method, index}=>{
                 if is_method{
-                    self.code.push(Opcode::METHOD_CALL_EXEC.into());
+                    self.push_code(Opcode::METHOD_CALL_EXEC.into(), index);
                 }
                 else{
-                    self.code.push(Opcode::CALL_EXEC.into());
+                    self.push_code(Opcode::CALL_EXEC.into(), index);
                 }
                 self.state.push(State::EndExpr);
             }
-            State::CallMaybeDo(is_method)=>{
+            State::CallMaybeDo{is_method, index}=>{
                 if id == id!(do){
-                    self.state.push(State::EmitCall(is_method));
+                    self.state.push(State::EmitCall{is_method, index});
                     self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 else{
                     if is_method{
-                        self.code.push(Opcode::METHOD_CALL_EXEC.into());
+                        self.push_code(Opcode::METHOD_CALL_EXEC.into(), index);
                     }
                     else{
-                        self.code.push(Opcode::CALL_EXEC.into());
+                        self.push_code(Opcode::CALL_EXEC.into(), index);
                     }
                     self.state.push(State::EndExpr);
                     return 0
                 }
             }
-            State::EndCall(is_method)=>{
+            State::EndCall{is_method, index}=>{
                 // expect )
-                self.state.push(State::CallMaybeDo(is_method));
+                self.state.push(State::CallMaybeDo{is_method, index});
                 if tok.is_close_round() {
                     return 1
                 }
@@ -582,7 +607,7 @@ impl ScriptParser{
                 }
             }
             State::ArrayIndex=>{
-                self.code.push(Opcode::ARRAY_INDEX.into());
+                self.push_code(Opcode::ARRAY_INDEX.into(), self.index);
                 self.state.push(State::EndExpr);
                 if tok.is_close_square() {
                     return 1
@@ -592,11 +617,11 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::IfTest=>{
-                let if_start = self.code.len() as _ ;
-                self.code.push(Opcode::NOP.into());
+            State::IfTest{index}=>{
+                let if_start = self.code_len() as _ ;
+                self.push_code(Opcode::IF_TEST.into(), index);
                 if tok.is_open_curly(){
-                    self.state.push(State::IfTrueBlock(if_start, false));
+                    self.state.push(State::IfTrueBlock{if_start, last_was_semi:false});
                     self.state.push(State::BeginStmt(false));
                     return 1
                 }
@@ -604,22 +629,22 @@ impl ScriptParser{
                     println!("Unexpected else, use {{}} to disambiguate");
                     return 1
                 }
-                self.state.push(State::IfTrueExpr(if_start));
+                self.state.push(State::IfTrueExpr{if_start});
                 self.state.push(State::BeginExpr(true));
                 return 0
             }
-            State::IfTrueExpr(if_start)=>{
-                self.state.push(State::IfMaybeElse(if_start, false));
+            State::IfTrueExpr{if_start}=>{
+                self.state.push(State::IfMaybeElse{if_start, was_block:false});
                 return 0
             }
-            State::IfTrueBlock(if_start, last_was_semi)=>{
+            State::IfTrueBlock{if_start, last_was_semi}=>{
                 if tok.is_close_curly() {
                     if !last_was_semi{
-                        if Some(&Opcode::POP_TO_ME.into()) == self.code.last(){
-                            self.code.pop();
+                        if Some(&Opcode::POP_TO_ME.into()) == self.code_last(){
+                            self.pop_code();
                         }
                     }
-                    self.state.push(State::IfMaybeElse(if_start, true));
+                    self.state.push(State::IfMaybeElse{if_start, was_block:true});
                     return 1
                 }
                 else {
@@ -628,51 +653,52 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::IfMaybeElse(if_start, was_block)=>{
+            State::IfMaybeElse{if_start, was_block}=>{
                 if id == id!(elif){
-                    let else_start = self.code.len() as u32;
-                    self.code.push(Opcode::NOP.into());
-                    self.code[if_start as usize] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32(self.code.len() as u32 -if_start));
-                    self.state.push(State::IfElse(else_start));
-                    self.state.push(State::IfTest);
+                    let else_start = self.code_len() as u32;
+                    self.push_code(Opcode::IF_ELSE.into(), self.index);
+                    self.set_opcode_args(if_start as usize, OpcodeArgs::from_u32(self.code_len() as u32 -if_start) );
+
+                    self.state.push(State::IfElse{else_start});
+                    self.state.push(State::IfTest{index:self.index});
                     self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 if id == id!(else){
-                    let else_start = self.code.len() as u32;
-                    self.code.push(Opcode::NOP.into());
-                    self.code[if_start as usize] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32(self.code.len() as u32 -if_start));
-                    self.state.push(State::IfElse(else_start));
+                    let else_start = self.code_len() as u32;
+                    self.push_code(Opcode::IF_ELSE.into(), self.index);
+                    self.set_opcode_args(if_start as usize, OpcodeArgs::from_u32(self.code_len() as u32 -if_start) );
+                    self.state.push(State::IfElse{else_start});
                     return 1
                 }
-                self.code[if_start as usize] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32((self.code.len() as u32 -if_start) as u32));
-                self.code.push(Value::NIL);
+                self.set_opcode_args(if_start as usize, OpcodeArgs::from_u32(self.code_len() as u32 -if_start) );
+                self.push_code_none(Value::NIL);
                 if was_block{ // allow expression to chain
                     self.state.push(State::EndExpr)
                 }
             }
-            State::IfElse(else_start)=>{
+            State::IfElse{else_start}=>{
                 if tok.is_open_curly(){
-                    self.state.push(State::IfElseBlock(else_start, false));
+                    self.state.push(State::IfElseBlock{else_start, last_was_semi:false});
                     self.state.push(State::BeginStmt(false));
                     return 1
                 }
-                self.state.push(State::IfElseExpr(else_start));
+                self.state.push(State::IfElseExpr{else_start});
                 self.state.push(State::BeginExpr(true));
                 return 0
             }
-            State::IfElseExpr(else_start)=>{
-                self.code[else_start as usize ] = Value::from_opcode_args(Opcode::IF_ELSE, OpcodeArgs::from_u32(self.code.len() as u32 -else_start));
+            State::IfElseExpr{else_start}=>{
+                self.set_opcode_args(else_start as usize, OpcodeArgs::from_u32(self.code_len() as u32 -else_start) );
                 return 0
             }
-            State::IfElseBlock(else_start, last_was_semi)=>{
+            State::IfElseBlock{else_start, last_was_semi}=>{
                 if tok.is_close_curly() {
                     if !last_was_semi{
-                        if Some(&Opcode::POP_TO_ME.into()) == self.code.last(){
-                            self.code.pop();
+                        if Some(&Opcode::POP_TO_ME.into()) == self.code_last(){
+                            self.pop_code();
                         }
                     }
-                    self.code[else_start as usize ] = Value::from_opcode_args(Opcode::IF_ELSE, OpcodeArgs::from_u32(self.code.len() as u32 - else_start));
+                    self.set_opcode_args(else_start as usize, OpcodeArgs::from_u32(self.code_len() as u32 -else_start) );
                     self.state.push(State::EndExpr);
                     return 1
                 }
@@ -684,11 +710,12 @@ impl ScriptParser{
             }
             State::BeginExpr(required)=>{
                 if tok.is_open_curly(){
-                    if let Some(State::EmitUnary(id!(+))) = self.state.last(){
+                    /*
+                    if let Some(State::EmitUnary{what_op:id!(+),..}) = self.state.last(){
                         self.state.pop();
-                        if let Some(State::EmitOp(id!(:))) = self.state.last(){
+                        if let Some(State::EmitOp{what_op:id!(:),..}) = self.state.last(){
                             // ok so we need to emit BEGIN_PROTO_ME
-                            self.code.push(Opcode::BEGIN_PROTO_ME.into());
+                            self.push_code(Opcode::BEGIN_PROTO_ME.into(), self.index);
                             self.state.push(State::EndBare);
                             self.state.push(State::BeginStmt(false));
                             return 1
@@ -696,14 +723,14 @@ impl ScriptParser{
                         else{
                             println!("Found +{{ protoinherit. Left hand side must be field:")
                         }
-                    }
-                    self.code.push(Opcode::BEGIN_BARE.into());
+                    }*/
+                    self.push_code(Opcode::BEGIN_BARE.into(), self.index);
                     self.state.push(State::EndBare);
                     self.state.push(State::BeginStmt(false));
                     return 1
                 }
                 if tok.is_open_square(){
-                    self.code.push(Opcode::BEGIN_ARRAY.into());
+                    self.push_code(Opcode::BEGIN_ARRAY.into(), self.index);
                     self.state.push(State::EndBareSquare);
                     self.state.push(State::BeginStmt(false));
                     return 1
@@ -715,26 +742,26 @@ impl ScriptParser{
                     return 1
                 }
                 if let Some(v) = tok.maybe_number(){
-                    self.code.push(Value::from_f64(v));
+                    self.push_code(Value::from_f64(v), self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
                 if id == id!(if){ // do if as an expression
-                    self.state.push(State::IfTest);
+                    self.state.push(State::IfTest{index:self.index});
                     self.state.push(State::BeginExpr(true));
                     return 1
                 }
                 if id == id!(for){
-                    self.state.push(State::ForIdent(0));
+                    self.state.push(State::ForIdent{idents:0, index:self.index});
                     return 1
                 }
                 if id == id!(let){
                     // we have to have an identifier after let
-                    self.state.push(State::Let);
+                    self.state.push(State::Let{index:self.index});
                     return 1
                 }
                 if id == id!(return){
-                    self.state.push(State::Return);
+                    self.state.push(State::Return{index:self.index});
                     self.state.push(State::BeginExpr(false));
                     return 1;
                 }
@@ -744,40 +771,40 @@ impl ScriptParser{
                     return 1;
                 }
                 if id == id!(true){
-                    self.code.push(Value::from_bool(true));
+                    self.push_code(Value::from_bool(true), self.index);
                     self.state.push(State::EndExpr);
                     return 1;
                 }
                 if id == id!(false){
-                    self.code.push(Value::from_bool(false));
+                    self.push_code(Value::from_bool(false), self.index);
                     self.state.push(State::EndExpr);
                     return 1;
                 }
                 if id == id!(me){
-                    self.code.push(Opcode::ME.into());
+                    self.push_code(Opcode::ME.into(), self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
                 if id == id!(scope){
-                    self.code.push(Opcode::SCOPE.into());
+                    self.push_code(Opcode::SCOPE.into(), self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
                 if id == id!(nil){
-                    self.code.push(Value::NIL);
+                    self.push_code(Value::NIL, self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
                 if id.not_empty(){
-                    self.code.push(Value::from_id(id));
+                    self.push_code(Value::from_id(id), self.index);
                     if starts_with_ds{
-                        self.code.push(Opcode::SEARCH_TREE.into());
+                        self.push_code(Opcode::SEARCH_TREE.into(), self.index);
                     }
                     self.state.push(State::EndExpr);
                     return 1
                 }
                 if let Some(v) = tok.maybe_color(){
-                    self.code.push(Value::from_color(v));
+                    self.push_code(Value::from_color(v), self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
@@ -785,16 +812,16 @@ impl ScriptParser{
                     // maybe make the string inline
                     let str = heap.string(ptr);
                     if let Some(value) = Value::from_inline_string(str){
-                        self.code.push(value);
+                        self.push_code(value, self.index);
                     }
                     else{
-                        self.code.push(Value::from_string(ptr));
+                        self.push_code(Value::from_string(ptr), self.index);
                     }
                     self.state.push(State::EndExpr);
                     return 1
                 }
                 if op == id!(-) || op == id!(+) || op == id!(!) || op == id!(~){
-                    self.state.push(State::EmitUnary(op));
+                    self.state.push(State::EmitUnary{what_op:op, index:self.index});
                     self.state.push(State::BeginExpr(true));
                     return 1
                 }
@@ -804,26 +831,26 @@ impl ScriptParser{
                     return 1
                 }
                 if op == id!(||){
-                    self.code.push(Opcode::FN_ARGS.into());
+                    self.push_code(Opcode::FN_ARGS.into(), self.index);
                     self.state.push(State::FnBody);
                     return 1
                 }
                 if op == id!(|){
-                    self.code.push(Opcode::FN_ARGS.into());
+                    self.push_code(Opcode::FN_ARGS.into(), self.index);
                     self.state.push(State::FnArgList);
                     return 1
                 }
                 if op == id!(.){
-                    self.state.push(State::EmitOp(id!(me.)));
+                    self.state.push(State::EmitOp{what_op:id!(me.), index:self.index});
                     self.state.push(State::BeginExpr(true));
                     return 1
                 }
-                if !required && op == id!(;) || op == id!(,){
-                    self.code.push(Value::NIL);
+                if !required && (op == id!(;) || op == id!(,)){
+                    self.push_code(Value::NIL, self.index);
                 }
                 if required{
                     println!("Expected expression after {:?} found {:?}", self.state, tok);
-                    self.code.push(Value::NIL);
+                    self.push_code_none(Value::NIL);
                 }
             }
                         
@@ -837,18 +864,19 @@ impl ScriptParser{
                 else{op};
                 
                 if State::operator_order(op) != 0{
-                    let next_state = State::EmitOp(op);
+                    let next_state = State::EmitOp{what_op:op, index:self.index};
                     // check if we have a ..[] = 
-                    if Some(&Opcode::ARRAY_INDEX.into()) == self.code.last(){
+                    if Some(&Opcode::ARRAY_INDEX.into()) == self.code_last(){
                         if State::is_assign_operator(op){
-                            self.code.pop();
-                            self.state.push(State::EmitIndexAssign(op));
+                            self.pop_code();
+                            self.state.push(State::EmitIndexAssign{what_op:op, index:self.index});
                             self.state.push(State::BeginExpr(true));
                             return 1
                         }
                     }
+                    // check if we need to generate proto_field ops
                     if let Some(last) = self.state.pop(){
-                        if let State::EmitOp(id!(.)) = last{
+                        if let State::EmitOp{what_op:id!(.),..} = last{
                             if State::is_assign_operator(op){
                                 for pair in self.code.rchunks_mut(2){
                                     if pair[0] == Opcode::FIELD.into() && pair[1].is_id(){
@@ -858,13 +886,13 @@ impl ScriptParser{
                                         break
                                     }
                                 }
-                                self.state.push(State::EmitFieldAssign(op));
+                                self.state.push(State::EmitFieldAssign{what_op:op, index:self.index});
                                 self.state.push(State::BeginExpr(true));
                                 return 1
                             }
                         }
                         if last.is_heq_prio(next_state){
-                            self.state.push(State::EmitOp(op));
+                            self.state.push(State::EmitOp{what_op:op, index:self.index});
                             self.state.push(State::BeginExpr(true));
                             self.state.push(last);
                             return 1
@@ -873,7 +901,7 @@ impl ScriptParser{
                             self.state.push(last);
                         }
                     }
-                    self.state.push(State::EmitOp(op));
+                    self.state.push(State::EmitOp{what_op:op, index:self.index});
                     self.state.push(State::BeginExpr(true));
                     return 1
                 }
@@ -881,12 +909,12 @@ impl ScriptParser{
                 if tok.is_open_curly() {
                                         
                     for state in self.state.iter().rev(){
-                        if let State::EmitOp(_) = state{}
-                        else if let State::EmitUnary(_) = state{}
-                        else if let State::IfTest = state{
+                        if let State::EmitOp{..} = state{}
+                        else if let State::EmitUnary{..} = state{}
+                        else if let State::IfTest{..} = state{
                             return 0
                         }
-                        else if let State::ForBody(_) = state{
+                        else if let State::ForBody{..} = state{
                             return 0
                         }
                         else{
@@ -894,24 +922,24 @@ impl ScriptParser{
                         }
                     }
                                         
-                    self.code.push(Opcode::BEGIN_PROTO.into());
+                    self.push_code(Opcode::BEGIN_PROTO.into(), self.index);
                     self.state.push(State::EndProto);
                     self.state.push(State::BeginStmt(false));
                     return 1
                 }
                 if tok.is_open_round(){ 
                     if let Some(last) = self.state.pop(){
-                        if let State::EmitOp(id!(.)) = last{
+                        if let State::EmitOp{what_op:id!(.),..} = last{
                             //self.code.push(State::operator_to_opcode(id!(.)));
-                            self.code.push(Opcode::METHOD_CALL_ARGS.into());
-                            self.state.push(State::EndCall(true));
+                            self.push_code(Opcode::METHOD_CALL_ARGS.into(), self.index);
+                            self.state.push(State::EndCall{is_method:true, index:self.index});
                             self.state.push(State::BeginStmt(false));
                                                                                     
                         }
                         else{
                             self.state.push(last);
-                            self.code.push(Opcode::CALL_ARGS.into());
-                            self.state.push(State::EndCall(false));
+                            self.push_code(Opcode::CALL_ARGS.into(), self.index);
+                            self.state.push(State::EndCall{is_method:false, index:self.index});
                             self.state.push(State::BeginStmt(false));
                         }
                     }
@@ -919,8 +947,8 @@ impl ScriptParser{
                 }
                 if tok.is_open_square(){
                     if let Some(last) = self.state.pop(){
-                        if let State::EmitOp(id!(.)) = last{
-                            self.code.push(State::operator_to_opcode(id!(.)));
+                        if let State::EmitOp{what_op:id!(.),index} = last{
+                            self.push_code(State::operator_to_opcode(id!(.)), index);
                         }
                         else{
                             self.state.push(last);
@@ -942,9 +970,9 @@ impl ScriptParser{
                 }
                 if tok.is_close_round() || tok.is_close_curly() || tok.is_close_square(){
                     if last_was_semi{
-                        if let Some(State::IfTrueBlock(_,ls)) = self.state.last_mut(){*ls = true}
-                        if let Some(State::IfElseBlock(_,ls)) = self.state.last_mut(){*ls = true}
-                        if let Some(State::EndFnBlock(_,ls)) = self.state.last_mut(){*ls = true}
+                        if let Some(State::IfTrueBlock{last_was_semi,..}) = self.state.last_mut(){*last_was_semi = true}
+                        if let Some(State::IfElseBlock{last_was_semi,..}) = self.state.last_mut(){*last_was_semi = true}
+                        if let Some(State::EndFnBlock{last_was_semi,..}) = self.state.last_mut(){*last_was_semi = true}
                     }
                     // pop and let the stack handle it
                     return 0
@@ -978,7 +1006,7 @@ impl ScriptParser{
                     }
                 }
                 // otherwise pop to me
-                self.code.push(Opcode::POP_TO_ME.into());
+                self.push_code_none(Opcode::POP_TO_ME.into());
                 self.state.push(State::BeginStmt(false));
                 return 0
             }
