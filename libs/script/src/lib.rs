@@ -72,12 +72,10 @@ pub fn test(){
     ";
     
     let code = "
-        let x = (0..100).step(10);
-        for v in x ~v;
+        for v in (0..1000).step(10) ~v;
     ";
     
     let _code = "
-        let x = {1,nil,3}
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     ";

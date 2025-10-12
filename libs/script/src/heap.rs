@@ -548,9 +548,10 @@ impl ScriptHeap{
         let ty = object.tag.get_type();
         if ty.has_paired_vec(){
             object.vec.extend_from_slice(&[key, value]);
-            //if key.is_unprefixed_id() && !object.tag.get_type().is_vec2(){ 
-            //    object.map.insert(key, value);
-            //}
+            if let Some(obj) = value.as_object(){
+                let object = &mut self.objects[obj.index as usize];
+                object.tag.set_reffed();
+            }
         }
         else if ty.is_typed(){
             println!("IMPLEMENT TYPED PUSH VALUE")
@@ -633,9 +634,9 @@ impl ScriptHeap{
         if let Some(id) = key.as_id(){
             // mark object as having methods
             if let Some(obj) = value.as_object(){
-                if self.object_is_fn(obj){
+                if self.object_is_fn_and_set_reffed(obj){
                     let object = &mut self.objects[ptr.index as usize];
-                    object.tag.set_has_methods();                    
+                    object.tag.set_has_methods();
                 }
             }
             if id.is_prefixed(){
@@ -703,6 +704,12 @@ impl ScriptHeap{
         object.tag.is_fn()
     }
     
+    pub fn object_is_fn_and_set_reffed(&mut self, ptr: ObjectPtr,)->bool{
+        let object = &mut self.objects[ptr.index as usize];
+        object.tag.set_reffed();
+        object.tag.is_fn()
+    }
+    
     pub fn parent_object_as_fn(&self, ptr: ObjectPtr,)->Option<(u32, bool)>{
         let object = &self.objects[ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
@@ -727,6 +734,10 @@ impl ScriptHeap{
             if let Some(key) = object.vec.get(index*2){
                 let key = *key;
                 self.objects[top_ptr.index as usize].vec.extend_from_slice(&[key, value]);
+                if let Some(obj) = value.as_object(){
+                    let object = &mut self.objects[obj.index as usize];
+                    object.tag.set_reffed();
+                }
             }
             else{
                 self.objects[top_ptr.index as usize].vec.extend_from_slice(&[Value::NIL, value]);
