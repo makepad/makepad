@@ -815,30 +815,27 @@ impl ScriptParser{
                 }
                 if id == id!(true){
                     self.code.push(Value::from_bool(true));
+                    self.state.push(State::EndExpr);
                     return 1;
                 }
                 if id == id!(false){
                     self.code.push(Value::from_bool(false));
+                    self.state.push(State::EndExpr);
                     return 1;
                 }
                 if id == id!(me){
                     self.code.push(Opcode::ME.into());
-                    return 1
-                }
-                if id == id!(this) || id == id!(self){
-                    self.code.push(Opcode::THIS.into());
+                    self.state.push(State::EndExpr);
                     return 1
                 }
                 if id == id!(scope){
                     self.code.push(Opcode::SCOPE.into());
-                    return 1
-                }                
-                if id == id!(mod){
-                    self.code.push(Opcode::MOD.into());
+                    self.state.push(State::EndExpr);
                     return 1
                 }
                 if id == id!(nil){
                     self.code.push(Value::NIL);
+                    self.state.push(State::EndExpr);
                     return 1
                 }
                 if id.not_empty(){
@@ -851,6 +848,7 @@ impl ScriptParser{
                 }
                 if let Some(v) = tok.maybe_color(){
                     self.code.push(Value::from_color(v));
+                    self.state.push(State::EndExpr);
                     return 1
                 }
                 if let Some(ptr) = tok.maybe_string(){
@@ -862,6 +860,7 @@ impl ScriptParser{
                     else{
                         self.code.push(Value::from_string(ptr));
                     }
+                    self.state.push(State::EndExpr);
                     return 1
                 }
                 if op == id!(-) || op == id!(+) || op == id!(!) || op == id!(~){

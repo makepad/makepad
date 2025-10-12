@@ -5,43 +5,54 @@ use crate::value::*;
 use crate::heap::*;
 use crate::methods::*;
 use crate::thread::*;
+use crate::native::*;
+use crate::modules::*;
+
+pub struct ScriptCtx{
+    pub methods: ScriptMethods,
+    pub modules: ScriptModules,
+    pub native: ScriptNative,
+    pub parser: ScriptParser,
+}
 
 pub struct Script{
-    pub methods: ScriptMethods,
-    pub parser: ScriptParser,
-    pub threads: Vec<ScriptThread>,
+    pub ctx: ScriptCtx,
     pub heap: ScriptHeap,
-    pub modules: ObjectPtr,
-    pub global: ObjectPtr,
+    pub threads: Vec<ScriptThread>,
     pub scope: ObjectPtr,
 }
 
 impl Script{
     pub fn new()->Self{
         let mut heap = ScriptHeap::new();
-        let methods = ScriptMethods::new(&mut heap);
-        
+        let mut native = ScriptNative::default();
+        let methods = ScriptMethods::new(&mut heap, &mut native);
+        let modules = ScriptModules::new(&mut heap, &mut native);
         let scope = heap.new_object_with_proto(id!(scope).into());
         let global = heap.new_object_with_proto(id!(global).into());
-        let modules = heap.new_object_with_proto(id!(mod).into());
+        heap.set_object_value(scope, id!(mod).into(), modules.obj.into());
+        heap.set_object_value(scope, id!(global).into(), global.into());
+                
         Self{
-            modules,
-            methods,
-            parser: Default::default(),
-            threads: vec![ScriptThread::new(scope, global, modules)],
+            ctx:ScriptCtx{
+                modules,
+                methods,
+                native,
+                parser: Default::default(),
+            },
+            threads: vec![ScriptThread::new(&mut heap, scope)],
             scope,
-            global: heap.new_object(0),
             heap: heap,
         }
     }
     
     pub fn parse(&mut self, code:&str){
-        self.parser.parse(code, &mut self.heap);
-        self.parser.tok.dump_tokens(&self.heap);
+        self.ctx.parser.parse(code, &mut self.heap);
+        self.ctx.parser.tok.dump_tokens(&self.heap);
     }
     
     pub fn run(&mut self, code: &str){
         self.parse(code);
-        self.threads[0].run(&self.parser, &mut self.heap, &self.methods)
+        self.threads[0].run(&mut self.heap, &self.ctx)
     }
 }
