@@ -72,13 +72,8 @@ pub fn test(){
     ";
     
     let code = "
-        scope.import(mod.math);
-        mod.math.ty();
-        let View = {@view}
-        let Button = {@button}
-        let t = Button{}
-        ~(t is object);
-        //for i in 100 ~sin(i);
+        let x = (0..100).step(10);
+        for v in x ~v;
     ";
     
     let _code = "

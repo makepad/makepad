@@ -316,6 +316,7 @@ impl fmt::Display for Opcode {
             Self::BREAK => return write!(f, "break"),
             Self::CONTINUE => return write!(f, "continue"),
             Self::IS => return write!(f, "is"),
+            Self::RANGE => return write!(f, ".."),
             _=>return write!(f, "OP{}",self.0)
         }
     }
