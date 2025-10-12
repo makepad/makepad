@@ -644,19 +644,22 @@ impl ScriptThread{
             }
                                   
             Opcode::LOG=>{
+                let index = ctx.parser.source_map[self.ip].unwrap();
+                let rc = ctx.parser.tok.token_index_to_row_col(index).unwrap();
+                
                 let value = self.peek_stack_resolved(heap);
                 if value != Value::NIL{
                     if let Some(obj) = value.as_object(){
-                        print!("Log OBJECT:");
+                        print!("script.rs:{}:{} -", rc.0, rc.1);
                         heap.print_object(obj, true);
                         println!("");
                     }
                     else{
-                        println!("Log {:?}: {:?}", value.value_type(), value);
+                        println!("script.rs:{}:{} - {:?}: {:?}", rc.0, rc.1, value.value_type(), value);
                     }
                 }
                 else{
-                    println!("Log: NIL");
+                    println!("script.rs:{}:{} - nil", rc.0, rc.1);
                 }
                 self.ip += 1;
             }
