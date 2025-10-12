@@ -5,7 +5,7 @@ let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
 ~fib(34);
 
 let MyApp = App{
-    $app_bar: +{
+    $app_bar+:{
         title: "Talk to AI"
     }
     $body: +{
