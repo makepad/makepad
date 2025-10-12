@@ -256,6 +256,7 @@ impl Default for ScriptParser{
 }
 
 impl ScriptParser{
+    
     fn code_len(&self)->u32{
         self.code.len() as _
     }
