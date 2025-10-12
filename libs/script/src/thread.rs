@@ -693,7 +693,7 @@ impl ScriptThread{
                 //heap.set_object_value(range, )
             }
             Opcode::IS=>{
-                let rhs = self.pop_stack_resolved(heap);
+                let rhs = self.pop_stack_value();
                 let lhs = self.pop_stack_resolved(heap);
                 let cmp = if let Some(id) = rhs.as_id(){
                     match lhs.value_type().to_redux(){
@@ -703,7 +703,21 @@ impl ScriptThread{
                         ValueType::REDUX_NIL=>id == id!(nan).into(),
                         ValueType::REDUX_COLOR=>id == id!(color).into(),
                         ValueType::REDUX_STRING=>id == id!(string).into(),
-                        ValueType::REDUX_OBJECT=>id == id!(object).into() ,
+                        ValueType::REDUX_OBJECT=>{
+                            id == id!(object).into() || {
+                                if let Some(rhs) = self.resolve(id, heap).as_object(){
+                                    if let Some(obj) = lhs.as_object(){
+                                        heap.object_has_proto(obj, rhs.into())
+                                    }
+                                    else{
+                                        false
+                                    }
+                                }
+                                else{
+                                    false
+                                }
+                            }
+                        },
                         ValueType::REDUX_ID=>id == id!(id).into(),
                         _=>false
                     }
