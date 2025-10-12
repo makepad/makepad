@@ -65,7 +65,7 @@ impl Opcode{
     pub const AND:Self = Self(10);
     pub const OR:Self = Self(11);
     pub const XOR:Self = Self(12);
-            
+    
     pub const CONCAT:Self = Self(13);
     pub const EQ:Self = Self(14);
     pub const NEQ:Self = Self(15);
@@ -175,6 +175,8 @@ impl Opcode{
     pub const BREAK: Self = Self(101);
     pub const CONTINUE: Self = Self(102);
     pub const RANGE: Self = Self(103);
+    pub const IS: Self = Self(104);
+    
 }
 
 
@@ -313,7 +315,7 @@ impl fmt::Display for Opcode {
             Self::FOR_END => return write!(f, "forend"),
             Self::BREAK => return write!(f, "break"),
             Self::CONTINUE => return write!(f, "continue"),
-            
+            Self::IS => return write!(f, "is"),
             _=>return write!(f, "OP{}",self.0)
         }
     }

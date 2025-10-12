@@ -11,6 +11,7 @@ use crate::modules::*;
 pub struct ScriptCtx{
     pub methods: ScriptMethods,
     pub modules: ScriptModules,
+    pub builtins: ScriptBuiltins,
     pub native: ScriptNative,
     pub parser: ScriptParser,
 }
@@ -32,9 +33,11 @@ impl Script{
         let global = heap.new_object_with_proto(id!(global).into());
         heap.set_object_value(scope, id!(mod).into(), modules.obj.into());
         heap.set_object_value(scope, id!(global).into(), global.into());
-                
+        let builtins = ScriptBuiltins::new(&mut heap, &modules);
+        
         Self{
             ctx:ScriptCtx{
+                builtins,
                 modules,
                 methods,
                 native,

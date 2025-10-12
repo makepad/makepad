@@ -39,9 +39,21 @@ impl From<f64> for Value{
     }
 }
 
+impl From<bool> for Value{
+    fn from(v:bool) -> Self{
+        Value::from_bool(v)
+    }
+}
+
 impl From<Id> for Value{
     fn from(v:Id) -> Self{
         Value::from_id(v)
+    }
+}
+
+impl From<&Id> for Value{
+    fn from(v:&Id) -> Self{
+        Value::from_id(*v)
     }
 }
 
@@ -55,7 +67,7 @@ impl From<Opcode> for Value{
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ValueType(u8);
 impl ValueType{
-    pub const F64: Self = Self(0);
+    pub const NUMBER: Self = Self(0);
     pub const NAN: Self = Self(0x01);
     pub const BOOL: Self = Self(0x02);
     pub const NIL: Self = Self(0x03);
@@ -74,6 +86,17 @@ impl ValueType{
     pub const INLINE_STRING_END: Self = Self(0x10);
     pub const ID: Self = Self(0x80);
     
+    pub const REDUX_NUMBER: usize = 0x00;
+    pub const REDUX_NAN: usize = 0x01;
+    pub const REDUX_BOOL: usize = 0x02;
+    pub const REDUX_NIL: usize = 0x03;
+    pub const REDUX_COLOR: usize = 0x04;
+    pub const REDUX_STRING: usize = 0x05;
+    pub const REDUX_OBJECT: usize = 0x06;
+    pub const REDUX_ID: usize = 0x07;
+    pub const REDUX_FACTORY: usize = 0x06;
+    pub const REDUX_OPCODE: usize = 0x07;
+    
     pub const fn to_u64(&self)->u64{ ((self.0 as u64) << 40) | 0xFFFF_0000_0000_0000 }
     pub const fn from_u64(val:u64)->Self{
         let val = ((val>>40)&0xff) as u8;
@@ -83,13 +106,13 @@ impl ValueType{
         Self(val)
     }
     
-    pub const fn to_index(&self)->usize{
+    pub const fn to_redux(&self)->usize{
         if self.0 > Self::ID_INDEX_HOLE.0{
             if self.0 >= Self::ID.0{
-                return Self::ID_INDEX_HOLE.0 as usize
+                return Self::REDUX_ID
             }
             else{
-                Self::STRING.0 as usize 
+                Self::REDUX_STRING as usize 
             }
         }
         else if self.0 > 0{
@@ -112,7 +135,7 @@ impl fmt::Debug for ValueType {
 impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self{
-            Self::F64=>write!(f,"F64"),
+            Self::NUMBER=>write!(f,"NUMBER"),
             Self::NAN=>write!(f,"NAN"),
             Self::BOOL=>write!(f,"BOOL"),
             Self::NIL=>write!(f,"NIL"),
@@ -130,6 +153,12 @@ impl fmt::Display for ValueType {
             x if x.0 >= Self::ID.0=>write!(f,"ID"),
             _=>write!(f,"ValueType?")
         }
+    }
+}
+
+impl Id{
+    pub fn escape(&self)->Value{
+        Value::from_escaped_id(*self)
     }
 }
 
@@ -173,8 +202,8 @@ impl Value{
     // TODO: make this behave like javascript as much as is sensible
     
     pub const fn value_type(&self)->ValueType{
-        if self.is_non_nan_f64(){
-            return ValueType::F64
+        if self.is_non_nan_number(){
+            return ValueType::NUMBER
         }
         ValueType::from_u64(self.0 & Self::TYPE_MASK)
     }
@@ -278,7 +307,7 @@ impl Value{
     }
         
     pub const fn as_f64(&self)->Option<f64>{
-        if self.is_f64(){
+        if self.is_number(){
             return Some(f64::from_bits(self.0))
         }
         None    
@@ -384,11 +413,11 @@ impl Value{
         None
     }
     
-    pub const fn is_f64(&self)->bool{
+    pub const fn is_number(&self)->bool{
         self.0 <= Self::TYPE_NAN
     }
     
-    pub const fn is_non_nan_f64(&self)->bool{
+    pub const fn is_non_nan_number(&self)->bool{
         self.0 < Self::TYPE_NAN
     }
     
