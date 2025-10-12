@@ -5,7 +5,7 @@ use crate::value::*;
 use crate::heap::*;
 use crate::opcode::*;
 use crate::object::*;
-use crate::interop::*;
+use crate::methods::*;
 
 #[derive(Debug, Default)]
 pub struct StackBases{
@@ -48,45 +48,6 @@ impl ScriptMe{
 
 pub struct ScriptThreadId(pub usize);
 
-struct LastVec<T>{
-    vec: Vec<T>,
-}
-
-impl<T> LastVec<T>{
-    pub fn new(t:T)->Self{
-        Self{
-            vec:vec![t],
-        }
-    }
-    
-    pub fn last(&self)->&T{
-        let idx = self.vec.len()-1;
-        unsafe{self.vec.get_unchecked(idx)}
-    }
-    
-    pub fn last_mut(&mut self)->&T{
-        let idx = self.vec.len()-1;
-        unsafe{self.vec.get_unchecked_mut(idx)}
-    }
-    
-    pub fn push(&mut self, t:T){
-        self.vec.push(t);
-    }
-    
-    pub fn pop(&mut self)->T{
-        let r = self.vec.pop().unwrap();
-        if self.vec.len()==0{panic!()}
-        r
-    }
-    
-    pub fn len(&self)->usize{
-        self.vec.len()
-    }
-    
-    pub fn truncate(&mut self, len:usize){
-        self.vec.truncate(len.max(1));
-    }
-}
 
 pub struct ScriptThread{
     stack_limit: usize,
@@ -95,44 +56,8 @@ pub struct ScriptThread{
     stack: Vec<Value>,
     calls: LastVec<CallFrame>,
     mes: LastVec<ScriptMe>,
+    modules: ObjectPtr,
     pub ip: usize
-}
-
-pub struct Script{
-    pub sys_fns: SystemFns,
-    pub parser: ScriptParser,
-    pub threads: Vec<ScriptThread>,
-    pub heap: ScriptHeap,
-    pub global: ObjectPtr,
-    pub scope: ObjectPtr,
-}
-
-impl Script{
-    pub fn new()->Self{
-        let mut heap = ScriptHeap::new();
-        let mut sys_fns = SystemFns::default();
-        crate::sys_fns::build_sys_fns(&mut sys_fns, &mut heap);
-        let scope = heap.new_object(0);
-        let global = heap.new_object(0);
-        Self{
-            sys_fns ,
-            parser: Default::default(),
-            threads: vec![ScriptThread::new(scope, global)],
-            scope,
-            global: heap.new_object(0),
-            heap: heap,
-        }
-    }
-    
-    pub fn parse(&mut self, code:&str){
-        self.parser.parse(code, &mut self.heap);
-        self.parser.tok.dump_tokens(&self.heap);
-    }
-    
-    pub fn run(&mut self, code: &str){
-        self.parse(code);
-        self.threads[0].run(&self.parser, &mut self.heap, &self.sys_fns)
-    }
 }
 
 macro_rules! f64_op_impl{
@@ -176,9 +101,10 @@ pub enum ScriptHook{
 
 impl ScriptThread{
     
-    pub fn new(scope:ObjectPtr, global:ObjectPtr)->Self{
+    pub fn new(scope:ObjectPtr, global:ObjectPtr, modules:ObjectPtr)->Self{
         Self{
             scopes:  LastVec::new(scope),
+            modules,
             stack_limit: 1_000_000,
             loops: vec![],
             stack: vec![],
@@ -288,7 +214,7 @@ impl ScriptThread{
         return heap.object_value(*self.scopes.last(), id.into());
     }
     
-    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap, sys_fns:&SystemFns)->Option<ScriptHook>{
+    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap, methods:&ScriptMethods)->Option<ScriptHook>{
         match opcode{
             
             Opcode::NOT=>{
@@ -476,10 +402,10 @@ impl ScriptThread{
                     // lets take the type
                     let type_index = this.value_type().to_index();
                     let method = method.as_id().unwrap_or(id!());
-                    let sys_fn = &sys_fns.type_table[type_index];
+                    let type_entry = &methods.type_table[type_index];
                     
-                    if let Some(sys_fn) = sys_fn.get(&method){
-                        let scope = heap.new_object_with_proto(sys_fn.arg_obj);
+                    if let Some(method) = type_entry.get(&method){
+                        let scope = heap.new_object_with_proto(method.arg_obj);
                         scope
                     }
                     else{ // fn not found
@@ -508,11 +434,7 @@ impl ScriptThread{
                 
                 if let Some((jump_to, is_system)) = heap.parent_object_as_fn(scope){
                     if is_system{
-                        let ret = match &sys_fns.fn_table[jump_to as usize]{
-                            SystemFnEntry::Inline{fn_ptr}=>{
-                                fn_ptr(heap, scope)
-                            }
-                        };
+                        let ret = (*methods.fn_table[jump_to as usize].fn_ptr)(heap, scope);
                         self.stack.push(ret);
                         self.ip += 1;
                     }
@@ -762,6 +684,13 @@ impl ScriptThread{
             Opcode::FOR_END=>{
                 self.end_for_loop(heap);
             }
+            Opcode::RANGE=>{
+                let start = self.pop_stack_resolved(heap);
+                let end = self.pop_stack_resolved(heap);
+                let range = heap.new_object_with_proto(id!(range).into());
+                //heap.set_object_value(range, )
+            }
+            
             opcode=>{
                 println!("UNDEFINED OPCODE {}", opcode);
                 self.ip += 1;
@@ -813,7 +742,7 @@ impl ScriptThread{
                 let end = heap.object_value(obj, id!(end).into()).as_f64().unwrap_or(0.0);
                 let v = start.into();
                 if (start-end).abs() >= 1.0{
-                    self.begin_for_loop_inner(heap, jump, source, value_id, key_id, index_id, v, start, v);
+                    self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, v, start, v);
                     return
                 }
             }
@@ -874,8 +803,8 @@ impl ScriptThread{
                     self.ip = lf.start_ip;
                     let scope = self.scopes.pop();
                     let value = object.vec[lf.index as usize * 2 + 1];
-                    let key = if let Some(key_id) = lf.key_id{
-                        object.vec[lf.index as usize * 2 + 1]
+                    let key = if lf.key_id.is_some(){
+                        object.vec[lf.index as usize * 2]
                     }else{Value::NIL};
                     let scope = heap.new_object_if_reffed(scope);
                     heap.set_object_value(scope, lf.value_id.into(), value.into());
@@ -883,7 +812,7 @@ impl ScriptThread{
                         heap.set_object_value(scope, index_id.into(), lf.index.into());
                     }
                     if let Some(key_id) = lf.key_id{
-                        heap.set_object_value(scope, key_id.into(), lf.index.into());
+                        heap.set_object_value(scope, key_id.into(), key);
                     }
                     self.scopes.push(scope);
                     self.ip = lf.start_ip;
@@ -918,7 +847,7 @@ impl ScriptThread{
     }
             
     
-    pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap,sys_fns:&SystemFns){
+    pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, methods:&ScriptMethods){
         
         self.ip = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
@@ -927,7 +856,7 @@ impl ScriptThread{
         while self.ip < parser.code.len(){
             let code = parser.code[self.ip];
             if let Some((opcode, args)) = code.as_opcode(){
-                if let Some(rust_call) = self.opcode(opcode, args, parser, heap, sys_fns){
+                if let Some(rust_call) = self.opcode(opcode, args, parser, heap, methods){
                     match rust_call{
                         ScriptHook::SysCall(_sys_id)=>{
                         }
@@ -954,5 +883,45 @@ impl ScriptThread{
         //heap.print_object(global, true);
         println!("");                                
         //self.heap.free_object(scope);
+    }
+}
+
+struct LastVec<T>{
+    vec: Vec<T>,
+}
+
+impl<T> LastVec<T>{
+    pub fn new(t:T)->Self{
+        Self{
+            vec:vec![t],
+        }
+    }
+        
+    pub fn last(&self)->&T{
+        let idx = self.vec.len()-1;
+        unsafe{self.vec.get_unchecked(idx)}
+    }
+        
+    pub fn last_mut(&mut self)->&T{
+        let idx = self.vec.len()-1;
+        unsafe{self.vec.get_unchecked_mut(idx)}
+    }
+        
+    pub fn push(&mut self, t:T){
+        self.vec.push(t);
+    }
+        
+    pub fn pop(&mut self)->T{
+        let r = self.vec.pop().unwrap();
+        if self.vec.len()==0{panic!()}
+        r
+    }
+        
+    pub fn len(&self)->usize{
+        self.vec.len()
+    }
+        
+    pub fn truncate(&mut self, len:usize){
+        self.vec.truncate(len.max(1));
     }
 }

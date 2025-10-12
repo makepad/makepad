@@ -520,6 +520,14 @@ impl ScriptTokenizer{
                     if c.is_numeric(){
                         self.temp.push(c);    
                     }
+                    else if c == '.' && self.temp.chars().last() == Some('.'){
+                        self.temp.pop();
+                        self.emit_number();
+                        self.temp.push('.');
+                        self.temp.push('.');
+                        self.emit_operator();
+                        self.state = State::Whitespace
+                    }
                     else if c == '.' && self.temp.chars().position(|v| v == '.').is_none(){
                         self.temp.push(c);    
                     }

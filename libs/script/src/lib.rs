@@ -6,12 +6,16 @@ pub mod value;
 pub mod id;
 pub mod colorhex;
 pub mod parser;
-pub mod interpreter;
 pub mod heap;
 pub mod opcode;
 pub mod interop;
 pub mod string;
-pub mod sys_fns;
+pub mod methods;
+pub mod mod_fs;
+pub mod mod_math;
+pub mod script;
+pub mod thread;
+
 // 'locals'
 //
 // locals
@@ -40,7 +44,7 @@ pub struct RustTest{
 }
 
 use crate::interop::*;
-use crate::interpreter::*;
+use crate::script::*;
 use crate::value::*;
 use crate::id::*;
 
@@ -66,6 +70,9 @@ pub fn test(){
     let time = std::time::Instant::now();
     
     let _code = "
+        let x = [@view,@bla]
+        for sym in x t[sym]
+        
         let View = {@view}
         let Window = {@window}
         let Button = {@button}
@@ -76,7 +83,7 @@ pub fn test(){
             $b2: Button{}
         }
         let x = MyWindow{
-            $b1 <: View{}
+            $b1 <: Checkbox{}
         }
         
         let x = if true 1 else 0
@@ -84,17 +91,21 @@ pub fn test(){
             
         }
         let x = x{};
-        for v in [1,2,3,4] ~v;
+        for v in [1 2 3 4] ~v
         ~x;
     ";
     
     let code = "
         //let x = @range{start:1 end:1000 step:1};
         //~@finished;
-        for i,v in [1,2,3] {~v;~i;}
+        let t = |x| y
+        t()
+        for i in 10 ~i;
     ";
     
     let _code = "
+        let x = {1,nil,3}
+        
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     ";
