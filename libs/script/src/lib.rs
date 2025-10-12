@@ -59,13 +59,12 @@ pub fn test(){
             $body: View{}
             $b2: Button{}
         }
+        
         let x = MyWindow{
             $b1 <: Checkbox{}
         }
-        
         let x = if true 1 else 0
         for v in 0..10{
-            
         }
         let x = x{};
         for v in [1 2 3 4] ~v
@@ -74,12 +73,16 @@ pub fn test(){
     
     let code = "
         scope.import(mod.math);
-        for i in 100 ~sin(i);
+        mod.math.ty();
+        let View = {@view}
+        let Button = {@button}
+        let t = Button{}
+        ~(t is Button);
+        //for i in 100 ~sin(i);
     ";
     
     let _code = "
         let x = {1,nil,3}
-        
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     ";

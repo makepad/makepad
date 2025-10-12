@@ -87,7 +87,7 @@ impl ObjectTag{
     pub const MARK:u64 = 0x100;
     pub const ALLOCED:u64 = 0x200;
     pub const DEEP:u64 = 0x400;
-    pub const FN: u64 = 0x800;
+    pub const SCRIPT_FN: u64 = 0x800;
     pub const NATIVE_FN: u64 = 0x1000;
     pub const REFFED: u64 = 0x2000;
     pub const HAS_METHODS: u64 = 0x4000;
@@ -100,8 +100,8 @@ impl ObjectTag{
         self.0 |= flags
     }
         
-    pub fn set_fn(&mut self, val: u32){
-        self.0 |= ((val as u64)<<32) | Self::FN
+    pub fn set_script_fn(&mut self, val: u32){
+        self.0 |= ((val as u64)<<32) | Self::SCRIPT_FN
     }
         
     pub fn get_fn(&self)->u32{
@@ -115,7 +115,11 @@ impl ObjectTag{
     pub fn is_native_fn(&self)->bool{
         self.0 & Self::NATIVE_FN != 0
     }
-        
+    
+    pub fn is_fn(&self)->bool{
+        self.0 & (Self::SCRIPT_FN|Self::NATIVE_FN) != 0
+    }
+    
     pub fn proto_fwd(&self)->u64{
         self.0 & Self::PROTO_FWD
     }
@@ -133,8 +137,8 @@ impl ObjectTag{
         return ObjectType( (self.0 & Self::TYPE_MASK) as u8 )
     }
         
-    pub fn is_fn(&self)->bool{
-        self.0 & Self::FN != 0
+    pub fn is_script_fn(&self)->bool{
+        self.0 & Self::SCRIPT_FN != 0
     }
             
     pub fn set_deep(&mut self){
@@ -203,7 +207,7 @@ impl fmt::Display for ObjectTag {
         if self.is_marked(){write!(f,"MARK|").ok();}
         if self.is_alloced(){write!(f,"ALLOCED|").ok();}
         if self.is_deep(){write!(f,"DEEP|").ok();}
-        if self.is_fn(){write!(f,"FN({})|", self.get_fn()).ok();}
+        if self.is_script_fn(){write!(f,"SCRIPT_FN({})|", self.get_fn()).ok();}
         if self.is_native_fn(){write!(f,"NATIVE_FN({})|", self.get_fn()).ok();}
         if self.is_reffed(){write!(f,"REFFED").ok();}
         write!(f, ")")

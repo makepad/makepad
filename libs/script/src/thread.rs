@@ -407,12 +407,12 @@ impl ScriptThread{
                                 
                 let scope = if fnobj == Value::NIL{
                     // lets take the type
-                    let type_index = this.value_type().to_index();
+                    let type_index = this.value_type().to_redux();
                     let method = method.as_id().unwrap_or(id!());
                     let type_entry = &ctx.methods.type_table[type_index];
                     
-                    if let Some(method) = type_entry.get(&method){
-                        let scope = heap.new_object_with_proto(method.fn_obj);
+                    if let Some(method_ptr) = type_entry.get(&method){
+                        let scope = heap.new_object_with_proto(method_ptr.fn_obj);
                         scope
                     }
                     else{ // fn not found
@@ -426,7 +426,8 @@ impl ScriptThread{
                 //heap.set_object_map(scope);
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
-                heap.set_fn_this(scope, this.into());
+                
+                heap.set_object_value_in_map(scope, id!(this).into(), this.into());
                 self.mes.push(ScriptMe::call(scope));
                 self.ip += 1;
             }
@@ -501,7 +502,7 @@ impl ScriptThread{
                 let jump_over_fn = args.to_u32();
                 let me = self.mes.pop();
                                 
-                heap.set_object_fn(me.object, (self.ip + 1) as u32);
+                heap.set_object_script_fn(me.object, (self.ip + 1) as u32);
                 self.ip += jump_over_fn as usize;
                 self.stack.push(me.object.into());
             }
@@ -650,7 +651,7 @@ impl ScriptThread{
             Opcode::ME=>{
                 if self.call_has_me(){
                     let me = self.mes.last();
-                    self.push_stack_value(heap.fn_this(me.object));
+                    self.push_stack_value(me.object.into());
                 }
                 else{
                     self.push_stack_value(Value::NIL);
@@ -690,6 +691,31 @@ impl ScriptThread{
                 let _end = self.pop_stack_resolved(heap);
                 let _range = heap.new_object_with_proto(id!(range).into());
                 //heap.set_object_value(range, )
+            }
+            Opcode::IS=>{
+                let rhs = self.pop_stack_resolved(heap);
+                let lhs = self.pop_stack_resolved(heap);
+                let cmp = if let Some(id) = rhs.as_id(){
+                    match lhs.value_type().to_redux(){
+                        ValueType::REDUX_NUMBER=>id == id!(number).into(),
+                        ValueType::REDUX_NAN=>id == id!(number).into() || id == id!(nan).into(),
+                        ValueType::REDUX_BOOL=>id == id!(bool).into(),
+                        ValueType::REDUX_NIL=>id == id!(nan).into(),
+                        ValueType::REDUX_COLOR=>id == id!(color).into(),
+                        ValueType::REDUX_STRING=>id == id!(string).into(),
+                        ValueType::REDUX_OBJECT=>id == id!(object).into() ,
+                        ValueType::REDUX_ID=>id == id!(id).into(),
+                        _=>false
+                    }
+                }
+                else if let Some(obj) = lhs.as_object(){
+                    heap.object_has_proto(obj, rhs)
+                }
+                else{
+                    false
+                };
+                self.stack.push(cmp.into());
+                self.ip += 1;
             }
             
             opcode=>{
@@ -880,9 +906,9 @@ impl ScriptThread{
         
         println!("Instructions {counter} Allocated objects:{:?}", heap.objects.len());
         //heap.print_object(*scope, true);
-        print!("\nGlobal:");
+        //print!("Global:");
         //heap.print_object(global, true);
-        println!("");                                
+        //println!("");                                
         //self.heap.free_object(scope);
     }
 }

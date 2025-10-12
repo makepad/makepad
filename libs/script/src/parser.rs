@@ -100,6 +100,7 @@ impl State{
             id!(-:) => 14,
             id!(++) => 14,
             id!(==) | id!(!=)  | id!(<) | id!(>) | id!(<=) | id!(>=) => 15,
+            id!(is) => 15,
             id!(&&)  => 16,
             id!(||)  => 17,
             id!(..) =>  18,
@@ -179,6 +180,7 @@ impl State{
             id!(^) => Opcode::XOR,
             id!(|)  => Opcode::OR,
             id!(++)  => Opcode::CONCAT,
+            id!(is) => Opcode::IS,
             id!(==) => Opcode::EQ,
             id!(!=) => Opcode::NEQ,
             id!(<) => Opcode::LT,
@@ -591,106 +593,6 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::EndExpr=>{
-                if op == id!(~){ // its a hard prefix operator
-                    return 0
-                }
-                if State::operator_order(op) != 0{
-                    let next_state = State::EmitOp(op);
-                    // check if we have a ..[] = 
-                    if Some(&Opcode::ARRAY_INDEX.into()) == self.code.last(){
-                        if State::is_assign_operator(op){
-                            self.code.pop();
-                            self.state.push(State::EmitIndexAssign(op));
-                            self.state.push(State::BeginExpr(true));
-                            return 1
-                        }
-                    }
-                    if let Some(last) = self.state.pop(){
-                        if let State::EmitOp(id!(.)) = last{
-                            if State::is_assign_operator(op){
-                                for pair in self.code.rchunks_mut(2){
-                                    if pair[0] == Opcode::FIELD.into() && pair[1].is_id(){
-                                        pair[0] = Opcode::PROTO_FIELD.into()
-                                    }
-                                    else{
-                                        break
-                                    }
-                                }
-                                self.state.push(State::EmitFieldAssign(op));
-                                self.state.push(State::BeginExpr(true));
-                                return 1
-                            }
-                        }
-                        if last.is_heq_prio(next_state){
-                            self.state.push(State::EmitOp(op));
-                            self.state.push(State::BeginExpr(true));
-                            self.state.push(last);
-                            return 1
-                        }
-                        else{
-                            self.state.push(last);
-                        }
-                    }
-                    self.state.push(State::EmitOp(op));
-                    self.state.push(State::BeginExpr(true));
-                    return 1
-                }
-                
-                if tok.is_open_curly() {
-                    
-                    for state in self.state.iter().rev(){
-                        if let State::EmitOp(_) = state{}
-                        else if let State::EmitUnary(_) = state{}
-                        else if let State::IfTest = state{
-                            return 0
-                        }
-                        else if let State::ForBody(_) = state{
-                            return 0
-                        }
-                        else{
-                            break;
-                        }
-                    }
-                    
-                    self.code.push(Opcode::BEGIN_PROTO.into());
-                    self.state.push(State::EndProto);
-                    self.state.push(State::BeginStmt(false));
-                    return 1
-                }
-                if tok.is_open_round(){ 
-                    if let Some(last) = self.state.pop(){
-                        if let State::EmitOp(id!(.)) = last{
-                            //self.code.push(State::operator_to_opcode(id!(.)));
-                            self.code.push(Opcode::METHOD_CALL_ARGS.into());
-                            self.state.push(State::EndCall(true));
-                            self.state.push(State::BeginStmt(false));
-                                                        
-                        }
-                        else{
-                            self.state.push(last);
-                            self.code.push(Opcode::CALL_ARGS.into());
-                            self.state.push(State::EndCall(false));
-                            self.state.push(State::BeginStmt(false));
-                        }
-                    }
-                    return 1
-                }
-                if tok.is_open_square(){
-                    if let Some(last) = self.state.pop(){
-                        if let State::EmitOp(id!(.)) = last{
-                            self.code.push(State::operator_to_opcode(id!(.)));
-                        }
-                        else{
-                            self.state.push(last);
-                        }
-                    }
-                    self.state.push(State::ArrayIndex);
-                    self.state.push(State::BeginExpr(true));
-                    return 1
-                }
-                return 0
-            }
             State::IfTest=>{
                 let if_start = self.code.len() as _ ;
                 self.code.push(Opcode::NOP.into());
@@ -895,6 +797,113 @@ impl ScriptParser{
                     println!("Expected expression after {:?} found {:?}", self.state, tok);
                     self.code.push(Value::NIL);
                 }
+            }
+                        
+            State::EndExpr=>{
+                if op == id!(~){ // its a hard prefix operator
+                    return 0
+                }
+                let op = if id == id!(is){ // the is operator
+                    id!(is)
+                }
+                else{
+                    op
+                };
+                if State::operator_order(op) != 0{
+                    let next_state = State::EmitOp(op);
+                    // check if we have a ..[] = 
+                    if Some(&Opcode::ARRAY_INDEX.into()) == self.code.last(){
+                        if State::is_assign_operator(op){
+                            self.code.pop();
+                            self.state.push(State::EmitIndexAssign(op));
+                            self.state.push(State::BeginExpr(true));
+                            return 1
+                        }
+                    }
+                    if let Some(last) = self.state.pop(){
+                        if let State::EmitOp(id!(.)) = last{
+                            if State::is_assign_operator(op){
+                                for pair in self.code.rchunks_mut(2){
+                                    if pair[0] == Opcode::FIELD.into() && pair[1].is_id(){
+                                        pair[0] = Opcode::PROTO_FIELD.into()
+                                    }
+                                    else{
+                                        break
+                                    }
+                                }
+                                self.state.push(State::EmitFieldAssign(op));
+                                self.state.push(State::BeginExpr(true));
+                                return 1
+                            }
+                        }
+                        if last.is_heq_prio(next_state){
+                            self.state.push(State::EmitOp(op));
+                            self.state.push(State::BeginExpr(true));
+                            self.state.push(last);
+                            return 1
+                        }
+                        else{
+                            self.state.push(last);
+                        }
+                    }
+                    self.state.push(State::EmitOp(op));
+                    self.state.push(State::BeginExpr(true));
+                    return 1
+                }
+                                
+                if tok.is_open_curly() {
+                                        
+                    for state in self.state.iter().rev(){
+                        if let State::EmitOp(_) = state{}
+                        else if let State::EmitUnary(_) = state{}
+                        else if let State::IfTest = state{
+                            return 0
+                        }
+                        else if let State::ForBody(_) = state{
+                            return 0
+                        }
+                        else{
+                            break;
+                        }
+                    }
+                                        
+                    self.code.push(Opcode::BEGIN_PROTO.into());
+                    self.state.push(State::EndProto);
+                    self.state.push(State::BeginStmt(false));
+                    return 1
+                }
+                if tok.is_open_round(){ 
+                    if let Some(last) = self.state.pop(){
+                        if let State::EmitOp(id!(.)) = last{
+                            //self.code.push(State::operator_to_opcode(id!(.)));
+                            self.code.push(Opcode::METHOD_CALL_ARGS.into());
+                            self.state.push(State::EndCall(true));
+                            self.state.push(State::BeginStmt(false));
+                                                                                    
+                        }
+                        else{
+                            self.state.push(last);
+                            self.code.push(Opcode::CALL_ARGS.into());
+                            self.state.push(State::EndCall(false));
+                            self.state.push(State::BeginStmt(false));
+                        }
+                    }
+                    return 1
+                }
+                if tok.is_open_square(){
+                    if let Some(last) = self.state.pop(){
+                        if let State::EmitOp(id!(.)) = last{
+                            self.code.push(State::operator_to_opcode(id!(.)));
+                        }
+                        else{
+                            self.state.push(last);
+                        }
+                    }
+                    self.state.push(State::ArrayIndex);
+                    self.state.push(State::BeginExpr(true));
+                    return 1
+                }
+                return 0
             }
             State::BeginStmt(last_was_semi) => {
                 if id == id!(for){
