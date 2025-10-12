@@ -883,6 +883,9 @@ impl ScriptThread{
                 
     pub fn break_for_loop(&mut self, heap:&mut ScriptHeap){
         let lp = self.loops.pop().unwrap();
+        if let Some(obj) = lp.source.as_object(){
+            heap.free_object_if_unreffed(obj);
+        }
         self.truncate_bases(lp.bases, heap);
         self.ip = lp.start_ip + lp.jump - 1;
     }
