@@ -353,8 +353,8 @@ impl ScriptHeap{
         self.objects[ptr.index as usize].set_type(ty)
     }
     
-    pub fn set_object_system_fn(&mut self, ptr:ObjectPtr, val:u32){
-        self.objects[ptr.index as usize].tag.set_system_fn(val)
+    pub fn set_object_native_fn(&mut self, ptr:ObjectPtr, val:u32){
+        self.objects[ptr.index as usize].tag.set_native_fn(val)
     }
         
     pub fn clear_object_deep(&mut self, ptr:ObjectPtr){
@@ -514,10 +514,10 @@ impl ScriptHeap{
             if let Some(source) = self.objects[source.index as usize].vec[i].as_object(){
                 let (target, source) = if target.index > source.index{
                     let (o1, o2) = self.objects.split_at_mut(target.index as _);
-                    (&mut o2[0], &mut o1[source.index as usize])                    
+                    (&mut o2[0], &mut o1[source.index as usize])
                 }else{
                     let (o1, o2) = self.objects.split_at_mut(source.index as _);
-                    (&mut o1[target.index as usize], &mut o2[0])                    
+                    (&mut o1[target.index as usize], &mut o2[0])
                 };
                 target.push_vec_from_other(source);
                 if map{
@@ -665,16 +665,11 @@ impl ScriptHeap{
         object.vec.extend_from_slice(&[key, value]);
     }
     
-    pub fn set_object_is_fn(&mut self, ptr: ObjectPtr, ip: u32){
+    pub fn set_object_fn(&mut self, ptr: ObjectPtr, ip: u32){
         let object = &mut self.objects[ptr.index as usize];
         object.tag.set_fn(ip);
     }
     
-    pub fn set_object_is_system_fn(&mut self, ptr: ObjectPtr, ip: u32){
-        let object = &mut self.objects[ptr.index as usize];
-        object.tag.set_system_fn(ip);
-    }
-        
     pub fn get_object_as_fn(&self, ptr: ObjectPtr,)->Option<u32>{
         let object = &self.objects[ptr.index as usize];
         if object.tag.is_fn(){
@@ -695,8 +690,8 @@ impl ScriptHeap{
         let object = &self.objects[ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             let fn_object = &self.objects[ptr.index as usize];
-            if fn_object.tag.is_fn() || fn_object.tag.is_system_fn(){
-                Some((fn_object.tag.get_fn(), fn_object.tag.is_system_fn()))
+            if fn_object.tag.is_fn() || fn_object.tag.is_native_fn(){
+                Some((fn_object.tag.get_fn(), fn_object.tag.is_native_fn()))
             }
             else{
                 None
