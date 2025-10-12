@@ -1,11 +1,10 @@
 use makepad_script_derive::*;
 use crate::id::*;
-use crate::parser::ScriptParser;
 use crate::value::*;
 use crate::heap::*;
 use crate::opcode::*;
 use crate::object::*;
-use crate::methods::*;
+use crate::script::*;
 
 #[derive(Debug, Default)]
 pub struct StackBases{
@@ -56,7 +55,6 @@ pub struct ScriptThread{
     stack: Vec<Value>,
     calls: LastVec<CallFrame>,
     mes: LastVec<ScriptMe>,
-    modules: ObjectPtr,
     pub ip: usize
 }
 
@@ -101,10 +99,10 @@ pub enum ScriptHook{
 
 impl ScriptThread{
     
-    pub fn new(scope:ObjectPtr, global:ObjectPtr, modules:ObjectPtr)->Self{
+    pub fn new(heap: &mut ScriptHeap, scope: ObjectPtr)->Self{
+        let root = heap.new_object_with_proto(id!(root).into());
         Self{
             scopes:  LastVec::new(scope),
-            modules,
             stack_limit: 1_000_000,
             loops: vec![],
             stack: vec![],
@@ -117,7 +115,7 @@ impl ScriptThread{
                 },
                 return_ip: 0,
             }),
-            mes: LastVec::new(ScriptMe::object(global)),
+            mes: LastVec::new(ScriptMe::object(root)),
             ip: 0
         }
     }
@@ -214,7 +212,7 @@ impl ScriptThread{
         return heap.object_value(*self.scopes.last(), id.into());
     }
     
-    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, _parser: &ScriptParser, heap:&mut ScriptHeap, methods:&ScriptMethods)->Option<ScriptHook>{
+    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, heap:&mut ScriptHeap, ctx:&ScriptCtx)->Option<ScriptHook>{
         match opcode{
             
             Opcode::NOT=>{
@@ -375,14 +373,22 @@ impl ScriptThread{
                 heap.set_object_deep(scope);
                 heap.set_object_type(scope, ObjectType::AUTO);
                                 
-                if let Some((jump_to, _is_system)) = heap.parent_object_as_fn(scope){
-                    let call = CallFrame{
-                        bases: self.new_bases(),
-                        return_ip: self.ip + 1,
-                    };
-                    self.scopes.push(scope);
-                    self.calls.push(call);
-                    self.ip = jump_to as _;
+                if let Some((jump_to, is_native)) = heap.parent_object_as_fn(scope){
+                    if is_native{
+                        let ret = (*ctx.native.fn_table[jump_to as usize].fn_ptr)(heap, scope);
+                        self.stack.push(ret);
+                        heap.free_object_if_unreffed(scope);
+                        self.ip += 1;
+                    }
+                    else{
+                        let call = CallFrame{
+                            bases: self.new_bases(),
+                            return_ip: self.ip + 1,
+                        };
+                        self.scopes.push(scope);
+                        self.calls.push(call);
+                        self.ip = jump_to as _;
+                    }
                 }
                 else{
                     self.stack.push(Value::NIL);
@@ -398,19 +404,20 @@ impl ScriptThread{
                 else{ // we're calling a method on some other thing
                     Value::NIL
                 };
+                                
                 let scope = if fnobj == Value::NIL{
                     // lets take the type
                     let type_index = this.value_type().to_index();
                     let method = method.as_id().unwrap_or(id!());
-                    let type_entry = &methods.type_table[type_index];
+                    let type_entry = &ctx.methods.type_table[type_index];
                     
                     if let Some(method) = type_entry.get(&method){
-                        let scope = heap.new_object_with_proto(method.arg_obj);
+                        let scope = heap.new_object_with_proto(method.fn_obj);
                         scope
                     }
                     else{ // fn not found
                         println!("Method not found on object: {}()", method);
-                        heap.new_object(0)
+                        heap.new_object_with_proto(id!(undefined_function).into())
                     }
                 }
                 else{
@@ -419,7 +426,7 @@ impl ScriptThread{
                 //heap.set_object_map(scope);
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
-                heap.set_fn_this(scope, this);
+                heap.set_fn_this(scope, this.into());
                 self.mes.push(ScriptMe::call(scope));
                 self.ip += 1;
             }
@@ -431,11 +438,12 @@ impl ScriptThread{
                 heap.set_object_deep(scope);
                 // set the heap back to a hashmap
                 heap.set_object_type(scope, ObjectType::AUTO);
-                
-                if let Some((jump_to, is_system)) = heap.parent_object_as_fn(scope){
-                    if is_system{
-                        let ret = (*methods.fn_table[jump_to as usize].fn_ptr)(heap, scope);
+                                
+                if let Some((jump_to, is_native)) = heap.parent_object_as_fn(scope){
+                    if is_native{
+                        let ret = (*ctx.native.fn_table[jump_to as usize].fn_ptr)(heap, scope);
                         self.stack.push(ret);
+                        heap.free_object_if_unreffed(scope);
                         self.ip += 1;
                     }
                     else{
@@ -493,7 +501,7 @@ impl ScriptThread{
                 let jump_over_fn = args.to_u32();
                 let me = self.mes.pop();
                                 
-                heap.set_object_is_fn(me.object, (self.ip + 1) as u32);
+                heap.set_object_fn(me.object, (self.ip + 1) as u32);
                 self.ip += jump_over_fn as usize;
                 self.stack.push(me.object.into());
             }
@@ -556,7 +564,7 @@ impl ScriptThread{
             }
             
             Opcode::POP_TO_ME=>{
-                let value = self.stack.pop().unwrap();
+                let value = self.pop_stack_value();
                 if self.call_has_me(){
                     let me = self.mes.last();
                     let (key, value) = if let Some(id) = value.as_id(){
@@ -639,13 +647,6 @@ impl ScriptThread{
                 self.ip += 1;
             }
             
-            Opcode::THIS=>{
-                // look up this on the scope
-                let scope = *self.scopes.last_mut();
-                self.push_stack_value(heap.fn_this(scope));
-                self.ip += 1;
-            }
-            
             Opcode::ME=>{
                 if self.call_has_me(){
                     let me = self.mes.last();
@@ -685,9 +686,9 @@ impl ScriptThread{
                 self.end_for_loop(heap);
             }
             Opcode::RANGE=>{
-                let start = self.pop_stack_resolved(heap);
-                let end = self.pop_stack_resolved(heap);
-                let range = heap.new_object_with_proto(id!(range).into());
+                let _start = self.pop_stack_resolved(heap);
+                let _end = self.pop_stack_resolved(heap);
+                let _range = heap.new_object_with_proto(id!(range).into());
                 //heap.set_object_value(range, )
             }
             
@@ -847,16 +848,16 @@ impl ScriptThread{
     }
             
     
-    pub fn run(&mut self, parser: &ScriptParser, heap:&mut ScriptHeap, methods:&ScriptMethods){
+    pub fn run(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx){
         
         self.ip = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         let mut counter = 0;
         
-        while self.ip < parser.code.len(){
-            let code = parser.code[self.ip];
+        while self.ip < ctx.parser.code.len(){
+            let code = ctx.parser.code[self.ip];
             if let Some((opcode, args)) = code.as_opcode(){
-                if let Some(rust_call) = self.opcode(opcode, args, parser, heap, methods){
+                if let Some(rust_call) = self.opcode(opcode, args, heap, ctx){
                     match rust_call{
                         ScriptHook::SysCall(_sys_id)=>{
                         }
@@ -875,7 +876,7 @@ impl ScriptThread{
         //println!("{:?}", profile);
         // lets have a look at our scope
         let _call = self.calls.last();
-        let scope = self.scopes.last();
+        let _scope = self.scopes.last();
         
         println!("Instructions {counter} Allocated objects:{:?}", heap.objects.len());
         //heap.print_object(*scope, true);

@@ -57,7 +57,7 @@ impl Opcode{
     pub const NEG:Self = Self(2);
     pub const MUL:Self = Self(3);
     pub const DIV:Self = Self(4);
-    pub const FMOD:Self = Self(5);
+    pub const MOD:Self = Self(5);
     pub const ADD:Self = Self(6);
     pub const SUB:Self = Self(7);
     pub const SHL:Self = Self(8);
@@ -162,19 +162,19 @@ impl Opcode{
     pub const STRING_STREAM:Self = Self(91);
     pub const LOG: Self = Self(92);
     
-    pub const THIS: Self = Self(93);
+    //pub const THIS: Self = Self(93);
     pub const ME: Self = Self(94);
     pub const DELETE: Self = Self(95);
     pub const SCOPE: Self = Self(96);
-    pub const MOD: Self = Self(97);
+    //pub const MOD: Self = Self(97);
         
-    pub const FOR_1: Self = Self(98);
-    pub const FOR_2: Self = Self(99);
-    pub const FOR_3: Self = Self(100);
-    pub const FOR_END: Self = Self(101);
-    pub const BREAK: Self = Self(102);
-    pub const CONTINUE: Self = Self(103);
-    pub const RANGE: Self = Self(104);
+    pub const FOR_1: Self = Self(97);
+    pub const FOR_2: Self = Self(98);
+    pub const FOR_3: Self = Self(99);
+    pub const FOR_END: Self = Self(100);
+    pub const BREAK: Self = Self(101);
+    pub const CONTINUE: Self = Self(102);
+    pub const RANGE: Self = Self(103);
 }
 
 
@@ -304,10 +304,8 @@ impl fmt::Display for Opcode {
             Self::SEARCH_TREE => return write!(f, "$"),
             Self::STRING_STREAM => return write!(f, "<STRINGSTREAM>"),
             Self::LOG => return write!(f, "log()"),
-            Self::THIS => return write!(f, "this"),
             Self::ME => return write!(f, "me"),
             Self::SCOPE => return write!(f, "scope"),
-            Self::MOD => return write!(f, "mod"),
                       
             Self::FOR_1 => return write!(f, "for1"),
             Self::FOR_2 => return write!(f, "for2"),

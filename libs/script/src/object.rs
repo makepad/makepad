@@ -88,7 +88,7 @@ impl ObjectTag{
     pub const ALLOCED:u64 = 0x200;
     pub const DEEP:u64 = 0x400;
     pub const FN: u64 = 0x800;
-    pub const SYSTEM_FN: u64 = 0x1000;
+    pub const NATIVE_FN: u64 = 0x1000;
     pub const REFFED: u64 = 0x2000;
     pub const HAS_METHODS: u64 = 0x4000;
         
@@ -108,12 +108,12 @@ impl ObjectTag{
         (self.0 >> 32) as u32
     }
         
-    pub fn set_system_fn(&mut self, val: u32){
-        self.0 |= Self::SYSTEM_FN | ((val as u64)<<32)
+    pub fn set_native_fn(&mut self, val: u32){
+        self.0 |= Self::NATIVE_FN | ((val as u64)<<32)
     }
             
-    pub fn is_system_fn(&self)->bool{
-        self.0 & Self::SYSTEM_FN != 0
+    pub fn is_native_fn(&self)->bool{
+        self.0 & Self::NATIVE_FN != 0
     }
         
     pub fn proto_fwd(&self)->u64{
@@ -204,7 +204,7 @@ impl fmt::Display for ObjectTag {
         if self.is_alloced(){write!(f,"ALLOCED|").ok();}
         if self.is_deep(){write!(f,"DEEP|").ok();}
         if self.is_fn(){write!(f,"FN({})|", self.get_fn()).ok();}
-        if self.is_system_fn(){write!(f,"SYSTEM_FN({})|", self.get_fn()).ok();}
+        if self.is_native_fn(){write!(f,"NATIVE_FN({})|", self.get_fn()).ok();}
         if self.is_reffed(){write!(f,"REFFED").ok();}
         write!(f, ")")
     }
