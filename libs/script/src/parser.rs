@@ -935,7 +935,6 @@ impl ScriptParser{
                             self.push_code(Opcode::METHOD_CALL_ARGS.into(), self.index);
                             self.state.push(State::EndCall{is_method:true, index:self.index});
                             self.state.push(State::BeginStmt{last_was_semi:false});
-                                                                                    
                         }
                         else{
                             self.state.push(last);
@@ -985,7 +984,7 @@ impl ScriptParser{
             }
             State::EndStmt{last}=>{
                 if last == self.index{
-                    println!("Tokenizer stuck on character {:?}, skipping", tok);
+                    println!("Parser stuck on character {:?}, skipping", tok);
                     self.state.push(State::BeginStmt{last_was_semi:false});
                     return 1
                 }
@@ -1030,7 +1029,7 @@ impl ScriptParser{
             }
            // println!("{:?} {:?}", self.code, self.state);
             if self.state.len()<=1 && steps_zero > 1000{
-                println!("Tokenizer stuck {:?} {} {:?}", self.state, step, self.tok.tokens[self.index as usize]);
+                println!("Parser stuck {:?} {} {:?}", self.state, step, self.tok.tokens[self.index as usize]);
                 break;
             }
             self.index += step;
