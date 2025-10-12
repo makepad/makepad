@@ -77,7 +77,7 @@ pub fn test(){
         let View = {@view}
         let Button = {@button}
         let t = Button{}
-        ~(t is Button);
+        ~(t is object);
         //for i in 100 ~sin(i);
     ";
     
