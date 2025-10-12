@@ -135,22 +135,22 @@ impl fmt::Debug for ValueType {
 impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self{
-            Self::NUMBER=>write!(f,"NUMBER"),
-            Self::NAN=>write!(f,"NAN"),
-            Self::BOOL=>write!(f,"BOOL"),
-            Self::NIL=>write!(f,"NIL"),
-            Self::COLOR=>write!(f,"COLOR"),
-            Self::STRING=>write!(f,"STRING"),
-            Self::OBJECT=>write!(f,"OBJECT"),
-            Self::FACTORY=>write!(f,"FACTORY"),
-            Self::OPCODE=>write!(f,"OPCODE"),
+            Self::NUMBER=>write!(f,"number"),
+            Self::NAN=>write!(f,"nan"),
+            Self::BOOL=>write!(f,"bool"),
+            Self::NIL=>write!(f,"nil"),
+            Self::COLOR=>write!(f,"color"),
+            Self::STRING=>write!(f,"string"),
+            Self::OBJECT=>write!(f,"object"),
+            Self::FACTORY=>write!(f,"factory"),
+            Self::OPCODE=>write!(f,"opcode"),
             Self::INLINE_STRING_0=>write!(f,"INLINE_STRING_0"),
             Self::INLINE_STRING_1=>write!(f,"INLINE_STRING_1"),
             Self::INLINE_STRING_2=>write!(f,"INLINE_STRING_2"),
             Self::INLINE_STRING_3=>write!(f,"INLINE_STRING_3"),
             Self::INLINE_STRING_4=>write!(f,"INLINE_STRING_4"),
             Self::INLINE_STRING_5=>write!(f,"INLINE_STRING_5"),
-            x if x.0 >= Self::ID.0=>write!(f,"ID"),
+            x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ValueType?")
         }
     }
