@@ -59,12 +59,11 @@ pub fn test(){
             $body: View{}
             $b2: Button{}
         }
-        
         let x = MyWindow{
             $b1 <: Checkbox{}
         }
         let x = if true 1 else 0
-        for v in 0..10{
+        for v in 1000000{
         }
         let x = x{};
         for v in [1 2 3 4] ~v
@@ -72,7 +71,8 @@ pub fn test(){
     ";
     
     let code = "
-        for v in (0..1000).step(10) ~v;
+        if true let x = 5;
+        ~x;
     ";
     
     let _code = "
