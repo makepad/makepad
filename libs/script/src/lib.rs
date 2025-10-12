@@ -8,11 +8,10 @@ pub mod colorhex;
 pub mod parser;
 pub mod heap;
 pub mod opcode;
-pub mod interop;
 pub mod string;
 pub mod methods;
-pub mod mod_fs;
-pub mod mod_math;
+pub mod modules;
+pub mod native;
 pub mod script;
 pub mod thread;
 
@@ -43,31 +42,9 @@ pub struct RustTest{
     _prop: f64    
 }
 
-use crate::interop::*;
 use crate::script::*;
-use crate::value::*;
-use crate::id::*;
-
-impl ScriptCall for RustTest{
-    // deserialize self from obj?
-    fn update_fields(&mut self, _obj: ObjectPtr){
-    }
-    
-    fn call_method(&mut self,_scx:&ScriptCx, method: Id, _args: ObjectPtr)->Value{
-        match method{
-            id!(on_click)=>{
-                return Value::NIL
-            }
-            _=>{// unknown call
-                return Value::NIL
-            }
-        }
-    }
-}
 
 pub fn test(){
-    
-    let time = std::time::Instant::now();
     
     let _code = "
         let x = [@view,@bla]
@@ -96,11 +73,8 @@ pub fn test(){
     ";
     
     let code = "
-        //let x = @range{start:1 end:1000 step:1};
-        //~@finished;
-        let t = |x| y
-        t()
-        for i in 10 ~i;
+        scope.import(mod.math);
+        for i in 100 ~sin(i);
     ";
     
     let _code = "
