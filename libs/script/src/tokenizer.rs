@@ -73,7 +73,7 @@ enum State{
 pub struct ScriptTokenizer{
     pos: usize,
     pub tokens: Vec<ScriptTokenPos>,
-    original: String,
+    pub original: String,
     temp: String,
     state: State,
 }
@@ -96,6 +96,25 @@ pub struct ScriptLoc{
 }
 
 impl ScriptTokenizer{
+    
+    pub fn  token_index_to_row_col(&self, tok_index:u32)->Option<(u32,u32)>{
+        // first find the real pos
+        
+        let char_index = self.tokens[tok_index as usize].pos;
+                
+        let mut line = 0;
+        let mut line_start = 0;
+        for (i, c) in self.original.chars().enumerate(){
+            if i >= char_index as usize{
+                return Some(( line as u32 ,(i-line_start) as u32))
+            }
+            if c == '\n'{
+                line_start = i + 1;
+                line += 1;
+            }    
+        }
+        None
+    }
     
     pub fn dump_tokens(&self, heap: &ScriptHeap){
         for i in 0..self.tokens.len(){
