@@ -102,8 +102,9 @@ impl State{
             id!(==) | id!(!=)  | id!(<) | id!(>) | id!(<=) | id!(>=) => 15,
             id!(&&)  => 16,
             id!(||)  => 17,
-            id!(:) | id!(=) | id!(>:) | id!(<:) | id!(^:) | id!(+=)  | id!(-=) | id!(*=) | id!(/=) | id!(%=) => 18,
-            id!(&=) | id!(|=)  | id!(^=) | id!(<<=) | id!(>>=) => 19,
+            id!(..) =>  18,
+            id!(:) | id!(=) | id!(>:) | id!(<:) | id!(^:) | id!(+=)  | id!(-=) | id!(*=) | id!(/=) | id!(%=) => 19,
+            id!(&=) | id!(|=)  | id!(^=) | id!(<<=) | id!(>>=) => 20,
             _=>0
         }
     }
@@ -202,6 +203,7 @@ impl State{
             id!(<<=) => Opcode::ASSIGN_SHL,
             id!(>>=)  => Opcode::ASSIGN_SHR,
             id!(?=)  => Opcode::ASSIGN_IFNIL,
+            id!(..) => Opcode::RANGE,
             id!(.)  => Opcode::FIELD,
             id!(me.) => Opcode::ME_FIELD,
             _=> Opcode::NOP,
@@ -823,7 +825,7 @@ impl ScriptParser{
                     self.code.push(Opcode::ME.into());
                     return 1
                 }
-                if id == id!(this){
+                if id == id!(this) || id == id!(self){
                     self.code.push(Opcode::THIS.into());
                     return 1
                 }
@@ -831,6 +833,10 @@ impl ScriptParser{
                     self.code.push(Opcode::SCOPE.into());
                     return 1
                 }                
+                if id == id!(mod){
+                    self.code.push(Opcode::MOD.into());
+                    return 1
+                }
                 if id == id!(nil){
                     self.code.push(Value::NIL);
                     return 1
