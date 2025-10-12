@@ -52,7 +52,7 @@ pub struct ScriptTokenPos{
     pos: usize
 }
 
-#[derive(Default)]
+#[derive(Default, Eq, PartialEq)]
 enum State{ 
     #[default]
     Whitespace,
@@ -333,7 +333,7 @@ impl ScriptTokenizer{
                     
                     // splice off prefix operator
                     // all double character operators
-                    if self.temp == "~" || self.temp == "@" || self.temp == ";" || self.temp == ","{
+                    if c == '~' || self.temp == ":" || self.temp == "~" || self.temp == "@" || self.temp == ";" || self.temp == ","{
                         self.emit_operator();
                     }
                         
@@ -394,6 +394,9 @@ impl ScriptTokenizer{
                                 self.emit_operator();
                             }
                             _=>{ // lets keep going
+                                if self.state != State::Operator{
+                                    
+                                }
                             }
                         }
                     }

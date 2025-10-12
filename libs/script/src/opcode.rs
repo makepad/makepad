@@ -292,7 +292,7 @@ impl fmt::Display for Opcode {
                         
             Self::IF_TEST => return write!(f, "if"),
             Self::IF_ELSE => return write!(f, "else"),
-                                                                                    
+            
             Self::FIELD => return write!(f, "."),
             Self::ME_FIELD => return write!(f, "me."),
             Self::ARRAY_INDEX => return write!(f, "[]"),

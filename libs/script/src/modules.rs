@@ -55,6 +55,10 @@ impl ScriptModules{
         self.add(heap, native, module, &[(id!(x), 0.0.into())], id!(sin), |heap, args|{
             heap.cast_to_f64(heap.object_value(args, id!(x).into())).sin().into()
         });
+        
+        self.add(heap, native, module, &[(id!(x), 0.0.into()),(id!(y), Value::NIL)], id!(vec2), |heap, args|{
+            heap.cast_to_f64(heap.object_value(args, id!(x).into())).sin().into()
+        });
     }
     
     pub fn add_std(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative){

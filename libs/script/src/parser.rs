@@ -312,7 +312,6 @@ impl ScriptParser{
                 }
                 if tok.is_open_curly(){
                     self.state.push(State::ForBlock(code_start));
-                    self.state.push(State::BeginStmt(false));
                     return 1
                 }
                 else{
@@ -630,6 +629,15 @@ impl ScriptParser{
                 }
             }
             State::IfMaybeElse(if_start, was_block)=>{
+                if id == id!(elif){
+                    let else_start = self.code.len() as u32;
+                    self.code.push(Opcode::NOP.into());
+                    self.code[if_start as usize] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32(self.code.len() as u32 -if_start));
+                    self.state.push(State::IfElse(else_start));
+                    self.state.push(State::IfTest);
+                    self.state.push(State::BeginExpr(true));
+                    return 1
+                }
                 if id == id!(else){
                     let else_start = self.code.len() as u32;
                     self.code.push(Opcode::NOP.into());
@@ -638,6 +646,7 @@ impl ScriptParser{
                     return 1
                 }
                 self.code[if_start as usize] = Value::from_opcode_args(Opcode::IF_TEST, OpcodeArgs::from_u32((self.code.len() as u32 -if_start) as u32));
+                self.code.push(Value::NIL);
                 if was_block{ // allow expression to chain
                     self.state.push(State::EndExpr)
                 }
@@ -714,6 +723,25 @@ impl ScriptParser{
                     self.state.push(State::IfTest);
                     self.state.push(State::BeginExpr(true));
                     return 1
+                }
+                if id == id!(for){
+                    self.state.push(State::ForIdent(0));
+                    return 1
+                }
+                if id == id!(let){
+                    // we have to have an identifier after let
+                    self.state.push(State::Let);
+                    return 1
+                }
+                if id == id!(return){
+                    self.state.push(State::Return);
+                    self.state.push(State::BeginExpr(false));
+                    return 1;
+                }
+                if id == id!(delete){
+                    self.state.push(State::Delete);
+                    self.state.push(State::BeginExpr(true));
+                    return 1;
                 }
                 if id == id!(true){
                     self.code.push(Value::from_bool(true));
@@ -800,15 +828,14 @@ impl ScriptParser{
             }
                         
             State::EndExpr=>{
-                if op == id!(~){ // its a hard prefix operator
-                    return 0
-                }
-                let op = if id == id!(is){ // the is operator
-                    id!(is)
-                }
-                else{
-                    op
-                };
+                if op == id!(~){return 0}
+                
+                // named operators
+                let op = if id == id!(is){id!(is)}
+                else if id == id!(and){id!(&&)}
+                else if id == id!(or){id!(||)} 
+                else{op};
+                
                 if State::operator_order(op) != 0{
                     let next_state = State::EmitOp(op);
                     // check if we have a ..[] = 
@@ -906,34 +933,7 @@ impl ScriptParser{
                 return 0
             }
             State::BeginStmt(last_was_semi) => {
-                if id == id!(for){
-                    self.state.push(State::EndStmt(self.index));
-                    self.state.push(State::ForIdent(0));
-                    return 1
-                }
-                if id == id!(let){
-                    // we have to have an identifier after let
-                    self.state.push(State::EndStmt(self.index));
-                    self.state.push(State::Let);
-                    return 1
-                }
-                if id == id!(return){
-                    self.state.push(State::EndStmt(self.index));
-                    self.state.push(State::Return);
-                    self.state.push(State::BeginExpr(false));
-                    return 1;
-                }
-                if id == id!(delete){
-                    self.state.push(State::EndStmt(self.index));
-                    self.state.push(State::Delete);
-                    self.state.push(State::BeginExpr(true));
-                    return 1;
-                }
-                if id == id!(for){
-                    self.state.push(State::EndStmt(self.index));
-                    //self.state.push(State::ForIdent);
-                    return 1;
-                }
+                
                 if op == id!(;) || op == id!(,){ // just eat it
                     // we can pop all operator emits
                     self.state.push(State::BeginStmt(true));
