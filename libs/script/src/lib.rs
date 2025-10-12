@@ -46,7 +46,7 @@ use crate::script::*;
 
 pub fn test(){
     
-    let _code = "
+    let code = "
         let x = [@view,@bla]
         for sym in x t[sym]
         
@@ -70,7 +70,7 @@ pub fn test(){
         ~x;
     ";
     
-    let code = "
+    let _code = "
         if true let x = 5;
         ~x;
     ";
