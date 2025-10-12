@@ -14,6 +14,7 @@ pub mod modules;
 pub mod native;
 pub mod script;
 pub mod thread;
+pub mod thread_opcode;
 
 // 'locals'
 //
