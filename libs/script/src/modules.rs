@@ -61,16 +61,16 @@ impl ScriptModules{
         let std = heap.new_object_with_proto(id!(std_module).into());
         heap.set_object_value(self.obj, id!(std).into(), std.into());
         
-        // alright lets add the Range object
-        
         let range = heap.new_object_with_proto(id!(range).into());
         heap.set_object_value(std, id!(Range).into(), range.into());
         
         self.add(heap, native, range, &[(id!(x), 0.0.into())], id!(step), |heap, args|{
+            
             if let Some(this) = heap.object_value(args, id!(this).into()).as_object(){
-                if let Some(x) = heap.object_value(this, id!(x).into()).as_f64(){
+                if let Some(x) = heap.object_value(args, id!(x).into()).as_f64(){
                     heap.set_object_value(this, id!(step).into(), x.into());
                 }
+                return this.into()
             }
             Value::NIL
         });
