@@ -31,13 +31,16 @@ impl ScriptHeap{
     
     pub fn new_object(&mut self, flags: u64)->ObjectPtr{
         if let Some(index) = self.objects_free.pop(){
-            self.objects[index].tag.set_flags(flags | ObjectTag::ALLOCED);
+            let object = &mut self.objects[index];
+            object.tag.set_flags(flags | ObjectTag::ALLOCED);
+            object.proto = id!(object).into();
             ObjectPtr{index: index as _}
         }
         else{
             let index = self.objects.len();
             let mut object = Object::default();
             object.tag.set_flags(flags | ObjectTag::ALLOCED);
+            object.proto = id!(object).into();
             self.objects.push(object);
             ObjectPtr{index: index as _}
         }
@@ -457,6 +460,19 @@ impl ScriptHeap{
         Value::NIL
     }
     
+    pub fn object_value_path(&self, ptr:ObjectPtr, keys:&[Id])->Value{
+        let mut value:Value = ptr.into();
+        for key in keys{
+            if let Some(obj) = value.as_object(){
+                value = self.object_value(obj, key.into());
+            }
+            else{
+                return Value::NIL;
+            }
+        }
+        value
+    }
+    
     pub fn object_prototype(&self, ptr:ObjectPtr)->Value{
         self.objects[ptr.index as usize].proto
     }
@@ -646,33 +662,35 @@ impl ScriptHeap{
         println!("Cant set object value with key {:?}", key);
     }
     
-    pub fn set_fn_this(&mut self, ptr:ObjectPtr, this:Value){
+    pub fn set_object_value_in_map(&mut self, ptr:ObjectPtr, key: Value, this:Value){
         let object = &mut self.objects[ptr.index as usize];
-        object.map.insert(id!(this).into(), this);
+        object.map.insert(key, this);
     }
     
-    pub fn fn_this(&mut self, ptr:ObjectPtr)->Value{
-        let object = &mut self.objects[ptr.index as usize];
-        if let Some(value) = object.map.get(&id!(this).into()){
-            return *value
+    pub fn object_has_proto(&mut self, ptr:ObjectPtr, rhs:Value)->bool{
+        let mut ptr = ptr;
+        loop{
+            let object = &mut self.objects[ptr.index as usize];
+            if object.proto == rhs{
+                return true
+            }            
+            if let Some(object) = object.proto.as_object(){
+                ptr = object
+            }
+            else{
+                return false
+            }
         }
-        Value::NIL
-    }
-        
-        
-    pub fn push_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
-        let object = &mut self.objects[ptr.index as usize];
-        object.vec.extend_from_slice(&[key, value]);
     }
     
-    pub fn set_object_fn(&mut self, ptr: ObjectPtr, ip: u32){
+    pub fn set_object_script_fn(&mut self, ptr: ObjectPtr, ip: u32){
         let object = &mut self.objects[ptr.index as usize];
-        object.tag.set_fn(ip);
+        object.tag.set_script_fn(ip);
     }
     
-    pub fn get_object_as_fn(&self, ptr: ObjectPtr,)->Option<u32>{
+    pub fn object_as_script_fn(&self, ptr: ObjectPtr,)->Option<u32>{
         let object = &self.objects[ptr.index as usize];
-        if object.tag.is_fn(){
+        if object.tag.is_script_fn(){
             Some(object.tag.get_fn())
         }
         else{
@@ -685,12 +703,11 @@ impl ScriptHeap{
         object.tag.is_fn()
     }
     
-    
     pub fn parent_object_as_fn(&self, ptr: ObjectPtr,)->Option<(u32, bool)>{
         let object = &self.objects[ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             let fn_object = &self.objects[ptr.index as usize];
-            if fn_object.tag.is_fn() || fn_object.tag.is_native_fn(){
+            if fn_object.tag.is_script_fn() || fn_object.tag.is_native_fn(){
                 Some((fn_object.tag.get_fn(), fn_object.tag.is_native_fn()))
             }
             else{
@@ -724,8 +741,12 @@ impl ScriptHeap{
                 print!("{}:", str);
             }
             let object = &self.objects[obj.index as usize];
-            if object.tag.is_fn(){
+            if object.tag.is_script_fn(){
                 print!("Fn");
+                self.print_object(obj,false);
+            }
+            else if object.tag.is_native_fn(){
+                print!("Native");
                 self.print_object(obj,false);
             }
             else{
