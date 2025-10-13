@@ -241,7 +241,21 @@ impl ScriptTokenizer{
             panic!()
         }
         self.temp.push(c);
-        self.emit_operator();
+        let id = match Id::from_str_with_lut(&self.temp){
+            Err(str)=>{
+                println!("--WARNING-- Id LUT collision between {} and {}", self.temp, str);
+                Id::from_str(&self.temp)
+            }
+            Ok(id)=>{
+                id
+            }
+        };
+        let len = self.temp.len();
+        self.temp.clear();
+        self.tokens.push(ScriptTokenPos{
+            pos: self.pos - len,
+            token: ScriptToken::Separator(id)
+        });
     }
     
     fn emit_color(&mut self){
