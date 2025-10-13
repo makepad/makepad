@@ -4,6 +4,7 @@ use crate::makepad_value::value::*;
 use crate::makepad_value_derive::*;
 use crate::native::*;
 use crate::object::*;
+use crate::script::*;
 
 pub struct ScriptModules{
     pub obj: ObjectPtr,
@@ -32,7 +33,7 @@ impl ScriptModules{
     }
     
     pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, module:ObjectPtr, args:&[(Id, Value)],method:Id, f: F) 
-    where F: Fn(&mut ScriptHeap, ObjectPtr)->Value + 'static{
+    where F: Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static{
         // lets get the 
         let fn_index = native.fn_table.len();
         let fn_obj = heap.new_object_with_proto(id!(native).into());
@@ -52,12 +53,12 @@ impl ScriptModules{
         let module = heap.new_object_with_proto(id!(math_module).into());
         heap.set_object_value(self.obj, id!(math).into(), module.into());
         
-        self.add(heap, native, module, &[(id!(x), 0.0.into())], id!(sin), |heap, args|{
-            heap.cast_to_f64(heap.object_value(args, id!(x).into())).sin().into()
+        self.add(heap, native, module, &[(id!(x), 0.0.into())], id!(sin), |ctx, args|{
+            ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into())).sin().into()
         });
         
-        self.add(heap, native, module, &[(id!(x), 0.0.into()),(id!(y), Value::NIL)], id!(vec2), |heap, args|{
-            heap.cast_to_f64(heap.object_value(args, id!(x).into())).sin().into()
+        self.add(heap, native, module, &[(id!(x), 0.0.into()),(id!(y), Value::NIL)], id!(vec2), |ctx, args|{
+            ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into())).sin().into()
         });
     }
     
@@ -68,11 +69,11 @@ impl ScriptModules{
         let range = heap.new_object_with_proto(id!(range).into());
         heap.set_object_value(std, id!(Range).into(), range.into());
         
-        self.add(heap, native, range, &[(id!(x), 0.0.into())], id!(step), |heap, args|{
+        self.add(heap, native, range, &[(id!(x), 0.0.into())], id!(step), |ctx, args|{
             
-            if let Some(this) = heap.object_value(args, id!(this).into()).as_object(){
-                if let Some(x) = heap.object_value(args, id!(x).into()).as_f64(){
-                    heap.set_object_value(this, id!(step).into(), x.into());
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
+                if let Some(x) = ctx.heap.object_value(args, id!(x).into()).as_f64(){
+                    ctx.heap.set_object_value(this, id!(step).into(), x.into());
                 }
                 return this.into()
             }

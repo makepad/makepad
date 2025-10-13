@@ -4,6 +4,7 @@ use crate::makepad_value::value::*;
 use crate::makepad_value_derive::*;
 use crate::native::*;
 use crate::object::*;
+use crate::script::*;
 
 #[derive(Default)]
 pub struct ScriptMethods{
@@ -18,8 +19,8 @@ impl ScriptMethods{
         t
     }
     
-    pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, args:&[Id], value_type:ValueType, method:Id, f: F) 
-    where F: Fn(&mut ScriptHeap, ObjectPtr)->Value + 'static{
+    pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, args:&[(Id,Value)], value_type:ValueType, method:Id, f: F) 
+    where F: Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static{
         let ty_redux = value_type.to_redux();
         if ty_redux >= self.type_table.len(){
             self.type_table.resize_with(ty_redux + 1, || Default::default());
@@ -27,12 +28,11 @@ impl ScriptMethods{
         let fn_index = native.fn_table.len();
         
         let fn_obj = heap.new_object_with_proto(id!(native).into());
-        heap.set_object_type(fn_obj, ObjectType::VEC2);        
-        
+        heap.set_object_type(fn_obj, ObjectType::VEC2);
         heap.set_object_fn(fn_obj, ScriptFnPtr::Native{index: fn_index as u32});
         
         for arg in args{
-            heap.set_object_value(fn_obj, (*arg).into(), Value::NIL);
+            heap.set_object_value(fn_obj, arg.0.into(), arg.1.into());
         }
         
         self.type_table[ty_redux].insert(method, NativeFnIndex{
@@ -56,23 +56,38 @@ impl ScriptMethods{
     }
     
     pub fn add_object(&mut self, h: &mut ScriptHeap, native:&mut ScriptNative){
-        self.add(h, native, &[], ValueType::OBJECT, id!(push), |heap, args|{
-            if let Some(this) = heap.object_value(args, id!(this).into()).as_object(){
-                heap.push_object_vec_into_object_vec(this, args);
+        self.add(h, native, &[], ValueType::OBJECT, id!(proto), |ctx, args|{
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
+                return ctx.heap.object_proto(this)
+            }
+            Value::NIL
+        });
+        
+        self.add(h, native, &[], ValueType::OBJECT, id!(push), |ctx, args|{
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
+                ctx.heap.push_object_vec_into_object_vec(this, args);
             }
             Value::NIL
         });
             
-        self.add(h, native, &[], ValueType::OBJECT, id!(extend), |heap, args|{
-            if let Some(this) = heap.object_value(args, id!(this).into()).as_object(){
-                heap.push_object_vec_of_vec_into_object_vec(this, args, false);
+        self.add(h, native, &[], ValueType::OBJECT, id!(extend), |ctx, args|{
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
+                ctx.heap.push_object_vec_of_vec_into_object_vec(this, args, false);
             }
             Value::NIL
         });
             
-        self.add(h, native, &[], ValueType::OBJECT, id!(import), |heap, args|{
-            if let Some(this) = heap.object_value(args, id!(this).into()).as_object(){
-                heap.push_object_vec_of_vec_into_object_vec(this, args, true);
+        self.add(h, native, &[], ValueType::OBJECT, id!(import), |ctx, args|{
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
+                ctx.heap.push_object_vec_of_vec_into_object_vec(this, args, true);
+            }
+            Value::NIL
+        });
+        
+        self.add(h, native, &[], ValueType::OBJECT, id!(retain), |ctx, args|{
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
+                // alright we could now theoretically do a new callframe on thread to call a closure
+                
             }
             Value::NIL
         });
