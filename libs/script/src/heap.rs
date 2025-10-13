@@ -355,10 +355,6 @@ impl ScriptHeap{
     pub fn set_object_type(&mut self, ptr:ObjectPtr, ty: ObjectType){
         self.objects[ptr.index as usize].set_type(ty)
     }
-    
-    pub fn set_object_native_fn(&mut self, ptr:ObjectPtr, val:u32){
-        self.objects[ptr.index as usize].tag.set_native_fn(val)
-    }
         
     pub fn clear_object_deep(&mut self, ptr:ObjectPtr){
         self.objects[ptr.index as usize].tag.clear_deep()
@@ -684,19 +680,14 @@ impl ScriptHeap{
         }
     }
     
-    pub fn set_object_script_fn(&mut self, ptr: ObjectPtr, ip: u32){
+    pub fn set_object_fn(&mut self, ptr: ObjectPtr, fnptr: ScriptFnPtr){
         let object = &mut self.objects[ptr.index as usize];
-        object.tag.set_script_fn(ip);
+        object.tag.set_fn(fnptr);
     }
     
-    pub fn object_as_script_fn(&self, ptr: ObjectPtr,)->Option<u32>{
+    pub fn object_as_fn(&self, ptr: ObjectPtr,)->Option<ScriptFnPtr>{
         let object = &self.objects[ptr.index as usize];
-        if object.tag.is_script_fn(){
-            Some(object.tag.get_fn())
-        }
-        else{
-            None
-        }
+        object.tag.as_fn()
     }
     
     pub fn object_is_fn(&self, ptr: ObjectPtr,)->bool{
@@ -710,16 +701,11 @@ impl ScriptHeap{
         object.tag.is_fn()
     }
     
-    pub fn parent_object_as_fn(&self, ptr: ObjectPtr,)->Option<(u32, bool)>{
+    pub fn parent_object_as_fn(&self, ptr: ObjectPtr,)->Option<ScriptFnPtr>{
         let object = &self.objects[ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             let fn_object = &self.objects[ptr.index as usize];
-            if fn_object.tag.is_script_fn() || fn_object.tag.is_native_fn(){
-                Some((fn_object.tag.get_fn(), fn_object.tag.is_native_fn()))
-            }
-            else{
-                None
-            }
+            fn_object.tag.as_fn()
         }
         else{
             None
