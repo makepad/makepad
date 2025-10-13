@@ -48,7 +48,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
     let mut values = Vec::new();
         
     tp_to_str(parser, span, &mut s, &mut values, &mut None);
-        
+    
     return (s, values);
         
     #[derive(Clone, Copy)]
@@ -69,20 +69,6 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
             Delimiter::Parenthesis => ('(', ')'),
             Delimiter::Bracket => ('[', ']'),
             Delimiter::None => (' ', ' '),
-        }
-    }
-        
-        
-    fn parse_type_ident(in_delim: Delimiter, parser: &mut TokenParser, out: &mut String, values: &mut Vec<TokenStream>) -> bool {
-        if in_delim == Delimiter::Brace && parser.is_group_with_delim(Delimiter::Brace) {
-            parser.open_group();
-            let index = values.len();
-            write!(out, "${{{index}}}").unwrap();
-            values.push(parser.eat_level());
-            true
-        }
-        else {
-            false
         }
     }
         
@@ -132,11 +118,12 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
         while !parser.eat_eot() {
             let span = parser.span().unwrap();
             if let Some(delim) = parser.open_group() {
-                if let Some(TokenTree::Punct(current)) = &last_tt{
-                    if current.as_char() == '$'{
-                        parser.open_group();
+                if let Some(TokenTree::Punct(last_punct)) = &last_tt{
+                    if last_punct.as_char() == '#'{
+                        last_tt = None;
+                        out.pop();
                         let index = values.len();
-                        write!(out, "${{{index}}}").unwrap();
+                        write!(out, "#({index})").unwrap();
                         values.push(parser.eat_level());
                         continue;
                     }

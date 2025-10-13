@@ -13,6 +13,7 @@ pub enum ScriptToken{
     StreamEnd,
     Identifier{id:Id, starts_with_ds:bool},
     Operator(Id),
+    Separator(Id),
     OpenCurly,
     CloseCurly,
     OpenRound,
@@ -23,16 +24,19 @@ pub enum ScriptToken{
     String(StringPtr),
     Number(f64),
     Color(u32),
+    RustValue(u32),
 }
 
 impl ScriptToken{
     pub fn identifier(&self)->(Id, bool){match self{ScriptToken::Identifier{id,starts_with_ds}=>(*id,*starts_with_ds),_=>(id!(),false)}}
     pub fn operator(&self)->Id{match self{ScriptToken::Operator(id)=>*id,_=>id!()}}
+    pub fn separator(&self)->Id{match self{ScriptToken::Separator(id)=>*id,_=>id!()}}
     pub fn number(&self)->f64{match self{ScriptToken::Number(v)=>*v,_=>0.0}}
-    pub fn maybe_number(&self)->Option<f64>{match self{ScriptToken::Number(v)=>Some(*v),_=>None}}
-    pub fn maybe_color(&self)->Option<u32>{match self{ScriptToken::Color(v)=>Some(*v),_=>None}}
-    pub fn maybe_string(&self)->Option<StringPtr>{match self{ScriptToken::StringUnfinished(v)=>Some(*v),ScriptToken::String(v)=>Some(*v),_=>None}}
-        
+    pub fn as_number(&self)->Option<f64>{match self{ScriptToken::Number(v)=>Some(*v),_=>None}}
+    pub fn as_color(&self)->Option<u32>{match self{ScriptToken::Color(v)=>Some(*v),_=>None}}
+    pub fn as_string(&self)->Option<StringPtr>{match self{ScriptToken::StringUnfinished(v)=>Some(*v),ScriptToken::String(v)=>Some(*v),_=>None}}
+    pub fn as_rust_value(&self)->Option<u32>{match self{ScriptToken::RustValue(v)=>Some(*v),_=>None}}
+            
     pub fn is_identifier(&self)->bool{match self{ScriptToken::Identifier{..}=>true,_=>false}}
     pub fn is_operator(&self)->bool{match self{ScriptToken::Operator(_)=>true,_=>false}}
     pub fn is_open_curly(&self)->bool{match self{ScriptToken::OpenCurly=>true,_=>false}}
@@ -44,6 +48,7 @@ impl ScriptToken{
     pub fn is_string(&self)->bool{match self{ScriptToken::StringUnfinished(_)|ScriptToken::String(_)=>true,_=>false}}
     pub fn is_number(&self)->bool{match self{ScriptToken::Number(_)=>true,_=>false}}
     pub fn is_color(&self)->bool{match self{ScriptToken::Color(_)=>true,_=>false}}
+    pub fn is_rust_value(&self)->bool{match self{ScriptToken::RustValue(_)=>true,_=>false}}
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -58,6 +63,7 @@ enum State{
     Whitespace,
     Identifier(bool),
     Operator,
+    RustValue,
     String(bool),
     EscapeInString(bool),
     UnicodeHexInString(bool),
@@ -123,6 +129,7 @@ impl ScriptTokenizer{
                 ScriptToken::StreamEnd=>print!("StreamEnd"),
                 ScriptToken::Identifier{id, ..}=>print!("{id}"),
                 ScriptToken::Operator(id)=>print!("{id}"),
+                ScriptToken::Separator(id)=>print!("{id}"),
                 ScriptToken::OpenCurly=>print!("{{"),
                 ScriptToken::CloseCurly=>print!("}}"),
                 ScriptToken::OpenRound=>print!("("),
@@ -133,6 +140,7 @@ impl ScriptTokenizer{
                 ScriptToken::String(ptr)=>print!("\"{}\"",heap.string(ptr)),
                 ScriptToken::Number(v)=>print!("{v}"),
                 ScriptToken::Color(v)=>print!("{:08x}", v),
+                ScriptToken::RustValue(v)=>print!("#({v})"),
             }
             print!(" ");
         }
@@ -155,6 +163,22 @@ impl ScriptTokenizer{
             }
         }
         None
+    }
+    
+    fn emit_rust_value(&mut self){
+        let number = if let Ok(v) = self.temp.parse::<u32>(){
+            self.temp.clear();
+            v
+        }
+        else{
+            0
+        };
+        let len = self.temp.len();
+        self.temp.clear();
+        self.tokens.push(ScriptTokenPos{
+            pos: self.pos - len,
+            token: ScriptToken::RustValue(number)
+        });
     }
     
     fn emit_number(&mut self){
@@ -212,6 +236,14 @@ impl ScriptTokenizer{
         });
     }
     
+    fn emit_separator(&mut self, c:char){
+        if self.temp.len() != 0{
+            panic!()
+        }
+        self.temp.push(c);
+        self.emit_operator();
+    }
+    
     fn emit_color(&mut self){
         let color = match hex_bytes_to_u32(&self.temp.as_bytes()){
             Err(())=>{
@@ -262,7 +294,10 @@ impl ScriptTokenizer{
         let mut iter = new_chars.chars();
         
         fn is_operator(c:char)->bool{
-            c == '!' || c == '^' || c == '&' || c == '*' || c == '+' || c == '-'|| c == '|' || c == '?' || c == ':' || c == '=' || c == '@' || c=='>' || c=='<' || c == '.' || c== ',' || c == ';' ||  c == '/' || c == '~'
+            c == '!' || c == '^' || c == '&' || c == '*' || c == '+' || c == '-'|| c == '|' || c == '?' || c == ':' || c == '=' || c == '@' || c=='>' || c=='<' || c == '.' ||  c == '/' || c == '~'
+        }
+        fn is_separator(c:char)->bool{
+            c == ',' || c == ';'
         }
         fn is_block(c:char)->Option<ScriptToken>{
             match c{
@@ -299,6 +334,9 @@ impl ScriptTokenizer{
                     else if c == '#'{
                         self.state = State::Color;
                     }
+                    else if is_separator(c){
+                        self.emit_separator(c);
+                    }
                     else if is_operator(c){
                         self.state = State::Operator;
                         self.temp.push(c);
@@ -326,6 +364,11 @@ impl ScriptTokenizer{
                         self.state = State::Operator;
                         self.temp.push(c);
                     }
+                    else if is_separator(c){
+                        self.emit_identifier(starts_with_ds);
+                        self.emit_separator(c);
+                        self.state = State::Whitespace;
+                    }
                     else if c == '#'{
                         self.emit_identifier(starts_with_ds);
                         self.state = State::Color;
@@ -352,10 +395,18 @@ impl ScriptTokenizer{
                     
                     // splice off prefix operator
                     // all double character operators
-                    if c == '~' || self.temp == ":" || self.temp == "~" || self.temp == "@" || self.temp == ";" || self.temp == ","{
+                    if self.temp == "@"{
+                        if c == '('{
+                            self.temp.clear();
+                            self.state = State::RustValue
+                        }
+                        else{
+                            self.emit_operator()
+                        }
+                    } 
+                    if c == '~' || self.temp == ":" || self.temp == "~"{
                         self.emit_operator();
                     }
-                        
                     // detect comments
                     if c.is_whitespace(){
                         self.emit_operator();
@@ -365,6 +416,11 @@ impl ScriptTokenizer{
                         self.emit_operator();
                         self.state = State::Number;
                         self.temp.push(c);
+                    }
+                    else if is_separator(c){
+                        self.emit_operator();
+                        self.emit_separator(c);
+                        self.state = State::Whitespace;
                     }
                     else if c == '_' || c == '$' || c.is_alphabetic(){
                         self.emit_operator();
@@ -576,6 +632,11 @@ impl ScriptTokenizer{
                         self.state = State::Operator;
                         self.temp.push(c);
                     }
+                    else if is_separator(c){
+                        self.emit_number();
+                        self.emit_separator(c);
+                        self.state = State::Whitespace;
+                    }
                     else if c == '"'{
                         self.emit_number();
                         self.state = State::String(true);
@@ -594,8 +655,20 @@ impl ScriptTokenizer{
                         self.state = State::Whitespace;
                     }
                 }
+                State::RustValue=>{
+                    if c>='0' && c<='9'{
+                        self.temp.push(c);
+                    }
+                    else{
+                        self.emit_rust_value();
+                        self.state = State::Whitespace
+                    }
+                }
                 State::Color=>{
-                    if c>='0' && c<='9' || c>='a' && c<='f' || c>='A' && c<='F'{
+                    if self.temp.len() == 0 && c == '('{
+                        self.state = State::RustValue
+                    }
+                    else if c>='0' && c<='9' || c>='a' && c<='f' || c>='A' && c<='F'{
                         self.temp.push(c);    
                         if  self.temp.len() == 8{
                             self.emit_color();
@@ -618,6 +691,11 @@ impl ScriptTokenizer{
                         self.emit_color();
                         self.state = State::Operator;
                         self.temp.push(c);
+                    }
+                    else if is_separator(c){
+                        self.emit_color();
+                        self.emit_separator(c);
+                        self.state = State::Whitespace;
                     }
                     else if c == '"'{
                         self.emit_color();

@@ -61,12 +61,12 @@ impl Script{
         }
     }
     
-    pub fn parse(&mut self, code:&str){
-        self.ctx.parser.parse(code, &mut self.heap);
+    pub fn parse(&mut self, body:&ScriptBody){
+        self.ctx.parser.parse(&body.code, &mut self.heap, &body.values);
         self.ctx.parser.tok.dump_tokens(&self.heap);
     }
     
-    pub fn run(&mut self, code: &str){
+    pub fn run(&mut self, code: &ScriptBody){
         self.parse(code);
         self.threads[0].run(&mut self.heap, &self.ctx)
     }
