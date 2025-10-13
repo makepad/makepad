@@ -8,6 +8,18 @@ use crate::thread::*;
 use crate::native::*;
 use crate::modules::*;
 
+// the script! macro
+#[derive(Default)]
+pub struct ScriptBody{
+    pub cargo_manifest_path: String,
+    pub module_path: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub code: String,
+    pub values: Vec<Value>,
+}
+
 pub struct ScriptCtx{
     pub methods: ScriptMethods,
     pub modules: ScriptModules,
