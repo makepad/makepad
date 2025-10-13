@@ -19,7 +19,6 @@ pub struct ScriptRust{
     pub values: Vec<Value>,
 }
 
-// the script! macro
 pub enum ScriptSource{
     Rust{
         rust: ScriptRust,
