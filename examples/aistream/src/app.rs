@@ -1,3 +1,6 @@
+scope.import(mod.widgets)
+scope.import(mod.math)
+
 let Todo = {done:false}
 
 let todos = [
@@ -5,7 +8,7 @@ let todos = [
     Todo{text: "Implement it"}
 ]
 
-Ui = View{
+let main_ui = View{
     PortalList{
         on_draw_item: |item|{
             View{
@@ -44,6 +47,7 @@ Ui = View{
         }
     }
 }
+ui.set_view(main_ui) 
 
 let req = http.fetch("https://todolistservice" + 10)
 let json = req.result.parse_json()

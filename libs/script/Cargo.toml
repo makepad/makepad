@@ -10,6 +10,5 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "yK9xdn_D0D3EdqleI-WHLtjk4rk="
 
 [dependencies]
-makepad-script-derive = { path = "derive", version = "1.0.0" }
-makepad-live-id = {path = "../live_id", version = "1.0.0" }
+makepad-value = {path = "../value", version = "1.0.0" }
 smallvec = "1.11.2"

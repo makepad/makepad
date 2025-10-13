@@ -1,7 +1,7 @@
-use makepad_script_derive::*;
-use crate::id::*;
-use crate::value::*;
+use crate::makepad_value::id::*;
 use crate::heap::*;
+use crate::makepad_value::value::*;
+use crate::makepad_value_derive::*;
 use crate::script::*;
 
 #[derive(Debug, Default)]
