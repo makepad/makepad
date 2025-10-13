@@ -1,8 +1,8 @@
-use makepad_script_derive::*;
-use crate::id::*;
-use crate::value::*;
+use crate::makepad_value::id::*;
 use crate::heap::*;
-use crate::opcode::*;
+use crate::makepad_value::value::*;
+use crate::makepad_value::opcode::*;
+use crate::makepad_value_derive::*;
 use crate::object::*;
 use crate::script::*;
 use crate::thread::*;
