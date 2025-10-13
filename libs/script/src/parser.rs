@@ -234,7 +234,7 @@ impl State{
 
 pub struct ScriptParser{
     pub index: u32,
-    pub code: Vec<Value>,
+    pub opcodes: Vec<Value>,
     pub source_map: Vec<Option<u32>>,
     
     state: Vec<State>,
@@ -245,7 +245,7 @@ impl Default for ScriptParser{
     fn default()->Self{
         Self{
             index: 0,
-            code: Default::default(),
+            opcodes: Default::default(),
             source_map: Default::default(),
             opstack: Default::default(),
             state: vec![State::BeginStmt{last_was_sep:false}],
@@ -256,30 +256,30 @@ impl Default for ScriptParser{
 impl ScriptParser{
     
     fn code_len(&self)->u32{
-        self.code.len() as _
+        self.opcodes.len() as _
     }
     
     fn code_last(&self)->Option<&Value>{
-        self.code.last()
+        self.opcodes.last()
     }
     
     fn pop_code(&mut self){
-        self.code.pop();
+        self.opcodes.pop();
         self.source_map.pop();
     }
     
     fn push_code(&mut self, code: Value, index: u32){
-        self.code.push(code);
+        self.opcodes.push(code);
         self.source_map.push(Some(index));
     }
     
     fn push_code_none(&mut self, code: Value){
-        self.code.push(code);
+        self.opcodes.push(code);
         self.source_map.push(None);
     }
     
     fn set_opcode_args(&mut self, index:u32, args: OpcodeArgs){
-        self.code[index as usize].set_opcode_args(args);
+        self.opcodes[index as usize].set_opcode_args(args);
     }
     
     fn push_state(&mut self, state:State){
@@ -877,7 +877,7 @@ impl ScriptParser{
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp{what_op:id!(.),..} = last{
                             if State::is_assign_operator(op){
-                                for pair in self.code.rchunks_mut(2){
+                                for pair in self.opcodes.rchunks_mut(2){
                                     if pair[0] == Opcode::FIELD.into() && pair[1].is_id(){
                                         pair[0] = Opcode::PROTO_FIELD.into()
                                     }
@@ -987,7 +987,7 @@ impl ScriptParser{
                     return 1
                 }
                 // in a function call we need the 
-                if let Some(code) = self.code.last_mut(){
+                if let Some(code) = self.opcodes.last_mut(){
                     if *code == Opcode::FOR_END.into(){
                         code.set_opcode_is_statement();
                         self.state.push(State::BeginStmt{last_was_sep:false});

@@ -469,7 +469,7 @@ impl ScriptHeap{
         value
     }
     
-    pub fn object_prototype(&self, ptr:ObjectPtr)->Value{
+    pub fn object_proto(&self, ptr:ObjectPtr)->Value{
         self.objects[ptr.index as usize].proto
     }
     

@@ -83,6 +83,8 @@ impl ObjectType{
     // cant really use these
 }
 
+pub struct RustRef(u64);
+
 #[derive(Debug,Clone,Copy)]
 pub enum ScriptFnPtr{
     Script{
@@ -95,16 +97,20 @@ pub enum ScriptFnPtr{
 }
 
 impl ObjectTag{
-    pub const MARK:u64 = 0x100;
-    pub const ALLOCED:u64 = 0x200;
-    pub const DEEP:u64 = 0x400;
-    pub const SCRIPT_FN: u64 = 0x800;
-    pub const NATIVE_FN: u64 = 0x1000;
-    pub const REFFED: u64 = 0x2000;
-    pub const HAS_METHODS: u64 = 0x4000;
+    pub const MARK:u64 = 0x800;
+    pub const ALLOCED:u64 = 0x1000;
+    pub const DEEP:u64 = 0x2000;
+    pub const REFFED: u64 = 0x4000;
+    pub const HAS_METHODS: u64 = 0x8000;
+    pub const FLAG_MASK: u64 = 0xf800;
+            
+    pub const SCRIPT_FN: u64 = 0x100;
+    pub const NATIVE_FN: u64 = 0x200;
+    pub const RUST_REF:  u64 = 0x300;
+    pub const REF_MASK:  u64 = 0x700;
         
     pub const TYPE_MASK: u64 = 0xff;
-        
+            
     const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::HAS_METHODS;
         
     pub fn set_flags(&mut self, flags:u64){
@@ -112,6 +118,7 @@ impl ObjectTag{
     }
         
     pub fn set_fn(&mut self, ptr:ScriptFnPtr){
+        self.0 &= !(Self::REF_MASK);
         match ptr{
             ScriptFnPtr::Script{body, ip}=>{
                 self.0 |= ((ip as u64)<<32) | ((body as u64)<<16) | Self::SCRIPT_FN
@@ -123,11 +130,25 @@ impl ObjectTag{
         
     }
     
+    pub fn set_rust_ref(&mut self, value: RustRef){
+        self.0 &= !(Self::REF_MASK);
+        self.0 |= ((value.0 as u64)<<16) | Self::RUST_REF
+    }
+    
+    pub fn as_rust_ref(&mut self)->Option<RustRef>{
+        if self.0 & Self::REF_MASK == Self::SCRIPT_FN{
+            Some(RustRef(self.0>>16))
+        }
+        else{
+            None
+        }
+    }
+    
     pub fn as_fn(&self)->Option<ScriptFnPtr>{
-        if self.0 & Self::SCRIPT_FN != 0{
+        if self.0 & Self::REF_MASK == Self::SCRIPT_FN{
             Some(ScriptFnPtr::Script{body:((self.0>>16)&0xffff) as u16, ip:(self.0 >> 32) as u32})
         }
-        else if self.0 & Self::NATIVE_FN != 0{
+        else if self.0 & Self::REF_MASK == Self::NATIVE_FN{
             Some(ScriptFnPtr::Native{index:(self.0 >> 32) as u32})
         }
         else{
@@ -136,15 +157,15 @@ impl ObjectTag{
     }
         
     pub fn is_script_fn(&self)->bool{
-        self.0 & Self::SCRIPT_FN != 0
+        self.0 & Self::REF_MASK == Self::SCRIPT_FN
     }
         
     pub fn is_native_fn(&self)->bool{
-        self.0 & Self::NATIVE_FN != 0
+        self.0 & Self::REF_MASK == Self::NATIVE_FN
     }
     
     pub fn is_fn(&self)->bool{
-        self.0 & (Self::SCRIPT_FN|Self::NATIVE_FN) != 0
+        self.is_script_fn() || self.is_native_fn()
     }
     
     pub fn proto_fwd(&self)->u64{

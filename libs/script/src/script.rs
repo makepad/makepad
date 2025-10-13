@@ -9,6 +9,7 @@ use crate::thread::*;
 use crate::native::*;
 use crate::modules::*;
 
+#[derive(Default)]
 pub struct ScriptRust{
     pub cargo_manifest_path: String,
     pub module_path: String,
@@ -36,7 +37,7 @@ pub struct ScriptBody{
     pub me: ObjectPtr,
 }
 
-pub struct ScriptCtx{
+pub struct ScriptCode{
     pub methods: ScriptMethods,
     pub modules: ScriptModules,
     pub builtins: ScriptBuiltins,
@@ -44,8 +45,14 @@ pub struct ScriptCtx{
     pub bodies: Vec<ScriptBody>,
 }
 
+pub struct ScriptCtx<'a>{
+    pub thread: &'a mut ScriptThread,
+    pub code: &'a ScriptCode,
+    pub heap: &'a mut ScriptHeap
+}
+
 pub struct ScriptVm{
-    pub ctx: ScriptCtx,
+    pub code: ScriptCode,
     pub global: ObjectPtr,
     pub heap: ScriptHeap,
     pub threads: Vec<ScriptThread>,
@@ -61,7 +68,7 @@ impl ScriptVm{
         let builtins = ScriptBuiltins::new(&mut heap, &modules);
         
         Self{
-            ctx:ScriptCtx{
+            code:ScriptCode{
                 builtins,
                 modules,
                 methods,
@@ -76,7 +83,7 @@ impl ScriptVm{
     
     pub fn add_rust_body(&mut self, new_rust:ScriptRust)->u16{
         let scope = self.heap.new_object_with_proto(id!(scope).into());
-        self.heap.set_object_value(scope, id!(mod).into(), self.ctx.modules.obj.into());
+        self.heap.set_object_value(scope, id!(mod).into(), self.code.modules.obj.into());
         self.heap.set_object_value(scope, id!(global).into(), self.global.into());
         let me = self.heap.new_object_with_proto(id!(root_me).into());
         
@@ -87,8 +94,8 @@ impl ScriptVm{
             scope,
             me,
         };
-        for i in 0..self.ctx.bodies.len(){
-            let body = &mut self.ctx.bodies[i];
+        for i in 0..self.code.bodies.len(){
+            let body = &mut self.code.bodies[i];
             if let ScriptSource::Rust{rust} = &body.source{
                 if let ScriptSource::Rust{rust:new_rust} = &new_body.source{
                     if  rust.file == new_rust.file &&
@@ -100,20 +107,20 @@ impl ScriptVm{
                 }
             }
         }
-        let i = self.ctx.bodies.len();
-        self.ctx.bodies.push(new_body);
+        let i = self.code.bodies.len();
+        self.code.bodies.push(new_body);
         i as u16
     }
     
     pub fn eval(&mut self, new_rust: ScriptRust){
         let body_id = self.add_rust_body(new_rust);
-        let body = &mut self.ctx.bodies[body_id as usize];
+        let body = &mut self.code.bodies[body_id as usize];
         
         if let ScriptSource::Rust{rust} = &body.source{
             body.tokenizer.tokenize(&rust.code, &mut self.heap);
             body.parser.parse(&body.tokenizer.tokens, &mut self.heap, &rust.values);
             // lets point our thread to it
-            self.threads[0].run(&mut self.heap, &self.ctx, body_id)
+            self.threads[0].run(&mut self.heap, &self.code, body_id)
         }
     }
 }
