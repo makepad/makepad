@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 use crate::tokenizer::*;
-use crate::id::*;
+use crate::makepad_value::id::*;
 use crate::heap::*;
-use crate::value::*;
-use crate::opcode::*;
-use makepad_script_derive::*;
+use crate::makepad_value::value::*;
+use crate::makepad_value::opcode::*;
+use crate::makepad_value_derive::*;
 
 #[derive(Debug, Eq, PartialEq)]
 enum State{

@@ -1,13 +1,10 @@
-pub use makepad_script_derive::*;
-
+pub use makepad_value;
+pub use makepad_value::makepad_value_derive;
 pub mod tokenizer; 
 pub mod object;
-pub mod value;
-pub mod id;
 pub mod colorhex;
 pub mod parser;
 pub mod heap;
-pub mod opcode;
 pub mod string;
 pub mod methods;
 pub mod modules;
@@ -54,7 +51,7 @@ pub fn test(){
         let View = {@view}
         let Window = {@window}
         let Button = {@button}
-        let MyWindow = Window{
+        let MyWindow = $(Window::ty()){
             size: 1.0
             $b1: Button{}
             $body: View{}

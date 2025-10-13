@@ -1,5 +1,5 @@
 use crate::heap::*;
-use crate::value::*;
+use crate::makepad_value::value::*;
 
 pub type NativeFnType = Box<dyn Fn(&mut ScriptHeap, ObjectPtr)->Value + 'static>;
 

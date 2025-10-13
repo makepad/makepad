@@ -1,5 +1,5 @@
 use std::fmt;
-use crate::value::*;
+use crate::makepad_value::value::*;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -19,7 +19,7 @@ impl fmt::Display for ObjectType {
         match *self{
             Self::AUTO=>write!(f, "AUTO"),
             Self::VEC2=>write!(f, "VEC2"),
-            Self::BTREE=>write!(f, "BTREE"),
+            Self::MAP=>write!(f, "MAP"),
             Self::VEC1=>write!(f, "VEC1"),
             Self::U8=>write!(f, "U8"),
             Self::U16=>write!(f, "U16"),
@@ -37,7 +37,7 @@ impl fmt::Display for ObjectType {
 impl ObjectType{
     pub const AUTO: Self = Self(0);
     pub const VEC2: Self = Self(1);
-    pub const BTREE: Self = Self(2);
+    pub const MAP: Self = Self(2);
     pub const VEC1:Self = Self(3);
         
     pub fn uses_vec2(&self)->bool{
@@ -56,8 +56,8 @@ impl ObjectType{
         *self == Self::VEC2
     }
         
-    pub fn is_btree(&self)->bool{
-        *self == Self::BTREE
+    pub fn is_map(&self)->bool{
+        *self == Self::MAP
     }
             
     pub fn has_paired_vec(&self)->bool{
@@ -220,7 +220,6 @@ pub struct Object{
     pub proto: Value,
     pub map: BTreeMap<Value, Value>,
     pub vec: Vec<Value>,
-//    pub vec: smallvec::SmallVec<[Value;6]>
 }
 
 impl Object{

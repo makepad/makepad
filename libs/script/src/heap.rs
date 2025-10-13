@@ -1,7 +1,7 @@
-use makepad_script_derive::*;
-use crate::id::*;
+use crate::makepad_value::id::*;
+use crate::makepad_value::value::*;
+use crate::makepad_value_derive::*;
 use std::fmt::Write;
-use crate::value::*;
 use crate::object::*;
 use crate::string::*;
 
@@ -390,7 +390,7 @@ impl ScriptHeap{
         if ty.is_typed(){ // typed access to the vec
             //todo IMPLEMENT IT
         }
-        if ty.is_btree(){
+        if ty.is_map(){
             if let Some(value) = object.map.get(&index){
                 return *value
             }
@@ -502,7 +502,7 @@ impl ScriptHeap{
             object.vec[index] = value;
             return 
         }
-        if ty == ObjectType::BTREE{
+        if ty.is_map(){
             object.map.insert(index, value);
             return
         }
