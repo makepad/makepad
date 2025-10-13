@@ -29,7 +29,7 @@ impl ScriptMethods{
         let fn_obj = heap.new_object_with_proto(id!(native).into());
         heap.set_object_type(fn_obj, ObjectType::VEC2);        
         
-        heap.set_object_native_fn(fn_obj, fn_index as u32);
+        heap.set_object_fn(fn_obj, ScriptFnPtr::Native{index: fn_index as u32});
         
         for arg in args{
             heap.set_object_value(fn_obj, (*arg).into(), Value::NIL);

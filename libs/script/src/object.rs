@@ -83,6 +83,17 @@ impl ObjectType{
     // cant really use these
 }
 
+#[derive(Debug,Clone,Copy)]
+pub enum ScriptFnPtr{
+    Script{
+        body: u16,
+        ip: u32,
+    },
+    Native{
+        index: u32     
+    }
+}
+
 impl ObjectTag{
     pub const MARK:u64 = 0x100;
     pub const ALLOCED:u64 = 0x200;
@@ -100,18 +111,34 @@ impl ObjectTag{
         self.0 |= flags
     }
         
-    pub fn set_script_fn(&mut self, val: u32){
-        self.0 |= ((val as u64)<<32) | Self::SCRIPT_FN
+    pub fn set_fn(&mut self, ptr:ScriptFnPtr){
+        match ptr{
+            ScriptFnPtr::Script{body, ip}=>{
+                self.0 |= ((ip as u64)<<32) | ((body as u64)<<16) | Self::SCRIPT_FN
+            }
+            ScriptFnPtr::Native{index}=>{
+                self.0 |= Self::NATIVE_FN | ((index as u64)<<32)
+            }
+        }
+        
+    }
+    
+    pub fn as_fn(&self)->Option<ScriptFnPtr>{
+        if self.0 & Self::SCRIPT_FN != 0{
+            Some(ScriptFnPtr::Script{body:((self.0>>16)&0xffff) as u16, ip:(self.0 >> 32) as u32})
+        }
+        else if self.0 & Self::NATIVE_FN != 0{
+            Some(ScriptFnPtr::Native{index:(self.0 >> 32) as u32})
+        }
+        else{
+            None
+        }
     }
         
-    pub fn get_fn(&self)->u32{
-        (self.0 >> 32) as u32
+    pub fn is_script_fn(&self)->bool{
+        self.0 & Self::SCRIPT_FN != 0
     }
         
-    pub fn set_native_fn(&mut self, val: u32){
-        self.0 |= Self::NATIVE_FN | ((val as u64)<<32)
-    }
-            
     pub fn is_native_fn(&self)->bool{
         self.0 & Self::NATIVE_FN != 0
     }
@@ -137,10 +164,6 @@ impl ObjectTag{
         return ObjectType( (self.0 & Self::TYPE_MASK) as u8 )
     }
         
-    pub fn is_script_fn(&self)->bool{
-        self.0 & Self::SCRIPT_FN != 0
-    }
-            
     pub fn set_deep(&mut self){
         self.0 |= Self::DEEP
     }
@@ -207,8 +230,8 @@ impl fmt::Display for ObjectTag {
         if self.is_marked(){write!(f,"MARK|").ok();}
         if self.is_alloced(){write!(f,"ALLOCED|").ok();}
         if self.is_deep(){write!(f,"DEEP|").ok();}
-        if self.is_script_fn(){write!(f,"SCRIPT_FN({})|", self.get_fn()).ok();}
-        if self.is_native_fn(){write!(f,"NATIVE_FN({})|", self.get_fn()).ok();}
+        if self.is_script_fn(){write!(f,"SCRIPT_FN({:?})|", self.as_fn().unwrap()).ok();}
+        if self.is_native_fn(){write!(f,"NATIVE_FN({:?})|", self.as_fn().unwrap()).ok();}
         if self.is_reffed(){write!(f,"REFFED").ok();}
         write!(f, ")")
     }
