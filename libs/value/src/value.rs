@@ -39,6 +39,24 @@ impl From<f64> for Value{
     }
 }
 
+impl From<u32> for Value{
+    fn from(v:u32) -> Self{
+        Value::from_f64(v as f64)
+    }
+}
+
+impl From<i32> for Value{
+    fn from(v:i32) -> Self{
+        Value::from_f64(v as f64)
+    }
+}
+
+impl From<usize> for Value{
+    fn from(v:usize) -> Self{
+        Value::from_f64(v as f64)
+    }
+}
+
 impl From<bool> for Value{
     fn from(v:bool) -> Self{
         Value::from_bool(v)

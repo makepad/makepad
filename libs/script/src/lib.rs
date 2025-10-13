@@ -40,32 +40,30 @@ pub struct RustTest{
     _prop: f64    
 }
 
+impl RustTest{
+    fn ty()->u32{1}
+}
+
 use crate::script::*;
 use makepad_script_derive::*;
 
 pub fn test(){
-    let value = 1.0;
-    let x = script!{
-        let x = ${value}
-    };
     
-    println!("{}", x.code);
-    
-    let code = "
+    let _code = script!{
         let x = [@view,@bla]
         for sym in x t[sym]
         
         let View = {@view}
         let Window = {@window}
         let Button = {@button}
-        let MyWindow = $(Window::ty()){
+        let MyWindow = #(RustTest::ty()){
             size: 1.0
             $b1: Button{}
             $body: View{}
             $b2: Button{}
         }
         let x = MyWindow{
-            $b1 <: Checkbox{}
+            $b1 : Checkbox{}
         }
         let x = if true 1 else 0
         for v in 1000000{
@@ -73,17 +71,18 @@ pub fn test(){
         let x = x{};
         for v in [1 2 3 4] ~v
         ~x;
-    ";
+    };
     
-    let _code = "
+    let _code = script!{
         if true let x = 5;
         ~x;
-    ";
+    };
     
-    let _code = "
+    let code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
-    ";
+    };
+    println!("{}", code.code);
     let dt = std::time::Instant::now();
     let mut interp = Script::new();
     interp.run(&code);
