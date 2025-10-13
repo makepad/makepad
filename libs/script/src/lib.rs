@@ -41,8 +41,15 @@ pub struct RustTest{
 }
 
 use crate::script::*;
+use makepad_script_derive::*;
 
 pub fn test(){
+    let value = 1.0;
+    let x = script!{
+        let x = ${value}
+    };
+    
+    println!("{}", x.code);
     
     let code = "
         let x = [@view,@bla]
