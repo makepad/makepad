@@ -1,7 +1,7 @@
-use crate::heap::*;
+use crate::script::*;
 use crate::makepad_value::value::*;
 
-pub type NativeFnType = Box<dyn Fn(&mut ScriptHeap, ObjectPtr)->Value + 'static>;
+pub type NativeFnType = Box<dyn Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static>;
 
 pub struct NativeFnEntry{
     pub fn_ptr: NativeFnType
@@ -14,7 +14,7 @@ pub struct NativeFnIndex{
 
 impl NativeFnEntry{
     pub fn new<F>(f: F)->Self 
-    where F: Fn(&mut ScriptHeap, ObjectPtr)->Value + 'static{
+    where F: Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static{
         Self{fn_ptr:Box::new(f)}
     }
 }

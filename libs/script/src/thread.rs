@@ -168,7 +168,7 @@ impl ScriptThread{
         return heap.object_value(*self.scopes.last().unwrap(), id.into());
     }
     
-    pub fn run(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx, body_id: u16){
+    pub fn run(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, body_id: u16){
         
         self.calls.push(CallFrame{
             bases: StackBases{
@@ -181,19 +181,19 @@ impl ScriptThread{
             return_body: 0,
         });
                 
-        self.scopes.push(ctx.bodies[body_id as usize].scope);
-        self.mes.push(ScriptMe::object(ctx.bodies[body_id as usize].me));
+        self.scopes.push(code.bodies[body_id as usize].scope);
+        self.mes.push(ScriptMe::object(code.bodies[body_id as usize].me));
                 
         self.body = body_id;
         self.ip = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         let mut counter = 0;
         
-        let mut body = &ctx.bodies[self.body as usize];
-        while (self.ip as usize) < body.parser.code.len(){
-            let code = body.parser.code[self.ip as usize];
-            if let Some((opcode, args)) = code.as_opcode(){
-                if let Some(rust_call) = self.opcode(opcode, args, heap, ctx){
+        let mut body = &code.bodies[self.body as usize];
+        while (self.ip as usize) < body.parser.opcodes.len(){
+            let opcode = body.parser.opcodes[self.ip as usize];
+            if let Some((opcode, args)) = opcode.as_opcode(){
+                if let Some(rust_call) = self.opcode(opcode, args, heap, code){
                     match rust_call{
                         ScriptHook::SysCall(_sys_id)=>{
                         }
@@ -204,10 +204,10 @@ impl ScriptThread{
                 }
             }
             else{ // its a direct value-to-stack?
-                self.push_stack_value(code);
+                self.push_stack_value(opcode);
                 self.ip += 1;
             }
-            body = &ctx.bodies[self.body as usize];
+            body = &code.bodies[self.body as usize];
             counter += 1;
         }
         //println!("{:?}", profile);

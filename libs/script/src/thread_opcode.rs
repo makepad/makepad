@@ -54,7 +54,7 @@ macro_rules! bool_op_impl{
 
 impl ScriptThread{
     
-    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, heap:&mut ScriptHeap, ctx:&ScriptCtx)->Option<ScriptHook>{
+    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, heap:&mut ScriptHeap, code:&ScriptCode)->Option<ScriptHook>{
         match opcode{
             
             Opcode::NOT=>{
@@ -221,7 +221,11 @@ impl ScriptThread{
                 if let Some(fnptr) = heap.parent_object_as_fn(scope){
                     match fnptr{
                         ScriptFnPtr::Native{index}=>{
-                            let ret = (*ctx.native.fn_table[index as usize].fn_ptr)(heap, scope);
+                            let ret = (*code.native.fn_table[index as usize].fn_ptr)(&mut ScriptCtx{
+                                heap,
+                                thread:self,
+                                code
+                            }, scope);
                             self.stack.push(ret);
                             heap.free_object_if_unreffed(scope);
                             self.ip += 1;
@@ -257,7 +261,7 @@ impl ScriptThread{
                     // lets take the type
                     let type_index = this.value_type().to_redux();
                     let method = method.as_id().unwrap_or(id!());
-                    let type_entry = &ctx.methods.type_table[type_index];
+                    let type_entry = &code.methods.type_table[type_index];
                     
                     if let Some(method_ptr) = type_entry.get(&method){
                         let scope = heap.new_object_with_proto(method_ptr.fn_obj);
@@ -447,7 +451,7 @@ impl ScriptThread{
             }
                                   
             Opcode::LOG=>{
-                let body = &ctx.bodies[self.body as usize];
+                let body = &code.bodies[self.body as usize];
                 let index = body.parser.source_map[self.ip as usize].unwrap();
                 let rc = body.tokenizer.token_index_to_row_col(index).unwrap();
                 let (line_shift, file) = if let ScriptSource::Rust{rust} = &body.source{
@@ -493,28 +497,28 @@ impl ScriptThread{
             Opcode::FOR_1 =>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, ctx, args.to_u32() as _, source, value_id, None, None);
+                self.begin_for_loop(heap, code, args.to_u32() as _, source, value_id, None, None);
             }
             Opcode::FOR_2 =>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
                 let index_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, ctx, args.to_u32() as _, source, value_id,Some(index_id), None);
+                self.begin_for_loop(heap, code, args.to_u32() as _, source, value_id,Some(index_id), None);
             }
             Opcode::FOR_3=>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
                 let index_id = self.pop_stack_value().as_id().unwrap();
                 let key_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, ctx, args.to_u32() as _, source, value_id, Some(index_id), Some(key_id));
+                self.begin_for_loop(heap, code, args.to_u32() as _, source, value_id, Some(index_id), Some(key_id));
             }
             Opcode::FOR_END=>{
-                self.end_for_loop(heap, ctx);
+                self.end_for_loop(heap, code);
             }
             Opcode::RANGE=>{
                 let end = self.pop_stack_resolved(heap);
                 let start = self.pop_stack_resolved(heap);
-                let range = heap.new_object_with_proto(ctx.builtins.range.into());
+                let range = heap.new_object_with_proto(code.builtins.range.into());
                 heap.set_object_value(range, id!(start).into(), start);
                 heap.set_object_value(range, id!(end).into(), end);
                 self.stack.push(range.into());
@@ -597,7 +601,7 @@ impl ScriptThread{
         }
     }
                 
-    pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx, jump:u32, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>){
+    pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, jump:u32, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>){
         let v0 = Value::from_f64(0.0);
         if let Some(s) = source.as_f64(){
             if s >= 1.0{
@@ -606,7 +610,7 @@ impl ScriptThread{
             }
         }
         else if let Some(obj) = source.as_object(){
-            if heap.object_has_proto(obj, ctx.builtins.range.into()){ // range object
+            if heap.object_has_proto(obj, code.builtins.range.into()){ // range object
                 let start = heap.object_value(obj, id!(start).into()).as_f64().unwrap_or(0.0);
                 let end = heap.object_value(obj, id!(end).into()).as_f64().unwrap_or(0.0);
                 let v = start.into();
@@ -631,7 +635,7 @@ impl ScriptThread{
         self.ip += jump;
     }
             
-    pub fn end_for_loop(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx){
+    pub fn end_for_loop(&mut self, heap:&mut ScriptHeap, code:&ScriptCode){
         // alright lets take a look at our top loop thing
         let lf = self.loops.last_mut().unwrap();
         if let Some(end) = lf.source.as_f64(){
@@ -646,7 +650,7 @@ impl ScriptThread{
             return
         }
         else if let Some(obj) = lf.source.as_object(){
-            if heap.object_has_proto(obj, ctx.builtins.range.into()){ // range object
+            if heap.object_has_proto(obj, code.builtins.range.into()){ // range object
                 let scope = self.scopes.last().unwrap();
                 let end = heap.object_value(obj, id!(end).into()).as_f64().unwrap_or(0.0);
                 let step = heap.object_value(obj, id!(step).into()).as_f64().unwrap_or(1.0);
