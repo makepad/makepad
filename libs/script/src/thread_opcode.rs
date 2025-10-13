@@ -450,25 +450,25 @@ impl ScriptThread{
                 let body = &ctx.bodies[self.body as usize];
                 let index = body.parser.source_map[self.ip as usize].unwrap();
                 let rc = body.tokenizer.token_index_to_row_col(index).unwrap();
-                let line_shift = if let ScriptSource::Rust{rust} = &body.source{
-                    rust.line as u32
+                let (line_shift, file) = if let ScriptSource::Rust{rust} = &body.source{
+                    (rust.line as u32 + 1, rust.file.as_str())
                 }else{
-                    0
+                    (0,"generated")
                 };
                 
                 let value = self.peek_stack_resolved(heap);
                 if value != Value::NIL{
                     if let Some(obj) = value.as_object(){
-                        print!("script.rs:{}:{} -", rc.0 + line_shift, rc.1);
+                        print!("{file}:{}:{} -", rc.0 + line_shift, rc.1);
                         heap.print_object(obj, true);
                         println!("");
                     }
                     else{
-                        println!("script.rs:{}:{} - {:?}: {:?}", rc.0 + line_shift, rc.1, value.value_type(), value);
+                        println!("{file}:{}:{} - {:?}: {:?}", rc.0 + line_shift, rc.1, value.value_type(), value);
                     }
                 }
                 else{
-                    println!("script.rs:{}:{} - nil", rc.0 + line_shift, rc.1);
+                    println!("{file}:{}:{} - nil", rc.0 + line_shift, rc.1);
                 }
                 self.ip += 1;
             }
