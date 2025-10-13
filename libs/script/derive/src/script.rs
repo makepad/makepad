@@ -19,7 +19,7 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
     if let Some(span) = parser.span() {
         let (s, values) = token_parser_to_whitespace_matching_string(&mut parser, span);
         
-        tb.add("ScriptBody {");
+        tb.add("ScriptRust {");
         tb.add("    cargo_manifest_path: env!(").string("CARGO_MANIFEST_DIR").add(").trim_start_matches(").string("\\\\?\\").add(").to_string(),");
         tb.add("    module_path :").ident_with_span("module_path", span).add("!().to_string(),");
         tb.add("    file:").ident_with_span("file", span).add("!().to_string().replace(").string("\\").add(",").string("/").add("),");
@@ -36,7 +36,7 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
         tb.add("}");
     }
     else{
-        tb.add("ScriptBody::default()");
+        tb.add("ScriptRust::default()");
     }
     tb.end()
 }

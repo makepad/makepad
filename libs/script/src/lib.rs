@@ -40,6 +40,7 @@ pub struct RustTest{
     _prop: f64    
 }
 
+
 impl RustTest{
     fn ty()->u32{1}
 }
@@ -49,7 +50,7 @@ use makepad_script_derive::*;
 
 pub fn test(){
     
-    let _code = script!{
+    let code = script!{
         let x = [@view,@bla]
         for sym in x t[sym]
         
@@ -66,8 +67,6 @@ pub fn test(){
             $b1 : Checkbox{}
         }
         let x = if true 1 else 0
-        for v in 1000000{
-        }
         let x = x{};
         for v in [1 2 3 4] ~v
         ~x;
@@ -78,14 +77,19 @@ pub fn test(){
         ~x;
     };
     
-    let code = script!{
+    let _code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     };
-    println!("{}", code.code);
     let dt = std::time::Instant::now();
-    let mut interp = Script::new();
-    interp.run(&code);
+    let mut vm = ScriptVm::new();
+    vm.eval(script!{
+        let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
+        ~fib(38);
+    });
+    
+    
+    
     println!("Duration {}", dt.elapsed().as_secs_f64())
     
 }

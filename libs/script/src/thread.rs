@@ -1,7 +1,6 @@
 use crate::makepad_value::id::*;
 use crate::heap::*;
 use crate::makepad_value::value::*;
-use crate::makepad_value_derive::*;
 use crate::script::*;
 
 #[derive(Debug, Default)]
@@ -18,15 +17,16 @@ pub struct LoopFrame{
     pub key_id: Option<Id>,
     pub index_id: Option<Id>,
     pub source: Value,
-    pub start_ip: usize,
-    pub jump: usize,
+    pub start_ip: u32,
+    pub jump: u32,
     pub index: f64,
     pub bases: StackBases,
 }
 
 pub struct CallFrame{
     pub bases: StackBases,
-    pub return_ip: usize,
+    pub return_ip: u32,
+    pub return_body: u16
 }
 
 pub struct ScriptMe{
@@ -48,11 +48,12 @@ pub struct ScriptThreadId(pub usize);
 pub struct ScriptThread{
     pub(crate) stack_limit: usize,
     pub(crate) loops: Vec<LoopFrame>,
-    pub(crate) scopes: LastVec<ObjectPtr>,
+    pub(crate) scopes: Vec<ObjectPtr>,
     pub(crate) stack: Vec<Value>,
-    pub(crate) calls: LastVec<CallFrame>,
-    pub(crate) mes: LastVec<ScriptMe>,
-    pub ip: usize
+    pub(crate) calls: Vec<CallFrame>,
+    pub(crate) mes: Vec<ScriptMe>,
+    pub ip: u32,
+    pub body: u16,
 }
 
 pub enum ScriptHook{
@@ -62,24 +63,16 @@ pub enum ScriptHook{
 
 impl ScriptThread{
     
-    pub fn new(heap: &mut ScriptHeap, scope: ObjectPtr)->Self{
-        let root = heap.new_object_with_proto(id!(root).into());
+    pub fn new()->Self{
         Self{
-            scopes:  LastVec::new(scope),
+            scopes: vec![],
             stack_limit: 1_000_000,
             loops: vec![],
             stack: vec![],
-            calls: LastVec::new(CallFrame{
-                bases: StackBases{
-                    loops: 0,
-                    stack: 0,
-                    scope: 1,
-                    mes: 1,
-                },
-                return_ip: 0,
-            }),
-            mes: LastVec::new(ScriptMe::object(root)),
-            ip: 0
+            calls: vec![],
+            mes: vec![],
+            ip: 0,
+            body: 0
         }
     }
     
@@ -101,7 +94,7 @@ impl ScriptThread{
     
     pub fn free_unreffed_scopes(&mut self, bases:&StackBases, heap:&mut ScriptHeap){
         while self.scopes.len() > bases.scope{
-            heap.free_object_if_unreffed(self.scopes.pop());
+            heap.free_object_if_unreffed(self.scopes.pop().unwrap());
         }
     }
     
@@ -167,22 +160,38 @@ impl ScriptThread{
     }
     
     pub fn call_has_me(&self)->bool{
-        self.mes.len() > self.calls.last().bases.mes
+        self.mes.len() > self.calls.last().unwrap().bases.mes
     }
     
     // lets resolve an id to a Value
     pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
-        return heap.object_value(*self.scopes.last(), id.into());
+        return heap.object_value(*self.scopes.last().unwrap(), id.into());
     }
     
-    pub fn run(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx){
+    pub fn run(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx, body_id: u16){
         
+        self.calls.push(CallFrame{
+            bases: StackBases{
+                loops: 0,
+                stack: 0,
+                scope: 0,
+                mes: 0,
+            },
+            return_ip: 0,
+            return_body: 0,
+        });
+                
+        self.scopes.push(ctx.bodies[body_id as usize].scope);
+        self.mes.push(ScriptMe::object(ctx.bodies[body_id as usize].me));
+                
+        self.body = body_id;
         self.ip = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         let mut counter = 0;
         
-        while self.ip < ctx.parser.code.len(){
-            let code = ctx.parser.code[self.ip];
+        let mut body = &ctx.bodies[self.body as usize];
+        while (self.ip as usize) < body.parser.code.len(){
+            let code = body.parser.code[self.ip as usize];
             if let Some((opcode, args)) = code.as_opcode(){
                 if let Some(rust_call) = self.opcode(opcode, args, heap, ctx){
                     match rust_call{
@@ -198,6 +207,7 @@ impl ScriptThread{
                 self.push_stack_value(code);
                 self.ip += 1;
             }
+            body = &ctx.bodies[self.body as usize];
             counter += 1;
         }
         //println!("{:?}", profile);
@@ -211,45 +221,5 @@ impl ScriptThread{
         //heap.print_object(global, true);
         //println!("");                                
         //self.heap.free_object(scope);
-    }
-}
-
-pub struct LastVec<T>{
-    vec: Vec<T>,
-}
-
-impl<T> LastVec<T>{
-    pub fn new(t:T)->Self{
-        Self{
-            vec:vec![t],
-        }
-    }
-        
-    pub fn last(&self)->&T{
-        let idx = self.vec.len()-1;
-        unsafe{self.vec.get_unchecked(idx)}
-    }
-        
-    pub fn last_mut(&mut self)->&T{
-        let idx = self.vec.len()-1;
-        unsafe{self.vec.get_unchecked_mut(idx)}
-    }
-        
-    pub fn push(&mut self, t:T){
-        self.vec.push(t);
-    }
-        
-    pub fn pop(&mut self)->T{
-        let r = self.vec.pop().unwrap();
-        if self.vec.len()==0{panic!()}
-        r
-    }
-        
-    pub fn len(&self)->usize{
-        self.vec.len()
-    }
-        
-    pub fn truncate(&mut self, len:usize){
-        self.vec.truncate(len.max(1));
     }
 }

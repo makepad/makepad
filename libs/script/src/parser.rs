@@ -234,7 +234,6 @@ impl State{
 
 pub struct ScriptParser{
     pub index: u32,
-    pub tok: ScriptTokenizer,
     pub code: Vec<Value>,
     pub source_map: Vec<Option<u32>>,
     
@@ -246,7 +245,6 @@ impl Default for ScriptParser{
     fn default()->Self{
         Self{
             index: 0,
-            tok: Default::default(),
             code: Default::default(),
             source_map: Default::default(),
             opstack: Default::default(),
@@ -288,13 +286,8 @@ impl ScriptParser{
         self.state.push(state)
     }
     
-    fn parse_step(&mut self, heap:&mut ScriptHeap, values: &[Value])->u32{
-        let tok = if let Some(tok) = self.tok.tokens.get(self.index as usize){
-            tok.token.clone()
-        }
-        else{
-            ScriptToken::StreamEnd
-        };
+    fn parse_step(&mut self, tok:ScriptToken, heap:&mut ScriptHeap, values: &[Value])->u32{
+        
         let op = tok.operator();
         let sep = tok.separator();
         let (id,starts_with_ds) = tok.identifier();
@@ -1019,13 +1012,19 @@ impl ScriptParser{
         0
     }
     
-    pub fn parse(&mut self, new_code:&str, heap:&mut ScriptHeap, values: &[Value]){
-        self.tok.tokenize(new_code, heap);
-        
+    pub fn parse(&mut self, tokens:&[ScriptTokenPos], heap:&mut ScriptHeap, values: &[Value]){
         // wait for the tokens to be consumed
         let mut steps_zero = 0;
-        while self.index < self.tok.tokens.len() as u32 && self.state.len()>0{
-            let step = self.parse_step(heap, values);
+        while self.index < tokens.len() as u32 && self.state.len()>0{
+            
+            let tok = if let Some(tok) = tokens.get(self.index as usize){
+                tok.token.clone()
+            }
+            else{
+                ScriptToken::StreamEnd
+            };
+            
+            let step = self.parse_step(tok, heap, values);
             if step == 0{
                 steps_zero += 1;
             }
@@ -1034,7 +1033,7 @@ impl ScriptParser{
             }
            // println!("{:?} {:?}", self.code, self.state);
             if self.state.len()<=1 && steps_zero > 1000{
-                println!("Parser stuck {:?} {} {:?}", self.state, step, self.tok.tokens[self.index as usize]);
+                println!("Parser stuck {:?} {} {:?}", self.state, step, tokens[self.index as usize]);
                 break;
             }
             self.index += step;
