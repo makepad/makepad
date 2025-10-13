@@ -81,15 +81,10 @@ pub fn test(){
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     };
+    
     let dt = std::time::Instant::now();
     let mut vm = ScriptVm::new();
-    vm.eval(script!{
-        let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
-        ~fib(38);
-    });
-    
-    
-    
+    vm.eval(code);
     println!("Duration {}", dt.elapsed().as_secs_f64())
     
 }
