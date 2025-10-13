@@ -109,7 +109,7 @@ impl ScriptThread{
             Opcode::ASSIGN_ME=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
-                heap.set_object_value(self.mes.last().object, field, value);
+                heap.set_object_value(self.mes.last().unwrap().object, field, value);
                 if !args.is_statement(){
                     self.push_stack_value(Value::NIL);
                 }
@@ -119,7 +119,7 @@ impl ScriptThread{
             Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
-                heap.insert_object_value_at(self.mes.last().object, field, value, opcode == Opcode::ASSIGN_ME_BEFORE);
+                heap.insert_object_value_at(self.mes.last().unwrap().object, field, value, opcode == Opcode::ASSIGN_ME_BEFORE);
                 if !args.is_statement(){
                     self.push_stack_value(Value::NIL);
                 }
@@ -129,7 +129,7 @@ impl ScriptThread{
             Opcode::ASSIGN_ME_BEGIN=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
-                heap.insert_object_value_begin(self.mes.last().object, field, value);
+                heap.insert_object_value_begin(self.mes.last().unwrap().object, field, value);
                 if !args.is_statement(){
                     self.push_stack_value(Value::NIL);
                 }
@@ -170,14 +170,14 @@ impl ScriptThread{
             }
             Opcode::BEGIN_PROTO_ME=>{
                 let field = self.peek_stack_value();
-                let me = self.mes.last();
+                let me = self.mes.last().unwrap();
                 let proto = heap.object_value(me.object, field);
                 let me = heap.new_object_with_proto(proto);
                 self.mes.push(ScriptMe::object(me));
                 self.ip += 1;
             }
             Opcode::END_PROTO=>{
-                let me = self.mes.pop();
+                let me = self.mes.pop().unwrap();
                 self.push_stack_value(me.object.into());
                 self.ip += 1;
             }
@@ -187,7 +187,7 @@ impl ScriptThread{
                 self.ip += 1;
             }
             Opcode::END_BARE=>{
-                let me = self.mes.pop();
+                let me = self.mes.pop().unwrap();
                 self.push_stack_value(me.object.into());
                 self.ip += 1;
             }
@@ -197,7 +197,7 @@ impl ScriptThread{
                 self.ip += 1;
             }
             Opcode::END_ARRAY=>{
-                let me = self.mes.pop();
+                let me = self.mes.pop().unwrap();
                 self.push_stack_value(me.object.into());
                 self.ip += 1;
             }
@@ -210,29 +210,33 @@ impl ScriptThread{
                 self.mes.push(ScriptMe::call(scope));
                 self.ip += 1;
             }
-            Opcode::CALL_EXEC=>{
+            Opcode::CALL_EXEC | Opcode::METHOD_CALL_EXEC=>{
                 // ok so now we have all our args on 'mes'
-                let me = self.mes.pop();
+                let me = self.mes.pop().unwrap();
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
                 heap.set_object_type(scope, ObjectType::AUTO);
                                 
-                if let Some((jump_to, is_native)) = heap.parent_object_as_fn(scope){
-                    if is_native{
-                        let ret = (*ctx.native.fn_table[jump_to as usize].fn_ptr)(heap, scope);
-                        self.stack.push(ret);
-                        heap.free_object_if_unreffed(scope);
-                        self.ip += 1;
-                    }
-                    else{
-                        let call = CallFrame{
-                            bases: self.new_bases(),
-                            return_ip: self.ip + 1,
-                        };
-                        self.scopes.push(scope);
-                        self.calls.push(call);
-                        self.ip = jump_to as _;
+                if let Some(fnptr) = heap.parent_object_as_fn(scope){
+                    match fnptr{
+                        ScriptFnPtr::Native{index}=>{
+                            let ret = (*ctx.native.fn_table[index as usize].fn_ptr)(heap, scope);
+                            self.stack.push(ret);
+                            heap.free_object_if_unreffed(scope);
+                            self.ip += 1;
+                        }
+                        ScriptFnPtr::Script{body, ip}=>{
+                            let call = CallFrame{
+                                bases: self.new_bases(),
+                                return_ip: self.ip + 1,
+                                return_body: self.body
+                            };
+                            self.scopes.push(scope);
+                            self.calls.push(call);
+                            self.ip = ip as _;
+                            self.body = body;
+                        }
                     }
                 }
                 else{
@@ -270,45 +274,13 @@ impl ScriptThread{
                 //heap.set_object_map(scope);
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
-                
                 heap.set_object_value_in_map(scope, id!(this).into(), this.into());
                 self.mes.push(ScriptMe::call(scope));
                 self.ip += 1;
             }
-            Opcode::METHOD_CALL_EXEC=>{
-                let me = self.mes.pop();
-                let scope = me.object;
-                //let this = self.peek_stack_value();
-                // set the scope back to 'deep' so values can be written again
-                heap.set_object_deep(scope);
-                // set the heap back to a hashmap
-                heap.set_object_type(scope, ObjectType::AUTO);
-                                
-                if let Some((jump_to, is_native)) = heap.parent_object_as_fn(scope){
-                    if is_native{
-                        let ret = (*ctx.native.fn_table[jump_to as usize].fn_ptr)(heap, scope);
-                        self.stack.push(ret);
-                        heap.free_object_if_unreffed(scope);
-                        self.ip += 1;
-                    }
-                    else{
-                        let call = CallFrame{
-                            bases: self.new_bases(),
-                            return_ip: self.ip + 1,
-                        };
-                        self.scopes.push(scope);
-                        self.calls.push(call);
-                        self.ip = jump_to as _;
-                    }
-                }
-                else{
-                    self.stack.push(Value::NIL);
-                    self.ip += 1;
-                }
-            }
-                        
+            
             Opcode::FN_ARGS=>{
-                let scope = *self.scopes.last_mut();
+                let scope = *self.scopes.last_mut().unwrap();
                 let me = heap.new_object_with_proto(scope.into());
                                 
                 // set it to a vec type to ensure ordered inserts
@@ -327,7 +299,7 @@ impl ScriptThread{
                     self.pop_stack_resolved(heap)
                 };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
-                heap.set_object_value(self.mes.last().object, id.into(), value);
+                heap.set_object_value(self.mes.last().unwrap().object, id.into(), value);
                 self.ip += 1;                
             }
             Opcode::FN_ARG_TYPED=>{
@@ -339,15 +311,15 @@ impl ScriptThread{
                 };
                 let _ty = self.pop_stack_value().as_id().unwrap_or(id!());
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
-                heap.set_object_value(self.mes.last().object, id.into(), value);
+                heap.set_object_value(self.mes.last().unwrap().object, id.into(), value);
                 self.ip += 1;
             }
             Opcode::FN_BODY=>{ // alright we have all the args now we get an expression
                 let jump_over_fn = args.to_u32();
-                let me = self.mes.pop();
+                let me = self.mes.pop().unwrap();
                                 
-                heap.set_object_script_fn(me.object, (self.ip + 1) as u32);
-                self.ip += jump_over_fn as usize;
+                heap.set_object_fn(me.object, ScriptFnPtr::Script{body: self.body, ip:(self.ip + 1)});
+                self.ip += jump_over_fn;
                 self.stack.push(me.object.into());
             }
             Opcode::RETURN=>{
@@ -357,7 +329,7 @@ impl ScriptThread{
                 else{
                     self.pop_stack_resolved(heap)
                 };
-                let call = self.calls.pop();
+                let call = self.calls.pop().unwrap();
                 self.truncate_bases(call.bases, heap);
                 
                 self.ip = call.return_ip;
@@ -372,12 +344,12 @@ impl ScriptThread{
                     self.ip += 1
                 }
                 else{ // jump to else
-                    self.ip += args.to_u32() as usize;
+                    self.ip += args.to_u32();
                 }
             }
             
             Opcode::IF_ELSE =>{ // we are running into an else jump over it
-                self.ip += args.to_u32() as usize;
+                self.ip += args.to_u32();
             }   
             
             Opcode::FIELD=>{
@@ -393,7 +365,7 @@ impl ScriptThread{
             }
             Opcode::ME_FIELD=>{
                 let field = self.pop_stack_value();
-                self.push_stack_value(heap.object_value(self.mes.last().object, field));
+                self.push_stack_value(heap.object_value(self.mes.last().unwrap().object, field));
                 self.ip += 1;
             }
             Opcode::PROTO_FIELD=>{ // implement proto field!
@@ -411,7 +383,7 @@ impl ScriptThread{
             Opcode::POP_TO_ME=>{
                 let value = self.pop_stack_value();
                 if self.call_has_me(){
-                    let me = self.mes.last();
+                    let me = self.mes.last().unwrap();
                     let (key, value) = if let Some(id) = value.as_id(){
                         if value.is_escaped_id(){ (Value::NIL, value) }
                         else{(value, self.resolve(id, heap))}
@@ -452,7 +424,7 @@ impl ScriptThread{
                     self.pop_stack_resolved(heap)
                 };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
-                let scope = *self.scopes.last_mut();
+                let scope = *self.scopes.last_mut().unwrap();
                 heap.set_object_value(scope, id.into(), value);
                 self.ip += 1;
             }
@@ -465,7 +437,7 @@ impl ScriptThread{
                 };
                 let _ty = self.pop_stack_value();
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
-                let scope = *self.scopes.last_mut();
+                let scope = *self.scopes.last_mut().unwrap();
                 heap.set_object_value(scope, id.into(), value);
                 self.ip += 1;
             } 
@@ -475,29 +447,35 @@ impl ScriptThread{
             }
                                   
             Opcode::LOG=>{
-                let index = ctx.parser.source_map[self.ip].unwrap();
-                let rc = ctx.parser.tok.token_index_to_row_col(index).unwrap();
+                let body = &ctx.bodies[self.body as usize];
+                let index = body.parser.source_map[self.ip as usize].unwrap();
+                let rc = body.tokenizer.token_index_to_row_col(index).unwrap();
+                let line_shift = if let ScriptSource::Rust{rust} = &body.source{
+                    rust.line as u32
+                }else{
+                    0
+                };
                 
                 let value = self.peek_stack_resolved(heap);
                 if value != Value::NIL{
                     if let Some(obj) = value.as_object(){
-                        print!("script.rs:{}:{} -", rc.0, rc.1);
+                        print!("script.rs:{}:{} -", rc.0 + line_shift, rc.1);
                         heap.print_object(obj, true);
                         println!("");
                     }
                     else{
-                        println!("script.rs:{}:{} - {:?}: {:?}", rc.0, rc.1, value.value_type(), value);
+                        println!("script.rs:{}:{} - {:?}: {:?}", rc.0 + line_shift, rc.1, value.value_type(), value);
                     }
                 }
                 else{
-                    println!("script.rs:{}:{} - nil", rc.0, rc.1);
+                    println!("script.rs:{}:{} - nil", rc.0 + line_shift, rc.1);
                 }
                 self.ip += 1;
             }
             
             Opcode::ME=>{
                 if self.call_has_me(){
-                    let me = self.mes.last();
+                    let me = self.mes.last().unwrap();
                     self.push_stack_value(me.object.into());
                 }
                 else{
@@ -507,7 +485,7 @@ impl ScriptThread{
             }
             
             Opcode::SCOPE=>{
-                let scope = *self.scopes.last_mut();
+                let scope = *self.scopes.last_mut().unwrap();
                 self.push_stack_value(scope.into());
                 self.ip += 1;
             }
@@ -592,7 +570,7 @@ impl ScriptThread{
     }
     
         
-    pub fn begin_for_loop_inner(&mut self, heap:&mut ScriptHeap, jump:usize, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>, first_value:Value, first_index:f64, first_key:Value){    
+    pub fn begin_for_loop_inner(&mut self, heap:&mut ScriptHeap, jump:u32, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>, first_value:Value, first_index:f64, first_key:Value){    
                                                
         self.ip += 1;
         self.loops.push(LoopFrame{
@@ -606,7 +584,7 @@ impl ScriptThread{
             index: first_index,
         });
         // lets make a new scope object and set our first value
-        let scope = *self.scopes.last();
+        let scope = *self.scopes.last().unwrap();
         let new_scope = heap.new_object_with_proto(scope.into());
         self.scopes.push(new_scope);
         // lets write our first value onto the scope
@@ -619,7 +597,7 @@ impl ScriptThread{
         }
     }
                 
-    pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx, jump:usize, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>){
+    pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx, jump:u32, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>){
         let v0 = Value::from_f64(0.0);
         if let Some(s) = source.as_f64(){
             if s >= 1.0{
@@ -650,7 +628,7 @@ impl ScriptThread{
             }
         }
         // jump over it and bail
-        self.ip += jump as usize;
+        self.ip += jump;
     }
             
     pub fn end_for_loop(&mut self, heap:&mut ScriptHeap, ctx:&ScriptCtx){
@@ -663,13 +641,13 @@ impl ScriptThread{
                 return
             }
             self.ip = lf.start_ip;
-            let scope = self.scopes.last();
+            let scope = self.scopes.last().unwrap();
             heap.set_object_value(*scope, lf.value_id.into(), lf.index.into());
             return
         }
         else if let Some(obj) = lf.source.as_object(){
             if heap.object_has_proto(obj, ctx.builtins.range.into()){ // range object
-                let scope = self.scopes.last();
+                let scope = self.scopes.last().unwrap();
                 let end = heap.object_value(obj, id!(end).into()).as_f64().unwrap_or(0.0);
                 let step = heap.object_value(obj, id!(step).into()).as_f64().unwrap_or(1.0);
                 lf.index += step;
@@ -691,7 +669,7 @@ impl ScriptThread{
                         return
                     }
                     self.ip = lf.start_ip;
-                    let scope = self.scopes.pop();
+                    let scope = self.scopes.pop().unwrap();
                     let value = object.vec[lf.index as usize * 2 + 1];
                     let key = if lf.key_id.is_some(){
                         object.vec[lf.index as usize * 2]
@@ -716,7 +694,7 @@ impl ScriptThread{
                         return
                     }
                     self.ip = lf.start_ip;
-                    let scope = self.scopes.pop();
+                    let scope = self.scopes.pop().unwrap();
                     let value = object.vec[lf.index as usize];
                     let scope = heap.new_object_if_reffed(scope);
                     heap.set_object_value(scope, lf.value_id.into(), value.into());
