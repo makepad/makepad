@@ -634,15 +634,31 @@ impl ScriptThread{
             let mut aw = a;
             let mut bw = b;
             loop{
+                if aw == bw{
+                    return true
+                }
                 if let Some(pa) = aw.as_object(){
                     if let Some(pb) = bw.as_object(){
                         let oa = heap.object(pa);
                         let ob = heap.object(pb);
-                        if oa.vec != ob.vec{
+                        if oa.vec.len() != ob.vec.len(){
                             return false
                         }
-                        if oa.map != ob.map{
+                        for (a,b) in oa.vec.iter().zip(ob.vec.iter()){
+                            if !self.deep_eq(heap, *a, *b){
+                                return false
+                            }
+                        }
+                        if oa.map.len() != ob.map.len(){
                             return false
+                        }
+                        for (a,b) in oa.map.iter().zip(ob.map.iter()){
+                            if !self.deep_eq(heap, *a.0, *b.0){
+                                return false
+                            }
+                            if !self.deep_eq(heap, *a.1, *b.1){
+                                return false
+                            }
                         }
                         aw = oa.proto;
                         bw = ob.proto;
@@ -652,9 +668,6 @@ impl ScriptThread{
                     }
                 }
                 else{
-                    if aw == bw{
-                        return true
-                    }
                     return false
                 }
             }

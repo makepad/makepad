@@ -96,6 +96,13 @@ impl ScriptMethods{
             }
             Value::from_err_internal(ctx.thread.ip)
         });
+        
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(pop), |ctx, args|{
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
+                return ctx.heap.pop_object_vec(this)
+            }
+            Value::from_err_internal(ctx.thread.ip)
+        });
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(extend), |ctx, args|{
             if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
