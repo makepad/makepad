@@ -105,7 +105,7 @@ impl ScriptThread{
             }
             return val    
         }
-        Value::from_exc_uflow(self.ip)
+        Value::from_err_uflow(self.ip)
     }
     
     pub fn peek_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
@@ -118,7 +118,7 @@ impl ScriptThread{
             }
             return *val    
         }
-        Value::from_exc_uflow(self.ip)
+        Value::from_err_uflow(self.ip)
     }
     
     pub fn peek_stack_value(&mut self)->Value{
@@ -126,7 +126,7 @@ impl ScriptThread{
             return *value
         }
         else{
-            Value::from_exc_uflow(self.ip)
+            Value::from_err_uflow(self.ip)
         }
     }
     
@@ -155,7 +155,7 @@ impl ScriptThread{
     
     // lets resolve an id to a Value
     pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
-        return heap.object_value(*self.scopes.last().unwrap(), id.into(),Value::from_exc_read(self.ip));
+        return heap.object_value(*self.scopes.last().unwrap(), id.into(),Value::from_err_read(self.ip));
     }
     
     pub fn call(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, scope:Value){
@@ -197,9 +197,9 @@ impl ScriptThread{
                 }
                 // if exception tracing
                 if let Some(value) = self.stack.last(){
-                    if let Some(ptr) = value.as_exc(){
-                        if let Some(loc2) = code.ip_to_loc(ptr){
-                            println!("Exception {} {}", value, loc2);
+                    if let Some(ptr) = value.as_err(){
+                        if let Some(loc2) = code.ip_to_loc(ptr.ip){
+                            println!("{} {}", value, loc2);
                         }
                     }
                 }

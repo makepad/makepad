@@ -243,7 +243,7 @@ impl ScriptThread{
                     }
                 }
                 else{
-                    self.stack.push(Value::from_exc_call(self.ip));
+                    self.stack.push(Value::from_err_call(self.ip));
                     self.ip.index += 1;
                 }
             }
@@ -360,10 +360,10 @@ impl ScriptThread{
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    self.push_stack_value(heap.object_value(obj, field, Value::from_exc_read(self.ip)))
+                    self.push_stack_value(heap.object_value(obj, field, Value::from_err_read(self.ip)))
                 }
                 else{
-                    self.push_stack_value(Value::from_exc_read(self.ip));
+                    self.push_stack_value(Value::from_err_read(self.ip));
                 }
                 self.ip.index += 1;
             }
@@ -376,10 +376,10 @@ impl ScriptThread{
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    self.push_stack_value(heap.object_value(obj, field, Value::from_exc_read(self.ip)))
+                    self.push_stack_value(heap.object_value(obj, field, Value::from_err_read(self.ip)))
                 }
                 else{
-                    self.push_stack_value(Value::from_exc_read(self.ip));
+                    self.push_stack_value(Value::from_err_read(self.ip));
                 }
                 self.ip.index += 1;
             }
@@ -412,10 +412,10 @@ impl ScriptThread{
                 let index = self.pop_stack_resolved(heap);
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    self.push_stack_value(heap.object_value(obj, index,Value::from_exc_read(self.ip)))
+                    self.push_stack_value(heap.object_value(obj, index,Value::from_err_read(self.ip)))
                 }
                 else{
-                    self.push_stack_value(Value::from_exc_read(self.ip));
+                    self.push_stack_value(Value::from_err_read(self.ip));
                 }
                 self.ip.index += 1;
             }
@@ -455,8 +455,8 @@ impl ScriptThread{
                 if let Some(loc) = code.ip_to_loc(self.ip){
                     let value = self.peek_stack_resolved(heap);
                     if value != Value::NIL{
-                        if let Some(ptr) = value.as_exc(){
-                            if let Some(loc2) = code.ip_to_loc(ptr){
+                        if let Some(err) = value.as_err(){
+                            if let Some(loc2) = code.ip_to_loc(err.ip){
                                 println!("{} {} {}", loc, value, loc2);
                             }
                         }
