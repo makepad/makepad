@@ -137,7 +137,7 @@ impl ValueType{
     pub const ERR_NOTOBJECT: Self = Self(20);
     pub const ERR_STACKUNDERFLOW: Self = Self(21);
     pub const ERR_INVALIDARGS: Self = Self(22);
-    pub const ERR_NEVERHAPPEN: Self = Self(23);
+    pub const ERR_INTERNAL: Self = Self(23);
     pub const ERR_ASSERTFAIL: Self = Self(24);
     pub const ERR_NOTIMPL: Self = Self(25);
     pub const ERR_USER: Self = Self(26);
@@ -213,17 +213,17 @@ impl fmt::Display for ValueType {
             Self::INLINE_STRING_3=>write!(f,"INLINE_STRING_3"),
             Self::INLINE_STRING_4=>write!(f,"INLINE_STRING_4"),
             Self::INLINE_STRING_5=>write!(f,"INLINE_STRING_5"),
-            Self::ERR_NOTFOUND=>write!(f,"NotFoundOnScopeError"),
-            Self::ERR_NOTFN=>write!(f,"NotAFunctionError"),
-            Self::ERR_NOTFIELD=>write!(f,"NotValidFieldError"),
-            Self::ERR_NOTINDEX=>write!(f,"NotValidIndexError"),
-            Self::ERR_NOTOBJECT=>write!(f,"NotValidObjectError"),
-            Self::ERR_STACKUNDERFLOW=>write!(f,"StackUnderflowError"),
-            Self::ERR_INVALIDARGS=>write!(f,"InvalidArgsError"),
-            Self::ERR_NEVERHAPPEN=>write!(f,"ShouldNeverHappenError"),
-            Self::ERR_ASSERTFAIL=>write!(f,"AssertFailureError"),
-            Self::ERR_NOTIMPL=>write!(f,"NotImplementedError"),
-            Self::ERR_USER=>write!(f,"UserGeneratedError"),
+            Self::ERR_NOTFOUND=>write!(f,"NotFoundOnScope"),
+            Self::ERR_NOTFN=>write!(f,"NotAFunction"),
+            Self::ERR_NOTFIELD=>write!(f,"FieldNotFound"),
+            Self::ERR_NOTINDEX=>write!(f,"IndexNotFound"),
+            Self::ERR_NOTOBJECT=>write!(f,"NotAnObjectr"),
+            Self::ERR_STACKUNDERFLOW=>write!(f,"StackUnderflow"),
+            Self::ERR_INVALIDARGS=>write!(f,"InvalidArgs"),
+            Self::ERR_INTERNAL=>write!(f,"Internal"),
+            Self::ERR_ASSERTFAIL=>write!(f,"AssertFailure"),
+            Self::ERR_NOTIMPL=>write!(f,"NotImplemented"),
+            Self::ERR_USER=>write!(f,"UserGenerated"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ValueType?")
         }
@@ -270,7 +270,7 @@ impl Value{
     pub const TYPE_ERR_NOTOBJECT: u64 = ValueType::ERR_NOTOBJECT.to_u64();
     pub const TYPE_ERR_STACKUNDERFLOW: u64 = ValueType::ERR_STACKUNDERFLOW.to_u64();
     pub const TYPE_ERR_INVALIDARGS: u64 = ValueType::ERR_INVALIDARGS.to_u64();
-    pub const TYPE_ERR_NEVERHAPPEN: u64 = ValueType::ERR_NEVERHAPPEN.to_u64();
+    pub const TYPE_ERR_INTERNAL: u64 = ValueType::ERR_INTERNAL.to_u64();
     pub const TYPE_ERR_ASSERTFAIL: u64 = ValueType::ERR_ASSERTFAIL.to_u64();
     pub const TYPE_ERR_NOTIMPL: u64 = ValueType::ERR_NOTIMPL.to_u64();
     pub const TYPE_ERR_USER: u64 = ValueType::ERR_USER.to_u64();
@@ -296,7 +296,7 @@ impl Value{
     pub const fn from_err_notobject(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTOBJECT| ip.encode_as_u40())}
     pub const fn from_err_stackunderflow(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_STACKUNDERFLOW | ip.encode_as_u40())}
     pub const fn from_err_invalidargs(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_INVALIDARGS | ip.encode_as_u40())}
-    pub const fn from_err_neverhappen(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NEVERHAPPEN | ip.encode_as_u40())}
+    pub const fn from_err_internal(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_INTERNAL | ip.encode_as_u40())}
     pub const fn from_err_assertfail(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_ASSERTFAIL | ip.encode_as_u40())}
     pub const fn from_err_notimpl(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTIMPL | ip.encode_as_u40())}
     pub const fn from_err_user(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_USER | ip.encode_as_u40())}
