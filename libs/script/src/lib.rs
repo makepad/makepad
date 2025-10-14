@@ -100,21 +100,18 @@ pub fn test(){
         for v in [1 2 3 4] ~v
         ~x;
     };
-    
     let code = script!{
         scope.import(mod.std)
-        let t = 1+{};
-        let x = t + 2
-        ~x
-        let x = [1,2,3,4]
-        ~x.y.z
-        //x.retain(|v| v > 2)
-        let f = ||{
-            assert(true)?;
-            ~@hi
-        }
-        f()
-        ~x;
+        let x = 1+2;
+        assert(x == 3)
+        assert(1+2 == 3);
+        let iv = [1,2,3,4]
+        let ov = []
+        for v in iv ov.push(v)
+        assert(iv === ov);
+    };
+    let _code = script!{
+        
     };
     
     let _code = script!{
