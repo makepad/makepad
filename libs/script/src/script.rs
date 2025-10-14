@@ -45,6 +45,51 @@ pub struct ScriptCode{
     pub bodies: Vec<ScriptBody>,
 }
 
+pub struct ScriptLoc<'a>{
+    pub file: &'a str,
+    pub col: u32,
+    pub line: u32,
+}
+
+impl<'a> std::fmt::Debug for ScriptLoc<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+
+impl<'a> std::fmt::Display for ScriptLoc<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}:{}:{}", self.file, self.line, self.col)
+    }
+}
+
+impl ScriptCode{
+    pub fn ip_to_loc(&self, ip:ScriptIp)->Option<ScriptLoc>{
+        let body = &self.bodies[ip.body as usize];
+        let index = body.parser.source_map[ip.index as usize].unwrap();
+        if let Some(rc) = body.tokenizer.token_index_to_row_col(index){
+            if let ScriptSource::Rust{rust} = &body.source{
+                return Some(
+                    ScriptLoc{
+                        file: rust.file.as_str(),
+                        line: rc.0 + rust.line as u32 + 1,
+                        col: rc.1
+                    }
+                )
+            }else{
+                return Some(ScriptLoc{
+                    file: "generated",
+                    line: rc.0,
+                    col: rc.1
+                })
+            };
+        }
+        None
+    }
+}
+
+
 pub struct ScriptCtx<'a>{
     pub thread: &'a mut ScriptThread,
     pub code: &'a ScriptCode,
@@ -59,6 +104,14 @@ pub struct ScriptVm{
 }
 
 impl ScriptVm{
+    pub fn ctx(&mut self)->ScriptCtx{
+        ScriptCtx{
+            code: &self.code,
+            heap: &mut self.heap,
+            thread: &mut self.threads[0]
+        }
+    }
+    
     pub fn new()->Self{
         let mut heap = ScriptHeap::new();
         let mut native = ScriptNative::default();
