@@ -19,9 +19,9 @@ impl ScriptMethods{
         t
     }
     
-    pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, args:&[(Id,Value)], value_type:ValueType, method:Id, f: F) 
+    pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, args:&[(Id,Value)], ty_redux:usize, method:Id, f: F) 
     where F: Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static{
-        let ty_redux = value_type.to_redux();
+        //let ty_redux = value_type.to_redux();
         if ty_redux >= self.type_table.len(){
             self.type_table.resize_with(ty_redux + 1, || Default::default());
         }
@@ -43,48 +43,49 @@ impl ScriptMethods{
     }
     
     pub fn add_shared(&mut self, h:&mut ScriptHeap, native:&mut ScriptNative){
-        self.add(h, native, &[], ValueType::NUMBER, id!(ty), |_, _|{id!(number).escape()});
-        self.add(h, native, &[], ValueType::NAN, id!(ty), |_, _|{id!(nan).escape()});
-        self.add(h, native, &[], ValueType::BOOL, id!(ty), |_, _|{id!(bool).escape()});
-        self.add(h, native, &[], ValueType::NIL, id!(ty), |_, _|{id!(nil).escape()});
-        self.add(h, native, &[], ValueType::COLOR, id!(ty), |_, _|{id!(color).escape()});
-        self.add(h, native, &[], ValueType::STRING, id!(ty), |_, _|{id!(string).escape()});
-        self.add(h, native, &[], ValueType::OBJECT, id!(ty), |_, _|{id!(object).escape()});
-        self.add(h, native, &[], ValueType::RSID, id!(ty), |_, _|{id!(rsid).escape()});
-        self.add(h, native, &[], ValueType::OPCODE, id!(ty), |_, _|{id!(opcode).escape()});
-        self.add(h, native, &[], ValueType::ID, id!(ty), |_, _|{id!(id).escape()});
+        self.add(h, native, &[], ValueType::REDUX_NUMBER, id!(ty), |_, _|{id!(number).escape()});
+        self.add(h, native, &[], ValueType::REDUX_NAN, id!(ty), |_, _|{id!(nan).escape()});
+        self.add(h, native, &[], ValueType::REDUX_BOOL, id!(ty), |_, _|{id!(bool).escape()});
+        self.add(h, native, &[], ValueType::REDUX_NIL, id!(ty), |_, _|{id!(nil).escape()});
+        self.add(h, native, &[], ValueType::REDUX_COLOR, id!(ty), |_, _|{id!(color).escape()});
+        self.add(h, native, &[], ValueType::REDUX_STRING, id!(ty), |_, _|{id!(string).escape()});
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(ty), |_, _|{id!(object).escape()});
+        self.add(h, native, &[], ValueType::REDUX_RSID, id!(ty), |_, _|{id!(rsid).escape()});
+        self.add(h, native, &[], ValueType::REDUX_OPCODE, id!(ty), |_, _|{id!(opcode).escape()});
+        self.add(h, native, &[], ValueType::REDUX_EXC, id!(ty), |_, _|{id!(exc).escape()});
+        self.add(h, native, &[], ValueType::REDUX_ID, id!(ty), |_, _|{id!(id).escape()});
     }
     
     pub fn add_object(&mut self, h: &mut ScriptHeap, native:&mut ScriptNative){
-        self.add(h, native, &[], ValueType::OBJECT, id!(proto), |ctx, args|{
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(proto), |ctx, args|{
             if let Some(this) = ctx.heap.object_value(args, id!(this).into(), Value::NIL).as_object(){
                 return ctx.heap.object_proto(this)
             }
             Value::NIL
         });
         
-        self.add(h, native, &[], ValueType::OBJECT, id!(push), |ctx, args|{
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(push), |ctx, args|{
             if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
                 ctx.heap.push_object_vec_into_object_vec(this, args);
             }
             Value::NIL
         });
             
-        self.add(h, native, &[], ValueType::OBJECT, id!(extend), |ctx, args|{
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(extend), |ctx, args|{
             if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
                 ctx.heap.push_object_vec_of_vec_into_object_vec(this, args, false);
             }
             Value::NIL
         });
             
-        self.add(h, native, &[], ValueType::OBJECT, id!(import), |ctx, args|{
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(import), |ctx, args|{
             if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
                 ctx.heap.push_object_vec_of_vec_into_object_vec(this, args, true);
             }
             Value::NIL
         });
         
-        self.add(h, native, &[], ValueType::OBJECT, id!(retain), |ctx, args|{
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(retain), |ctx, args|{
             if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
                 // alright so. 'retain'. how do we do it
                 let mut i = 0;
