@@ -136,7 +136,7 @@ pub fn test(){
         let t t ?= 2 assert(t == 2)
         
         let x = {f:2} x.f+=2 assert(x.f == 4)
-        let x = [1,2] x[1]+=2 ssert(x == [1 4])
+        let x = [1,2] x[1]+=2 assert(x == [1 4])
         
         ;
     };
