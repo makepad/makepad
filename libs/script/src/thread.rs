@@ -158,7 +158,7 @@ impl ScriptThread{
         return heap.object_value(*self.scopes.last().unwrap(), id.into(),Value::from_err_read(self.ip));
     }
     
-    pub fn call(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, scope:Value){
+    pub fn call(&mut self, _heap:&mut ScriptHeap, _code:&ScriptCode, _scope:Value){
         
     }
     

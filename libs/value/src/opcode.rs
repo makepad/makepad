@@ -176,7 +176,7 @@ impl Opcode{
     pub const CONTINUE: Self = Self(102);
     pub const RANGE: Self = Self(103);
     pub const IS: Self = Self(104);
-    
+    pub const RETURN_IF_ERR:Self = Self(105);
 }
 
 
@@ -315,8 +315,9 @@ impl fmt::Display for Opcode {
             Self::FOR_END => return write!(f, "forend"),
             Self::BREAK => return write!(f, "break"),
             Self::CONTINUE => return write!(f, "continue"),
-            Self::IS => return write!(f, "is"),
             Self::RANGE => return write!(f, ".."),
+            Self::IS => return write!(f, "is"),
+            Self::RETURN_IF_ERR => return write!(f, "?"),
             _=>return write!(f, "OP{}",self.0)
         }
     }

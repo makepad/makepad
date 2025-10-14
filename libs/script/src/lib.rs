@@ -47,9 +47,9 @@ pub enum EnumTest{
 
 //#[derive(Scriptable)]
 pub struct RustTest{
-    enm1: EnumTest,
-    enm2: EnumTest,
-    enm3: EnumTest,
+    _enm1: EnumTest,
+    _enm2: EnumTest,
+   _enm3: EnumTest,
     _prop: f64    
 }
 
@@ -102,8 +102,14 @@ pub fn test(){
     };
     
     let code = script!{
+        scope.import(mod.std)
         let x = [1,2,3,4]
-        x.retain(|v| v > 2)
+        //x.retain(|v| v > 2)
+        let f = ||{
+            assert(true)?;
+            ~@hi
+        }
+        f()
         ~x;
     };
     
