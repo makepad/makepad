@@ -101,7 +101,7 @@ impl ScriptThread{
                 if val.is_escaped_id(){
                     return val
                 }
-                return self.resolve(id, heap)
+                return self.scope_value(heap, id)
             }
             return val    
         }
@@ -114,7 +114,7 @@ impl ScriptThread{
                 if val.is_escaped_id(){
                     return *val
                 }
-                return self.resolve(id, heap)
+                return self.scope_value(heap, id)
             }
             return *val    
         }
@@ -154,8 +154,12 @@ impl ScriptThread{
     }
     
     // lets resolve an id to a Value
-    pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
+    pub fn scope_value(&self, heap:&ScriptHeap, id: Id)->Value{
         return heap.object_value(*self.scopes.last().unwrap(), id.into(),Value::from_err_notfound(self.ip));
+    }
+    
+    pub fn set_scope_value(&self, heap:&mut ScriptHeap, id: Id, value:Value){
+        heap.set_object_value(*self.scopes.last().unwrap(), id.into(),value);
     }
     
     pub fn call(&mut self, _heap:&mut ScriptHeap, _code:&ScriptCode, _scope:Value){
