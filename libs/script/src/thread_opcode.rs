@@ -9,16 +9,16 @@ use crate::thread::*;
 
 macro_rules! f64_scope_assign_op_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
-        let b = $obj.pop_stack_resolved($heap);
-        let a = $obj.pop_stack_value();
-        if let Some(id) = a.as_id(){
+        let value = $obj.pop_stack_resolved($heap);
+        let id = $obj.pop_stack_value();
+        if let Some(id) = id.as_id(){
             let va = $obj.scope_value($heap, id);
             if va.is_err(){
                 $obj.stack.push(va);
             }
             else{
                 let fa = $heap.cast_to_f64(va, $obj.ip);
-                let fb = $heap.cast_to_f64(b, $obj.ip);
+                let fb = $heap.cast_to_f64(value, $obj.ip);
                 $obj.set_scope_value($heap, id, Value::from_f64_traced_nan((fa $op fb), $obj.ip));
                 $obj.stack.push(Value::NIL);
             }
@@ -32,19 +32,103 @@ macro_rules! f64_scope_assign_op_impl{
 
 macro_rules! fu64_scope_assign_op_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
-        let b = $obj.pop_stack_resolved($heap);
-        let a = $obj.pop_stack_value();
-        if let Some(id) = a.as_id(){
+        let value = $obj.pop_stack_resolved($heap);
+        let id = $obj.pop_stack_value();
+        if let Some(id) = id.as_id(){
             let va = $obj.scope_value($heap, id);
             if va.is_err(){
                 $obj.stack.push(va);
             }
             else{
                 let ua = $heap.cast_to_f64(va, $obj.ip) as u64;
-                let ub = $heap.cast_to_f64(b, $obj.ip) as u64;
+                let ub = $heap.cast_to_f64(value, $obj.ip) as u64;
                 $obj.set_scope_value($heap, id, Value::from_f64_traced_nan((ua $op ub) as f64, $obj.ip));
                 $obj.stack.push(Value::NIL);
             }
+        }
+        else{
+            $obj.stack.push(Value::from_err_notassignable($obj.ip));
+        }
+        $obj.ip.index += 1;
+    }}
+}
+
+macro_rules! f64_field_assign_op_impl{
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let value = $obj.pop_stack_resolved($heap);
+        let field = $obj.pop_stack_value();
+        let object = $obj.pop_stack_resolved($heap);
+        if let Some(obj) = object.as_object(){
+            let old_value = $heap.object_value(obj, field, Value::from_err_notfield($obj.ip));
+            let fa = $heap.cast_to_f64(old_value, $obj.ip);
+            let fb = $heap.cast_to_f64(value, $obj.ip);
+            
+            $heap.set_object_value(obj, field, Value::from_f64_traced_nan(fa $op fb, $obj.ip));
+            
+            $obj.stack.push(Value::NIL);
+        }
+        else{
+            $obj.stack.push(Value::from_err_notassignable($obj.ip));
+        }
+        $obj.ip.index += 1;
+    }}
+}
+
+macro_rules! fu64_field_assign_op_impl{
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let value = $obj.pop_stack_resolved($heap);
+        let field = $obj.pop_stack_value();
+        let object = $obj.pop_stack_resolved($heap);
+        if let Some(obj) = object.as_object(){
+            let old_value = $heap.object_value(obj, field, Value::from_err_notfield($obj.ip));
+            let fa = $heap.cast_to_f64(old_value, $obj.ip) as u64;
+            let fb = $heap.cast_to_f64(value, $obj.ip) as u64;
+                        
+            $heap.set_object_value(obj, field, Value::from_f64_traced_nan((fa $op fb) as f64, $obj.ip));
+                        
+            $obj.stack.push(Value::NIL);
+        }
+        else{
+            $obj.stack.push(Value::from_err_notassignable($obj.ip));
+        }
+        $obj.ip.index += 1;
+    }}
+}
+
+macro_rules! f64_index_assign_op_impl{
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let value = $obj.pop_stack_resolved($heap);
+        let index = $obj.pop_stack_resolved($heap);
+        let object = $obj.pop_stack_resolved($heap);
+        if let Some(obj) = object.as_object(){
+            let old_value = $heap.object_value(obj, index, Value::from_err_notindex($obj.ip));
+            let fa = $heap.cast_to_f64(old_value, $obj.ip);
+            let fb = $heap.cast_to_f64(value, $obj.ip);
+                        
+            $heap.set_object_value(obj, index, Value::from_f64_traced_nan(fa $op fb, $obj.ip));
+                        
+            $obj.stack.push(Value::NIL);
+        }
+        else{
+            $obj.stack.push(Value::from_err_notassignable($obj.ip));
+        }
+        $obj.ip.index += 1;
+    }}
+}
+
+macro_rules! fu64_index_assign_op_impl{
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let value = $obj.pop_stack_resolved($heap);
+        let index = $obj.pop_stack_resolved($heap);
+        let object = $obj.pop_stack_resolved($heap);
+        if let Some(obj) = object.as_object(){
+            let old_value = $heap.object_value(obj, index, Value::from_err_notindex($obj.ip));
+            let fa = $heap.cast_to_f64(old_value, $obj.ip) as u64;
+            let fb = $heap.cast_to_f64(value, $obj.ip) as u64;
+                                    
+            $heap.set_object_value(obj, index, Value::from_f64_traced_nan((fa $op fb) as f64, $obj.ip));
+                                    
+            $obj.stack.push(Value::NIL);
         }
         else{
             $obj.stack.push(Value::from_err_notassignable($obj.ip));
@@ -228,12 +312,12 @@ impl ScriptThread{
             Opcode::ASSIGN_SHL=>fu64_scope_assign_op_impl!(self, heap, <<),
             Opcode::ASSIGN_SHR=>fu64_scope_assign_op_impl!(self, heap, >>),
             Opcode::ASSIGN_IFNIL=>{
-                let b = self.pop_stack_resolved(heap);
-                let a = self.pop_stack_value();
-                if let Some(id) = a.as_id(){
+                let value = self.pop_stack_resolved(heap);
+                let id = self.pop_stack_value();
+                if let Some(id) = id.as_id(){
                     let va = self.scope_value(heap, id);
                     if va.is_err() || va.is_nil(){
-                        self.set_scope_value(heap, id, b);
+                        self.set_scope_value(heap, id, value);
                     }
                     self.stack.push(Value::NIL);
                 }
@@ -242,7 +326,48 @@ impl ScriptThread{
                 }
                 self.ip.index += 1;
             }
-                        
+            
+            Opcode::ASSIGN_FIELD=>{
+                let value = self.pop_stack_resolved(heap);
+                let field = self.pop_stack_value();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    heap.set_object_value(obj, field, value);
+                    self.push_stack_value(value);
+                }
+                else{
+                    self.push_stack_value(Value::from_err_notobject(self.ip));
+                }
+                self.ip.index += 1;
+            }
+            
+            Opcode::ASSIGN_FIELD_ADD=>f64_field_assign_op_impl!(self, heap, +),
+            Opcode::ASSIGN_FIELD_SUB=>f64_field_assign_op_impl!(self, heap, -),
+            Opcode::ASSIGN_FIELD_MUL=>f64_field_assign_op_impl!(self, heap, *),
+            Opcode::ASSIGN_FIELD_DIV=>f64_field_assign_op_impl!(self, heap, /),
+            Opcode::ASSIGN_FIELD_MOD=>f64_field_assign_op_impl!(self, heap, %),
+            Opcode::ASSIGN_FIELD_AND=>fu64_field_assign_op_impl!(self, heap, &),
+            Opcode::ASSIGN_FIELD_OR=>fu64_field_assign_op_impl!(self, heap, |),
+            Opcode::ASSIGN_FIELD_XOR=>fu64_field_assign_op_impl!(self, heap, ^),
+            Opcode::ASSIGN_FIELD_SHL=>fu64_field_assign_op_impl!(self, heap, <<),
+            Opcode::ASSIGN_FIELD_SHR=>fu64_field_assign_op_impl!(self, heap, >>),
+            Opcode::ASSIGN_FIELD_IFNIL=>{
+                let value = self.pop_stack_resolved(heap);
+                let field = self.pop_stack_value();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    let old_value = heap.object_value(obj, field, Value::from_err_notfield(self.ip));
+                    if old_value.is_err() || old_value.is_nil(){
+                        heap.set_object_value(obj, field, value);
+                    }
+                    self.stack.push(Value::NIL);
+                }
+                else{
+                    self.push_stack_value(Value::from_err_notobject(self.ip));
+                }
+                self.ip.index += 1;
+            }
+            
             Opcode::ASSIGN_INDEX=>{
                 let value = self.pop_stack_resolved(heap);
                 let index = self.pop_stack_value();
@@ -256,14 +381,26 @@ impl ScriptThread{
                 }
                 self.ip.index += 1;
             }
-            
-            Opcode::ASSIGN_FIELD=>{
+            Opcode::ASSIGN_INDEX_ADD=>f64_index_assign_op_impl!(self, heap, +),
+            Opcode::ASSIGN_INDEX_SUB=>f64_index_assign_op_impl!(self, heap, -),
+            Opcode::ASSIGN_INDEX_MUL=>f64_index_assign_op_impl!(self, heap, *),
+            Opcode::ASSIGN_INDEX_DIV=>f64_index_assign_op_impl!(self, heap, /),
+            Opcode::ASSIGN_INDEX_MOD=>f64_index_assign_op_impl!(self, heap, %),
+            Opcode::ASSIGN_INDEX_AND=>fu64_index_assign_op_impl!(self, heap, &),
+            Opcode::ASSIGN_INDEX_OR=>fu64_index_assign_op_impl!(self, heap, |),
+            Opcode::ASSIGN_INDEX_XOR=>fu64_index_assign_op_impl!(self, heap, ^),
+            Opcode::ASSIGN_INDEX_SHL=>fu64_index_assign_op_impl!(self, heap, <<),
+            Opcode::ASSIGN_INDEX_SHR=>fu64_index_assign_op_impl!(self, heap, >>),
+            Opcode::ASSIGN_INDEX_IFNIL=>{
                 let value = self.pop_stack_resolved(heap);
-                let field = self.pop_stack_value();
+                let index = self.pop_stack_resolved(heap);
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    heap.set_object_value(obj, field, value);
-                    self.push_stack_value(value);
+                    let old_value = heap.object_value(obj, index, Value::from_err_notindex(self.ip));
+                    if old_value.is_err() || old_value.is_nil(){
+                        heap.set_object_value(obj, index, value);
+                    }
+                    self.stack.push(Value::NIL);
                 }
                 else{
                     self.push_stack_value(Value::from_err_notobject(self.ip));
