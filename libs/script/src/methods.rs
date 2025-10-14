@@ -29,7 +29,7 @@ impl ScriptMethods{
         
         let fn_obj = heap.new_object_with_proto(id!(native).into());
         heap.set_object_type(fn_obj, ObjectType::VEC2);
-        heap.set_object_fn(fn_obj, ScriptFnPtr::Native{index: fn_index as u32});
+        heap.set_object_fn(fn_obj, ScriptFnPtr::Native(NativeId{index: fn_index as u32}));
         
         for arg in args{
             heap.set_object_value(fn_obj, arg.0.into(), arg.1.into());
@@ -50,44 +50,48 @@ impl ScriptMethods{
         self.add(h, native, &[], ValueType::COLOR, id!(ty), |_, _|{id!(color).escape()});
         self.add(h, native, &[], ValueType::STRING, id!(ty), |_, _|{id!(string).escape()});
         self.add(h, native, &[], ValueType::OBJECT, id!(ty), |_, _|{id!(object).escape()});
-        self.add(h, native, &[], ValueType::FACTORY, id!(ty), |_, _|{id!(factory).escape()});
+        self.add(h, native, &[], ValueType::RSID, id!(ty), |_, _|{id!(rsid).escape()});
         self.add(h, native, &[], ValueType::OPCODE, id!(ty), |_, _|{id!(opcode).escape()});
         self.add(h, native, &[], ValueType::ID, id!(ty), |_, _|{id!(id).escape()});
     }
     
     pub fn add_object(&mut self, h: &mut ScriptHeap, native:&mut ScriptNative){
         self.add(h, native, &[], ValueType::OBJECT, id!(proto), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into(), Value::NIL).as_object(){
                 return ctx.heap.object_proto(this)
             }
             Value::NIL
         });
         
         self.add(h, native, &[], ValueType::OBJECT, id!(push), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
                 ctx.heap.push_object_vec_into_object_vec(this, args);
             }
             Value::NIL
         });
             
         self.add(h, native, &[], ValueType::OBJECT, id!(extend), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
                 ctx.heap.push_object_vec_of_vec_into_object_vec(this, args, false);
             }
             Value::NIL
         });
             
         self.add(h, native, &[], ValueType::OBJECT, id!(import), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
                 ctx.heap.push_object_vec_of_vec_into_object_vec(this, args, true);
             }
             Value::NIL
         });
         
         self.add(h, native, &[], ValueType::OBJECT, id!(retain), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
-                // alright we could now theoretically do a new callframe on thread to call a closure
-                
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
+                // alright so. 'retain'. how do we do it
+                let mut i = 0;
+                //while i < ctx.heap.object_mut(this).vec.len(){
+                   // ctx.thread.call()
+                    
+                //}
             }
             Value::NIL
         });

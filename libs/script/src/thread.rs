@@ -25,8 +25,7 @@ pub struct LoopFrame{
 
 pub struct CallFrame{
     pub bases: StackBases,
-    pub return_ip: u32,
-    pub return_body: u16
+    pub return_ip: ScriptIp,
 }
 
 pub struct ScriptMe{
@@ -52,8 +51,7 @@ pub struct ScriptThread{
     pub(crate) stack: Vec<Value>,
     pub(crate) calls: Vec<CallFrame>,
     pub(crate) mes: Vec<ScriptMe>,
-    pub ip: u32,
-    pub body: u16,
+    pub ip: ScriptIp,
 }
 
 pub enum ScriptHook{
@@ -71,8 +69,7 @@ impl ScriptThread{
             stack: vec![],
             calls: vec![],
             mes: vec![],
-            ip: 0,
-            body: 0
+            ip: ScriptIp::default(),
         }
     }
     
@@ -108,10 +105,7 @@ impl ScriptThread{
             }
             return val    
         }
-        //else{ this slows down execution by 10%? weird
-        //    println!("STACK UNDERFLOW");
-            Value::NIL
-       // }
+        Value::from_exc_uflow(self.ip)
     }
     
     pub fn peek_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
@@ -124,10 +118,7 @@ impl ScriptThread{
             }
             return *val    
         }
-        else{
-           println!("STACK UNDERFLOW");
-            Value::NIL
-        }
+        Value::from_exc_uflow(self.ip)
     }
     
     pub fn peek_stack_value(&mut self)->Value{
@@ -135,8 +126,7 @@ impl ScriptThread{
             return *value
         }
         else{
-            println!("STACK UNDERFLOW");
-            Value::NIL
+            Value::from_exc_uflow(self.ip)
         }
     }
     
@@ -165,7 +155,11 @@ impl ScriptThread{
     
     // lets resolve an id to a Value
     pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
-        return heap.object_value(*self.scopes.last().unwrap(), id.into());
+        return heap.object_value(*self.scopes.last().unwrap(), id.into(),Value::from_exc_read(self.ip));
+    }
+    
+    pub fn call(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, scope:Value){
+        
     }
     
     pub fn run(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, body_id: u16){
@@ -177,21 +171,20 @@ impl ScriptThread{
                 scope: 0,
                 mes: 0,
             },
-            return_ip: 0,
-            return_body: 0,
+            return_ip: ScriptIp::default(),
         });
                 
         self.scopes.push(code.bodies[body_id as usize].scope);
         self.mes.push(ScriptMe::object(code.bodies[body_id as usize].me));
                 
-        self.body = body_id;
-        self.ip = 0;
+        self.ip.body = body_id;
+        self.ip.index = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         let mut counter = 0;
         
-        let mut body = &code.bodies[self.body as usize];
-        while (self.ip as usize) < body.parser.opcodes.len(){
-            let opcode = body.parser.opcodes[self.ip as usize];
+        let mut body = &code.bodies[self.ip.body as usize];
+        while (self.ip.index as usize) < body.parser.opcodes.len(){
+            let opcode = body.parser.opcodes[self.ip.index as usize];
             if let Some((opcode, args)) = opcode.as_opcode(){
                 if let Some(rust_call) = self.opcode(opcode, args, heap, code){
                     match rust_call{
@@ -202,12 +195,21 @@ impl ScriptThread{
                     }
                     self.stack.push(Value::NIL)
                 }
+                // if exception tracing
+                if let Some(value) = self.stack.last(){
+                    if let Some(ptr) = value.as_exc(){
+                        if let Some(loc2) = code.ip_to_loc(ptr){
+                            println!("Exception {} {}", value, loc2);
+                        }
+                    }
+                }
+                
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(opcode);
-                self.ip += 1;
+                self.ip.index += 1;
             }
-            body = &code.bodies[self.body as usize];
+            body = &code.bodies[self.ip.body as usize];
             counter += 1;
         }
         //println!("{:?}", profile);
