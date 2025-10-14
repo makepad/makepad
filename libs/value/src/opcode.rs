@@ -147,36 +147,37 @@ impl Opcode{
     pub const IF_ELSE:Self = Self(80);
         
     pub const FIELD:Self = Self(81);
-    pub const ME_FIELD:Self = Self(82);
-    pub const ARRAY_INDEX:Self = Self(83);
+    pub const FIELD_NIL: Self = Self(82);
+    pub const ME_FIELD:Self = Self(83);
+    pub const ARRAY_INDEX:Self = Self(84);
     // prototypically inherit the chain for deep prototype fields
-    pub const PROTO_FIELD:Self = Self(84);
-    pub const POP_TO_ME:Self = Self(85);
+    pub const PROTO_FIELD:Self = Self(85);
+    pub const POP_TO_ME:Self = Self(86);
             
-    pub const LET_FIRST:Self = Self(86);
+    pub const LET_FIRST:Self = Self(87);
     pub const LET_TYPED:Self = Self(87);
     pub const LET_DYN:Self = Self(88);
-    pub const LET_LAST:Self = Self(89);
+    pub const LET_LAST:Self = Self(88);
                 
-    pub const SEARCH_TREE:Self = Self(90);
-    pub const STRING_STREAM:Self = Self(91);
-    pub const LOG: Self = Self(92);
+    pub const SEARCH_TREE:Self = Self(89);
+    pub const STRING_STREAM:Self = Self(90);
+    pub const LOG: Self = Self(91);
     
     //pub const THIS: Self = Self(93);
-    pub const ME: Self = Self(94);
-    pub const DELETE: Self = Self(95);
-    pub const SCOPE: Self = Self(96);
+    pub const ME: Self = Self(92);
+    pub const DELETE: Self = Self(93);
+    pub const SCOPE: Self = Self(94);
     //pub const MOD: Self = Self(97);
         
-    pub const FOR_1: Self = Self(97);
-    pub const FOR_2: Self = Self(98);
-    pub const FOR_3: Self = Self(99);
-    pub const FOR_END: Self = Self(100);
-    pub const BREAK: Self = Self(101);
-    pub const CONTINUE: Self = Self(102);
-    pub const RANGE: Self = Self(103);
-    pub const IS: Self = Self(104);
-    pub const RETURN_IF_ERR:Self = Self(105);
+    pub const FOR_1: Self = Self(95);
+    pub const FOR_2: Self = Self(96);
+    pub const FOR_3: Self = Self(97);
+    pub const FOR_END: Self = Self(98);
+    pub const BREAK: Self = Self(99);
+    pub const CONTINUE: Self = Self(100);
+    pub const RANGE: Self = Self(101);
+    pub const IS: Self = Self(102);
+    pub const RETURN_IF_ERR:Self = Self(103);
 }
 
 
@@ -294,6 +295,7 @@ impl fmt::Display for Opcode {
             Self::IF_ELSE => return write!(f, "else"),
             
             Self::FIELD => return write!(f, "."),
+            Self::FIELD_NIL => return write!(f, ".?"),
             Self::ME_FIELD => return write!(f, "me."),
             Self::ARRAY_INDEX => return write!(f, "[]"),
                                                         

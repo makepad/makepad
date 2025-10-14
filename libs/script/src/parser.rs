@@ -91,6 +91,7 @@ impl State{
     fn operator_order(op:Id)->usize{
         match op{
             id!(.) => 3,
+            id!(.?) => 3,
             id!(*) | id!(/) | id!(%) => 8,
             id!(+) | id!(-) => 9,
             id!(<<) | id!(>>) => 10,
@@ -207,6 +208,7 @@ impl State{
             id!(?=)  => Opcode::ASSIGN_IFNIL,
             id!(..) => Opcode::RANGE,
             id!(.)  => Opcode::FIELD,
+            id!(.?)  => Opcode::FIELD_NIL,
             id!(me.) => Opcode::ME_FIELD,
             id!(?) => Opcode::RETURN_IF_ERR,
             _=> Opcode::NOP,
@@ -857,9 +859,11 @@ impl ScriptParser{
             State::EndExpr=>{
                 if op == id!(~){return 0}
                 if op == id!(?){ // we have a post op return if err
-                    if let Some(State::EmitOp{what_op:id!(.),index}) = self.state.last(){
-                        self.push_code(State::operator_to_opcode(id!(.)), *index);
-                        self.state.pop();
+                    if let Some(State::EmitOp{what_op,index}) = self.state.last(){
+                        if *what_op == id!(.) || *what_op == id!(.?){
+                            self.push_code(State::operator_to_opcode(*what_op), *index);
+                            self.state.pop();
+                        }
                     }
                     self.push_code(State::operator_to_opcode(id!(?)), self.index);
                     return 1
@@ -883,7 +887,7 @@ impl ScriptParser{
                     }
                     // check if we need to generate proto_field ops
                     if let Some(last) = self.state.pop(){
-                        if let State::EmitOp{what_op:id!(.),..} = last{
+                        if let State::EmitOp{what_op:id!(.)|id!(.?),..} = last{
                             if State::is_assign_operator(op){
                                 for pair in self.opcodes.rchunks_mut(2){
                                     if pair[0] == Opcode::FIELD.into() && pair[1].is_id(){
@@ -936,7 +940,7 @@ impl ScriptParser{
                 }
                 if tok.is_open_round(){ 
                     if let Some(last) = self.state.pop(){
-                        if let State::EmitOp{what_op:id!(.),..} = last{
+                        if let State::EmitOp{what_op:id!(.)|id!(.?),..} = last{
                             //self.code.push(State::operator_to_opcode(id!(.)));
                             self.push_code(Opcode::METHOD_CALL_ARGS.into(), self.index);
                             self.state.push(State::EndCall{is_method:true, index:self.index});
@@ -955,6 +959,9 @@ impl ScriptParser{
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp{what_op:id!(.),index} = last{
                             self.push_code(State::operator_to_opcode(id!(.)), index);
+                        }
+                        else if let State::EmitOp{what_op:id!(.?),index} = last{
+                            self.push_code(State::operator_to_opcode(id!(.?)), index);
                         }
                         else{
                             self.state.push(last);

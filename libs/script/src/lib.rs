@@ -104,6 +104,7 @@ pub fn test(){
     let code = script!{
         scope.import(mod.std)
         let x = [1,2,3,4]
+        ~x.?y.?z
         //x.retain(|v| v > 2)
         let f = ||{
             assert(true)?;
