@@ -106,7 +106,7 @@ impl State{
             id!(||) | id!(|?)  => 17,
             id!(..) =>  18,
             id!(:) | id!(=) | id!(>:) | id!(<:) | id!(^:) | id!(+=)  | id!(-=) | id!(*=) | id!(/=) | id!(%=) => 19,
-            id!(&=) | id!(|=)  | id!(^=) | id!(<<=) | id!(>>=) => 20,
+            id!(&=) | id!(|=)  | id!(^=) | id!(<<=) | id!(>>=) | id!(?=) => 20,
             _=>0
         }
     }
@@ -1011,7 +1011,7 @@ impl ScriptParser{
                         self.state.push(State::BeginStmt{last_was_sep:false});
                         return 0;
                     }
-                    if code.is_assign_opcode(){
+                    if *code == Opcode::ASSIGN_ME.into(){
                         code.set_opcode_is_statement();
                         self.state.push(State::BeginStmt{last_was_sep:false});
                         return 0;

@@ -202,7 +202,9 @@ impl ScriptHeap{
         else if v.is_opcode(){
             write!(out, "[Opcode]").ok();
         }
-        
+        else if v.is_err(){
+            write!(out, "[Error:{}]", v).ok();
+        }
         else{
             write!(out, "[Unknown]").ok();
         }
