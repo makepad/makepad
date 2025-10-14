@@ -208,6 +208,7 @@ impl State{
             id!(..) => Opcode::RANGE,
             id!(.)  => Opcode::FIELD,
             id!(me.) => Opcode::ME_FIELD,
+            id!(?) => Opcode::RETURN_IF_ERR,
             _=> Opcode::NOP,
         }.into()
     }
@@ -855,7 +856,14 @@ impl ScriptParser{
                         
             State::EndExpr=>{
                 if op == id!(~){return 0}
-                
+                if op == id!(?){ // we have a post op return if err
+                    if let Some(State::EmitOp{what_op:id!(.),index}) = self.state.last(){
+                        self.push_code(State::operator_to_opcode(id!(.)), *index);
+                        self.state.pop();
+                    }
+                    self.push_code(State::operator_to_opcode(id!(?)), self.index);
+                    return 1
+                }
                 // named operators
                 let op = if id == id!(is){id!(is)}
                 else if id == id!(and){id!(&&)}
