@@ -24,7 +24,7 @@ impl ScriptIp{
             index: ((value) & 0xFFF_FFFF) as u32
         }
     }
-    const fn encode_as_u40(&self)->u64{
+    const fn to_u40(&self)->u64{
         ((self.body as u64)<<28) | self.index as u64
     }
 }
@@ -240,6 +240,7 @@ impl Value{
     pub const TYPE_MASK: u64 = 0xFFFF_FF00_0000_0000;
         
     pub const TYPE_NAN: u64 = ValueType::NAN.to_u64();
+    pub const TYPE_TRACED_NAN_MAX: u64 = ValueType::NAN.to_u64() | 0xFF_FFFF_FFFF;
     pub const NAN: Value = Value( Self::TYPE_NAN);
     
     pub const TYPE_BOOL: u64 = ValueType::BOOL.to_u64();
@@ -289,17 +290,17 @@ impl Value{
         
     // TODO: make this behave like javascript as much as is sensible
         
-    pub const fn from_err_notfound(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTFOUND | ip.encode_as_u40())}
-    pub const fn from_err_notfn(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTFN | ip.encode_as_u40())}
-    pub const fn from_err_notfield(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTFIELD | ip.encode_as_u40())}
-    pub const fn from_err_notindex(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTINDEX | ip.encode_as_u40())}
-    pub const fn from_err_notobject(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTOBJECT| ip.encode_as_u40())}
-    pub const fn from_err_stackunderflow(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_STACKUNDERFLOW | ip.encode_as_u40())}
-    pub const fn from_err_invalidargs(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_INVALIDARGS | ip.encode_as_u40())}
-    pub const fn from_err_internal(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_INTERNAL | ip.encode_as_u40())}
-    pub const fn from_err_assertfail(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_ASSERTFAIL | ip.encode_as_u40())}
-    pub const fn from_err_notimpl(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTIMPL | ip.encode_as_u40())}
-    pub const fn from_err_user(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_USER | ip.encode_as_u40())}
+    pub const fn from_err_notfound(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTFOUND | ip.to_u40())}
+    pub const fn from_err_notfn(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTFN | ip.to_u40())}
+    pub const fn from_err_notfield(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTFIELD | ip.to_u40())}
+    pub const fn from_err_notindex(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTINDEX | ip.to_u40())}
+    pub const fn from_err_notobject(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTOBJECT| ip.to_u40())}
+    pub const fn from_err_stackunderflow(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_STACKUNDERFLOW | ip.to_u40())}
+    pub const fn from_err_invalidargs(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_INVALIDARGS | ip.to_u40())}
+    pub const fn from_err_internal(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_INTERNAL | ip.to_u40())}
+    pub const fn from_err_assertfail(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_ASSERTFAIL | ip.to_u40())}
+    pub const fn from_err_notimpl(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTIMPL | ip.to_u40())}
+    pub const fn from_err_user(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_USER | ip.to_u40())}
     
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=Self::TYPE_ERR_FIRST &&(self.0&Self::TYPE_MASK) <=Self::TYPE_ERR_LAST}
     
@@ -328,6 +329,30 @@ impl Value{
         }
         else{
             Self(val.to_bits())
+        }
+    }
+    
+    pub const fn as_f64_traced_nan(&self)->Option<ScriptIp>{
+        if self.is_nan(){
+            Some(ScriptIp::from_u40(self.0))
+        }
+        else{
+            None
+        }
+    }
+    
+    pub  fn from_f64_traced_nan(val:f64, ip:ScriptIp)->Self{
+        let bits = val.to_bits();
+        if val.is_nan(){
+            if bits >= Self::TYPE_NAN && bits <= Self::TYPE_TRACED_NAN_MAX{
+                Self(bits)
+            }
+            else{
+                Self(Self::TYPE_NAN | ip.to_u40())
+            }
+        }
+        else{
+            Self(bits)
         }
     }
     
@@ -521,7 +546,7 @@ impl Value{
     }
     
     pub const fn is_number(&self)->bool{
-        self.0 <= Self::TYPE_NAN
+        self.0 <= Self::TYPE_TRACED_NAN_MAX
     }
     
     pub const fn is_non_nan_number(&self)->bool{
@@ -534,6 +559,10 @@ impl Value{
     
     pub const fn is_bool(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_BOOL
+    }
+    
+    pub const fn is_nan(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_NAN
     }
     
     pub const fn is_nil(&self)->bool{

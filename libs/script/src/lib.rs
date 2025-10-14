@@ -103,6 +103,9 @@ pub fn test(){
     
     let code = script!{
         scope.import(mod.std)
+        let t = 1+{};
+        let x = t + 2
+        ~x
         let x = [1,2,3,4]
         ~x.y.z
         //x.retain(|v| v > 2)
