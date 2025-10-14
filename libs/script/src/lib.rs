@@ -103,21 +103,21 @@ pub fn test(){
     // basic test script
     let code = script!{
         scope.import(mod.std)
-        let x = 1+2;
+        let x = 1+2
         assert(x == 3)
-        assert(1+2 == 3);
-        let iv = [1,2,3,4]
+        assert(1+2 == 3)
+        let iv = [1 2 3 4]
         let ov = []
         for v in iv ov.push(v)
-        assert(iv === ov);
-        ov.pop();
-        assert(iv !== ov);
-        let oa = {y:1.0,z:2.0}
-        let ob = {z:3.0,y:1.0}
+        assert(iv == ov)
+        ov.pop()
+        assert(iv != ov)
+        let oa = {y:1 z:2}
+        let ob = {z:3 y:1}
+        assert(oa != ob)
+        ob.z = 2;
+        assert(oa == ob)
         assert(oa !== ob);
-        ob.z = 2.0;
-        assert(oa === ob);
-        
     };
     let _code = script!{
         
