@@ -468,8 +468,8 @@ impl ScriptHeap{
         &self.objects[ptr.index as usize]
     }
     
-    pub fn object_mut(&self, ptr:ObjectPtr)->&Object{
-        &self.objects[ptr.index as usize]
+    pub fn object_mut(&mut self, ptr:ObjectPtr)->&mut Object{
+        &mut self.objects[ptr.index as usize]
     }
     
     pub fn set_object_value_index(&mut self, ptr: ObjectPtr, index:Value, value: Value){
@@ -501,6 +501,15 @@ impl ScriptHeap{
             println!("Implement typed array set value");
             //todo IMPLEMENT IT
             return
+        }
+    }
+    
+    pub fn pop_object_vec(&mut self, ptr:ObjectPtr)->Value{
+        if let Some(value) = self.objects[ptr.index as usize].vec.pop(){
+            value
+        }
+        else{
+            Value::NIL
         }
     }
     
