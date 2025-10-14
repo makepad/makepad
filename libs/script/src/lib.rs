@@ -63,6 +63,7 @@ use makepad_script_derive::*;
 pub fn test(){
     let mut vm = ScriptVm::new();
     
+    //#[derive(Scriptable)]
     pub enum _EnumTest{
         Bare,
         Tuple(u32),
@@ -72,6 +73,7 @@ pub fn test(){
     let _code = script!{
         //let EnumTest = #(EnumTest::def(vm.ctx()));
         scope.import(EnumTest);
+        
         let MyView = #(RustTest::ty()){
             enm1: Bare,
             enm2: Tuple(2),
@@ -80,6 +82,15 @@ pub fn test(){
     };
 
     let _code = script!{
+        let x = Button{
+            draw_bg:{
+                pixel: ||{
+                    let x = 1
+                    return t(x)
+                }
+            }
+        }
+        
         let x = [@view,@bla]
         for sym in x t[sym]
         
@@ -103,24 +114,30 @@ pub fn test(){
     // basic test script
     let code = script!{
         scope.import(mod.std)
-        let x = 1+2
-        assert(x == 3)
-        assert(1+2 == 3)
-        let iv = [1 2 3 4]
-        let ov = []
-        for v in iv ov.push(v)
-        assert(iv == ov)
-        ov.pop()
-        assert(iv != ov)
+        
+        let x = 1+2 assert(x == 3)
+        let iv = [1 2 3 4] let ov = []
+        for v in iv ov.push(v) assert(iv == ov)
+        ov.pop() assert(iv != ov)
+        
         let oa = {y:1 z:2}
         let ob = {z:3 y:1}
         assert(oa != ob)
-        ob.z = 2;
-        assert(oa == ob)
-        assert(oa !== ob);
-    };
-    let _code = script!{
+        ob.z = 2 assert(oa == ob)
+        assert(oa !== ob)
         
+        assert("123" == "123")
+        assert("123" != "223")
+        assert("123456" == "123456")
+        assert("123456" != "123")
+        
+        let x = 1 x += 2 assert(x == 3)
+        let t = 3 t ?= 2 assert(t == 3)
+        let t t ?= 2 assert(t == 2)
+        ;
+    };
+    
+    let _code = script!{
     };
     
     let _code = script!{

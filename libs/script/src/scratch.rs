@@ -21,7 +21,6 @@ let MyApp = App{
     }
 }
 
-
 http.server(8080,{
     on_request:|req,res| res.write(200,"Working")
 })
