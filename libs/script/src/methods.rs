@@ -86,7 +86,7 @@ impl ScriptMethods{
             if let Some(this) = ctx.heap.object_value(args, id!(this).into(), Value::NIL).as_object(){
                 return ctx.heap.object_proto(this)
             }
-            Value::from_err_never(ctx.thread.ip)
+            Value::from_err_neverhappen(ctx.thread.ip)
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(push), |ctx, args|{
@@ -94,7 +94,7 @@ impl ScriptMethods{
                 ctx.heap.push_object_vec_into_object_vec(this, args);
                 return Value::NIL
             }
-            Value::from_err_never(ctx.thread.ip)
+            Value::from_err_neverhappen(ctx.thread.ip)
         });
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(extend), |ctx, args|{
@@ -102,7 +102,7 @@ impl ScriptMethods{
                 ctx.heap.push_object_vec_of_vec_into_object_vec(this, args, false);
                 return Value::NIL
             }
-            Value::from_err_never(ctx.thread.ip)
+            Value::from_err_neverhappen(ctx.thread.ip)
         });
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(import), |ctx, args|{
@@ -110,7 +110,7 @@ impl ScriptMethods{
                 ctx.heap.push_object_vec_of_vec_into_object_vec(this, args, true);
                 return Value::NIL
             }
-            Value::from_err_never(ctx.thread.ip)
+            Value::from_err_neverhappen(ctx.thread.ip)
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(retain), |ctx, args|{

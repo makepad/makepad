@@ -105,7 +105,7 @@ impl ScriptThread{
             }
             return val    
         }
-        Value::from_err_uflow(self.ip)
+        Value::from_err_stackunderflow(self.ip)
     }
     
     pub fn peek_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
@@ -118,7 +118,7 @@ impl ScriptThread{
             }
             return *val    
         }
-        Value::from_err_uflow(self.ip)
+        Value::from_err_stackunderflow(self.ip)
     }
     
     pub fn peek_stack_value(&mut self)->Value{
@@ -126,7 +126,7 @@ impl ScriptThread{
             return *value
         }
         else{
-            Value::from_err_uflow(self.ip)
+            Value::from_err_stackunderflow(self.ip)
         }
     }
     
@@ -155,7 +155,7 @@ impl ScriptThread{
     
     // lets resolve an id to a Value
     pub fn resolve(&self, id: Id, heap:&ScriptHeap)->Value{
-        return heap.object_value(*self.scopes.last().unwrap(), id.into(),Value::from_err_read(self.ip));
+        return heap.object_value(*self.scopes.last().unwrap(), id.into(),Value::from_err_notfound(self.ip));
     }
     
     pub fn call(&mut self, _heap:&mut ScriptHeap, _code:&ScriptCode, _scope:Value){
