@@ -378,6 +378,17 @@ impl ScriptThread{
                 }
                 self.ip.index += 1;
             }
+            Opcode::FIELD_NIL=>{
+                let field = self.pop_stack_value();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    self.push_stack_value(heap.object_value(obj, field, Value::NIL))
+                }
+                else{
+                    self.push_stack_value(Value::NIL);
+                }
+                self.ip.index += 1;
+            }
             Opcode::ME_FIELD=>{
                 let field = self.pop_stack_value();
                 self.push_stack_value(heap.object_value(self.mes.last().unwrap().object, field,Value::NIL));
