@@ -102,25 +102,25 @@ impl ScriptThread{
                 }
                 self.ip.index += 1;
             }
-            Opcode::EQ =>{
+            Opcode::SHALLOW_EQ =>{
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
                 self.push_stack_value(self.shallow_eq(heap, a, b).into());
                 self.ip.index += 1;
             }
-            Opcode::NEQ=>{
+            Opcode::SHALLOW_NEQ=>{
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
                 self.push_stack_value((!self.shallow_eq(heap, a, b)).into());
                 self.ip.index += 1;
             }
-            Opcode::DEEP_EQ=> {
+            Opcode::EQ=> {
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
                 self.push_stack_value(self.deep_eq(heap, a, b).into());
                 self.ip.index += 1;
             }
-            Opcode::DEEP_NEQ=> {
+            Opcode::NEQ=> {
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
                 self.push_stack_value((!self.deep_eq(heap, a, b)).into());
