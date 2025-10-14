@@ -84,8 +84,6 @@ impl ScriptThread{
             Opcode::OR=>fu64_op_impl!(self, heap, |),
             Opcode::XOR=>fu64_op_impl!(self, heap, ^),
             
-            Opcode::EQ=>f64_cmp_impl!(self, heap, ==),
-            Opcode::NEQ=>f64_cmp_impl!(self, heap, !=),
             Opcode::LT=>f64_cmp_impl!(self, heap, <),
             Opcode::GT=>f64_cmp_impl!(self, heap, >),
             Opcode::LEQ=>f64_cmp_impl!(self, heap, <=),
@@ -93,7 +91,41 @@ impl ScriptThread{
             
             Opcode::LOGIC_AND => bool_op_impl!(self, heap, &&),
             Opcode::LOGIC_OR => bool_op_impl!(self, heap, ||),
-            
+            Opcode::NIL_OR => {
+                let op1 = self.pop_stack_resolved(heap);
+                let op2 = self.pop_stack_resolved(heap);
+                if op1.is_nil(){
+                    self.push_stack_value(op2);
+                }
+                else{
+                    self.push_stack_value(op1);
+                }
+                self.ip.index += 1;
+            }
+            Opcode::EQ =>{
+                let b = self.pop_stack_resolved(heap);
+                let a = self.pop_stack_resolved(heap);
+                self.push_stack_value(self.shallow_eq(heap, a, b).into());
+                self.ip.index += 1;
+            }
+            Opcode::NEQ=>{
+                let b = self.pop_stack_resolved(heap);
+                let a = self.pop_stack_resolved(heap);
+                self.push_stack_value((!self.shallow_eq(heap, a, b)).into());
+                self.ip.index += 1;
+            }
+            Opcode::DEEP_EQ=> {
+                let b = self.pop_stack_resolved(heap);
+                let a = self.pop_stack_resolved(heap);
+                self.push_stack_value(self.deep_eq(heap, a, b).into());
+                self.ip.index += 1;
+            }
+            Opcode::DEEP_NEQ=> {
+                let b = self.pop_stack_resolved(heap);
+                let a = self.pop_stack_resolved(heap);
+                self.push_stack_value((!self.deep_eq(heap, a, b)).into());
+                self.ip.index += 1;
+            }
             Opcode::CONCAT=>{
                 let op1 = self.pop_stack_resolved(heap);
                 let op2 = self.pop_stack_resolved(heap);
@@ -104,7 +136,6 @@ impl ScriptThread{
                 self.push_stack_value(ptr.into());
                 self.ip.index += 1;
             }
-            
             Opcode::ASSIGN_ME=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
@@ -598,6 +629,94 @@ impl ScriptThread{
         None
     }
     
+    pub fn deep_eq(&self, heap:&ScriptHeap, a:Value, b:Value)->bool{
+        if a.is_object(){
+            let mut aw = a;
+            let mut bw = b;
+            loop{
+                if let Some(pa) = aw.as_object(){
+                    if let Some(pb) = bw.as_object(){
+                        let oa = heap.object(pa);
+                        let ob = heap.object(pb);
+                        if oa.vec != ob.vec{
+                            return false
+                        }
+                        if oa.map != ob.map{
+                            return false
+                        }
+                        aw = oa.proto;
+                        bw = ob.proto;
+                    }
+                    else{
+                        return false
+                    }
+                }
+                else{
+                    if aw == bw{
+                        return true
+                    }
+                    return false
+                }
+            }
+        }
+        else {
+            self.shallow_eq(heap, a, b)
+        }
+    }
+    
+    pub fn shallow_eq(&self, heap:&ScriptHeap, a:Value, b:Value)->bool{
+        if let Some(a) = a.as_f64(){
+            if let Some(b) = b.as_f64(){a == b}else{false}
+        }
+        else if let Some(a) = a.as_bool(){
+            if let Some(b) = b.as_bool(){a == b}else{false}
+        } 
+        else if let Some(a) = a.as_id(){
+            if let Some(b) = b.as_id(){a == b}else{false}
+        }
+        else if let Some(a) = a.as_object(){
+            if let Some(b) = b.as_object(){a == b}else{false}
+        }
+        else if let Some(a) = a.as_color(){
+            if let Some(b) = b.as_color(){a == b}else{false}
+        }
+        else if let Some(a) = a.as_color(){
+            if let Some(b) = b.as_color(){a == b}else{false}
+        }
+        else if a.is_nil(){
+            b.is_nil()
+        }
+        else if let Some(cmp) = a.as_inline_string(|a|{
+            if let Some(cmp) = b.as_inline_string(|b|{
+                a == b
+            }){cmp}
+            else{
+                if let Some(b)  = b.as_string(){
+                    heap.string(b) == a
+                }
+                else{
+                    false
+                }
+            }
+        }){cmp}
+        else if let Some(a) = a.as_string(){
+            let a = heap.string(a);
+            if let Some(cmp) = b.as_inline_string(|b|{
+                a == b
+            }){cmp}
+            else{
+                if let Some(b)  = b.as_string(){
+                    heap.string(b) == a
+                }
+                else{
+                    false
+                }
+            }
+        }
+        else{
+            false
+        }
+    }
         
     pub fn begin_for_loop_inner(&mut self, heap:&mut ScriptHeap, jump:u32, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>, first_value:Value, first_index:f64, first_key:Value){    
                                                
