@@ -208,7 +208,7 @@ impl ScriptHeap{
         }
     }
         
-    pub fn cast_to_f64(&self, v:Value)->f64{
+    pub fn cast_to_f64(&self, v:Value, ip:ScriptIp)->f64{
         if let Some(v) = v.as_f64(){
             v
         }
@@ -224,23 +224,11 @@ impl ScriptHeap{
         else if let Some(v) = v.as_bool(){
             return if v{1.0}else{0.0}
         }
-        else if let Some(_v) = v.as_id(){
-            return 0.0
-        }
-        else if let Some(_v) = v.as_object(){
-            return 0.0
-        }
         else if let Some(v) = v.as_color(){
             return v as f64
         }
-        else if v.is_nil(){
-            0.0
-        }
-        else if v.is_opcode(){
-            0.0
-        }
-        else{
-            0.0
+        else {
+            Value::from_f64_traced_nan(f64::NAN, ip).as_f64().unwrap()
         }
     }
     

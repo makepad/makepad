@@ -54,11 +54,11 @@ impl ScriptModules{
         heap.set_object_value(self.obj, id!(math).into(), module.into());
         
         self.add(heap, native, module, id!(sin), &[(id!(x), 0.0.into())], |ctx, args|{
-            ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into(),Value::NIL)).sin().into()
+            ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into(),Value::NIL), ctx.thread.ip).sin().into()
         });
         
         self.add(heap, native, module, id!(vec2), &[(id!(x), 0.0.into()),(id!(y), Value::NIL)], |ctx, args|{
-            ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into(),Value::NIL)).sin().into()
+            ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into(),Value::NIL), ctx.thread.ip).sin().into()
         });
     }
     
