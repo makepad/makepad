@@ -207,17 +207,17 @@ impl fmt::Display for ValueType {
             Self::OBJECT=>write!(f,"object"),
             Self::RSID=>write!(f,"rsid"),
             Self::OPCODE=>write!(f,"opcode"),
-            Self::INLINE_STRING_0=>write!(f,"INLINE_STRING_0"),
-            Self::INLINE_STRING_1=>write!(f,"INLINE_STRING_1"),
-            Self::INLINE_STRING_2=>write!(f,"INLINE_STRING_2"),
-            Self::INLINE_STRING_3=>write!(f,"INLINE_STRING_3"),
-            Self::INLINE_STRING_4=>write!(f,"INLINE_STRING_4"),
-            Self::INLINE_STRING_5=>write!(f,"INLINE_STRING_5"),
+            Self::INLINE_STRING_0=>write!(f,"string0"),
+            Self::INLINE_STRING_1=>write!(f,"string1"),
+            Self::INLINE_STRING_2=>write!(f,"string2"),
+            Self::INLINE_STRING_3=>write!(f,"string3"),
+            Self::INLINE_STRING_4=>write!(f,"string4"),
+            Self::INLINE_STRING_5=>write!(f,"string5"),
             Self::ERR_NOTFOUND=>write!(f,"NotFoundOnScope"),
             Self::ERR_NOTFN=>write!(f,"NotAFunction"),
             Self::ERR_NOTFIELD=>write!(f,"FieldNotFound"),
             Self::ERR_NOTINDEX=>write!(f,"IndexNotFound"),
-            Self::ERR_NOTOBJECT=>write!(f,"NotAnObjectr"),
+            Self::ERR_NOTOBJECT=>write!(f,"NotAnObject"),
             Self::ERR_STACKUNDERFLOW=>write!(f,"StackUnderflow"),
             Self::ERR_INVALIDARGS=>write!(f,"InvalidArgs"),
             Self::ERR_INTERNAL=>write!(f,"Internal"),
@@ -433,7 +433,7 @@ impl Value{
             return Some(f(unsafe{std::str::from_utf8_unchecked(&[(self.0 & 0xff) as u8, ((self.0>>8) & 0xff) as u8, ((self.0>>16) & 0xff) as u8, ((self.0>>24) & 0xff) as u8, ((self.0>>32) & 0xff) as u8])}))
         }
     }
-    
+
     pub fn inline_string_not_empty(&self)->bool{
         self.0 >= Self::TYPE_INLINE_STRING_1  && self.0 <= Self::TYPE_INLINE_STRING_END
     }
@@ -444,7 +444,7 @@ impl Value{
         }
         None
     }
-        
+    
     pub const fn as_f64(&self)->Option<f64>{
         if self.is_number(){
             return Some(f64::from_bits(self.0))
@@ -502,7 +502,7 @@ impl Value{
     pub const fn is_assign_opcode(&self)->bool{
         if self.is_opcode(){
             let code = Opcode(((self.0>>32) & 0xff) as u8);
-            return code.0 >= Opcode::ASSIGN_FIRST.0 && code.0 <= Opcode::ASSIGN_LAST.0
+            return code.is_assign()
         }
         false
     }
@@ -510,7 +510,7 @@ impl Value{
     pub const fn is_let_opcode(&self)->bool{
         if self.is_opcode(){
             let code = Opcode(((self.0>>32) & 0xff) as u8);
-            return code.0 >= Opcode::LET_FIRST.0 && code.0 <= Opcode::LET_LAST.0
+            return code.0 == Opcode::LET_TYPED.0 || code.0 == Opcode::LET_DYN.0
         }
         false
     }

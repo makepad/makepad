@@ -66,26 +66,32 @@ impl<'a> std::fmt::Display for ScriptLoc<'a> {
 
 impl ScriptCode{
     pub fn ip_to_loc(&self, ip:ScriptIp)->Option<ScriptLoc>{
-        let body = &self.bodies[ip.body as usize];
-        let index = body.parser.source_map[ip.index as usize].unwrap();
-        if let Some(rc) = body.tokenizer.token_index_to_row_col(index){
-            if let ScriptSource::Rust{rust} = &body.source{
-                return Some(
-                    ScriptLoc{
-                        file: rust.file.as_str(),
-                        line: rc.0 + rust.line as u32 + 1,
-                        col: rc.1
-                    }
-                )
-            }else{
-                return Some(ScriptLoc{
-                    file: "generated",
-                    line: rc.0,
-                    col: rc.1
-                })
-            };
+        if let Some(body) = self.bodies.get(ip.body as usize){
+            if let Some(Some(index)) = body.parser.source_map.get(ip.index as usize){
+                if let Some(rc) = body.tokenizer.token_index_to_row_col(*index){
+                    if let ScriptSource::Rust{rust} = &body.source{
+                        return Some(
+                            ScriptLoc{
+                                file: rust.file.as_str(),
+                                line: rc.0 + rust.line as u32 + 1,
+                                col: rc.1
+                            }
+                        )
+                    }else{
+                        return Some(ScriptLoc{
+                            file: "generated",
+                            line: rc.0,
+                            col: rc.1
+                        })
+                    };
+                }
+            }
         }
-        None
+        return Some(ScriptLoc{
+            file: "unknown",
+            line: ip.body as _,
+            col: ip.index as _
+        })
     }
 }
 
