@@ -11,13 +11,25 @@ impl Default for Value{
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ScriptIp{
     pub body: u16,
     pub index: u32,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+impl ScriptIp{
+    const fn from_u40(value:u64)->Self{
+        Self{
+            body: ((value >> 28)&0xFFF) as u16,
+            index: ((value) & 0xFFF_FFFF) as u32
+        }
+    }
+    const fn encode_as_u40(&self)->u64{
+        ((self.body as u64)<<28) | self.index as u64
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ObjectPtr{
     pub index: u32    
 }
@@ -28,7 +40,7 @@ impl From<ObjectPtr> for Value{
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct StringPtr{
     pub index: u32    
 }
@@ -88,8 +100,15 @@ impl From<Opcode> for Value{
 }
 // NaN box value
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct ValueError{
+    pub ty: ValueType,
+    pub ip: ScriptIp
+}
+
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ValueType(u8);
+
 impl ValueType{
     pub const NUMBER: Self = Self(0);
     pub const NAN: Self = Self(1);
@@ -109,11 +128,19 @@ impl ValueType{
     pub const INLINE_STRING_4: Self = Self(13);
     pub const INLINE_STRING_5: Self = Self(14);
     pub const INLINE_STRING_END: Self = Self(15);
-    pub const EXC_READ: Self = Self(16);
-    pub const EXC_WRITE: Self = Self(17);
-    pub const EXC_CALL: Self = Self(18);
-    pub const EXC_UFLOW: Self = Self(19);
     
+    pub const ERR_FIRST: Self = Self(16);
+    pub const ERR_READ: Self = Self(16);
+    pub const ERR_WRITE: Self = Self(17);
+    pub const ERR_CALL: Self = Self(18);
+    pub const ERR_UFLOW: Self = Self(19);
+    pub const ERR_ARGS: Self = Self(21);
+    pub const ERR_NEVER: Self = Self(22);
+    pub const ERR_USER: Self = Self(23);
+    pub const ERR_ASSERT: Self = Self(24);
+    pub const ERR_NOTIMPL: Self = Self(25);
+    pub const ERR_LAST: Self = Self(25);
+            
     pub const ID: Self = Self(0x80);
     
     pub const REDUX_NUMBER: usize = 0;
@@ -125,7 +152,7 @@ impl ValueType{
     pub const REDUX_OBJECT: usize = 6;
     pub const REDUX_RSID: usize = 7;
     pub const REDUX_OPCODE: usize = 8;
-    pub const REDUX_EXC: usize = 9;
+    pub const REDUX_ERR: usize = 9;
     pub const REDUX_ID: usize = 10;
     
     pub const fn to_u64(&self)->u64{ ((self.0 as u64) << 40) | 0xFFFF_0000_0000_0000 }
@@ -142,8 +169,8 @@ impl ValueType{
             if self.0 >= Self::ID.0{
                 return Self::REDUX_ID
             }
-            else if self.0 >= Self::EXC_READ.0{
-                Self::REDUX_EXC as usize
+            else if self.0 >= Self::ERR_FIRST.0{
+                Self::REDUX_ERR as usize
             }
             else{
                 Self::REDUX_STRING as usize 
@@ -184,7 +211,15 @@ impl fmt::Display for ValueType {
             Self::INLINE_STRING_3=>write!(f,"INLINE_STRING_3"),
             Self::INLINE_STRING_4=>write!(f,"INLINE_STRING_4"),
             Self::INLINE_STRING_5=>write!(f,"INLINE_STRING_5"),
-            
+            Self::ERR_READ=>write!(f,"ReadValueError"),
+            Self::ERR_WRITE=>write!(f,"WriteValueError"),
+            Self::ERR_CALL=>write!(f,"NotAFunctionError"),
+            Self::ERR_UFLOW=>write!(f,"StackUnderflowError"),
+            Self::ERR_ARGS=>write!(f,"IncorrectArgsError"),
+            Self::ERR_NEVER=>write!(f,"ShouldNeverHappenError"),
+            Self::ERR_NOTIMPL=>write!(f,"NotImplementedError"),
+            Self::ERR_USER=>write!(f,"UserError"),
+            Self::ERR_ASSERT=>write!(f,"AssertFailureError"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ValueType?")
         }
@@ -223,11 +258,18 @@ impl Value{
     pub const TYPE_INLINE_STRING_5: u64 = ValueType::INLINE_STRING_5.to_u64();
     pub const TYPE_INLINE_STRING_END: u64 = ValueType::INLINE_STRING_END.to_u64();
     
-    pub const TYPE_EXC_READ: u64 = ValueType::EXC_READ.to_u64();
-    pub const TYPE_EXC_WRITE: u64 = ValueType::EXC_WRITE.to_u64();
-    pub const TYPE_EXC_CALL: u64 = ValueType::EXC_CALL.to_u64();
-    pub const TYPE_EXC_UFLOW: u64 = ValueType::EXC_UFLOW.to_u64();
-        
+    pub const TYPE_ERR_FIRST: u64 = ValueType::ERR_FIRST.to_u64();
+    pub const TYPE_ERR_READ: u64 = ValueType::ERR_READ.to_u64();
+    pub const TYPE_ERR_WRITE: u64 = ValueType::ERR_WRITE.to_u64();
+    pub const TYPE_ERR_CALL: u64 = ValueType::ERR_CALL.to_u64();
+    pub const TYPE_ERR_UFLOW: u64 = ValueType::ERR_UFLOW.to_u64();
+    pub const TYPE_ERR_ARGS: u64 = ValueType::ERR_ARGS.to_u64();
+    pub const TYPE_ERR_NEVER: u64 = ValueType::ERR_NEVER.to_u64();
+    pub const TYPE_ERR_USER: u64 = ValueType::ERR_USER.to_u64();
+    pub const TYPE_ERR_ASSERT: u64 = ValueType::ERR_ASSERT.to_u64();
+    pub const TYPE_ERR_NOTIMPL: u64 = ValueType::ERR_NOTIMPL.to_u64();
+    pub const TYPE_ERR_LAST: u64 = ValueType::ERR_LAST.to_u64();
+            
     pub const TYPE_ID: u64 = ValueType::ID.to_u64();
     
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
@@ -241,37 +283,23 @@ impl Value{
         
     // TODO: make this behave like javascript as much as is sensible
         
-    pub const fn from_exc_read(ip:ScriptIp)->Self{
-        Self(Self::TYPE_EXC_READ | ((ip.body as u64)<<28) | ip.index as u64)
-    }
-        
-    pub const fn from_exc_write(ip:ScriptIp)->Self{
-        Self(Self::TYPE_EXC_WRITE | ((ip.body as u64)<<28) | ip.index as u64)
-    }
+    pub const fn from_err_read(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_READ | ip.encode_as_u40())}
+    pub const fn from_err_write(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_WRITE | ip.encode_as_u40())}
+    pub const fn from_err_call(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_CALL | ip.encode_as_u40())}
+    pub const fn from_err_uflow(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_UFLOW | ip.encode_as_u40())}
+    pub const fn from_err_args(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_ARGS | ip.encode_as_u40())}
+    pub const fn from_err_never(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NEVER | ip.encode_as_u40())}
+    pub const fn from_err_user(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_USER | ip.encode_as_u40())}
+    pub const fn from_err_assert(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_ASSERT | ip.encode_as_u40())}
+    pub const fn from_err_notimpl(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTIMPL | ip.encode_as_u40())}
     
-    pub const fn from_exc_call(ip:ScriptIp)->Self{
-        Self(Self::TYPE_EXC_CALL | ((ip.body as u64)<<28) | ip.index as u64)
-    }
+    pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=Self::TYPE_ERR_FIRST &&(self.0&Self::TYPE_MASK) <=Self::TYPE_ERR_LAST}
     
-    pub const fn from_exc_uflow(ip:ScriptIp)->Self{
-        Self(Self::TYPE_EXC_UFLOW | ((ip.body as u64)<<28) | ip.index as u64)
-    }
-    
-    pub const fn is_exc_read(&self)->bool{(self.0&Self::TYPE_MASK) ==Self::TYPE_EXC_READ}
-    pub const fn is_exc_write(&self)->bool{(self.0&Self::TYPE_MASK) ==Self::TYPE_EXC_WRITE}
-    pub const fn is_exc_call(&self)->bool{(self.0&Self::TYPE_MASK) ==Self::TYPE_EXC_CALL}
-    pub const fn is_exc_uflow(&self)->bool{(self.0&Self::TYPE_MASK) ==Self::TYPE_EXC_UFLOW}
-        
-    pub const fn is_exc(&self)->bool{
-        (self.0&Self::TYPE_MASK) >=Self::TYPE_EXC_READ &&
-        (self.0&Self::TYPE_MASK) <=Self::TYPE_EXC_UFLOW
-    }
-    
-    pub const fn as_exc(&self)->Option<ScriptIp>{
-        if self.is_exc(){
-            Some(ScriptIp{
-                body: ((self.0 >> 28)&0xFFF) as u16,
-                index: ((self.0) & 0xFFF_FFFF) as u32
+    pub const fn as_err(&self)->Option<ValueError>{
+        if self.is_err(){
+            Some(ValueError{
+                ty: self.value_type(),
+                ip: ScriptIp::from_u40(self.0)
             })
         }
         else{
@@ -569,17 +597,8 @@ impl fmt::Display for Value {
         if let Some(index) = self.as_rsid(){
             return write!(f, "[RsID:{}]",index)
         }
-        if self.is_exc_read(){
-            return write!(f, "EXC_READ")
-        }
-        if self.is_exc_write(){
-            return write!(f, "EXC_WRITE")
-        }
-        if self.is_exc_call(){
-            return write!(f, "EXC_CALL")
-        }
-        if self.is_exc_uflow(){
-            return write!(f, "EXC_UFLOW")
+        if let Some(error) = self.as_err(){
+            return write!(f, "{}", error.ty)
         }
         if self.is_nil(){
             return write!(f, "nil")
