@@ -339,7 +339,18 @@ impl ScriptThread{
                 self.ip = call.return_ip;
                 self.stack.push(value);
             }
-            
+            Opcode::RETURN_IF_ERR=>{
+                let value = self.peek_stack_resolved(heap);
+                if value.is_err(){
+                    let call = self.calls.pop().unwrap();
+                    self.truncate_bases(call.bases, heap);
+                    self.ip = call.return_ip;
+                    self.stack.push(value);
+                }
+                else{
+                    self.ip.index += 1
+                }
+            }
             Opcode::IF_TEST=>{
                 let test = self.pop_stack_resolved(heap);
                 let test = heap.cast_to_bool(test);

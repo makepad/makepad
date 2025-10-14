@@ -32,7 +32,7 @@ impl ScriptModules{
         t
     }
     
-    pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, module:ObjectPtr, args:&[(Id, Value)],method:Id, f: F) 
+    pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, module:ObjectPtr, method:Id, args:&[(Id, Value)], f: F) 
     where F: Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static{
         // lets get the 
         let fn_index = native.fn_table.len();
@@ -53,11 +53,11 @@ impl ScriptModules{
         let module = heap.new_object_with_proto(id!(math_module).into());
         heap.set_object_value(self.obj, id!(math).into(), module.into());
         
-        self.add(heap, native, module, &[(id!(x), 0.0.into())], id!(sin), |ctx, args|{
+        self.add(heap, native, module, id!(sin), &[(id!(x), 0.0.into())], |ctx, args|{
             ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into(),Value::NIL)).sin().into()
         });
         
-        self.add(heap, native, module, &[(id!(x), 0.0.into()),(id!(y), Value::NIL)], id!(vec2), |ctx, args|{
+        self.add(heap, native, module, id!(vec2), &[(id!(x), 0.0.into()),(id!(y), Value::NIL)], |ctx, args|{
             ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into(),Value::NIL)).sin().into()
         });
     }
@@ -66,11 +66,21 @@ impl ScriptModules{
         let std = heap.new_object_with_proto(id!(std_module).into());
         heap.set_object_value(self.obj, id!(std).into(), std.into());
         
+        
+        self.add(heap, native, std, id!(assert), &[(id!(v), Value::NIL)], |ctx, args|{
+            if let Some(x) = ctx.heap.object_value(args, id!(v).into(),Value::NIL).as_bool(){
+                if x == true{
+                    return Value::NIL
+                }
+            }
+            return Value::from_err_assert(ctx.thread.ip)
+        });
+                
+        
         let range = heap.new_object_with_proto(id!(range).into());
         heap.set_object_value(std, id!(Range).into(), range.into());
         
-        self.add(heap, native, range, &[(id!(x), 0.0.into())], id!(step), |ctx, args|{
-            
+        self.add(heap, native, range, id!(step), &[(id!(x), 0.0.into())], |ctx, args|{
             if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
                 if let Some(x) = ctx.heap.object_value(args, id!(x).into(),Value::NIL).as_f64(){
                     ctx.heap.set_object_value(this, id!(step).into(), x.into());
