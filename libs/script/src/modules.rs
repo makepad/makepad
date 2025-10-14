@@ -73,7 +73,7 @@ impl ScriptModules{
                     return Value::NIL
                 }
             }
-            return Value::from_err_assert(ctx.thread.ip)
+            return Value::from_err_assertfail(ctx.thread.ip)
         });
                 
         

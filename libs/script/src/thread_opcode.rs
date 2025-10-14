@@ -243,7 +243,7 @@ impl ScriptThread{
                     }
                 }
                 else{
-                    self.stack.push(Value::from_err_call(self.ip));
+                    self.stack.push(Value::from_err_notfn(self.ip));
                     self.ip.index += 1;
                 }
             }
@@ -371,10 +371,10 @@ impl ScriptThread{
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    self.push_stack_value(heap.object_value(obj, field, Value::from_err_read(self.ip)))
+                    self.push_stack_value(heap.object_value(obj, field, Value::from_err_notfield(self.ip)))
                 }
                 else{
-                    self.push_stack_value(Value::from_err_read(self.ip));
+                    self.push_stack_value(Value::from_err_notobject(self.ip));
                 }
                 self.ip.index += 1;
             }
@@ -398,10 +398,10 @@ impl ScriptThread{
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    self.push_stack_value(heap.object_value(obj, field, Value::from_err_read(self.ip)))
+                    self.push_stack_value(heap.object_value(obj, field, Value::from_err_notfield(self.ip)))
                 }
                 else{
-                    self.push_stack_value(Value::from_err_read(self.ip));
+                    self.push_stack_value(Value::from_err_notobject(self.ip));
                 }
                 self.ip.index += 1;
             }
@@ -434,10 +434,10 @@ impl ScriptThread{
                 let index = self.pop_stack_resolved(heap);
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    self.push_stack_value(heap.object_value(obj, index,Value::from_err_read(self.ip)))
+                    self.push_stack_value(heap.object_value(obj, index,Value::from_err_notindex(self.ip)))
                 }
                 else{
-                    self.push_stack_value(Value::from_err_read(self.ip));
+                    self.push_stack_value(Value::from_err_notobject(self.ip));
                 }
                 self.ip.index += 1;
             }
