@@ -188,8 +188,8 @@ impl State{
             id!(>) => Opcode::GT,
             id!(<=) => Opcode::LEQ,
             id!(>=) => Opcode::GEQ,
-            id!(===) => Opcode::DEEP_EQ,
-            id!(!==) => Opcode::DEEP_NEQ,
+            id!(===) => Opcode::SHALLOW_EQ,
+            id!(!==) => Opcode::SHALLOW_NEQ,
                         
             id!(&&) => Opcode::LOGIC_AND,
             id!(||)  => Opcode::LOGIC_OR,
