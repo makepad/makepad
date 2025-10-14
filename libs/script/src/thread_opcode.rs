@@ -11,9 +11,9 @@ macro_rules! f64_op_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
         let op2 = $obj.pop_stack_resolved($heap);
         let op1 = $obj.pop_stack_resolved($heap);
-        let v1 = $heap.cast_to_f64(op1);
-        let v2 = $heap.cast_to_f64(op2);
-        $obj.stack.push(Value::from_f64(v1 $op v2));
+        let v1 = $heap.cast_to_f64(op1, $obj.ip);
+        let v2 = $heap.cast_to_f64(op2, $obj.ip);
+        $obj.stack.push(Value::from_f64_traced_nan(v1 $op v2, $obj.ip));
         $obj.ip.index += 1;
     }}
 }
@@ -22,21 +22,20 @@ macro_rules! f64_cmp_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
         let op2 = $obj.pop_stack_resolved($heap);
         let op1 = $obj.pop_stack_resolved($heap);
-        let v1 = $heap.cast_to_f64(op1);
-        let v2 = $heap.cast_to_f64(op2);
+        let v1 = $heap.cast_to_f64(op1, $obj.ip);
+        let v2 = $heap.cast_to_f64(op2, $obj.ip);
         $obj.stack.push(Value::from_bool(v1 $op v2));
         $obj.ip.index += 1;
     }}
 }
 
-
 macro_rules! fu64_op_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
         let op2 = $obj.pop_stack_resolved($heap);
         let op1 = $obj.pop_stack_resolved($heap);
-        let v1 = $heap.cast_to_f64(op1) as u64;
-        let v2 = $heap.cast_to_f64(op2) as u64;
-        $obj.stack.push(Value::from_f64((v1 $op v2) as f64));
+        let v1 = $heap.cast_to_f64(op1, $obj.ip) as u64;
+        let v2 = $heap.cast_to_f64(op2, $obj.ip) as u64;
+        $obj.stack.push(Value::from_f64_traced_nan((v1 $op v2) as f64, $obj.ip));
         $obj.ip.index += 1;
     }}
 } 
@@ -69,7 +68,7 @@ impl ScriptThread{
                 }
             },
             Opcode::NEG=>{
-                let v = heap.cast_to_f64(self.pop_stack_resolved(heap));
+                let v = heap.cast_to_f64(self.pop_stack_resolved(heap), self.ip);
                 self.push_stack_value(Value::from_f64(-v));
                 self.ip.index += 1;
             },
@@ -486,6 +485,11 @@ impl ScriptThread{
                             print!("{} ", loc);
                             heap.print_object(obj, true);
                             println!("");
+                        }
+                        else if let Some(nanip) = value.as_f64_traced_nan(){
+                            if let Some(loc2) = code.ip_to_loc(nanip){
+                                println!("{} NaN Traced to {}", loc, loc2);
+                            }
                         }
                         else{
                             println!("{} {:?}: {:?}", loc, value.value_type(), value);
