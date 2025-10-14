@@ -360,7 +360,7 @@ impl ScriptHeap{
         self.objects[ptr.index as usize].tag.clear_deep()
     }
     
-    pub fn object_value_index(&self, ptr: ObjectPtr, index: Value)->Value{
+    pub fn object_value_index(&self, ptr: ObjectPtr, index: Value, def:Value)->Value{
         let object = &self.objects[ptr.index as usize];
         
         let ty = object.tag.get_type();
@@ -371,7 +371,7 @@ impl ScriptHeap{
                 return *value
             }
             else{
-                return Value::NIL
+                return def
             }
         }
         if ty.is_vec1(){
@@ -380,7 +380,7 @@ impl ScriptHeap{
                 return *value
             }
             else{
-                return Value::NIL
+                return def
             }
         }
         if ty.is_typed(){ // typed access to the vec
@@ -391,23 +391,23 @@ impl ScriptHeap{
                 return *value
             }
             else{
-                return Value::NIL
+                return def
             }
         }
-        Value::NIL
+        def
     }
     
-    pub fn object_value_prefixed(&self, ptr: ObjectPtr, key: Value)->Value{
+    pub fn object_value_prefixed(&self, ptr: ObjectPtr, key: Value, def:Value)->Value{
         let object = &self.objects[ptr.index as usize];
         for chunk in object.vec.rchunks(2){
             if chunk[0] == key{
                 return chunk[1]
             }
         }
-        return Value::NIL
+        return def
     }
     
-    pub fn object_value_deep(&self, obj_ptr:ObjectPtr, key: Value)->Value{
+    pub fn object_value_deep(&self, obj_ptr:ObjectPtr, key: Value, def:Value)->Value{
         let mut ptr = obj_ptr;
         loop{
             let object = &self.objects[ptr.index as usize];
@@ -428,42 +428,42 @@ impl ScriptHeap{
                 break;
             }
         }
-        Value::NIL
+        def
     }
     
-    pub fn object_method(&self, ptr:ObjectPtr, key:Value)->Value{
+    pub fn object_method(&self, ptr:ObjectPtr, key:Value, def:Value)->Value{
         let object = &self.objects[ptr.index as usize];
         if object.tag.has_methods(){
-            self.object_value(ptr, key)
+            self.object_value(ptr, key, def)
         }
         else{
-            Value::NIL
+            def
         }
     }
     
-    pub fn object_value(&self, ptr:ObjectPtr, key:Value)->Value{
+    pub fn object_value(&self, ptr:ObjectPtr, key:Value, def:Value)->Value{
         // hard array index
         if key.is_id(){
-            return self.object_value_deep(ptr, key)
+            return self.object_value_deep(ptr, key, def)
         }
         if key.is_index(){
-            return self.object_value_index(ptr, key)
+            return self.object_value_index(ptr, key, def)
         }
         if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
-            return self.object_value_deep(ptr, key)
+            return self.object_value_deep(ptr, key, def)
         }
         // TODO implement string lookup
-        Value::NIL
+        def
     }
     
-    pub fn object_value_path(&self, ptr:ObjectPtr, keys:&[Id])->Value{
+    pub fn object_value_path(&self, ptr:ObjectPtr, keys:&[Id], def:Value)->Value{
         let mut value:Value = ptr.into();
         for key in keys{
             if let Some(obj) = value.as_object(){
-                value = self.object_value(obj, key.into());
+                value = self.object_value(obj, key.into(), def);
             }
             else{
-                return Value::NIL;
+                return def;
             }
         }
         value
@@ -474,6 +474,10 @@ impl ScriptHeap{
     }
     
     pub fn object(&self, ptr:ObjectPtr)->&Object{
+        &self.objects[ptr.index as usize]
+    }
+    
+    pub fn object_mut(&self, ptr:ObjectPtr)->&Object{
         &self.objects[ptr.index as usize]
     }
     

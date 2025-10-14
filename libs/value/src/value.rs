@@ -11,6 +11,12 @@ impl Default for Value{
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScriptIp{
+    pub body: u16,
+    pub index: u32,
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct ObjectPtr{
     pub index: u32    
@@ -86,34 +92,41 @@ impl From<Opcode> for Value{
 pub struct ValueType(u8);
 impl ValueType{
     pub const NUMBER: Self = Self(0);
-    pub const NAN: Self = Self(0x01);
-    pub const BOOL: Self = Self(0x02);
-    pub const NIL: Self = Self(0x03);
-    pub const COLOR: Self = Self(0x04);
-    pub const STRING: Self = Self(0x05);
-    pub const OBJECT: Self = Self(0x06);
-    pub const FACTORY: Self = Self(0x07);
-    pub const OPCODE: Self = Self(0x08);
-    pub const ID_INDEX_HOLE: Self = Self(0x09);
-    pub const INLINE_STRING_0: Self = Self(0x0A);
-    pub const INLINE_STRING_1: Self = Self(0x0B);
-    pub const INLINE_STRING_2: Self = Self(0x0C);
-    pub const INLINE_STRING_3: Self = Self(0x0D);
-    pub const INLINE_STRING_4: Self = Self(0x0E);
-    pub const INLINE_STRING_5: Self = Self(0x0F);
-    pub const INLINE_STRING_END: Self = Self(0x10);
+    pub const NAN: Self = Self(1);
+    pub const BOOL: Self = Self(2);
+    pub const NIL: Self = Self(3);
+    pub const COLOR: Self = Self(4);
+    pub const STRING: Self = Self(5);
+    pub const OBJECT: Self = Self(6);
+    pub const RSID: Self = Self(7);
+    pub const OPCODE: Self = Self(8);
+    
+    pub const REDUX_MARKER: Self = Self(9);
+    pub const INLINE_STRING_0: Self = Self(9);
+    pub const INLINE_STRING_1: Self = Self(10);
+    pub const INLINE_STRING_2: Self = Self(11);
+    pub const INLINE_STRING_3: Self = Self(12);
+    pub const INLINE_STRING_4: Self = Self(13);
+    pub const INLINE_STRING_5: Self = Self(14);
+    pub const INLINE_STRING_END: Self = Self(15);
+    pub const EXC_READ: Self = Self(16);
+    pub const EXC_WRITE: Self = Self(17);
+    pub const EXC_CALL: Self = Self(18);
+    pub const EXC_UFLOW: Self = Self(19);
+    
     pub const ID: Self = Self(0x80);
     
-    pub const REDUX_NUMBER: usize = 0x00;
-    pub const REDUX_NAN: usize = 0x01;
-    pub const REDUX_BOOL: usize = 0x02;
-    pub const REDUX_NIL: usize = 0x03;
-    pub const REDUX_COLOR: usize = 0x04;
-    pub const REDUX_STRING: usize = 0x05;
-    pub const REDUX_OBJECT: usize = 0x06;
-    pub const REDUX_ID: usize = 0x07;
-    pub const REDUX_FACTORY: usize = 0x06;
-    pub const REDUX_OPCODE: usize = 0x07;
+    pub const REDUX_NUMBER: usize = 0;
+    pub const REDUX_NAN: usize = 1;
+    pub const REDUX_BOOL: usize = 2;
+    pub const REDUX_NIL: usize = 3;
+    pub const REDUX_COLOR: usize = 4;
+    pub const REDUX_STRING: usize = 5;
+    pub const REDUX_OBJECT: usize = 6;
+    pub const REDUX_EXC: usize = 7;
+    pub const REDUX_ID: usize = 8;
+    pub const REDUX_FACTORY: usize = 9;
+    pub const REDUX_OPCODE: usize = 10;
     
     pub const fn to_u64(&self)->u64{ ((self.0 as u64) << 40) | 0xFFFF_0000_0000_0000 }
     pub const fn from_u64(val:u64)->Self{
@@ -125,9 +138,12 @@ impl ValueType{
     }
     
     pub const fn to_redux(&self)->usize{
-        if self.0 > Self::ID_INDEX_HOLE.0{
+        if self.0 >= Self::REDUX_MARKER.0{
             if self.0 >= Self::ID.0{
                 return Self::REDUX_ID
+            }
+            else if self.0 >= Self::EXC_READ.0{
+                Self::REDUX_EXC as usize
             }
             else{
                 Self::REDUX_STRING as usize 
@@ -160,7 +176,7 @@ impl fmt::Display for ValueType {
             Self::COLOR=>write!(f,"color"),
             Self::STRING=>write!(f,"string"),
             Self::OBJECT=>write!(f,"object"),
-            Self::FACTORY=>write!(f,"factory"),
+            Self::RSID=>write!(f,"rsid"),
             Self::OPCODE=>write!(f,"opcode"),
             Self::INLINE_STRING_0=>write!(f,"INLINE_STRING_0"),
             Self::INLINE_STRING_1=>write!(f,"INLINE_STRING_1"),
@@ -168,6 +184,7 @@ impl fmt::Display for ValueType {
             Self::INLINE_STRING_3=>write!(f,"INLINE_STRING_3"),
             Self::INLINE_STRING_4=>write!(f,"INLINE_STRING_4"),
             Self::INLINE_STRING_5=>write!(f,"INLINE_STRING_5"),
+            
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ValueType?")
         }
@@ -196,7 +213,7 @@ impl Value{
     pub const TYPE_COLOR: u64 = ValueType::COLOR.to_u64();
     pub const TYPE_STRING: u64 = ValueType::STRING.to_u64();
     pub const TYPE_OBJECT: u64 = ValueType::OBJECT.to_u64();
-    pub const TYPE_FACTORY: u64 = ValueType::FACTORY.to_u64();
+    pub const TYPE_RSID: u64 = ValueType::RSID.to_u64();
     
     pub const TYPE_INLINE_STRING_0: u64 = ValueType::INLINE_STRING_0.to_u64();
     pub const TYPE_INLINE_STRING_1: u64 = ValueType::INLINE_STRING_1.to_u64();
@@ -206,6 +223,11 @@ impl Value{
     pub const TYPE_INLINE_STRING_5: u64 = ValueType::INLINE_STRING_5.to_u64();
     pub const TYPE_INLINE_STRING_END: u64 = ValueType::INLINE_STRING_END.to_u64();
     
+    pub const TYPE_EXC_READ: u64 = ValueType::EXC_READ.to_u64();
+    pub const TYPE_EXC_WRITE: u64 = ValueType::EXC_WRITE.to_u64();
+    pub const TYPE_EXC_CALL: u64 = ValueType::EXC_CALL.to_u64();
+    pub const TYPE_EXC_UFLOW: u64 = ValueType::EXC_UFLOW.to_u64();
+        
     pub const TYPE_ID: u64 = ValueType::ID.to_u64();
     
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
@@ -218,7 +240,45 @@ impl Value{
     pub const fn from_opcode_args(op:Opcode, args:OpcodeArgs)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32 | (args.0 as u64))}
         
     // TODO: make this behave like javascript as much as is sensible
+        
+    pub const fn from_exc_read(ip:ScriptIp)->Self{
+        Self(Self::TYPE_EXC_READ | ((ip.body as u64)<<28) | ip.index as u64)
+    }
+        
+    pub const fn from_exc_write(ip:ScriptIp)->Self{
+        Self(Self::TYPE_EXC_WRITE | ((ip.body as u64)<<28) | ip.index as u64)
+    }
     
+    pub const fn from_exc_call(ip:ScriptIp)->Self{
+        Self(Self::TYPE_EXC_CALL | ((ip.body as u64)<<28) | ip.index as u64)
+    }
+    
+    pub const fn from_exc_uflow(ip:ScriptIp)->Self{
+        Self(Self::TYPE_EXC_UFLOW | ((ip.body as u64)<<28) | ip.index as u64)
+    }
+    
+    pub const fn is_exc_read(&self)->bool{(self.0&Self::TYPE_MASK) ==Self::TYPE_EXC_READ}
+    pub const fn is_exc_write(&self)->bool{(self.0&Self::TYPE_MASK) ==Self::TYPE_EXC_WRITE}
+    pub const fn is_exc_call(&self)->bool{(self.0&Self::TYPE_MASK) ==Self::TYPE_EXC_CALL}
+    pub const fn is_exc_uflow(&self)->bool{(self.0&Self::TYPE_MASK) ==Self::TYPE_EXC_UFLOW}
+        
+    pub const fn is_exc(&self)->bool{
+        (self.0&Self::TYPE_MASK) >=Self::TYPE_EXC_READ &&
+        (self.0&Self::TYPE_MASK) <=Self::TYPE_EXC_UFLOW
+    }
+    
+    pub const fn as_exc(&self)->Option<ScriptIp>{
+        if self.is_exc(){
+            Some(ScriptIp{
+                body: ((self.0 >> 28)&0xFFF) as u16,
+                index: ((self.0) & 0xFFF_FFFF) as u32
+            })
+        }
+        else{
+            None
+        }
+    }
+        
     pub const fn value_type(&self)->ValueType{
         if self.is_non_nan_number(){
             return ValueType::NUMBER
@@ -248,8 +308,8 @@ impl Value{
         Self(val as u64|Self::TYPE_COLOR)
     }
     
-    pub const fn from_factory(val: u32)->Self{
-        Self(val as u64|Self::TYPE_FACTORY)
+    pub const fn from_rsid(val: u64)->Self{
+        Self(val as u64|(Self::TYPE_RSID&0xFF_FFFF_FFFF))
     }
     
     pub const fn from_id(val: Id)->Self{
@@ -356,7 +416,6 @@ impl Value{
         self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
     }
         
-        
     pub const fn as_object(&self)->Option<ObjectPtr>{
         if self.is_object(){
             return Some(ObjectPtr{
@@ -395,12 +454,6 @@ impl Value{
         false
     }
     
-    pub const fn set_opcode_arg(&mut self, args:OpcodeArgs){
-        if self.is_opcode(){
-            self.0 |= args.0 as u64;
-        }
-    }
-    
     pub const fn set_opcode_is_statement(&mut self){
         if self.is_opcode(){
             self.0 |= OpcodeArgs::STATEMENT_FLAG as u64;
@@ -424,9 +477,9 @@ impl Value{
         None
     }
     
-    pub const fn as_factory(&self)->Option<u32>{
-        if self.is_factory(){
-            return Some((self.0&0xffff_ffff) as u32)
+    pub const fn as_rsid(&self)->Option<u64>{
+        if self.is_rsid(){
+            return Some((self.0&0xff_ffff_ffff) as u64)
         }
         None
     }
@@ -479,8 +532,8 @@ impl Value{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
     }
     
-    pub const fn is_factory(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_FACTORY
+    pub const fn is_rsid(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_RSID
     }
 }
 
@@ -513,8 +566,20 @@ impl fmt::Display for Value {
         if let Some(ptr) = self.as_object(){
             return write!(f, "[Object:{}]",ptr.index)
         }
-        if let Some(index) = self.as_factory(){
-            return write!(f, "[Factory:{}]",index)
+        if let Some(index) = self.as_rsid(){
+            return write!(f, "[RsID:{}]",index)
+        }
+        if self.is_exc_read(){
+            return write!(f, "EXC_READ")
+        }
+        if self.is_exc_write(){
+            return write!(f, "EXC_WRITE")
+        }
+        if self.is_exc_call(){
+            return write!(f, "EXC_CALL")
+        }
+        if self.is_exc_uflow(){
+            return write!(f, "EXC_UFLOW")
         }
         if self.is_nil(){
             return write!(f, "nil")
