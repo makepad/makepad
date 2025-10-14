@@ -123,10 +123,10 @@ impl ValueType{
     pub const REDUX_COLOR: usize = 4;
     pub const REDUX_STRING: usize = 5;
     pub const REDUX_OBJECT: usize = 6;
-    pub const REDUX_EXC: usize = 7;
-    pub const REDUX_ID: usize = 8;
-    pub const REDUX_FACTORY: usize = 9;
-    pub const REDUX_OPCODE: usize = 10;
+    pub const REDUX_RSID: usize = 7;
+    pub const REDUX_OPCODE: usize = 8;
+    pub const REDUX_EXC: usize = 9;
+    pub const REDUX_ID: usize = 10;
     
     pub const fn to_u64(&self)->u64{ ((self.0 as u64) << 40) | 0xFFFF_0000_0000_0000 }
     pub const fn from_u64(val:u64)->Self{
