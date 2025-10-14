@@ -7,46 +7,92 @@ use crate::object::*;
 use crate::script::*;
 use crate::thread::*;
 
-macro_rules! f64_op_impl{
+macro_rules! f64_scope_assign_op_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
-        let op2 = $obj.pop_stack_resolved($heap);
-        let op1 = $obj.pop_stack_resolved($heap);
-        let v1 = $heap.cast_to_f64(op1, $obj.ip);
-        let v2 = $heap.cast_to_f64(op2, $obj.ip);
-        $obj.stack.push(Value::from_f64_traced_nan(v1 $op v2, $obj.ip));
+        let b = $obj.pop_stack_resolved($heap);
+        let a = $obj.pop_stack_value();
+        if let Some(id) = a.as_id(){
+            let va = $obj.scope_value($heap, id);
+            if va.is_err(){
+                $obj.stack.push(va);
+            }
+            else{
+                let fa = $heap.cast_to_f64(va, $obj.ip);
+                let fb = $heap.cast_to_f64(b, $obj.ip);
+                $obj.set_scope_value($heap, id, Value::from_f64_traced_nan((fa $op fb), $obj.ip));
+                $obj.stack.push(Value::NIL);
+            }
+        }
+        else{
+            $obj.stack.push(Value::from_err_notassignable($obj.ip));
+        }
         $obj.ip.index += 1;
     }}
 }
 
-macro_rules! f64_cmp_impl{
+macro_rules! fu64_scope_assign_op_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
-        let op2 = $obj.pop_stack_resolved($heap);
-        let op1 = $obj.pop_stack_resolved($heap);
-        let v1 = $heap.cast_to_f64(op1, $obj.ip);
-        let v2 = $heap.cast_to_f64(op2, $obj.ip);
-        $obj.stack.push(Value::from_bool(v1 $op v2));
+        let b = $obj.pop_stack_resolved($heap);
+        let a = $obj.pop_stack_value();
+        if let Some(id) = a.as_id(){
+            let va = $obj.scope_value($heap, id);
+            if va.is_err(){
+                $obj.stack.push(va);
+            }
+            else{
+                let ua = $heap.cast_to_f64(va, $obj.ip) as u64;
+                let ub = $heap.cast_to_f64(b, $obj.ip) as u64;
+                $obj.set_scope_value($heap, id, Value::from_f64_traced_nan((ua $op ub) as f64, $obj.ip));
+                $obj.stack.push(Value::NIL);
+            }
+        }
+        else{
+            $obj.stack.push(Value::from_err_notassignable($obj.ip));
+        }
+        $obj.ip.index += 1;
+    }}
+}
+
+macro_rules! f64_op_impl{
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let b = $obj.pop_stack_resolved($heap);
+        let a = $obj.pop_stack_resolved($heap);
+        let fa = $heap.cast_to_f64(a, $obj.ip);
+        let fb = $heap.cast_to_f64(b, $obj.ip);
+        $obj.stack.push(Value::from_f64_traced_nan(fa $op fb, $obj.ip));
         $obj.ip.index += 1;
     }}
 }
 
 macro_rules! fu64_op_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
-        let op2 = $obj.pop_stack_resolved($heap);
-        let op1 = $obj.pop_stack_resolved($heap);
-        let v1 = $heap.cast_to_f64(op1, $obj.ip) as u64;
-        let v2 = $heap.cast_to_f64(op2, $obj.ip) as u64;
-        $obj.stack.push(Value::from_f64_traced_nan((v1 $op v2) as f64, $obj.ip));
+        let b = $obj.pop_stack_resolved($heap);
+        let a = $obj.pop_stack_resolved($heap);
+        let ua = $heap.cast_to_f64(a, $obj.ip) as u64;
+        let ub = $heap.cast_to_f64(b, $obj.ip) as u64;
+        $obj.stack.push(Value::from_f64_traced_nan((ua $op ub) as f64, $obj.ip));
         $obj.ip.index += 1;
     }}
 } 
 
+macro_rules! f64_cmp_impl{
+    ($obj:ident, $heap:ident, $op:tt)=>{{
+        let b = $obj.pop_stack_resolved($heap);
+        let a = $obj.pop_stack_resolved($heap);
+        let fa = $heap.cast_to_f64(a, $obj.ip);
+        let fb = $heap.cast_to_f64(b, $obj.ip);
+        $obj.stack.push(Value::from_bool(fa $op fb));
+        $obj.ip.index += 1;
+    }}
+}
+
 macro_rules! bool_op_impl{
     ($obj:ident, $heap:ident, $op:tt)=>{{
-        let op2 = $obj.pop_stack_resolved($heap);
-        let op1 = $obj.pop_stack_resolved($heap);
-        let v1 = $heap.cast_to_bool(op1);
-        let v2 = $heap.cast_to_bool(op2);
-        $obj.stack.push(Value::from_bool((v1 $op v2)));
+        let b = $obj.pop_stack_resolved($heap);
+        let a = $obj.pop_stack_resolved($heap);
+        let ba = $heap.cast_to_bool(a);
+        let bb = $heap.cast_to_bool(b);
+        $obj.stack.push(Value::from_bool((ba $op bb)));
         $obj.ip.index += 1;
     }}
 } 
@@ -83,6 +129,29 @@ impl ScriptThread{
             Opcode::AND=>fu64_op_impl!(self, heap,&),
             Opcode::OR=>fu64_op_impl!(self, heap, |),
             Opcode::XOR=>fu64_op_impl!(self, heap, ^),
+                                
+            Opcode::CONCAT=>{
+                let op1 = self.pop_stack_resolved(heap);
+                let op2 = self.pop_stack_resolved(heap);
+                let ptr = heap.new_string_with(|heap, out|{
+                    heap.cast_to_string(op1, out);
+                    heap.cast_to_string(op2, out);
+                });
+                self.push_stack_value(ptr.into());
+                self.ip.index += 1;
+            }
+            Opcode::EQ=> {
+                let b = self.pop_stack_resolved(heap);
+                let a = self.pop_stack_resolved(heap);
+                self.push_stack_value(self.deep_eq(heap, a, b).into());
+                self.ip.index += 1;
+            }
+            Opcode::NEQ=> {
+                let b = self.pop_stack_resolved(heap);
+                let a = self.pop_stack_resolved(heap);
+                self.push_stack_value((!self.deep_eq(heap, a, b)).into());
+                self.ip.index += 1;
+            }
             
             Opcode::LT=>f64_cmp_impl!(self, heap, <),
             Opcode::GT=>f64_cmp_impl!(self, heap, >),
@@ -114,28 +183,7 @@ impl ScriptThread{
                 self.push_stack_value((!self.shallow_eq(heap, a, b)).into());
                 self.ip.index += 1;
             }
-            Opcode::EQ=> {
-                let b = self.pop_stack_resolved(heap);
-                let a = self.pop_stack_resolved(heap);
-                self.push_stack_value(self.deep_eq(heap, a, b).into());
-                self.ip.index += 1;
-            }
-            Opcode::NEQ=> {
-                let b = self.pop_stack_resolved(heap);
-                let a = self.pop_stack_resolved(heap);
-                self.push_stack_value((!self.deep_eq(heap, a, b)).into());
-                self.ip.index += 1;
-            }
-            Opcode::CONCAT=>{
-                let op1 = self.pop_stack_resolved(heap);
-                let op2 = self.pop_stack_resolved(heap);
-                let ptr = heap.new_string_with(|heap, out|{
-                    heap.cast_to_string(op1, out);
-                    heap.cast_to_string(op2, out);
-                });
-                self.push_stack_value(ptr.into());
-                self.ip.index += 1;
-            }
+            
             Opcode::ASSIGN_ME=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
@@ -166,15 +214,45 @@ impl ScriptThread{
                 self.ip.index += 1;
             }
             
+            Opcode::ASSIGN=>{
+            }
+            
+            Opcode::ASSIGN_ADD=>f64_scope_assign_op_impl!(self, heap, +),
+            Opcode::ASSIGN_SUB=>f64_scope_assign_op_impl!(self, heap, -),
+            Opcode::ASSIGN_MUL=>f64_scope_assign_op_impl!(self, heap, *),
+            Opcode::ASSIGN_DIV=>f64_scope_assign_op_impl!(self, heap, /),
+            Opcode::ASSIGN_MOD=>f64_scope_assign_op_impl!(self, heap, %),
+            Opcode::ASSIGN_AND=>fu64_scope_assign_op_impl!(self, heap, &),
+            Opcode::ASSIGN_OR=>fu64_scope_assign_op_impl!(self, heap, |),
+            Opcode::ASSIGN_XOR=>fu64_scope_assign_op_impl!(self, heap, ^),
+            Opcode::ASSIGN_SHL=>fu64_scope_assign_op_impl!(self, heap, <<),
+            Opcode::ASSIGN_SHR=>fu64_scope_assign_op_impl!(self, heap, >>),
+            Opcode::ASSIGN_IFNIL=>{
+                let b = self.pop_stack_resolved(heap);
+                let a = self.pop_stack_value();
+                if let Some(id) = a.as_id(){
+                    let va = self.scope_value(heap, id);
+                    if va.is_err() || va.is_nil(){
+                        self.set_scope_value(heap, id, b);
+                    }
+                    self.stack.push(Value::NIL);
+                }
+                else{
+                    self.stack.push(Value::from_err_notassignable(self.ip));
+                }
+                self.ip.index += 1;
+            }
+                        
             Opcode::ASSIGN_INDEX=>{
                 let value = self.pop_stack_resolved(heap);
                 let index = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
                     heap.set_object_value(obj, index, value);
+                    self.push_stack_value(value);
                 }
-                if !args.is_statement(){
-                    self.push_stack_value(Value::NIL);
+                else{
+                    self.push_stack_value(Value::from_err_notobject(self.ip));
                 }
                 self.ip.index += 1;
             }
@@ -185,9 +263,10 @@ impl ScriptThread{
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
                     heap.set_object_value(obj, field, value);
+                    self.push_stack_value(value);
                 }
-                if !args.is_statement(){
-                    self.push_stack_value(Value::NIL);
+                else{
+                    self.push_stack_value(Value::from_err_notobject(self.ip));
                 }
                 self.ip.index += 1;
             }
@@ -442,10 +521,10 @@ impl ScriptThread{
                     let me = self.mes.last().unwrap();
                     let (key, value) = if let Some(id) = value.as_id(){
                         if value.is_escaped_id(){ (Value::NIL, value) }
-                        else{(value, self.resolve(id, heap))}
+                        else{(value, self.scope_value(heap, id))}
                     }else{(Value::NIL,value)};
                         
-                    if !value.is_nil() || me.ty != ScriptMe::OBJ{
+                    if (!value.is_nil() && !value.is_err()) || me.ty != ScriptMe::OBJ{
                         if me.ty == ScriptMe::CALL{
                             heap.push_fn_arg(me.object, value);       
                         }
@@ -593,7 +672,7 @@ impl ScriptThread{
                         ValueType::REDUX_STRING=>id == id!(string).into(),
                         ValueType::REDUX_OBJECT=>{
                             id == id!(object).into() || {
-                                if let Some(rhs) = self.resolve(id, heap).as_object(){
+                                if let Some(rhs) = self.scope_value(heap,id).as_object(){
                                     if let Some(obj) = lhs.as_object(){
                                         heap.object_has_proto(obj, rhs.into())
                                     }
@@ -630,13 +709,13 @@ impl ScriptThread{
     }
     
     pub fn deep_eq(&self, heap:&ScriptHeap, a:Value, b:Value)->bool{
+        if a == b{
+            return true
+        }
         if a.is_object(){
             let mut aw = a;
             let mut bw = b;
             loop{
-                if aw == bw{
-                    return true
-                }
                 if let Some(pa) = aw.as_object(){
                     if let Some(pb) = bw.as_object(){
                         let oa = heap.object(pa);
@@ -662,6 +741,9 @@ impl ScriptThread{
                         }
                         aw = oa.proto;
                         bw = ob.proto;
+                        if aw == bw{
+                            return true
+                        }
                     }
                     else{
                         return false
@@ -678,31 +760,13 @@ impl ScriptThread{
     }
     
     pub fn shallow_eq(&self, heap:&ScriptHeap, a:Value, b:Value)->bool{
-        if let Some(a) = a.as_f64(){
-            if let Some(b) = b.as_f64(){a == b}else{false}
+        if a == b{
+            return true
         }
-        else if let Some(a) = a.as_bool(){
-            if let Some(b) = b.as_bool(){a == b}else{false}
-        } 
-        else if let Some(a) = a.as_id(){
-            if let Some(b) = b.as_id(){a == b}else{false}
-        }
-        else if let Some(a) = a.as_object(){
-            if let Some(b) = b.as_object(){a == b}else{false}
-        }
-        else if let Some(a) = a.as_color(){
-            if let Some(b) = b.as_color(){a == b}else{false}
-        }
-        else if let Some(a) = a.as_color(){
-            if let Some(b) = b.as_color(){a == b}else{false}
-        }
-        else if a.is_nil(){
-            b.is_nil()
-        }
-        else if let Some(cmp) = a.as_inline_string(|a|{
+        if let Some(cmp) = a.as_inline_string(|a|{
             if let Some(cmp) = b.as_inline_string(|b|{
                 a == b
-            }){cmp}
+            }){return cmp}
             else{
                 if let Some(b)  = b.as_string(){
                     heap.string(b) == a
@@ -711,24 +775,19 @@ impl ScriptThread{
                     false
                 }
             }
-        }){cmp}
+        }){return cmp}
         else if let Some(a) = a.as_string(){
             let a = heap.string(a);
             if let Some(cmp) = b.as_inline_string(|b|{
                 a == b
-            }){cmp}
+            }){return cmp}
             else{
                 if let Some(b)  = b.as_string(){
-                    heap.string(b) == a
-                }
-                else{
-                    false
+                    return heap.string(b) == a
                 }
             }
         }
-        else{
-            false
-        }
+        false
     }
         
     pub fn begin_for_loop_inner(&mut self, heap:&mut ScriptHeap, jump:u32, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>, first_value:Value, first_index:f64, first_key:Value){    
