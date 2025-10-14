@@ -227,6 +227,9 @@ impl ScriptHeap{
         else if let Some(v) = v.as_color(){
             return v as f64
         }
+        else if v.is_nil(){
+            0.0
+        }
         else {
             Value::from_f64_traced_nan(f64::NAN, ip).as_f64().unwrap()
         }

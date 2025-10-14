@@ -476,8 +476,8 @@ impl ScriptTokenizer{
                                 self.state = State::LineComment;
                                 self.temp.clear();
                             },
-                            "==" | "!=" | ">:" | "<:" | "^:" | "+:" |
-                            "<=" | ">=" | "&&" | "||" | 
+                            ">:" | "<:" | "^:" | "+:" |
+                            "<=" | ">=" | "&&" | "||" | "|?" |
                             "+=" | "-=" | "*=" | "/=" | 
                             "%=" | "&=" | "|=" | "^=" | ".?" =>{
                                 self.emit_operator();
@@ -491,7 +491,7 @@ impl ScriptTokenizer{
                     }
                     if self.temp.len() == 3{ 
                         match self.temp.as_str(){
-                            "<<=" | ">>=" =>{
+                            "<<=" | ">>=" | "===" | "!=="=>{
                                 self.emit_operator();
                             }
                             _=>{

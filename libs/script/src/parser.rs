@@ -100,10 +100,10 @@ impl State{
             id!(|)  => 13,
             id!(-:) => 14,
             id!(++) => 14,
-            id!(==) | id!(!=)  | id!(<) | id!(>) | id!(<=) | id!(>=) => 15,
+            id!(===) | id!(!==) |id!(==) | id!(!=)  | id!(<) | id!(>) | id!(<=) | id!(>=) => 15,
             id!(is) => 15,
             id!(&&)  => 16,
-            id!(||)  => 17,
+            id!(||) | id!(|?)  => 17,
             id!(..) =>  18,
             id!(:) | id!(=) | id!(>:) | id!(<:) | id!(^:) | id!(+=)  | id!(-=) | id!(*=) | id!(/=) | id!(%=) => 19,
             id!(&=) | id!(|=)  | id!(^=) | id!(<<=) | id!(>>=) => 20,
@@ -188,8 +188,12 @@ impl State{
             id!(>) => Opcode::GT,
             id!(<=) => Opcode::LEQ,
             id!(>=) => Opcode::GEQ,
+            id!(===) => Opcode::DEEP_EQ,
+            id!(!==) => Opcode::DEEP_NEQ,
+                        
             id!(&&) => Opcode::LOGIC_AND,
             id!(||)  => Opcode::LOGIC_OR,
+            id!(|?) => Opcode::NIL_OR,
             id!(:) => Opcode::ASSIGN_ME,
             id!(<:) => Opcode::ASSIGN_ME_BEFORE,
             id!(>:) => Opcode::ASSIGN_ME_AFTER,
@@ -941,7 +945,6 @@ impl ScriptParser{
                 if tok.is_open_round(){ 
                     if let Some(last) = self.state.pop(){
                         if let State::EmitOp{what_op:id!(.)|id!(.?),..} = last{
-                            //self.code.push(State::operator_to_opcode(id!(.)));
                             self.push_code(Opcode::METHOD_CALL_ARGS.into(), self.index);
                             self.state.push(State::EndCall{is_method:true, index:self.index});
                             self.state.push(State::BeginStmt{last_was_sep:false});
