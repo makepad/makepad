@@ -86,30 +86,31 @@ impl ObjectType{
 pub struct RustRef(u64);
 
 #[derive(Debug,Clone,Copy)]
+pub struct NativeId{
+    pub index: u32
+}
+
+#[derive(Debug,Clone,Copy)]
 pub enum ScriptFnPtr{
-    Script{
-        body: u16,
-        ip: u32,
-    },
-    Native{
-        index: u32     
-    }
+    Script(ScriptIp),
+    Native(NativeId)
 }
 
 impl ObjectTag{
-    pub const MARK:u64 = 0x800;
-    pub const ALLOCED:u64 = 0x1000;
-    pub const DEEP:u64 = 0x2000;
-    pub const REFFED: u64 = 0x4000;
-    pub const HAS_METHODS: u64 = 0x8000;
-    pub const FLAG_MASK: u64 = 0xf800;
-            
-    pub const SCRIPT_FN: u64 = 0x100;
-    pub const NATIVE_FN: u64 = 0x200;
-    pub const RUST_REF:  u64 = 0x300;
-    pub const REF_MASK:  u64 = 0x700;
+    pub const MARK:u64 = 0x10;
+    pub const ALLOCED:u64 = 0x20;
+    pub const DEEP:u64 = 0x40;
+    pub const DIRTY:u64 = 0x80;
+    pub const REFFED: u64 = 0x100;
+    pub const HAS_METHODS: u64 = 0x200;
+    pub const FLAG_MASK: u64 = 0xff0;
+                
+    pub const SCRIPT_FN: u64 = 0x1000;
+    pub const NATIVE_FN: u64 = 0x2000;
+    pub const RUST_REF:  u64 = 0x3000;
+    pub const REF_MASK:  u64 = 0xf000;
         
-    pub const TYPE_MASK: u64 = 0xff;
+    pub const TYPE_MASK: u64 = 0x0f;
             
     const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::HAS_METHODS;
         
@@ -120,11 +121,11 @@ impl ObjectTag{
     pub fn set_fn(&mut self, ptr:ScriptFnPtr){
         self.0 &= !(Self::REF_MASK);
         match ptr{
-            ScriptFnPtr::Script{body, ip}=>{
-                self.0 |= ((ip as u64)<<32) | ((body as u64)<<16) | Self::SCRIPT_FN
+            ScriptFnPtr::Script(ip)=>{
+                self.0 |= ((ip.index as u64)<<32) | ((ip.body as u64)<<16) | Self::SCRIPT_FN
             }
-            ScriptFnPtr::Native{index}=>{
-                self.0 |= Self::NATIVE_FN | ((index as u64)<<32)
+            ScriptFnPtr::Native(ni)=>{
+                self.0 |= Self::NATIVE_FN | ((ni.index as u64)<<32)
             }
         }
         
@@ -146,10 +147,10 @@ impl ObjectTag{
     
     pub fn as_fn(&self)->Option<ScriptFnPtr>{
         if self.0 & Self::REF_MASK == Self::SCRIPT_FN{
-            Some(ScriptFnPtr::Script{body:((self.0>>16)&0xffff) as u16, ip:(self.0 >> 32) as u32})
+            Some(ScriptFnPtr::Script(ScriptIp{body:((self.0>>16)&0xffff) as u16, index:(self.0 >> 32) as u32}))
         }
         else if self.0 & Self::REF_MASK == Self::NATIVE_FN{
-            Some(ScriptFnPtr::Native{index:(self.0 >> 32) as u32})
+            Some(ScriptFnPtr::Native(NativeId{index:(self.0 >> 32) as u32}))
         }
         else{
             None

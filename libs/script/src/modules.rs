@@ -17,7 +17,7 @@ pub struct ScriptBuiltins{
 impl ScriptBuiltins{
     pub fn new(heap:&mut ScriptHeap, modules:&ScriptModules)->Self{
         Self{
-            range: heap.object_value_path(modules.obj, ids!(std.Range)).as_object().unwrap()
+            range: heap.object_value_path(modules.obj, ids!(std.Range),Value::NIL).as_object().unwrap()
         }
     }
 }
@@ -43,7 +43,7 @@ impl ScriptModules{
             heap.set_object_value(fn_obj, (*arg).into(), *def);
         }
         
-        heap.set_object_fn(fn_obj, ScriptFnPtr::Native{index: fn_index as u32});
+        heap.set_object_fn(fn_obj, ScriptFnPtr::Native(NativeId{index: fn_index as u32}));
         native.fn_table.push(NativeFnEntry::new(f));
         
         heap.set_object_value(module, method.into(), fn_obj.into());
@@ -54,11 +54,11 @@ impl ScriptModules{
         heap.set_object_value(self.obj, id!(math).into(), module.into());
         
         self.add(heap, native, module, &[(id!(x), 0.0.into())], id!(sin), |ctx, args|{
-            ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into())).sin().into()
+            ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into(),Value::NIL)).sin().into()
         });
         
         self.add(heap, native, module, &[(id!(x), 0.0.into()),(id!(y), Value::NIL)], id!(vec2), |ctx, args|{
-            ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into())).sin().into()
+            ctx.heap.cast_to_f64(ctx.heap.object_value(args, id!(x).into(),Value::NIL)).sin().into()
         });
     }
     
@@ -71,8 +71,8 @@ impl ScriptModules{
         
         self.add(heap, native, range, &[(id!(x), 0.0.into())], id!(step), |ctx, args|{
             
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into()).as_object(){
-                if let Some(x) = ctx.heap.object_value(args, id!(x).into()).as_f64(){
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
+                if let Some(x) = ctx.heap.object_value(args, id!(x).into(),Value::NIL).as_f64(){
                     ctx.heap.set_object_value(this, id!(step).into(), x.into());
                 }
                 return this.into()

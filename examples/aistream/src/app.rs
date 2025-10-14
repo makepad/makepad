@@ -1,5 +1,6 @@
 scope.import(mod.widgets)
 scope.import(mod.math)
+let net = mod.net;
 
 let Todo = {done:false}
 
@@ -49,8 +50,8 @@ let main_ui = View{
 }
 ui.set_view(main_ui) 
 
-let req = http.fetch("https://todolistservice" + 10)
-let json = req.result.parse_json()
+let req = net.fetch("https://todolistservice" + 10)
+let json = res.parse_json()
 for todo in json{
     Todos += Todo{
         text: todo.text
