@@ -77,8 +77,8 @@ impl Opcode{
     pub const LOGIC_AND:Self = Self(20);
     pub const LOGIC_OR:Self = Self(21);
     pub const NIL_OR:Self = Self(22);
-    pub const DEEP_EQ:Self = Self(23);
-    pub const DEEP_NEQ:Self = Self(24);
+    pub const SHALLOW_EQ:Self = Self(23);
+    pub const SHALLOW_NEQ:Self = Self(24);
          
     pub const fn is_assign(self)->bool{self.0 >= Opcode::ASSIGN_ME.0 && self.0 <= Opcode::ASSIGN_INDEX_IFNIL.0}
                     
@@ -231,8 +231,8 @@ impl fmt::Display for Opcode {
             Self::LOGIC_AND => return write!(f, "&&"),
             Self::LOGIC_OR => return write!(f, "||"),
             Self::NIL_OR => return write!(f, "|?"),
-            Self::DEEP_EQ => return write!(f, "==="),
-            Self::DEEP_NEQ => return write!(f, "!=="),
+            Self::SHALLOW_EQ => return write!(f, "==="),
+            Self::SHALLOW_NEQ => return write!(f, "!=="),
                                                     
             Self::ASSIGN => return write!(f, "="),
             Self::ASSIGN_ME => return write!(f, ":"),
