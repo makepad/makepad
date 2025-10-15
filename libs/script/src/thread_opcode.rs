@@ -243,13 +243,13 @@ impl ScriptThread{
             Opcode::EQ=> {
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
-                self.push_stack_value_nc(self.deep_eq(heap, a, b).into());
+                self.push_stack_value_nc(heap.deep_eq(a, b).into());
                 self.ip.index += 1;
             }
             Opcode::NEQ=> {
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
-                self.push_stack_value_nc((!self.deep_eq(heap, a, b)).into());
+                self.push_stack_value_nc((!heap.deep_eq(a, b)).into());
                 self.ip.index += 1;
             }
             
@@ -274,13 +274,13 @@ impl ScriptThread{
             Opcode::SHALLOW_EQ =>{
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
-                self.push_stack_value(self.shallow_eq(heap, a, b).into());
+                self.push_stack_value(heap.shallow_eq(a, b).into());
                 self.ip.index += 1;
             }
             Opcode::SHALLOW_NEQ=>{
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
-                self.push_stack_value_nc((!self.shallow_eq(heap, a, b)).into());
+                self.push_stack_value_nc((!heap.shallow_eq(a, b)).into());
                 self.ip.index += 1;
             }
             
@@ -903,88 +903,6 @@ impl ScriptThread{
         }
     }
     
-    pub fn deep_eq(&self, heap:&ScriptHeap, a:Value, b:Value)->bool{
-        if a == b{
-            return true
-        }
-        if a.is_object(){
-            let mut aw = a;
-            let mut bw = b;
-            loop{
-                if let Some(pa) = aw.as_object(){
-                    if let Some(pb) = bw.as_object(){
-                        let oa = heap.object(pa);
-                        let ob = heap.object(pb);
-                        if oa.vec.len() != ob.vec.len(){
-                            return false
-                        }
-                        for (a,b) in oa.vec.iter().zip(ob.vec.iter()){
-                            if !self.deep_eq(heap, *a, *b){
-                                return false
-                            }
-                        }
-                        if oa.map.len() != ob.map.len(){
-                            return false
-                        }
-                        for (a,b) in oa.map.iter().zip(ob.map.iter()){
-                            if !self.deep_eq(heap, *a.0, *b.0){
-                                return false
-                            }
-                            if !self.deep_eq(heap, *a.1, *b.1){
-                                return false
-                            }
-                        }
-                        aw = oa.proto;
-                        bw = ob.proto;
-                        if aw == bw{
-                            return true
-                        }
-                    }
-                    else{
-                        return false
-                    }
-                }
-                else{
-                    return false
-                }
-            }
-        }
-        else {
-            self.shallow_eq(heap, a, b)
-        }
-    }
-    
-    pub fn shallow_eq(&self, heap:&ScriptHeap, a:Value, b:Value)->bool{
-        if a == b{
-            return true
-        }
-        if let Some(cmp) = a.as_inline_string(|a|{
-            if let Some(cmp) = b.as_inline_string(|b|{
-                a == b
-            }){return cmp}
-            else{
-                if let Some(b)  = b.as_string(){
-                    heap.string(b) == a
-                }
-                else{
-                    false
-                }
-            }
-        }){return cmp}
-        else if let Some(a) = a.as_string(){
-            let a = heap.string(a);
-            if let Some(cmp) = b.as_inline_string(|b|{
-                a == b
-            }){return cmp}
-            else{
-                if let Some(b)  = b.as_string(){
-                    return heap.string(b) == a
-                }
-            }
-        }
-        false
-    }
-        
     pub fn begin_for_loop_inner(&mut self, heap:&mut ScriptHeap, jump:u32, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>, first_value:Value, first_index:f64, first_key:Value){    
                                                
         self.ip.index += 1;
