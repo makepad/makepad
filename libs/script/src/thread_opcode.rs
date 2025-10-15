@@ -791,6 +791,9 @@ impl ScriptThread{
             Opcode::FOR_END=>{
                 self.end_for_loop(heap, code);
             }
+            Opcode::BREAK=>{
+                self.break_for_loop(heap);
+            }
             Opcode::RANGE=>{
                 let end = self.pop_stack_resolved(heap);
                 let start = self.pop_stack_resolved(heap);
@@ -859,17 +862,16 @@ impl ScriptThread{
                 if value.is_escaped_id(){ (Value::NIL, value) }
                 else{(value, self.scope_value(heap, id))}
             }else{(Value::NIL,value)};
-                                                    
-            if (!value.is_nil() && !value.is_err()) || me.ty != ScriptMe::OBJ{
-                if me.ty == ScriptMe::CALL{
-                    heap.push_fn_arg(me.object, value);       
-                }
-                else if me.ty == ScriptMe::OBJ{
+            if me.ty == ScriptMe::CALL{
+                heap.push_fn_arg(me.object, value);       
+            }
+            else if me.ty == ScriptMe::OBJ{
+                if !value.is_nil() && !value.is_err(){
                     heap.object_push_value(me.object, key, value);       
                 }
-                else{
-                    heap.object_push_value(me.object, Value::NIL, value);       
-                }
+            }
+            else{
+                heap.object_push_value(me.object, Value::NIL, value);       
             }
         }
     }
@@ -972,6 +974,7 @@ impl ScriptThread{
         // lets make a new scope object and set our first value
         let scope = *self.scopes.last().unwrap();
         let new_scope = heap.new_object_with_proto(scope.into());
+
         self.scopes.push(new_scope);
         // lets write our first value onto the scope
         heap.set_object_value(new_scope, value_id.into(), first_value);

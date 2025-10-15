@@ -204,11 +204,6 @@ impl ScriptThread{
         self.ip.index = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         let mut counter = 0;
-        #[derive(Copy,Clone,Debug)]
-        struct Count{
-            index: usize,
-            count: usize
-        }
         // let mut opcodes = [Count{index:0,count:0};128];
         // for i in 0..128{opcodes[i].index = i}
         let mut body = &code.bodies[self.ip.body as usize];
@@ -229,7 +224,6 @@ impl ScriptThread{
                         }
                     }
                 }
-                    
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(opcode);
