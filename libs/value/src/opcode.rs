@@ -176,12 +176,14 @@ impl Opcode{
     pub const FOR_1: Self = Self(97);
     pub const FOR_2: Self = Self(98);
     pub const FOR_3: Self = Self(99);
-    pub const FOR_END: Self = Self(100);
-    pub const BREAK: Self = Self(101);
-    pub const CONTINUE: Self = Self(102);
-    pub const RANGE: Self = Self(103);
-    pub const IS: Self = Self(104);
-    pub const RETURN_IF_ERR:Self = Self(105);
+    pub const LOOP: Self = Self(101);
+    pub const BREAKIFNOT: Self = Self(103);
+    pub const FOR_END: Self = Self(104);
+    pub const BREAK: Self = Self(105);
+    pub const CONTINUE: Self = Self(106);
+    pub const RANGE: Self = Self(107);
+    pub const IS: Self = Self(108);
+    pub const RETURN_IF_ERR:Self = Self(109);
 }
 
 
@@ -324,8 +326,13 @@ impl fmt::Display for Opcode {
             Self::FOR_2 => return write!(f, "for2"),
             Self::FOR_3 => return write!(f, "for2"),
             Self::FOR_END => return write!(f, "forend"),
+            Self::LOOP => return write!(f, "loop"),
+            Self::BREAKIFNOT => return write!(f, "breakifnot"),
+
             Self::BREAK => return write!(f, "break"),
             Self::CONTINUE => return write!(f, "continue"),
+            
+            
             Self::RANGE => return write!(f, ".."),
             Self::IS => return write!(f, "is"),
             Self::RETURN_IF_ERR => return write!(f, "?"),

@@ -788,11 +788,26 @@ impl ScriptThread{
                 let key_id = self.pop_stack_value().as_id().unwrap();
                 self.begin_for_loop(heap, code, args.to_u32() as _, source, value_id, Some(index_id), Some(key_id));
             }
+            Opcode::LOOP=>{
+                self.begin_loop(heap, args.to_u32() as _);
+            }
             Opcode::FOR_END=>{
                 self.end_for_loop(heap, code);
             }
             Opcode::BREAK=>{
                 self.break_for_loop(heap);
+            }
+            Opcode::BREAKIFNOT=>{
+                let value = self.pop_stack_resolved(heap);
+                if !heap.cast_to_bool(value){
+                    self.break_for_loop(heap);
+                }
+                else{
+                    self.ip.index += 1;
+                }
+            }
+            Opcode::CONTINUE=>{
+                self.end_for_loop(heap, code);
             }
             Opcode::RANGE=>{
                 let end = self.pop_stack_resolved(heap);
@@ -964,12 +979,14 @@ impl ScriptThread{
         self.loops.push(LoopFrame{
             bases: self.new_bases(),
             start_ip: self.ip.index,
-            value_id,
-            key_id,
+            values: Some(LoopValues{
+                value_id,
+                key_id,
+                index_id,
+                source,
+                index: first_index,
+            }),
             jump,
-            index_id,
-            source,
-            index: first_index,
         });
         // lets make a new scope object and set our first value
         let scope = *self.scopes.last().unwrap();
@@ -984,6 +1001,20 @@ impl ScriptThread{
         if let Some(index_id) = index_id{
             heap.set_object_value(new_scope, index_id.into(), first_index.into());
         }
+    }
+    
+    pub fn begin_loop(&mut self, heap:&mut ScriptHeap, jump:u32){   
+        self.ip.index += 1;
+        self.loops.push(LoopFrame{
+            bases: self.new_bases(),
+            start_ip: self.ip.index,
+            values: None,
+            jump,
+        });
+        // lets make a new scope object and set our first value
+        let scope = *self.scopes.last().unwrap();
+        let new_scope = heap.new_object_with_proto(scope.into());
+        self.scopes.push(new_scope);
     }
                 
     pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, jump:u32, source:Value, value_id:Id, index_id:Option<Id>, key_id:Option<Id>){
@@ -1023,73 +1054,81 @@ impl ScriptThread{
     pub fn end_for_loop(&mut self, heap:&mut ScriptHeap, code:&ScriptCode){
         // alright lets take a look at our top loop thing
         let lf = self.loops.last_mut().unwrap();
-        if let Some(end) = lf.source.as_f64(){
-            lf.index += 1.0;
-            if lf.index >= end{ // terminate
-                self.break_for_loop(heap);
-                return
-            }
-            self.ip.index = lf.start_ip;
-            let scope = self.scopes.last().unwrap();
-            heap.set_object_value(*scope, lf.value_id.into(), lf.index.into());
-            return
-        }
-        else if let Some(obj) = lf.source.as_object(){
-            if heap.object_has_proto(obj, code.builtins.range.into()){ // range object
-                let scope = self.scopes.last().unwrap();
-                let end = heap.object_value(obj, id!(end).into(),Value::NIL).as_f64().unwrap_or(0.0);
-                let step = heap.object_value(obj, id!(step).into(),Value::NIL).as_f64().unwrap_or(1.0);
-                lf.index += step;
-                if lf.index >= end{
+        if let Some(values) = &mut lf.values{
+            if let Some(end) = values.source.as_f64(){
+                values.index += 1.0;
+                if values.index >= end{ // terminate
                     self.break_for_loop(heap);
                     return
-                } 
-                heap.set_object_value(*scope, lf.value_id.into(), lf.index.into());
+                }
                 self.ip.index = lf.start_ip;
+                let scope = self.scopes.last().unwrap();
+                heap.set_object_value(*scope, values.value_id.into(), values.index.into());
                 return
             }
-            else{
-                let object = heap.object(obj);
-                if object.tag.get_type().uses_vec2(){
-                    let len = object.vec.len() >> 1;
-                    lf.index += 1.0;
-                    if lf.index >= len as f64{
+            else if let Some(obj) = values.source.as_object(){
+                if heap.object_has_proto(obj, code.builtins.range.into()){ // range object
+                    let scope = self.scopes.last().unwrap();
+                    let end = heap.object_value(obj, id!(end).into(),Value::NIL).as_f64().unwrap_or(0.0);
+                    let step = heap.object_value(obj, id!(step).into(),Value::NIL).as_f64().unwrap_or(1.0);
+                    values.index += step;
+                    if values.index >= end{
                         self.break_for_loop(heap);
                         return
-                    }
-                    let scope = self.scopes.pop().unwrap();
-                    let value = object.vec[lf.index as usize * 2 + 1];
-                    let key = if lf.key_id.is_some(){
-                        object.vec[lf.index as usize * 2]
-                    }else{Value::NIL};
-                    let scope = heap.new_object_if_reffed(scope);
-                    heap.set_object_value(scope, lf.value_id.into(), value.into());
-                    if let Some(index_id) = lf.index_id{
-                        heap.set_object_value(scope, index_id.into(), lf.index.into());
-                    }
-                    if let Some(key_id) = lf.key_id{
-                        heap.set_object_value(scope, key_id.into(), key);
-                    }
-                    self.scopes.push(scope);
+                    } 
+                    heap.set_object_value(*scope, values.value_id.into(), values.index.into());
                     self.ip.index = lf.start_ip;
-                    return                    
+                    return
                 }
-                else if object.tag.get_type().is_vec1() && object.vec.len() > 0{
-                    let len = object.vec.len();
-                    lf.index += 1.0;
-                    if lf.index >= len as f64{
-                        self.break_for_loop(heap);
-                        return
+                else{
+                    let object = heap.object(obj);
+                    if object.tag.get_type().uses_vec2(){
+                        let len = object.vec.len() >> 1;
+                        values.index += 1.0;
+                        if values.index >= len as f64{
+                            self.break_for_loop(heap);
+                            return
+                        }
+                        let scope = self.scopes.pop().unwrap();
+                        let value = object.vec[values.index as usize * 2 + 1];
+                        let key = if values.key_id.is_some(){
+                            object.vec[values.index as usize * 2]
+                        }else{Value::NIL};
+                        
+                        let scope = heap.new_object_if_reffed(scope);
+                        heap.set_object_value(scope, values.value_id.into(), value.into());
+                        if let Some(index_id) = values.index_id{
+                            heap.set_object_value(scope, index_id.into(), values.index.into());
+                        }
+                        if let Some(key_id) = values.key_id{
+                            heap.set_object_value(scope, key_id.into(), key);
+                        }
+                        self.scopes.push(scope);
+                        
+                        self.ip.index = lf.start_ip;
+                        return                    
                     }
-                    self.ip.index = lf.start_ip;
-                    let scope = self.scopes.pop().unwrap();
-                    let value = object.vec[lf.index as usize];
-                    let scope = heap.new_object_if_reffed(scope);
-                    heap.set_object_value(scope, lf.value_id.into(), value.into());
-                    self.scopes.push(scope);
-                    return                    
+                    else if object.tag.get_type().is_vec1() && object.vec.len() > 0{
+                        let len = object.vec.len();
+                        values.index += 1.0;
+                        if values.index >= len as f64{
+                            self.break_for_loop(heap);
+                            return
+                        }
+                        self.ip.index = lf.start_ip;
+                        let scope = self.scopes.pop().unwrap();
+                        let value = object.vec[values.index as usize];
+                        let scope = heap.new_object_if_reffed(scope);
+                        heap.set_object_value(scope, values.value_id.into(), value.into());
+                        self.scopes.push(scope);
+                        return                    
+                    }
                 }
             }
+        }
+        else{ // we are a loop
+            self.ip.index = lf.start_ip;
+            return
         }
         println!("For end unknown state");
         self.ip.index += 1;
@@ -1097,9 +1136,11 @@ impl ScriptThread{
                     
     pub fn break_for_loop(&mut self, heap:&mut ScriptHeap){
         let lp = self.loops.pop().unwrap();
-        if let Some(obj) = lp.source.as_object(){
-            heap.free_object_if_unreffed(obj);
-        }
+        if let Some(values) = lp.values{
+            if let Some(obj) = values.source.as_object(){
+                heap.free_object_if_unreffed(obj);
+            }
+        }            
         self.truncate_bases(lp.bases, heap);
         self.ip.index = lp.start_ip + lp.jump - 1;
     }

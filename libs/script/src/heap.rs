@@ -247,6 +247,9 @@ impl ScriptHeap{
         if let Some(v) = v.as_f64(){
             return v != 0.0
         }
+        if let Some(_v) = v.as_object(){
+            return true
+        }
         if v.inline_string_not_empty(){
             return true
         }
@@ -254,9 +257,6 @@ impl ScriptHeap{
             return self.string(v).len() != 0
         }
         if let Some(_v) = v.as_id(){
-            return true
-        }
-        if let Some(_v) = v.as_object(){
             return true
         }
         if let Some(_v) = v.as_color(){
