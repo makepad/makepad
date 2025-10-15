@@ -3,6 +3,7 @@ use crate::heap::*;
 use crate::makepad_value::value::*;
 use crate::makepad_value::opcode::*;
 use crate::script::*;
+use crate::object::*;
 
 #[derive(Debug, Default)]
 pub struct StackBases{
@@ -32,7 +33,7 @@ pub struct LoopFrame{
 pub struct CallFrame{
     pub bases: StackBases,
     pub args: OpcodeArgs,
-    pub return_ip: ScriptIp,
+    pub return_ip: Option<ScriptIp>,
 }
 
 pub struct ScriptMe{
@@ -53,6 +54,7 @@ pub struct ScriptThreadId(pub usize);
 
 pub enum ScriptTrap{
     Error(Value),
+    Return(Value),
 }
 
 pub struct ScriptThread{
@@ -166,7 +168,7 @@ impl ScriptThread{
     
     pub fn push_stack_value(&mut self, value:Value){
         if self.stack.len() > self.stack_limit{
-           println!("STACK OVERFLOW")
+            self.trap = Some(ScriptTrap::Error(Value::from_err_stackoverflow(self.ip)));
         }
         else{
             if value.is_err(){
@@ -196,31 +198,42 @@ impl ScriptThread{
         heap.set_object_value(*self.scopes.last().unwrap(), id.into(),value);
     }
     
-    pub fn call(&mut self, _heap:&mut ScriptHeap, _code:&ScriptCode, _scope:Value){
+    pub fn call(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, fnobj:Value, args:&[Value])->Value{
+        let scope = heap.new_object_with_proto(fnobj);
         
+        heap.clear_object_deep(scope);
+        heap.push_all_fn_args(scope, args);
+        heap.set_object_deep(scope);
+        heap.set_object_type(scope, ObjectType::AUTO);
+        
+        if let Some(fnptr) = heap.parent_object_as_fn(scope){
+            match fnptr{
+                ScriptFnPtr::Native(ni)=>{
+                    return (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut ScriptCtx{
+                        heap,
+                        thread:self,
+                        code
+                    }, scope);
+                }
+                ScriptFnPtr::Script(sip)=>{
+                    let call = CallFrame{
+                        bases: self.new_bases(),
+                        args: OpcodeArgs::default(),
+                        return_ip: None
+                    };
+                    self.scopes.push(scope);
+                    self.calls.push(call);
+                    self.ip = sip;
+                    return self.run_core(heap, code);
+                }
+            }
+        }
+        else{
+            return Value::from_err_notfn(self.ip)
+        }
     }
     
-    pub fn run(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, body_id: u16){
-        
-        self.calls.push(CallFrame{
-            bases: StackBases{
-                loops: 0,
-                stack: 0,
-                scope: 0,
-                mes: 0,
-            },
-            args: Default::default(),
-            return_ip: ScriptIp::default(),
-        });
-                
-        self.scopes.push(code.bodies[body_id as usize].scope);
-        self.mes.push(ScriptMe::object(code.bodies[body_id as usize].me));
-                
-        self.ip.body = body_id;
-        self.ip.index = 0;
-        //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
-        
-        // the main interpreter loop
+    pub fn run_core(&mut self, heap:&mut ScriptHeap, code:&ScriptCode)->Value{
         let mut body = &code.bodies[self.ip.body as usize];
         while (self.ip.index as usize) < body.parser.opcodes.len(){
             let opcode = body.parser.opcodes[self.ip.index as usize];
@@ -236,6 +249,9 @@ impl ScriptThread{
                                 }
                             }
                         }
+                        ScriptTrap::Return(value)=>{
+                            return value
+                        }
                     }
                 }
             }
@@ -245,6 +261,31 @@ impl ScriptThread{
             }
             body = &code.bodies[self.ip.body as usize];
         }
+        Value::NIL
+    }
+    
+    pub fn run_root(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, body_id: u16){
+        
+        self.calls.push(CallFrame{
+            bases: StackBases{
+                loops: 0,
+                stack: 0,
+                scope: 0,
+                mes: 0,
+            },
+            args: Default::default(),
+            return_ip: None,
+        });
+                
+        self.scopes.push(code.bodies[body_id as usize].scope);
+        self.mes.push(ScriptMe::object(code.bodies[body_id as usize].me));
+                
+        self.ip.body = body_id;
+        self.ip.index = 0;
+        //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
+        
+        // the main interpreter loop
+        self.run_core(heap, code);
         //println!("{:?}", profile);
         // lets have a look at our scope
         let _call = self.calls.last();

@@ -484,11 +484,13 @@ impl ScriptThread{
                 if let Some(fnptr) = heap.parent_object_as_fn(scope){
                     match fnptr{
                         ScriptFnPtr::Native(ni)=>{
+                            let ip = self.ip;
                             let ret = (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut ScriptCtx{
                                 heap,
                                 thread:self,
                                 code
                             }, scope);
+                            self.ip = ip;
                             self.push_stack_value(ret);
                             heap.free_object_if_unreffed(scope);
                             self.ip.index += 1;
@@ -497,7 +499,7 @@ impl ScriptThread{
                             let call = CallFrame{
                                 bases: self.new_bases(),
                                 args: args,
-                                return_ip: ScriptIp{index: self.ip.index + 1, body:self.ip.body}
+                                return_ip: Some(ScriptIp{index: self.ip.index + 1, body:self.ip.body})
                             };
                             self.scopes.push(scope);
                             self.calls.push(call);
@@ -599,10 +601,15 @@ impl ScriptThread{
                 let call = self.calls.pop().unwrap();
                 self.truncate_bases(call.bases, heap);
                 
-                self.ip = call.return_ip;
-                self.push_stack_value_nc(value);
-                if call.args.is_pop_to_me(){
-                    self.pop_to_me(heap);
+                if let Some(ret) = call.return_ip{
+                    self.ip = ret;
+                    self.push_stack_value_nc(value);
+                    if call.args.is_pop_to_me(){
+                        self.pop_to_me(heap);
+                    }
+                }
+                else{
+                    self.trap = Some(ScriptTrap::Return(value));
                 }
             }
             Opcode::RETURN_IF_ERR=>{
@@ -610,10 +617,15 @@ impl ScriptThread{
                 if value.is_err(){
                     let call = self.calls.pop().unwrap();
                     self.truncate_bases(call.bases, heap);
-                    self.ip = call.return_ip;
-                    self.push_stack_value_nc(value);
-                    if call.args.is_pop_to_me(){
-                        self.pop_to_me(heap);
+                    if let Some(ret) = call.return_ip{
+                        self.ip = ret;
+                        self.push_stack_value_nc(value);
+                        if call.args.is_pop_to_me(){
+                            self.pop_to_me(heap);
+                        }
+                    }
+                    else{
+                        self.trap = Some(ScriptTrap::Return(value));
                     }
                 }
                 else{

@@ -335,8 +335,13 @@ impl ScriptParser{
     
     fn set_pop_to_me(&mut self){
         if let Some(code) = self.opcodes.last_mut(){
-            if code.is_opcode(){
-                code.set_opcode_args_pop_to_me();
+            if let Some((opcode, _args)) = code.as_opcode(){
+                if opcode == Opcode::RETURN{
+                    self.push_code(Opcode::POP_TO_ME.into(), self.index)
+                }
+                else{
+                    code.set_opcode_args_pop_to_me();
+                }
             }
             else{
                 self.push_code(Opcode::POP_TO_ME.into(), self.index)

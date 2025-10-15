@@ -111,7 +111,8 @@ pub fn test(){
         for v in [1 2 3 4] ~v
         ~x;
     };
-    // basic test script
+    
+    // Our unit tests :)
     let code = script!{
         scope.import(mod.std)
         let x = 1+2 assert(x == 3)
@@ -143,12 +144,12 @@ pub fn test(){
         let c = 0 while c < 3{c+=1}assert(c==3);
     };
     
-    let _code = script!{
+    let code = script!{
         scope.import(mod.std)
-        let c = 0 while c < 9{
-            c+=1;
-        }
-        assert(c==9);
+        let a = [1,2,3];
+        a.retain(|v| v!=2);
+        ~a;
+        //a.retain(|v|{~v;v>=3}) assert(a==[3 4]);
     };
     
     let _code = script!{
