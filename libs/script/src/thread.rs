@@ -292,7 +292,7 @@ impl ScriptThread{
         let _scope = self.scopes.last();
         //opcodes.sort_by(|a,b| a.count.cmp(&b.count));
         //println!("{:?}", opcodes);
-        println!("Allocated objects:{:?}", heap.objects.len());
+        println!("Allocated objects:{:?}", heap.objects_len());
         //heap.print_object(*scope, true);
         //print!("Global:");
         //heap.print_object(global, true);

@@ -6,12 +6,12 @@ use crate::object::*;
 use crate::string::*;
 
 pub struct ScriptHeap{
-    pub mark_vec: Vec<usize>,
-    pub objects: Vec<Object>,
-    pub roots: Vec<usize>,
-    pub objects_free: Vec<usize>,
-    pub strings: Vec<HeapString>,
-    pub strings_free: Vec<usize>
+    mark_vec: Vec<usize>,
+    objects: Vec<Object>,
+    roots: Vec<usize>,
+    objects_free: Vec<usize>,
+    strings: Vec<HeapString>,
+    strings_free: Vec<usize>
 }
 
 impl ScriptHeap{
@@ -462,6 +462,10 @@ impl ScriptHeap{
         }
     }
     
+    pub fn objects_len(&self)->usize{
+        self.objects.len()
+    }
+    
     pub fn object_vec_remove(&mut self, ptr:ObjectPtr, index:usize)->Value{
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.get_type().has_paired_vec(){
@@ -511,10 +515,10 @@ impl ScriptHeap{
     pub fn object(&self, ptr:ObjectPtr)->&Object{
         &self.objects[ptr.index as usize]
     }
-    
+    /*
     pub fn object_mut(&mut self, ptr:ObjectPtr)->&mut Object{
         &mut self.objects[ptr.index as usize]
-    }
+    }*/
     
     pub fn set_object_value_index(&mut self, ptr: ObjectPtr, index:Value, value: Value){
         // alright so. now what.
@@ -826,6 +830,88 @@ impl ScriptHeap{
             str.clear();self.cast_to_string(value, str);
             print!("{}",str);
         }
+    }
+    
+    pub fn deep_eq(&self, a:Value, b:Value)->bool{
+        if a == b{
+            return true
+        }
+        if a.is_object(){
+            let mut aw = a;
+            let mut bw = b;
+            loop{
+                if let Some(pa) = aw.as_object(){
+                    if let Some(pb) = bw.as_object(){
+                        let oa = &self.objects[pa.index as usize];
+                        let ob = &self.objects[pb.index as usize];
+                        if oa.vec.len() != ob.vec.len(){
+                            return false
+                        }
+                        for (a,b) in oa.vec.iter().zip(ob.vec.iter()){
+                            if !self.deep_eq(*a, *b){
+                                return false
+                            }
+                        }
+                        if oa.map.len() != ob.map.len(){
+                            return false
+                        }
+                        for (a,b) in oa.map.iter().zip(ob.map.iter()){
+                            if !self.deep_eq(*a.0, *b.0){
+                                return false
+                            }
+                            if !self.deep_eq(*a.1, *b.1){
+                                return false
+                            }
+                        }
+                        aw = oa.proto;
+                        bw = ob.proto;
+                        if aw == bw{
+                            return true
+                        }
+                    }
+                    else{
+                        return false
+                    }
+                }
+                else{
+                    return false
+                }
+            }
+        }
+        else {
+            self.shallow_eq(a, b)
+        }
+    }
+    
+    pub fn shallow_eq(&self, a:Value, b:Value)->bool{
+        if a == b{
+            return true
+        }
+        if let Some(cmp) = a.as_inline_string(|a|{
+            if let Some(cmp) = b.as_inline_string(|b|{
+                a == b
+            }){return cmp}
+            else{
+                if let Some(b)  = b.as_string(){
+                    self.string(b) == a
+                }
+                else{
+                    false
+                }
+            }
+        }){return cmp}
+        else if let Some(a) = a.as_string(){
+            let a = self.string(a);
+            if let Some(cmp) = b.as_inline_string(|b|{
+                a == b
+            }){return cmp}
+            else{
+                if let Some(b)  = b.as_string(){
+                    return self.string(b) == a
+                }
+            }
+        }
+        false
     }
     
     pub fn print_object(&self, set_ptr:ObjectPtr, deep:bool){

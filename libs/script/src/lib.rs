@@ -144,7 +144,7 @@ pub fn test(){
         let c = 0 while c < 3{c+=1}assert(c==3);
     };
     
-    let code = script!{
+    let _code = script!{
         scope.import(mod.std)
         let a = [1,2,3];
         a.retain(|v| v!=2);
@@ -152,7 +152,7 @@ pub fn test(){
         //a.retain(|v|{~v;v>=3}) assert(a==[3 4]);
     };
     
-    let _code = script!{
+    let code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     };
