@@ -13,14 +13,19 @@ pub struct StackBases{
 }
 
 #[derive(Debug)]
-pub struct LoopFrame{
+pub struct LoopValues{
     pub value_id: Id,
     pub key_id: Option<Id>,
     pub index_id: Option<Id>,
     pub source: Value,
+    pub index: f64,
+}
+
+#[derive(Debug)]
+pub struct LoopFrame{
+    pub values: Option<LoopValues>,
     pub start_ip: u32,
     pub jump: u32,
-    pub index: f64,
     pub bases: StackBases,
 }
 
@@ -113,7 +118,11 @@ impl ScriptThread{
             }
             return val    
         }
-        Value::from_err_stackunderflow(self.ip)
+        else{
+            let value = Value::from_err_stackunderflow(self.ip);
+            self.trap = Some(ScriptTrap::Error(value));
+            value
+        }
     }
     
     pub fn peek_stack_resolved(&mut self, heap:&ScriptHeap)->Value{
@@ -126,7 +135,11 @@ impl ScriptThread{
             }
             return *val    
         }
-        Value::from_err_stackunderflow(self.ip)
+        else{
+            let value = Value::from_err_stackunderflow(self.ip);
+            self.trap = Some(ScriptTrap::Error(value));
+            value
+        }
     }
     
     pub fn peek_stack_value(&mut self)->Value{
@@ -134,7 +147,9 @@ impl ScriptThread{
             return *value
         }
         else{
-            Value::from_err_stackunderflow(self.ip)
+            let value = Value::from_err_stackunderflow(self.ip);
+            self.trap = Some(ScriptTrap::Error(value));
+            value
         }
     }
     
@@ -143,8 +158,9 @@ impl ScriptThread{
             return value
         }
         else{
-            println!("STACK UNDERFLOW");
-            Value::from_err_stackunderflow(self.ip)
+            let value = Value::from_err_stackunderflow(self.ip);
+            self.trap = Some(ScriptTrap::Error(value));
+            value
         }
     }
     
@@ -203,14 +219,12 @@ impl ScriptThread{
         self.ip.body = body_id;
         self.ip.index = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
-        let mut counter = 0;
-        // let mut opcodes = [Count{index:0,count:0};128];
-        // for i in 0..128{opcodes[i].index = i}
+        
+        // the main interpreter loop
         let mut body = &code.bodies[self.ip.body as usize];
         while (self.ip.index as usize) < body.parser.opcodes.len(){
             let opcode = body.parser.opcodes[self.ip.index as usize];
             if let Some((opcode, args)) = opcode.as_opcode(){
-                //opcodes[opcode.0 as usize].count += 1;
                 self.opcode(opcode, args, heap, code);
                 // if exception tracing
                 if let Some(trap) = self.trap.take(){
@@ -230,7 +244,6 @@ impl ScriptThread{
                 self.ip.index += 1;
             }
             body = &code.bodies[self.ip.body as usize];
-            counter += 1;
         }
         //println!("{:?}", profile);
         // lets have a look at our scope
@@ -238,7 +251,7 @@ impl ScriptThread{
         let _scope = self.scopes.last();
         //opcodes.sort_by(|a,b| a.count.cmp(&b.count));
         //println!("{:?}", opcodes);
-        println!("Instructions {counter} Allocated objects:{:?}", heap.objects.len());
+        println!("Allocated objects:{:?}", heap.objects.len());
         //heap.print_object(*scope, true);
         //print!("Global:");
         //heap.print_object(global, true);

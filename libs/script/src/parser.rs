@@ -19,7 +19,10 @@ enum State{
     ForBody{idents:u32, index:u32},
     ForExpr{code_start:u32},
     ForBlock{code_start:u32},
-
+    Loop{index:u32},
+    While{index:u32},
+    WhileTest{code_start:u32},
+    
     IfTest{index: u32},
     IfTrueExpr{if_start:u32},
     IfTrueBlock{if_start:u32, last_was_sep:bool},
@@ -412,6 +415,37 @@ impl ScriptParser{
                     println!("Wrong number of identifiers for for loop {idents}");
                     return 0
                 }
+                if tok.is_open_curly(){
+                    self.state.push(State::ForBlock{code_start});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                else{
+                    self.state.push(State::ForExpr{code_start});
+                    self.state.push(State::BeginExpr{required:true});
+                }
+            }
+            State::Loop{index}=>{
+                let code_start = self.code_len();
+                self.push_code(Opcode::LOOP.into(), index);
+                if tok.is_open_curly(){
+                    self.state.push(State::ForBlock{code_start});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                else{
+                    self.state.push(State::ForExpr{code_start});
+                    self.state.push(State::BeginExpr{required:true});
+                }
+            }
+            State::While{index}=>{
+                let code_start = self.code_len();
+                self.push_code(Opcode::LOOP.into(), index);
+                self.state.push(State::WhileTest{code_start});
+                self.state.push(State::BeginExpr{required:true});
+            }
+            State::WhileTest{code_start}=>{
+                self.push_code(Opcode::BREAKIFNOT.into(), self.index);
                 if tok.is_open_curly(){
                     self.state.push(State::ForBlock{code_start});
                     self.state.push(State::BeginStmt{last_was_sep:false});
@@ -871,6 +905,14 @@ impl ScriptParser{
                     self.state.push(State::ForIdent{idents:0, index:self.index});
                     return 1
                 }
+                if id == id!(loop){
+                    self.state.push(State::Loop{index:self.index});
+                    return 1
+                }
+                if id == id!(while){
+                    self.state.push(State::While{index:self.index});
+                    return 1
+                }
                 if id == id!(let){
                     // we have to have an identifier after let
                     self.state.push(State::Let{index:self.index});
@@ -884,6 +926,10 @@ impl ScriptParser{
                 if id == id!(break){
                     self.state.push(State::EmitBreak{index:self.index});
                     self.state.push(State::BeginExpr{required:false});
+                    return 1;
+                }
+                if id == id!(continue){
+                    self.state.push(State::EmitContinue{index:self.index});
                     return 1;
                 }
                 if id == id!(delete){
@@ -1044,6 +1090,9 @@ impl ScriptParser{
                         else if let State::IfTest{..} = state{
                             return 0
                         }
+                        else if let State::WhileTest{..} = state{
+                            return 0
+                        }
                         else if let State::ForBody{..} = state{
                             return 0
                         }
@@ -1132,7 +1181,7 @@ impl ScriptParser{
                             self.state.push(State::BeginStmt{last_was_sep:false});
                             return 0;
                         }
-                        if opcode == Opcode::BREAK{
+                        if opcode == Opcode::BREAK || opcode == Opcode::CONTINUE{
                             code.set_opcode_is_statement();
                             self.state.push(State::BeginStmt{last_was_sep:false});
                             return 0;

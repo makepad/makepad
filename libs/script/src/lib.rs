@@ -136,14 +136,19 @@ pub fn test(){
         let x = {f:2} x.f+=2 assert(x.f == 4)
         let x = [1,2] x[1]+=2 assert(x == [1 4])
         let c = 0 for x in 4{ if c == 3 break; c += 1} assert(c==3)
-        let c = 0 for x in 4{ if c == 3{break;}c += 1} assert(c==3);
-        ;
+        let c = 0 for x in 5{ if c == 4{break;}c += 1} assert(c==4);
+        let c = 0 for x in 7{ if x == 3 ||  x == 5 continue;c += 1} assert(c==5);
+        let c = 0 loop{ c+=1; if c>5 break} assert(c==6)
+        let c = 0 while c < 9 c+=1 assert(c==9);
+        let c = 0 while c < 3{c+=1}assert(c==3);
     };
     
-    let code = script!{
+    let _code = script!{
         scope.import(mod.std)
-        let c = 0 for x in 4{ if c == 3 break; c += 1} assert(c==4)
-        ;
+        let c = 0 while c < 9{
+            c+=1;
+        }
+        assert(c==9);
     };
     
     let _code = script!{
