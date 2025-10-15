@@ -449,6 +449,48 @@ impl ScriptHeap{
         def
     }
     
+    pub fn object_vec_len(&self, ptr:ObjectPtr)->usize{
+        let object = &self.objects[ptr.index as usize];
+        if object.tag.get_type().has_paired_vec(){
+            object.vec.len() >> 1
+        }
+        else if object.tag.get_type().is_vec1(){
+            object.vec.len()
+        }
+        else{
+            0
+        }
+    }
+    
+    pub fn object_vec_remove(&mut self, ptr:ObjectPtr, index:usize)->Value{
+        let object = &mut self.objects[ptr.index as usize];
+        if object.tag.get_type().has_paired_vec(){
+            object.vec.remove(index * 2);
+            return object.vec.remove(index * 2);
+        }
+        else if object.tag.get_type().is_vec1(){
+            return object.vec.remove(index);
+        }
+        else{
+            Value::NIL
+        }
+    }
+    
+    pub fn object_vec_value(&self, ptr:ObjectPtr, index:usize)->Value{
+        let object = &self.objects[ptr.index as usize];
+        if object.tag.get_type().has_paired_vec(){
+            if let Some(value) = object.vec.get(index * 2 + 1){
+                return *value
+            }
+        }
+        else if object.tag.get_type().is_vec1(){
+            if let Some(value) = object.vec.get(index){
+                return *value
+            }
+        }
+        Value::NIL
+    }
+    
     pub fn object_value_path(&self, ptr:ObjectPtr, keys:&[Id], def:Value)->Value{
         let mut value:Value = ptr.into();
         for key in keys{
@@ -733,6 +775,26 @@ impl ScriptHeap{
             }
             else{
                 self.objects[top_ptr.index as usize].vec.extend_from_slice(&[Value::NIL, value]);
+            }
+        }
+    }
+    
+    pub fn push_all_fn_args(&mut self, top_ptr:ObjectPtr, args:&[Value]){
+        let object = &self.objects[top_ptr.index as usize];
+        if let Some(ptr) = object.proto.as_object(){
+            for (index, value) in args.iter().enumerate(){
+                let object = &self.objects[ptr.index as usize];
+                if let Some(key) = object.vec.get(index*2){
+                    let key = *key;
+                    self.objects[top_ptr.index as usize].vec.extend_from_slice(&[key, *value]);
+                    if let Some(obj) = value.as_object(){
+                        let object = &mut self.objects[obj.index as usize];
+                        object.tag.set_reffed();
+                    }
+                }
+                else{
+                    self.objects[top_ptr.index as usize].vec.extend_from_slice(&[Value::NIL, *value]);
+                }
             }
         }
     }
