@@ -7,10 +7,11 @@ impl OpcodeArgs{
     pub const TYPE_NONE: u32 = 0;
     pub const TYPE_NIL:u32 =  1 <<28;
     pub const TYPE_NUMBER:u32 =  2 <<28;
-    pub const TYPE_MASK: u32 = 7 <<28;
+    pub const TYPE_MASK: u32 = 3 <<28;
     pub const STATEMENT_FLAG:u32 =  1 <<31;
+    pub const POP_TO_ME_FLAG:u32 =  1 <<30;
     pub const MAX_U32: u32 = (1<<28) - 1;
-        
+    
     pub const NONE: Self = Self(0);
     pub const NIL: Self = Self(Self::TYPE_NIL);
     
@@ -33,6 +34,10 @@ impl OpcodeArgs{
     pub fn is_statement(&self)->bool{
         self.0 & Self::STATEMENT_FLAG != 0
     }
+    
+    pub fn is_pop_to_me(&self)->bool{
+        self.0 & Self::POP_TO_ME_FLAG != 0
+    }
         
     pub fn is_nil(&self)->bool{
         self.0 & Self::TYPE_MASK == Self::TYPE_NIL
@@ -45,7 +50,7 @@ impl OpcodeArgs{
 
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Opcode(pub(crate) u8);
+pub struct Opcode(pub u8);
 impl Opcode{
         
     pub fn raw(&self)->u8{
@@ -195,11 +200,12 @@ impl fmt::Display for OpcodeArgs {
             _=>{}
         };
         if self.is_statement(){
-            write!(f,"<Stmt>")
+            write!(f,"<stm>").ok();
         }
-        else{
-            write!(f,"")
+        if self.is_pop_to_me(){
+            write!(f,"<me=>").ok();
         }
+        write!(f,"")
     }
 }
        
@@ -246,7 +252,8 @@ impl fmt::Display for Opcode {
             Self::ASSIGN_XOR => return write!(f, "^="),
             Self::ASSIGN_SHL => return write!(f, "<<="),
             Self::ASSIGN_SHR => return write!(f, ">>="),
-                                        
+            Self::ASSIGN_IFNIL => return write!(f, "?="),
+                        
             Self::ASSIGN_FIELD => return write!(f, ".="),
             Self::ASSIGN_FIELD_ADD => return write!(f, ".+="),
             Self::ASSIGN_FIELD_SUB => return write!(f, ".-="),

@@ -41,6 +41,7 @@ enum State{
     EmitOp{what_op:Id, index:u32},
     EmitFieldAssign{what_op:Id, index:u32},
     EmitIndexAssign{what_op:Id, index:u32},
+    
     EndBare,
     EndBareSquare,
     EndProto,
@@ -120,6 +121,48 @@ impl State{
             id!(?=)  => true,
             _=>false
         }
+    }
+    
+    fn operator_supports_inline_number(op:Id)->bool{
+        match op{
+            id!(*) | id!(/) | id!(%) |
+            id!(+)| id!(-) | id!(<<) |id!(>>) | 
+            id!(&) | id!(^) | id!(|) | 
+            id!(<) | id!(>) | id!(<=) | id!(>=) => true,
+            _=> false
+        }
+        /*
+            id!(is) |
+            id!(==) | id!(!=) | 
+            id!(===) => Opcode::SHALLOW_EQ,
+            id!(!==) => Opcode::SHALLOW_NEQ,
+                                    
+            id!(&&) => Opcode::LOGIC_AND,
+            id!(||)  => Opcode::LOGIC_OR,
+            id!(|?) => Opcode::NIL_OR,
+            id!(:) => Opcode::ASSIGN_ME,
+            id!(<:) => Opcode::ASSIGN_ME_BEFORE,
+            id!(>:) => Opcode::ASSIGN_ME_AFTER,
+            id!(^:) => Opcode::ASSIGN_ME_BEGIN,
+            id!(=) => Opcode::ASSIGN,
+            id!(+=) => Opcode::ASSIGN_ADD,
+            id!(-=) => Opcode::ASSIGN_SUB,
+            id!(*=) => Opcode::ASSIGN_MUL,
+            id!(/=) => Opcode::ASSIGN_DIV,
+            id!(%=) => Opcode::ASSIGN_MOD,
+            id!(&=) => Opcode::ASSIGN_AND,
+            id!(|=) => Opcode::ASSIGN_OR,
+            id!(^=) => Opcode::ASSIGN_XOR,
+            id!(<<=) => Opcode::ASSIGN_SHL,
+            id!(>>=)  => Opcode::ASSIGN_SHR,
+            id!(?=)  => Opcode::ASSIGN_IFNIL,
+            id!(..) => Opcode::RANGE,
+            id!(.)  => Opcode::FIELD,
+            id!(.?)  => Opcode::FIELD_NIL,
+            id!(me.) => Opcode::ME_FIELD,
+            id!(?) => Opcode::RETURN_IF_ERR,
+            _=> Opcode::NOP,
+        }*/
     }
     
     fn operator_to_field_assign(op:Id)->Value{
@@ -285,6 +328,32 @@ impl ScriptParser{
         self.source_map.push(None);
     }
     
+    fn set_pop_to_me(&mut self){
+        if let Some(code) = self.opcodes.last_mut(){
+            if code.is_opcode(){
+                code.set_opcode_args_pop_to_me();
+            }
+            else{
+                self.push_code(Opcode::POP_TO_ME.into(), self.index)
+            }
+        }
+    }
+    
+    fn has_pop_to_me(&self)->bool{
+        if let Some(code) = self.opcodes.last(){
+            code.has_opcode_args_pop_to_me()
+        }
+        else{
+            false
+        }
+    }
+    
+    fn clear_pop_to_me(&mut self){
+        if let Some(code) = self.opcodes.last_mut(){
+            code.clear_opcode_args_pop_to_me();
+        }
+    }
+    
     fn set_opcode_args(&mut self, index:u32, args: OpcodeArgs){
         self.opcodes[index as usize].set_opcode_args(args);
     }
@@ -351,7 +420,8 @@ impl ScriptParser{
                 }
             }
             State::ForExpr{code_start}=>{
-                self.push_code_none(Opcode::POP_TO_ME.into());
+                self.set_pop_to_me();
+                //self.push_code_none(Opcode::POP_TO_ME.into());
                 self.push_code_none(Opcode::FOR_END.into());
                 let jump_to = (self.code_len() - code_start) as _;
                 self.set_opcode_args(code_start, OpcodeArgs::from_u32(jump_to));
@@ -501,10 +571,15 @@ impl ScriptParser{
             }
             State::EndFnBlock{fn_slot, last_was_sep, index}=>{
                 
-                if !last_was_sep && Some(&Opcode::POP_TO_ME.into()) == self.code_last(){
+               /* if !last_was_sep && Some(&Opcode::POP_TO_ME.into()) == self.code_last(){
                     self.pop_code();
                     self.push_code(Opcode::RETURN.into(), index);
+                }*/
+                if !last_was_sep && self.has_pop_to_me(){
+                    self.clear_pop_to_me();
+                    self.push_code(Opcode::RETURN.into(), index);
                 }
+                                 
                 else{
                     self.push_code(Value::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL), index);
                 }
@@ -526,6 +601,20 @@ impl ScriptParser{
                 self.push_code(State::operator_to_index_assign(what_op), index);
             }
             State::EmitOp{what_op, index}=>{
+                if State::operator_supports_inline_number(what_op){
+                    if let Some(code) = self.code_last(){
+                        if let Some(vf64) = code.as_f64(){
+                            let num = vf64 as u64;
+                            if vf64.fract() == 0.0 && num <= OpcodeArgs::MAX_U32 as u64{
+                                self.pop_code();
+                                let mut value = State::operator_to_opcode(what_op);
+                                value.set_opcode_args(OpcodeArgs::from_u32(num as u32));
+                                self.push_code(value, index);
+                            }
+                            return 0
+                        }
+                    }
+                }
                 self.push_code(State::operator_to_opcode(what_op), index);
                 return 0
             }
@@ -641,10 +730,13 @@ impl ScriptParser{
             }
             State::IfTrueBlock{if_start, last_was_sep}=>{
                 if tok.is_close_curly() {
-                    if !last_was_sep{
+                    /*if !last_was_sep{
                         if Some(&Opcode::POP_TO_ME.into()) == self.code_last(){
                             self.pop_code();
                         }
+                    }*/
+                    if !last_was_sep && self.has_pop_to_me(){
+                        self.clear_pop_to_me();
                     }
                     self.state.push(State::IfMaybeElse{if_start, was_block:true});
                     return 1
@@ -695,11 +787,15 @@ impl ScriptParser{
             }
             State::IfElseBlock{else_start, last_was_sep}=>{
                 if tok.is_close_curly() {
+                    if !last_was_sep && self.has_pop_to_me(){
+                        self.clear_pop_to_me();
+                    }
+                    /*
                     if !last_was_sep{
                         if Some(&Opcode::POP_TO_ME.into()) == self.code_last(){
                             self.pop_code();
                         }
-                    }
+                    }*/
                     self.set_opcode_args(else_start, OpcodeArgs::from_u32(self.code_len() as u32 -else_start) );
                     self.state.push(State::EndExpr);
                     return 1
@@ -1022,7 +1118,8 @@ impl ScriptParser{
                     }
                 }
                 // otherwise pop to me
-                self.push_code_none(Opcode::POP_TO_ME.into());
+                self.set_pop_to_me();
+                //self.push_code_none(Opcode::POP_TO_ME.into());
                 self.state.push(State::BeginStmt{last_was_sep:false});
                 return 0
             }
