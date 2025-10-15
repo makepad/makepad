@@ -121,13 +121,23 @@ impl ScriptMethods{
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(retain), |ctx, args|{
-            if let Some(_this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
-                // alright so. 'retain'. how do we do it
-                let mut _i = 0;
-                //while i < ctx.heap.object_mut(this).vec.len(){
-                   // ctx.thread.call()
-                    
-                //}
+            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
+                let fnptr = ctx.heap.object_vec_value(args, 0);
+                let mut i = 0;
+                while i < ctx.heap.object_vec_len(this){
+                    let value = ctx.heap.object_vec_value(this, i);
+                    let ret = ctx.thread.call(ctx.heap, ctx.code,  fnptr, &[value]);
+                    if ret.is_err(){
+                        return ret;
+                    }
+                    if !ctx.heap.cast_to_bool(ret){
+                        ctx.heap.object_vec_remove(this, i);
+                    }
+                    else{
+                        i += 1
+                    }
+                }
+                return Value::NIL
             }
             Value::from_err_notimpl(ctx.thread.ip)
         });
