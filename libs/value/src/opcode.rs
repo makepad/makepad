@@ -200,10 +200,10 @@ impl fmt::Display for OpcodeArgs {
             _=>{}
         };
         if self.is_statement(){
-            write!(f,"<stm>").ok();
+            write!(f,"<st>").ok();
         }
         if self.is_pop_to_me(){
-            write!(f,"<me=>").ok();
+            write!(f,"<m>").ok();
         }
         write!(f,"")
     }
@@ -309,7 +309,7 @@ impl fmt::Display for Opcode {
             Self::ARRAY_INDEX => return write!(f, "[]"),
                                                         
             Self::PROTO_FIELD=> return write!(f, "<proto>."),
-            Self::POP_TO_ME=> return write!(f, "me="),
+            Self::POP_TO_ME=> return write!(f, "<M>"),
                         
             Self::LET_TYPED => return write!(f, "let_ty"),
             Self::LET_DYN => return write!(f, "let"),

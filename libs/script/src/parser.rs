@@ -51,10 +51,12 @@ enum State{
     EmitCall{is_method:bool, index:u32},
     EndCall{is_method:bool, index:u32},
     ArrayIndex,
-    Delete,
     
-    Return{index:u32},
-    
+    EmitDelete{index:u32},
+    EmitReturn{index:u32},
+    EmitBreak{index:u32},
+    EmitContinue{index:u32},
+        
     Let{index:u32},
     LetDynOrTyped{index:u32},
     LetType{index:u32},
@@ -412,6 +414,7 @@ impl ScriptParser{
                 }
                 if tok.is_open_curly(){
                     self.state.push(State::ForBlock{code_start});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
                     return 1
                 }
                 else{
@@ -439,7 +442,6 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::Delete=>{}
             State::Let{index}=>{
                 if id.not_empty(){ // lets expect an assignment expression
                     // push the id on to the stack
@@ -622,9 +624,21 @@ impl ScriptParser{
                 self.push_code(State::operator_to_unary(what_op), index);
                 return 0
             }
-            State::Return{index}=>{
+            State::EmitReturn{index}=>{
                 self.push_code(Opcode::RETURN.into(), index);
                 return 0
+            }
+            State::EmitBreak{index}=>{
+                self.push_code(Opcode::BREAK.into(), index);
+                return 0
+            }
+            State::EmitContinue{index}=>{
+                self.push_code(Opcode::CONTINUE.into(), index);
+                return 0
+            }
+            State::EmitDelete{index}=>{
+                self.push_code(Opcode::DELETE.into(), index);
+                return 0       
             }
             State::EndBareSquare=>{
                 self.push_code(Opcode::END_ARRAY.into(), self.index);
@@ -766,7 +780,7 @@ impl ScriptParser{
                     return 1
                 }
                 self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 -if_start) );
-                self.push_code_none(Value::NIL);
+               // self.push_code_none(Value::NIL);
                 if was_block{ // allow expression to chain
                     self.state.push(State::EndExpr)
                 }
@@ -863,12 +877,17 @@ impl ScriptParser{
                     return 1
                 }
                 if id == id!(return){
-                    self.state.push(State::Return{index:self.index});
+                    self.state.push(State::EmitReturn{index:self.index});
+                    self.state.push(State::BeginExpr{required:false});
+                    return 1;
+                }
+                if id == id!(break){
+                    self.state.push(State::EmitBreak{index:self.index});
                     self.state.push(State::BeginExpr{required:false});
                     return 1;
                 }
                 if id == id!(delete){
-                    self.state.push(State::Delete);
+                    self.state.push(State::EmitDelete{index:self.index});
                     self.state.push(State::BeginExpr{required:true});
                     return 1;
                 }
@@ -948,7 +967,7 @@ impl ScriptParser{
                     return 1
                 }
                 if !required && (sep == id!(;) || sep == id!(,)){
-                    self.push_code(Value::NIL, self.index);
+                   // self.push_code(Value::NIL, self.index);
                 }
                 if required{
                     println!("Expected expression after {:?} found {:?}", self.state, tok);
@@ -1102,19 +1121,26 @@ impl ScriptParser{
                 }
                 // in a function call we need the 
                 if let Some(code) = self.opcodes.last_mut(){
-                    if *code == Opcode::FOR_END.into(){
-                        code.set_opcode_is_statement();
-                        self.state.push(State::BeginStmt{last_was_sep:false});
-                        return 0;
-                    }
-                    if *code == Opcode::ASSIGN_ME.into(){
-                        code.set_opcode_is_statement();
-                        self.state.push(State::BeginStmt{last_was_sep:false});
-                        return 0;
-                    }
-                    if code.is_let_opcode(){
-                        self.state.push(State::BeginStmt{last_was_sep:false});
-                        return 0;
+                    if let Some((opcode,_)) = code.as_opcode(){
+                        if opcode == Opcode::FOR_END{
+                            code.set_opcode_is_statement();
+                            self.state.push(State::BeginStmt{last_was_sep:false});
+                            return 0;
+                        }
+                        if opcode == Opcode::ASSIGN_ME{
+                            code.set_opcode_is_statement();
+                            self.state.push(State::BeginStmt{last_was_sep:false});
+                            return 0;
+                        }
+                        if opcode == Opcode::BREAK{
+                            code.set_opcode_is_statement();
+                            self.state.push(State::BeginStmt{last_was_sep:false});
+                            return 0;
+                        }
+                        if code.is_let_opcode(){
+                            self.state.push(State::BeginStmt{last_was_sep:false});
+                            return 0;
+                        }
                     }
                 }
                 // otherwise pop to me
