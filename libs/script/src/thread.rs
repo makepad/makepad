@@ -1,6 +1,7 @@
 use crate::makepad_value::id::*;
 use crate::heap::*;
 use crate::makepad_value::value::*;
+use crate::makepad_value::opcode::*;
 use crate::script::*;
 
 #[derive(Debug, Default)]
@@ -25,6 +26,7 @@ pub struct LoopFrame{
 
 pub struct CallFrame{
     pub bases: StackBases,
+    pub args: OpcodeArgs,
     pub return_ip: ScriptIp,
 }
 
@@ -44,6 +46,10 @@ impl ScriptMe{
 
 pub struct ScriptThreadId(pub usize);
 
+pub enum ScriptTrap{
+    Error(Value),
+}
+
 pub struct ScriptThread{
     pub(crate) stack_limit: usize,
     pub(crate) loops: Vec<LoopFrame>,
@@ -51,6 +57,7 @@ pub struct ScriptThread{
     pub(crate) stack: Vec<Value>,
     pub(crate) calls: Vec<CallFrame>,
     pub(crate) mes: Vec<ScriptMe>,
+    pub(crate) trap: Option<ScriptTrap>,
     pub ip: ScriptIp,
 }
 
@@ -70,6 +77,7 @@ impl ScriptThread{
             calls: vec![],
             mes: vec![],
             ip: ScriptIp::default(),
+            trap: None,
         }
     }
     
@@ -136,17 +144,27 @@ impl ScriptThread{
         }
         else{
             println!("STACK UNDERFLOW");
-            Value::NIL
+            Value::from_err_stackunderflow(self.ip)
         }
     }
     
     pub fn push_stack_value(&mut self, value:Value){
         if self.stack.len() > self.stack_limit{
-            println!("STACK OVERFLOW")
+           println!("STACK OVERFLOW")
         }
         else{
+            if value.is_err(){
+                self.trap = Some(ScriptTrap::Error(value));
+            }
             self.stack.push(value);
         }
+    }
+    
+    pub fn push_stack_value_nc(&mut self, value:Value){
+        if value.is_err(){
+            self.trap = Some(ScriptTrap::Error(value));
+        }
+        self.stack.push(value);
     }
     
     pub fn call_has_me(&self)->bool{
@@ -175,6 +193,7 @@ impl ScriptThread{
                 scope: 0,
                 mes: 0,
             },
+            args: Default::default(),
             return_ip: ScriptIp::default(),
         });
                 
@@ -185,29 +204,32 @@ impl ScriptThread{
         self.ip.index = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         let mut counter = 0;
-        
+        #[derive(Copy,Clone,Debug)]
+        struct Count{
+            index: usize,
+            count: usize
+        }
+        // let mut opcodes = [Count{index:0,count:0};128];
+        // for i in 0..128{opcodes[i].index = i}
         let mut body = &code.bodies[self.ip.body as usize];
         while (self.ip.index as usize) < body.parser.opcodes.len(){
             let opcode = body.parser.opcodes[self.ip.index as usize];
             if let Some((opcode, args)) = opcode.as_opcode(){
-                if let Some(rust_call) = self.opcode(opcode, args, heap, code){
-                    match rust_call{
-                        ScriptHook::SysCall(_sys_id)=>{
-                        }
-                        ScriptHook::RustCall=>{
-                        }
-                    }
-                    self.stack.push(Value::NIL)
-                }
+                //opcodes[opcode.0 as usize].count += 1;
+                self.opcode(opcode, args, heap, code);
                 // if exception tracing
-                if let Some(value) = self.stack.last(){
-                    if let Some(ptr) = value.as_err(){
-                        if let Some(loc2) = code.ip_to_loc(ptr.ip){
-                            println!("{} {}", value, loc2);
+                if let Some(trap) = self.trap.take(){
+                    match trap{
+                        ScriptTrap::Error(value)=>{
+                            if let Some(ptr) = value.as_err(){
+                                if let Some(loc2) = code.ip_to_loc(ptr.ip){
+                                    println!("{} {}", value, loc2);
+                                }
+                            }
                         }
                     }
                 }
-                
+                    
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(opcode);
@@ -220,7 +242,8 @@ impl ScriptThread{
         // lets have a look at our scope
         let _call = self.calls.last();
         let _scope = self.scopes.last();
-        
+        //opcodes.sort_by(|a,b| a.count.cmp(&b.count));
+        //println!("{:?}", opcodes);
         println!("Instructions {counter} Allocated objects:{:?}", heap.objects.len());
         //heap.print_object(*scope, true);
         //print!("Global:");

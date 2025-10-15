@@ -504,6 +504,27 @@ impl Value{
         }
     }
     
+    pub const fn set_opcode_args_pop_to_me(&mut self){
+        if self.is_opcode(){
+            self.0 |= OpcodeArgs::POP_TO_ME_FLAG as u64;
+        }
+    }
+    
+    pub const fn clear_opcode_args_pop_to_me(&mut self){
+        if self.is_opcode(){
+            self.0 &= !(OpcodeArgs::POP_TO_ME_FLAG as u64);
+        }
+    }
+    
+    pub const fn has_opcode_args_pop_to_me(&self)->bool{
+        if self.is_opcode(){
+            self.0 & (OpcodeArgs::POP_TO_ME_FLAG as u64) != 0
+        }
+        else{
+            false
+        }
+    }
+        
     pub const fn is_assign_opcode(&self)->bool{
         if self.is_opcode(){
             let code = Opcode(((self.0>>32) & 0xff) as u8);
