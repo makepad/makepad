@@ -180,7 +180,7 @@ impl ScriptVm{
             body.tokenizer.tokenize(&rust.code, &mut self.heap);
             body.parser.parse(&body.tokenizer.tokens, &mut self.heap, &rust.values);
             // lets point our thread to it
-            self.threads[0].run(&mut self.heap, &self.code, body_id)
+            self.threads[0].run_root(&mut self.heap, &self.code, body_id)
         }
     }
 }

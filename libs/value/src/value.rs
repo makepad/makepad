@@ -136,13 +136,14 @@ impl ValueType{
     pub const ERR_NOTINDEX: Self = Self(19);
     pub const ERR_NOTOBJECT: Self = Self(20);
     pub const ERR_STACKUNDERFLOW: Self = Self(21);
-    pub const ERR_INVALIDARGS: Self = Self(22);
-    pub const ERR_NOTASSIGNABLE: Self = Self(23);
-    pub const ERR_INTERNAL: Self = Self(24);
-    pub const ERR_ASSERTFAIL: Self = Self(25);
-    pub const ERR_NOTIMPL: Self = Self(26);
-    pub const ERR_USER: Self = Self(27);
-    pub const ERR_LAST: Self = Self(27);
+    pub const ERR_STACKOVERFLOW: Self = Self(22);
+    pub const ERR_INVALIDARGS: Self = Self(23);
+    pub const ERR_NOTASSIGNABLE: Self = Self(24);
+    pub const ERR_INTERNAL: Self = Self(25);
+    pub const ERR_ASSERTFAIL: Self = Self(26);
+    pub const ERR_NOTIMPL: Self = Self(27);
+    pub const ERR_USER: Self = Self(28);
+    pub const ERR_LAST: Self = Self(28);
             
     pub const ID: Self = Self(0x80);
     
@@ -220,6 +221,7 @@ impl fmt::Display for ValueType {
             Self::ERR_NOTINDEX=>write!(f,"IndexNotFound"),
             Self::ERR_NOTOBJECT=>write!(f,"NotAnObject"),
             Self::ERR_STACKUNDERFLOW=>write!(f,"StackUnderflow"),
+            Self::ERR_STACKOVERFLOW=>write!(f,"StackOverflow"),
             Self::ERR_INVALIDARGS=>write!(f,"InvalidArgs"),
             Self::ERR_NOTASSIGNABLE=>write!(f,"NotAssignable"),
             Self::ERR_INTERNAL=>write!(f,"Internal"),
@@ -264,23 +266,7 @@ impl Value{
     pub const TYPE_INLINE_STRING_4: u64 = ValueType::INLINE_STRING_4.to_u64();
     pub const TYPE_INLINE_STRING_5: u64 = ValueType::INLINE_STRING_5.to_u64();
     pub const TYPE_INLINE_STRING_END: u64 = ValueType::INLINE_STRING_END.to_u64();
-    
-    pub const TYPE_ERR_FIRST: u64 = ValueType::ERR_FIRST.to_u64();
-    pub const TYPE_ERR_NOTFOUND: u64 = ValueType::ERR_NOTFOUND.to_u64();
-    pub const TYPE_ERR_NOTFN: u64 = ValueType::ERR_NOTFN.to_u64();
-    pub const TYPE_ERR_NOTFIELD: u64 = ValueType::ERR_NOTFIELD.to_u64();
-    pub const TYPE_ERR_NOTINDEX: u64 = ValueType::ERR_NOTINDEX.to_u64();
-    pub const TYPE_ERR_NOTOBJECT: u64 = ValueType::ERR_NOTOBJECT.to_u64();
-    pub const TYPE_ERR_STACKUNDERFLOW: u64 = ValueType::ERR_STACKUNDERFLOW.to_u64();
-    pub const TYPE_ERR_INVALIDARGS: u64 = ValueType::ERR_INVALIDARGS.to_u64();
-    pub const TYPE_ERR_NOTASSIGNABLE: u64 = ValueType::ERR_NOTASSIGNABLE.to_u64();
-    
-    pub const TYPE_ERR_INTERNAL: u64 = ValueType::ERR_INTERNAL.to_u64();
-    pub const TYPE_ERR_ASSERTFAIL: u64 = ValueType::ERR_ASSERTFAIL.to_u64();
-    pub const TYPE_ERR_NOTIMPL: u64 = ValueType::ERR_NOTIMPL.to_u64();
-    pub const TYPE_ERR_USER: u64 = ValueType::ERR_USER.to_u64();
-    pub const TYPE_ERR_LAST: u64 = ValueType::ERR_LAST.to_u64();
-            
+
     pub const TYPE_ID: u64 = ValueType::ID.to_u64();
     
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
@@ -294,20 +280,21 @@ impl Value{
         
     // TODO: make this behave like javascript as much as is sensible
         
-    pub const fn from_err_notfound(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTFOUND | ip.to_u40())}
-    pub const fn from_err_notfn(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTFN | ip.to_u40())}
-    pub const fn from_err_notfield(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTFIELD | ip.to_u40())}
-    pub const fn from_err_notindex(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTINDEX | ip.to_u40())}
-    pub const fn from_err_notobject(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTOBJECT| ip.to_u40())}
-    pub const fn from_err_stackunderflow(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_STACKUNDERFLOW | ip.to_u40())}
-    pub const fn from_err_invalidargs(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_INVALIDARGS | ip.to_u40())}
-    pub const fn from_err_notassignable(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTASSIGNABLE | ip.to_u40())}
-    pub const fn from_err_internal(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_INTERNAL | ip.to_u40())}
-    pub const fn from_err_assertfail(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_ASSERTFAIL | ip.to_u40())}
-    pub const fn from_err_notimpl(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_NOTIMPL | ip.to_u40())}
-    pub const fn from_err_user(ip:ScriptIp)->Self{Self(Self::TYPE_ERR_USER | ip.to_u40())}
+    pub const fn from_err_notfound(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTFOUND.to_u64() | ip.to_u40())}
+    pub const fn from_err_notfn(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTFN.to_u64() | ip.to_u40())}
+    pub const fn from_err_notfield(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTFIELD.to_u64() | ip.to_u40())}
+    pub const fn from_err_notindex(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTINDEX.to_u64() | ip.to_u40())}
+    pub const fn from_err_notobject(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTOBJECT.to_u64()| ip.to_u40())}
+    pub const fn from_err_stackunderflow(ip:ScriptIp)->Self{Self(ValueType::ERR_STACKUNDERFLOW.to_u64() | ip.to_u40())}
+    pub const fn from_err_stackoverflow(ip:ScriptIp)->Self{Self(ValueType::ERR_STACKOVERFLOW.to_u64() | ip.to_u40())}
+    pub const fn from_err_invalidargs(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDARGS.to_u64() | ip.to_u40())}
+    pub const fn from_err_notassignable(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTASSIGNABLE.to_u64() | ip.to_u40())}
+    pub const fn from_err_internal(ip:ScriptIp)->Self{Self(ValueType::ERR_INTERNAL.to_u64() | ip.to_u40())}
+    pub const fn from_err_assertfail(ip:ScriptIp)->Self{Self(ValueType::ERR_ASSERTFAIL.to_u64() | ip.to_u40())}
+    pub const fn from_err_notimpl(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
+    pub const fn from_err_user(ip:ScriptIp)->Self{Self(ValueType::ERR_USER.to_u64() | ip.to_u40())}
     
-    pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=Self::TYPE_ERR_FIRST &&(self.0&Self::TYPE_MASK) <=Self::TYPE_ERR_LAST}
+    pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ValueType::ERR_LAST.to_u64()}
     
     pub const fn as_err(&self)->Option<ValueError>{
         if self.is_err(){
