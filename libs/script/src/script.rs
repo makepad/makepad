@@ -142,6 +142,7 @@ impl ScriptVm{
     
     pub fn add_rust_body(&mut self, new_rust:ScriptRust)->u16{
         let scope = self.heap.new_object_with_proto(id!(scope).into());
+        self.heap.set_object_deep(scope);
         self.heap.set_object_value(scope, id!(mod).into(), self.code.modules.obj.into());
         self.heap.set_object_value(scope, id!(global).into(), self.global.into());
         let me = self.heap.new_object_with_proto(id!(root_me).into());
