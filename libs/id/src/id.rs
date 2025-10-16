@@ -10,7 +10,6 @@ use {
         fmt,
     }
 };
-use crate::value::*;
 
 impl IdToString {
     pub fn add(&mut self, val: &str) {
@@ -189,12 +188,7 @@ impl Id {
     pub fn not_empty(&self)->bool{
         self.0 != 0
     }
-        
-    pub const fn to_value(self)->Value{
-        Value::from_id(self)
-    }
     
-
     pub fn from_str_with_lut(id_str: &str) -> Result<Self,
     String> {
         let id = Self::from_str(id_str);

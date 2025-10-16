@@ -1,4 +1,4 @@
-use crate::id::Id;
+use crate::makepad_id::*;
 use crate::opcode::*;
 use std::fmt;
 
@@ -236,8 +236,12 @@ impl fmt::Display for ValueType {
     }
 }
 
-impl Id{
-    pub fn escape(&self)->Value{
+pub trait IdExt{
+    fn escape(&self)->Value;
+}
+
+impl IdExt for Id{
+    fn escape(&self)->Value{
         Value::from_escaped_id(*self)
     }
 }
