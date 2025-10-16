@@ -3,15 +3,15 @@ use crate::heap::*;
 use crate::makepad_value::value::*;
 use crate::makepad_value_derive::*;
 use crate::native::*;
-use crate::object::*;
 use crate::script::*;
+use crate::*;
 
 #[derive(Default)]
-pub struct ScriptMethods{
-    pub type_table: Vec<IdMap<Id, NativeFnIndex>>,
+pub struct ScriptTypeMethods{
+    pub type_table: Vec<IdMap<Id, ObjectPtr>>,
 }
 
-impl ScriptMethods{
+impl ScriptTypeMethods{
     pub fn new(h:&mut ScriptHeap, native:&mut ScriptNative)->Self{
         let mut t = Self::default();
         t.add_shared(h, native);
@@ -21,25 +21,12 @@ impl ScriptMethods{
     
     pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, args:&[(Id,Value)], ty_redux:usize, method:Id, f: F) 
     where F: Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static{
-        //let ty_redux = value_type.to_redux();
+        let fn_obj = native.add(heap, args, f);
+                
         if ty_redux >= self.type_table.len(){
             self.type_table.resize_with(ty_redux + 1, || Default::default());
         }
-        let fn_index = native.fn_table.len();
-        
-        let fn_obj = heap.new_object_with_proto(id!(native).into());
-        heap.set_object_type(fn_obj, ObjectType::VEC2);
-        heap.set_object_fn(fn_obj, ScriptFnPtr::Native(NativeId{index: fn_index as u32}));
-        
-        for arg in args{
-            heap.set_object_value(fn_obj, arg.0.into(), arg.1.into());
-        }
-        
-        self.type_table[ty_redux].insert(method, NativeFnIndex{
-            fn_index,
-            fn_obj: fn_obj.into()
-        });
-        native.fn_table.push(NativeFnEntry::new(f));
+        self.type_table[ty_redux].insert(method,fn_obj);
     }
     
     pub fn add_shared(&mut self, h:&mut ScriptHeap, native:&mut ScriptNative){
@@ -83,63 +70,70 @@ impl ScriptMethods{
     
     pub fn add_object(&mut self, h: &mut ScriptHeap, native:&mut ScriptNative){
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(proto), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into(), Value::NIL).as_object(){
+            if let Some(this) = value!(ctx, args.this).as_object(){
                 return ctx.heap.object_proto(this)
             }
-            Value::from_err_internal(ctx.thread.ip)
+            Value::err_internal(ctx.thread.ip)
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(push), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
-                ctx.heap.push_object_vec_into_object_vec(this, args);
-                return Value::NIL
+            if let Some(this) = value!(ctx, args.this).as_object(){
+                ctx.heap.push_vec_into_vec(this, args);
+                return NIL
             }
-            Value::from_err_internal(ctx.thread.ip)
+            Value::err_internal(ctx.thread.ip)
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(pop), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
-                return ctx.heap.pop_object_vec(this)
+            if let Some(this) = value!(ctx, args.this).as_object(){
+                return ctx.heap.pop_vec(this)
             }
-            Value::from_err_internal(ctx.thread.ip)
+            Value::err_internal(ctx.thread.ip)
+        });
+        
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(len), |ctx, args|{
+            if let Some(this) = value!(ctx, args.this).as_object(){
+                return ctx.heap.vec_len(this).into()
+            }
+            Value::err_internal(ctx.thread.ip)
         });
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(extend), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
-                ctx.heap.push_object_vec_of_vec_into_object_vec(this, args, false);
-                return Value::NIL
+            if let Some(this) = value!(ctx, args.this).as_object(){
+                ctx.heap.push_vec_of_vec_into_vec(this, args, false);
+                return NIL
             }
-            Value::from_err_internal(ctx.thread.ip)
+            Value::err_internal(ctx.thread.ip)
         });
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(import), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
-                ctx.heap.push_object_vec_of_vec_into_object_vec(this, args, true);
-                return Value::NIL
+            if let Some(this) = value!(ctx, args.this).as_object(){
+                ctx.heap.push_vec_of_vec_into_vec(this, args, true);
+                return NIL
             }
-            Value::from_err_internal(ctx.thread.ip)
+            Value::err_internal(ctx.thread.ip)
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(retain), |ctx, args|{
-            if let Some(this) = ctx.heap.object_value(args, id!(this).into(),Value::NIL).as_object(){
-                let fnptr = ctx.heap.object_vec_value(args, 0);
+            if let Some(this) = value!(ctx, args.this).as_object(){
+                let fnptr = ctx.heap.vec_value(args, 0);
                 let mut i = 0;
-                while i < ctx.heap.object_vec_len(this){
-                    let value = ctx.heap.object_vec_value(this, i);
-                    let ret = ctx.thread.call(ctx.heap, ctx.code,  fnptr, &[value]);
+                while i < ctx.heap.vec_len(this){
+                    let value = ctx.heap.vec_value(this, i);
+                    let ret = ctx.thread.call(ctx.heap, ctx.code,  ctx.host, fnptr, &[value]);
                     if ret.is_err(){
                         return ret;
                     }
                     if !ctx.heap.cast_to_bool(ret){
-                        ctx.heap.object_vec_remove(this, i);
+                        ctx.heap.vec_remove(this, i);
                     }
                     else{
                         i += 1
                     }
                 }
-                return Value::NIL
+                return NIL
             }
-            Value::from_err_notimpl(ctx.thread.ip)
+            Value::err_notimpl(ctx.thread.ip)
         });
     }     
 }    

@@ -6,6 +6,7 @@ use crate::object::*;
 use crate::string::*;
 
 pub struct ScriptHeap{
+    pub modules: ObjectPtr,
     mark_vec: Vec<usize>,
     objects: Vec<Object>,
     roots: Vec<usize>,
@@ -29,7 +30,7 @@ impl ScriptHeap{
         }
     }
     
-    pub fn new_object(&mut self, flags: u64)->ObjectPtr{
+    pub fn new(&mut self, flags: u64)->ObjectPtr{
         if let Some(index) = self.objects_free.pop(){
             let object = &mut self.objects[index];
             object.tag.set_flags(flags | ObjectTag::ALLOCED);
@@ -45,14 +46,21 @@ impl ScriptHeap{
             ObjectPtr{index: index as _}
         }
     }
+    
+    pub fn new_module(&mut self, id:Id)->ObjectPtr{
+        let md = self.new_with_proto(id.into());
+        self.set_value(self.modules, id.into(), md.into());
+        md
+    }
     /*
     pub fn free_object(&mut self, index: usize){
         self.objects[index].tag.clear();
         self.objects_free.push(index);
     }
     */
-    pub fn new()->Self{
-        Self{
+    pub fn empty()->Self{
+        let mut v = Self{
+            modules: ObjectPtr{index:0},
             mark_vec: Default::default(),
             objects: Default::default(),
             roots: vec![0],
@@ -60,7 +68,9 @@ impl ScriptHeap{
             // index 0 is always an empty string
             strings: vec![Default::default()],
             strings_free: Default::default(),
-        }
+        };
+        v.modules = v.new_with_proto(id!(mod).into()); 
+        v
     }
         
     pub fn mark_inner(&mut self, index:usize){
@@ -149,11 +159,11 @@ impl ScriptHeap{
         }
     }
     
-    pub fn new_object_if_reffed(&mut self, ptr:ObjectPtr)->ObjectPtr{
+    pub fn new_if_reffed(&mut self, ptr:ObjectPtr)->ObjectPtr{
         let obj = &self.objects[ptr.index as usize];
         if obj.tag.is_reffed(){
             let proto = obj.proto;
-            return self.new_object_with_proto(proto);
+            return self.new_with_proto(proto);
         }
         return ptr;
     }
@@ -300,14 +310,14 @@ impl ScriptHeap{
         StringPtr{index: index as u32}
     }
             
-    pub fn new_object_with_proto(&mut self, proto:Value)->ObjectPtr{
+    pub fn new_with_proto(&mut self, proto:Value)->ObjectPtr{
         let (proto_fwd, proto_index) = if let Some(ptr) = proto.as_object(){
             let object = &mut self.objects[ptr.index as usize];
             object.tag.set_reffed();
             (object.tag.proto_fwd(), ptr.index as usize)
         }
         else{
-            let ptr = self.new_object(0);
+            let ptr = self.new(0);
             self.objects[ptr.index as usize].proto = proto;
             return ptr
         };
@@ -353,7 +363,7 @@ impl ScriptHeap{
         self.objects[ptr.index as usize].tag.clear_deep()
     }
     
-    pub fn object_value_index(&self, ptr: ObjectPtr, index: Value, def:Value)->Value{
+    pub fn value_index(&self, ptr: ObjectPtr, index: Value, def:Value)->Value{
         let object = &self.objects[ptr.index as usize];
         
         let ty = object.tag.get_type();
@@ -390,7 +400,7 @@ impl ScriptHeap{
         def
     }
     
-    pub fn object_value_prefixed(&self, ptr: ObjectPtr, key: Value, def:Value)->Value{
+    pub fn value_prefixed(&self, ptr: ObjectPtr, key: Value, def:Value)->Value{
         let object = &self.objects[ptr.index as usize];
         for chunk in object.vec.rchunks(2){
             if chunk[0] == key{
@@ -400,7 +410,7 @@ impl ScriptHeap{
         return def
     }
     
-    pub fn object_value_deep(&self, obj_ptr:ObjectPtr, key: Value, def:Value)->Value{
+    pub fn value_deep(&self, obj_ptr:ObjectPtr, key: Value, def:Value)->Value{
         let mut ptr = obj_ptr;
         loop{
             let object = &self.objects[ptr.index as usize];
@@ -427,29 +437,29 @@ impl ScriptHeap{
     pub fn object_method(&self, ptr:ObjectPtr, key:Value, def:Value)->Value{
         let object = &self.objects[ptr.index as usize];
         if object.tag.has_methods(){
-            self.object_value(ptr, key, def)
+            self.value(ptr, key, def)
         }
         else{
             def
         }
     }
     
-    pub fn object_value(&self, ptr:ObjectPtr, key:Value, def:Value)->Value{
+    pub fn value(&self, ptr:ObjectPtr, key:Value, def:Value)->Value{
         // hard array index
         if key.is_id(){
-            return self.object_value_deep(ptr, key, def)
+            return self.value_deep(ptr, key, def)
         }
         if key.is_index(){
-            return self.object_value_index(ptr, key, def)
+            return self.value_index(ptr, key, def)
         }
         if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
-            return self.object_value_deep(ptr, key, def)
+            return self.value_deep(ptr, key, def)
         }
         // TODO implement string lookup
         def
     }
     
-    pub fn object_vec_len(&self, ptr:ObjectPtr)->usize{
+    pub fn vec_len(&self, ptr:ObjectPtr)->usize{
         let object = &self.objects[ptr.index as usize];
         if object.tag.get_type().has_paired_vec(){
             object.vec.len() >> 1
@@ -466,7 +476,7 @@ impl ScriptHeap{
         self.objects.len()
     }
     
-    pub fn object_vec_remove(&mut self, ptr:ObjectPtr, index:usize)->Value{
+    pub fn vec_remove(&mut self, ptr:ObjectPtr, index:usize)->Value{
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.get_type().has_paired_vec(){
             object.vec.remove(index * 2);
@@ -476,11 +486,11 @@ impl ScriptHeap{
             return object.vec.remove(index);
         }
         else{
-            Value::NIL
+            NIL
         }
     }
     
-    pub fn object_vec_value(&self, ptr:ObjectPtr, index:usize)->Value{
+    pub fn vec_value(&self, ptr:ObjectPtr, index:usize)->Value{
         let object = &self.objects[ptr.index as usize];
         if object.tag.get_type().has_paired_vec(){
             if let Some(value) = object.vec.get(index * 2 + 1){
@@ -492,14 +502,14 @@ impl ScriptHeap{
                 return *value
             }
         }
-        Value::NIL
+        NIL
     }
     
-    pub fn object_value_path(&self, ptr:ObjectPtr, keys:&[Id], def:Value)->Value{
+    pub fn value_path(&self, ptr:ObjectPtr, keys:&[Id], def:Value)->Value{
         let mut value:Value = ptr.into();
         for key in keys{
             if let Some(obj) = value.as_object(){
-                value = self.object_value(obj, key.into(), def);
+                value = self.value(obj, key.into(), def);
             }
             else{
                 return def;
@@ -520,23 +530,23 @@ impl ScriptHeap{
         &mut self.objects[ptr.index as usize]
     }*/
     
-    pub fn set_object_value_index(&mut self, ptr: ObjectPtr, index:Value, value: Value){
+    pub fn set_value_index(&mut self, ptr: ObjectPtr, index:Value, value: Value){
         // alright so. now what.
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
         if ty.uses_vec2(){
             let index = index.as_index() * 2;
             if index + 1 >= object.vec.len(){
-                object.vec.resize(index + 2, Value::NIL);
+                object.vec.resize(index + 2, NIL);
             }
-            object.vec[index] = Value::NIL;
+            object.vec[index] = NIL;
             object.vec[index+1] = value; 
             return 
         }
         if ty.is_vec1(){
             let index = index.as_index();
             if index>= object.vec.len(){
-                object.vec.resize(index, Value::NIL);
+                object.vec.resize(index, NIL);
             }
             object.vec[index] = value;
             return 
@@ -552,16 +562,16 @@ impl ScriptHeap{
         }
     }
     
-    pub fn pop_object_vec(&mut self, ptr:ObjectPtr)->Value{
+    pub fn pop_vec(&mut self, ptr:ObjectPtr)->Value{
         if let Some(value) = self.objects[ptr.index as usize].vec.pop(){
             value
         }
         else{
-            Value::NIL
+            NIL
         }
     }
     
-    pub fn push_object_vec_into_object_vec(&mut self, target:ObjectPtr, source:ObjectPtr){
+    pub fn push_vec_into_vec(&mut self, target:ObjectPtr, source:ObjectPtr){
         let (target, source) = if target.index > source.index{
             let (o1, o2) = self.objects.split_at_mut(target.index as _);
             (&mut o2[0], &mut o1[source.index as usize])                    
@@ -572,7 +582,7 @@ impl ScriptHeap{
         target.push_vec_from_other(source);
     }
     
-    pub fn push_object_vec_of_vec_into_object_vec(&mut self, target:ObjectPtr, source:ObjectPtr, map:bool){
+    pub fn push_vec_of_vec_into_vec(&mut self, target:ObjectPtr, source:ObjectPtr, map:bool){
         let len = self.objects[source.index as usize].vec.len();
         for i in 0..len{
             if let Some(source) = self.objects[source.index as usize].vec[i].as_object(){
@@ -591,7 +601,7 @@ impl ScriptHeap{
         }
     }
     
-    pub fn object_push_value(&mut self, ptr: ObjectPtr, key: Value, value: Value){
+    pub fn push_value(&mut self, ptr: ObjectPtr, key: Value, value: Value){
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
         if ty.has_paired_vec(){
@@ -609,7 +619,7 @@ impl ScriptHeap{
         }
     }
     
-    pub fn set_object_value_prefixed(&mut self, ptr: ObjectPtr, key: Value, value: Value){
+    pub fn set_value_prefixed(&mut self, ptr: ObjectPtr, key: Value, value: Value){
         let object = &mut self.objects[ptr.index as usize];
         for chunk in object.vec.rchunks_mut(2){
             if chunk[0] == key{
@@ -621,7 +631,7 @@ impl ScriptHeap{
         object.vec.extend_from_slice(&[key, value]);
     }
     
-    pub fn set_object_value_deep(&mut self, ptr:ObjectPtr, key: Value, value: Value){
+    pub fn set_value_deep(&mut self, ptr:ObjectPtr, key: Value, value: Value){
         let mut ptr = ptr;
         loop{
             let object = &mut self.objects[ptr.index as usize];
@@ -654,7 +664,7 @@ impl ScriptHeap{
         }
     }
     
-    pub fn set_object_value_shallow(&mut self, ptr:ObjectPtr, key:Value, value:Value){
+    pub fn set_value_shallow(&mut self, ptr:ObjectPtr, key:Value, value:Value){
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.get_type().is_vec2(){
             for chunk in object.vec.rchunks_mut(2){
@@ -669,54 +679,54 @@ impl ScriptHeap{
         object.map.insert(key, value);
     }
     
-    pub fn insert_object_value_at(&mut self, _ptr:ObjectPtr, _key:Value, _value:Value, _before:bool){
+    pub fn insert_value_at(&mut self, _ptr:ObjectPtr, _key:Value, _value:Value, _before:bool){
     }
     
-    pub fn insert_object_value_begin(&mut self, _ptr:ObjectPtr, _key:Value, _value:Value){
+    pub fn insert_value_begin(&mut self, _ptr:ObjectPtr, _key:Value, _value:Value){
     }
     
-    pub fn set_object_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
+    pub fn set_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
         if key.is_index(){ // use vector
-            return self.set_object_value_index(ptr, key, value);
+            return self.set_value_index(ptr, key, value);
         }
         if let Some(id) = key.as_id(){
             // mark object as having methods
             if let Some(obj) = value.as_object(){
-                if self.object_is_fn_and_set_reffed(obj){
+                if self.is_fn_and_set_reffed(obj){
                     let object = &mut self.objects[ptr.index as usize];
                     object.tag.set_has_methods();
                 }
             }
             if id.is_prefixed(){
-                return self.set_object_value_prefixed(ptr, key, value)
+                return self.set_value_prefixed(ptr, key, value)
             }
             // scan prototype chain for id
             let object = &self.objects[ptr.index as usize];
             if !object.tag.is_deep(){
-                return self.set_object_value_shallow(ptr, key, value);
+                return self.set_value_shallow(ptr, key, value);
             }
             else{
-                return self.set_object_value_deep(ptr, key, value)
+                return self.set_value_deep(ptr, key, value)
             }
         }
         if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             let object = &mut self.objects[ptr.index as usize];
             if !object.tag.is_deep(){
-                return self.set_object_value_shallow(ptr, key, value);
+                return self.set_value_shallow(ptr, key, value);
             }
             else{
-                return self.set_object_value_deep(ptr, key, value)
+                return self.set_value_deep(ptr, key, value)
             }
         }
         println!("Cant set object value with key {:?}", key);
     }
     
-    pub fn set_object_value_in_map(&mut self, ptr:ObjectPtr, key: Value, this:Value){
+    pub fn set_value_in_map(&mut self, ptr:ObjectPtr, key: Value, this:Value){
         let object = &mut self.objects[ptr.index as usize];
         object.map.insert(key, this);
     }
     
-    pub fn object_has_proto(&mut self, ptr:ObjectPtr, rhs:Value)->bool{
+    pub fn has_proto(&mut self, ptr:ObjectPtr, rhs:Value)->bool{
         let mut ptr = ptr;
         loop{
             let object = &mut self.objects[ptr.index as usize];
@@ -732,28 +742,28 @@ impl ScriptHeap{
         }
     }
     
-    pub fn set_object_fn(&mut self, ptr: ObjectPtr, fnptr: ScriptFnPtr){
+    pub fn set_fn(&mut self, ptr: ObjectPtr, fnptr: ScriptFnPtr){
         let object = &mut self.objects[ptr.index as usize];
         object.tag.set_fn(fnptr);
     }
     
-    pub fn object_as_fn(&self, ptr: ObjectPtr,)->Option<ScriptFnPtr>{
+    pub fn as_fn(&self, ptr: ObjectPtr,)->Option<ScriptFnPtr>{
         let object = &self.objects[ptr.index as usize];
         object.tag.as_fn()
     }
     
-    pub fn object_is_fn(&self, ptr: ObjectPtr,)->bool{
+    pub fn is_fn(&self, ptr: ObjectPtr,)->bool{
         let object = &self.objects[ptr.index as usize];
         object.tag.is_fn()
     }
     
-    pub fn object_is_fn_and_set_reffed(&mut self, ptr: ObjectPtr,)->bool{
+    pub fn is_fn_and_set_reffed(&mut self, ptr: ObjectPtr,)->bool{
         let object = &mut self.objects[ptr.index as usize];
         object.tag.set_reffed();
         object.tag.is_fn()
     }
     
-    pub fn parent_object_as_fn(&self, ptr: ObjectPtr,)->Option<ScriptFnPtr>{
+    pub fn parent_as_fn(&self, ptr: ObjectPtr,)->Option<ScriptFnPtr>{
         let object = &self.objects[ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             let fn_object = &self.objects[ptr.index as usize];
@@ -778,7 +788,7 @@ impl ScriptHeap{
                 }
             }
             else{
-                self.objects[top_ptr.index as usize].vec.extend_from_slice(&[Value::NIL, value]);
+                self.objects[top_ptr.index as usize].vec.extend_from_slice(&[NIL, value]);
             }
         }
     }
@@ -797,7 +807,7 @@ impl ScriptHeap{
                     }
                 }
                 else{
-                    self.objects[top_ptr.index as usize].vec.extend_from_slice(&[Value::NIL, *value]);
+                    self.objects[top_ptr.index as usize].vec.extend_from_slice(&[NIL, *value]);
                 }
             }
         }
@@ -812,14 +822,14 @@ impl ScriptHeap{
             let object = &self.objects[obj.index as usize];
             if object.tag.is_script_fn(){
                 print!("Fn");
-                self.print_object(obj,false);
+                self.print(obj,false);
             }
             else if object.tag.is_native_fn(){
                 print!("Native");
-                self.print_object(obj,false);
+                self.print(obj,false);
             }
             else{
-                self.print_object(obj, deep);
+                self.print(obj, deep);
             }
         }
         else{
@@ -914,7 +924,7 @@ impl ScriptHeap{
         false
     }
     
-    pub fn print_object(&self, set_ptr:ObjectPtr, deep:bool){
+    pub fn print(&self, set_ptr:ObjectPtr, deep:bool){
         let mut ptr = set_ptr;
         let mut str = String::new();
         // scan up the chain to set the proto value
