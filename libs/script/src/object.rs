@@ -289,7 +289,7 @@ impl Object{
                 
         if ty_self.has_paired_vec() && ty_other.is_vec1(){
             for value in &other.vec{
-                self.vec.extend_from_slice(&[Value::NIL, *value]);
+                self.vec.extend_from_slice(&[NIL, *value]);
             }
             return
         }
@@ -304,7 +304,7 @@ impl Object{
         }
         if !ty_now.has_paired_vec() && ty_new.has_paired_vec(){
             if self.vec.len() & 1 != 0{
-                self.vec.push(Value::NIL)
+                self.vec.push(NIL)
             }
         }
         self.tag.set_type_unchecked(ty_new)
@@ -318,7 +318,7 @@ impl Object{
     }
     
     pub fn clear(&mut self){
-        self.proto = Value::NIL;
+        self.proto = NIL;
         self.tag.clear();
         self.map.clear();
         self.vec.clear();
