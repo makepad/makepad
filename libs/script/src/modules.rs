@@ -3,7 +3,6 @@ use crate::heap::*;
 use crate::makepad_value::value::*;
 use crate::makepad_value_derive::*;
 use crate::native::*;
-use crate::script::*;
 use crate::*;
 
 pub fn define_math_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
