@@ -819,7 +819,7 @@ impl ScriptParser{
                     return 1
                 }
                 self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 -if_start) );
-               // self.push_code_none(Value::NIL);
+               // self.push_code_none(NIL);
                 if was_block{ // allow expression to chain
                     self.state.push(State::EndExpr)
                 }
@@ -963,7 +963,7 @@ impl ScriptParser{
                     return 1
                 }
                 if id == id!(nil){
-                    self.push_code(Value::NIL, self.index);
+                    self.push_code(NIL, self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
@@ -1018,11 +1018,11 @@ impl ScriptParser{
                     return 1
                 }
                 if !required && (sep == id!(;) || sep == id!(,)){
-                   // self.push_code(Value::NIL, self.index);
+                   // self.push_code(NIL, self.index);
                 }
                 if required{
                     println!("Expected expression after {:?} found {:?}", self.state, tok);
-                    self.push_code_none(Value::NIL);
+                    self.push_code_none(NIL);
                 }
             }
                         

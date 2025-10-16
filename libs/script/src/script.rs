@@ -8,6 +8,7 @@ use crate::methods::*;
 use crate::thread::*;
 use crate::native::*;
 use crate::modules::*;
+use std::any::Any;
 
 #[derive(Default)]
 pub struct ScriptRust{
@@ -38,8 +39,7 @@ pub struct ScriptBody{
 }
 
 pub struct ScriptCode{
-    pub methods: ScriptMethods,
-    pub modules: ScriptModules,
+    pub type_methods: ScriptTypeMethods,
     pub builtins: ScriptBuiltins,
     pub native: ScriptNative,
     pub bodies: Vec<ScriptBody>,
@@ -97,6 +97,7 @@ impl ScriptCode{
 
 
 pub struct ScriptCtx<'a>{
+    pub host: &'a mut dyn Any,
     pub thread: &'a mut ScriptThread,
     pub code: &'a ScriptCode,
     pub heap: &'a mut ScriptHeap
@@ -110,8 +111,9 @@ pub struct ScriptVm{
 }
 
 impl ScriptVm{
-    pub fn ctx(&mut self)->ScriptCtx{
+    pub fn ctx<'a>(&'a mut self, host:&'a mut dyn Any)->ScriptCtx<'a>{
         ScriptCtx{
+            host,
             code: &self.code,
             heap: &mut self.heap,
             thread: &mut self.threads[0]
@@ -119,18 +121,19 @@ impl ScriptVm{
     }
     
     pub fn new()->Self{
-        let mut heap = ScriptHeap::new();
+        let mut heap = ScriptHeap::empty();
         let mut native = ScriptNative::default();
-        let methods = ScriptMethods::new(&mut heap, &mut native);
-        let modules = ScriptModules::new(&mut heap, &mut native);
-        let global = heap.new_object_with_proto(id!(global).into());
-        let builtins = ScriptBuiltins::new(&mut heap, &modules);
+        let type_methods = ScriptTypeMethods::new(&mut heap, &mut native);
+        define_math_module(&mut heap, &mut native);
+        define_std_module(&mut heap, &mut native);
+    
+        let global = heap.new_with_proto(id!(global).into());
+        let builtins = ScriptBuiltins::new(&mut heap);
         
         Self{
             code:ScriptCode{
                 builtins,
-                modules,
-                methods,
+                type_methods,
                 native,
                 bodies: Default::default(),
             },
@@ -141,11 +144,11 @@ impl ScriptVm{
     }
     
     pub fn add_rust_body(&mut self, new_rust:ScriptRust)->u16{
-        let scope = self.heap.new_object_with_proto(id!(scope).into());
+        let scope = self.heap.new_with_proto(id!(scope).into());
         self.heap.set_object_deep(scope);
-        self.heap.set_object_value(scope, id!(mod).into(), self.code.modules.obj.into());
-        self.heap.set_object_value(scope, id!(global).into(), self.global.into());
-        let me = self.heap.new_object_with_proto(id!(root_me).into());
+        self.heap.set_value(scope, id!(mod).into(), self.heap.modules.into());
+        self.heap.set_value(scope, id!(global).into(), self.global.into());
+        let me = self.heap.new_with_proto(id!(root_me).into());
         
         let new_body = ScriptBody{
             source: ScriptSource::Rust{rust:new_rust},
@@ -172,7 +175,7 @@ impl ScriptVm{
         i as u16
     }
     
-    pub fn eval(&mut self, new_rust: ScriptRust){
+    pub fn eval(&mut self, new_rust: ScriptRust, host:&mut dyn Any){
         let body_id = self.add_rust_body(new_rust);
         let body = &mut self.code.bodies[body_id as usize];
         
@@ -180,7 +183,7 @@ impl ScriptVm{
             body.tokenizer.tokenize(&rust.code, &mut self.heap);
             body.parser.parse(&body.tokenizer.tokens, &mut self.heap, &rust.values);
             // lets point our thread to it
-            self.threads[0].run_root(&mut self.heap, &self.code, body_id)
+            self.threads[0].run_root(&mut self.heap, &self.code, host, body_id)
         }
     }
 }
