@@ -1,5 +1,5 @@
 use std::fmt;
-use crate::makepad_value::value::*;
+use crate::value::*;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
