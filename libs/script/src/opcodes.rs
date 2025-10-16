@@ -4,7 +4,7 @@ use crate::makepad_value::value::*;
 use crate::makepad_value::opcode::*;
 use crate::makepad_value_derive::*;
 use crate::object::*;
-use crate::script::*;
+use crate::vm::*;
 use crate::thread::*;
 use std::any::Any;
 
@@ -486,7 +486,7 @@ impl ScriptThread{
                     match fnptr{
                         ScriptFnPtr::Native(ni)=>{
                             let ip = self.ip;
-                            let ret = (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut ScriptCtx{
+                            let ret = (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut ScriptVmRef{
                                 host,
                                 heap,
                                 thread:self,

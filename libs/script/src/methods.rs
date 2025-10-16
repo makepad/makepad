@@ -3,7 +3,7 @@ use crate::heap::*;
 use crate::makepad_value::value::*;
 use crate::makepad_value_derive::*;
 use crate::native::*;
-use crate::script::*;
+use crate::vm::*;
 use crate::*;
 
 #[derive(Default)]
@@ -20,7 +20,7 @@ impl ScriptTypeMethods{
     }
     
     pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, args:&[(Id,Value)], ty_redux:usize, method:Id, f: F) 
-    where F: Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static{
+    where F: Fn(&mut ScriptVmRef, ObjectPtr)->Value + 'static{
         let fn_obj = native.add(heap, args, f);
                 
         if ty_redux >= self.type_table.len(){
@@ -69,63 +69,63 @@ impl ScriptTypeMethods{
     }
     
     pub fn add_object(&mut self, h: &mut ScriptHeap, native:&mut ScriptNative){
-        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(proto), |ctx, args|{
-            if let Some(this) = value!(ctx, args.this).as_object(){
-                return ctx.heap.object_proto(this)
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(proto), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                return vm.heap.object_proto(this)
             }
-            Value::err_internal(ctx.thread.ip)
+            Value::err_internal(vm.thread.ip)
         });
         
-        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(push), |ctx, args|{
-            if let Some(this) = value!(ctx, args.this).as_object(){
-                ctx.heap.push_vec_into_vec(this, args);
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(push), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                vm.heap.push_vec_into_vec(this, args);
                 return NIL
             }
-            Value::err_internal(ctx.thread.ip)
+            Value::err_internal(vm.thread.ip)
         });
         
-        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(pop), |ctx, args|{
-            if let Some(this) = value!(ctx, args.this).as_object(){
-                return ctx.heap.pop_vec(this)
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(pop), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                return vm.heap.pop_vec(this)
             }
-            Value::err_internal(ctx.thread.ip)
+            Value::err_internal(vm.thread.ip)
         });
         
-        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(len), |ctx, args|{
-            if let Some(this) = value!(ctx, args.this).as_object(){
-                return ctx.heap.vec_len(this).into()
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(len), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                return vm.heap.vec_len(this).into()
             }
-            Value::err_internal(ctx.thread.ip)
+            Value::err_internal(vm.thread.ip)
         });
             
-        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(extend), |ctx, args|{
-            if let Some(this) = value!(ctx, args.this).as_object(){
-                ctx.heap.push_vec_of_vec_into_vec(this, args, false);
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(extend), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                vm.heap.push_vec_of_vec_into_vec(this, args, false);
                 return NIL
             }
-            Value::err_internal(ctx.thread.ip)
+            Value::err_internal(vm.thread.ip)
         });
             
-        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(import), |ctx, args|{
-            if let Some(this) = value!(ctx, args.this).as_object(){
-                ctx.heap.push_vec_of_vec_into_vec(this, args, true);
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(import), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                vm.heap.push_vec_of_vec_into_vec(this, args, true);
                 return NIL
             }
-            Value::err_internal(ctx.thread.ip)
+            Value::err_internal(vm.thread.ip)
         });
         
-        self.add(h, native, args!(cb:NIL), ValueType::REDUX_OBJECT, id!(retain), |ctx, args|{
-            if let Some(this) = value!(ctx, args.this).as_object(){
-                let fnptr = value!(ctx, args[0]);
+        self.add(h, native, args!(cb:NIL), ValueType::REDUX_OBJECT, id!(retain), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                let fnptr = value!(vm, args[0]);
                 let mut i = 0;
-                while i < ctx.heap.vec_len(this){
-                    let value = value!(ctx, this[i]);
-                    let ret = ctx.call(fnptr, &[value]);
+                while i < vm.heap.vec_len(this){
+                    let value = value!(vm, this[i]);
+                    let ret = vm.call(fnptr, &[value]);
                     if ret.is_err(){
                         return ret;
                     }
-                    if !ctx.heap.cast_to_bool(ret){
-                        ctx.heap.vec_remove(this, i);
+                    if !vm.heap.cast_to_bool(ret){
+                        vm.heap.vec_remove(this, i);
                     }
                     else{
                         i += 1
@@ -133,7 +133,7 @@ impl ScriptTypeMethods{
                 }
                 return NIL
             }
-            Value::err_notimpl(ctx.thread.ip)
+            Value::err_notimpl(vm.thread.ip)
         });
     }     
 }    
