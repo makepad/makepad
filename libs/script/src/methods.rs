@@ -114,12 +114,12 @@ impl ScriptTypeMethods{
             Value::err_internal(ctx.thread.ip)
         });
         
-        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(retain), |ctx, args|{
+        self.add(h, native, args!(cb:NIL), ValueType::REDUX_OBJECT, id!(retain), |ctx, args|{
             if let Some(this) = value!(ctx, args.this).as_object(){
-                let fnptr = ctx.heap.vec_value(args, 0);
+                let fnptr = value!(ctx, args[0]);
                 let mut i = 0;
                 while i < ctx.heap.vec_len(this){
-                    let value = ctx.heap.vec_value(this, i);
+                    let value = value!(ctx, this[i]);
                     let ret = ctx.thread.call(ctx.heap, ctx.code,  ctx.host, fnptr, &[value]);
                     if ret.is_err(){
                         return ret;
