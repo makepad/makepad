@@ -2,7 +2,7 @@ use crate::makepad_value::id::*;
 use crate::heap::*;
 use crate::makepad_value::value::*;
 use crate::makepad_value::opcode::*;
-use crate::script::*;
+use crate::vm::*;
 use crate::object::*;
 use std::any::Any;
 
@@ -210,7 +210,7 @@ impl ScriptThread{
         if let Some(fnptr) = heap.parent_as_fn(scope){
             match fnptr{
                 ScriptFnPtr::Native(ni)=>{
-                    return (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut ScriptCtx{
+                    return (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut ScriptVmRef{
                         host,
                         heap,
                         thread:self,

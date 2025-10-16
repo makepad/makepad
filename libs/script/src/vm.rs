@@ -96,14 +96,14 @@ impl ScriptCode{
 }
 
 
-pub struct ScriptCtx<'a>{
+pub struct ScriptVmRef<'a>{
     pub host: &'a mut dyn Any,
     pub thread: &'a mut ScriptThread,
     pub code: &'a ScriptCode,
     pub heap: &'a mut ScriptHeap
 }
 
-impl <'a> ScriptCtx<'a>{
+impl <'a> ScriptVmRef<'a>{
       pub fn call(&mut self,fnobj:Value, args:&[Value])->Value{
           self.thread.call(self.heap, self.code, self.host, fnobj, args)
       }
@@ -117,8 +117,8 @@ pub struct ScriptVm{
 }
 
 impl ScriptVm{
-    pub fn ctx<'a>(&'a mut self, host:&'a mut dyn Any)->ScriptCtx<'a>{
-        ScriptCtx{
+    pub fn new_ref<'a>(&'a mut self, host:&'a mut dyn Any)->ScriptVmRef<'a>{
+        ScriptVmRef{
             host,
             code: &self.code,
             heap: &mut self.heap,
