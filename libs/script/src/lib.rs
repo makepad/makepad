@@ -1,5 +1,5 @@
-pub use makepad_value;
-pub use makepad_value::makepad_value_derive;
+pub use makepad_id;
+pub use makepad_id::makepad_id_derive;
 pub mod tokenizer; 
 pub mod object;
 pub mod colorhex;
@@ -12,7 +12,12 @@ pub mod modules;
 pub mod native;
 pub mod vm;
 pub mod thread;
+pub mod opcode;
+pub mod value;
 pub mod opcodes;
+pub use makepad_id_derive::*;
+pub use makepad_id::id::*;
+pub use value::*;
 
 // can we refcount object roots on the heap?
 // yea why not 
