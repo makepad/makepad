@@ -103,6 +103,12 @@ pub struct ScriptCtx<'a>{
     pub heap: &'a mut ScriptHeap
 }
 
+impl <'a> ScriptCtx<'a>{
+      pub fn call(&mut self,fnobj:Value, args:&[Value])->Value{
+          self.thread.call(self.heap, self.code, self.host, fnobj, args)
+      }
+}
+
 pub struct ScriptVm{
     pub code: ScriptCode,
     pub global: ObjectPtr,

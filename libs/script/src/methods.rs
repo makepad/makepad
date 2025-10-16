@@ -120,7 +120,7 @@ impl ScriptTypeMethods{
                 let mut i = 0;
                 while i < ctx.heap.vec_len(this){
                     let value = value!(ctx, this[i]);
-                    let ret = ctx.thread.call(ctx.heap, ctx.code,  ctx.host, fnptr, &[value]);
+                    let ret = ctx.call(fnptr, &[value]);
                     if ret.is_err(){
                         return ret;
                     }
