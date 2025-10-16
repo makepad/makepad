@@ -9,6 +9,9 @@ use crate::object::*;
 macro_rules! value_f64{
     ($ctx:ident, $args:ident.$id: ident)=>{
         $ctx.heap.cast_to_f64($ctx.heap.value($args, id!($id).into(),NIL), $ctx.thread.ip)
+    };
+    ($ctx:ident, $obj:ident[$index: expr])=>{
+        $ctx.heap.cast_to_f64($ctx.heap.vec_value($obj, ($index) as usize), $ctx.thread.ip)
     }
 }
 
@@ -16,6 +19,9 @@ macro_rules! value_f64{
 macro_rules! value_bool{
     ($ctx:ident, $args:ident.$id: ident)=>{
         $ctx.heap.cast_to_bool($ctx.heap.value($args, id!($id).into(),NIL), $ctx.thread.ip)
+    };
+    ($ctx:ident, $obj:ident[$index: expr])=>{
+        $ctx.heap.cast_to_bool($ctx.heap.vec_value($obj, ($index) as usize), $ctx.thread.ip)
     }
 }
         
@@ -23,16 +29,12 @@ macro_rules! value_bool{
 macro_rules! value{
     ($ctx:ident, $obj:ident.$id: ident)=>{
         $ctx.heap.value($obj, id!($id).into(),NIL)
+    };
+    ($ctx:ident, $obj:ident[$index: expr])=>{
+        $ctx.heap.vec_value($obj, ($index) as usize)
     }
 }
 
-#[macro_export]
-macro_rules! index{
-    ($ctx:ident, $obj:ident.$id: ident)=>{
-        $ctx.heap.value($obj, id!($id).into(),NIL)
-    }
-}
-        
 #[macro_export]
 macro_rules! args{
     ($($id:ident:$val:expr),*)=>{
