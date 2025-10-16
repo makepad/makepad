@@ -1,7 +1,7 @@
-use crate::makepad_value::id::*;
+use crate::makepad_id::id::*;
 use crate::heap::*;
-use crate::makepad_value::value::*;
-use crate::makepad_value::opcode::*;
+use crate::value::*;
+use crate::opcode::*;
 use crate::vm::*;
 use crate::object::*;
 use std::any::Any;

@@ -23,6 +23,7 @@ pub mod audio;
 pub mod midi;
 pub mod video;
 pub mod scope;
+pub mod script;
 
 mod draw_matrix;
 mod draw_shader; 
@@ -73,6 +74,7 @@ pub use ::windows as windows;
 pub use makepad_futures;
  
 pub use {
+    makepad_script,
     makepad_shader_compiler,
     makepad_shader_compiler::makepad_derive_live,
     makepad_shader_compiler::makepad_math,
@@ -84,6 +86,9 @@ pub use {
     smallvec::SmallVec,
     //makepad_image_formats::image,
     makepad_derive_live::*,
+    
+    makepad_script::vm::*,
+    
     log::*,
     makepad_math::*,
     makepad_live_id::*,

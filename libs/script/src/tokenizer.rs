@@ -1,10 +1,10 @@
 // Makepad script streaming tokenizer
 
-use crate::makepad_value::id::Id;
+use crate::makepad_id::id::Id;
 use crate::colorhex::hex_bytes_to_u32;
-use crate::makepad_value_derive::*;
+use crate::makepad_id_derive::*;
 use crate::heap::*;
-use crate::makepad_value::value::*;
+use crate::value::*;
  
 
 #[derive(Copy, Clone, Debug)]

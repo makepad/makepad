@@ -1,7 +1,6 @@
-use crate::makepad_value::id::*;
+use crate::makepad_id::*;
 use crate::heap::*;
-use crate::makepad_value::value::*;
-use crate::makepad_value_derive::*;
+use crate::value::*;
 use crate::parser::*;
 use crate::tokenizer::*;
 use crate::methods::*;
@@ -11,7 +10,7 @@ use crate::modules::*;
 use std::any::Any;
 
 #[derive(Default)]
-pub struct ScriptRust{
+pub struct Script{
     pub cargo_manifest_path: String,
     pub module_path: String,
     pub file: String,
@@ -23,7 +22,7 @@ pub struct ScriptRust{
 
 pub enum ScriptSource{
     Rust{
-        rust: ScriptRust,
+        rust: Script,
     },
     Streaming{
         code: String,
@@ -148,8 +147,17 @@ impl ScriptVm{
             heap: heap,
         }
     }
+        
+    pub fn new_module(&mut self, id:Id)->ObjectPtr{
+        self.heap.new_module(id)
+    }
     
-    pub fn add_rust_body(&mut self, new_rust:ScriptRust)->u16{
+    pub fn add_fn<F>(&mut self, module:ObjectPtr, method:Id, args:&[(Id, Value)], f: F) 
+    where F: Fn(&mut ScriptVmRef, ObjectPtr)->Value + 'static{
+        self.code.native.add_fn(&mut self.heap, module, method, args, f)
+    }
+        
+    pub fn add_rust_script(&mut self, new_rust:Script)->u16{
         let scope = self.heap.new_with_proto(id!(scope).into());
         self.heap.set_object_deep(scope);
         self.heap.set_value(scope, id!(mod).into(), self.heap.modules.into());
@@ -181,8 +189,8 @@ impl ScriptVm{
         i as u16
     }
     
-    pub fn eval(&mut self, new_rust: ScriptRust, host:&mut dyn Any){
-        let body_id = self.add_rust_body(new_rust);
+    pub fn eval(&mut self, new_rust: Script, host:&mut dyn Any){
+        let body_id = self.add_rust_script(new_rust);
         let body = &mut self.code.bodies[body_id as usize];
         
         if let ScriptSource::Rust{rust} = &body.source{
