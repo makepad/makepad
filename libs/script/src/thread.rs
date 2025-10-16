@@ -4,6 +4,7 @@ use crate::makepad_value::value::*;
 use crate::makepad_value::opcode::*;
 use crate::script::*;
 use crate::object::*;
+use std::any::Any;
 
 #[derive(Debug, Default)]
 pub struct StackBases{
@@ -121,7 +122,7 @@ impl ScriptThread{
             return val    
         }
         else{
-            let value = Value::from_err_stackunderflow(self.ip);
+            let value = Value::err_stackunderflow(self.ip);
             self.trap = Some(ScriptTrap::Error(value));
             value
         }
@@ -138,7 +139,7 @@ impl ScriptThread{
             return *val    
         }
         else{
-            let value = Value::from_err_stackunderflow(self.ip);
+            let value = Value::err_stackunderflow(self.ip);
             self.trap = Some(ScriptTrap::Error(value));
             value
         }
@@ -149,7 +150,7 @@ impl ScriptThread{
             return *value
         }
         else{
-            let value = Value::from_err_stackunderflow(self.ip);
+            let value = Value::err_stackunderflow(self.ip);
             self.trap = Some(ScriptTrap::Error(value));
             value
         }
@@ -160,7 +161,7 @@ impl ScriptThread{
             return value
         }
         else{
-            let value = Value::from_err_stackunderflow(self.ip);
+            let value = Value::err_stackunderflow(self.ip);
             self.trap = Some(ScriptTrap::Error(value));
             value
         }
@@ -168,7 +169,7 @@ impl ScriptThread{
     
     pub fn push_stack_value(&mut self, value:Value){
         if self.stack.len() > self.stack_limit{
-            self.trap = Some(ScriptTrap::Error(Value::from_err_stackoverflow(self.ip)));
+            self.trap = Some(ScriptTrap::Error(Value::err_stackoverflow(self.ip)));
         }
         else{
             if value.is_err(){
@@ -191,25 +192,26 @@ impl ScriptThread{
     
     // lets resolve an id to a Value
     pub fn scope_value(&self, heap:&ScriptHeap, id: Id)->Value{
-        return heap.object_value(*self.scopes.last().unwrap(), id.into(),Value::from_err_notfound(self.ip));
+        return heap.value(*self.scopes.last().unwrap(), id.into(),Value::err_notfound(self.ip));
     }
     
     pub fn set_scope_value(&self, heap:&mut ScriptHeap, id: Id, value:Value){
-        heap.set_object_value(*self.scopes.last().unwrap(), id.into(),value);
+        heap.set_value(*self.scopes.last().unwrap(), id.into(),value);
     }
     
-    pub fn call(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, fnobj:Value, args:&[Value])->Value{
-        let scope = heap.new_object_with_proto(fnobj);
+    pub fn call(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any, fnobj:Value, args:&[Value])->Value{
+        let scope = heap.new_with_proto(fnobj);
         
         heap.clear_object_deep(scope);
         heap.push_all_fn_args(scope, args);
         heap.set_object_deep(scope);
         heap.set_object_type(scope, ObjectType::AUTO);
         
-        if let Some(fnptr) = heap.parent_object_as_fn(scope){
+        if let Some(fnptr) = heap.parent_as_fn(scope){
             match fnptr{
                 ScriptFnPtr::Native(ni)=>{
                     return (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut ScriptCtx{
+                        host,
                         heap,
                         thread:self,
                         code
@@ -224,21 +226,21 @@ impl ScriptThread{
                     self.scopes.push(scope);
                     self.calls.push(call);
                     self.ip = sip;
-                    return self.run_core(heap, code);
+                    return self.run_core(heap, code, host);
                 }
             }
         }
         else{
-            return Value::from_err_notfn(self.ip)
+            return Value::err_notfn(self.ip)
         }
     }
     
-    pub fn run_core(&mut self, heap:&mut ScriptHeap, code:&ScriptCode)->Value{
+    pub fn run_core(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any)->Value{
         let mut body = &code.bodies[self.ip.body as usize];
         while (self.ip.index as usize) < body.parser.opcodes.len(){
             let opcode = body.parser.opcodes[self.ip.index as usize];
             if let Some((opcode, args)) = opcode.as_opcode(){
-                self.opcode(opcode, args, heap, code);
+                self.opcode(opcode, args, heap, code, host);
                 // if exception tracing
                 if let Some(trap) = self.trap.take(){
                     match trap{
@@ -261,10 +263,10 @@ impl ScriptThread{
             }
             body = &code.bodies[self.ip.body as usize];
         }
-        Value::NIL
+        NIL
     }
     
-    pub fn run_root(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, body_id: u16){
+    pub fn run_root(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any, body_id: u16){
         
         self.calls.push(CallFrame{
             bases: StackBases{
@@ -285,7 +287,7 @@ impl ScriptThread{
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         
         // the main interpreter loop
-        self.run_core(heap, code);
+        self.run_core(heap, code, host);
         //println!("{:?}", profile);
         // lets have a look at our scope
         let _call = self.calls.last();
@@ -293,9 +295,9 @@ impl ScriptThread{
         //opcodes.sort_by(|a,b| a.count.cmp(&b.count));
         //println!("{:?}", opcodes);
         println!("Allocated objects:{:?}", heap.objects_len());
-        //heap.print_object(*scope, true);
+        //heap.print(*scope, true);
         //print!("Global:");
-        //heap.print_object(global, true);
+        //heap.print(global, true);
         //println!("");                                
         //self.heap.free_object(scope);
     }
