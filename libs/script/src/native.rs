@@ -1,4 +1,4 @@
-use crate::script::*;
+use crate::vm::*;
 use crate::makepad_value::value::*;
 use crate::makepad_value::id::*;
 use crate::heap::*;
@@ -42,7 +42,7 @@ macro_rules! args{
     }
 }
 
-pub type NativeFnType = Box<dyn Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static>;
+pub type NativeFnType = Box<dyn Fn(&mut ScriptVmRef, ObjectPtr)->Value + 'static>;
 
 pub struct NativeFnEntry{
     pub fn_ptr: NativeFnType
@@ -50,7 +50,7 @@ pub struct NativeFnEntry{
 
 impl NativeFnEntry{
     pub fn new<F>(f: F)->Self 
-    where F: Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static{
+    where F: Fn(&mut ScriptVmRef, ObjectPtr)->Value + 'static{
         Self{fn_ptr:Box::new(f)}
     }
 }
@@ -62,7 +62,7 @@ pub struct ScriptNative{
 
 impl ScriptNative{
     pub fn add<F>(&mut self, heap:&mut ScriptHeap, args:&[(Id,Value)], f: F)-> ObjectPtr
-    where F: Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static{
+    where F: Fn(&mut ScriptVmRef, ObjectPtr)->Value + 'static{
         let fn_index = self.fn_table.len();
         let fn_obj = heap.new_with_proto(id!(native).into());
         heap.set_object_type(fn_obj, ObjectType::VEC2);
@@ -77,8 +77,8 @@ impl ScriptNative{
         fn_obj
     }
     
-    pub fn add_method<F>(&mut self, heap:&mut ScriptHeap, module:ObjectPtr, method:Id, args:&[(Id, Value)], f: F) 
-    where F: Fn(&mut ScriptCtx, ObjectPtr)->Value + 'static{
+    pub fn add_fn<F>(&mut self, heap:&mut ScriptHeap, module:ObjectPtr, method:Id, args:&[(Id, Value)], f: F) 
+    where F: Fn(&mut ScriptVmRef, ObjectPtr)->Value + 'static{
         // lets get the 
         let fn_obj = self.add(heap, args, f);
         heap.set_value(module, method.into(), fn_obj.into());

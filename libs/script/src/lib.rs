@@ -10,9 +10,9 @@ pub mod methods;
 pub mod modules;
 #[macro_use]
 pub mod native;
-pub mod script;
+pub mod vm;
 pub mod thread;
-pub mod thread_opcode;
+pub mod opcodes;
 
 // can we refcount object roots on the heap?
 // yea why not 
@@ -58,7 +58,7 @@ impl RustTest{
     fn ty()->u32{1}
 }
 
-use crate::script::*;
+use crate::vm::*;
 use makepad_script_derive::*;
 
 pub fn test(){
