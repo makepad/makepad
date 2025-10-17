@@ -1175,6 +1175,7 @@ impl ScriptParser{
                     return 1
                 }
                 // in a function call we need the 
+                
                 if let Some(code) = self.opcodes.last_mut(){
                     if let Some((opcode,_)) = code.as_opcode(){
                         if opcode == Opcode::FOR_END{
@@ -1182,17 +1183,8 @@ impl ScriptParser{
                             self.state.push(State::BeginStmt{last_was_sep:false});
                             return 0;
                         }
-                        if opcode == Opcode::ASSIGN_ME{
-                            //code.set_opcode_is_statement();
-                            self.state.push(State::BeginStmt{last_was_sep:false});
-                            return 0;
-                        }
                         if opcode == Opcode::BREAK || opcode == Opcode::CONTINUE{
                             //code.set_opcode_is_statement();
-                            self.state.push(State::BeginStmt{last_was_sep:false});
-                            return 0;
-                        }
-                        if code.is_let_opcode(){
                             self.state.push(State::BeginStmt{last_was_sep:false});
                             return 0;
                         }
