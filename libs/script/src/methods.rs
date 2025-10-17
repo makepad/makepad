@@ -70,14 +70,14 @@ impl ScriptTypeMethods{
     pub fn add_object(&mut self, h: &mut ScriptHeap, native:&mut ScriptNative){
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(proto), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                return vm.heap.object_proto(this)
+                return vm.heap.proto(this)
             }
             Value::err_internal(vm.thread.ip)
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(push), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                vm.heap.push_vec_into_vec(this, args);
+                vm.heap.vec_push_vec(this, args);
                 return NIL
             }
             Value::err_internal(vm.thread.ip)
@@ -85,7 +85,7 @@ impl ScriptTypeMethods{
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(pop), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                return vm.heap.pop_vec(this)
+                return vm.heap.vec_pop(this)
             }
             Value::err_internal(vm.thread.ip)
         });
@@ -99,7 +99,7 @@ impl ScriptTypeMethods{
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(extend), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                vm.heap.push_vec_of_vec_into_vec(this, args, false);
+                vm.heap.vec_push_vec_of_vec(this, args, false);
                 return NIL
             }
             Value::err_internal(vm.thread.ip)
@@ -107,7 +107,7 @@ impl ScriptTypeMethods{
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(import), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                vm.heap.push_vec_of_vec_into_vec(this, args, true);
+                vm.heap.vec_push_vec_of_vec(this, args, true);
                 return NIL
             }
             Value::err_internal(vm.thread.ip)
