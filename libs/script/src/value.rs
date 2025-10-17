@@ -144,8 +144,12 @@ impl ValueType{
     pub const ERR_INTERNAL: Self = Self(25);
     pub const ERR_ASSERTFAIL: Self = Self(26);
     pub const ERR_NOTIMPL: Self = Self(27);
-    pub const ERR_USER: Self = Self(28);
-    pub const ERR_LAST: Self = Self(28);
+    pub const ERR_FROZEN: Self = Self(28);
+    pub const ERR_VALIDATION: Self = Self(29);
+    pub const ERR_INVKEY: Self = Self(30);
+    
+    pub const ERR_USER: Self = Self(31);
+    pub const ERR_LAST: Self = Self(31);
             
     pub const ID: Self = Self(0x80);
     
@@ -298,6 +302,14 @@ impl Value{
     pub const fn err_internal(ip:ScriptIp)->Self{Self(ValueType::ERR_INTERNAL.to_u64() | ip.to_u40())}
     pub const fn err_assertfail(ip:ScriptIp)->Self{Self(ValueType::ERR_ASSERTFAIL.to_u64() | ip.to_u40())}
     pub const fn err_notimpl(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
+    pub const fn err_frozen(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
+    pub const fn err_validation(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
+    pub const fn err_wrongkey(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
+        
+    pub const ERR_FROZEN: Self = Self(28);
+    pub const ERR_VALIDATION: Self = Self(29);
+    pub const ERR_INVKEY: Self = Self(30);
+    
     pub const fn err_user(ip:ScriptIp)->Self{Self(ValueType::ERR_USER.to_u64() | ip.to_u40())}
     
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ValueType::ERR_LAST.to_u64()}
@@ -533,12 +545,12 @@ impl Value{
         }
         false
     }
-    
+    /*
     pub const fn set_opcode_is_statement(&mut self){
         if self.is_opcode(){
             self.0 |= OpcodeArgs::STATEMENT_FLAG as u64;
         }
-    }
+    }*/
         
         
     pub const fn as_string(&self)->Option<StringPtr>{

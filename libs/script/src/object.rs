@@ -149,7 +149,11 @@ impl ObjectTag{
     pub fn has_rw(&self)->bool{
         self.0 & Self::RW_MASK != 0
     }
-        
+    
+    pub fn is_frozen(&self)->bool{
+        self.0 & Self::FROZEN != 0
+    }
+            
     pub fn is_checked(&self)->bool{
         self.0 & Self::CHECKED != 0
     }

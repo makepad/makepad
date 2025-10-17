@@ -195,8 +195,8 @@ impl ScriptThread{
         return heap.value(*self.scopes.last().unwrap(), id.into(),Value::err_notfound(self.ip));
     }
     
-    pub fn set_scope_value(&self, heap:&mut ScriptHeap, id: Id, value:Value){
-        heap.set_value(*self.scopes.last().unwrap(), id.into(),value);
+    pub fn set_scope_value(&self, heap:&mut ScriptHeap, id: Id, value:Value)->Value{
+        heap.set_value_ip(*self.scopes.last().unwrap(), id.into(),value, self.ip)
     }
     
     pub fn call(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any, fnobj:Value, args:&[Value])->Value{

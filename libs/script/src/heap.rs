@@ -323,12 +323,23 @@ impl ScriptHeap{
     // Writing object values 
         
         
-            
+    
+    pub(crate) fn force_value_in_map(&mut self, ptr:ObjectPtr, key: Value, this:Value){
+        let object = &mut self.objects[ptr.index as usize];
+        object.map.insert(key, this);
+    }            
         
-    fn set_value_index(&mut self, ptr: ObjectPtr, index:Value, value: Value){
+    fn set_value_index(&mut self, ptr: ObjectPtr, index:Value, value: Value, ip:ScriptIp)->Value{
         // alright so. now what.
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
+        
+        if object.tag.has_rw(){ // has rw flags
+            if object.tag.is_frozen(){
+                
+            }
+        }
+        
         if ty.uses_vec2(){
             let index = index.as_index() * 2;
             if index + 1 >= object.vec.len(){
@@ -336,7 +347,7 @@ impl ScriptHeap{
             }
             object.vec[index] = NIL;
             object.vec[index+1] = value; 
-            return 
+            return NIL
         }
         if ty.is_vec1(){
             let index = index.as_index();
@@ -344,32 +355,34 @@ impl ScriptHeap{
                 object.vec.resize(index, NIL);
             }
             object.vec[index] = value;
-            return 
+            return NIL 
         }
         if ty.is_map(){
             object.map.insert(index, value);
-            return
+            return NIL
         }
         if ty.is_typed(){ // typed array
             println!("Implement typed array set value");
             //todo IMPLEMENT IT
-            return
+            return NIL
         }
+        Value::err_internal(ip)
     }
             
-    fn set_value_prefixed(&mut self, ptr: ObjectPtr, key: Value, value: Value){
+    fn set_value_prefixed(&mut self, ptr: ObjectPtr, key: Value, value: Value, _ip:ScriptIp)->Value{
         let object = &mut self.objects[ptr.index as usize];
         for chunk in object.vec.rchunks_mut(2){
             if chunk[0] == key{
                 chunk[1] = value;
-                return
+                return NIL
             }
         }
         // just append it
         object.vec.extend_from_slice(&[key, value]);
+        NIL
     }
         
-    fn set_value_deep(&mut self, ptr:ObjectPtr, key: Value, value: Value){
+    fn set_value_deep(&mut self, ptr:ObjectPtr, key: Value, value: Value, _ip:ScriptIp)->Value{
         let mut ptr = ptr;
         loop{
             let object = &mut self.objects[ptr.index as usize];
@@ -377,13 +390,13 @@ impl ScriptHeap{
                 for chunk in object.vec.rchunks_mut(2){
                     if chunk[0] == key{
                         chunk[1] = value;
-                        return
+                        return NIL
                     }
                 }
             }
             if let Some(set_value) = object.map.get_mut(&key){
                 *set_value = value;
-                return
+                return NIL
             }
             if let Some(next_ptr) = object.proto.as_object(){
                 ptr = next_ptr
@@ -400,55 +413,57 @@ impl ScriptHeap{
         else{
             object.map.insert(key, value);
         }
+        NIL
     }
         
-    fn set_value_shallow(&mut self, ptr:ObjectPtr, key:Value, value:Value){
+    fn set_value_shallow(&mut self, ptr:ObjectPtr, key:Value, value:Value, _ip:ScriptIp)->Value{
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.get_type().is_vec2(){
             for chunk in object.vec.rchunks_mut(2){
                 if chunk[0] == key{
                     chunk[1] = value;
-                    return
+                    return NIL
                 }
             }
             object.vec.extend_from_slice(&[key, value]);
-            return
+            return NIL
         }
         object.map.insert(key, value);
+        NIL
     }
             
-    pub fn set_value_in_map(&mut self, ptr:ObjectPtr, key: Value, this:Value){
-        let object = &mut self.objects[ptr.index as usize];
-        object.map.insert(key, this);
+    
+    pub fn set_value(&mut self, ptr:ObjectPtr, key:Value, value:Value)->Value{
+        self.set_value_ip(ptr, key, value, ScriptIp::default())
     }
     
-    pub fn set_value(&mut self, ptr:ObjectPtr, key:Value, value:Value){
+    pub fn set_value_ip(&mut self, ptr:ObjectPtr, key:Value, value:Value, ip:ScriptIp)->Value{
         if key.is_index(){ // use vector
-            return self.set_value_index(ptr, key, value);
+            return self.set_value_index(ptr, key, value, ip);
         }
         if let Some(id) = key.as_id(){
             if id.is_prefixed(){
-                return self.set_value_prefixed(ptr, key, value)
+                return self.set_value_prefixed(ptr, key, value, ip)
             }
             // scan prototype chain for id
             let object = &self.objects[ptr.index as usize];
             if !object.tag.is_deep(){
-                return self.set_value_shallow(ptr, key, value);
+                return self.set_value_shallow(ptr, key, value, ip);
             }
             else{
-                return self.set_value_deep(ptr, key, value)
+                return self.set_value_deep(ptr, key, value, ip)
             }
         }
         if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             let object = &mut self.objects[ptr.index as usize];
             if !object.tag.is_deep(){
-                return self.set_value_shallow(ptr, key, value);
+                return self.set_value_shallow(ptr, key, value, ip);
             }
             else{
-                return self.set_value_deep(ptr, key, value)
+                return self.set_value_deep(ptr, key, value, ip)
             }
         }
-        println!("Cant set object value with key {:?}", key);
+        Value::err_wrongkey(ip)
     }
     
         
@@ -494,16 +509,6 @@ impl ScriptHeap{
         }
         def
     }
-    
-    /*fn value_prefixed(&self, ptr: ObjectPtr, key: Value, def:Value)->Value{
-        let object = &self.objects[ptr.index as usize];
-        for chunk in object.vec.rchunks(2){
-            if chunk[0] == key{
-                return chunk[1]
-            }
-        }
-        return def
-    }*/
     
     fn value_deep_map(&self, obj_ptr:ObjectPtr, key: Value, def:Value)->Value{
         let mut ptr = obj_ptr;
@@ -565,7 +570,6 @@ impl ScriptHeap{
         def
     }
     
-        
     pub fn value_path(&self, ptr:ObjectPtr, keys:&[Id], def:Value)->Value{
         let mut value:Value = ptr.into();
         for key in keys{
@@ -650,10 +654,12 @@ impl ScriptHeap{
     
     
         
-    pub fn vec_insert_value_at(&mut self, _ptr:ObjectPtr, _key:Value, _value:Value, _before:bool){
+    pub fn vec_insert_value_at(&mut self, _ptr:ObjectPtr, _key:Value, _value:Value, _before:bool, _ip:ScriptIp)->Value{
+        NIL
     }
         
-    pub fn vec_insert_value_begin(&mut self, _ptr:ObjectPtr, _key:Value, _value:Value){
+    pub fn vec_insert_value_begin(&mut self, _ptr:ObjectPtr, _key:Value, _value:Value,_ip:ScriptIp)->Value{
+        NIL
     }
         
     pub fn vec_push_vec(&mut self, target:ObjectPtr, source:ObjectPtr){
