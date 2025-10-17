@@ -97,23 +97,71 @@ pub enum ScriptFnPtr{
 }
 
 impl ObjectTag{
-    pub const MARK:u64 = 0x10;
-    pub const ALLOCED:u64 = 0x20;
-    pub const DEEP:u64 = 0x40;
-    pub const DIRTY:u64 = 0x80;
-    pub const REFFED: u64 = 0x100;
-    pub const HAS_METHODS: u64 = 0x200;
-    pub const FLAG_MASK: u64 = 0xff0;
+    pub const MARK:u64 = 0x40;
+    pub const ALLOCED:u64 = 0x80;
+    pub const DEEP:u64 = 0x100;
+    pub const DIRTY:u64 = 0x200;
+    pub const REFFED: u64 = 0x400;
+    
+    
+    // marks object readonly
+    pub const FROZEN: u64 = 0x800;
+    // for readonly allow writes if checked passes
+    pub const CHECKED: u64 = 0x1000;
+    // for read only allow writes only if map item doesnt exist
+    pub const MAP_ADD: u64 = 0x2000;
+    // alow read only to append to the vec
+    pub const VEC_MUT: u64 = 0x4000;
+    
+    pub const RW_MASK: u64 = Self::FROZEN|Self::CHECKED|Self::MAP_ADD|Self::VEC_MUT;
+
+    pub const FLAG_MASK: u64 = 0xff40;
                 
-    pub const SCRIPT_FN: u64 = 0x1000;
-    pub const NATIVE_FN: u64 = 0x2000;
-    pub const RUST_REF:  u64 = 0x3000;
-    pub const REF_MASK:  u64 = 0xf000;
+    pub const SCRIPT_FN: u64 = 0x10;
+    pub const NATIVE_FN: u64 = 0x20;
+    pub const RUST_REF:  u64 = 0x30;
+    pub const REF_MASK:  u64 = 0x30;
         
     pub const TYPE_MASK: u64 = 0x0f;
             
-    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::HAS_METHODS;
+    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::CHECKED|Self::MAP_ADD|Self::VEC_MUT;
+
+    pub fn freeze(&mut self){
+        self.0 &= !(Self::RW_MASK);
+        self.0  |= Self::FROZEN
+    }
+    
+    pub fn set_api(&mut self){
+        self.0 &= !(Self::RW_MASK);
+        self.0 |= Self::CHECKED
+    }
+
+    pub fn set_module(&mut self){
+        self.0 &= !(Self::RW_MASK);
+        self.0  |= Self::MAP_ADD
+    }
+    
+    pub fn set_widget(&mut self){
+        self.0 &= !(Self::RW_MASK);
+        self.0 |= Self::FROZEN|Self::CHECKED|Self::VEC_MUT
+    }
+    
+    pub fn has_rw(&self)->bool{
+        self.0 & Self::RW_MASK != 0
+    }
         
+    pub fn is_checked(&self)->bool{
+        self.0 & Self::CHECKED != 0
+    }
+    
+    pub fn is_map_add(&self)->bool{
+        self.0 & Self::MAP_ADD != 0
+    }
+    
+    pub fn is_vec_mut(&self)->bool{
+        self.0 & Self::VEC_MUT != 0
+    }
+            
     pub fn set_flags(&mut self, flags:u64){
         self.0 |= flags
     }
@@ -190,14 +238,6 @@ impl ObjectTag{
         self.0 |= Self::DEEP
     }
     
-    pub fn set_has_methods(&mut self){
-        self.0 |= Self::HAS_METHODS;
-    }
-    
-    pub fn has_methods(&self)->bool{
-        self.0 & Self::HAS_METHODS != 0
-    }
-        
     pub fn set_reffed(&mut self){
         self.0 |= Self::REFFED
     }
