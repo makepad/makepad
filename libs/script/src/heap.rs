@@ -923,7 +923,7 @@ impl ScriptHeap{
                 let key = *key;
                 if let Some(defvalue) = object.vec.get(index*2 + 1){
                     if !defvalue.is_nil() && defvalue.value_type().to_redux() != value.value_type().to_redux(){
-                        return Value::err_argtypefail(ip) 
+                        return Value::err_invalidargtype(ip) 
                     }
                 }
                 self.objects[top_ptr.index as usize].map.insert(key, value);
@@ -951,13 +951,13 @@ impl ScriptHeap{
             for chunk in object.vec.chunks(2){
                 if chunk[0] == key{
                     if !chunk[1].is_nil() && chunk[1].value_type().to_redux() != value.value_type().to_redux(){
-                        return Value::err_argtypefail(ip) 
+                        return Value::err_invalidargtype(ip) 
                     }
                     self.objects[top_ptr.index as usize].map.insert(key, value);
                     return NIL    
                 }
             }
-            return Value::err_argnamefail(ip) 
+            return Value::err_invalidargname(ip) 
         }
         Value::err_unexpected(ip)
     }
@@ -972,7 +972,7 @@ impl ScriptHeap{
                     // typecheck against default arg
                     if let Some(defvalue) = object.vec.get(index*2 + 1){
                         if !defvalue.is_nil() && defvalue.value_type().to_redux() != value.value_type().to_redux(){
-                            return Value::err_argtypefail(ip) 
+                            return Value::err_invalidargtype(ip) 
                         }
                     }
                     self.objects[top_ptr.index as usize].map.insert(key, *value);
