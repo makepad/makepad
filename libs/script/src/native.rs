@@ -37,7 +37,7 @@ macro_rules! value{
 
 #[macro_export]
 macro_rules! args{
-    ($($id:ident:$val:expr),*)=>{
+    ($($id:ident=$val:expr),*)=>{
         &[$((id!($id), ($val).into()),)*]
     }
 }

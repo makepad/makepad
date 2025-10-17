@@ -500,6 +500,9 @@ impl ScriptThread{
                             self.ip.index += 1;
                         }
                         ScriptFnPtr::Script(sip)=>{
+                            if args.is_pop_to_me(){
+                                self.push_stack_value(NIL);
+                            }
                             let call = CallFrame{
                                 bases: self.new_bases(),
                                 args: args,
@@ -515,6 +518,7 @@ impl ScriptThread{
                     self.push_stack_value_nc(Value::err_notfn(self.ip));
                     self.ip.index += 1;
                 }
+                
             }
             Opcode::METHOD_CALL_ARGS=>{
                 let method =  self.pop_stack_value();
