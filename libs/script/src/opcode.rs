@@ -8,7 +8,7 @@ impl OpcodeArgs{
     pub const TYPE_NIL:u32 =  1 <<28;
     pub const TYPE_NUMBER:u32 =  2 <<28;
     pub const TYPE_MASK: u32 = 3 <<28;
-    pub const STATEMENT_FLAG:u32 =  1 <<31;
+    //pub const STATEMENT_FLAG:u32 =  1 <<31;
     pub const POP_TO_ME_FLAG:u32 =  1 <<30;
     pub const MAX_U32: u32 = (1<<28) - 1;
     
@@ -31,9 +31,9 @@ impl OpcodeArgs{
         self.0 & Self::TYPE_MASK
     }
         
-    pub fn is_statement(&self)->bool{
-        self.0 & Self::STATEMENT_FLAG != 0
-    }
+   // pub fn is_statement(&self)->bool{
+   //     self.0 & Self::STATEMENT_FLAG != 0
+   // }
     
     pub fn is_pop_to_me(&self)->bool{
         self.0 & Self::POP_TO_ME_FLAG != 0
@@ -201,9 +201,9 @@ impl fmt::Display for OpcodeArgs {
             Self::TYPE_NUMBER=>{write!(f,"({})",self.to_u32()).ok();},
             _=>{}
         };
-        if self.is_statement(){
-            write!(f,"<st>").ok();
-        }
+        //if self.is_statement(){
+        //    write!(f,"<st>").ok();
+        //}
         if self.is_pop_to_me(){
             write!(f,"<m>").ok();
         }
