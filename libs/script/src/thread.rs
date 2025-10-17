@@ -203,7 +203,12 @@ impl ScriptThread{
         let scope = heap.new_with_proto(fnobj);
         
         heap.clear_object_deep(scope);
-        heap.push_all_fn_args(scope, args);
+        
+        let err = heap.push_all_fn_args(scope, args, self.ip);
+        if err.is_err(){
+            return err
+        }
+        
         heap.set_object_deep(scope);
         heap.set_object_type(scope, ObjectType::AUTO);
         

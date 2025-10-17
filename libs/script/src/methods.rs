@@ -134,15 +134,15 @@ impl ScriptTypeMethods{
             Value::err_unexpected(vm.thread.ip)
         });
         
-        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(freeze_widget), |vm, args|{
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(freeze_component), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                vm.heap.freeze_widget(this);
+                vm.heap.freeze_component(this);
                 return this.into()
             }
             Value::err_unexpected(vm.thread.ip)
         });
         
-        self.add(h, native, args!(cb:NIL), ValueType::REDUX_OBJECT, id!(retain), |vm, args|{
+        self.add(h, native, args!(cb=NIL), ValueType::REDUX_OBJECT, id!(retain), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
                 let fnptr = value!(vm, args.cb);
                 let mut i = 0;
