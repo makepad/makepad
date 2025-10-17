@@ -120,7 +120,7 @@ pub fn test(){
     };
     
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         
         scope.import(mod.std)
         
@@ -161,7 +161,7 @@ pub fn test(){
         a.retain(|v|{~v;v>=3}) assert(a==[3 4]);
     };
     
-    let code = script!{
+    let _code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     };
