@@ -19,8 +19,7 @@ macro_rules! f64_scope_assign_op_impl{
             else{
                 let fa = $heap.cast_to_f64(va, $obj.ip);
                 let fb = $heap.cast_to_f64(value, $obj.ip);
-                $obj.set_scope_value($heap, id, Value::from_f64_traced_nan((fa $op fb), $obj.ip));
-                $obj.push_stack_value_nc(NIL);
+                $obj.push_stack_value_nc($obj.set_scope_value($heap, id, Value::from_f64_traced_nan((fa $op fb), $obj.ip)));
             }
         }
         else{
@@ -42,8 +41,7 @@ macro_rules! fu64_scope_assign_op_impl{
             else{
                 let ua = $heap.cast_to_f64(va, $obj.ip) as u64;
                 let ub = $heap.cast_to_f64(value, $obj.ip) as u64;
-                $obj.set_scope_value($heap, id, Value::from_f64_traced_nan((ua $op ub) as f64, $obj.ip));
-                $obj.push_stack_value_nc(NIL);
+                $obj.push_stack_value_nc($obj.set_scope_value($heap, id, Value::from_f64_traced_nan((ua $op ub) as f64, $obj.ip)));
             }
         }
         else{
@@ -62,10 +60,7 @@ macro_rules! f64_field_assign_op_impl{
             let old_value = $heap.value(obj, field, Value::err_notfield($obj.ip));
             let fa = $heap.cast_to_f64(old_value, $obj.ip);
             let fb = $heap.cast_to_f64(value, $obj.ip);
-            
-            $heap.set_value(obj, field, Value::from_f64_traced_nan(fa $op fb, $obj.ip));
-            
-            $obj.push_stack_value_nc(NIL);
+            $obj.push_stack_value_nc($heap.set_value_ip(obj, field, Value::from_f64_traced_nan(fa $op fb, $obj.ip), $obj.ip));
         }
         else{
             $obj.push_stack_value_nc(Value::err_notassignable($obj.ip));
@@ -84,9 +79,7 @@ macro_rules! fu64_field_assign_op_impl{
             let fa = $heap.cast_to_f64(old_value, $obj.ip) as u64;
             let fb = $heap.cast_to_f64(value, $obj.ip) as u64;
                         
-            $heap.set_value(obj, field, Value::from_f64_traced_nan((fa $op fb) as f64, $obj.ip));
-                        
-            $obj.push_stack_value_nc(NIL);
+            $obj.push_stack_value_nc($heap.set_value_ip(obj, field, Value::from_f64_traced_nan((fa $op fb) as f64, $obj.ip), $obj.ip));
         }
         else{
             $obj.push_stack_value_nc(Value::err_notassignable($obj.ip));
@@ -105,9 +98,7 @@ macro_rules! f64_index_assign_op_impl{
             let fa = $heap.cast_to_f64(old_value, $obj.ip);
             let fb = $heap.cast_to_f64(value, $obj.ip);
                         
-            $heap.set_value(obj, index, Value::from_f64_traced_nan(fa $op fb, $obj.ip));
-                        
-            $obj.push_stack_value_nc(NIL);
+            $obj.push_stack_value_nc($heap.set_value_ip(obj, index, Value::from_f64_traced_nan(fa $op fb, $obj.ip), $obj.ip));
         }
         else{
             $obj.push_stack_value_nc(Value::err_notassignable($obj.ip));
@@ -126,9 +117,7 @@ macro_rules! fu64_index_assign_op_impl{
             let fa = $heap.cast_to_f64(old_value, $obj.ip) as u64;
             let fb = $heap.cast_to_f64(value, $obj.ip) as u64;
                                     
-            $heap.set_value(obj, index, Value::from_f64_traced_nan((fa $op fb) as f64, $obj.ip));
-                                    
-            $obj.push_stack_value_nc(NIL);
+            $obj.push_stack_value_nc($heap.set_value_ip(obj, index, Value::from_f64_traced_nan((fa $op fb) as f64, $obj.ip), $obj.ip));
         }
         else{
             $obj.push_stack_value_nc(Value::err_notassignable($obj.ip));
@@ -287,36 +276,34 @@ impl ScriptThread{
             Opcode::ASSIGN_ME=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
-                heap.set_value(self.mes.last().unwrap().object, field, value);
-                if !args.is_statement(){
-                    self.push_stack_value_nc(NIL);
-                }
+                self.push_stack_value_nc(heap.set_value_ip(self.mes.last().unwrap().object, field, value, self.ip));
                 self.ip.index += 1;
             }
             
             Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
-                heap.vec_insert_value_at(self.mes.last().unwrap().object, field, value, opcode == Opcode::ASSIGN_ME_BEFORE);
-                if !args.is_statement(){
-                    self.push_stack_value_nc(NIL);
-                }
+                self.push_stack_value_nc(heap.vec_insert_value_at(self.mes.last().unwrap().object, field, value, opcode == Opcode::ASSIGN_ME_BEFORE, self.ip));
                 self.ip.index += 1;
             }
             
             Opcode::ASSIGN_ME_BEGIN=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
-                heap.vec_insert_value_begin(self.mes.last().unwrap().object, field, value);
-                if !args.is_statement(){
-                    self.push_stack_value_nc(NIL);
-                }
+                self.push_stack_value_nc(heap.vec_insert_value_begin(self.mes.last().unwrap().object, field, value, self.ip));
                 self.ip.index += 1;
             }
             
             Opcode::ASSIGN=>{
+                let value = self.pop_stack_resolved(heap);
+                let id = self.pop_stack_value();
+                if let Some(id) = id.as_id(){
+                    self.push_stack_value_nc(self.set_scope_value(heap, id, value));
+                }
+                else{
+                    self.push_stack_value_nc(Value::err_notassignable(self.ip));
+                }
             }
-            
             Opcode::ASSIGN_ADD=>f64_scope_assign_op_impl!(self, heap, +),
             Opcode::ASSIGN_SUB=>f64_scope_assign_op_impl!(self, heap, -),
             Opcode::ASSIGN_MUL=>f64_scope_assign_op_impl!(self, heap, *),
@@ -333,9 +320,11 @@ impl ScriptThread{
                 if let Some(id) = id.as_id(){
                     let va = self.scope_value(heap, id);
                     if va.is_err() || va.is_nil(){
-                        self.set_scope_value(heap, id, value);
+                        self.push_stack_value_nc(self.set_scope_value(heap, id, value));
                     }
-                    self.push_stack_value_nc(NIL);
+                    else{
+                        self.push_stack_value_nc(NIL);
+                    }
                 }
                 else{
                     self.push_stack_value_nc(Value::err_notassignable(self.ip));
@@ -348,8 +337,7 @@ impl ScriptThread{
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    heap.set_value(obj, field, value);
-                    self.push_stack_value_nc(value);
+                    self.push_stack_value_nc(heap.set_value_ip(obj, field, value, self.ip));
                 }
                 else{
                     self.push_stack_value_nc(Value::err_notobject(self.ip));
@@ -374,9 +362,11 @@ impl ScriptThread{
                 if let Some(obj) = object.as_object(){
                     let old_value = heap.value(obj, field, Value::err_notfield(self.ip));
                     if old_value.is_err() || old_value.is_nil(){
-                        heap.set_value(obj, field, value);
+                        self.push_stack_value_nc(heap.set_value_ip(obj, field, value, self.ip));
                     }
-                    self.push_stack_value_nc(NIL);
+                    else{
+                        self.push_stack_value_nc(NIL);
+                    }
                 }
                 else{
                     self.push_stack_value_nc(Value::err_notobject(self.ip));
@@ -389,8 +379,7 @@ impl ScriptThread{
                 let index = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    heap.set_value(obj, index, value);
-                    self.push_stack_value_nc(value);
+                    self.push_stack_value_nc(heap.set_value_ip(obj, index, value, self.ip));
                 }
                 else{
                     self.push_stack_value_nc(Value::err_notobject(self.ip));
@@ -414,9 +403,11 @@ impl ScriptThread{
                 if let Some(obj) = object.as_object(){
                     let old_value = heap.value(obj, index, Value::err_notindex(self.ip));
                     if old_value.is_err() || old_value.is_nil(){
-                        heap.set_value(obj, index, value);
+                        self.push_stack_value_nc(heap.set_value_ip(obj, index, value, self.ip));
                     }
-                    self.push_stack_value_nc(NIL);
+                    else{
+                        self.push_stack_value_nc(NIL);
+                    }
                 }
                 else{
                     self.push_stack_value_nc(Value::err_notobject(self.ip));
@@ -542,7 +533,7 @@ impl ScriptThread{
                 //heap.set_object_map(scope);
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
-                heap.set_value_in_map(scope, id!(this).into(), this.into());
+                heap.force_value_in_map(scope, id!(this).into(), this.into());
                 self.mes.push(ScriptMe::call(scope));
                 self.ip.index += 1;
             }
@@ -567,7 +558,7 @@ impl ScriptThread{
                     self.pop_stack_resolved(heap)
                 };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
-                heap.set_value(self.mes.last().unwrap().object, id.into(), value);
+                heap.set_value_ip(self.mes.last().unwrap().object, id.into(), value, self.ip);
                 self.ip.index += 1;                
             }
             Opcode::FN_ARG_TYPED=>{
@@ -579,7 +570,7 @@ impl ScriptThread{
                 };
                 let _ty = self.pop_stack_value().as_id().unwrap_or(id!());
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
-                heap.set_value(self.mes.last().unwrap().object, id.into(), value);
+                heap.set_value_ip(self.mes.last().unwrap().object, id.into(), value, self.ip);
                 self.ip.index += 1;
             }
             Opcode::FN_BODY=>{ // alright we have all the args now we get an expression
