@@ -276,7 +276,10 @@ impl ScriptThread{
             Opcode::ASSIGN_ME=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
-                self.push_stack_value_nc(heap.set_value_ip(self.mes.last().unwrap().object, field, value, self.ip));
+                let value = heap.set_value_ip(self.mes.last().unwrap().object, field, value, self.ip);
+                if value.is_err(){
+                    self.trap = Some(ScriptTrap::Error(value));
+                }
                 self.ip.index += 1;
             }
             
@@ -665,7 +668,7 @@ impl ScriptThread{
             }
             Opcode::ME_FIELD=>{
                 let field = self.pop_stack_value();
-                self.push_stack_value(heap.value(self.mes.last().unwrap().object, field,NIL));
+                self.push_stack_value(heap.value(self.mes.last().unwrap().object, field, Value::err_notfield(self.ip)));
                 self.ip.index += 1;
             }
             Opcode::PROTO_FIELD=>{ // implement proto field!
@@ -706,7 +709,10 @@ impl ScriptThread{
                 };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 let scope = *self.scopes.last_mut().unwrap();
-                self.push_stack_value_nc(heap.set_value_ip(scope, id.into(), value, self.ip));
+                let value =heap.set_value_ip(scope, id.into(), value, self.ip);
+                if value.is_err(){
+                    self.trap = Some(ScriptTrap::Error(value));
+                }
                 self.ip.index += 1;
             }
             Opcode::LET_TYPED=>{
@@ -719,7 +725,10 @@ impl ScriptThread{
                 let _ty = self.pop_stack_value();
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 let scope = *self.scopes.last_mut().unwrap();
-                self.push_stack_value_nc(heap.set_value_ip(scope, id.into(), value, self.ip));
+                let value = heap.set_value_ip(scope, id.into(), value, self.ip);
+                if value.is_err(){
+                    self.trap = Some(ScriptTrap::Error(value));
+                }
                 self.ip.index += 1;
             } 
             
