@@ -665,7 +665,7 @@ impl ScriptHeap{
         NIL
     }
         
-    pub fn vec_push_vec(&mut self, target:ObjectPtr, source:ObjectPtr){
+    pub fn vec_push_vec(&mut self, target:ObjectPtr, source:ObjectPtr)->Value{
         let (target, source) = if target.index > source.index{
             let (o1, o2) = self.objects.split_at_mut(target.index as _);
             (&mut o2[0], &mut o1[source.index as usize])                    
@@ -674,9 +674,10 @@ impl ScriptHeap{
             (&mut o1[target.index as usize], &mut o2[0])                    
         };
         target.push_vec_from_other(source);
+        NIL
     }
         
-    pub fn vec_push_vec_of_vec(&mut self, target:ObjectPtr, source:ObjectPtr, map:bool){
+    pub fn vec_push_vec_of_vec(&mut self, target:ObjectPtr, source:ObjectPtr, map:bool)->Value{
         let len = self.objects[source.index as usize].vec.len();
         for i in 0..len{
             if let Some(source) = self.objects[source.index as usize].vec[i].as_object(){
@@ -693,9 +694,10 @@ impl ScriptHeap{
                 }
             }
         }
+        NIL
     }
         
-    pub fn vec_push(&mut self, ptr: ObjectPtr, key: Value, value: Value){
+    pub fn vec_push(&mut self, ptr: ObjectPtr, key: Value, value: Value)->Value{
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
         if ty.has_paired_vec(){
@@ -711,6 +713,7 @@ impl ScriptHeap{
         else{
             object.vec.push(value);
         }
+        NIL
     }
             
     pub fn vec_remove(&mut self, ptr:ObjectPtr, index:usize)->Value{
@@ -774,23 +777,53 @@ impl ScriptHeap{
         }
     }   
         
-    pub fn push_fn_arg(&mut self, top_ptr:ObjectPtr, value:Value){
+    pub fn unnamed_fn_arg(&mut self, top_ptr:ObjectPtr, value:Value, _ip:ScriptIp)->Value{
         let object = &self.objects[top_ptr.index as usize];
-        let index = object.vec.len();
+        
+        // which arg number?
+        let index = object.map.len();
+        
         if let Some(ptr) = object.proto.as_object(){
             let object = &self.objects[ptr.index as usize];
             if let Some(key) = object.vec.get(index*2){
                 let key = *key;
-                self.objects[top_ptr.index as usize].vec.extend_from_slice(&[key, value]);
+                self.objects[top_ptr.index as usize].map.insert(key, value);
                 if let Some(obj) = value.as_object(){
                     let object = &mut self.objects[obj.index as usize];
                     object.tag.set_reffed();
                 }
             }
             else{
+                // only allow if we are varargs
                 self.objects[top_ptr.index as usize].vec.extend_from_slice(&[NIL, value]);
             }
         }
+        NIL
+    }
+    
+        
+    pub fn named_fn_arg(&mut self, top_ptr:ObjectPtr, _name:Value, value:Value, _ip:ScriptIp)->Value{
+        let object = &self.objects[top_ptr.index as usize];
+                
+        // which arg number?
+        let index = object.map.len();
+                
+        if let Some(ptr) = object.proto.as_object(){
+            let object = &self.objects[ptr.index as usize];
+            if let Some(key) = object.vec.get(index*2){
+                let key = *key;
+                self.objects[top_ptr.index as usize].map.insert(key, value);
+                if let Some(obj) = value.as_object(){
+                    let object = &mut self.objects[obj.index as usize];
+                    object.tag.set_reffed();
+                }
+            }
+            else{
+                // only allow if we are varargs
+                self.objects[top_ptr.index as usize].vec.extend_from_slice(&[NIL, value]);
+            }
+        }
+        NIL
     }
             
     pub fn push_all_fn_args(&mut self, top_ptr:ObjectPtr, args:&[Value]){
@@ -800,7 +833,7 @@ impl ScriptHeap{
                 let object = &self.objects[ptr.index as usize];
                 if let Some(key) = object.vec.get(index*2){
                     let key = *key;
-                    self.objects[top_ptr.index as usize].vec.extend_from_slice(&[key, *value]);
+                    self.objects[top_ptr.index as usize].map.insert(key, *value);
                     if let Some(obj) = value.as_object(){
                         let object = &mut self.objects[obj.index as usize];
                         object.tag.set_reffed();
@@ -940,7 +973,7 @@ impl ScriptHeap{
         let mut first = true;
         loop{
             let object = &self.objects[ptr.index as usize];
-            for (key, value) in &object.map{
+            for (key, value) in object.map.iter(){
                 if !first{print!(",")}
                 self.print_key_value(*key, *value, deep, &mut str);
                 first = false;
