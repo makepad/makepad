@@ -146,15 +146,16 @@ impl ValueType{
     pub const ERR_NOTIMPL: Self = Self(27);
     pub const ERR_FROZEN: Self = Self(28);
     pub const ERR_VEC_FROZEN: Self = Self(29);
-    pub const ERR_VALIDATION: Self = Self(30);
-    pub const ERR_KEYEXISTS: Self = Self(31);
-    pub const ERR_KEYTYPE: Self = Self(32);
-    pub const ERR_USER: Self = Self(33);
-    pub const ERR_VECBOUND: Self = Self(34);
-    pub const ERR_INVALIDARGTYPE: Self = Self(35);
-    pub const ERR_INVALIDARGNAME: Self = Self(36);
+    pub const ERR_INVALIDPROPTYPE: Self = Self(30);
+    pub const ERR_INVALIDPROPNAME: Self = Self(31);
+    pub const ERR_KEYALREADYEXISTS: Self = Self(32);
+    pub const ERR_INVALIDKEYTYPE: Self = Self(33);
+    pub const ERR_USER: Self = Self(34);
+    pub const ERR_VECBOUND: Self = Self(36);
+    pub const ERR_INVALIDARGTYPE: Self = Self(37);
+    pub const ERR_INVALIDARGNAME: Self = Self(38);
                 
-    pub const ERR_LAST: Self = Self(37);
+    pub const ERR_LAST: Self = Self(97);
             
     pub const ID: Self = Self(0x80);
     
@@ -240,9 +241,10 @@ impl fmt::Display for ValueType {
             Self::ERR_NOTIMPL=>write!(f,"NotImplemented"),
             Self::ERR_FROZEN=>write!(f,"ObjectFrozen"),
             Self::ERR_VEC_FROZEN=>write!(f,"VecFrozen"),
-            Self::ERR_VALIDATION=>write!(f,"ValidationFailed"),
-            Self::ERR_KEYEXISTS=>write!(f,"KeyAlreadyExists"),
-            Self::ERR_KEYTYPE=>write!(f,"UnsupportedKeyType"),
+            Self::ERR_INVALIDPROPTYPE=>write!(f,"InvalidPropertyType"),
+            Self::ERR_INVALIDPROPNAME=>write!(f,"InvalidPropertyName"),
+            Self::ERR_KEYALREADYEXISTS=>write!(f,"KeyAlreadyExists"),
+            Self::ERR_INVALIDKEYTYPE=>write!(f,"UnsupportedKeyType"),
             Self::ERR_VECBOUND=>write!(f,"VecBoundFail"),
             Self::ERR_INVALIDARGTYPE=>write!(f,"InvalidArgumentType"),
             Self::ERR_INVALIDARGNAME=>write!(f,"InvalidArgumentName"),
@@ -318,9 +320,10 @@ impl Value{
     pub const fn err_notimpl(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
     pub const fn err_frozen(ip:ScriptIp)->Self{Self(ValueType::ERR_FROZEN.to_u64() | ip.to_u40())}
     pub const fn err_vecfrozen(ip:ScriptIp)->Self{Self(ValueType::ERR_VEC_FROZEN.to_u64() | ip.to_u40())}
-    pub const fn err_validation(ip:ScriptIp)->Self{Self(ValueType::ERR_VALIDATION.to_u64() | ip.to_u40())}
-    pub const fn err_keyexists(ip:ScriptIp)->Self{Self(ValueType::ERR_KEYEXISTS.to_u64() | ip.to_u40())}
-    pub const fn err_keytype(ip:ScriptIp)->Self{Self(ValueType::ERR_KEYTYPE.to_u64() | ip.to_u40())}
+    pub const fn err_invalidproptype(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDPROPTYPE.to_u64() | ip.to_u40())}
+    pub const fn err_invalidpropname(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDPROPNAME.to_u64() | ip.to_u40())}
+    pub const fn err_keyalreadyexists(ip:ScriptIp)->Self{Self(ValueType::ERR_KEYALREADYEXISTS.to_u64() | ip.to_u40())}
+    pub const fn err_invalidkeytype(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDKEYTYPE.to_u64() | ip.to_u40())}
     pub const fn err_vecbound(ip:ScriptIp)->Self{Self(ValueType::ERR_VECBOUND.to_u64() | ip.to_u40())}
     pub const fn err_invalidargtype(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDARGTYPE.to_u64() | ip.to_u40())}            
     pub const fn err_invalidargname(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDARGNAME.to_u64() | ip.to_u40())}               pub const ERR_FROZEN: Self = Self(28);
