@@ -107,13 +107,13 @@ impl ObjectTag{
     // marks object readonly
     pub const FROZEN: u64 = 0x800;
     // for readonly allow writes if checked passes
-    pub const CHECKED: u64 = 0x1000;
+    pub const VALIDATED: u64 = 0x1000;
     // for read only allow writes only if map item doesnt exist
     pub const MAP_ADD: u64 = 0x2000;
-    // alow read only to append to the vec
-    pub const VEC_MUT: u64 = 0x4000;
+    // vec is frozen
+    pub const VEC_FROZEN: u64 = 0x4000;
     
-    pub const RW_MASK: u64 = Self::FROZEN|Self::CHECKED|Self::MAP_ADD|Self::VEC_MUT;
+    pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
 
     pub const FLAG_MASK: u64 = 0xff40;
                 
@@ -124,48 +124,48 @@ impl ObjectTag{
         
     pub const TYPE_MASK: u64 = 0x0f;
             
-    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::CHECKED|Self::MAP_ADD|Self::VEC_MUT;
+    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
 
     pub fn freeze(&mut self){
-        self.0 &= !(Self::RW_MASK);
+        self.0 &= !(Self::FREEZE_MASK);
         self.0  |= Self::FROZEN
     }
     
-    pub fn set_api(&mut self){
-        self.0 &= !(Self::RW_MASK);
-        self.0 |= Self::CHECKED
+    pub fn freeze_api(&mut self){
+        self.0 &= !(Self::FREEZE_MASK);
+        self.0 |= Self::FROZEN|Self::VALIDATED|Self::VEC_FROZEN
     }
 
-    pub fn set_module(&mut self){
-        self.0 &= !(Self::RW_MASK);
+    pub fn freeze_module(&mut self){
+        self.0 &= !(Self::FREEZE_MASK);
         self.0  |= Self::MAP_ADD
     }
     
-    pub fn set_widget(&mut self){
-        self.0 &= !(Self::RW_MASK);
-        self.0 |= Self::FROZEN|Self::CHECKED|Self::VEC_MUT
+    pub fn freeze_widget(&mut self){
+        self.0 &= !(Self::FREEZE_MASK);
+        self.0 |= Self::FROZEN|Self::VALIDATED
     }
     
-    pub fn has_rw(&self)->bool{
-        self.0 & Self::RW_MASK != 0
+    pub fn has_freeze(&self)->bool{
+        self.0 & Self::FREEZE_MASK != 0
     }
     
     pub fn is_frozen(&self)->bool{
         self.0 & Self::FROZEN != 0
     }
             
-    pub fn is_checked(&self)->bool{
-        self.0 & Self::CHECKED != 0
+    pub fn is_validated(&self)->bool{
+        self.0 & Self::VALIDATED != 0
     }
     
     pub fn is_map_add(&self)->bool{
         self.0 & Self::MAP_ADD != 0
     }
     
-    pub fn is_vec_mut(&self)->bool{
-        self.0 & Self::VEC_MUT != 0
+    pub fn is_vec_frozen(&self)->bool{
+        self.0 & (Self::VEC_FROZEN|Self::FROZEN) != 0
     }
-            
+  
     pub fn set_flags(&mut self, flags:u64){
         self.0 |= flags
     }
@@ -298,7 +298,14 @@ impl fmt::Display for ObjectTag {
         if self.is_deep(){write!(f,"DEEP|").ok();}
         if self.is_script_fn(){write!(f,"SCRIPT_FN({:?})|", self.as_fn().unwrap()).ok();}
         if self.is_native_fn(){write!(f,"NATIVE_FN({:?})|", self.as_fn().unwrap()).ok();}
-        if self.is_reffed(){write!(f,"REFFED").ok();}
+        if self.is_reffed(){write!(f,"REFFED|").ok();}
+        if self.is_frozen(){write!(f,"FROZEN|").ok();}
+        if self.is_vec_frozen(){write!(f,"VEC_FROZEN|").ok();}
+        if self.is_validated(){write!(f,"VALIDATED|").ok();}
+        if self.is_map_add(){write!(f,"MAP_ADD|").ok();}
+        if self.is_script_fn(){write!(f,"SCRIPT_FN|").ok();}
+        if self.is_native_fn(){write!(f,"NATIVE_FN|").ok();}
+                                
         write!(f, ")")
     }
 }

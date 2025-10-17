@@ -72,45 +72,74 @@ impl ScriptTypeMethods{
             if let Some(this) = value!(vm, args.this).as_object(){
                 return vm.heap.proto(this)
             }
-            Value::err_internal(vm.thread.ip)
+            Value::err_unexpected(vm.thread.ip)
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(push), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                vm.heap.vec_push_vec(this, args);
-                return NIL
+                return vm.heap.vec_push_vec(this, args, vm.thread.ip);
             }
-            Value::err_internal(vm.thread.ip)
+            Value::err_unexpected(vm.thread.ip)
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(pop), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                return vm.heap.vec_pop(this)
+                return vm.heap.vec_pop(this, vm.thread.ip)
             }
-            Value::err_internal(vm.thread.ip)
+            Value::err_unexpected(vm.thread.ip)
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(len), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
                 return vm.heap.vec_len(this).into()
             }
-            Value::err_internal(vm.thread.ip)
+            Value::err_unexpected(vm.thread.ip)
         });
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(extend), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                vm.heap.vec_push_vec_of_vec(this, args, false);
-                return NIL
+                return vm.heap.vec_push_vec_of_vec(this, args, false, vm.thread.ip);
             }
-            Value::err_internal(vm.thread.ip)
+            Value::err_unexpected(vm.thread.ip)
         });
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(import), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                vm.heap.vec_push_vec_of_vec(this, args, true);
-                return NIL
+                return vm.heap.vec_push_vec_of_vec(this, args, true, vm.thread.ip);
             }
-            Value::err_internal(vm.thread.ip)
+            Value::err_unexpected(vm.thread.ip)
+        });
+        
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(freeze), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                vm.heap.freeze(this);
+                return this.into()
+            }
+            Value::err_unexpected(vm.thread.ip)
+        });
+        
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(freeze_api), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                vm.heap.freeze_api(this);
+                return this.into()
+            }
+            Value::err_unexpected(vm.thread.ip)
+        });
+        
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(freeze_module), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                vm.heap.freeze_module(this);
+                return this.into()
+            }
+            Value::err_unexpected(vm.thread.ip)
+        });
+        
+        self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(freeze_widget), |vm, args|{
+            if let Some(this) = value!(vm, args.this).as_object(){
+                vm.heap.freeze_widget(this);
+                return this.into()
+            }
+            Value::err_unexpected(vm.thread.ip)
         });
         
         self.add(h, native, args!(cb:NIL), ValueType::REDUX_OBJECT, id!(retain), |vm, args|{
@@ -124,7 +153,7 @@ impl ScriptTypeMethods{
                         return ret;
                     }
                     if !vm.heap.cast_to_bool(ret){
-                        vm.heap.vec_remove(this, i);
+                        vm.heap.vec_remove(this, i, vm.thread.ip);
                     }
                     else{
                         i += 1

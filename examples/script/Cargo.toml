@@ -1,0 +1,11 @@
+[package]
+name = "makepad-example-script"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad splash example"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "BkQvnL-yt07_4n3oopSxq7yCP_w="
+
+[dependencies]
+makepad-script = { path = "../../libs/script", version = "1.0.0"}

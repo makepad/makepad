@@ -141,15 +141,17 @@ impl ValueType{
     pub const ERR_STACKOVERFLOW: Self = Self(22);
     pub const ERR_INVALIDARGS: Self = Self(23);
     pub const ERR_NOTASSIGNABLE: Self = Self(24);
-    pub const ERR_INTERNAL: Self = Self(25);
+    pub const ERR_UNEXPECTED: Self = Self(25);
     pub const ERR_ASSERTFAIL: Self = Self(26);
     pub const ERR_NOTIMPL: Self = Self(27);
     pub const ERR_FROZEN: Self = Self(28);
-    pub const ERR_VALIDATION: Self = Self(29);
-    pub const ERR_INVKEY: Self = Self(30);
-    
-    pub const ERR_USER: Self = Self(31);
-    pub const ERR_LAST: Self = Self(31);
+    pub const ERR_VEC_FROZEN: Self = Self(29);
+    pub const ERR_VALIDATION: Self = Self(30);
+    pub const ERR_KEYEXISTS: Self = Self(31);
+    pub const ERR_KEYTYPE: Self = Self(32);
+    pub const ERR_USER: Self = Self(33);
+    pub const ERR_VECBOUND: Self = Self(34);
+    pub const ERR_LAST: Self = Self(35);
             
     pub const ID: Self = Self(0x80);
     
@@ -230,9 +232,16 @@ impl fmt::Display for ValueType {
             Self::ERR_STACKOVERFLOW=>write!(f,"StackOverflow"),
             Self::ERR_INVALIDARGS=>write!(f,"InvalidArgs"),
             Self::ERR_NOTASSIGNABLE=>write!(f,"NotAssignable"),
-            Self::ERR_INTERNAL=>write!(f,"Internal"),
+            Self::ERR_UNEXPECTED=>write!(f,"Unexpected"),
             Self::ERR_ASSERTFAIL=>write!(f,"AssertFailure"),
             Self::ERR_NOTIMPL=>write!(f,"NotImplemented"),
+            Self::ERR_FROZEN=>write!(f,"ObjectFrozen"),
+            Self::ERR_VEC_FROZEN=>write!(f,"VecFrozen"),
+            Self::ERR_VALIDATION=>write!(f,"ValidationFailed"),
+            Self::ERR_KEYEXISTS=>write!(f,"KeyAlreadyExists"),
+            Self::ERR_KEYTYPE=>write!(f,"UnsupportedKeyType"),
+            Self::ERR_VECBOUND=>write!(f,"VecBoundFail"),
+                                    
             Self::ERR_USER=>write!(f,"UserGenerated"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ValueType?")
@@ -299,13 +308,15 @@ impl Value{
     pub const fn err_stackoverflow(ip:ScriptIp)->Self{Self(ValueType::ERR_STACKOVERFLOW.to_u64() | ip.to_u40())}
     pub const fn err_invalidargs(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDARGS.to_u64() | ip.to_u40())}
     pub const fn err_notassignable(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTASSIGNABLE.to_u64() | ip.to_u40())}
-    pub const fn err_internal(ip:ScriptIp)->Self{Self(ValueType::ERR_INTERNAL.to_u64() | ip.to_u40())}
+    pub const fn err_unexpected(ip:ScriptIp)->Self{Self(ValueType::ERR_UNEXPECTED.to_u64() | ip.to_u40())}
     pub const fn err_assertfail(ip:ScriptIp)->Self{Self(ValueType::ERR_ASSERTFAIL.to_u64() | ip.to_u40())}
     pub const fn err_notimpl(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
-    pub const fn err_frozen(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
-    pub const fn err_validation(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
-    pub const fn err_wrongkey(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
-        
+    pub const fn err_frozen(ip:ScriptIp)->Self{Self(ValueType::ERR_FROZEN.to_u64() | ip.to_u40())}
+    pub const fn err_vecfrozen(ip:ScriptIp)->Self{Self(ValueType::ERR_VEC_FROZEN.to_u64() | ip.to_u40())}
+    pub const fn err_validation(ip:ScriptIp)->Self{Self(ValueType::ERR_VALIDATION.to_u64() | ip.to_u40())}
+    pub const fn err_keyexists(ip:ScriptIp)->Self{Self(ValueType::ERR_KEYEXISTS.to_u64() | ip.to_u40())}
+    pub const fn err_keytype(ip:ScriptIp)->Self{Self(ValueType::ERR_KEYTYPE.to_u64() | ip.to_u40())}
+    pub const fn err_vecbound(ip:ScriptIp)->Self{Self(ValueType::ERR_VECBOUND.to_u64() | ip.to_u40())}            
     pub const ERR_FROZEN: Self = Self(28);
     pub const ERR_VALIDATION: Self = Self(29);
     pub const ERR_INVKEY: Self = Self(30);

@@ -902,21 +902,21 @@ impl ScriptThread{
             if me.ty == ScriptMe::CALL{
                 let err = heap.unnamed_fn_arg(me.object, value, self.ip);       
                 if err.is_err(){
-                    self.trap = Some(ScriptTrap::Error(value));
+                    self.trap = Some(ScriptTrap::Error(err));
                 }
             }
             else if me.ty == ScriptMe::OBJ{
                 if !value.is_nil() && !value.is_err(){
-                    let err = heap.vec_push(me.object, key, value);       
+                    let err = heap.vec_push(me.object, key, value, self.ip);       
                     if err.is_err(){
-                        self.trap = Some(ScriptTrap::Error(value));
+                        self.trap = Some(ScriptTrap::Error(err));
                     }
                 }
             }
             else{
-                let err = heap.vec_push(me.object, NIL, value);       
+                let err = heap.vec_push(me.object, NIL, value, self.ip);       
                 if err.is_err(){
-                    self.trap = Some(ScriptTrap::Error(value));
+                    self.trap = Some(ScriptTrap::Error(err));
                 }
             }
         }
