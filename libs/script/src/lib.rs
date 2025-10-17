@@ -155,6 +155,13 @@ pub fn test(){
     
     let _code = script!{
         scope.import(mod.std)
+        let iv = [1 2 3 4] let ov = []
+        for v in iv ov.push(v) assert(iv == ov)
+        ;
+    };
+    
+    let _code = script!{
+        scope.import(mod.std)
         let a = [1,2,3];
         a.retain(|v| v!=2);
         ~a;

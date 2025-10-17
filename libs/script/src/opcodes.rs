@@ -303,6 +303,7 @@ impl ScriptThread{
                 else{
                     self.push_stack_value_nc(Value::err_notassignable(self.ip));
                 }
+                self.ip.index += 1;
             }
             Opcode::ASSIGN_ADD=>f64_scope_assign_op_impl!(self, heap, +),
             Opcode::ASSIGN_SUB=>f64_scope_assign_op_impl!(self, heap, -),
@@ -705,7 +706,7 @@ impl ScriptThread{
                 };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 let scope = *self.scopes.last_mut().unwrap();
-                heap.set_value(scope, id.into(), value);
+                self.push_stack_value_nc(heap.set_value_ip(scope, id.into(), value, self.ip));
                 self.ip.index += 1;
             }
             Opcode::LET_TYPED=>{
@@ -718,7 +719,7 @@ impl ScriptThread{
                 let _ty = self.pop_stack_value();
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 let scope = *self.scopes.last_mut().unwrap();
-                heap.set_value(scope, id.into(), value);
+                self.push_stack_value_nc(heap.set_value_ip(scope, id.into(), value, self.ip));
                 self.ip.index += 1;
             } 
             
@@ -961,6 +962,7 @@ impl ScriptThread{
                 let (key,value) = heap.vec_key_value(obj, 0);
                 if heap.vec_len(obj)>0{
                     self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, value, 0.0, key);
+                    return
                 }
             }
         }
@@ -1018,6 +1020,7 @@ impl ScriptThread{
                     self.scopes.push(scope);
                                             
                     self.ip.index = lf.start_ip;
+                    return
                 }
             }
         }
