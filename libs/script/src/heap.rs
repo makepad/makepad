@@ -438,6 +438,9 @@ impl ScriptHeap{
     }
     
     pub fn set_value_ip(&mut self, ptr:ObjectPtr, key:Value, value:Value, ip:ScriptIp)->Value{
+        if let Some(obj) = value.as_object(){
+            self.set_reffed(obj);
+        }
         if key.is_index(){ // use vector
             return self.set_value_index(ptr, key, value, ip);
         }
@@ -755,10 +758,9 @@ impl ScriptHeap{
         object.tag.is_fn()
     }
             
-    pub fn is_fn_and_set_reffed(&mut self, ptr: ObjectPtr,)->bool{
+    pub fn set_reffed(&mut self, ptr: ObjectPtr,){
         let object = &mut self.objects[ptr.index as usize];
         object.tag.set_reffed();
-        object.tag.is_fn()
     }
             
     pub fn parent_as_fn(&self, ptr: ObjectPtr,)->Option<ScriptFnPtr>{
