@@ -143,6 +143,7 @@ pub fn test(){
         let x = 1 x += 2 assert(x == 3)
         let t = 3 t ?= 2 assert(t == 3)
         let t t ?= 2 assert(t == 2)
+        let t = 0 t = 2 t += 1 assert(t==3)
         let x = {f:2} x.f+=2 assert(x.f == 4)
         let x = [1,2] x[1]+=2 assert(x == [1 4])
         let c = 0 for x in 4{ if c == 3 break; c += 1} assert(c==3)
@@ -151,6 +152,8 @@ pub fn test(){
         let c = 0 loop{ c+=1; if c>5 break} assert(c==6)
         let c = 0 while c < 9 c+=1 assert(c==9);
         let c = 0 while c < 3{c+=1}assert(c==3);
+        // access rights
+        
     };
     
     let _code = script!{
