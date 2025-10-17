@@ -120,7 +120,7 @@ pub fn test(){
     };
     
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         
         scope.import(mod.std)
         
