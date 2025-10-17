@@ -97,21 +97,27 @@ pub enum ScriptFnPtr{
 }
 
 impl ObjectTag{
+    // marked in the mark-sweep gc
     pub const MARK:u64 = 0x40;
+    // object is not 'free'
     pub const ALLOCED:u64 = 0x80;
+    // object is 'deep' aka writes to protochain
     pub const DEEP:u64 = 0x100;
+    // used to mark objects dirty for Rust deserialisers
     pub const DIRTY:u64 = 0x200;
+    // used to quick-free objects if not set
     pub const REFFED: u64 = 0x400;
-    
+    // object is skipped in gc passes
+    pub const STATIC: u64 = 0x800;
     
     // marks object readonly
-    pub const FROZEN: u64 = 0x800;
+    pub const FROZEN: u64 = 0x1000;
     // for readonly allow writes if checked passes
-    pub const VALIDATED: u64 = 0x1000;
+    pub const VALIDATED: u64 = 0x2000;
     // for read only allow writes only if map item doesnt exist
-    pub const MAP_ADD: u64 = 0x2000;
+    pub const MAP_ADD: u64 = 0x4000;
     // vec is frozen
-    pub const VEC_FROZEN: u64 = 0x4000;
+    pub const VEC_FROZEN: u64 = 0x8000;
     
     pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
 

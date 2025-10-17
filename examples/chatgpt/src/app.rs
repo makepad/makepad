@@ -79,14 +79,15 @@ impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
         makepad_script::test();
+        
         script!{
             let net = mod.net 
             let fs = mod.fs
-            let req = net.{
+            let req = net.HttpRequest{
                 url: "www.google.com",
                 method: net.POST,
                 is_streaming: true,
-                headers2{
+                headers:{
                     "Content-Type":"application/json",
                     "Authorization":"Bearer"++fs.read_string("OPENAI_KEY")
                 }
