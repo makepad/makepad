@@ -93,6 +93,7 @@ pub use {
     makepad_math::*,
     makepad_live_id::*,
     app_main::*,
+    makepad_script::script,
     makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,

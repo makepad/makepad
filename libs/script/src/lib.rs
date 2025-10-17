@@ -15,10 +15,13 @@ pub mod thread;
 pub mod opcode;
 pub mod value;
 pub mod opcodes;
+pub mod gc;
 pub use makepad_id_derive::*;
 pub use makepad_id::id::*;
 pub use value::*;
-
+pub use vm::ScriptVm;
+pub use makepad_script_derive::*;
+pub use vm::Script;
 // can we refcount object roots on the heap?
 // yea why not 
 // we can make a super convenient ObjectRef type you can use to hold onto script objects
@@ -63,8 +66,6 @@ impl RustTest{
     fn ty()->u32{1}
 }
 
-use crate::vm::*;
-use makepad_script_derive::*;
 
 pub fn test(){
     let mut vm = ScriptVm::new();
@@ -120,7 +121,9 @@ pub fn test(){
     
     // Our unit tests :)
     let code = script!{
+        
         scope.import(mod.std)
+        
         let x = 1+2 assert(x == 3)
         let iv = [1 2 3 4] let ov = []
         for v in iv ov.push(v) assert(iv == ov)
@@ -155,10 +158,10 @@ pub fn test(){
         let a = [1,2,3];
         a.retain(|v| v!=2);
         ~a;
-        //a.retain(|v|{~v;v>=3}) assert(a==[3 4]);
+        a.retain(|v|{~v;v>=3}) assert(a==[3 4]);
     };
     
-    let _code = script!{
+    let code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     };
