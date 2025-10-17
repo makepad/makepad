@@ -276,9 +276,17 @@ impl ScriptThread{
             Opcode::ASSIGN_ME=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
-                let value = heap.set_value_ip(self.mes.last().unwrap().object, field, value, self.ip);
-                if value.is_err(){
-                    self.trap = Some(ScriptTrap::Error(value));
+                if self.call_has_me(){
+                    let me = self.mes.last().unwrap();
+                    let value = if me.ty == ScriptMe::CALL{
+                        heap.named_fn_arg(me.object, field, value, self.ip)
+                    }
+                    else{
+                        heap.set_value_ip(self.mes.last().unwrap().object, field, value, self.ip)
+                    };
+                    if value.is_err(){
+                        self.trap = Some(ScriptTrap::Error(value));
+                    }
                 }
                 self.ip.index += 1;
             }
@@ -892,15 +900,24 @@ impl ScriptThread{
                 else{(value, self.scope_value(heap, id))}
             }else{(NIL,value)};
             if me.ty == ScriptMe::CALL{
-                heap.push_fn_arg(me.object, value);       
+                let err = heap.unnamed_fn_arg(me.object, value, self.ip);       
+                if err.is_err(){
+                    self.trap = Some(ScriptTrap::Error(value));
+                }
             }
             else if me.ty == ScriptMe::OBJ{
                 if !value.is_nil() && !value.is_err(){
-                    heap.vec_push(me.object, key, value);       
+                    let err = heap.vec_push(me.object, key, value);       
+                    if err.is_err(){
+                        self.trap = Some(ScriptTrap::Error(value));
+                    }
                 }
             }
             else{
-                heap.vec_push(me.object, NIL, value);       
+                let err = heap.vec_push(me.object, NIL, value);       
+                if err.is_err(){
+                    self.trap = Some(ScriptTrap::Error(value));
+                }
             }
         }
     }
