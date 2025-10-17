@@ -297,7 +297,7 @@ impl ScriptThread{
             Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
-                heap.insert_value_at(self.mes.last().unwrap().object, field, value, opcode == Opcode::ASSIGN_ME_BEFORE);
+                heap.vec_insert_value_at(self.mes.last().unwrap().object, field, value, opcode == Opcode::ASSIGN_ME_BEFORE);
                 if !args.is_statement(){
                     self.push_stack_value_nc(NIL);
                 }
@@ -307,7 +307,7 @@ impl ScriptThread{
             Opcode::ASSIGN_ME_BEGIN=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
-                heap.insert_value_begin(self.mes.last().unwrap().object, field, value);
+                heap.vec_insert_value_begin(self.mes.last().unwrap().object, field, value);
                 if !args.is_statement(){
                     self.push_stack_value_nc(NIL);
                 }
@@ -895,11 +895,11 @@ impl ScriptThread{
             }
             else if me.ty == ScriptMe::OBJ{
                 if !value.is_nil() && !value.is_err(){
-                    heap.push_value(me.object, key, value);       
+                    heap.vec_push(me.object, key, value);       
                 }
             }
             else{
-                heap.push_value(me.object, NIL, value);       
+                heap.vec_push(me.object, NIL, value);       
             }
         }
     }
@@ -967,14 +967,9 @@ impl ScriptThread{
                 }
             }
             else{
-                let object = heap.object(obj);
-                if object.tag.get_type().uses_vec2() && object.vec.len() > 1{
-                    self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, object.vec[1], 0.0, object.vec[0]);
-                    return 
-                }
-                else if object.tag.get_type().is_vec1() && object.vec.len() > 0{
-                    self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, object.vec[0], 0.0, NIL);                  
-                    return 
+                let (key,value) = heap.vec_key_value(obj, 0);
+                if heap.vec_len(obj)>0{
+                    self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, value, 0.0, key);
                 }
             }
         }
@@ -1012,48 +1007,26 @@ impl ScriptThread{
                     return
                 }
                 else{
-                    let object = heap.object(obj);
-                    if object.tag.get_type().uses_vec2(){
-                        let len = object.vec.len() >> 1;
-                        values.index += 1.0;
-                        if values.index >= len as f64{
-                            self.break_for_loop(heap);
-                            return
-                        }
-                        let scope = self.scopes.pop().unwrap();
-                        let value = object.vec[values.index as usize * 2 + 1];
-                        let key = if values.key_id.is_some(){
-                            object.vec[values.index as usize * 2]
-                        }else{NIL};
-                        
-                        let scope = heap.new_if_reffed(scope);
-                        heap.set_value(scope, values.value_id.into(), value.into());
-                        if let Some(index_id) = values.index_id{
-                            heap.set_value(scope, index_id.into(), values.index.into());
-                        }
-                        if let Some(key_id) = values.key_id{
-                            heap.set_value(scope, key_id.into(), key);
-                        }
-                        self.scopes.push(scope);
-                        
-                        self.ip.index = lf.start_ip;
-                        return                    
+                    values.index += 1.0;
+                    if values.index >= heap.vec_len(obj) as f64{
+                        self.break_for_loop(heap);
+                        return
                     }
-                    else if object.tag.get_type().is_vec1() && object.vec.len() > 0{
-                        let len = object.vec.len();
-                        values.index += 1.0;
-                        if values.index >= len as f64{
-                            self.break_for_loop(heap);
-                            return
-                        }
-                        self.ip.index = lf.start_ip;
-                        let scope = self.scopes.pop().unwrap();
-                        let value = object.vec[values.index as usize];
-                        let scope = heap.new_if_reffed(scope);
-                        heap.set_value(scope, values.value_id.into(), value.into());
-                        self.scopes.push(scope);
-                        return                    
+                    let (key,value) = heap.vec_key_value(obj, values.index as usize);
+                    
+                    let scope = self.scopes.pop().unwrap();
+                    let scope = heap.new_if_reffed(scope);
+                    
+                    heap.set_value(scope, values.value_id.into(), value.into());
+                    if let Some(index_id) = values.index_id{
+                        heap.set_value(scope, index_id.into(), values.index.into());
                     }
+                    if let Some(key_id) = values.key_id{
+                        heap.set_value(scope, key_id.into(), key);
+                    }
+                    self.scopes.push(scope);
+                                            
+                    self.ip.index = lf.start_ip;
                 }
             }
         }
