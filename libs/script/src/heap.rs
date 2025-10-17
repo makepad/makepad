@@ -447,7 +447,7 @@ impl ScriptHeap{
                     for chunk in object.vec.rchunks(2){
                         if chunk[0] == key{
                             if chunk[1].value_type().to_redux() != value.value_type().to_redux(){
-                                return Value::err_validation(ip) 
+                                return Value::err_invalidproptype(ip) 
                             }
                             return self.set_value_shallow(ptr, key, value, ip);
                         }
@@ -455,7 +455,7 @@ impl ScriptHeap{
                 }
                 if let Some(set_value) = object.map.get(&key){
                     if set_value.value_type().to_redux() != value.value_type().to_redux(){
-                        return Value::err_validation(ip) 
+                        return Value::err_invalidproptype(ip) 
                     }
                     return self.set_value_shallow(ptr, key, value, ip);
                 }
@@ -463,7 +463,7 @@ impl ScriptHeap{
                     ptr = next_ptr
                 }
                 else{ // not found
-                    return Value::err_validation(ip) 
+                    return Value::err_invalidpropname(ip) 
                 } 
             }
         }
@@ -472,7 +472,7 @@ impl ScriptHeap{
             if object.tag.get_type().is_vec2(){
                 for chunk in object.vec.rchunks_mut(2){
                     if chunk[0] == key{
-                        return Value::err_keyexists(ip) 
+                        return Value::err_keyalreadyexists(ip) 
                     }
                 }
                 object.vec.extend_from_slice(&[key, value]);
@@ -480,7 +480,7 @@ impl ScriptHeap{
             }
             match object.map.entry(key) {
                 Entry::Occupied(_) => {
-                    return Value::err_keyexists(ip) 
+                    return Value::err_keyalreadyexists(ip) 
                 }
                 Entry::Vacant(vac) => {
                     vac.insert(value);
@@ -546,7 +546,7 @@ impl ScriptHeap{
                 return self.set_value_deep(ptr, key, value, ip)
             }
         }
-        Value::err_keytype(ip)
+        Value::err_invalidkeytype(ip)
     }
     
         
