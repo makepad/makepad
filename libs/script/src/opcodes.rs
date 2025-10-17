@@ -500,9 +500,6 @@ impl ScriptThread{
                             self.ip.index += 1;
                         }
                         ScriptFnPtr::Script(sip)=>{
-                            if args.is_pop_to_me(){
-                                self.push_stack_value(NIL);
-                            }
                             let call = CallFrame{
                                 bases: self.new_bases(),
                                 args: args,
@@ -511,6 +508,9 @@ impl ScriptThread{
                             self.scopes.push(scope);
                             self.calls.push(call);
                             self.ip = sip;
+                            if args.is_pop_to_me(){ // skip this
+                                return
+                            }
                         }
                     }
                 }
