@@ -153,15 +153,14 @@ pub fn test(){
         let c = 0 loop{ c+=1; if c>5 break} assert(c==6)
         let c = 0 while c < 9 c+=1 assert(c==9);
         let c = 0 while c < 3{c+=1}assert(c==3);
-        // access rights
-        
+        // test api mode
+        let x = {x:1.0,y:2.0}.freeze_api();
+        let t = x{y:3.0}
     };
     
     let _code = script!{
-        scope.import(mod.std)
-        let iv = [1 2 3 4] let ov = []
-        for v in iv ov.push(v) assert(iv == ov)
-        ;
+        let x = {x:1.0,y:2.0}.freeze_api();
+        let y = x{y: 1.0,5.0, x:2.0};
     };
     
     let _code = script!{

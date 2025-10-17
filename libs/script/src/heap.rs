@@ -4,6 +4,7 @@ use crate::makepad_id_derive::*;
 use std::fmt::Write;
 use crate::object::*;
 use crate::string::*;
+use std::collections::hash_map::Entry;
 
 pub struct ScriptHeap{
     pub modules: ObjectPtr,
@@ -316,9 +317,22 @@ impl ScriptHeap{
         self.objects[ptr.index as usize].tag.clear_deep()
     }
     
-        
-        
-        
+    pub fn freeze(&mut self, ptr: ObjectPtr){
+        self.objects[ptr.index as usize].tag.freeze()
+    }
+    
+    pub fn freeze_module(&mut self, ptr: ObjectPtr){
+        self.objects[ptr.index as usize].tag.freeze_module()
+    }
+            
+    pub fn freeze_widget(&mut self, ptr: ObjectPtr){
+        self.objects[ptr.index as usize].tag.freeze_widget()
+    }
+            
+    pub fn freeze_api(&mut self, ptr: ObjectPtr){
+        self.objects[ptr.index as usize].tag.freeze_api()
+    }
+            
         
     // Writing object values 
         
@@ -334,12 +348,9 @@ impl ScriptHeap{
         let object = &mut self.objects[ptr.index as usize];
         let ty = object.tag.get_type();
         
-        if object.tag.has_rw(){ // has rw flags
-            if object.tag.is_frozen(){
-                
-            }
+        if object.tag.is_vec_frozen(){ // has rw flags
+            return Value::err_vecfrozen(ip)
         }
-        
         if ty.uses_vec2(){
             let index = index.as_index() * 2;
             if index + 1 >= object.vec.len(){
@@ -366,11 +377,14 @@ impl ScriptHeap{
             //todo IMPLEMENT IT
             return NIL
         }
-        Value::err_internal(ip)
+        Value::err_unexpected(ip)
     }
             
-    fn set_value_prefixed(&mut self, ptr: ObjectPtr, key: Value, value: Value, _ip:ScriptIp)->Value{
+    fn set_value_prefixed(&mut self, ptr: ObjectPtr, key: Value, value: Value, ip:ScriptIp)->Value{
         let object = &mut self.objects[ptr.index as usize];
+        if object.tag.is_vec_frozen(){
+            return Value::err_vecfrozen(ip)
+        }
         for chunk in object.vec.rchunks_mut(2){
             if chunk[0] == key{
                 chunk[1] = value;
@@ -382,11 +396,14 @@ impl ScriptHeap{
         NIL
     }
         
-    fn set_value_deep(&mut self, ptr:ObjectPtr, key: Value, value: Value, _ip:ScriptIp)->Value{
+    fn set_value_deep(&mut self, ptr:ObjectPtr, key: Value, value: Value, ip:ScriptIp)->Value{
         let mut ptr = ptr;
         loop{
             let object = &mut self.objects[ptr.index as usize];
-            if object.tag.get_type().has_paired_vec(){
+            if object.tag.has_freeze(){
+                return Value::err_frozen(ip)
+            }
+            if object.tag.get_type().is_vec2(){
                 for chunk in object.vec.rchunks_mut(2){
                     if chunk[0] == key{
                         chunk[1] = value;
@@ -415,7 +432,65 @@ impl ScriptHeap{
         }
         NIL
     }
-        
+    
+    fn set_value_shallow_checked(&mut self, ptr:ObjectPtr, key:Value, value:Value, ip:ScriptIp)->Value{
+        let object = &self.objects[ptr.index as usize];
+        if object.tag.is_frozen(){
+            return Value::err_frozen(ip)
+        }
+        // check against prototype
+        if object.tag.is_validated(){
+            let mut ptr = ptr;
+            loop{
+                let object = &self.objects[ptr.index as usize];
+                if object.tag.get_type().is_vec2(){
+                    for chunk in object.vec.rchunks(2){
+                        if chunk[0] == key{
+                            if chunk[1].value_type().to_redux() != value.value_type().to_redux(){
+                                return Value::err_validation(ip) 
+                            }
+                            return self.set_value_shallow(ptr, key, value, ip);
+                        }
+                    }
+                }
+                if let Some(set_value) = object.map.get(&key){
+                    if set_value.value_type().to_redux() != value.value_type().to_redux(){
+                        return Value::err_validation(ip) 
+                    }
+                    return self.set_value_shallow(ptr, key, value, ip);
+                }
+                if let Some(next_ptr) = object.proto.as_object(){
+                    ptr = next_ptr
+                }
+                else{ // not found
+                    return Value::err_validation(ip) 
+                } 
+            }
+        }
+        let object = &mut self.objects[ptr.index as usize];
+        if object.tag.is_map_add(){
+            if object.tag.get_type().is_vec2(){
+                for chunk in object.vec.rchunks_mut(2){
+                    if chunk[0] == key{
+                        return Value::err_keyexists(ip) 
+                    }
+                }
+                object.vec.extend_from_slice(&[key, value]);
+                return NIL
+            }
+            match object.map.entry(key) {
+                Entry::Occupied(_) => {
+                    return Value::err_keyexists(ip) 
+                }
+                Entry::Vacant(vac) => {
+                    vac.insert(value);
+                    return NIL
+                }
+            }
+        }
+        Value::err_unexpected(ip) 
+    }
+    
     fn set_value_shallow(&mut self, ptr:ObjectPtr, key:Value, value:Value, _ip:ScriptIp)->Value{
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.get_type().is_vec2(){
@@ -441,32 +516,37 @@ impl ScriptHeap{
         if let Some(obj) = value.as_object(){
             self.set_reffed(obj);
         }
-        if key.is_index(){ // use vector
-            return self.set_value_index(ptr, key, value, ip);
-        }
         if let Some(id) = key.as_id(){
             if id.is_prefixed(){
                 return self.set_value_prefixed(ptr, key, value, ip)
             }
-            // scan prototype chain for id
             let object = &self.objects[ptr.index as usize];
             if !object.tag.is_deep(){
+                if object.tag.has_freeze(){
+                    return self.set_value_shallow_checked(ptr, key, value, ip)
+                }
                 return self.set_value_shallow(ptr, key, value, ip);
             }
             else{
                 return self.set_value_deep(ptr, key, value, ip)
             }
+        }
+        if key.is_index(){ // use vector
+            return self.set_value_index(ptr, key, value, ip);
         }
         if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             let object = &mut self.objects[ptr.index as usize];
             if !object.tag.is_deep(){
+                if object.tag.has_freeze(){
+                    return self.set_value_shallow_checked(ptr, key, value, ip)
+                }
                 return self.set_value_shallow(ptr, key, value, ip);
             }
             else{
                 return self.set_value_deep(ptr, key, value, ip)
             }
         }
-        Value::err_wrongkey(ip)
+        Value::err_keytype(ip)
     }
     
         
@@ -513,6 +593,18 @@ impl ScriptHeap{
         def
     }
     
+    fn value_prefixed(&self, ptr: ObjectPtr, key: Value, def:Value)->Value{
+        let object = &self.objects[ptr.index as usize];
+        if object.tag.get_type().uses_vec2(){
+            for chunk in object.vec.rchunks(2){
+                if chunk[0] == key{
+                    return chunk[1]
+                }
+            }
+        }
+        def
+    }
+    
     fn value_deep_map(&self, obj_ptr:ObjectPtr, key: Value, def:Value)->Value{
         let mut ptr = obj_ptr;
         loop{
@@ -537,7 +629,7 @@ impl ScriptHeap{
             if let Some(value) = object.map.get(&key){
                 return *value
             }
-            if object.tag.get_type().has_paired_vec(){
+            if object.tag.get_type().is_vec2(){
                 for chunk in object.vec.rchunks(2){
                     if chunk[0] == key{
                         return chunk[1]
@@ -554,23 +646,28 @@ impl ScriptHeap{
         def
     }
     
-    pub fn object_method(&self, ptr:ObjectPtr, key:Value, def:Value)->Value{
-        self.value_map(ptr, key, def)
-    }
-    
+    /*
     pub fn value_map(&self, ptr:ObjectPtr, key:Value, def:Value)->Value{
         // hard array index
-        if key.is_id(){
+        if key.is_unprefixed_id(){
             return self.value_deep_map(ptr, key, def)
         }
         if key.is_index(){
             return self.value_index(ptr, key, def)
+        }
+        if key.is_prefixed_id(){
+            return self.value_deep_prefixed(ptr, key, def)
         }
         if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             return self.value_deep_map(ptr, key, def)
         }
         // TODO implement string lookup
         def
+    }*/
+    
+        
+    pub fn object_method(&self, ptr:ObjectPtr, key:Value, def:Value)->Value{
+        return self.value_deep_map(ptr, key, def)
     }
     
     pub fn value_path(&self, ptr:ObjectPtr, keys:&[Id], def:Value)->Value{
@@ -587,12 +684,14 @@ impl ScriptHeap{
     }
     
     pub fn value(&self, ptr:ObjectPtr, key:Value, def:Value)->Value{
-        // hard array index
-        if key.is_id(){
+        if key.is_unprefixed_id(){
             return self.value_deep(ptr, key, def)
         }
         if key.is_index(){
             return self.value_index(ptr, key, def)
+        }
+        if key.is_prefixed_id(){
+            return self.value_prefixed(ptr, key, def)
         }
         if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             return self.value_deep(ptr, key, def)
@@ -665,7 +764,10 @@ impl ScriptHeap{
         NIL
     }
         
-    pub fn vec_push_vec(&mut self, target:ObjectPtr, source:ObjectPtr)->Value{
+    pub fn vec_push_vec(&mut self, target:ObjectPtr, source:ObjectPtr, ip:ScriptIp)->Value{
+        if target == source{
+            return Value::err_invalidargs(ip)
+        }
         let (target, source) = if target.index > source.index{
             let (o1, o2) = self.objects.split_at_mut(target.index as _);
             (&mut o2[0], &mut o1[source.index as usize])                    
@@ -673,14 +775,20 @@ impl ScriptHeap{
             let (o1, o2) = self.objects.split_at_mut(source.index as _);
             (&mut o1[target.index as usize], &mut o2[0])                    
         };
+        if target.tag.is_vec_frozen(){
+            return Value::err_vecfrozen(ip);
+        }
         target.push_vec_from_other(source);
         NIL
     }
         
-    pub fn vec_push_vec_of_vec(&mut self, target:ObjectPtr, source:ObjectPtr, map:bool)->Value{
+    pub fn vec_push_vec_of_vec(&mut self, target:ObjectPtr, source:ObjectPtr, map:bool, ip:ScriptIp)->Value{
         let len = self.objects[source.index as usize].vec.len();
         for i in 0..len{
             if let Some(source) = self.objects[source.index as usize].vec[i].as_object(){
+                if target == source{
+                    return Value::err_invalidargs(ip)
+                }
                 let (target, source) = if target.index > source.index{
                     let (o1, o2) = self.objects.split_at_mut(target.index as _);
                     (&mut o2[0], &mut o1[source.index as usize])
@@ -688,6 +796,9 @@ impl ScriptHeap{
                     let (o1, o2) = self.objects.split_at_mut(source.index as _);
                     (&mut o1[target.index as usize], &mut o2[0])
                 };
+                if target.tag.is_vec_frozen(){
+                    return Value::err_vecfrozen(ip);
+                }
                 target.push_vec_from_other(source);
                 if map{
                     target.merge_map_from_other(source);
@@ -697,8 +808,11 @@ impl ScriptHeap{
         NIL
     }
         
-    pub fn vec_push(&mut self, ptr: ObjectPtr, key: Value, value: Value)->Value{
+    pub fn vec_push(&mut self, ptr: ObjectPtr, key: Value, value: Value, ip:ScriptIp)->Value{
         let object = &mut self.objects[ptr.index as usize];
+        if object.tag.is_vec_frozen(){
+            return Value::err_vecfrozen(ip);
+        }
         let ty = object.tag.get_type();
         if ty.has_paired_vec(){
             object.vec.extend_from_slice(&[key, value]);
@@ -707,22 +821,34 @@ impl ScriptHeap{
                 object.tag.set_reffed();
             }
         }
+        else if ty.is_vec1(){
+            object.vec.push(value);
+        }
         else if ty.is_typed(){
-            println!("IMPLEMENT TYPED PUSH VALUE")
+            return Value::err_notimpl(ip);
         }
         else{
-            object.vec.push(value);
+            return Value::err_notimpl(ip);
         }
         NIL
     }
             
-    pub fn vec_remove(&mut self, ptr:ObjectPtr, index:usize)->Value{
+    pub fn vec_remove(&mut self, ptr:ObjectPtr, index:usize, ip:ScriptIp)->Value{
         let object = &mut self.objects[ptr.index as usize];
+        if object.tag.is_vec_frozen(){
+            return Value::err_vecfrozen(ip);
+        }
         if object.tag.get_type().has_paired_vec(){
+            if index >= object.vec.len() * 2{
+                return Value::err_vecbound(ip);
+            }
             object.vec.remove(index * 2);
             return object.vec.remove(index * 2);
         }
         else if object.tag.get_type().is_vec1(){
+            if index >= object.vec.len(){
+                return Value::err_vecbound(ip);
+            }
             return object.vec.remove(index);
         }
         else{
@@ -730,12 +856,20 @@ impl ScriptHeap{
         }
     }
         
-    pub fn vec_pop(&mut self, ptr:ObjectPtr)->Value{
-        if let Some(value) = self.objects[ptr.index as usize].vec.pop(){
-            value
+    pub fn vec_pop(&mut self, ptr:ObjectPtr, ip:ScriptIp)->Value{
+        let object = &mut self.objects[ptr.index as usize];
+        if object.tag.is_vec_frozen(){
+            return Value::err_vecfrozen(ip);
+        }
+        if object.tag.get_type().has_paired_vec(){
+            object.vec.pop();
+            object.vec.pop().unwrap_or(Value::err_vecbound(ip))
+        }
+        else if object.tag.get_type().is_vec1(){
+            object.vec.pop().unwrap_or(Value::err_vecbound(ip))
         }
         else{
-            NIL
+            Value::err_vecbound(ip)
         }
     }
     
