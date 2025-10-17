@@ -158,13 +158,9 @@ pub fn test(){
         let t = x{y:3.0}
     };
     
-    let code = script!{
-        let f = |v| {
-            ~@hi    
-            ~v
-            return 4.0
-        }
-        ~f(3.0);
+    let _code = script!{
+        let f = |v| 1.0
+        ~f(v:3.0);
     };
     
     let _code = script!{
