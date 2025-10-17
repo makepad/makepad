@@ -141,7 +141,7 @@ impl ObjectTag{
         self.0  |= Self::MAP_ADD
     }
     
-    pub fn freeze_widget(&mut self){
+    pub fn freeze_component(&mut self){
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN|Self::VALIDATED
     }

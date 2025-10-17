@@ -158,9 +158,13 @@ pub fn test(){
         let t = x{y:3.0}
     };
     
-    let _code = script!{
-        let x = {x:1.0,y:2.0}.freeze_api();
-        let y = x{y: 1.0,5.0, x:2.0};
+    let code = script!{
+        let f = |v| {
+            ~@hi    
+            ~v
+            return 4.0
+        }
+        ~f(3.0);
     };
     
     let _code = script!{

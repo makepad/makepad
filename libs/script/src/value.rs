@@ -151,7 +151,10 @@ impl ValueType{
     pub const ERR_KEYTYPE: Self = Self(32);
     pub const ERR_USER: Self = Self(33);
     pub const ERR_VECBOUND: Self = Self(34);
-    pub const ERR_LAST: Self = Self(35);
+    pub const ERR_ARGTYPEFAIL: Self = Self(35);
+    pub const ERR_ARGNAMEFAIL: Self = Self(36);
+                
+    pub const ERR_LAST: Self = Self(37);
             
     pub const ID: Self = Self(0x80);
     
@@ -241,7 +244,9 @@ impl fmt::Display for ValueType {
             Self::ERR_KEYEXISTS=>write!(f,"KeyAlreadyExists"),
             Self::ERR_KEYTYPE=>write!(f,"UnsupportedKeyType"),
             Self::ERR_VECBOUND=>write!(f,"VecBoundFail"),
-                                    
+            Self::ERR_ARGTYPEFAIL=>write!(f,"ArgumentTypeFailed"),
+            Self::ERR_ARGNAMEFAIL=>write!(f,"ArgumentNameFailed"),
+                                                            
             Self::ERR_USER=>write!(f,"UserGenerated"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ValueType?")
@@ -316,8 +321,9 @@ impl Value{
     pub const fn err_validation(ip:ScriptIp)->Self{Self(ValueType::ERR_VALIDATION.to_u64() | ip.to_u40())}
     pub const fn err_keyexists(ip:ScriptIp)->Self{Self(ValueType::ERR_KEYEXISTS.to_u64() | ip.to_u40())}
     pub const fn err_keytype(ip:ScriptIp)->Self{Self(ValueType::ERR_KEYTYPE.to_u64() | ip.to_u40())}
-    pub const fn err_vecbound(ip:ScriptIp)->Self{Self(ValueType::ERR_VECBOUND.to_u64() | ip.to_u40())}            
-    pub const ERR_FROZEN: Self = Self(28);
+    pub const fn err_vecbound(ip:ScriptIp)->Self{Self(ValueType::ERR_VECBOUND.to_u64() | ip.to_u40())}
+    pub const fn err_argtypefail(ip:ScriptIp)->Self{Self(ValueType::ERR_ARGTYPEFAIL.to_u64() | ip.to_u40())}            
+    pub const fn err_argnamefail(ip:ScriptIp)->Self{Self(ValueType::ERR_ARGNAMEFAIL.to_u64() | ip.to_u40())}               pub const ERR_FROZEN: Self = Self(28);
     pub const ERR_VALIDATION: Self = Self(29);
     pub const ERR_INVKEY: Self = Self(30);
     
