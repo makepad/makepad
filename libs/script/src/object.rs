@@ -1,6 +1,6 @@
 use std::fmt;
 use crate::value::*;
-use std::collections::BTreeMap;
+use crate::value_map::*;
 
 #[derive(Default)]
 pub struct ObjectTag(u64); 
@@ -307,13 +307,13 @@ impl fmt::Display for ObjectTag {
 pub struct Object{
     pub tag: ObjectTag,
     pub proto: Value,
-    pub map: BTreeMap<Value, Value>,
+    pub map: ValueMap<Value, Value>,
     pub vec: Vec<Value>,
 }
 
 impl Object{
     pub fn merge_map_from_other(&mut self, other:&Object){
-        self.map.extend(&other.map);
+        self.map.extend(other.map.iter());
     }
      
     pub fn push_vec_from_other(&mut self, other:&Object){

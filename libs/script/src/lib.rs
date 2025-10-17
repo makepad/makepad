@@ -16,6 +16,7 @@ pub mod opcode;
 pub mod value;
 pub mod opcodes;
 pub mod gc;
+pub mod value_map;
 pub use makepad_id_derive::*;
 pub use makepad_id::id::*;
 pub use value::*;

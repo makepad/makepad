@@ -115,7 +115,7 @@ impl ScriptTypeMethods{
         
         self.add(h, native, args!(cb:NIL), ValueType::REDUX_OBJECT, id!(retain), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                let fnptr = value!(vm, args[0]);
+                let fnptr = value!(vm, args.cb);
                 let mut i = 0;
                 while i < vm.heap.vec_len(this){
                     let value = value!(vm, this[i]);
