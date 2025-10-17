@@ -325,8 +325,8 @@ impl ScriptHeap{
         self.objects[ptr.index as usize].tag.freeze_module()
     }
             
-    pub fn freeze_widget(&mut self, ptr: ObjectPtr){
-        self.objects[ptr.index as usize].tag.freeze_widget()
+    pub fn freeze_component(&mut self, ptr: ObjectPtr){
+        self.objects[ptr.index as usize].tag.freeze_component()
     }
             
     pub fn freeze_api(&mut self, ptr: ObjectPtr){
@@ -911,7 +911,7 @@ impl ScriptHeap{
         }
     }   
         
-    pub fn unnamed_fn_arg(&mut self, top_ptr:ObjectPtr, value:Value, _ip:ScriptIp)->Value{
+    pub fn unnamed_fn_arg(&mut self, top_ptr:ObjectPtr, value:Value, ip:ScriptIp)->Value{
         let object = &self.objects[top_ptr.index as usize];
         
         // which arg number?
@@ -921,52 +921,60 @@ impl ScriptHeap{
             let object = &self.objects[ptr.index as usize];
             if let Some(key) = object.vec.get(index*2){
                 let key = *key;
+                if let Some(defvalue) = object.vec.get(index*2 + 1){
+                    if !defvalue.is_nil() && defvalue.value_type().to_redux() != value.value_type().to_redux(){
+                        return Value::err_argtypefail(ip) 
+                    }
+                }
                 self.objects[top_ptr.index as usize].map.insert(key, value);
                 if let Some(obj) = value.as_object(){
                     let object = &mut self.objects[obj.index as usize];
                     object.tag.set_reffed();
                 }
+                return NIL
             }
             else{
                 // only allow if we are varargs
                 self.objects[top_ptr.index as usize].vec.extend_from_slice(&[NIL, value]);
+                return NIL
             }
         }
-        NIL
+        Value::err_unexpected(ip)
     }
     
         
-    pub fn named_fn_arg(&mut self, top_ptr:ObjectPtr, _name:Value, value:Value, _ip:ScriptIp)->Value{
+    pub fn named_fn_arg(&mut self, top_ptr:ObjectPtr, key:Value, value:Value, ip:ScriptIp)->Value{
         let object = &self.objects[top_ptr.index as usize];
-                
-        // which arg number?
-        let index = object.map.len();
-                
+            
         if let Some(ptr) = object.proto.as_object(){
             let object = &self.objects[ptr.index as usize];
-            if let Some(key) = object.vec.get(index*2){
-                let key = *key;
-                self.objects[top_ptr.index as usize].map.insert(key, value);
-                if let Some(obj) = value.as_object(){
-                    let object = &mut self.objects[obj.index as usize];
-                    object.tag.set_reffed();
+            for chunk in object.vec.chunks(2){
+                if chunk[0] == key{
+                    if !chunk[1].is_nil() && chunk[1].value_type().to_redux() != value.value_type().to_redux(){
+                        return Value::err_argtypefail(ip) 
+                    }
+                    self.objects[top_ptr.index as usize].map.insert(key, value);
+                    return NIL    
                 }
             }
-            else{
-                // only allow if we are varargs
-                self.objects[top_ptr.index as usize].vec.extend_from_slice(&[NIL, value]);
-            }
+            return Value::err_argnamefail(ip) 
         }
-        NIL
+        Value::err_unexpected(ip)
     }
             
-    pub fn push_all_fn_args(&mut self, top_ptr:ObjectPtr, args:&[Value]){
+    pub fn push_all_fn_args(&mut self, top_ptr:ObjectPtr, args:&[Value], ip:ScriptIp)->Value{
         let object = &self.objects[top_ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             for (index, value) in args.iter().enumerate(){
                 let object = &self.objects[ptr.index as usize];
                 if let Some(key) = object.vec.get(index*2){
                     let key = *key;
+                    // typecheck against default arg
+                    if let Some(defvalue) = object.vec.get(index*2 + 1){
+                        if !defvalue.is_nil() && defvalue.value_type().to_redux() != value.value_type().to_redux(){
+                            return Value::err_argtypefail(ip) 
+                        }
+                    }
                     self.objects[top_ptr.index as usize].map.insert(key, *value);
                     if let Some(obj) = value.as_object(){
                         let object = &mut self.objects[obj.index as usize];
@@ -978,6 +986,7 @@ impl ScriptHeap{
                 }
             }
         }
+        Value::err_unexpected(ip)
     }
     
     
