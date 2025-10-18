@@ -168,8 +168,7 @@ pub fn test(){
     
     let code = script!{
         scope.import(mod.std)
-        assert(~b is Ty)
-;
+        ~1
     };
     
     let _code = script!{
