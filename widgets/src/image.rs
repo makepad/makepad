@@ -293,8 +293,6 @@ impl Image {
                 (w,h)
             }
             else{
-                self.draw_bg.image_scale = vec2(1.0,1.0);
-                self.draw_bg.image_pan = vec2(0.0,0.0);
                 (width as f64 * self.width_scale, height as f64)
             }
         }
