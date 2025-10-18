@@ -389,7 +389,11 @@ impl AppleHttpRequests{
                 msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: deleg delegateQueue:nil]
             }
             else{
-                msg_send![class!(NSURLSession), sharedSession]
+                let config: ObjcId = msg_send![class!(NSURLSessionConfiguration), defaultSessionConfiguration];
+                let () = msg_send![config, setTimeoutIntervalForRequest: 60.0];
+                let () = msg_send![config, setTimeoutIntervalForResource: 120.0];
+                msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: nil delegateQueue:nil]
+               // msg_send![class!(NSURLSession), sharedSession]
             };
                     
             if is_streaming{ // its using the streaming delegate

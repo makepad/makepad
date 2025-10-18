@@ -1,0 +1,11 @@
+[package]
+name = "makepad-example-simple"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad simple example"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "EVyKRfOGV339Re5CS45PMHHxw_M="
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "1.0.0" }

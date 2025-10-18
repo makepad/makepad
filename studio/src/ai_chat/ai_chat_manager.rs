@@ -23,7 +23,7 @@ impl Default for AiChatManager{
                 AiModel{
                     name: "local".to_string(),
                     backend: AiBackend::OpenAI{
-                        url:"http://10.0.0.113:8080/v1/chat/completions".to_string(),
+                        url:"http://127.0.0.1:8080/v1/chat/completions".to_string(),
                         model:"".to_string(),
                         reasoning_effort: None,
                         key:"".to_string()
@@ -159,12 +159,28 @@ impl Default for AiChatManager{
                     ]
                 },
                 BaseContext{
+                    name: "Makepad AiStream".to_string(),
+                    apply: AiApply::WholeFile,
+                    system_pre: live_id!(AISTREAM_PRE),
+                    system_post: live_id!(AISTREAM_POST),
+                    general_post: live_id!(AISTREAM_GENPOST),
+                    files: vec![
+                        AiContextFile::new("AiStream example","makepad/examples/aistream/src/app.rs"),
+                    ]
+                },
+                
+                BaseContext{
                     name: "Makepad Rust".to_string(),
                     apply: AiApply::WholeFile,
                     system_pre: live_id!(ALL_PRE),
                     system_post: live_id!(ALL_POST),
                     general_post: live_id!(GENERAL_POST),
                     files: vec![
+                        AiContextFile::new("News feed example","makepad/examples/news_feed/src/app.rs"),
+                        AiContextFile::new("Todo example","makepad/examples/todo/src/app.rs"),
+                        AiContextFile::new("Simple example","makepad/examples/simple/src/app.rs"),
+                        AiContextFile::new("Snake game example","makepad/examples/snake/src/app.rs"),
+                        AiContextFile::new("Slides viewer example","makepad/examples/slides/src/app.rs"),
                     ]
                 },
                 BaseContext{
@@ -317,15 +333,21 @@ impl Default for AiChatManager{
                     files:vec![]
                 },
                 AiProject{
-                    name:"makepad-experiment-ai-snake".to_string(),
+                    name:"makepad-ai-demo1".to_string(),
                     files:vec![
-                        AiContextFile::new("Main app to rewrite","ai_snake/src/app.rs")
+                        AiContextFile::new("Main app to rewrite","ai_demo1/src/app.rs")
                     ]
                 },
                 AiProject{
-                    name:"makepad-experiment-ai-mr".to_string(),
+                    name:"makepad-ai-demo2".to_string(),
                     files:vec![
-                        AiContextFile::new("Main app to rewrite","ai_mr/src/app.rs")
+                        AiContextFile::new("Main app to rewrite","ai_demo2/src/app.rs")
+                    ]
+                },
+                AiProject{
+                    name:"makepad-ai-demo3".to_string(),
+                    files:vec![
+                        AiContextFile::new("Main app to rewrite","ai_demo3/src/app.rs")
                     ]
                 },
             ]
@@ -702,6 +724,8 @@ impl AiChatManager{
                             if let Some(new_data) = new_data.strip_suffix("```"){
                                 // alright depending
                                 // go set the snapshot textbox
+                                
+                                
                                 if let Some(AiChatMessage::User(usr)) = usr.cloned(){
                                     cx.action(AppAction::SetSnapshotMessage{message:usr.message.clone()});
                                 }
@@ -821,6 +845,7 @@ impl AiChatManager{
                     }
                     
                     request.set_json_body(OpenAiChatPrompt {
+                        cache_prompt: true,
                         messages: out_messages,
                         model: model.to_string(),
                         reasoning_effort:reasoning_effort.clone(),

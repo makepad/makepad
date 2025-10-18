@@ -24,7 +24,7 @@ pub struct TyChecker<'a> {
 }
 
 impl<'a> TyChecker<'a> {
-    fn lhs_checker(&self) -> LhsChecker {
+    fn lhs_checker(&self) -> LhsChecker<'_> {
         LhsChecker {scopes: self.scopes, shader_registry: self.shader_registry,}
     }
     

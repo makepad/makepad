@@ -222,14 +222,14 @@ impl PortalList2 {
                     abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                     margin: Default::default(),
                     width: Size::fill(),
-                    height: Size::Fit
+                    height: Size::fit()
                 }, layout);
             }
             Vec2Index::X => {
                 cx.begin_turtle(Walk {
                     abs_pos: Some(dvec2(viewport.pos.x , viewport.pos.y)),
                     margin: Default::default(),
-                    width: Size::Fit,
+                    width: Size::fit(),
                     height: Size::fill()
                 }, layout);
             }

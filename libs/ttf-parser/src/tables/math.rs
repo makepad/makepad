@@ -45,7 +45,7 @@ impl FromData for MathValueRecord {
 }
 
 impl MathValueRecord {
-    fn get(self, data: &[u8]) -> MathValue {
+    fn get(self, data: &[u8]) -> MathValue<'_> {
         let device = self
             .device_offset
             .and_then(|offset| data.get(offset.to_usize()..))
