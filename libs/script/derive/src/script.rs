@@ -48,7 +48,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
     let mut values = Vec::new();
         
     tp_to_str(parser, span, &mut s, &mut values, &mut None);
-    
+    s.push(';');
     return (s, values);
         
     #[derive(Clone, Copy)]
