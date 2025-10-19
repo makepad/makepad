@@ -158,6 +158,13 @@ pub fn test(){
         let x = {1, nil, 2}
         let x = {x:1.0,y:2.0}.freeze_api();
         let t = x{y:3.0}
+        // scope shadowing
+        let x = 1
+        let f = || x
+        let x = 2
+        let g =|| x
+        assert(f() == 1)
+        assert(g() == 2)
     };
     
     let _code = script!{
