@@ -196,7 +196,14 @@ impl ScriptThread{
     }
     
     pub fn set_scope_value(&self, heap:&mut ScriptHeap, id: Id, value:Value)->Value{
-        heap.set_value_ip(*self.scopes.last().unwrap(), id.into(),value, self.ip)
+        heap.set_scope_value(*self.scopes.last().unwrap(), id.into(),value, self.ip)
+    }
+    
+    pub fn def_scope_value(&mut self, heap:&mut ScriptHeap, id: Id, value:Value){
+        // alright if we are shadowing a value, we need to make a new scope
+        if let Some(new_scope) = heap.def_scope_value(*self.scopes.last().unwrap(), id, value){
+            self.scopes.push(new_scope);
+        }
     }
     
     pub fn call(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any, fnobj:Value, args:&[Value])->Value{

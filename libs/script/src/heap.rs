@@ -549,6 +549,42 @@ impl ScriptHeap{
         Value::err_invalidkeytype(ip)
     }
     
+    pub fn set_scope_value(&mut self, ptr:ObjectPtr, key:Id, value:Value, ip:ScriptIp)->Value{
+        let mut ptr = ptr;
+        loop{
+            let object = &mut self.objects[ptr.index as usize];
+            if let Some(set_value) = object.map.get_mut(&key.into()){
+                *set_value = value;
+                return NIL
+            }
+            if let Some(next_ptr) = object.proto.as_object(){
+                ptr = next_ptr
+            }
+            else{
+                break;
+            } 
+        }
+        // alright nothing found
+        Value::err_notfound(ip)
+    }
+    
+    pub fn def_scope_value(&mut self, ptr:ObjectPtr, key:Id, value:Value)->Option<ObjectPtr>{
+        // if we already have this value we have to shadow the scope
+        let object = &mut self.objects[ptr.index as usize];
+        match object.map.entry(key.into()) {
+            Entry::Occupied(_) => {
+                let new_scope = self.new_with_proto(ptr.into());
+                let object = &mut self.objects[new_scope.index as usize];
+                object.map.insert(key.into(), value);
+                return Some(new_scope)
+               
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(value);
+                return None
+            }
+        }
+    }
         
     
     
