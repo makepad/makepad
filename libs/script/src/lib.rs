@@ -121,7 +121,7 @@ pub fn test(){
     };
     
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         
         scope.import(mod.std)
         
@@ -153,20 +153,14 @@ pub fn test(){
         let c = 0 loop{ c+=1; if c>5 break} assert(c==6)
         let c = 0 while c < 9 c+=1 assert(c==9);
         let c = 0 while c < 3{c+=1}assert(c==3);
-        
-        let x = http()
-        
-        // test api mode
-        Button{
-            something()
-        }
+        // freezing
         let x = [1, nil, 2]
         let x = {1, nil, 2}
         let x = {x:1.0,y:2.0}.freeze_api();
         let t = x{y:3.0}
     };
     
-    let code = script!{
+    let _code = script!{
         scope.import(mod.std)
         ~1
     };

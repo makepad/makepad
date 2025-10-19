@@ -720,11 +720,14 @@ impl ScriptThread{
                     self.pop_stack_resolved(heap)
                 };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
+                self.def_scope_value(heap, id, value);
+                /*
                 let scope = *self.scopes.last_mut().unwrap();
                 let value =heap.set_value_ip(scope, id.into(), value, self.ip);
                 if value.is_err(){
                     self.trap = Some(ScriptTrap::Error(value));
                 }
+                */
                 self.ip.index += 1;
             }
             Opcode::LET_TYPED=>{
@@ -736,11 +739,13 @@ impl ScriptThread{
                 };
                 let _ty = self.pop_stack_value();
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
+                self.def_scope_value(heap, id, value);
+/*                
                 let scope = *self.scopes.last_mut().unwrap();
                 let value = heap.set_value_ip(scope, id.into(), value, self.ip);
                 if value.is_err(){
                     self.trap = Some(ScriptTrap::Error(value));
-                }
+                }*/
                 self.ip.index += 1;
             } 
             
@@ -1011,13 +1016,16 @@ impl ScriptThread{
                     return
                 }
                 self.ip.index = lf.start_ip;
-                let scope = self.scopes.last().unwrap();
-                heap.set_value(*scope, values.value_id.into(), values.index.into());
+                while self.scopes.len() > lf.bases.scope{
+                    heap.free_object_if_unreffed(self.scopes.pop().unwrap());
+                }
+                let scope = heap.new_with_proto((*self.scopes.last().unwrap()).into());
+                self.scopes.push(scope);
+                heap.set_value(scope, values.value_id.into(), values.index.into());
                 return
             }
             else if let Some(obj) = values.source.as_object(){
                 if heap.has_proto(obj, code.builtins.range.into()){ // range object
-                    let scope = self.scopes.last().unwrap();
                     let end = heap.value(obj, id!(end).into(),NIL).as_f64().unwrap_or(0.0);
                     let step = heap.value(obj, id!(step).into(),NIL).as_f64().unwrap_or(1.0);
                     values.index += step;
@@ -1025,7 +1033,12 @@ impl ScriptThread{
                         self.break_for_loop(heap);
                         return
                     } 
-                    heap.set_value(*scope, values.value_id.into(), values.index.into());
+                    while self.scopes.len() > lf.bases.scope{
+                        heap.free_object_if_unreffed(self.scopes.pop().unwrap());
+                    }
+                    let scope = heap.new_with_proto((*self.scopes.last().unwrap()).into());
+                    self.scopes.push(scope);
+                    heap.set_value(scope, values.value_id.into(), values.index.into());
                     self.ip.index = lf.start_ip;
                     return
                 }
@@ -1037,9 +1050,11 @@ impl ScriptThread{
                     }
                     let (key,value) = heap.vec_key_value(obj, values.index as usize);
                     
-                    let scope = self.scopes.pop().unwrap();
-                    let scope = heap.new_if_reffed(scope);
-                    
+                    while self.scopes.len() > lf.bases.scope{
+                        heap.free_object_if_unreffed(self.scopes.pop().unwrap());
+                    }
+                    let scope = heap.new_with_proto((*self.scopes.last().unwrap()).into());
+                    self.scopes.push(scope);
                     heap.set_value(scope, values.value_id.into(), value.into());
                     if let Some(index_id) = values.index_id{
                         heap.set_value(scope, index_id.into(), values.index.into());
@@ -1047,8 +1062,7 @@ impl ScriptThread{
                     if let Some(key_id) = values.key_id{
                         heap.set_value(scope, key_id.into(), key);
                     }
-                    self.scopes.push(scope);
-                                            
+                    
                     self.ip.index = lf.start_ip;
                     return
                 }
@@ -1064,11 +1078,6 @@ impl ScriptThread{
                     
     pub fn break_for_loop(&mut self, heap:&mut ScriptHeap){
         let lp = self.loops.pop().unwrap();
-        if let Some(values) = lp.values{
-            if let Some(obj) = values.source.as_object(){
-                heap.free_object_if_unreffed(obj);
-            }
-        }            
         self.truncate_bases(lp.bases, heap);
         self.ip.index = lp.start_ip + lp.jump - 1;
     }

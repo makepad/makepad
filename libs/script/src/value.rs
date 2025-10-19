@@ -150,12 +150,12 @@ impl ValueType{
     pub const ERR_INVALIDPROPNAME: Self = Self(31);
     pub const ERR_KEYALREADYEXISTS: Self = Self(32);
     pub const ERR_INVALIDKEYTYPE: Self = Self(33);
-    pub const ERR_USER: Self = Self(34);
+    pub const ERR_INVALIDVARNAME: Self = Self(34);
+    pub const ERR_USER: Self = Self(35);
     pub const ERR_VECBOUND: Self = Self(36);
     pub const ERR_INVALIDARGTYPE: Self = Self(37);
     pub const ERR_INVALIDARGNAME: Self = Self(38);
-                
-    pub const ERR_LAST: Self = Self(97);
+    pub const ERR_LAST: Self = Self(38);
             
     pub const ID: Self = Self(0x80);
     
@@ -248,7 +248,8 @@ impl fmt::Display for ValueType {
             Self::ERR_VECBOUND=>write!(f,"VecBoundFail"),
             Self::ERR_INVALIDARGTYPE=>write!(f,"InvalidArgumentType"),
             Self::ERR_INVALIDARGNAME=>write!(f,"InvalidArgumentName"),
-                                                            
+            Self::ERR_INVALIDVARNAME=>write!(f,"InvalidVariableName"),
+                                                                        
             Self::ERR_USER=>write!(f,"UserGenerated"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ValueType?")
@@ -326,10 +327,9 @@ impl Value{
     pub const fn err_invalidkeytype(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDKEYTYPE.to_u64() | ip.to_u40())}
     pub const fn err_vecbound(ip:ScriptIp)->Self{Self(ValueType::ERR_VECBOUND.to_u64() | ip.to_u40())}
     pub const fn err_invalidargtype(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDARGTYPE.to_u64() | ip.to_u40())}            
-    pub const fn err_invalidargname(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDARGNAME.to_u64() | ip.to_u40())}               pub const ERR_FROZEN: Self = Self(28);
-    pub const ERR_VALIDATION: Self = Self(29);
-    pub const ERR_INVKEY: Self = Self(30);
-    
+    pub const fn err_invalidargname(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDARGNAME.to_u64() | ip.to_u40())}
+    pub const fn err_invalidvarname(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDVARNAME.to_u64() | ip.to_u40())} 
+        
     pub const fn err_user(ip:ScriptIp)->Self{Self(ValueType::ERR_USER.to_u64() | ip.to_u40())}
     
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ValueType::ERR_LAST.to_u64()}
