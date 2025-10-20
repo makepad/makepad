@@ -923,6 +923,7 @@ impl ScriptThread{
             }
             Opcode::TRY_TEST=>{
                 // make a try stack item
+                self.last_err = NIL;
                 self.tries.push(TryFrame{
                     start_ip: self.trap.ip(),
                     jump: args.to_u32() + 1,

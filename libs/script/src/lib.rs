@@ -169,7 +169,7 @@ pub fn test(){
         // try undefined
         try{undef = 1} assert(true) ok assert(false)
         let t = 0 try{t = 1} assert(false) ok assert(true)
-        
+        try{undef = 2} ~err()
     };
     
     let _code = script!{
