@@ -156,9 +156,29 @@ pub fn test(){
         let x = {x:1 y:2}.freeze_api();
         // property value unknown
         try {x{z:3}} assert(true) ok assert(false)
+        // property value known
+        let x2 = x{x:3} assert(x2.x == 3)
         // property frozen
         try {x.x = 2} assert(true) ok assert(false)
+                
+        // modules can be extended but not overwritten
+        let x = {x:1 y:2}.freeze_module();
+        try {x.x = 2} assert(true) ok assert(false)
+        try {x.z = 2} assert(false) ok assert(true)
+        // but we cant add items to it
+        try {x{1}} assert(true) ok assert(false)
         
+        let x = {x:1 y:2}.freeze_component();
+        // cant write to it at all
+        try {x.z = 1} assert(true) ok assert(false)
+        try {x.x = 1} assert(true) ok assert(false)
+        // can write with same type on derived        
+        try {x{x:1}} assert(false) ok assert(true)
+        // cant change value type   
+        try {x{x:true}} assert(true) ok assert(false)
+        // can append to vec  
+        try {x{1}} assert(false) ok assert(true)
+                                                        
         // scope shadowing
         let x = 1
         let f = || x
@@ -166,10 +186,10 @@ pub fn test(){
         let g =|| x
         assert(f() == 1)
         assert(g() == 2)
+        
         // try undefined
         try{undef = 1} assert(true) ok assert(false)
         let t = 0 try{t = 1} assert(false) ok assert(true)
-        try{undef = 2} ~err()
     };
     
     let _code = script!{

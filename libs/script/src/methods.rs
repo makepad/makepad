@@ -65,6 +65,7 @@ impl ScriptTypeMethods{
             self.add(h, native, &[], ValueType::REDUX_ERR, id, move |_, _|{ (ty == ValueType::REDUX_ERR).into()});
             self.add(h, native, &[], ValueType::REDUX_ID, id, move |_, _|{ (ty == ValueType::REDUX_ID).into()});
         }
+        
     }
     
     pub fn add_object(&mut self, h: &mut ScriptHeap, native:&mut ScriptNative){
