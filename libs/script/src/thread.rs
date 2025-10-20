@@ -76,6 +76,7 @@ pub struct ScriptThread{
     pub(crate) calls: Vec<CallFrame>,
     pub(crate) mes: Vec<ScriptMe>,
     pub(crate) trap: ScriptTrap,
+    pub(crate) last_err: Value,
 }
 
 #[derive(Default, Debug)]
@@ -138,6 +139,7 @@ impl ScriptThread{
     
     pub fn new()->Self{
         Self{
+            last_err: NIL,
             scopes: vec![],
             tries: vec![],
             stack_limit: 1_000_000,
@@ -315,6 +317,7 @@ impl ScriptThread{
                                 let try_frame = self.tries.pop().unwrap();
                                 self.truncate_bases(try_frame.bases, heap);
                                 self.trap.goto(try_frame.start_ip + try_frame.jump);
+                                self.last_err = value;
                             }
                             else{
                                 if let Some(ptr) = value.as_err(){
