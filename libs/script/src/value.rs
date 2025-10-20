@@ -134,7 +134,6 @@ impl ValueType{
     pub const ERR_FIRST: Self = Self(16);
     pub const ERR_NOTFOUND: Self = Self(16);
     pub const ERR_NOTFN: Self = Self(17);
-    pub const ERR_NOTFIELD: Self = Self(18);
     pub const ERR_NOTINDEX: Self = Self(19);
     pub const ERR_NOTOBJECT: Self = Self(20);
     pub const ERR_STACKUNDERFLOW: Self = Self(21);
@@ -227,9 +226,8 @@ impl fmt::Display for ValueType {
             Self::INLINE_STRING_3=>write!(f,"string3"),
             Self::INLINE_STRING_4=>write!(f,"string4"),
             Self::INLINE_STRING_5=>write!(f,"string5"),
-            Self::ERR_NOTFOUND=>write!(f,"NotFoundOnScope"),
+            Self::ERR_NOTFOUND=>write!(f,"NotFound"),
             Self::ERR_NOTFN=>write!(f,"NotAFunction"),
-            Self::ERR_NOTFIELD=>write!(f,"FieldNotFound"),
             Self::ERR_NOTINDEX=>write!(f,"IndexNotFound"),
             Self::ERR_NOTOBJECT=>write!(f,"NotAnObject"),
             Self::ERR_STACKUNDERFLOW=>write!(f,"StackUnderflow"),
@@ -309,7 +307,6 @@ impl Value{
         
     pub const fn err_notfound(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTFOUND.to_u64() | ip.to_u40())}
     pub const fn err_notfn(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTFN.to_u64() | ip.to_u40())}
-    pub const fn err_notfield(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTFIELD.to_u64() | ip.to_u40())}
     pub const fn err_notindex(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTINDEX.to_u64() | ip.to_u40())}
     pub const fn err_notobject(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTOBJECT.to_u64()| ip.to_u40())}
     pub const fn err_stackunderflow(ip:ScriptIp)->Self{Self(ValueType::ERR_STACKUNDERFLOW.to_u64() | ip.to_u40())}

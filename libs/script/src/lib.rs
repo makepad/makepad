@@ -122,7 +122,6 @@ pub fn test(){
     
     // Our unit tests :)
     let code = script!{
-        
         scope.import(mod.std)
         
         let x = 1+2 assert(x == 3)
@@ -169,7 +168,6 @@ pub fn test(){
     
     let _code = script!{
         scope.import(mod.std)
-        ~1
     };
     
     let _code = script!{
