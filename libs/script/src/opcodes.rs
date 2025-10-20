@@ -921,7 +921,22 @@ impl ScriptThread{
                 self.push_stack_value_nc(cmp.into());
                 self.trap.goto_next();
             }
-            
+            Opcode::TRY_TEST=>{
+                // make a try stack item
+                self.tries.push(TryFrame{
+                    start_ip: self.trap.ip(),
+                    jump: args.to_u32() + 1,
+                    bases: self.new_bases()
+                });
+                self.trap.goto_next();
+            }
+            Opcode::TRY_ERR=>{ // we hit err, meaning we dont have errors, pop try frame
+                self.tries.pop().unwrap();
+                self.trap.goto_rel(args.to_u32() + 1);
+            }
+            Opcode::TRY_OK=>{ // we hit ok, jump over it
+                self.trap.goto_rel(args.to_u32() + 1);
+            }
             opcode=>{
                 println!("UNDEFINED OPCODE {}", opcode);
                 self.trap.goto_next();

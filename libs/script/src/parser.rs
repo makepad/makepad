@@ -32,6 +32,17 @@ enum State{
     IfElseExpr{else_start:u32},
     IfElseBlock{else_start:u32, last_was_sep:bool},
     
+    TryTest{index: u32},
+    TryTestBlock{try_start:u32, last_was_sep:bool},
+    TryTestExpr{try_start:u32},
+    TryErrBlockOrExpr,
+    TryErrBlock{err_start:u32, last_was_sep:bool},
+    TryErrExpr{err_start:u32},
+    TryOk{was_block:bool},
+    TryOkBlockOrExpr,
+    TryOkBlock{ok_start:u32, last_was_sep:bool},
+    TryOkExpr{ok_start:u32},
+        
     FnArgList,
     FnArgMaybeType{index:u32},
     FnArgType{index:u32},
@@ -762,6 +773,111 @@ impl ScriptParser{
                     return 0
                 }
             }
+                        
+            State::TryTest{index}=>{
+                let try_start = self.code_len() as _ ;
+                self.push_code(Opcode::TRY_TEST.into(), index);
+                if tok.is_open_curly(){
+                    self.state.push(State::TryTestBlock{try_start, last_was_sep:false});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                self.state.push(State::TryTestExpr{try_start});
+                self.state.push(State::BeginExpr{required:true});
+                return 0
+            }
+            State::TryTestExpr{try_start}=>{
+                self.set_opcode_args(try_start, OpcodeArgs::from_u32(self.code_len() as u32 -try_start) );
+                self.state.push(State::TryErrBlockOrExpr);
+                return 0
+            }
+            State::TryTestBlock{try_start, last_was_sep}=>{
+                
+                self.set_opcode_args(try_start, OpcodeArgs::from_u32(self.code_len() as u32 -try_start) );
+                if tok.is_close_curly() {
+                    if !last_was_sep && self.has_pop_to_me(){
+                        self.clear_pop_to_me();
+                    }
+                    self.state.push(State::TryErrBlockOrExpr);
+                    return 1
+                }
+                else {
+                    self.state.push(State::TryErrBlockOrExpr);
+                    return 0
+                }
+            }
+            State::TryErrBlockOrExpr=>{
+                let err_start = self.code_len() as _ ;
+                self.push_code(Opcode::TRY_ERR.into(), self.index);
+                if tok.is_open_curly(){
+                    self.state.push(State::TryErrBlock{err_start, last_was_sep:false});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                self.state.push(State::TryErrExpr{err_start});
+                self.state.push(State::BeginExpr{required:true});
+                return 0
+            }
+            State::TryErrExpr{err_start}=>{
+                
+                self.set_opcode_args(err_start, OpcodeArgs::from_u32(self.code_len() as u32 -err_start) );
+                self.state.push(State::TryOk{was_block:false});
+            }
+            State::TryErrBlock{err_start, last_was_sep}=>{
+                
+                self.set_opcode_args(err_start, OpcodeArgs::from_u32(self.code_len() as u32 -err_start) );
+                if tok.is_close_curly() {
+                    if !last_was_sep && self.has_pop_to_me(){
+                        self.clear_pop_to_me();
+                    }
+                    self.state.push(State::TryOk{was_block: true});
+                    return 1
+                }
+                else {
+                    println!("Expected }} not found");
+                    self.state.push(State::TryOk{was_block:false});
+                    return 0
+                }
+            }
+            State::TryOk{was_block}=>{
+                if id == id!(ok){
+                    self.state.push(State::TryOkBlockOrExpr);
+                    return 1
+                }
+                if was_block{
+                    self.state.push(State::EndExpr)
+                }
+                return 0
+            }
+            State::TryOkBlockOrExpr=>{
+                let ok_start = self.code_len() as _ ;
+                self.push_code(Opcode::TRY_OK.into(), self.index);
+                if tok.is_open_curly(){
+                    self.state.push(State::TryOkBlock{ok_start, last_was_sep:false});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                self.state.push(State::TryOkExpr{ok_start});
+                self.state.push(State::BeginExpr{required:true});
+                return 0
+            }
+            State::TryOkExpr{ok_start}=>{
+                self.set_opcode_args(ok_start, OpcodeArgs::from_u32(self.code_len() as u32 -ok_start) );
+            }
+            State::TryOkBlock{ok_start, last_was_sep}=>{
+                self.set_opcode_args(ok_start, OpcodeArgs::from_u32(self.code_len() as u32 -ok_start) );
+                if tok.is_close_curly() {
+                    if !last_was_sep && self.has_pop_to_me(){
+                        self.clear_pop_to_me();
+                    }
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
+                else {
+                    println!("Expected }} not found");
+                    return 0
+                }
+            }
             State::IfTest{index}=>{
                 let if_start = self.code_len() as _ ;
                 self.push_code(Opcode::IF_TEST.into(), index);
@@ -784,11 +900,6 @@ impl ScriptParser{
             }
             State::IfTrueBlock{if_start, last_was_sep}=>{
                 if tok.is_close_curly() {
-                    /*if !last_was_sep{
-                        if Some(&Opcode::POP_TO_ME.into()) == self.code_last(){
-                            self.pop_code();
-                        }
-                    }*/
                     if !last_was_sep && self.has_pop_to_me(){
                         self.clear_pop_to_me();
                     }
@@ -905,6 +1016,10 @@ impl ScriptParser{
                 if id == id!(if){ // do if as an expression
                     self.state.push(State::IfTest{index:self.index});
                     self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
+                if id == id!(try){ // do if as an expression
+                    self.state.push(State::TryTest{index:self.index});
                     return 1
                 }
                 if id == id!(for){
@@ -1096,6 +1211,9 @@ impl ScriptParser{
                         else if let State::IfTest{..} = state{
                             return 0
                         }
+                        else if let State::TryTestExpr{..} = state{
+                            return 0
+                        }
                         else if let State::WhileTest{..} = state{
                             return 0
                         }
@@ -1156,6 +1274,9 @@ impl ScriptParser{
                 }
                 if tok.is_close_round() || tok.is_close_curly() || tok.is_close_square(){
                     if last_was_sep{
+                        if let Some(State::TryTestBlock{last_was_sep,..}) = self.state.last_mut(){*last_was_sep = true}
+                        if let Some(State::TryErrBlock{last_was_sep,..}) = self.state.last_mut(){*last_was_sep = true}
+                        if let Some(State::TryOkBlock{last_was_sep,..}) = self.state.last_mut(){*last_was_sep = true}
                         if let Some(State::IfTrueBlock{last_was_sep,..}) = self.state.last_mut(){*last_was_sep = true}
                         if let Some(State::IfElseBlock{last_was_sep,..}) = self.state.last_mut(){*last_was_sep = true}
                         if let Some(State::EndFnBlock{last_was_sep,..}) = self.state.last_mut(){*last_was_sep = true}

@@ -164,10 +164,14 @@ pub fn test(){
         let g =|| x
         assert(f() == 1)
         assert(g() == 2)
+        try{undef = 1} assert(true) ok assert(false)
+        let t = 0 try{t = 1} assert(false) ok assert(true)
     };
     
     let _code = script!{
-        scope.import2(mod.std)
+        scope.import(mod.std)
+        let t = 0
+        try{t = 1} ~@ERR ok ~@OK
     };
     
     let _code = script!{
