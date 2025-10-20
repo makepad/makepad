@@ -144,7 +144,7 @@ impl ObjectTag{
 
     pub fn freeze_module(&mut self){
         self.0 &= !(Self::FREEZE_MASK);
-        self.0  |= Self::MAP_ADD
+        self.0  |= Self::MAP_ADD|Self::VEC_FROZEN
     }
     
     pub fn freeze_component(&mut self){
