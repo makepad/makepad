@@ -935,7 +935,7 @@ impl ScriptThread{
                 self.trap.goto_rel(args.to_u32() + 1);
             }
             Opcode::TRY_OK=>{ // we hit ok, jump over it
-                self.trap.goto_rel(args.to_u32() + 1);
+                self.trap.goto_rel(args.to_u32());
             }
             opcode=>{
                 println!("UNDEFINED OPCODE {}", opcode);
