@@ -153,10 +153,12 @@ pub fn test(){
         let c = 0 while c < 9 c+=1 assert(c==9);
         let c = 0 while c < 3{c+=1}assert(c==3);
         // freezing
-        let x = [1, nil, 2]
-        let x = {1, nil, 2}
-        let x = {x:1.0,y:2.0}.freeze_api();
-        let t = x{y:3.0}
+        let x = {x:1 y:2}.freeze_api();
+        // property value unknown
+        try {x{z:3}} assert(true) ok assert(false)
+        // property frozen
+        try {x.x = 2} assert(true) ok assert(false)
+        
         // scope shadowing
         let x = 1
         let f = || x
@@ -164,14 +166,21 @@ pub fn test(){
         let g =|| x
         assert(f() == 1)
         assert(g() == 2)
+        // try undefined
         try{undef = 1} assert(true) ok assert(false)
         let t = 0 try{t = 1} assert(false) ok assert(true)
+        
     };
     
     let _code = script!{
         scope.import(mod.std)
-        let t = 0
-        try{t = 1} ~@ERR ok ~@OK
+        // freezing
+        let x = {x:1 y:2}.freeze_api();
+        // property value unknown
+        try {x{z:3}} assert(true) ok assert(false)
+        // property frozen
+        try {x.x = 2} assert(true) ok assert(false)
+        
     };
     
     let _code = script!{
