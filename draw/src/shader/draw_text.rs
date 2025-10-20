@@ -12,7 +12,7 @@ use {
             geom::{Point, Rect, Size, Transform},
             layouter::{
                 BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions,
-                Style,
+                SelectionRect, Style,
             },
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
@@ -216,7 +216,7 @@ impl DrawText {
         &mut self,
         cx: &mut Cx2d,
         text_str: &str,
-        mut f: impl FnMut(&mut Cx2d, makepad_platform::Rect),
+        mut f: impl FnMut(&mut Cx2d, makepad_platform::Rect, f32),
     ) {
         let turtle_pos = cx.turtle().pos();
         let turtle_rect = cx.turtle().inner_rect();
@@ -295,7 +295,7 @@ impl DrawText {
         }
         else{0.0};
                 
-        for rect_in_lpxs in text.selection_rects_in_lpxs(Selection {
+        for SelectionRect { rect_in_lpxs, ascender_in_lpxs, } in text.selection_rects(Selection {
             anchor: Cursor {
                 index: 0,
                 prefer_next_row: false,
@@ -317,6 +317,7 @@ impl DrawText {
                     rect_in_lpxs.size.width as f64,
                     rect_in_lpxs.size.height as f64,
                 ),
+                ascender_in_lpxs,
             )
         }
     }

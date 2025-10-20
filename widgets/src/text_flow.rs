@@ -723,7 +723,7 @@ impl TextFlow{
                     let rect = TextFlow::walk_margin(cx, self.inline_code_margin.left);
                     areas_tracker.track_rect(cx, rect);
                 }
-                dt.draw_walk_resumable_with(cx, text, |cx, mut rect|{
+                dt.draw_walk_resumable_with(cx, text, |cx, mut rect, _|{
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
                     db.draw_abs(cx, rect);
@@ -736,7 +736,7 @@ impl TextFlow{
                 let db = &mut self.draw_block;
                 db.line_color = *font_color;
                 db.block_type = FlowBlockType::Strikethrough;
-                dt.draw_walk_resumable_with(cx, text, |cx, rect|{
+                dt.draw_walk_resumable_with(cx, text, |cx, rect, _|{
                     db.draw_abs(cx, rect);
                     areas_tracker.track_rect(cx, rect);
                 });
@@ -745,13 +745,13 @@ impl TextFlow{
                 let db = &mut self.draw_block;
                 db.line_color = *font_color;
                 db.block_type = FlowBlockType::Underline;
-                dt.draw_walk_resumable_with(cx, text, |cx, rect|{
+                dt.draw_walk_resumable_with(cx, text, |cx, rect, _|{
                     db.draw_abs(cx, rect);
                     areas_tracker.track_rect(cx, rect);
                 });
             }
             else{
-                dt.draw_walk_resumable_with(cx, text, |cx, rect|{
+                dt.draw_walk_resumable_with(cx, text, |cx, rect, _|{
                     areas_tracker.track_rect(cx, rect);
                 });
             }
