@@ -437,7 +437,7 @@ impl ScriptHeap{
     fn set_value_shallow_checked(&mut self, ptr:ObjectPtr, key:Value, value:Value, trap:&mut ScriptTrap)->Value{
         let object = &self.objects[ptr.index as usize];
         if object.tag.is_frozen(){
-            return trap.err_vecfrozen()
+            return trap.err_frozen()
         }
         // check against prototype
         if object.tag.is_validated(){

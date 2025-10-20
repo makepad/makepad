@@ -24,6 +24,10 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         }
         vm.thread.trap.err_assertfail()
     });
+    
+    native.add_fn(heap, std, id!(err), args!(), |vm, _args|{
+        return vm.thread.last_err
+    });
             
     let range = heap.new_with_proto(id!(range).into());
     heap.set_value(std, id!(Range).into(), range.into());
