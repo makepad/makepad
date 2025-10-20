@@ -72,42 +72,42 @@ impl ScriptTypeMethods{
             if let Some(this) = value!(vm, args.this).as_object(){
                 return vm.heap.proto(this)
             }
-            Value::err_unexpected(vm.thread.ip)
+            vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(push), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                return vm.heap.vec_push_vec(this, args, vm.thread.ip);
+                return vm.heap.vec_push_vec(this, args, &mut vm.thread.trap);
             }
-            Value::err_unexpected(vm.thread.ip)
+            vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(pop), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                return vm.heap.vec_pop(this, vm.thread.ip)
+                return vm.heap.vec_pop(this, &mut vm.thread.trap)
             }
-            Value::err_unexpected(vm.thread.ip)
+            vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(len), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
                 return vm.heap.vec_len(this).into()
             }
-            Value::err_unexpected(vm.thread.ip)
+            vm.thread.trap.err_unexpected()
         });
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(extend), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                return vm.heap.vec_push_vec_of_vec(this, args, false, vm.thread.ip);
+                return vm.heap.vec_push_vec_of_vec(this, args, false, &mut vm.thread.trap);
             }
-            Value::err_unexpected(vm.thread.ip)
+            vm.thread.trap.err_unexpected()
         });
             
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(import), |vm, args|{
             if let Some(this) = value!(vm, args.this).as_object(){
-                return vm.heap.vec_push_vec_of_vec(this, args, true, vm.thread.ip);
+                return vm.heap.vec_push_vec_of_vec(this, args, true, &mut vm.thread.trap);
             }
-            Value::err_unexpected(vm.thread.ip)
+            vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(freeze), |vm, args|{
@@ -115,7 +115,7 @@ impl ScriptTypeMethods{
                 vm.heap.freeze(this);
                 return this.into()
             }
-            Value::err_unexpected(vm.thread.ip)
+            vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(freeze_api), |vm, args|{
@@ -123,7 +123,7 @@ impl ScriptTypeMethods{
                 vm.heap.freeze_api(this);
                 return this.into()
             }
-            Value::err_unexpected(vm.thread.ip)
+            vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(freeze_module), |vm, args|{
@@ -131,7 +131,7 @@ impl ScriptTypeMethods{
                 vm.heap.freeze_module(this);
                 return this.into()
             }
-            Value::err_unexpected(vm.thread.ip)
+            vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ValueType::REDUX_OBJECT, id!(freeze_component), |vm, args|{
@@ -139,7 +139,7 @@ impl ScriptTypeMethods{
                 vm.heap.freeze_component(this);
                 return this.into()
             }
-            Value::err_unexpected(vm.thread.ip)
+            vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, args!(cb=NIL), ValueType::REDUX_OBJECT, id!(retain), |vm, args|{
@@ -153,7 +153,7 @@ impl ScriptTypeMethods{
                         return ret;
                     }
                     if !vm.heap.cast_to_bool(ret){
-                        vm.heap.vec_remove(this, i, vm.thread.ip);
+                        vm.heap.vec_remove(this, i, &mut vm.thread.trap);
                     }
                     else{
                         i += 1
@@ -161,7 +161,7 @@ impl ScriptTypeMethods{
                 }
                 return NIL
             }
-            Value::err_notimpl(vm.thread.ip)
+            vm.thread.trap.err_notimpl()
         });
     }     
 }    

@@ -53,7 +53,8 @@ impl ScriptMe{
 
 pub struct ScriptThreadId(pub usize);
 
-pub enum ScriptTrap{
+#[derive(Debug)]
+pub enum ScriptTrapOn{
     Error(Value),
     Return(Value),
 }
@@ -65,8 +66,43 @@ pub struct ScriptThread{
     pub(crate) stack: Vec<Value>,
     pub(crate) calls: Vec<CallFrame>,
     pub(crate) mes: Vec<ScriptMe>,
-    pub(crate) trap: Option<ScriptTrap>,
+    pub(crate) trap: ScriptTrap,
+}
+
+#[derive(Default)]
+pub struct ScriptTrap{
+    pub(crate) on: Option<ScriptTrapOn>,
     pub ip: ScriptIp,
+}
+
+impl ScriptTrap{
+    pub fn err(&mut self, err:Value)->Value{
+        self.on = Some(ScriptTrapOn::Error(err));
+        err
+    }
+    
+    pub fn err_notfound(&mut self)->Value{self.err(Value::err_notfound(self.ip))}
+    pub fn err_notfn(&mut self)->Value{self.err(Value::err_notfn(self.ip))}
+    pub fn err_notindex(&mut self)->Value{self.err(Value::err_notindex(self.ip))}
+    pub fn err_notobject(&mut self)->Value{self.err(Value::err_notobject(self.ip))}
+    pub fn err_stackunderflow(&mut self)->Value{self.err(Value::err_stackunderflow(self.ip))}
+    pub fn err_stackoverflow(&mut self)->Value{self.err(Value::err_stackoverflow(self.ip))}
+    pub fn err_invalidargs(&mut self)->Value{self.err(Value::err_invalidargs(self.ip))}
+    pub fn err_notassignable(&mut self)->Value{self.err(Value::err_notassignable(self.ip))}
+    pub fn err_unexpected(&mut self)->Value{self.err(Value::err_unexpected(self.ip))}
+    pub fn err_assertfail(&mut self)->Value{self.err(Value::err_assertfail(self.ip))}
+    pub fn err_notimpl(&mut self)->Value{self.err(Value::err_notimpl(self.ip))}
+    pub fn err_frozen(&mut self)->Value{self.err(Value::err_frozen(self.ip))}
+    pub fn err_vecfrozen(&mut self)->Value{self.err(Value::err_vecfrozen(self.ip))}
+    pub fn err_invalidproptype(&mut self)->Value{self.err(Value::err_invalidproptype(self.ip))}
+    pub fn err_invalidpropname(&mut self)->Value{self.err(Value::err_invalidpropname(self.ip))}
+    pub fn err_keyalreadyexists(&mut self)->Value{self.err(Value::err_keyalreadyexists(self.ip))}
+    pub fn err_invalidkeytype(&mut self)->Value{self.err(Value::err_invalidkeytype(self.ip))}
+    pub fn err_vecbound(&mut self)->Value{self.err(Value::err_vecbound(self.ip))}
+    pub fn err_invalidargtype(&mut self)->Value{self.err(Value::err_invalidargtype(self.ip))}
+    pub fn err_invalidargname(&mut self)->Value{self.err(Value::err_invalidargname(self.ip))}
+    pub fn err_invalidvarname(&mut self)->Value{self.err(Value::err_invalidvarname(self.ip))}
+    pub fn err_user(&mut self)->Value{self.err(Value::err_user(self.ip))}
 }
 
 pub enum ScriptHook{
@@ -84,8 +120,7 @@ impl ScriptThread{
             stack: vec![],
             calls: vec![],
             mes: vec![],
-            ip: ScriptIp::default(),
-            trap: None,
+            trap: ScriptTrap::default(),
         }
     }
     
@@ -122,9 +157,7 @@ impl ScriptThread{
             return val    
         }
         else{
-            let value = Value::err_stackunderflow(self.ip);
-            self.trap = Some(ScriptTrap::Error(value));
-            value
+            self.trap.err_stackunderflow()
         }
     }
     
@@ -139,9 +172,7 @@ impl ScriptThread{
             return *val    
         }
         else{
-            let value = Value::err_stackunderflow(self.ip);
-            self.trap = Some(ScriptTrap::Error(value));
-            value
+            self.trap.err_stackunderflow()
         }
     }
     
@@ -150,9 +181,7 @@ impl ScriptThread{
             return *value
         }
         else{
-            let value = Value::err_stackunderflow(self.ip);
-            self.trap = Some(ScriptTrap::Error(value));
-            value
+            self.trap.err_stackunderflow()
         }
     }
     
@@ -161,28 +190,20 @@ impl ScriptThread{
             return value
         }
         else{
-            let value = Value::err_stackunderflow(self.ip);
-            self.trap = Some(ScriptTrap::Error(value));
-            value
+            self.trap.err_stackunderflow()
         }
     }
     
     pub fn push_stack_value(&mut self, value:Value){
         if self.stack.len() > self.stack_limit{
-            self.trap = Some(ScriptTrap::Error(Value::err_stackoverflow(self.ip)));
+            self.trap.err_stackoverflow();
         }
         else{
-            if value.is_err(){
-                self.trap = Some(ScriptTrap::Error(value));
-            }
             self.stack.push(value);
         }
     }
     
     pub fn push_stack_value_nc(&mut self, value:Value){
-        if value.is_err(){
-            self.trap = Some(ScriptTrap::Error(value));
-        }
         self.stack.push(value);
     }
     
@@ -191,12 +212,13 @@ impl ScriptThread{
     }
     
     // lets resolve an id to a Value
-    pub fn scope_value(&self, heap:&ScriptHeap, id: Id)->Value{
-        return heap.value(*self.scopes.last().unwrap(), id.into(),Value::err_notfound(self.ip));
+    pub fn scope_value(&mut  self, heap:&ScriptHeap, id: Id)->Value{
+        let val = heap.value(*self.scopes.last().unwrap(), id.into(),&mut self.trap);
+        val
     }
     
-    pub fn set_scope_value(&self, heap:&mut ScriptHeap, id: Id, value:Value)->Value{
-        heap.set_scope_value(*self.scopes.last().unwrap(), id.into(),value, self.ip)
+    pub fn set_scope_value(&mut self, heap:&mut ScriptHeap, id: Id, value:Value)->Value{
+        heap.set_scope_value(*self.scopes.last().unwrap(), id.into(),value,&mut self.trap)
     }
     
     pub fn def_scope_value(&mut self, heap:&mut ScriptHeap, id: Id, value:Value){
@@ -211,7 +233,7 @@ impl ScriptThread{
         
         heap.clear_object_deep(scope);
         
-        let err = heap.push_all_fn_args(scope, args, self.ip);
+        let err = heap.push_all_fn_args(scope, args, &mut self.trap);
         if err.is_err(){
             return err
         }
@@ -237,33 +259,33 @@ impl ScriptThread{
                     };
                     self.scopes.push(scope);
                     self.calls.push(call);
-                    self.ip = sip;
+                    self.trap.ip = sip;
                     return self.run_core(heap, code, host);
                 }
             }
         }
         else{
-            return Value::err_notfn(self.ip)
+            return self.trap.err_notfn()
         }
     }
     
     pub fn run_core(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any)->Value{
-        let mut body = &code.bodies[self.ip.body as usize];
-        while (self.ip.index as usize) < body.parser.opcodes.len(){
-            let opcode = body.parser.opcodes[self.ip.index as usize];
+        let mut body = &code.bodies[self.trap.ip.body as usize];
+        while (self.trap.ip.index as usize) < body.parser.opcodes.len(){
+            let opcode = body.parser.opcodes[self.trap.ip.index as usize];
             if let Some((opcode, args)) = opcode.as_opcode(){
                 self.opcode(opcode, args, heap, code, host);
                 // if exception tracing
-                if let Some(trap) = self.trap.take(){
+                if let Some(trap) = self.trap.on.take(){
                     match trap{
-                        ScriptTrap::Error(value)=>{
+                        ScriptTrapOn::Error(value)=>{
                             if let Some(ptr) = value.as_err(){
                                 if let Some(loc2) = code.ip_to_loc(ptr.ip){
                                     println!("{} {}", value, loc2);
                                 }
                             }
                         }
-                        ScriptTrap::Return(value)=>{
+                        ScriptTrapOn::Return(value)=>{
                             return value
                         }
                     }
@@ -271,9 +293,9 @@ impl ScriptThread{
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(opcode);
-                self.ip.index += 1;
+                self.trap.ip.index += 1;
             }
-            body = &code.bodies[self.ip.body as usize];
+            body = &code.bodies[self.trap.ip.body as usize];
         }
         NIL
     }
@@ -294,8 +316,8 @@ impl ScriptThread{
         self.scopes.push(code.bodies[body_id as usize].scope);
         self.mes.push(ScriptMe::object(code.bodies[body_id as usize].me));
                 
-        self.ip.body = body_id;
-        self.ip.index = 0;
+        self.trap.ip.body = body_id;
+        self.trap.ip.index = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         
         // the main interpreter loop

@@ -8,30 +8,30 @@ use crate::object::*;
 #[macro_export]
 macro_rules! value_f64{
     ($ctx:ident, $args:ident.$id: ident)=>{
-        $ctx.heap.cast_to_f64($ctx.heap.value($args, id!($id).into(),NIL), $ctx.thread.ip)
+        $ctx.heap.cast_to_f64($ctx.heap.value($args, id!($id).into(),&mut $ctx.thread.trap), $ctx.thread.trap.ip)
     };
     ($ctx:ident, $obj:ident[$index: expr])=>{
-        $ctx.heap.cast_to_f64($ctx.heap.vec_value($obj, ($index) as usize), $ctx.thread.ip)
+        $ctx.heap.cast_to_f64($ctx.heap.vec_value($obj, ($index) as usize), $ctx.thread.ip())
     }
 }
 
 #[macro_export]
 macro_rules! value_bool{
     ($ctx:ident, $args:ident.$id: ident)=>{
-        $ctx.heap.cast_to_bool($ctx.heap.value($args, id!($id).into(),NIL), $ctx.thread.ip)
+        $ctx.heap.cast_to_bool($ctx.heap.value($args, id!($id).into(),NIL), $ctx.thread.ip())
     };
     ($ctx:ident, $obj:ident[$index: expr])=>{
-        $ctx.heap.cast_to_bool($ctx.heap.vec_value($obj, ($index) as usize), $ctx.thread.ip)
+        $ctx.heap.cast_to_bool($ctx.heap.vec_value($obj, ($index) as usize), $ctx.thread.ip())
     }
 }
         
 #[macro_export]
 macro_rules! value{
     ($ctx:ident, $obj:ident.$id: ident)=>{
-        $ctx.heap.value($obj, id!($id).into(),NIL)
+        $ctx.heap.value($obj, id!($id).into(),&mut $ctx.thread.trap)
     };
     ($ctx:ident, $obj:ident[$index: expr])=>{
-        $ctx.heap.vec_value($obj, ($index) as usize)
+        $ctx.heap.vec_value($obj, ($index) as usize,&mut $ctx.thread.trap)
     }
 }
 

@@ -22,7 +22,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                 return NIL
             }
         }
-        Value::err_assertfail(vm.thread.ip)
+        vm.thread.trap.err_assertfail()
     });
             
     let range = heap.new_with_proto(id!(range).into());
@@ -47,7 +47,7 @@ pub struct ScriptBuiltins{
 impl ScriptBuiltins{
     pub fn new(heap:&mut ScriptHeap)->Self{
         Self{
-            range: heap.value_path(heap.modules, ids!(std.Range),NIL).as_object().unwrap()
+            range: heap.value_path(heap.modules, ids!(std.Range),&mut Default::default()).as_object().unwrap()
         }
     }
 }
