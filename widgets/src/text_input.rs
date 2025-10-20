@@ -9,7 +9,10 @@ use {
                     CursorPosition,
                     Selection
                 },
-                layouter::LaidoutText,
+                layouter::{
+                    LaidoutText,
+                    SelectionRect,
+                },
             },
             *
         },
@@ -891,7 +894,7 @@ impl TextInput {
             .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
         
         self.draw_selection.begin_many_instances(cx);
-        for rect_in_lpxs in laidout_text.selection_rects_in_lpxs(
+        for SelectionRect { rect_in_lpxs, .. } in laidout_text.selection_rects(
             self.selection_to_password_selection(self.selection)
         ) {
             self.draw_selection.draw_abs(
