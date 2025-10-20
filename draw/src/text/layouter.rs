@@ -707,7 +707,7 @@ impl LaidoutText {
         }
     }
 
-    pub fn selection_rects_in_lpxs(&self, selection: Selection) -> Vec<Rect<f32>> {
+    pub fn selection_rects(&self, selection: Selection) -> Vec<SelectionRect> {
         let CursorPosition {
             row_index: start_row_index,
             x_in_lpxs: start_x_in_lpxs,
@@ -716,52 +716,70 @@ impl LaidoutText {
             row_index: end_row_index,
             x_in_lpxs: end_x_in_lpxs,
         } = self.cursor_to_position(selection.end());
-        let mut rects_in_lpxs = Vec::new();
+        let mut selection_rects = Vec::new();
         if start_row_index == end_row_index {
             let row = &self.rows[start_row_index];
-            rects_in_lpxs.push(Rect::new(
-                Point::new(start_x_in_lpxs, row.origin_in_lpxs.y - row.ascender_in_lpxs),
-                Size::new(
-                    end_x_in_lpxs - start_x_in_lpxs,
-                    row.ascender_in_lpxs - row.descender_in_lpxs,
+            selection_rects.push(SelectionRect {
+                rect_in_lpxs: Rect::new(
+                    Point::new(start_x_in_lpxs, row.origin_in_lpxs.y - row.ascender_in_lpxs),
+                    Size::new(
+                        end_x_in_lpxs - start_x_in_lpxs,
+                        row.ascender_in_lpxs - row.descender_in_lpxs,
+                    ),
                 ),
-            ));
+                ascender_in_lpxs: row.ascender_in_lpxs,
+            });
         } else {
             let start_row = &self.rows[start_row_index];
             let end_row = &self.rows[end_row_index];
-            rects_in_lpxs.push(Rect::new(
-                Point::new(
-                    start_x_in_lpxs,
-                    start_row.origin_in_lpxs.y - start_row.ascender_in_lpxs,
-                ),
-                Size::new(
-                    start_row.width_in_lpxs - start_x_in_lpxs,
-                    start_row.ascender_in_lpxs - start_row.descender_in_lpxs,
-                ),
-            ));
-            for row_index in start_row_index + 1..end_row_index {
-                let row = &self.rows[row_index];
-                rects_in_lpxs.push(Rect::new(
+            selection_rects.push(SelectionRect {
+                rect_in_lpxs: Rect::new(
                     Point::new(
-                        row.origin_in_lpxs.x,
-                        row.origin_in_lpxs.y - row.ascender_in_lpxs,
+                        start_x_in_lpxs,
+                        start_row.origin_in_lpxs.y - start_row.ascender_in_lpxs,
                     ),
                     Size::new(
-                        row.width_in_lpxs,
-                        row.ascender_in_lpxs - row.descender_in_lpxs,
+                        start_row.width_in_lpxs - start_x_in_lpxs,
+                        start_row.ascender_in_lpxs - start_row.descender_in_lpxs,
                     ),
-                ));
-            }
-            rects_in_lpxs.push(Rect::new(
-                Point::new(0.0, end_row.origin_in_lpxs.y - end_row.ascender_in_lpxs),
-                Size::new(
-                    end_x_in_lpxs,
-                    end_row.ascender_in_lpxs - end_row.descender_in_lpxs,
                 ),
-            ));
+                ascender_in_lpxs: start_row.ascender_in_lpxs
+            });
+            for row_index in start_row_index + 1..end_row_index {
+                let row = &self.rows[row_index];
+                selection_rects.push(SelectionRect {
+                    rect_in_lpxs: Rect::new(
+                        Point::new(
+                            row.origin_in_lpxs.x,
+                            row.origin_in_lpxs.y - row.ascender_in_lpxs,
+                        ),
+                        Size::new(
+                            row.width_in_lpxs,
+                            row.ascender_in_lpxs - row.descender_in_lpxs,
+                        ),
+                    ),
+                    ascender_in_lpxs: row.ascender_in_lpxs
+                });
+            }
+            selection_rects.push(SelectionRect {
+                rect_in_lpxs: Rect::new(
+                    Point::new(0.0, end_row.origin_in_lpxs.y - end_row.ascender_in_lpxs),
+                    Size::new(
+                        end_x_in_lpxs,
+                        end_row.ascender_in_lpxs - end_row.descender_in_lpxs,
+                    ),
+                ),
+                ascender_in_lpxs: end_row.ascender_in_lpxs,
+            });
         }
-        rects_in_lpxs
+        selection_rects
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SelectionRect {
+    pub rect_in_lpxs: Rect<f32>,
+    pub ascender_in_lpxs: f32,
 }
 
 #[derive(Clone, Debug)]
