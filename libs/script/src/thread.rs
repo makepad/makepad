@@ -9,6 +9,7 @@ use std::any::Any;
 #[derive(Debug, Default)]
 pub struct StackBases{
     pub loops: usize,
+    pub tries: usize,
     pub stack: usize,
     pub scope: usize,
     pub mes: usize,
@@ -21,6 +22,13 @@ pub struct LoopValues{
     pub index_id: Option<Id>,
     pub source: Value,
     pub index: f64,
+}
+
+#[derive(Debug)]
+pub struct TryFrame{
+    pub start_ip: u32,
+    pub jump: u32,
+    pub bases: StackBases,
 }
 
 #[derive(Debug)]
@@ -61,6 +69,7 @@ pub enum ScriptTrapOn{
 
 pub struct ScriptThread{
     pub(crate) stack_limit: usize,
+    pub(crate) tries: Vec<TryFrame>,
     pub(crate) loops: Vec<LoopFrame>,
     pub(crate) scopes: Vec<ObjectPtr>,
     pub(crate) stack: Vec<Value>,
@@ -130,6 +139,7 @@ impl ScriptThread{
     pub fn new()->Self{
         Self{
             scopes: vec![],
+            tries: vec![],
             stack_limit: 1_000_000,
             loops: vec![],
             stack: vec![],
@@ -141,6 +151,7 @@ impl ScriptThread{
     
     pub fn new_bases(&self)->StackBases{
         StackBases{
+            tries: self.tries.len(),
             loops: self.loops.len(),
             stack: self.stack.len(),
             scope: self.scopes.len(),
@@ -149,6 +160,7 @@ impl ScriptThread{
     }
     
     pub fn truncate_bases(&mut self, bases:StackBases, heap:&mut ScriptHeap){
+        self.tries.truncate(bases.tries);
         self.loops.truncate(bases.loops);
         self.stack.truncate(bases.stack);
         self.free_unreffed_scopes(&bases, heap);
@@ -226,6 +238,10 @@ impl ScriptThread{
         self.mes.len() > self.calls.last().unwrap().bases.mes
     }
     
+    pub fn call_has_try(&self)->bool{
+        self.tries.len() > self.calls.last().unwrap().bases.tries
+    }
+    
     // lets resolve an id to a Value
     pub fn scope_value(&mut  self, heap:&ScriptHeap, id: Id)->Value{
         let val = heap.value(*self.scopes.last().unwrap(), id.into(),&mut self.trap);
@@ -294,9 +310,17 @@ impl ScriptThread{
                 if let Some(trap) = self.trap.on.take(){
                     match trap{
                         ScriptTrapOn::Error(value)=>{
-                            if let Some(ptr) = value.as_err(){
-                                if let Some(loc2) = code.ip_to_loc(ptr.ip){
-                                    println!("{} {}", value, loc2);
+                            // check if we have a try clause
+                            if self.call_has_try(){
+                                let try_frame = self.tries.pop().unwrap();
+                                self.truncate_bases(try_frame.bases, heap);
+                                self.trap.goto(try_frame.start_ip + try_frame.jump);
+                            }
+                            else{
+                                if let Some(ptr) = value.as_err(){
+                                    if let Some(loc2) = code.ip_to_loc(ptr.ip){
+                                        println!("{} {}", value, loc2);
+                                    }
                                 }
                             }
                         }
@@ -319,6 +343,7 @@ impl ScriptThread{
         
         self.calls.push(CallFrame{
             bases: StackBases{
+                tries: 0,
                 loops: 0,
                 stack: 0,
                 scope: 0,
