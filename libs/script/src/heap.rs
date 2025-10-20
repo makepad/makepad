@@ -971,13 +971,10 @@ impl ScriptHeap{
                 }
                 return NIL
             }
-            else{
-                // only allow if we are varargs
-                self.objects[top_ptr.index as usize].vec.extend_from_slice(&[NIL, value]);
-                return NIL
-            }
         }
-        trap.err_unexpected()
+        // only allow if we are varargs
+        self.objects[top_ptr.index as usize].vec.extend_from_slice(&[NIL, value]);
+        return NIL
     }
     
         
