@@ -934,9 +934,12 @@ impl ScriptThread{
     }
     
     pub fn pop_to_me(&mut self, heap:&mut ScriptHeap){
+        
         let value = self.pop_stack_value();
         if self.call_has_me(){
             
+            
+                   
             let (key, value) = if let Some(id) = value.as_id(){
                 if value.is_escaped_id(){ (NIL, value) }
                 else{(value, self.scope_value(heap, id))}
