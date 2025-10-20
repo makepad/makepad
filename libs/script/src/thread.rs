@@ -76,6 +76,21 @@ pub struct ScriptTrap{
 }
 
 impl ScriptTrap{
+    pub fn ip(&self)->u32{
+        self.ip.index
+    }
+    pub fn goto(&mut self, wh:u32){
+        self.ip.index = wh;
+    }
+    pub fn goto_rel(&mut self, wh:u32){
+        self.ip.index += wh;
+    }
+    pub fn goto_next(&mut self){
+        self.ip.index += 1;
+    }
+}
+
+impl ScriptTrap{
     pub fn err(&mut self, err:Value)->Value{
         self.on = Some(ScriptTrapOn::Error(err));
         err
@@ -293,7 +308,7 @@ impl ScriptThread{
             }
             else{ // its a direct value-to-stack?
                 self.push_stack_value(opcode);
-                self.trap.ip.index += 1;
+                self.trap.goto_next();
             }
             body = &code.bodies[self.trap.ip.body as usize];
         }
