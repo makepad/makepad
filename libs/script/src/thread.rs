@@ -69,7 +69,7 @@ pub struct ScriptThread{
     pub(crate) trap: ScriptTrap,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ScriptTrap{
     pub(crate) on: Option<ScriptTrapOn>,
     pub ip: ScriptIp,

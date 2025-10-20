@@ -167,7 +167,7 @@ pub fn test(){
     };
     
     let _code = script!{
-        scope.import(mod.std)
+        scope.import2(mod.std)
     };
     
     let _code = script!{
