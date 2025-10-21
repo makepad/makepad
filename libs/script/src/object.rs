@@ -1,6 +1,7 @@
 use std::fmt;
 use crate::value::*;
 use crate::value_map::*;
+use std::collections::hash_map::Entry;
 
 #[derive(Default)]
 pub struct ObjectTag(u64); 
@@ -103,8 +104,8 @@ impl ObjectTag{
     pub const ALLOCED:u64 = 0x80;
     // object is 'deep' aka writes to protochain
     pub const DEEP:u64 = 0x100;
-    // used to mark objects dirty for Rust deserialisers
-    pub const DIRTY:u64 = 0x200;
+    // make the map tracked
+    pub const TRACKED:u64 = 0x200;
     // used to quick-free objects if not set
     pub const REFFED: u64 = 0x400;
     // object is skipped in gc passes
@@ -131,6 +132,14 @@ impl ObjectTag{
     pub const TYPE_MASK: u64 = 0x0f;
             
     const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
+    
+    pub fn set_tracked(&mut self){
+        self.0  |= Self::TRACKED
+    }
+    
+    pub fn is_tracked(&self)->bool{
+        self.0  & Self::TRACKED != 0
+    }
     
     pub fn set_static(&mut self){
         self.0  |= Self::STATIC
@@ -328,11 +337,106 @@ impl fmt::Display for ObjectTag {
 pub struct ObjectData{
     pub tag: ObjectTag,
     pub proto: Value,
+    
+    tracked: Vec<Value>,
     pub map: ValueMap<Value, Value>,
     pub vec: Vec<Value>,
 }
 
 impl ObjectData{
+    pub fn map_insert(&mut self, key:Value, value:Value){
+        if self.tag.is_tracked(){
+            match self.map.entry(key) {
+                Entry::Occupied(mut occ) => {
+                    let store = occ.get_mut();
+                    let index = store.as_trackid().unwrap();
+                    if let Some(val) = self.tracked.get_mut(index as usize){
+                        *val = value;
+                        store.set_trackid_dirty();
+                    }
+                    return 
+                }
+                Entry::Vacant(vac) => {
+                    let index = self.tracked.len();
+                    self.tracked.push(value);
+                    vac.insert(Value::from_trackid_dirty(index as u32));
+                    return
+                }   
+            }
+        }
+        else{
+            self.map.insert(key, value);
+        }
+    }
+    
+    pub fn map_get_mut(&mut self, key:&Value)->Option<&mut Value>{
+        if self.tag.is_tracked(){
+            match self.map.entry(*key) {
+                Entry::Occupied(mut occ) => {
+                    let store = occ.get_mut();
+                    let index = store.as_trackid().unwrap();
+                    if let Some(val) = self.tracked.get_mut(index as usize){
+                        store.set_trackid_dirty();
+                        return Some(val)
+                    }
+                    return None
+                }
+                Entry::Vacant(_) => {
+                    return None
+                }   
+            }
+        }
+        self.map.get_mut(key)
+    }
+    
+    pub fn map_get(&self, key:&Value)->Option<&Value>{
+        if self.tag.is_tracked(){
+            if let Some(store) = self.map.get(key) {
+                let index = store.as_trackid().unwrap();
+                if let Some(val) = self.tracked.get(index as usize){
+                    return Some(val)
+                }
+            }
+            return None
+        }
+        self.map.get(key)
+    }
+    
+    pub fn map_get_if_dirty(&mut self, key:&Value)->Option<&Value>{
+        if self.tag.is_tracked(){
+            if let Some(store) = self.map.get_mut(key) {
+                if store.get_and_clear_trackid_dirty(){
+                    let index = store.as_trackid().unwrap();
+                    if let Some(val) = self.tracked.get(index as usize){
+                        return Some(val)
+                    }
+                }
+            }
+            return None
+        }
+        self.map.get(key)
+    }
+        
+    pub fn map_len(&self)->usize{
+        self.map.len()
+    }
+    
+    pub fn map_iter_ret<T,F:FnMut(Value,Value)->Option<T>>(&self, mut f:F)->Option<T>{
+        for (key,value) in self.map.iter(){
+            let r = f(*key,*value);
+            if r.is_some(){
+                return r
+            }
+        }
+        None
+    }
+    
+    pub fn map_iter<F:FnMut(Value,Value)>(&self, mut f:F){
+        for (key,value) in self.map.iter(){
+            f(*key,*value);
+        }
+    }
+    
     pub fn merge_map_from_other(&mut self, other:&ObjectData){
         self.map.extend(other.map.iter());
     }
