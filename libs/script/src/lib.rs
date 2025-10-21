@@ -94,14 +94,19 @@ pub fn test(){
         fn script_def(vm:&mut Vm)->Value{
             let obj = vm.heap.new(0);
             let v = f64::script_def(vm);
-            set_value!(vm, obj.field = v);
+            id_lut!(field);set_value!(vm, obj.field = v);
             obj.into()
         }
     }
     
+    impl ScriptHook for StructTest{}    
+            
     impl Script for StructTest{
         fn script_apply(&mut self, vm:&mut Vm, apply:&mut ScriptApply, value:Value){
-            self.field.script_apply(vm, apply, value!(vm, value.field));
+            if value.is_nil() || self.on_skip_apply(vm, apply, value){return}
+            self.on_before_apply(vm, apply, value);
+            self.field.script_apply(vm, apply, vm.heap.value_for_apply(value, Value::from_id(id!(field))));
+            self.on_after_apply(vm, apply, value);
         }
         
         fn script_call(&mut self, _vm:&mut Vm, _method:Id, _args:Object)->Value{
@@ -109,10 +114,9 @@ pub fn test(){
         }
     }
     
-    let _code = script!{
-        //let EnumTest = #(EnumTest::def(vm.ctx()));
-        scope.import(EnumTest);
-        //let RustTest = #(StructTest::script_def(vm_ref!(vm)));
+    let code = script!{
+        let RustTest = #(StructTest::script_api(vm_ref!(vm)));
+        let x = RustTest{field:2.0}
     };
 
     let _code = script!{
@@ -141,7 +145,7 @@ pub fn test(){
     };
     
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         scope.import(mod.std)
         
         // array operations

@@ -723,13 +723,6 @@ impl ScriptHeap{
         value
     }
     
-    pub fn prop_value(&self, obj:Value, key:Value, trap:&ScriptTrap)->Value{
-        if let Some(obj) = obj.as_object(){
-            return self.value(obj, key, trap)
-        }
-        trap.err_notfound()
-    }
-    
     pub fn value(&self, ptr:Object, key:Value, trap:&ScriptTrap)->Value{
         if key.is_unprefixed_id(){
             return self.value_deep(ptr, key, trap)
@@ -747,8 +740,25 @@ impl ScriptHeap{
         trap.err_notfound()
     }
     
-    
-    
+    #[inline]
+    pub fn value_for_apply(&self, obj:Value, key:Value)->Value{
+        if let Some(mut ptr) = obj.as_object(){
+            loop{
+                let object = &self.objects[ptr.index as usize];
+                if let Some(value) = object.map.get(&key){
+                    return *value
+                }
+                if let Some(next_ptr) = object.proto.as_object(){
+                    ptr = next_ptr
+                }
+                else{
+                    break;
+                }
+            }
+        }
+        NIL    
+    }
+        
     
     // Vec Reading
     
