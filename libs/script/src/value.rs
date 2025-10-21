@@ -32,23 +32,23 @@ impl ScriptIp{
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct ObjectPtr{
+pub struct Object{
     pub index: u32    
 }
 
-impl From<ObjectPtr> for Value{
-    fn from(v:ObjectPtr) -> Self{
+impl From<Object> for Value{
+    fn from(v:Object) -> Self{
         Value::from_object(v)
     }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct StringPtr{
+pub struct HeapString{
     pub index: u32    
 }
 
-impl From<StringPtr> for Value{
-    fn from(v:StringPtr) -> Self{
+impl From<HeapString> for Value{
+    fn from(v:HeapString) -> Self{
         Value::from_string(v)
     }
 }
@@ -383,7 +383,7 @@ impl Value{
         }
     }
     
-    pub fn from_object(ptr: ObjectPtr)->Self{
+    pub fn from_object(ptr: Object)->Self{
          Self(ptr.index as u64 | Self::TYPE_OBJECT)
     }
         
@@ -408,7 +408,7 @@ impl Value{
         Self(val.0|Self::TYPE_ID|Self::ESCAPED_ID)
     }
         
-    pub fn from_string(ptr: StringPtr)->Self{
+    pub fn from_string(ptr: HeapString)->Self{
          Self(ptr.index as u64 | Self::TYPE_STRING)
     }
     
@@ -504,9 +504,9 @@ impl Value{
         self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
     }
         
-    pub const fn as_object(&self)->Option<ObjectPtr>{
+    pub const fn as_object(&self)->Option<Object>{
         if self.is_object(){
-            return Some(ObjectPtr{
+            return Some(Object{
                 index: (self.0 & 0xffff_ffff) as u32
             })
         }
@@ -570,9 +570,9 @@ impl Value{
     }*/
         
         
-    pub const fn as_string(&self)->Option<StringPtr>{
+    pub const fn as_string(&self)->Option<HeapString>{
         if self.is_string(){
-            return Some(StringPtr{
+            return Some(HeapString{
                 index: (self.0 & 0xffff_ffff) as u32
             })
         }

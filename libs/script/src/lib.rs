@@ -17,12 +17,14 @@ pub mod value;
 pub mod opcodes;
 pub mod gc;
 pub mod value_map;
+pub mod script;
 pub use makepad_id_derive::*;
 pub use makepad_id::id::*;
 pub use value::*;
 pub use vm::ScriptVm;
 pub use makepad_script_derive::*;
-pub use vm::Script;
+pub use vm::ScriptBlock;
+pub use script::*;
 // can we refcount object roots on the heap?
 // yea why not 
 // we can make a super convenient ObjectRef type you can use to hold onto script objects
@@ -40,7 +42,7 @@ pub trait ScriptLife{
         }
         
         if let Some(object) = cx.vm.call(self.rsid(), id!(on_draw), &[item.into()]).as_object(){
-            // we have an ObjectPtr. can we read a value
+            // we have an Object. can we read a value
             object.get(id!(myfield))
             object.set(id!(my_field), 2.0.into())
         }
@@ -48,28 +50,24 @@ pub trait ScriptLife{
 }*/
 
 
-//#[derive(Scriptable)]
+//#[derive(Script)]
 pub enum EnumTest{
     Bare,
     Tuple(u32),
     Fields{field:u32}
 }
 
-//#[derive(Scriptable)]
-pub struct RustTest{
-    _enm1: EnumTest,
-    _enm2: EnumTest,
-   _enm3: EnumTest,
-    _prop: f64    
-}
-
-impl RustTest{
-    fn ty()->u32{1}
-}
-
 
 pub fn test(){
     let mut vm = ScriptVm::new();
+    
+    let net = vm.new_module(id!(test));
+    vm.add_fn(net, id!(fetch), args!(url=NIL, options=NIL), |vm, args|{
+        // how do we construct our options
+        let _options = value!(vm, args.options); 
+        //let options = StructTest::new_apply(vm, options);
+        NIL
+    });
     
     //#[derive(Scriptable)]
     pub enum _EnumTest{
@@ -78,15 +76,42 @@ pub fn test(){
         Fields{field:u32}
     }
     
+    pub struct StructTest{
+        _field:f64
+    }
+    
+    //use crate::scriptable::*;
+    use crate::vm::*;
+    use crate::value::*;
+    
+    impl ScriptNew for StructTest{
+        fn script_new(vm:&mut Vm)->Self{
+            StructTest{
+                _field: f64::script_new(vm)
+            }
+        }
+                
+        fn script_def(vm:&mut Vm)->Value{
+            let obj = vm.heap.new(0);
+            let v = f64::script_def(vm);
+            set_value!(vm, obj.field = v);
+            obj.into()
+        }
+    }
+    
+    impl Script for StructTest{
+        fn script_apply(&mut self, _vm:&mut Vm, _apply:&mut ScriptApply, _value:Value){
+        }
+        
+        fn script_call(&mut self, _vm:&mut Vm, _method:Id, _args:Object)->Value{
+            NIL
+        }
+    }
+    
     let _code = script!{
         //let EnumTest = #(EnumTest::def(vm.ctx()));
         scope.import(EnumTest);
-        
-        let MyView = #(RustTest::ty()){
-            enm1: Bare,
-            enm2: Tuple(2),
-            enm3: Fields{field: 1.0}
-        }
+        //let RustTest = #(StructTest::script_def(vm_ref!(vm)));
     };
 
     let _code = script!{
@@ -105,12 +130,6 @@ pub fn test(){
         let View = {@view}
         let Window = {@window}
         let Button = {@button}
-        let MyWindow = #(RustTest::ty()){
-            size: 1.0
-            $b1: Button{}
-            $body: View{}
-            $b2: Button{}
-        }
         let x = MyWindow{
             $b1 : Checkbox{}
         }
@@ -124,34 +143,41 @@ pub fn test(){
     let code = script!{
         scope.import(mod.std)
         
+        // array operations
         let x = 1+2 assert(x == 3)
         let iv = [1 2 3 4] let ov = []
         for v in iv ov.push(v) assert(iv == ov)
         ov.pop() assert(iv != ov)
         
+        // shallow and deep compare
         let oa = {y:1 z:2}
         let ob = {z:3 y:1}
         assert(oa != ob)
         ob.z = 2 assert(oa == ob)
         assert(oa !== ob)
         
+        // string comparison        
         assert("123" == "123")
         assert("123" != "223")
         assert("123456" == "123456")
         assert("123456" != "123")
         
+        // test arrays        
         let x = 1 x += 2 assert(x == 3)
         let t = 3 t ?= 2 assert(t == 3)
         let t t ?= 2 assert(t == 2)
         let t = 0 t = 2 t += 1 assert(t==3)
         let x = {f:2} x.f+=2 assert(x.f == 4)
         let x = [1,2] x[1]+=2 assert(x == [1 4])
+        
+        // test loops
         let c = 0 for x in 4{ if c == 3 break; c += 1} assert(c==3)
         let c = 0 for x in 5{ if c == 4{break;}c += 1} assert(c==4);
         let c = 0 for x in 7{ if x == 3 ||  x == 5 continue;c += 1} assert(c==5);
         let c = 0 loop{ c+=1; if c>5 break} assert(c==6)
         let c = 0 while c < 9 c+=1 assert(c==9);
         let c = 0 while c < 3{c+=1}assert(c==3);
+        
         // freezing
         let x = {x:1 y:2}.freeze_api();
         // property value unknown
@@ -159,23 +185,23 @@ pub fn test(){
         // property value known
         let x2 = x{x:3} assert(x2.x == 3)
         // property frozen
-        try {x.x = 2} assert(true) ok assert(false)
+        try x.x = 2 assert(true) ok assert(false)
                 
         // modules can be extended but not overwritten
-        let x = {x:1 y:2}.freeze_module();
-        try {x.x = 2} assert(true) ok assert(false)
-        try {x.z = 2} assert(false) ok assert(true)
-        // but we cant add items to it
+        let x = {p:1}.freeze_module();
+        try x.p = 2 assert(true) ok assert(false)
+        try x.z = 2 assert(false) ok assert(true)
+        // but we cant add items to its vec
         try {x{1}} assert(true) ok assert(false)
         
-        let x = {x:1 y:2}.freeze_component();
+        let x = {p:1}.freeze_component();
         // cant write to it at all
-        try {x.z = 1} assert(true) ok assert(false)
-        try {x.x = 1} assert(true) ok assert(false)
+        try x.x = 1 assert(true) ok assert(false)
+        try x.p = 1 assert(true) ok assert(false)
         // can write with same type on derived        
-        try {x{x:1}} assert(false) ok assert(true)
+        try {x{p:1}} assert(false) ok assert(true)
         // cant change value type   
-        try {x{x:true}} assert(true) ok assert(false)
+        try {x{p:true}} assert(true) ok assert(false)
         // can append to vec  
         try {x{1}} assert(false) ok assert(true)
                                                         
@@ -194,13 +220,7 @@ pub fn test(){
     
     let _code = script!{
         scope.import(mod.std)
-        // freezing
-        let x = {x:1 y:2}.freeze_api();
-        // property value unknown
-        try {x{z:3}} assert(true) ok assert(false)
-        // property frozen
-        try {x.x = 2} assert(true) ok assert(false)
-        
+        mod.test.fetch();
     };
     
     let _code = script!{

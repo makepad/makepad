@@ -88,12 +88,12 @@ pub use {
     makepad_derive_live::*,
     
     makepad_script::vm::*,
-    
+    makepad_script::script::*,
     log::*,
     makepad_math::*,
     makepad_live_id::*,
     app_main::*,
-    makepad_script::script,
+    makepad_script::vm,
     makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,
