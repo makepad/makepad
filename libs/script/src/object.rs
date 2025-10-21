@@ -131,7 +131,11 @@ impl ObjectTag{
     pub const TYPE_MASK: u64 = 0x0f;
             
     const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
-
+    
+    pub fn set_static(&mut self){
+        self.0  |= Self::STATIC
+    }
+    
     pub fn freeze(&mut self){
         self.0 &= !(Self::FREEZE_MASK);
         self.0  |= Self::FROZEN
@@ -175,7 +179,11 @@ impl ObjectTag{
     pub fn set_flags(&mut self, flags:u64){
         self.0 |= flags
     }
-        
+    
+    pub fn is_static(&mut self)->bool{
+        self.0  & Self::STATIC != 0
+    }
+    
     pub fn set_fn(&mut self, ptr:ScriptFnPtr){
         self.0 &= !(Self::REF_MASK);
         match ptr{

@@ -640,7 +640,7 @@ impl ScriptThread{
                     }
                 }
                 else{
-                    self.trap.on = Some(ScriptTrapOn::Return(value));
+                    self.trap.on.set(Some(ScriptTrapOn::Return(value)));
                 }
             }
             Opcode::RETURN_IF_ERR=>{
@@ -656,7 +656,7 @@ impl ScriptThread{
                         }
                     }
                     else{
-                        self.trap.on = Some(ScriptTrapOn::Return(value));
+                        self.trap.on.set(Some(ScriptTrapOn::Return(value)));
                     }
                 }
                 else{
