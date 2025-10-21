@@ -277,7 +277,7 @@ impl ScriptThread{
         if let Some(fnptr) = heap.parent_as_fn(scope){
             match fnptr{
                 ScriptFnPtr::Native(ni)=>{
-                    return (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut Vm{
+                    return (*code.native.borrow().fn_table[ni.index as usize].fn_ptr)(&mut Vm{
                         host,
                         heap,
                         thread:self,

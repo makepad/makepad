@@ -7,6 +7,7 @@ use crate::methods::*;
 use crate::thread::*;
 use crate::native::*;
 use crate::modules::*;
+use std::cell::RefCell;
 use std::any::Any;
 
 #[derive(Default)]
@@ -40,7 +41,7 @@ pub struct ScriptBody{
 pub struct ScriptCode{
     pub type_methods: ScriptTypeMethods,
     pub builtins: ScriptBuiltins,
-    pub native: ScriptNative,
+    pub native: RefCell<ScriptNative>,
     pub bodies: Vec<ScriptBody>,
 }
 
@@ -103,13 +104,18 @@ pub struct Vm<'a>{
 }
 
 impl <'a> Vm<'a>{
-      pub fn call(&mut self,fnobj:Value, args:&[Value])->Value{
-          self.thread.call(self.heap, self.code, self.host, fnobj, args)
-      }
-      
-      pub fn cast_to_f64(&self, v:Value)->f64{
-          self.heap.cast_to_f64(v, self.thread.trap.ip)
-      }
+    pub fn call(&mut self,fnobj:Value, args:&[Value])->Value{
+        self.thread.call(self.heap, self.code, self.host, fnobj, args)
+    }
+          
+    pub fn cast_to_f64(&self, v:Value)->f64{
+        self.heap.cast_to_f64(v, self.thread.trap.ip)
+    }
+          
+    pub fn add_fn<F>(&mut self, module:Object, method:Id, args:&[(Id, Value)], f: F) 
+    where F: Fn(&mut Vm, Object)->Value + 'static{
+        self.code.native.borrow_mut().add_fn(&mut self.heap, module, method, args, f)
+    }
 }
 
 pub struct ScriptVm{
@@ -143,7 +149,7 @@ impl ScriptVm{
             code:ScriptCode{
                 builtins,
                 type_methods,
-                native,
+                native: RefCell::new(native),
                 bodies: Default::default(),
             },
             threads: vec![ScriptThread::new()],
@@ -158,7 +164,7 @@ impl ScriptVm{
     
     pub fn add_fn<F>(&mut self, module:Object, method:Id, args:&[(Id, Value)], f: F) 
     where F: Fn(&mut Vm, Object)->Value + 'static{
-        self.code.native.add_fn(&mut self.heap, module, method, args, f)
+        self.code.native.borrow_mut().add_fn(&mut self.heap, module, method, args, f)
     }
         
     pub fn add_script_block(&mut self, new_block:ScriptBlock)->u16{
