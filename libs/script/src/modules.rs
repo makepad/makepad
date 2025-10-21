@@ -30,12 +30,12 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     });
             
     let range = heap.new_with_proto(id!(range).into());
-    heap.set_value(std, id!(Range).into(), range.into());
+    heap.set_value_def(std, id!(Range).into(), range.into());
             
     native.add_fn(heap, range, id!(step), args!(x= 0.0), |vm, args|{
         if let Some(this) = value!(vm, args.this).as_object(){
             if let Some(x) = value!(vm, args.x).as_f64(){
-                vm.heap.set_value(this, id!(step).into(), x.into());
+                set_value!(vm, this.step = x);
             }
             return this.into()
         }
@@ -45,7 +45,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
 
 
 pub struct ScriptBuiltins{
-    pub range: ObjectPtr,
+    pub range: Object,
 }
 
 impl ScriptBuiltins{

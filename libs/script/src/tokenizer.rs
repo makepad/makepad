@@ -20,8 +20,8 @@ pub enum ScriptToken{
     CloseRound,
     OpenSquare,
     CloseSquare,
-    StringUnfinished(StringPtr),
-    String(StringPtr),
+    StringUnfinished(HeapString),
+    String(HeapString),
     Number(f64),
     Color(u32),
     RustValue(u32),
@@ -34,7 +34,7 @@ impl ScriptToken{
     pub fn number(&self)->f64{match self{ScriptToken::Number(v)=>*v,_=>0.0}}
     pub fn as_number(&self)->Option<f64>{match self{ScriptToken::Number(v)=>Some(*v),_=>None}}
     pub fn as_color(&self)->Option<u32>{match self{ScriptToken::Color(v)=>Some(*v),_=>None}}
-    pub fn as_string(&self)->Option<StringPtr>{match self{ScriptToken::StringUnfinished(v)=>Some(*v),ScriptToken::String(v)=>Some(*v),_=>None}}
+    pub fn as_string(&self)->Option<HeapString>{match self{ScriptToken::StringUnfinished(v)=>Some(*v),ScriptToken::String(v)=>Some(*v),_=>None}}
     pub fn as_rust_value(&self)->Option<u32>{match self{ScriptToken::RustValue(v)=>Some(*v),_=>None}}
             
     pub fn is_identifier(&self)->bool{match self{ScriptToken::Identifier{..}=>true,_=>false}}
