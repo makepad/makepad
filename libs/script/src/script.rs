@@ -11,6 +11,19 @@ pub trait ScriptHook{
     fn on_script_def(_vm:&mut Vm, _obj:Object){}
 }
 
+pub trait FromValue{
+    fn from_value(vm:&mut Vm, value:Value)->Self;   
+}
+
+impl<T:ScriptNew> FromValue for T{
+    fn from_value(vm:&mut Vm, value:Value)->Self where Self:Sized{
+        let mut s = Self::script_new(vm);
+        s.on_new(vm);
+        s.script_apply(vm, &mut ScriptApply::default(), value);
+        s
+    }    
+}
+
 // this is generated
 pub trait ScriptNew: Script + ScriptHook{
     fn script_new(vm:&mut Vm)->Self;
@@ -38,13 +51,19 @@ pub trait Script{
     fn script_apply(&mut self, vm:&mut Vm, apply:&mut ScriptApply, value:Value);
 }
 
+pub trait ScriptReset{
+    fn script_reset(&mut self, vm:&mut Vm, apply:&mut ScriptApply, value:Value);
+}
+
 pub trait ToValue{
     fn to_value(&self, vm:&mut Vm)->Value;   
 }
 
+
 pub enum ScriptApplyFrom{
 }
 
+#[derive(Default)]
 pub struct ScriptApply{
 }
 

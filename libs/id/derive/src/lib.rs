@@ -136,8 +136,3 @@ pub fn id_lut(item: TokenStream) -> TokenStream {
         parser.unexpected()
     }
 }
-
-#[proc_macro_derive(Script)]
-pub fn derive_script(_input: TokenStream) -> TokenStream {
-    Default::default()
-}
