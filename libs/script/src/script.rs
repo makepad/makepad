@@ -38,12 +38,17 @@ pub trait Script{
     fn script_apply(&mut self, vm:&mut Vm, apply:&mut ScriptApply, value:Value);
 }
 
+pub trait ToValue{
+    fn to_value(&self, vm:&mut Vm)->Value;   
+}
+
 pub enum ScriptApplyFrom{
 }
 
 pub struct ScriptApply{
 }
 
+impl ToValue for f64{fn to_value(&self, _vm:&mut Vm)->Value{Value::from_f64(*self)}}
 impl ScriptHook for f64{}
 impl ScriptNew for f64{
     fn script_new(_vm:&mut Vm)->Self{Default::default()}

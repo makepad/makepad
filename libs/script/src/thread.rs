@@ -273,7 +273,7 @@ impl ScriptThread{
         
         heap.set_object_deep(scope);
         heap.set_object_type(scope, ObjectType::AUTO);
-        
+                
         if let Some(fnptr) = heap.parent_as_fn(scope){
             match fnptr{
                 ScriptFnPtr::Native(ni)=>{

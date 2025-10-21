@@ -1040,6 +1040,7 @@ impl ScriptHeap{
                     self.objects[top_ptr.index as usize].vec.extend_from_slice(&[NIL, *value]);
                 }
             }
+            return NIL
         }
         trap.err_unexpected()
     }
