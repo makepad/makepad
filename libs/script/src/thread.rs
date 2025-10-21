@@ -61,7 +61,7 @@ impl ScriptMe{
 
 pub struct ScriptThreadId(pub usize);
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ScriptTrapOn{
     Error(Value),
     Return(Value),
@@ -78,10 +78,10 @@ pub struct ScriptThread{
     pub trap: ScriptTrap,
     pub(crate) last_err: Value,
 }
-
+use std::cell::Cell;
 #[derive(Default, Debug)]
 pub struct ScriptTrap{
-    pub(crate) on: Option<ScriptTrapOn>,
+    pub(crate) on: Cell<Option<ScriptTrapOn>>,
     pub ip: ScriptIp,
 }
 
@@ -101,33 +101,33 @@ impl ScriptTrap{
 }
 
 impl ScriptTrap{
-    pub fn err(&mut self, err:Value)->Value{
-        self.on = Some(ScriptTrapOn::Error(err));
+    pub fn err(&self, err:Value)->Value{
+        self.on.set(Some(ScriptTrapOn::Error(err)));
         err
     }
     
-    pub fn err_notfound(&mut self)->Value{self.err(Value::err_notfound(self.ip))}
-    pub fn err_notfn(&mut self)->Value{self.err(Value::err_notfn(self.ip))}
-    pub fn err_notindex(&mut self)->Value{self.err(Value::err_notindex(self.ip))}
-    pub fn err_notobject(&mut self)->Value{self.err(Value::err_notobject(self.ip))}
-    pub fn err_stackunderflow(&mut self)->Value{self.err(Value::err_stackunderflow(self.ip))}
-    pub fn err_stackoverflow(&mut self)->Value{self.err(Value::err_stackoverflow(self.ip))}
-    pub fn err_invalidargs(&mut self)->Value{self.err(Value::err_invalidargs(self.ip))}
-    pub fn err_notassignable(&mut self)->Value{self.err(Value::err_notassignable(self.ip))}
-    pub fn err_unexpected(&mut self)->Value{self.err(Value::err_unexpected(self.ip))}
-    pub fn err_assertfail(&mut self)->Value{self.err(Value::err_assertfail(self.ip))}
-    pub fn err_notimpl(&mut self)->Value{self.err(Value::err_notimpl(self.ip))}
-    pub fn err_frozen(&mut self)->Value{self.err(Value::err_frozen(self.ip))}
-    pub fn err_vecfrozen(&mut self)->Value{self.err(Value::err_vecfrozen(self.ip))}
-    pub fn err_invalidproptype(&mut self)->Value{self.err(Value::err_invalidproptype(self.ip))}
-    pub fn err_invalidpropname(&mut self)->Value{self.err(Value::err_invalidpropname(self.ip))}
-    pub fn err_keyalreadyexists(&mut self)->Value{self.err(Value::err_keyalreadyexists(self.ip))}
-    pub fn err_invalidkeytype(&mut self)->Value{self.err(Value::err_invalidkeytype(self.ip))}
-    pub fn err_vecbound(&mut self)->Value{self.err(Value::err_vecbound(self.ip))}
-    pub fn err_invalidargtype(&mut self)->Value{self.err(Value::err_invalidargtype(self.ip))}
-    pub fn err_invalidargname(&mut self)->Value{self.err(Value::err_invalidargname(self.ip))}
-    pub fn err_invalidvarname(&mut self)->Value{self.err(Value::err_invalidvarname(self.ip))}
-    pub fn err_user(&mut self)->Value{self.err(Value::err_user(self.ip))}
+    pub fn err_notfound(&self)->Value{self.err(Value::err_notfound(self.ip))}
+    pub fn err_notfn(&self)->Value{self.err(Value::err_notfn(self.ip))}
+    pub fn err_notindex(&self)->Value{self.err(Value::err_notindex(self.ip))}
+    pub fn err_notobject(&self)->Value{self.err(Value::err_notobject(self.ip))}
+    pub fn err_stackunderflow(&self)->Value{self.err(Value::err_stackunderflow(self.ip))}
+    pub fn err_stackoverflow(&self)->Value{self.err(Value::err_stackoverflow(self.ip))}
+    pub fn err_invalidargs(&self)->Value{self.err(Value::err_invalidargs(self.ip))}
+    pub fn err_notassignable(&self)->Value{self.err(Value::err_notassignable(self.ip))}
+    pub fn err_unexpected(&self)->Value{self.err(Value::err_unexpected(self.ip))}
+    pub fn err_assertfail(&self)->Value{self.err(Value::err_assertfail(self.ip))}
+    pub fn err_notimpl(&self)->Value{self.err(Value::err_notimpl(self.ip))}
+    pub fn err_frozen(&self)->Value{self.err(Value::err_frozen(self.ip))}
+    pub fn err_vecfrozen(&self)->Value{self.err(Value::err_vecfrozen(self.ip))}
+    pub fn err_invalidproptype(&self)->Value{self.err(Value::err_invalidproptype(self.ip))}
+    pub fn err_invalidpropname(&self)->Value{self.err(Value::err_invalidpropname(self.ip))}
+    pub fn err_keyalreadyexists(&self)->Value{self.err(Value::err_keyalreadyexists(self.ip))}
+    pub fn err_invalidkeytype(&self)->Value{self.err(Value::err_invalidkeytype(self.ip))}
+    pub fn err_vecbound(&self)->Value{self.err(Value::err_vecbound(self.ip))}
+    pub fn err_invalidargtype(&self)->Value{self.err(Value::err_invalidargtype(self.ip))}
+    pub fn err_invalidargname(&self)->Value{self.err(Value::err_invalidargname(self.ip))}
+    pub fn err_invalidvarname(&self)->Value{self.err(Value::err_invalidvarname(self.ip))}
+    pub fn err_user(&self)->Value{self.err(Value::err_user(self.ip))}
 }
 
 pub enum ScriptHook{
