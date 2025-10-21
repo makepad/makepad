@@ -10,7 +10,7 @@ use crate::modules::*;
 use std::any::Any;
 
 #[derive(Default)]
-pub struct Script{
+pub struct ScriptBlock{
     pub cargo_manifest_path: String,
     pub module_path: String,
     pub file: String,
@@ -21,8 +21,8 @@ pub struct Script{
 }
 
 pub enum ScriptSource{
-    Rust{
-        rust: Script,
+    Block{
+        block: ScriptBlock,
     },
     Streaming{
         code: String,
@@ -33,8 +33,8 @@ pub struct ScriptBody{
     pub source: ScriptSource,
     pub tokenizer: ScriptTokenizer,
     pub parser: ScriptParser,
-    pub scope: ObjectPtr,
-    pub me: ObjectPtr,
+    pub scope: Object,
+    pub me: Object,
 }
 
 pub struct ScriptCode{
@@ -68,11 +68,11 @@ impl ScriptCode{
         if let Some(body) = self.bodies.get(ip.body as usize){
             if let Some(Some(index)) = body.parser.source_map.get(ip.index as usize){
                 if let Some(rc) = body.tokenizer.token_index_to_row_col(*index){
-                    if let ScriptSource::Rust{rust} = &body.source{
+                    if let ScriptSource::Block{block} = &body.source{
                         return Some(
                             ScriptLoc{
-                                file: rust.file.as_str(),
-                                line: rc.0 + rust.line as u32 + 1,
+                                file: block.file.as_str(),
+                                line: rc.0 + block.line as u32 + 1,
                                 col: rc.1
                             }
                         )
@@ -95,29 +95,33 @@ impl ScriptCode{
 }
 
 
-pub struct ScriptVmRef<'a>{
+pub struct Vm<'a>{
     pub host: &'a mut dyn Any,
     pub thread: &'a mut ScriptThread,
     pub code: &'a ScriptCode,
     pub heap: &'a mut ScriptHeap
 }
 
-impl <'a> ScriptVmRef<'a>{
+impl <'a> Vm<'a>{
       pub fn call(&mut self,fnobj:Value, args:&[Value])->Value{
           self.thread.call(self.heap, self.code, self.host, fnobj, args)
+      }
+      
+      pub fn cast_to_f64(&self, v:Value)->f64{
+          self.heap.cast_to_f64(v, self.thread.trap.ip)
       }
 }
 
 pub struct ScriptVm{
     pub code: ScriptCode,
-    pub global: ObjectPtr,
+    pub global: Object,
     pub heap: ScriptHeap,
     pub threads: Vec<ScriptThread>,
 }
 
 impl ScriptVm{
-    pub fn new_ref<'a>(&'a mut self, host:&'a mut dyn Any)->ScriptVmRef<'a>{
-        ScriptVmRef{
+    pub fn new_ref<'a>(&'a mut self, host:&'a mut dyn Any)->Vm<'a>{
+        Vm{
             host,
             code: &self.code,
             heap: &mut self.heap,
@@ -148,24 +152,24 @@ impl ScriptVm{
         }
     }
         
-    pub fn new_module(&mut self, id:Id)->ObjectPtr{
+    pub fn new_module(&mut self, id:Id)->Object{
         self.heap.new_module(id)
     }
     
-    pub fn add_fn<F>(&mut self, module:ObjectPtr, method:Id, args:&[(Id, Value)], f: F) 
-    where F: Fn(&mut ScriptVmRef, ObjectPtr)->Value + 'static{
+    pub fn add_fn<F>(&mut self, module:Object, method:Id, args:&[(Id, Value)], f: F) 
+    where F: Fn(&mut Vm, Object)->Value + 'static{
         self.code.native.add_fn(&mut self.heap, module, method, args, f)
     }
         
-    pub fn add_rust_script(&mut self, new_rust:Script)->u16{
+    pub fn add_script_block(&mut self, new_block:ScriptBlock)->u16{
         let scope = self.heap.new_with_proto(id!(scope).into());
         self.heap.set_object_deep(scope);
-        self.heap.set_value(scope, id!(mod).into(), self.heap.modules.into());
-        self.heap.set_value(scope, id!(global).into(), self.global.into());
+        self.heap.set_value_def(scope, id!(mod).into(), self.heap.modules.into());
+        self.heap.set_value_def(scope, id!(global).into(), self.global.into());
         let me = self.heap.new_with_proto(id!(root_me).into());
         
         let new_body = ScriptBody{
-            source: ScriptSource::Rust{rust:new_rust},
+            source: ScriptSource::Block{block:new_block},
             tokenizer: ScriptTokenizer::default(),
             parser: ScriptParser::default(),
             scope,
@@ -173,11 +177,11 @@ impl ScriptVm{
         };
         for i in 0..self.code.bodies.len(){
             let body = &mut self.code.bodies[i];
-            if let ScriptSource::Rust{rust} = &body.source{
-                if let ScriptSource::Rust{rust:new_rust} = &new_body.source{
-                    if  rust.file == new_rust.file &&
-                        rust.line == new_rust.line &&
-                        rust.column == new_rust.column{
+            if let ScriptSource::Block{block} = &body.source{
+                if let ScriptSource::Block{block:new_block} = &new_body.source{
+                    if  block.file == new_block.file &&
+                        block.line == new_block.line &&
+                        block.column == new_block.column{
                         *body = new_body;
                         return i as u16
                     }
@@ -189,13 +193,13 @@ impl ScriptVm{
         i as u16
     }
     
-    pub fn eval(&mut self, new_rust: Script, host:&mut dyn Any){
-        let body_id = self.add_rust_script(new_rust);
+    pub fn eval(&mut self, block: ScriptBlock, host:&mut dyn Any){
+        let body_id = self.add_script_block(block);
         let body = &mut self.code.bodies[body_id as usize];
         
-        if let ScriptSource::Rust{rust} = &body.source{
-            body.tokenizer.tokenize(&rust.code, &mut self.heap);
-            body.parser.parse(&body.tokenizer.tokens, &mut self.heap, &rust.values);
+        if let ScriptSource::Block{block} = &body.source{
+            body.tokenizer.tokenize(&block.code, &mut self.heap);
+            body.parser.parse(&body.tokenizer.tokens, &mut self.heap, &block.values);
             // lets point our thread to it
             self.threads[0].run_root(&mut self.heap, &self.code, host, body_id)
         }
