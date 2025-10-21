@@ -38,6 +38,9 @@ macro_rules! value{
     ($vm:ident, $obj:ident.$id: ident)=>{
         $vm.heap.value(($obj).into(), id!($id).into(),&$vm.thread.trap)
     };
+    ($vm:ident, $obj:ident.$id:ident.$id2:ident)=>{
+        $vm.heap.value($vm.heap.value(($obj).into(), id!($id).into(),&$vm.thread.trap).into(), id!($id2).into(),&$vm.thread.trap)
+    };
     ($vm:ident, $obj:ident[$index: expr])=>{
         $vm.heap.vec_value(($obj).into(), ($index) as usize,&$vm.thread.trap)
     }
