@@ -1,7 +1,6 @@
 
 use crate::vm::*;
 use crate::value::*;
-use makepad_id::*;
 
 // this we implement
 pub trait ScriptHook{
@@ -9,9 +8,7 @@ pub trait ScriptHook{
     fn on_before_apply(&mut self, _vm:&mut Vm, _apply:&mut ScriptApply, _value:Value){}
     fn on_after_apply(&mut self, _vm:&mut Vm, _apply:&mut ScriptApply, _value:Value){}
     fn on_skip_apply(&mut self, _vm:&mut Vm, _apply:&mut ScriptApply, _value:Value)->bool{false}
-    fn on_call(&mut self, _vm:&mut Vm, _method:Id, _args:Object)->Value{
-        NIL
-    }
+    fn on_script_def(_vm:&mut Vm, _obj:Object){}
 }
 
 // this is generated
@@ -39,9 +36,6 @@ pub trait ScriptNew: Script + ScriptHook{
 // this as well
 pub trait Script{
     fn script_apply(&mut self, vm:&mut Vm, apply:&mut ScriptApply, value:Value);
-    fn script_call(&mut self, _vm:&mut Vm, _method:Id, _args:Object)->Value{
-        NIL
-    }
 }
 
 pub enum ScriptApplyFrom{
@@ -60,9 +54,5 @@ impl Script for f64{
         if !value.is_nil(){
             *self = vm.cast_to_f64(value);
         }
-    }
-        
-    fn script_call(&mut self, vm:&mut Vm, _method:Id, _args:Object)->Value{
-        vm.thread.trap.err_notfn()
     }
 }

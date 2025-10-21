@@ -509,7 +509,7 @@ impl ScriptThread{
                     match fnptr{
                         ScriptFnPtr::Native(ni)=>{
                             let ip = self.trap.ip;
-                            let ret = (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut Vm{
+                            let ret = (*code.native.borrow().fn_table[ni.index as usize].fn_ptr)(&mut Vm{
                                 host,
                                 heap,
                                 thread:self,
