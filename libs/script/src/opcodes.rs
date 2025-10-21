@@ -509,12 +509,14 @@ impl ScriptThread{
                     match fnptr{
                         ScriptFnPtr::Native(ni)=>{
                             let ip = self.trap.ip;
+                            self.trap.in_rust = true;
                             let ret = (*code.native.borrow().fn_table[ni.index as usize].fn_ptr)(&mut Vm{
                                 host,
                                 heap,
                                 thread:self,
                                 code
                             }, scope);
+                            self.trap.in_rust = false;
                             self.trap.ip = ip;
                             self.push_stack_value(ret);
                             heap.free_object_if_unreffed(scope);

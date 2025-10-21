@@ -64,8 +64,7 @@ pub fn test(){
     let net = vm.new_module(id!(test));
     vm.add_fn(net, id!(fetch), args!(url=NIL, options=NIL), |vm, args|{
         // how do we construct our options
-        let _options = value!(vm, args.options); 
-        // let options = StructTest::new_apply(vm, options);
+        let _options = StructTest::from_value(vm, value!(vm, args.options));
         NIL
     });
     
@@ -76,6 +75,7 @@ pub fn test(){
         Fields{field:u32}
     }
     
+    //#[derive(Script)]
     pub struct StructTest{
         field:f64
     }
@@ -105,7 +105,7 @@ pub fn test(){
         fn on_script_def(vm:&mut Vm, obj:Object){
             vm.add_fn(obj, id!(method), args!(o = 1.0), |vm, args|{
                 let fnptr = value!(vm, args.this.on_click);
-                vm.call(fnptr, &[]);
+                vm.call(fnptr, args!());
                 NIL
             });
         }
@@ -115,16 +115,22 @@ pub fn test(){
         fn script_apply(&mut self, vm:&mut Vm, apply:&mut ScriptApply, value:Value){
             if value.is_nil() || self.on_skip_apply(vm, apply, value){return}
             self.on_before_apply(vm, apply, value);
-            self.field.script_apply(vm, apply, vm.heap.value_for_apply(value, Value::from_id(id!(field))));
+            
+            if let Some(v) = vm.heap.value_dirty(value, Value::from_id(id!(field))){
+                self.field.script_apply(vm, apply, v);
+            };
+            
             self.on_after_apply(vm, apply, value);
         }
     }
     
-    let code = script!{
+    let _code = script!{
         let RustTest = #(StructTest::script_def(vm_ref!(vm)));
         let x = RustTest{
             field:2.0
-            on_click: || ~@CLICK
+            on_click: || {
+                this.field = 3.0
+            }
         }
         // a
         x.method();
@@ -156,7 +162,7 @@ pub fn test(){
     };
     
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         scope.import(mod.std)
         
         // array operations
@@ -200,6 +206,7 @@ pub fn test(){
         try {x{z:3}} assert(true) ok assert(false)
         // property value known
         let x2 = x{x:3} assert(x2.x == 3)
+        let x2 = x{x:2}
         // property frozen
         try x.x = 2 assert(true) ok assert(false)
                 
@@ -220,7 +227,7 @@ pub fn test(){
         try {x{p:true}} assert(true) ok assert(false)
         // can append to vec  
         try {x{1}} assert(false) ok assert(true)
-                                                        
+        
         // scope shadowing
         let x = 1
         let f = || x

@@ -9,10 +9,10 @@ use makepad_micro_proc_macro::{
     StructField
 };
 
-pub fn derive_scriptable_impl(input: TokenStream) -> TokenStream {
+pub fn derive_script_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
-    if let Err(err) = derive_scriptable_impl_inner(&mut parser, &mut tb) {
+    if let Err(err) = derive_script_impl_inner(&mut parser, &mut tb) {
         err
     }
     else {
@@ -20,7 +20,7 @@ pub fn derive_scriptable_impl(input: TokenStream) -> TokenStream {
     }
 }
 
-fn derive_scriptable_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<(), TokenStream> {
+fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<(), TokenStream> {
     
     let main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
@@ -62,7 +62,7 @@ fn derive_scriptable_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder)
         }
         
         tb.add("impl").stream(generic.clone());
-        tb.add("ScriptableReset for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        tb.add("ScriptReset for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
         let walk_fields = ["abs_pos","margin","width","height"];
         let layout_fields = ["scroll","clip_x","clip_y","padding","align","flow","spacing"];

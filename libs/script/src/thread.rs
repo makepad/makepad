@@ -63,7 +63,10 @@ pub struct ScriptThreadId(pub usize);
 
 #[derive(Debug, Clone, Copy)]
 pub enum ScriptTrapOn{
-    Error(Value),
+    Error{
+        in_rust: bool,
+        value: Value
+    },
     Return(Value),
 }
 
@@ -81,6 +84,7 @@ pub struct ScriptThread{
 use std::cell::Cell;
 #[derive(Default, Debug)]
 pub struct ScriptTrap{
+    pub in_rust: bool,
     pub(crate) on: Cell<Option<ScriptTrapOn>>,
     pub ip: ScriptIp,
 }
@@ -102,7 +106,10 @@ impl ScriptTrap{
 
 impl ScriptTrap{
     pub fn err(&self, err:Value)->Value{
-        self.on.set(Some(ScriptTrapOn::Error(err)));
+        self.on.set(Some(ScriptTrapOn::Error{
+            in_rust:self.in_rust,
+            value:err
+        }));
         err
     }
     
@@ -246,8 +253,7 @@ impl ScriptThread{
     
     // lets resolve an id to a Value
     pub fn scope_value(&mut  self, heap:&ScriptHeap, id: Id)->Value{
-        let val = heap.value(*self.scopes.last().unwrap(), id.into(),&mut self.trap);
-        val
+        heap.scope_value(*self.scopes.last().unwrap(), id.into(),&mut self.trap)
     }
     
     pub fn set_scope_value(&mut self, heap:&mut ScriptHeap, id: Id, value:Value)->Value{
@@ -265,6 +271,9 @@ impl ScriptThread{
         let scope = heap.new_with_proto(fnobj);
         
         heap.clear_object_deep(scope);
+        if fnobj.is_err(){
+            return fnobj
+        }
         
         let err = heap.push_all_fn_args(scope, args, &mut self.trap);
         if err.is_err(){
@@ -277,6 +286,7 @@ impl ScriptThread{
         if let Some(fnptr) = heap.parent_as_fn(scope){
             match fnptr{
                 ScriptFnPtr::Native(ni)=>{
+                    self.trap.in_rust = true;
                     return (*code.native.borrow().fn_table[ni.index as usize].fn_ptr)(&mut Vm{
                         host,
                         heap,
@@ -285,6 +295,7 @@ impl ScriptThread{
                     }, scope);
                 }
                 ScriptFnPtr::Script(sip)=>{
+                    self.trap.in_rust = false;
                     let call = CallFrame{
                         bases: self.new_bases(),
                         args: OpcodeArgs::default(),
@@ -293,6 +304,7 @@ impl ScriptThread{
                     self.scopes.push(scope);
                     self.calls.push(call);
                     self.trap.ip = sip;
+                    self.trap.in_rust = true;
                     return self.run_core(heap, code, host);
                 }
             }
@@ -303,6 +315,7 @@ impl ScriptThread{
     }
     
     pub fn run_core(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any)->Value{
+        self.trap.in_rust = false;
         let mut body = &code.bodies[self.trap.ip.body as usize];
         while (self.trap.ip.index as usize) < body.parser.opcodes.len(){
             let opcode = body.parser.opcodes[self.trap.ip.index as usize];
@@ -311,7 +324,7 @@ impl ScriptThread{
                 // if exception tracing
                 if let Some(trap) = self.trap.on.take(){
                     match trap{
-                        ScriptTrapOn::Error(value)=>{
+                        ScriptTrapOn::Error{value, in_rust}=>{
                             // check if we have a try clause
                             if self.call_has_try(){
                                 let try_frame = self.tries.pop().unwrap();
@@ -322,7 +335,12 @@ impl ScriptThread{
                             else{
                                 if let Some(ptr) = value.as_err(){
                                     if let Some(loc2) = code.ip_to_loc(ptr.ip){
-                                        println!("{} {}", value, loc2);
+                                        if in_rust{
+                                            println!("{}(in rust) {}", value, loc2);
+                                        }
+                                        else{
+                                            println!("{} {}", value, loc2);
+                                        }
                                     }
                                 }
                             }
@@ -358,7 +376,7 @@ impl ScriptThread{
                 
         self.scopes.push(code.bodies[body_id as usize].scope);
         self.mes.push(ScriptMe::object(code.bodies[body_id as usize].me));
-                
+        
         self.trap.ip.body = body_id;
         self.trap.ip.index = 0;
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();

@@ -4,7 +4,6 @@ use crate::makepad_id_derive::*;
 use std::fmt::Write;
 use crate::object::*;
 use crate::string::*;
-use std::collections::hash_map::Entry;
 use crate::thread::*;
 
 pub struct ScriptHeap{
@@ -344,7 +343,7 @@ impl ScriptHeap{
     
     pub(crate) fn force_value_in_map(&mut self, ptr:Object, key: Value, this:Value){
         let object = &mut self.objects[ptr.index as usize];
-        object.map.insert(key, this);
+        object.map_insert(key, this);
     }            
         
     fn set_value_index(&mut self, ptr: Object, index:Value, value: Value, trap:&ScriptTrap)->Value{
@@ -373,7 +372,7 @@ impl ScriptHeap{
             return NIL 
         }
         if ty.is_map(){
-            object.map.insert(index, value);
+            object.map_insert(index, value);
             return NIL
         }
         if ty.is_typed(){ // typed array
@@ -415,7 +414,7 @@ impl ScriptHeap{
                     }
                 }
             }
-            if let Some(set_value) = object.map.get_mut(&key){
+            if let Some(set_value) = object.map_get_mut(&key){
                 *set_value = value;
                 return NIL
             }
@@ -432,7 +431,7 @@ impl ScriptHeap{
             object.vec.extend_from_slice(&[key, value]);
         }
         else{
-            object.map.insert(key, value);
+            object.map_insert(key, value);
         }
         NIL
     }
@@ -457,7 +456,7 @@ impl ScriptHeap{
                         }
                     }
                 }
-                if let Some(set_value) = object.map.get(&key){
+                if let Some(set_value) = object.map_get(&key){
                     if set_value.value_type().to_redux() != value.value_type().to_redux(){
                         return trap.err_invalidproptype()
                     }
@@ -482,6 +481,14 @@ impl ScriptHeap{
                 object.vec.extend_from_slice(&[key, value]);
                 return NIL
             }
+            if let Some(_) = object.map_get(&key){
+                return trap.err_keyalreadyexists()
+            }
+            else{
+                object.map_insert(key, value);
+                return NIL    
+            }
+            /*
             match object.map.entry(key) {
                 Entry::Occupied(_) => {
                     return trap.err_keyalreadyexists()
@@ -490,7 +497,7 @@ impl ScriptHeap{
                     vac.insert(value);
                     return NIL
                 }
-            }
+            }*/
         }
         trap.err_unexpected()
     }
@@ -507,7 +514,7 @@ impl ScriptHeap{
             object.vec.extend_from_slice(&[key, value]);
             return NIL
         }
-        object.map.insert(key, value);
+        object.map_insert(key, value);
         NIL
     }
             
@@ -572,21 +579,36 @@ impl ScriptHeap{
         trap.err_notfound()
     }
     
+    pub fn scope_value(&self, ptr:Object, key: Id, trap:&ScriptTrap)->Value{
+        let mut ptr = ptr;
+        loop{
+            let object = &self.objects[ptr.index as usize];
+            if let Some(value) = object.map.get(&key.into()){
+                return *value
+            }
+            if let Some(next_ptr) = object.proto.as_object(){
+                ptr = next_ptr
+            }
+            else{
+                break;
+            } 
+        }
+        // alright nothing found
+        trap.err_notfound()
+    }
+    
     pub fn def_scope_value(&mut self, ptr:Object, key:Id, value:Value)->Option<Object>{
         // if we already have this value we have to shadow the scope
         let object = &mut self.objects[ptr.index as usize];
-        match object.map.entry(key.into()) {
-            Entry::Occupied(_) => {
-                let new_scope = self.new_with_proto(ptr.into());
-                let object = &mut self.objects[new_scope.index as usize];
-                object.map.insert(key.into(), value);
-                return Some(new_scope)
-               
-            }
-            Entry::Vacant(vac) => {
-                vac.insert(value);
-                return None
-            }
+        if let Some(_) = object.map.get(&key.into()){
+            let new_scope = self.new_with_proto(ptr.into());
+            let object = &mut self.objects[new_scope.index as usize];
+            object.map_insert(key.into(), value);
+            return Some(new_scope)
+        }
+        else{
+            object.map_insert(key.into(), value);
+            return None
         }
     }
         
@@ -623,7 +645,7 @@ impl ScriptHeap{
             //todo IMPLEMENT IT
         }
         if ty.is_map(){
-            if let Some(value) = object.map.get(&index){
+            if let Some(value) = object.map_get(&index){
                 return *value
             }
             else{
@@ -649,7 +671,7 @@ impl ScriptHeap{
         let mut ptr = obj_ptr;
         loop{
             let object = &self.objects[ptr.index as usize];
-            if let Some(value) = object.map.get(&key){
+            if let Some(value) = object.map_get(&key){
                 return *value
             }
             if let Some(next_ptr) = object.proto.as_object(){
@@ -666,7 +688,7 @@ impl ScriptHeap{
         let mut ptr = obj_ptr;
         loop{
             let object = &self.objects[ptr.index as usize];
-            if let Some(value) = object.map.get(&key){
+            if let Some(value) = object.map_get(&key){
                 return *value
             }
             if object.tag.get_type().is_vec2(){
@@ -685,26 +707,7 @@ impl ScriptHeap{
         }
         trap.err_notfound()
     }
-    
-    /*
-    pub fn value_map(&self, ptr:Object, key:Value, def:Value)->Value{
-        // hard array index
-        if key.is_unprefixed_id(){
-            return self.value_deep_map(ptr, key, def)
-        }
-        if key.is_index(){
-            return self.value_index(ptr, key, def)
-        }
-        if key.is_prefixed_id(){
-            return self.value_deep_prefixed(ptr, key, def)
-        }
-        if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
-            return self.value_deep_map(ptr, key, def)
-        }
-        // TODO implement string lookup
-        def
-    }*/
-    
+
         
     pub fn object_method(&self, ptr:Object, key:Value, trap:&ScriptTrap)->Value{
         return self.value_deep_map(ptr, key, trap)
@@ -741,12 +744,12 @@ impl ScriptHeap{
     }
     
     #[inline]
-    pub fn value_for_apply(&self, obj:Value, key:Value)->Value{
+    pub fn value_dirty(&mut self, obj:Value, key:Value)->Option<Value>{
         if let Some(mut ptr) = obj.as_object(){
             loop{
-                let object = &self.objects[ptr.index as usize];
-                if let Some(value) = object.map.get(&key){
-                    return *value
+                let object = &mut self.objects[ptr.index as usize];
+                if let Some(value) = object.map_get_if_dirty(&key){
+                    return Some(*value)
                 }
                 if let Some(next_ptr) = object.proto.as_object(){
                     ptr = next_ptr
@@ -756,7 +759,7 @@ impl ScriptHeap{
                 }
             }
         }
-        NIL    
+        None    
     }
         
     
@@ -973,7 +976,7 @@ impl ScriptHeap{
         let object = &self.objects[top_ptr.index as usize];
         
         // which arg number?
-        let index = object.map.len();
+        let index = object.map_len();
         
         if let Some(ptr) = object.proto.as_object(){
             let object = &self.objects[ptr.index as usize];
@@ -984,7 +987,7 @@ impl ScriptHeap{
                         return trap.err_invalidargtype()
                     }
                 }
-                self.objects[top_ptr.index as usize].map.insert(key, value);
+                self.objects[top_ptr.index as usize].map_insert(key, value);
                 if let Some(obj) = value.as_object(){
                     let object = &mut self.objects[obj.index as usize];
                     object.tag.set_reffed();
@@ -1008,7 +1011,7 @@ impl ScriptHeap{
                     if !chunk[1].is_nil() && chunk[1].value_type().to_redux() != value.value_type().to_redux(){
                         return trap.err_invalidargtype()
                     }
-                    self.objects[top_ptr.index as usize].map.insert(key, value);
+                    self.objects[top_ptr.index as usize].map_insert(key, value);
                     return NIL    
                 }
             }
@@ -1030,7 +1033,7 @@ impl ScriptHeap{
                             return trap.err_invalidargtype()
                         }
                     }
-                    self.objects[top_ptr.index as usize].map.insert(key, *value);
+                    self.objects[top_ptr.index as usize].map_insert(key, *value);
                     if let Some(obj) = value.as_object(){
                         let object = &mut self.objects[obj.index as usize];
                         object.tag.set_reffed();
@@ -1072,17 +1075,23 @@ impl ScriptHeap{
                                 return false
                             }
                         }
-                        if oa.map.len() != ob.map.len(){
+                        if oa.map_len() != ob.map_len(){
                             return false
                         }
-                        for (a,b) in oa.map.iter().zip(ob.map.iter()){
-                            if !self.deep_eq(*a.0, *b.0){
-                                return false
+                        if let Some(ret) = oa.map_iter_ret(|k,v1|{
+                            if let Some(v2) = ob.map_get(&k){
+                                if !self.deep_eq(v1, *v2){
+                                    return Some(false)
+                                }
                             }
-                            if !self.deep_eq(*a.1, *b.1){
-                                return false
+                            else{
+                                return Some(false)
                             }
+                            None
+                        }){
+                            return ret
                         }
+                        
                         aw = oa.proto;
                         bw = ob.proto;
                         if aw == bw{
@@ -1172,11 +1181,16 @@ impl ScriptHeap{
         let mut first = true;
         loop{
             let object = &self.objects[ptr.index as usize];
-            for (key, value) in object.map.iter(){
+            object.map_iter(|key,value|{
+                if !first{print!(",")}
+                self.print_key_value(key, value, deep, &mut str);
+                first = false;
+            });
+            /*for (key, value) in object.map.iter(){
                 if !first{print!(",")}
                 self.print_key_value(*key, *value, deep, &mut str);
                 first = false;
-            }
+            }*/
             if object.tag.get_type().has_paired_vec(){
                 for chunk in object.vec.chunks(2){
                     if !first{print!(",")}
