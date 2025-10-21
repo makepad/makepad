@@ -26,41 +26,15 @@ live_design!{
     }
 }
 
-/// A sample of a scroll event
-#[derive(Clone, Copy)]
-struct ScrollSample {
-    abs: DVec2,
-    time: f64,
-}
-
-enum ScrollState {
-    Stopped,
-    Drag { samples: Vec<ScrollSample> },
-    Flick { delta: DVec2, next_frame: NextFrame },
-}
-
 #[derive(Live, LiveHook, LiveRegister)]
 pub struct ScrollBars {
     #[live] show_scroll_x: bool,
     #[live] show_scroll_y: bool,
     #[live] scroll_bar_x: ScrollBar,
     #[live] scroll_bar_y: ScrollBar,
-
-    /// The minimum amount of scroll to trigger a flick animation
-    #[live(0.2)] flick_scroll_minimum: f64,
-    /// The maximum amount of scroll to trigger a flick animation
-    #[live(80.0)] flick_scroll_maximum: f64,
-    /// The scaling factor for the flick animation
-    #[live(0.005)] flick_scroll_scaling: f64,
-    /// The decay factor for the flick animation
-    #[live(0.97)] flick_scroll_decay: f64,
-    /// Whether to enable drag scrolling
-    #[live(true)] drag_scrolling: bool,
-
     #[rust] nav_scroll_index: Option<NavScrollIndex>,
     #[rust] scroll: DVec2,
     #[rust] area: Area,
-    #[rust(ScrollState::Stopped)] scroll_state: ScrollState,
 }
 
 pub enum ScrollBarsAction {
@@ -91,8 +65,6 @@ impl ScrollBars {
     }
     
     pub fn handle_main_event(&mut self, cx: &mut Cx, event: &Event, _scope:&mut Scope, actions: &mut Vec<ScrollBarsAction> ) {
-        self.handle_flick(cx, event, actions);
-
         if let Event::Trigger(te) = event{
             if let Some(triggers) = te.triggers.get(&self.area){
                 if let Some(trigger) = triggers.iter().find(|t| t.id == live_id!(scroll_focus_nav)){
@@ -162,163 +134,6 @@ impl ScrollBars {
                 }
             });
             if let Some(y) = ret_y {self.scroll.y = y; self.redraw(cx);}
-        }
-
-        self.handle_touch_based_drag(cx, event, actions);
-    }
-
-    fn handle_flick(&mut self, cx: &mut Cx, event: &Event, actions: &mut Vec<ScrollBarsAction> ) {
-        let flick_delta = if let ScrollState::Flick { delta, next_frame } = &self.scroll_state {
-            if next_frame.is_event(event).is_some() {
-                Some(*delta)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some(mut delta) = flick_delta {
-            delta = delta * self.flick_scroll_decay;
-
-            let mut should_continue = false;
-            if self.show_scroll_x && delta.x.abs() > self.flick_scroll_minimum {
-                should_continue = true;
-            }
-            if self.show_scroll_y && delta.y.abs() > self.flick_scroll_minimum {
-                should_continue = true;
-            }
-
-            if should_continue {
-                let mut pos = self.scroll;
-                if self.show_scroll_x {
-                    pos.x -= delta.x;
-                }
-                if self.show_scroll_y {
-                    pos.y -= delta.y;
-                }
-
-                if self.set_scroll_pos(cx, pos) {
-                    if self.show_scroll_x && delta.x.abs() > 0.0 {
-                        actions.push(ScrollBarsAction::ScrollX(pos.x));
-                    }
-                    if self.show_scroll_y && delta.y.abs() > 0.0 {
-                        actions.push(ScrollBarsAction::ScrollY(pos.y));
-                    }
-                }
-
-                self.scroll_state = ScrollState::Flick {
-                    delta,
-                    next_frame: cx.new_next_frame()
-                };
-            } else {
-                self.scroll_state = ScrollState::Stopped;
-            }
-        }
-    }
-    
-    /// Handles touch-based drag scrolling
-    fn handle_touch_based_drag(&mut self, cx: &mut Cx, event: &Event, actions: &mut Vec<ScrollBarsAction> ) {
-        if !self.drag_scrolling {
-            return;
-        }
-
-        // Check if scroll bar handles are not captured
-        let scroll_bar_captured = self.scroll_bar_x.is_area_captured(cx)
-            || self.scroll_bar_y.is_area_captured(cx);
-
-        if scroll_bar_captured {
-            self.scroll_state = ScrollState::Stopped;
-            return;
-        }
-
-        match event.hits(cx, self.area) {
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                self.scroll_state = ScrollState::Drag {
-                    samples: vec![ScrollSample { abs: fe.abs, time: fe.time }]
-                };
-            }
-            Hit::FingerMove(e) => {
-                match &mut self.scroll_state {
-                    ScrollState::Drag { samples } => {
-                        let new_abs = e.abs;
-                        let old_sample = *samples.last().unwrap();
-                        samples.push(ScrollSample { abs: new_abs, time: e.time });
-                        if samples.len() > 4 {
-                            samples.remove(0);
-                        }
-
-                        let delta = new_abs - old_sample.abs;
-                        let mut pos = self.scroll;
-
-                        if self.show_scroll_x {
-                            pos.x -= delta.x;
-                        }
-                        if self.show_scroll_y {
-                            pos.y -= delta.y;
-                        }
-
-                        if self.set_scroll_pos(cx, pos) {
-                            if self.show_scroll_x && delta.x.abs() > 0.0 {
-                                actions.push(ScrollBarsAction::ScrollX(pos.x));
-                            }
-                            if self.show_scroll_y && delta.y.abs() > 0.0 {
-                                actions.push(ScrollBarsAction::ScrollY(pos.y));
-                            }
-                        }
-                    }
-                    _ => ()
-                }
-            }
-            Hit::FingerUp(fe) if fe.is_primary_hit() => {
-                match &mut self.scroll_state {
-                    ScrollState::Drag { samples } => {
-                        let mut last = None;
-                        let mut scaled_delta = DVec2::default();
-                        let mut total_delta = DVec2::default();
-
-                        for sample in samples.iter().rev() {
-                            if last.is_none() {
-                                last = Some(sample);
-                            } else {
-                                let time_delta = last.unwrap().time - sample.time;
-                                if time_delta > 0.0 {
-                                    let abs_delta = last.unwrap().abs - sample.abs;
-                                    total_delta += abs_delta;
-                                    scaled_delta += abs_delta / time_delta;
-                                }
-                            }
-                        }
-
-                        scaled_delta *= self.flick_scroll_scaling;
-
-                        // Check if we should start flick animation
-                        let mut should_flick = false;
-                        if self.show_scroll_x && total_delta.x.abs() > 10.0 && scaled_delta.x.abs() > self.flick_scroll_minimum {
-                            should_flick = true;
-                        }
-                        if self.show_scroll_y && total_delta.y.abs() > 10.0 && scaled_delta.y.abs() > self.flick_scroll_minimum {
-                            should_flick = true;
-                        }
-
-                        if should_flick {
-                            // Clamp the delta to maximum values
-                            let delta = DVec2 {
-                                x: scaled_delta.x.min(self.flick_scroll_maximum).max(-self.flick_scroll_maximum),
-                                y: scaled_delta.y.min(self.flick_scroll_maximum).max(-self.flick_scroll_maximum),
-                            };
-                            self.scroll_state = ScrollState::Flick {
-                                delta,
-                                next_frame: cx.new_next_frame()
-                            };
-                        } else {
-                            self.scroll_state = ScrollState::Stopped;
-                        }
-                    }
-                    _ => ()
-                }
-            }
-            _ => ()
         }
     }
     
