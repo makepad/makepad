@@ -47,16 +47,16 @@ pub struct CallFrame{
 
 pub struct ScriptMe{
     pub(crate) ty: u32,
-    pub(crate) object: ObjectPtr,
+    pub(crate) object: Object,
 }
  
 impl ScriptMe{
     pub const ARRAY: u32 = 1;
     pub const CALL: u32 = 2;
     pub const OBJ: u32 = 3;
-    pub fn object(object:ObjectPtr)->Self{Self{object, ty: Self::OBJ}}
-    pub fn array(object:ObjectPtr)->Self{Self{object, ty: Self::ARRAY}}
-    pub fn call(object:ObjectPtr)->Self{Self{object, ty: Self::CALL}}
+    pub fn object(object:Object)->Self{Self{object, ty: Self::OBJ}}
+    pub fn array(object:Object)->Self{Self{object, ty: Self::ARRAY}}
+    pub fn call(object:Object)->Self{Self{object, ty: Self::CALL}}
 }
 
 pub struct ScriptThreadId(pub usize);
@@ -71,11 +71,11 @@ pub struct ScriptThread{
     pub(crate) stack_limit: usize,
     pub(crate) tries: Vec<TryFrame>,
     pub(crate) loops: Vec<LoopFrame>,
-    pub(crate) scopes: Vec<ObjectPtr>,
+    pub(crate) scopes: Vec<Object>,
     pub(crate) stack: Vec<Value>,
     pub(crate) calls: Vec<CallFrame>,
     pub(crate) mes: Vec<ScriptMe>,
-    pub(crate) trap: ScriptTrap,
+    pub trap: ScriptTrap,
     pub(crate) last_err: Value,
 }
 
@@ -277,7 +277,7 @@ impl ScriptThread{
         if let Some(fnptr) = heap.parent_as_fn(scope){
             match fnptr{
                 ScriptFnPtr::Native(ni)=>{
-                    return (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut ScriptVmRef{
+                    return (*code.native.fn_table[ni.index as usize].fn_ptr)(&mut Vm{
                         host,
                         heap,
                         thread:self,

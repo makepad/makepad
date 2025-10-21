@@ -7,7 +7,7 @@ use crate::*;
 
 #[derive(Default)]
 pub struct ScriptTypeMethods{
-    pub type_table: Vec<IdMap<Id, ObjectPtr>>,
+    pub type_table: Vec<IdMap<Id, Object>>,
 }
 
 impl ScriptTypeMethods{
@@ -19,7 +19,7 @@ impl ScriptTypeMethods{
     }
     
     pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, args:&[(Id,Value)], ty_redux:usize, method:Id, f: F) 
-    where F: Fn(&mut ScriptVmRef, ObjectPtr)->Value + 'static{
+    where F: Fn(&mut Vm, Object)->Value + 'static{
         let fn_obj = native.add(heap, args, f);
                 
         if ty_redux >= self.type_table.len(){

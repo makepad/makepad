@@ -82,7 +82,7 @@ impl ScriptHeap{
     }
     
         
-    pub fn free_object_if_unreffed(&mut self, ptr:ObjectPtr){
+    pub fn free_object_if_unreffed(&mut self, ptr:Object){
         let obj = &mut self.objects[ptr.index as usize];
         if !obj.tag.is_reffed(){
             obj.clear();

@@ -317,19 +317,19 @@ impl fmt::Display for ObjectTag {
 }
 
 #[derive(Default, Debug)]
-pub struct Object{
+pub struct ObjectData{
     pub tag: ObjectTag,
     pub proto: Value,
     pub map: ValueMap<Value, Value>,
     pub vec: Vec<Value>,
 }
 
-impl Object{
-    pub fn merge_map_from_other(&mut self, other:&Object){
+impl ObjectData{
+    pub fn merge_map_from_other(&mut self, other:&ObjectData){
         self.map.extend(other.map.iter());
     }
      
-    pub fn push_vec_from_other(&mut self, other:&Object){
+    pub fn push_vec_from_other(&mut self, other:&ObjectData){
         // alright lets go and push the vec from other
         let ty_self = self.tag.get_type();
         let ty_other = other.tag.get_type();
