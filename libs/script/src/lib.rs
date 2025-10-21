@@ -90,13 +90,11 @@ pub fn test(){
                 field: ScriptNew::script_new(vm)
             }
         }
-                
+        
         fn script_def(vm:&mut Vm)->Value{
             let obj = vm.heap.new(0);
-            let v = f64::script_def(vm);
-            
+            let v = (1.0).to_value(vm);
             vm.heap.set_value(obj, Id::from_str_with_lut("field").unwrap().into(), v, &vm.thread.trap);
-            
             // lets give this thing some methods
             Self::on_script_def(vm, obj);
             obj.into()
@@ -105,8 +103,9 @@ pub fn test(){
     
     impl ScriptHook for StructTest{
         fn on_script_def(vm:&mut Vm, obj:Object){
-            vm.add_fn(obj, id!(method), args!(o = 1.0), |_vm, _args|{
-                println!("CALLED METHOD");
+            vm.add_fn(obj, id!(method), args!(o = 1.0), |vm, args|{
+                let fnptr = value!(vm, args.this.on_click);
+                vm.call(fnptr, &[]);
                 NIL
             });
         }
@@ -122,8 +121,11 @@ pub fn test(){
     }
     
     let code = script!{
-        let RustTest = #(StructTest::script_api(vm_ref!(vm)));
-        let x = RustTest{field:2.0}
+        let RustTest = #(StructTest::script_def(vm_ref!(vm)));
+        let x = RustTest{
+            field:2.0
+            on_click: || ~@CLICK
+        }
         // a
         x.method();
     };
