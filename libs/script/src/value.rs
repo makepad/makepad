@@ -42,6 +42,18 @@ impl From<Object> for Value{
     }
 }
 
+
+impl From<Value> for Object{
+    fn from(v:Value) -> Self{
+        if let Some(obj) = v.as_object(){
+            obj
+        }
+        else{
+            Object{index:0}
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct HeapString{
     pub index: u32    

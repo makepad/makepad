@@ -65,7 +65,7 @@ pub fn test(){
     vm.add_fn(net, id!(fetch), args!(url=NIL, options=NIL), |vm, args|{
         // how do we construct our options
         let _options = value!(vm, args.options); 
-        //let options = StructTest::new_apply(vm, options);
+        // let options = StructTest::new_apply(vm, options);
         NIL
     });
     
@@ -77,7 +77,7 @@ pub fn test(){
     }
     
     pub struct StructTest{
-        _field:f64
+        field:f64
     }
     
     //use crate::scriptable::*;
@@ -87,7 +87,7 @@ pub fn test(){
     impl ScriptNew for StructTest{
         fn script_new(vm:&mut Vm)->Self{
             StructTest{
-                _field: f64::script_new(vm)
+                field: ScriptNew::script_new(vm)
             }
         }
                 
@@ -100,7 +100,8 @@ pub fn test(){
     }
     
     impl Script for StructTest{
-        fn script_apply(&mut self, _vm:&mut Vm, _apply:&mut ScriptApply, _value:Value){
+        fn script_apply(&mut self, vm:&mut Vm, apply:&mut ScriptApply, value:Value){
+            self.field.script_apply(vm, apply, value!(vm, value.field));
         }
         
         fn script_call(&mut self, _vm:&mut Vm, _method:Id, _args:Object)->Value{
