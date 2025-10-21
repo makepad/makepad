@@ -131,7 +131,7 @@ impl ValueType{
     pub const COLOR: Self = Self(4);
     pub const STRING: Self = Self(5);
     pub const OBJECT: Self = Self(6);
-    pub const RSID: Self = Self(7);
+    pub const TRACKID: Self = Self(7);
     pub const OPCODE: Self = Self(8);
     
     pub const REDUX_MARKER: Self = Self(9);
@@ -167,9 +167,9 @@ impl ValueType{
     pub const ERR_INVALIDARGTYPE: Self = Self(37);
     pub const ERR_INVALIDARGNAME: Self = Self(38);
     pub const ERR_LAST: Self = Self(38);
-            
-    pub const ID: Self = Self(0x80);
     
+    pub const ID: Self = Self(0x80);
+        
     pub const REDUX_NUMBER: usize = 0;
     pub const REDUX_NAN: usize = 1;
     pub const REDUX_BOOL: usize = 2;
@@ -230,7 +230,7 @@ impl fmt::Display for ValueType {
             Self::COLOR=>write!(f,"color"),
             Self::STRING=>write!(f,"string"),
             Self::OBJECT=>write!(f,"object"),
-            Self::RSID=>write!(f,"rsid"),
+            Self::TRACKID=>write!(f,"trackid"),
             Self::OPCODE=>write!(f,"opcode"),
             Self::INLINE_STRING_0=>write!(f,"string0"),
             Self::INLINE_STRING_1=>write!(f,"string1"),
@@ -294,7 +294,7 @@ impl Value{
     pub const TYPE_COLOR: u64 = ValueType::COLOR.to_u64();
     pub const TYPE_STRING: u64 = ValueType::STRING.to_u64();
     pub const TYPE_OBJECT: u64 = ValueType::OBJECT.to_u64();
-    pub const TYPE_RSID: u64 = ValueType::RSID.to_u64();
+    pub const TYPE_TRACKID: u64 = ValueType::TRACKID.to_u64();
     
     pub const TYPE_INLINE_STRING_0: u64 = ValueType::INLINE_STRING_0.to_u64();
     pub const TYPE_INLINE_STRING_1: u64 = ValueType::INLINE_STRING_1.to_u64();
@@ -307,6 +307,10 @@ impl Value{
     pub const TYPE_ID: u64 = ValueType::ID.to_u64();
     
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
+    
+    pub const TRACKID_VALUE_MASK: u64 = 0xffff_ffff;
+    pub const TRACKID_DIRTY_BIT: u64 = 0x1_0000_0000;
+    
     
     // opcodes
     pub const TYPE_OPCODE: u64 = ValueType::OPCODE.to_u64();
@@ -408,8 +412,38 @@ impl Value{
         Self(val as u64|Self::TYPE_COLOR)
     }
     
-    pub const fn from_rsid(val: u64)->Self{
-        Self(val as u64|(Self::TYPE_RSID&0xFF_FFFF_FFFF))
+    pub const fn from_trackid(val: u32)->Self{
+        Self((val as u64)|Self::TYPE_TRACKID)
+    }
+    
+    pub const fn from_trackid_dirty(val: u32)->Self{
+        Self((val as u64)|Self::TYPE_TRACKID|Self::TRACKID_DIRTY_BIT)
+    }
+    
+    pub const fn get_and_clear_trackid_dirty(&mut self)->bool{
+        if self.is_trackid(){
+            let ret = self.0 & Self::TRACKID_DIRTY_BIT != 0;
+            self.0 &= !Self::TRACKID_DIRTY_BIT;
+            ret
+        }
+        else{
+            false
+        }
+    }
+    
+    pub const fn set_trackid_dirty(&mut self){
+        if self.is_trackid(){
+            self.0 |= Self::TRACKID_DIRTY_BIT
+        }
+    }
+        
+    pub const fn as_trackid(&self)->Option<u32>{
+        if self.is_trackid(){
+            Some((self.0 &0xFFFF_FFFF) as u32)
+        }
+        else{
+            None
+        }
     }
     
     pub const fn from_id(val: Id)->Self{
@@ -598,12 +632,6 @@ impl Value{
         None
     }
     
-    pub const fn as_rsid(&self)->Option<u64>{
-        if self.is_rsid(){
-            return Some((self.0&0xff_ffff_ffff) as u64)
-        }
-        None
-    }
     
     pub const fn is_number(&self)->bool{
         self.0 <= Self::TYPE_TRACED_NAN_MAX
@@ -657,8 +685,8 @@ impl Value{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
     }
     
-    pub const fn is_rsid(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_RSID
+    pub const fn is_trackid(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_TRACKID
     }
 }
 
@@ -691,8 +719,8 @@ impl fmt::Display for Value {
         if let Some(ptr) = self.as_object(){
             return write!(f, "[Object:{}]",ptr.index)
         }
-        if let Some(index) = self.as_rsid(){
-            return write!(f, "[RsID:{}]",index)
+        if let Some(index) = self.as_trackid(){
+            return write!(f, "[TrackID:{}]",index)
         }
         if let Some(error) = self.as_err(){
             return write!(f, "{}", error.ty)

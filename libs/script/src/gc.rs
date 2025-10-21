@@ -9,7 +9,7 @@ impl ScriptHeap{
             return;
         }
         obj.tag.set_mark();
-        for (key, value) in obj.map.iter(){
+        obj.map_iter(|key,value|{
             if let Some(ptr) = key.as_object(){
                 self.mark_vec.push(ptr.index as usize);
             }
@@ -22,7 +22,7 @@ impl ScriptHeap{
             else if let Some(ptr) = value.as_string(){
                 self.strings[ptr.index as usize].tag.set_mark();
             }
-        }
+        });
         let len = obj.vec.len();
         for i in 0..len{
             let object = &self.objects[index];
