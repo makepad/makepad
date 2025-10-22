@@ -41,23 +41,28 @@ impl ScriptHeap{
     
     
     
-    pub fn new(&mut self, flags: u64)->Object{
+    pub fn new(&mut self)->Object{
         if let Some(index) = self.objects_free.pop(){
             let object = &mut self.objects[index];
-            object.tag.set_flags(flags | ObjectTag::ALLOCED);
+            object.tag.set_alloced();
             object.proto = id!(object).into();
             Object{index: index as _}
         }
         else{
             let index = self.objects.len();
             let mut object = ObjectData::default();
-            object.tag.set_flags(flags | ObjectTag::ALLOCED);
+            object.tag.set_alloced();
             object.proto = id!(object).into();
             self.objects.push(object);
             Object{index: index as _}
         }
     }
     
+    pub fn new_tracked(&mut self)->Object{
+        let obj = self.new();
+        self.objects[obj.index as usize].tag.set_tracked();
+        obj
+    }
              
     pub fn new_with_proto(&mut self, proto:Value)->Object{
         let (proto_fwd, proto_index) = if let Some(ptr) = proto.as_object(){
@@ -66,7 +71,7 @@ impl ScriptHeap{
             (object.tag.proto_fwd(), ptr.index as usize)
         }
         else{
-            let ptr = self.new(0);
+            let ptr = self.new();
             self.objects[ptr.index as usize].proto = proto;
             return ptr
         };
@@ -315,7 +320,11 @@ impl ScriptHeap{
     pub fn set_object_type(&mut self, ptr:Object, ty: ObjectType){
         self.objects[ptr.index as usize].set_type(ty)
     }
-        
+    
+    pub fn set_first_applied_and_clean(&mut self, ptr:Object){
+        self.objects[ptr.index as usize].tag.set_first_applied_and_clean()
+    }
+            
     pub fn clear_object_deep(&mut self, ptr:Object){
         self.objects[ptr.index as usize].tag.clear_deep()
     }
@@ -414,8 +423,7 @@ impl ScriptHeap{
                     }
                 }
             }
-            if let Some(set_value) = object.map_get_mut(&key){
-                *set_value = value;
+            if object.map_set_if_exist(key, value){
                 return NIL
             }
             if let Some(next_ptr) = object.proto.as_object(){
@@ -560,6 +568,10 @@ impl ScriptHeap{
         trap.err_invalidkeytype()
     }
     
+    
+    // scope specific value get/set
+    
+    
     pub fn set_scope_value(&mut self, ptr:Object, key:Id, value:Value, trap:&ScriptTrap)->Value{
         let mut ptr = ptr;
         loop{
@@ -581,10 +593,18 @@ impl ScriptHeap{
     
     pub fn scope_value(&self, ptr:Object, key: Id, trap:&ScriptTrap)->Value{
         let mut ptr = ptr;
+        let key = key.into();
         loop{
             let object = &self.objects[ptr.index as usize];
-            if let Some(value) = object.map.get(&key.into()){
+            if let Some(value) = object.map.get(&key){
                 return *value
+            }
+            if object.tag.get_type().is_vec2(){
+                for chunk in object.vec.rchunks(2){
+                    if chunk[0] == key{
+                        return chunk[1]
+                    }
+                }
             }
             if let Some(next_ptr) = object.proto.as_object(){
                 ptr = next_ptr
@@ -603,11 +623,11 @@ impl ScriptHeap{
         if let Some(_) = object.map.get(&key.into()){
             let new_scope = self.new_with_proto(ptr.into());
             let object = &mut self.objects[new_scope.index as usize];
-            object.map_insert(key.into(), value);
+            object.map.insert(key.into(), value);
             return Some(new_scope)
         }
         else{
-            object.map_insert(key.into(), value);
+            object.map.insert(key.into(), value);
             return None
         }
     }
@@ -744,18 +764,36 @@ impl ScriptHeap{
     }
     
     #[inline]
-    pub fn value_dirty(&mut self, obj:Value, key:Value)->Option<Value>{
-        if let Some(mut ptr) = obj.as_object(){
-            loop{
-                let object = &mut self.objects[ptr.index as usize];
-                if let Some(value) = object.map_get_if_dirty(&key){
-                    return Some(*value)
-                }
-                if let Some(next_ptr) = object.proto.as_object(){
-                    ptr = next_ptr
+    pub fn value_apply_if_dirty(&mut self, obj:Value, key:Value)->Option<Value>{
+        if let Some(ptr) = obj.as_object(){
+            // only do top level if dirty
+            let object = &mut self.objects[ptr.index as usize];
+            if let Some(value) = object.map_get_if_dirty(&key){
+                return Some(*value)
+            }
+            // if we havent been applied before apply prototype chain too
+            if !object.tag.is_first_applied(){
+                let mut ptr = if let Some(next_ptr) = object.proto.as_object(){
+                    next_ptr
                 }
                 else{
-                    break;
+                    return None
+                };
+                loop{
+                    let object = &self.objects[ptr.index as usize];
+                    // skip the last prototype, since its already default valued on the Rust object
+                    if !object.proto.is_object(){
+                        return None
+                    }
+                    if let Some(value) = object.map_get(&key){
+                        return Some(*value)
+                    }
+                    if let Some(next_ptr) = object.proto.as_object(){
+                        ptr = next_ptr
+                    }
+                    else{
+                        return None
+                    }
                 }
             }
         }

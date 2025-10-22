@@ -36,7 +36,7 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
         tb.add("}");
     }
     else{
-        tb.add("Script::default()");
+        tb.add("ScriptBlock::default()");
     }
     tb.end()
 }

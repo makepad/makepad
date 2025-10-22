@@ -1,12 +1,10 @@
 use proc_macro::{TokenStream};
 
 use makepad_micro_proc_macro::{
+    Id,
     TokenBuilder,
     TokenParser,
-    unwrap_option,
     error_result,
-    Attribute,
-    StructField
 };
 
 pub fn derive_script_impl(input: TokenStream) -> TokenStream {
@@ -28,7 +26,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         let struct_name = parser.expect_any_ident() ?;
         let generic = parser.eat_generic();
         let types = parser.eat_all_types();
-        let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
+        let where_clause = parser.eat_where_clause(None); 
         
         let mut fields = if let Some(_types) = types {
             return error_result("Unexpected type form")
@@ -62,276 +60,66 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         }
         
         tb.add("impl").stream(generic.clone());
-        tb.add("ScriptReset for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        tb.add("ScriptHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        tb.add("    fn on_deref_before_apply(&mut self, vm:&mut Vm, apply:&mut ApplyScope, value:Value){");
+        tb.add("        <Self as ScriptHook>::on_before_apply(self, vm, apply, value);");
         
-        let walk_fields = ["abs_pos","margin","width","height"];
-        let layout_fields = ["scroll","clip_x","clip_y","padding","align","flow","spacing"];
+        if let Some(deref_field) = deref_field {
+            tb.add("    <Self as ScriptHookDeref>::on_deref_before_apply(&mut self.").ident(&deref_field.name).add(",vm, apply, value);");
+        }
+        tb.add("    }");
+        
+        tb.add("    fn on_deref_after_apply(&mut self,vm: &mut Vm, apply:&mut ApplyScope, value:Value){");
+        tb.add("        <Self as ScriptHook>::on_after_apply(self, vm, apply, value);");
+        
+        if let Some(deref_field) = deref_field {
+            tb.add("    <Self as ScriptHookDeref>::on_deref_after_apply(&mut self.").ident(&deref_field.name).add(", vm, apply, value);");
+        }
+        tb.add("        <Self as ScriptHook>::on_after_apply(self, vm, apply, value);");
+        tb.add("    }");
+        tb.add("}");
                 
-        tb.add("    fn apply_reset(&mut self, cx: &mut Cx, apply:&mut Apply, start_index:usize, nodes:&[LiveNode]) {");
         
-        if let Some(deref_field) = deref_field {
-            tb.add("    self.").ident(&deref_field.name).add(".apply_reset(cx, apply, start_index, nodes);");
-        }
-
+        // Script
+        
+        
+        
+        tb.add("impl").stream(generic.clone());
+        tb.add("ScriptApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        
+        tb.add("    fn script_apply(&mut self, vm:&mut Vm, apply:&mut ApplyScope, value:Value) {");
+        tb.add("       if <Self as ScriptHook>::on_skip_apply(self, vm, apply, value) || value.is_nil(){return};");
+        
+        tb.add("        <Self as ScriptHookDeref>::on_deref_before_apply(self, vm, apply, value);");
+        
         for field in &fields {
-             if field.attrs.iter().any( | a | a.name == "live")  {
-                tb.add("let mut ").ident(&format!("has_{}",field.name)).add(" = false;");
+            if field.attrs.iter().any( | a | a.name == "live" || a.name =="script"){
+                tb.add("if let Some(v) = vm.heap.value_apply_if_dirty(value, Value::from_id(id!(")
+                    .ident(&field.name).add("))){");
+                tb.add("self.").ident(&field.name).add(".script_apply(vm, apply, v);");
+                tb.add("}");
             }
-            else if field.attrs.iter().any( | a | a.name == "walk") {
-                for f in walk_fields{
-                    tb.add("let mut").ident(&format!("has_{}",f)).add(" = false;");
-                }
-            }
-            else if field.attrs.iter().any( | a | a.name == "layout") {
-                for f in layout_fields{
-                    tb.add("let mut").ident(&format!("has_{}",f)).add(" = false;");
-                }
-            } 
-        } 
-        /*
-        tb.add("        if !nodes[start_index].value.is_structy_type(){");
-        tb.add("            return;");
-        tb.add("        }");
-        tb.add("        let mut index = start_index + 1;");
-        tb.add("        while !nodes[index].is_close(){");
-        tb.add("            if nodes[index].origin.has_prop_type(LivePropType::Field){");
-        tb.add("               match nodes[index].id {");
-        for field in &fields {
-            if field.attrs.iter().any( | a | a.name == "live")  {
-                tb.add("            LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>").ident(&format!("has_{}",field.name)).add("= true,");
-            }
-            else if field.attrs.iter().any( | a | a.name == "walk") {
-                for f in walk_fields{
-                    tb.add("        live_id!(").ident(f).add(")=>").ident(&format!("has_{}",f)).add(" = true,");
-                }
-            }
-            else if field.attrs.iter().any( | a | a.name == "layout") {
-                for f in layout_fields{
-                    tb.add("        live_id!(").ident(f).add(")=>").ident(&format!("has_{}",f)).add(" = true,");
-                }
+            if field.attrs.iter().any( | a | a.name =="deref" || a.name == "splat" || a.name =="walk" || a.name=="layout"){
+                tb.add("self.").ident(&field.name).add(".script_apply(vm, apply, value);");
             }
         }
-        tb.add("                    _=>()");
-        tb.add("                }");
-        tb.add("            }");
-        tb.add("            index = nodes.skip_node(index);");
-        tb.add("        }");
-        */
-        for field in &fields {
-            if let Some(attr) = field.attrs.iter().find( | a | a.name == "live" ){
-                tb.add("if !").ident(&format!("has_{}",&field.name)).add("{");
-                tb.add("self.").ident(&field.name).add(" = ");
-                if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                    tb.add("LiveNew::new(cx);}");
-                }
-                else {
-                    tb.add("(").stream(attr.args.clone()).add(").into();}");
-                }
-            }
-            else if field.attrs.iter().any( | a | a.name == "walk") {
-                for f in walk_fields{
-                    tb.add("if !").ident(&format!("has_{}",f)).add("{self.").ident(&field.name).add(".").ident(f).add(" = Walk::default().").ident(f).add(";}");
-                }
-            }
-            else if field.attrs.iter().any( | a | a.name == "layout") {
-                for f in layout_fields{
-                    tb.add("if !").ident(&format!("has_{}",f)).add("{self.").ident(&field.name).add(".").ident(f).add(" = Layout::default().").ident(f).add(";}");
-                }
-            }
-        }
+        tb.add("        if let Some(o) = value.as_object(){vm.heap.set_first_applied_and_clean(o);}");
+        tb.add("        <Self as ScriptHookDeref>::on_deref_after_apply(self, vm, apply, value);");
         tb.add("    }");
         tb.add("}");
         
         tb.add("impl").stream(generic.clone());
-        tb.add("LiveApplyValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        tb.add("ScriptNew for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
         
-        tb.add("    fn apply_value(&mut self, cx: &mut Cx, apply:&mut Apply, index:usize, nodes:&[LiveNode]) -> usize{");
-        tb.add("        if nodes[index].origin.has_prop_type(LivePropType::Field){");
-        tb.add("            match nodes[index].id {");
-        
-        for field in &fields {
-            
-            
-            if field.attrs.iter().any( | a | a.name == "live"){
-                //tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).0).add(")=>self.").ident(&field.name).add(".apply(cx, apply, index, nodes),");
-            }
-            else if field.attrs.iter().any( | a | a.name == "walk") {
-                for field in &fields {
-                    for f in walk_fields{
-                        if f == field.name{
-                          return error_result(&format!("Name collision between walk splat and {}", field.name));
-                      }
-                  }
-                }
-                for f in walk_fields{
-                    tb.add("        live_id!(").ident(f).add(")=>self.").ident(&field.name).add(".").ident(f).add(".apply(cx, apply, index, nodes),");
-                }
-            }
-            else if field.attrs.iter().any( | a | a.name == "layout") {
-                for field in &fields {
-                    for f in layout_fields{
-                        if f == field.name{
-                          return error_result(&format!("Name collision between layout splat and {}", field.name));
-                      }
-                  }
-                }
-                for f in layout_fields{
-                    tb.add("        live_id!(").ident(f).add(")=>self.").ident(&field.name).add(".").ident(f).add(".apply(cx, apply, index, nodes),");
-                }
-            }
-        }
-        // Unknown value handling
-        if let Some(deref_field) = deref_field {
-            tb.add("            _=> self.").ident(&deref_field.name).add(".apply_value(cx, apply, index, nodes)");
-        }
-        else {
-            tb.add("        _=> <Self as LiveHook>::apply_value_unknown(self, cx, apply, index, nodes)");
-        }
-        tb.add("            }");
-        tb.add("        } else {");
-        
-        if let Some(deref_field) = deref_field {
-            tb.add("        self.").ident(&deref_field.name).add(".apply_value(cx, apply, index, nodes)");
-        }
-        else {
-            tb.add("        <Self as LiveHook>::apply_value_instance(self, cx, apply, index, nodes)");
-        }
-        tb.add("        }");
-        tb.add("    }");
-        tb.add("}"); 
-        
-        tb.add("impl").stream(generic.clone());
-        tb.add("LiveHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-        tb.add("    fn deref_before_apply(&mut self, cx: &mut Cx, apply:&mut Apply, index: usize, nodes: &[LiveNode]){");
-        tb.add("        <Self as LiveHook>::before_apply(self, cx, apply, index, nodes);");
-        
-        if let Some(deref_field) = deref_field {
-            tb.add("    self.").ident(&deref_field.name).add(".deref_before_apply(cx, apply, index, nodes);");
-        }
-        tb.add("    }");
-        
-        tb.add("    fn deref_after_apply(&mut self, cx: &mut Cx, apply:&mut Apply, index: usize, nodes: &[LiveNode]){");
-        tb.add("        <Self as LiveHook>::after_apply(self, cx, apply, index, nodes);");
-        
-        if let Some(deref_field) = deref_field {
-            tb.add("    self.").ident(&deref_field.name).add(".deref_after_apply(cx, apply, index, nodes);");
-        }
-        tb.add("        <Self as LiveHook>::after_apply_from(self, cx, apply);");
-        tb.add("    }");
-        tb.add("}");
-        
-        tb.add("impl").stream(generic.clone());
-        tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-        
-        tb.add("    fn apply(&mut self, cx: &mut Cx, apply:&mut Apply, start_index: usize, nodes: &[LiveNode])->usize {");
-        tb.add("        self.deref_before_apply(cx, apply, start_index, nodes);");
-        
-        tb.add("        let index = if let Some(index) = <Self as LiveHook>::skip_apply(self, cx, apply, start_index, nodes){index} else {");
-        
-        tb.add("            if !nodes[start_index].value.is_structy_type(){");
-        tb.add("                cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, struct_id);");
-        tb.add("                <Self as LiveHook>::after_apply(self, cx, apply, start_index, nodes);");
-        tb.add("                return nodes.skip_node(start_index);");
-        tb.add("            }");
-        
-        tb.add("            let mut index = start_index + 1;"); // skip the class
-        tb.add("            loop{");
-        tb.add("                if nodes[index].value.is_close(){");
-        tb.add("                    index += 1;");
-        tb.add("                    break;");
-        tb.add("                }");
-        
-        tb.add("                index = self.apply_value(cx, apply, index, nodes);");
-        tb.add("            }");
-        tb.add("            index");
-        tb.add("        };");
-        
-        tb.add("        if apply.from.should_apply_reset(){<Self as LiveApplyReset>::apply_reset(self, cx, apply, start_index, nodes);}");
-                
-        tb.add("        self.deref_after_apply(cx, apply, start_index, nodes);");
-        
-        
-        tb.add("        return index;");
-        tb.add("    }");
-        tb.add("}");
-        
-        tb.add("impl").stream(generic.clone());
-        tb.add("LiveNew for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
-        
-        tb.add("    fn live_type_info(cx:&mut Cx) -> LiveTypeInfo {");
-        tb.add("        let mut fields = Vec::new();");
-        
-        for field in &fields {
-            if  let Some(attr) = 
-                field.attrs.iter().find( | a | a.name == "animator" || a.name == "live" || a.name == "calc" ||a.name == "deref"){
-                tb.add("fields.push(LiveTypeField{id:LiveId::from_str_with_lut(").string(&field.name).add(").unwrap(),");
-                // ok so what do we do if we have an Option<..>
-                // how about LiveOrCalc becomes LiveFieldType::Option
-                match unwrap_option(field.ty.clone()) {
-                    Ok(inside) => {
-                        if attr.name != "live" {
-                            return error_result("For option type only use of live is supported")
-                        }
-                        tb.add("live_type_info:").add("<").stream(Some(inside)).add("as LiveNew>::live_type_info(cx),");
-                        tb.add("live_field_kind: LiveFieldKind::LiveOption");
-                    }
-                    Err(not_option) => {
-                        tb.add("live_type_info:").add("<").stream(Some(not_option)).add("as LiveNew>::live_type_info(cx),");
-                        if attr.name == "animator" {
-                            tb.add("live_field_kind: LiveFieldKind::Animator");
-                        }
-                        else if attr.name == "live" {
-                            tb.add("live_field_kind: LiveFieldKind::Live");
-                        }
-                        else if attr.name == "deref" {
-                            tb.add("live_field_kind: LiveFieldKind::Deref");
-                        }
-                        else {
-                            tb.add("live_field_kind: LiveFieldKind::Calc");
-                        }
-                    }
-                }
-                tb.add("});");
-            }
-        }
-        tb.add("        LiveTypeInfo{");
-        tb.add("            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),");
-        tb.add("            live_type: LiveType::of::<Self>(),");
-        let live_ignore = main_attribs.iter().any( | attr | attr.name == "live_ignore");
-        tb.add("            live_ignore: ").ident(if live_ignore {"true"} else {"false"}).add(",");
-        tb.add("            fields,");
-        
-        tb.add("            type_name: LiveId::from_str_with_lut(").string(&struct_name).add(").unwrap()");
-        tb.add("        }");
-        tb.add("    }");
-        
-        tb.add("    fn live_design_with(cx: &mut Cx) {");
-        tb.add("<Self as LiveRegister>::live_register(cx);");
-        // we need this here for shader enums to register without hassle
-        for field in &fields {
-            if  field.attrs.iter().any( | a | a.name == "live" || a.name == "calc" ||a.name == "deref"){
-                match unwrap_option(field.ty.clone()) {
-                    Ok(inside) => {
-                        tb.add("<").stream(Some(inside)).add("as LiveNew>::live_design_with(cx);");
-                    }
-                    Err(not_option) => {
-                        tb.add("<").stream(Some(not_option)).add("as LiveNew>::live_design_with(cx);");
-                    }
-                }
-            }
-        }
-        
-        tb.add("    }");
-        
-        tb.add("    fn new(cx: &mut Cx) -> Self {");
+        tb.add("    fn script_new(vm: &mut Vm) -> Self {");
         tb.add("        let mut ret = Self {");
         for field in &fields {
             tb.ident(&field.name).add(":");
             
-            if let Some(attr) = field.attrs.iter().find( | a | a.name == "live" ||a.name == "deref" || a.name == "rust" || a.name == "calc"){
+            if let Some(attr) = field.attrs.iter().find(|a| a.name == "script" || a.name == "live" ||a.name == "deref" || a.name == "rust"){
                 if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                    if attr.name == "live" || attr.name == "deref" {
-                        tb.add("LiveNew::new(cx)");
+                    if attr.name == "live" || attr.name =="script" || attr.name == "deref" {
+                        tb.add("ScriptNew::script_new(vm)");
                     }
                     else {
                         tb.add("Default::default()");
@@ -347,17 +135,39 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             tb.add(",");
         }
         tb.add("        };");
-        tb.add("        <Self as LiveHook>::after_new_before_apply(&mut ret, cx);");
+        tb.add("        <Self as ScriptHook>::on_new(&mut ret, vm);");
         tb.add("        ret");
         tb.add("    }");
-        
+         
+        tb.add("    fn script_def_props(vm: &mut Vm, obj:Object) {");
+        for field in &fields {
+            
+            if field.attrs.iter().find(|a| a.name == "deref").is_some(){
+                tb.add("self.").ident(&field.name).add(".script_def_props(vm, obj)");
+            }
+            if let Some(attr) = field.attrs.iter().find(|a| a.name == "script" || a.name == "live"){
+                tb.add("let value:Value = ");
+                if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
+                    tb.add("").stream(Some(field.ty.clone())).add("::script_def(vm);");
+                }
+                else {
+                    tb.add("(").stream(attr.args.clone()).add(").into();");
+                }  
+                tb.add("vm.heap.set_value(obj, Value::from_id(id_lut!(")
+                    .ident(&field.name).add(")), value,&vm.thread.trap);");
+            }
+        }
+        tb.add("    }");
         tb.add("}");
-        if main_attribs.iter().any( | attr | attr.name == "live_debug") {
+        
+        if main_attribs.iter().any( | attr | attr.name == "debug_print") {
             tb.eprint();
         }
         
-        Ok(())
+        return Ok(())
     }
+    Ok(())
+    /*
     else if parser.eat_ident("enum") {
         let enum_name = parser.expect_any_ident() ?;
         let generic = parser.eat_generic();
@@ -606,7 +416,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
     }
     else {
         error_result("Not enum or struct")
-    }
+    }*/
     
 }
 

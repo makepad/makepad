@@ -64,6 +64,13 @@ macro_rules! args{
     }
 }
 
+#[macro_export]
+macro_rules! args_lut{
+    ($($id:ident=$val:expr),*)=>{
+        &[$((id_lut!($id), ($val).into()),)*]
+    }
+}
+
 pub type NativeFnType = Box<dyn Fn(&mut Vm, Object)->Value + 'static>;
 
 pub struct NativeFnEntry{
