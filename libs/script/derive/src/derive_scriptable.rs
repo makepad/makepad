@@ -1,7 +1,6 @@
 use proc_macro::{TokenStream};
 
 use makepad_micro_proc_macro::{
-    Id,
     TokenBuilder,
     TokenParser,
     error_result,
