@@ -75,67 +75,27 @@ pub fn test(){
         Fields{field:u32}
     }
     
-    //#[derive(Script)]
+    #[derive(Script)]
     pub struct StructTest{
-        field:f64
+        #[live(1.0)] field:f64,
+        #[live] this: Value,
+        #[live] onclick: Object,
     }
     
     //use crate::scriptable::*;
     use crate::vm::*;
     use crate::value::*;
     
-    impl ScriptNew for StructTest{
-        fn script_new(vm:&mut Vm)->Self{
-            StructTest{
-                field: ScriptNew::script_new(vm)
-            }
-        }
-        
-        fn script_def(vm:&mut Vm)->Value{
-            let obj = vm.heap.new(0);
-            let v = (1.0).to_value(vm);
-            vm.heap.set_value(obj, Id::from_str_with_lut("field").unwrap().into(), v, &vm.thread.trap);
-            // lets give this thing some methods
-            Self::on_script_def(vm, obj);
-            obj.into()
-        }
-    }
-    
     impl ScriptHook for StructTest{
         fn on_script_def(vm:&mut Vm, obj:Object){
-            vm.add_fn(obj, id!(method), args!(o = 1.0), |vm, args|{
+            vm.add_fn(obj, id_lut!(method), args_lut!(o = 1.0), |vm, args|{
+                println!("METHOD");
                 let fnptr = value!(vm, args.this.on_click);
-                vm.call(fnptr, args!());
-                NIL
+                vm.call(fnptr, args!())
             });
         }
     }    
-            
-    impl Script for StructTest{
-        fn script_apply(&mut self, vm:&mut Vm, apply:&mut ScriptApply, value:Value){
-            if value.is_nil() || self.on_skip_apply(vm, apply, value){return}
-            self.on_before_apply(vm, apply, value);
-            
-            if let Some(v) = vm.heap.value_dirty(value, Value::from_id(id!(field))){
-                self.field.script_apply(vm, apply, v);
-            };
-            
-            self.on_after_apply(vm, apply, value);
-        }
-    }
     
-    let _code = script!{
-        let RustTest = #(StructTest::script_def(vm_ref!(vm)));
-        let x = RustTest{
-            field:2.0
-            on_click: || {
-                this.field = 3.0
-            }
-        }
-        // a
-        x.method();
-    };
-
     let _code = script!{
         let x = Button{
             draw_bg:{
@@ -178,7 +138,7 @@ pub fn test(){
         ob.z = 2 assert(oa == ob)
         assert(oa !== ob)
         
-        // string comparison        
+        // string comparison
         assert("123" == "123")
         assert("123" != "223")
         assert("123456" == "123456")
@@ -239,6 +199,13 @@ pub fn test(){
         // try undefined
         try{undef = 1} assert(true) ok assert(false)
         let t = 0 try{t = 1} assert(false) ok assert(true)
+        
+        // struct tests
+        let x = #(StructTest::script_api(vm_ref!(vm)));
+        try{x{field:2}} assert(false) ok assert(true)
+        try{x{field:true}} assert(true) ok assert(false)
+        x.method()
+        
     };
     
     let _code = script!{
