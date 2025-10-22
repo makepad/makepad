@@ -468,7 +468,7 @@ impl ScriptThread{
                 self.trap.goto_next();
             }
             Opcode::BEGIN_BARE=>{ // bare object
-                let me = heap.new(0);
+                let me = heap.new();
                 self.mes.push(ScriptMe::object(me));
                 self.trap.goto_next();
             }
@@ -478,7 +478,7 @@ impl ScriptThread{
                 self.trap.goto_next();
             }
             Opcode::BEGIN_ARRAY=>{
-                let me = heap.new(0);
+                let me = heap.new();
                 self.mes.push(ScriptMe::array(me));
                 self.trap.goto_next();
             }

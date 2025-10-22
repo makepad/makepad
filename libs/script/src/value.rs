@@ -20,20 +20,23 @@ pub struct ScriptIp{
 }
 
 impl ScriptIp{
-    const fn from_u40(value:u64)->Self{
+    pub const fn from_u40(value:u64)->Self{
         Self{
             body: ((value >> 28)&0xFFF) as u16,
             index: ((value) & 0xFFF_FFFF) as u32
         }
     }
-    const fn to_u40(&self)->u64{
+    pub const fn to_u40(&self)->u64{
         ((self.body as u64)<<28) | self.index as u64
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Object{
-    pub index: u32    
+    pub(crate) index: u32    
+}
+impl Object{
+    pub const ZERO:Object = Object{index:0};
 }
 
 impl From<Object> for Value{
@@ -290,7 +293,7 @@ impl Value{
     
     pub const TYPE_NIL: u64 = ValueType::NIL.to_u64();
     pub const NIL: Value = Value(Self::TYPE_NIL);
-    
+    pub const OBJECT_ZERO: Value = Value::from_object(Object::ZERO);
     pub const TYPE_COLOR: u64 = ValueType::COLOR.to_u64();
     pub const TYPE_STRING: u64 = ValueType::STRING.to_u64();
     pub const TYPE_OBJECT: u64 = ValueType::OBJECT.to_u64();
@@ -399,7 +402,7 @@ impl Value{
         }
     }
     
-    pub fn from_object(ptr: Object)->Self{
+    pub const fn from_object(ptr: Object)->Self{
          Self(ptr.index as u64 | Self::TYPE_OBJECT)
     }
         
@@ -454,11 +457,11 @@ impl Value{
         Self(val.0|Self::TYPE_ID|Self::ESCAPED_ID)
     }
         
-    pub fn from_string(ptr: HeapString)->Self{
+    pub const fn from_string(ptr: HeapString)->Self{
          Self(ptr.index as u64 | Self::TYPE_STRING)
     }
     
-    pub fn from_inline_string(str: &str)->Option<Self>{
+    pub const fn from_inline_string(str: &str)->Option<Self>{
         let bytes = str.as_bytes();
         if bytes.len()>5{
             return None
@@ -507,8 +510,12 @@ impl Value{
         }
     }
 
-    pub fn inline_string_not_empty(&self)->bool{
+    pub const fn inline_string_not_empty(&self)->bool{
         self.0 >= Self::TYPE_INLINE_STRING_1  && self.0 <= Self::TYPE_INLINE_STRING_END
+    }
+    
+    pub const fn add(&self, val:u64)->Self{
+        Self(self.0 + val)
     }
     
     pub const fn as_bool(&self)->Option<bool>{
