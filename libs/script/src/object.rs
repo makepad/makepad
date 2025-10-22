@@ -84,8 +84,6 @@ impl ObjectType{
     // cant really use these
 }
 
-pub struct RustRef(u64);
-
 #[derive(Debug,Clone,Copy)]
 pub struct NativeId{
     pub index: u32
@@ -99,46 +97,73 @@ pub enum ScriptFnPtr{
 
 impl ObjectTag{
     // marked in the mark-sweep gc
-    pub const MARK:u64 = 0x40;
+    pub const MARK:u64 = 0x1<<40;
     // object is not 'free'
-    pub const ALLOCED:u64 = 0x80;
+    pub const ALLOCED:u64 = 0x2<<40;
     // object is 'deep' aka writes to protochain
-    pub const DEEP:u64 = 0x100;
+    pub const DEEP:u64 = 0x4<<40;
     // make the map tracked
-    pub const TRACKED:u64 = 0x200;
+    pub const TRACKED:u64 = 0x8<<40;
     // used to quick-free objects if not set
-    pub const REFFED: u64 = 0x400;
+    pub const REFFED: u64 = 0x10<<40;
     // object is skipped in gc passes
-    pub const STATIC: u64 = 0x800;
-    
+    pub const STATIC: u64 = 0x20<<40;
+    // object dirty
+    pub const DIRTY: u64 = 0x40<<40;
+    // set when the object has been first applied
+    pub const FIRST_APPLIED: u64 = 0x80<<40;
     // marks object readonly
-    pub const FROZEN: u64 = 0x1000;
+    pub const FROZEN: u64 = 0x100<<40;
     // for readonly allow writes if checked passes
-    pub const VALIDATED: u64 = 0x2000;
+    pub const VALIDATED: u64 = 0x200<<40;
     // for read only allow writes only if map item doesnt exist
-    pub const MAP_ADD: u64 = 0x4000;
+    pub const MAP_ADD: u64 = 0x400<<40;
     // vec is frozen
-    pub const VEC_FROZEN: u64 = 0x8000;
+    pub const VEC_FROZEN: u64 = 0x800<<40;
     
     pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
 
-    pub const FLAG_MASK: u64 = 0xff40;
+    pub const FLAG_MASK: u64 = 0xFFF<<40;
                 
-    pub const SCRIPT_FN: u64 = 0x10;
-    pub const NATIVE_FN: u64 = 0x20;
-    pub const RUST_REF:  u64 = 0x30;
-    pub const REF_MASK:  u64 = 0x30;
+    pub const SCRIPT_FN: u64 = 0x1<<52;
+    pub const NATIVE_FN: u64 = 0x2<<52;
+    pub const RUST_REF:  u64 = 0x3<<52;
+    pub const REF_MASK:  u64 = 0xF<<52;
         
-    pub const TYPE_MASK: u64 = 0x0f;
+    pub const TYPE_SHIFT: u64 = 56;
+    pub const TYPE_MASK: u64 = 0xF<<Self::TYPE_SHIFT;
             
-    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
+    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN|Self::TRACKED;
     
+    pub fn set_first_applied_and_clean(&mut self){
+        self.0 &= !Self::DIRTY;
+        self.0 |= Self::FIRST_APPLIED;
+    }
+    
+    pub fn is_first_applied(&self)->bool{
+        self.0 & Self::FIRST_APPLIED != 0
+    }
+        
     pub fn set_tracked(&mut self){
         self.0  |= Self::TRACKED
     }
     
     pub fn is_tracked(&self)->bool{
         self.0  & Self::TRACKED != 0
+    }
+    
+    pub fn set_dirty(&mut self){
+        self.0  |= Self::DIRTY
+    }
+        
+    pub fn check_and_clear_dirty(&mut self)->bool{
+        if self.0 & Self::DIRTY !=  0{
+            self.0 &= !Self::DIRTY;
+            true
+        }
+        else{
+            false
+        }
     }
     
     pub fn set_static(&mut self){
@@ -184,10 +209,7 @@ impl ObjectTag{
     pub fn is_vec_frozen(&self)->bool{
         self.0 & (Self::VEC_FROZEN|Self::FROZEN) != 0
     }
-  
-    pub fn set_flags(&mut self, flags:u64){
-        self.0 |= flags
-    }
+    
     
     pub fn is_static(&mut self)->bool{
         self.0  & Self::STATIC != 0
@@ -197,35 +219,21 @@ impl ObjectTag{
         self.0 &= !(Self::REF_MASK);
         match ptr{
             ScriptFnPtr::Script(ip)=>{
-                self.0 |= ((ip.index as u64)<<32) | ((ip.body as u64)<<16) | Self::SCRIPT_FN
+                self.0 |= ip.to_u40()|Self::SCRIPT_FN
             }
             ScriptFnPtr::Native(ni)=>{
-                self.0 |= Self::NATIVE_FN | ((ni.index as u64)<<32)
+                self.0 |= ((ni.index as u64)) | Self::NATIVE_FN 
             }
         }
         
     }
     
-    pub fn set_rust_ref(&mut self, value: RustRef){
-        self.0 &= !(Self::REF_MASK);
-        self.0 |= ((value.0 as u64)<<16) | Self::RUST_REF
-    }
-    
-    pub fn as_rust_ref(&mut self)->Option<RustRef>{
-        if self.0 & Self::REF_MASK == Self::SCRIPT_FN{
-            Some(RustRef(self.0>>16))
-        }
-        else{
-            None
-        }
-    }
-    
     pub fn as_fn(&self)->Option<ScriptFnPtr>{
         if self.0 & Self::REF_MASK == Self::SCRIPT_FN{
-            Some(ScriptFnPtr::Script(ScriptIp{body:((self.0>>16)&0xffff) as u16, index:(self.0 >> 32) as u32}))
+            Some(ScriptFnPtr::Script(ScriptIp::from_u40(self.0)))
         }
         else if self.0 & Self::REF_MASK == Self::NATIVE_FN{
-            Some(ScriptFnPtr::Native(NativeId{index:(self.0 >> 32) as u32}))
+            Some(ScriptFnPtr::Native(NativeId{index:self.0 as u32}))
         }
         else{
             None
@@ -254,11 +262,11 @@ impl ObjectTag{
         
     pub fn set_type_unchecked(&mut self, ty:ObjectType){
         self.0 &= !Self::TYPE_MASK;
-        self.0 |= (ty.0 as u64) & Self::TYPE_MASK;
+        self.0 |= ((ty.0 as u64) << Self::TYPE_SHIFT) & Self::TYPE_MASK;
     }
         
     pub fn get_type(&self)->ObjectType{
-        return ObjectType( (self.0 & Self::TYPE_MASK) as u8 )
+        return ObjectType( ((self.0 & Self::TYPE_MASK)>>Self::TYPE_SHIFT) as u8 )
     }
         
     pub fn set_deep(&mut self){
@@ -338,7 +346,6 @@ pub struct ObjectData{
     pub tag: ObjectTag,
     pub proto: Value,
     
-    tracked: Vec<Value>,
     pub map: ValueMap<Value, Value>,
     pub vec: Vec<Value>,
 }
@@ -348,18 +355,16 @@ impl ObjectData{
         if self.tag.is_tracked(){
             match self.map.entry(key) {
                 Entry::Occupied(mut occ) => {
-                    let store = occ.get_mut();
-                    let index = store.as_trackid().unwrap();
-                    if let Some(val) = self.tracked.get_mut(index as usize){
-                        *val = value;
-                        store.set_trackid_dirty();
+                    let old_value = occ.get_mut();
+                    if *old_value != value{
+                        *old_value = value;
+                        self.map.insert(key.add(1), Value::TRUE);
+                        self.tag.set_dirty();
                     }
                     return 
                 }
                 Entry::Vacant(vac) => {
-                    let index = self.tracked.len();
-                    self.tracked.push(value);
-                    vac.insert(Value::from_trackid_dirty(index as u32));
+                    vac.insert(value);
                     return
                 }   
             }
@@ -369,50 +374,52 @@ impl ObjectData{
         }
     }
     
-    pub fn map_get_mut(&mut self, key:&Value)->Option<&mut Value>{
+    pub fn map_set_if_exist(&mut self, key:Value, value:Value)->bool{
         if self.tag.is_tracked(){
-            match self.map.entry(*key) {
+            match self.map.entry(key) {
                 Entry::Occupied(mut occ) => {
-                    let store = occ.get_mut();
-                    let index = store.as_trackid().unwrap();
-                    if let Some(val) = self.tracked.get_mut(index as usize){
-                        store.set_trackid_dirty();
-                        return Some(val)
+                    let old_value = occ.get_mut();
+                    if *old_value != value{
+                        *old_value = value;
+                        self.map.insert(key.add(1), Value::TRUE);
+                        self.tag.set_dirty();
                     }
-                    return None
+                    return true
                 }
-                Entry::Vacant(_) => {
-                    return None
-                }   
+                Entry::Vacant(_) => {}
             }
         }
-        self.map.get_mut(key)
+        if let Some(val) = self.map.get_mut(&key){
+            *val = value;
+            return true
+        }
+        false
     }
     
     pub fn map_get(&self, key:&Value)->Option<&Value>{
-        if self.tag.is_tracked(){
-            if let Some(store) = self.map.get(key) {
-                let index = store.as_trackid().unwrap();
-                if let Some(val) = self.tracked.get(index as usize){
-                    return Some(val)
-                }
-            }
-            return None
-        }
         self.map.get(key)
     }
     
     pub fn map_get_if_dirty(&mut self, key:&Value)->Option<&Value>{
         if self.tag.is_tracked(){
-            if let Some(store) = self.map.get_mut(key) {
-                if store.get_and_clear_trackid_dirty(){
-                    let index = store.as_trackid().unwrap();
-                    if let Some(val) = self.tracked.get(index as usize){
-                        return Some(val)
+            let dirty = match self.map.entry(key.add(1)) {
+                Entry::Occupied(mut occ) => {
+                    if *occ.get() == Value::TRUE{
+                        occ.insert(Value::FALSE);
+                        true
+                    }
+                    else{
+                        false
                     }
                 }
+                Entry::Vacant(vac) => {
+                    vac.insert(Value::FALSE);
+                    true
+                }
+            };
+            if !dirty{
+                return None
             }
-            return None
         }
         self.map.get(key)
     }
