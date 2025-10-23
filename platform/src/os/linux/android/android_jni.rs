@@ -437,6 +437,12 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
         let rotation_angle = unsafe {ndk_utils::call_float_method!(env, event, "getOrientation", "(I)F", touch_index)} as f64;
         let force = unsafe {ndk_utils::call_float_method!(env, event, "getPressure", "(I)F", touch_index)} as f64;
 
+        // Get actual touch size from Android (returns diameter in pixels)
+        let touch_major = unsafe {ndk_utils::call_float_method!(env, event, "getTouchMajor", "(I)F", touch_index)} as f64;
+        let touch_minor = unsafe {ndk_utils::call_float_method!(env, event, "getTouchMinor", "(I)F", touch_index)} as f64;
+        // Convert diameter to radius
+        let radius = dvec2(touch_major / 2.0, touch_minor / 2.0);
+
         touches.push(TouchPoint {
             state: {
                 if action_index == touch_index {
@@ -454,7 +460,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
             uid: id as u64,
             rotation_angle,
             force,
-            radius: dvec2(1.0, 1.0),
+            radius,
             handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
             abs: dvec2(x as f64, y as f64),
