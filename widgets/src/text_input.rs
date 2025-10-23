@@ -599,6 +599,7 @@ pub struct TextInput {
     #[live] is_password: bool,
     #[live] is_read_only: bool,
     #[live] is_numeric_only: bool,
+    #[live] scroll_y: f64,
     #[live] empty_text: String,
     #[rust] text: String,
     #[live(0.5)] blink_speed: f64,
@@ -671,6 +672,19 @@ impl TextInput {
         self.set_is_numeric_only(cx, !self.is_numeric_only);
     }
 
+    pub fn scroll_y(&self) -> f64 {
+        self.scroll_y
+    }
+
+    pub fn set_scroll_y(&mut self, cx: &mut Cx, scroll_y: f64) {
+        let height = self.draw_bg.area.rect(cx).size.y;
+        let laidout_text = self.laidout_text.as_ref().unwrap();
+        let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
+        let max_scroll_y = laidout_text_height.max(height) - height;
+        self.scroll_y = scroll_y.max(0.0).min(max_scroll_y);
+        self.draw_bg.redraw(cx);
+    }
+
     pub fn empty_text(&self) -> &str {
         &self.empty_text
     }
@@ -682,7 +696,6 @@ impl TextInput {
         }
     }
 
-
     pub fn selection(&self) -> Selection {
         self.selection
     }
@@ -690,6 +703,21 @@ impl TextInput {
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
         self.selection = selection;
         self.history.force_new_edit_group();
+        let position = self.cursor_to_position(selection.cursor).unwrap();
+        let laidout_text = self.laidout_text.as_ref().unwrap();
+        let laidout_row = &laidout_text.rows[position.row_index];
+        let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
+        let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
+        let height = self.draw_bg.area.rect(cx).size.y - self.layout.padding.height();
+        println!("Viewport height {:?}", height);
+        println!("Text height {:?}", laidout_text.size_in_lpxs.height);
+        if y_min < self.scroll_y {
+            self.set_scroll_y(cx, y_min);
+        }
+        if y_max > self.scroll_y + height {
+            println!("Scrolling to {:?}", y_max - height);
+            self.set_scroll_y(cx, y_max - height);
+        }
         self.draw_bg.redraw(cx);
     }
 
@@ -1162,7 +1190,7 @@ impl Widget for TextInput {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.draw_bg.begin(cx, walk, self.layout);
+        self.draw_bg.begin(cx, walk, self.layout.with_scroll(dvec2(0.0, self.scroll_y)));
         self.draw_selection.append_to_draw_call(cx);
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
