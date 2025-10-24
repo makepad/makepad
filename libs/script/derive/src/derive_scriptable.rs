@@ -156,6 +156,12 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("impl").stream(generic.clone());
         tb.add("ScriptNew for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
+        tb.add("    fn script_type_id_static()->std::any::TypeId{ ScriptTypeId::of::<Self>()}");
+        
+        tb.add("    fn script_type_check(heap:&ScriptHeap, value:Value)->bool{");
+        tb.add("        if let Some(o) = value.as_object(){heap.type_matches_id(o, Self::script_type_id_static())}else{false}");
+        tb.add("    }");
+        
         tb.add("    fn script_new(vm: &mut Vm) -> Self {");
         tb.add("        let mut ret = Self {");
         for field in &fields {
@@ -185,22 +191,26 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    }");
         
          
-        tb.add("    fn script_def_props(vm: &mut Vm, obj:Object) {");
+        tb.add("    fn script_proto_props(vm: &mut Vm, obj:Object, props:&mut ScriptTypeProps) {");
         for field in &fields {
             
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
-                tb.add("self.").ident(&field.name).add(".script_def_props(vm, obj)");
+                tb.add("self.").ident(&field.name).add(".script_proto_props(vm, obj, props)");
             }
             if let Some(attr) = field.attrs.iter().find(|a| a.name == "script" || a.name == "live"){
+                // lets make sure the type is defined
+                tb.stream(Some(field.ty.clone())).add("::script_proto(vm);");
+                
                 tb.add("let value:Value = ");
                 if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                    tb.add("").stream(Some(field.ty.clone())).add("::script_def(vm);");
+                    tb.add("").stream(Some(field.ty.clone())).add("::script_default(vm);");
                 }
                 else {
                     tb.add("(").stream(attr.args.clone()).add(").script_to_value(vm);");
                 }  
                 tb.add("vm.heap.set_value(obj, Value::from_id(id_lut!(")
                     .ident(&field.name).add(")), value,&vm.thread.trap);");
+                tb.add("props.props.insert(id!(").ident(&field.name).add("),").stream(Some(field.ty.clone())).add("::script_type_id_static());");
             }
         }
         tb.add("    }");

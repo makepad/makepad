@@ -96,7 +96,7 @@ impl ScriptNative{
         let fn_obj = heap.new_with_proto(id!(native).into());
         heap.set_object_storage_type(fn_obj, ObjectStorageType::VEC2);
         heap.set_fn(fn_obj, ScriptFnPtr::Native(NativeId{index: fn_index as u32}));
-                
+
         for (arg, def) in args{
             heap.set_value_def(fn_obj, (*arg).into(), *def);
         }

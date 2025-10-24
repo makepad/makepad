@@ -127,26 +127,23 @@ impl ObjectTag{
     // cant be a prototype
     pub const NOTPROTO: u64 = 0x2000<<40;
     
-    
     pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
         
     pub const NEED_CHECK_MASK: u64 = Self::FREEZE_MASK|Self::TYPE_CHECKED;
     
-        
-    
     pub const FLAG_MASK: u64 = 0xFFFF<<40;
         
-    pub const REF_SCRIPT_FN: u64 = 0x1<<56;
-    pub const REF_NATIVE_FN: u64 = 0x2<<56;
-    pub const REF_TYPE_INDEX: u64 = 0x3<<56;
-    pub const REF_MASK:  u64 = 0xF<<56;
-    pub const DATA_MASK: u64 = 0xFF_FFFF_FFFF;    
+    pub const REF_KIND_SCRIPT_FN: u64 = 0x1<<56;
+    pub const REF_KIND_NATIVE_FN: u64 = 0x2<<56;
+    pub const REF_KIND_TYPE_INDEX: u64 = 0x3<<56;
+    pub const REF_KIND_MASK:  u64 = 0xF<<56;
+    pub const REF_DATA_MASK: u64 = 0xFF_FFFF_FFFF;    
             
     pub const STORAGE_SHIFT: u64 = 60;
     pub const STORAGE_MASK: u64 = 0xF<<Self::STORAGE_SHIFT;
             
     const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::STORAGE_MASK|Self::VALIDATED|
-        Self::MAP_ADD|Self::VEC_FROZEN|Self::TRACKED|Self::REF_MASK|Self::DATA_MASK|Self::TYPE_CHECKED;
+        Self::MAP_ADD|Self::VEC_FROZEN|Self::TRACKED|Self::REF_KIND_MASK|Self::REF_DATA_MASK|Self::TYPE_CHECKED;
     
     pub fn set_first_applied_and_clean(&mut self){
         self.0 &= !Self::DIRTY;
@@ -188,11 +185,15 @@ impl ObjectTag{
         self.0  |= Self::FROZEN
     }
     
-    pub fn freeze_type(&mut self, ty:ScriptTypeIndex){
+    pub fn set_type_index(&mut self, ty:ScriptTypeIndex){
+        self.0 &= !(Self::REF_DATA_MASK);
+        self.0 &= !(Self::REF_KIND_MASK);
+        self.0 |= ty.0 as u64|Self::REF_KIND_TYPE_INDEX|Self::TYPE_CHECKED;
+    }
+    
+    pub fn freeze_type(&mut self){
         self.0 &= !(Self::FREEZE_MASK);
-        self.0 &= !(Self::DATA_MASK);
-        self.0 &= !(Self::REF_MASK);
-        self.0 |= ty.0 as u64|Self::FROZEN|Self::VEC_FROZEN|Self::REF_TYPE_INDEX|Self::TYPE_CHECKED
+        self.0 |= Self::FROZEN|Self::VEC_FROZEN
     }
     
     pub fn freeze_api(&mut self){
@@ -239,23 +240,23 @@ impl ObjectTag{
     }
     
     pub fn set_fn(&mut self, ptr:ScriptFnPtr){
-        self.0 &= !(Self::REF_MASK);
+        self.0 &= !(Self::REF_KIND_MASK);
         match ptr{
             ScriptFnPtr::Script(ip)=>{
-                self.0 |= ip.to_u40()|Self::REF_SCRIPT_FN
+                self.0 |= ip.to_u40()|Self::REF_KIND_SCRIPT_FN
             }
             ScriptFnPtr::Native(ni)=>{
-                self.0 |= ((ni.index as u64)) | Self::REF_NATIVE_FN 
+                self.0 |= ((ni.index as u64)) | Self::REF_KIND_NATIVE_FN 
             }
         }
         
     }
     
     pub fn as_fn(&self)->Option<ScriptFnPtr>{
-        if self.0 & Self::REF_MASK == Self::REF_SCRIPT_FN{
+        if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN{
             Some(ScriptFnPtr::Script(ScriptIp::from_u40(self.0)))
         }
-        else if self.0 & Self::REF_MASK == Self::REF_NATIVE_FN{
+        else if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_NATIVE_FN{
             Some(ScriptFnPtr::Native(NativeId{index:self.0 as u32}))
         }
         else{
@@ -264,7 +265,7 @@ impl ObjectTag{
     }
     
     pub fn as_type_index(&self)->Option<ScriptTypeIndex>{
-        if self.0 & Self::REF_MASK == Self::REF_TYPE_INDEX{
+        if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_TYPE_INDEX{
             Some(ScriptTypeIndex(self.0 as u32))
         }
         else{
@@ -273,11 +274,11 @@ impl ObjectTag{
     }
         
     pub fn is_script_fn(&self)->bool{
-        self.0 & Self::REF_MASK == Self::REF_SCRIPT_FN
+        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN
     }
         
     pub fn is_native_fn(&self)->bool{
-        self.0 & Self::REF_MASK == Self::REF_NATIVE_FN
+        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_NATIVE_FN
     }
     
     pub fn is_fn(&self)->bool{

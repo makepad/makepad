@@ -1356,6 +1356,6 @@ impl ScriptParser{
             }
             self.index += step;
         }
-        println!("MADE CODE: {:?}", self.opcodes);
+        //println!("MADE CODE: {:?}", self.opcodes);
     }
 }

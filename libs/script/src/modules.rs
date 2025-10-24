@@ -22,7 +22,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                 return NIL
             }
         }
-        vm.thread.trap.err_assertfail()
+        vm.thread.trap.err_assert_fail()
     });
     
     native.add_fn(heap, std, id!(err), args!(), |vm, _args|{
