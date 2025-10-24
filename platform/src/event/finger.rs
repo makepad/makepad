@@ -996,6 +996,16 @@ impl Event {
                             let tap_count = cx.fingers.tap_count();
                             let rect = area.clipped_rect(&cx);
                             if let Some(capture) = cx.fingers.find_area_capture(area) {
+                                // Check if finger is over the widget.
+                                // Handle two cases:
+                                // 1. Normal: finger is within the widget's current rect
+                                // 2. Layout shift (keyboard dismissal): finger didn't move much from start,
+                                //    so treat as "over" even if widget moved underneath
+                                let is_over = rect.contains(t.abs) || (
+                                    (e.time - capture.time < TAP_COUNT_TIME) &&
+                                    ((t.abs - capture.abs_start).length() < TAP_COUNT_DISTANCE)
+                                );
+
                                 return Hit::FingerUp(FingerUpEvent {
                                     abs_start: capture.abs_start,
                                     rect,
@@ -1008,7 +1018,7 @@ impl Event {
                                     capture_time: capture.time,
                                     modifiers: e.modifiers,
                                     time: e.time,
-                                    is_over: rect.contains(t.abs),
+                                    is_over,
                                     is_sweep: false,
                                 });
                             }
