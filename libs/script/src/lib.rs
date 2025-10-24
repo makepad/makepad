@@ -24,6 +24,7 @@ pub use value::*;
 pub use vm::*;
 pub use makepad_script_derive::*;
 pub use script::*;
+pub use thread::*;
 pub use heap::*;
 // can we refcount object roots on the heap?
 // yea why not 
@@ -135,19 +136,55 @@ pub fn test(){
     }
     
     impl ScriptToValue for EnumTest{
-        fn script_to_value(&self, _vm:&mut Vm)->Value{
-            // alright script to al
-            NIL
+        fn script_to_value(&self, vm:&mut Vm)->Value{
+            match self{
+                Self::Bare=>{
+                    id!(Bare).into()
+                }
+                Self::Tuple(x)=>{
+                    let tuple = vm.heap.new_with_proto(id!(Tuple).into());
+                    vm.heap.vec_push(tuple, NIL, (*x).into(), &vm.thread.trap);
+                    tuple.into()
+                }
+                Self::Named{field}=>{
+                    let named = Self::enum_named_to_value_create(vm, id!(Named));
+                    vm.heap.set_value(named, id_lut!(field).into(), (*field).into(), &vm.thread.trap);
+                    named.into()
+                }
+            }
         }
     }
     
     impl ScriptApply for EnumTest{
         fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-        fn script_apply(&mut self, _vm:&mut Vm, _apply:&mut ApplyScope, _value:Value){
-            // alright lets apply 'value'
-            // we now have to 'deserialise' value into the right enum type
-            // the types should already be checked
-            
+        fn script_apply(&mut self, vm:&mut Vm, _apply:&mut ApplyScope, value:Value){
+            if let Some(id) = value.as_id(){
+                if id == id!(Bare){
+                    *self = Self::Bare
+                }
+                else{
+                    vm.thread.trap.err_enum_unknown_variant();
+                }
+            }
+            // alright its an object
+            else if let Some(o) = value.as_object(){
+                let root_proto = vm.heap.root_proto(o);
+                // we now have to fetch the proto Id of the object
+                if let Some(id) = root_proto.as_id(){
+                    if id == id!(Field){
+                        
+                    }
+                    else if id == id!(Tuple){
+                        
+                    }
+                    else{
+                        vm.thread.trap.err_enum_unknown_variant();
+                    }
+                }
+            }
+            else{
+                vm.thread.trap.err_enum_unknown_variant();
+            }
         }
     }
     

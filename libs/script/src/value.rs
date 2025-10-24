@@ -171,7 +171,8 @@ impl ValueType{
     pub const ERR_INVALID_ARG_NAME: Self = Self(38);
     pub const ERR_NOT_PROTO: Self = Self(39);
     pub const ERR_TYPE_NOT_REGISTERED: Self = Self(40);
-    pub const ERR_LAST: Self = Self(40);
+    pub const ERR_ENUM_UNKNOWN_VARIANT: Self = Self(41);
+    pub const ERR_LAST: Self = Self(42);
     
     pub const ID: Self = Self(0x80);
         
@@ -266,6 +267,7 @@ impl fmt::Display for ValueType {
             Self::ERR_INVALID_VAR_NAME=>write!(f,"InvalidVariableName"),
             Self::ERR_NOT_PROTO=>write!(f,"NotAllowedAsPrototype"),
             Self::ERR_TYPE_NOT_REGISTERED=>write!(f,"TypeNotRegistered"),
+            Self::ERR_ENUM_UNKNOWN_VARIANT=>write!(f,"EnumUnknownVariant"),
             Self::ERR_USER=>write!(f,"UserGenerated"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ValueType?")
@@ -352,6 +354,10 @@ impl Value{
     pub const fn err_user(ip:ScriptIp)->Self{Self(ValueType::ERR_USER.to_u64() | ip.to_u40())}
     pub const fn err_not_proto(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_PROTO.to_u64() | ip.to_u40())}
     pub const fn err_type_not_registered(ip:ScriptIp)->Self{Self(ValueType::ERR_TYPE_NOT_REGISTERED.to_u64() | ip.to_u40())}
+    
+    pub const fn err_enum_unknown_variant(ip:ScriptIp)->Self{Self(ValueType::ERR_ENUM_UNKNOWN_VARIANT.to_u64() | ip.to_u40())}
+        
+    
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ValueType::ERR_LAST.to_u64()}
     
     pub const fn as_err(&self)->Option<ValueError>{
