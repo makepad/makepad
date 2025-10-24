@@ -39,11 +39,15 @@ pub struct ScriptTypeProps{
     pub(crate) props: IdMap<Id, ScriptTypeId>
 }
 
-pub struct ScriptTypeCheck{
+pub struct ScriptTypeObject{
     pub(crate) type_id: ScriptTypeId,
     pub(crate) check: Box<dyn Fn(&ScriptHeap, Value)->bool>,
     pub(crate) proto: Value,
-    pub(crate) props: ScriptTypeProps
+}
+
+pub struct ScriptTypeCheck{
+    pub(crate) props: ScriptTypeProps,
+    pub(crate) object: Option<ScriptTypeObject>,
 }
 
 #[derive(Copy, Clone)]
@@ -70,17 +74,19 @@ pub trait ScriptNew: ScriptApply + ScriptHook where Self:'static{
     fn script_proto(vm:&mut Vm)->Value{  
         let type_id = Self::script_type_id_static();
         if let Some(check) = vm.heap.registered_type(type_id){
-            return check.proto
+            return check.object.as_ref().unwrap().proto
         }
         let mut props = ScriptTypeProps::default();
         let proto = Self::script_proto_build(vm, &mut props);
         let ty_check = ScriptTypeCheck{
-            type_id,
-            proto,
-            check: Box::new(Self::script_type_check),
+            object: Some(ScriptTypeObject{
+                type_id,
+                proto,
+                check: Box::new(Self::script_type_check),
+            }),
             props
         };
-        let ty_index = vm.heap.register_type(type_id, ty_check);
+        let ty_index = vm.heap.register_type(Some(type_id), ty_check);
         if let Some(obj) = proto.as_object(){
             vm.heap.freeze_with_type(obj, ty_index);
         }
@@ -99,7 +105,7 @@ pub trait ScriptNew: ScriptApply + ScriptHook where Self:'static{
     fn script_proto_props(_vm:&mut Vm, _object:Object, _props:&mut ScriptTypeProps){}
     
     fn script_type_check(_heap:&ScriptHeap, value:Value)->bool;
-        
+    
     fn script_api(vm:&mut Vm)->Value{
         let val = Self::script_proto(vm);
         vm.heap.freeze_api(val.into());
