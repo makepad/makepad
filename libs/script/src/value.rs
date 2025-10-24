@@ -169,7 +169,8 @@ impl ValueType{
     pub const ERR_VECBOUND: Self = Self(36);
     pub const ERR_INVALIDARGTYPE: Self = Self(37);
     pub const ERR_INVALIDARGNAME: Self = Self(38);
-    pub const ERR_LAST: Self = Self(38);
+    pub const ERR_NOTPROTO: Self = Self(39);
+    pub const ERR_LAST: Self = Self(39);
     
     pub const ID: Self = Self(0x80);
         
@@ -262,7 +263,8 @@ impl fmt::Display for ValueType {
             Self::ERR_INVALIDARGTYPE=>write!(f,"InvalidArgumentType"),
             Self::ERR_INVALIDARGNAME=>write!(f,"InvalidArgumentName"),
             Self::ERR_INVALIDVARNAME=>write!(f,"InvalidVariableName"),
-                                                                        
+            Self::ERR_NOTPROTO=>write!(f,"NotAllowedAsPrototype"),
+                                                                                    
             Self::ERR_USER=>write!(f,"UserGenerated"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ValueType?")
@@ -347,7 +349,8 @@ impl Value{
     pub const fn err_invalidvarname(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDVARNAME.to_u64() | ip.to_u40())} 
         
     pub const fn err_user(ip:ScriptIp)->Self{Self(ValueType::ERR_USER.to_u64() | ip.to_u40())}
-    
+    pub const fn err_notproto(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTPROTO.to_u64() | ip.to_u40())}
+        
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ValueType::ERR_LAST.to_u64()}
     
     pub const fn as_err(&self)->Option<ValueError>{
