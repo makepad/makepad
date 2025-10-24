@@ -134,6 +134,7 @@ impl ScriptTrap{
     pub fn err_invalidargtype(&self)->Value{self.err(Value::err_invalidargtype(self.ip))}
     pub fn err_invalidargname(&self)->Value{self.err(Value::err_invalidargname(self.ip))}
     pub fn err_invalidvarname(&self)->Value{self.err(Value::err_invalidvarname(self.ip))}
+    pub fn err_notproto(&self)->Value{self.err(Value::err_notproto(self.ip))}
     pub fn err_user(&self)->Value{self.err(Value::err_user(self.ip))}
 }
 
@@ -281,7 +282,7 @@ impl ScriptThread{
         }
         
         heap.set_object_deep(scope);
-        heap.set_object_type(scope, ObjectType::AUTO);
+        heap.set_object_storage_type(scope, ObjectStorageType::AUTO);
                 
         if let Some(fnptr) = heap.parent_as_fn(scope){
             match fnptr{

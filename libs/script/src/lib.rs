@@ -64,34 +64,84 @@ pub fn test(){
     let net = vm.new_module(id!(test));
     vm.add_fn(net, id!(fetch), args!(url=NIL, options=NIL), |vm, args|{
         // how do we construct our options
-        let _options = StructTest::from_value(vm, value!(vm, args.options));
+        let _options = StructTest::script_from_value(vm, value!(vm, args.options));
         NIL
     });
-    
-    //#[derive(Scriptable)]
-    pub enum _EnumTest{
+    /*
+    //#[derive(Script)]
+    pub enum EnumTest{
+      //  #[pick]
         Bare,
         Tuple(u32),
-        Fields{field:u32}
+        Named{field:u32}
     }
+    
+    impl ScriptNew for EnumTest{
+        fn script_new(_vm:&mut Vm)->Self{Self::Bare}
+        fn script_def(vm:&mut Vm)->Value{
+            let obj = vm.heap.new();
+            
+            // how do we typecheck an enum type eh
+            vm.heap.set_value(obj, id_lut!(Bare).into(), id!(Bare).into(), &vm.thread.trap);
+            
+            // alright next one the tuple
+            vm.add_fn(obj, id!(Tuple), &[], |vm, args|{
+                let tuple = vm.heap.new_with_proto(id!(Tuple).into());
+                // lets figure out thetypecheck of the tuple
+                vm.heap.vec_push_vec(tuple, args, &vm.thread.trap);
+                tuple.into()
+            });
+            
+            let named = vm.heap.new_with_proto(id!(Named).into());
+            let value = (1).script_to_value(vm);
+            vm.heap.set_value(named, id_lut!(field).into(), value, &vm.thread.trap);
+            vm.heap.freeze_api(named);
+            
+            vm.heap.set_value(obj, id_lut!(Named).into(), named.into(), &vm.thread.trap);
+            
+            //vm.heap.freeze_enum(obj);
+            obj.into()
+        }
+    }
+    
+    impl ScriptApply for EnumTest{
+        fn script_apply(&mut self, _vm:&mut Vm, _apply:&mut ApplyScope, _value:Value){
+            // alright lets apply 'value'
+            // its either an array with a root proto ID of 'bare'
+            // or its an object with root proto id Field
+            // or its a bare id
+        }
+    }*/
+    
+    //impl ScriptHook for EnumTest{}
     
     #[derive(Script)]
     pub struct StructTest{
         #[live(1.0)] field:f64,
-        #[live] this: Value,
+        //#[live(EnumTest::Bare)] enm:EnumTest,
+        #[live] this: Object,
         #[live] onclick: Object,
     }
+    
+    let s = StructTest::script_new(vm_ref!(vm));
+    let v = s.script_to_value(vm_ref!(vm)).into();
+    vm.heap.print(v);
     
     //use crate::scriptable::*;
     use crate::vm::*;
     use crate::value::*;
     
+    impl ScriptTypeInfo for StructTest{
+        
+    }
+    
     impl ScriptHook for StructTest{
         fn on_script_def(vm:&mut Vm, obj:Object){
-            vm.add_fn(obj, id_lut!(method), args_lut!(o = 1.0), |vm, args|{
-                println!("METHOD");
-                let fnptr = value!(vm, args.this.on_click);
-                vm.call(fnptr, args!())
+            vm.add_fn(obj, id_lut!(method), args_lut!(o = 1.0), |_vm, _args|{
+                //println!("METHOD");
+                //let fnptr = value!(vm, args.this.on_click);
+                //vm.call(fnptr, args!())\\
+                NIL
             });
         }
     }    
