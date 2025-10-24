@@ -21,9 +21,8 @@ pub mod script;
 pub use makepad_id_derive::*;
 pub use makepad_id::id::*;
 pub use value::*;
-pub use vm::ScriptVm;
+pub use vm::*;
 pub use makepad_script_derive::*;
-pub use vm::ScriptBlock;
 pub use script::*;
 pub use heap::*;
 // can we refcount object roots on the heap?
@@ -68,18 +67,42 @@ pub fn test(){
         let _options = StructTest::script_from_value(vm, value!(vm, args.options));
         NIL
     });
-    /*
+    
     //#[derive(Script)]
+    #[allow(unused)]
     pub enum EnumTest{
       //  #[pick]
         Bare,
-        Tuple(u32),
-        Named{field:u32}
+        Tuple(f64),
+        Named{field:f64}
+    }
+    
+    impl ScriptHook for EnumTest{
     }
     
     impl ScriptNew for EnumTest{
+        fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}
         fn script_new(_vm:&mut Vm)->Self{Self::Bare}
-        fn script_def(vm:&mut Vm)->Value{
+        fn script_default(vm:&mut Vm)->Value{
+            let proto = Self::script_proto(vm);
+            vm.heap.value(proto.into(), id!(Bare).into(), &vm.thread.trap)
+        }
+        
+        // alright so. hows this work
+        fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{
+            // if its an id its a bare one. so lets check
+            if let Some(id) = value.as_id(){
+                if id == id!(Bare){return true}
+            }
+            // alright its an object
+            else if let Some(_o) = value.as_object(){
+                // we now have to fetch the proto Id of the object
+                // the arguments have been checked by the function or the type checker
+            }
+            false
+        }
+        
+        fn script_proto_build(vm:&mut Vm, _props:&mut ScriptTypeProps)->Value{
             let obj = vm.heap.new();
             
             // how do we typecheck an enum type eh
@@ -88,31 +111,45 @@ pub fn test(){
             // alright next one the tuple
             vm.add_fn(obj, id!(Tuple), &[], |vm, args|{
                 let tuple = vm.heap.new_with_proto(id!(Tuple).into());
-                // lets figure out thetypecheck of the tuple
+                // lets typecheck the args here codegenerated
                 vm.heap.vec_push_vec(tuple, args, &vm.thread.trap);
                 tuple.into()
             });
             
+            // we can make a type index prop check for this thing
             let named = vm.heap.new_with_proto(id!(Named).into());
-            let value = (1).script_to_value(vm);
+            let mut props = ScriptTypeProps::default();
+            let value = (1.0).script_to_value(vm);
+            props.props.insert(id!(field), f64::script_type_id_static());
             vm.heap.set_value(named, id_lut!(field).into(), value, &vm.thread.trap);
-            vm.heap.freeze_api(named);
+            let ty_check = ScriptTypeCheck{
+                props,
+                object: None
+            };
+            let ty_index = vm.heap.register_type(None, ty_check);
+            vm.heap.freeze_with_type(named, ty_index);
             
             vm.heap.set_value(obj, id_lut!(Named).into(), named.into(), &vm.thread.trap);
-            
-            //vm.heap.freeze_enum(obj);
             obj.into()
         }
     }
     
+    impl ScriptToValue for EnumTest{
+        fn script_to_value(&self, _vm:&mut Vm)->Value{
+            // alright script to al
+            NIL
+        }
+    }
+    
     impl ScriptApply for EnumTest{
+        fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
         fn script_apply(&mut self, _vm:&mut Vm, _apply:&mut ApplyScope, _value:Value){
             // alright lets apply 'value'
-            // its either an array with a root proto ID of 'bare'
-            // or its an object with root proto id Field
-            // or its a bare id
+            // we now have to 'deserialise' value into the right enum type
+            // the types should already be checked
+            
         }
-    }*/
+    }
     
     //impl ScriptHook for EnumTest{}
     
@@ -136,11 +173,8 @@ pub fn test(){
     
     impl ScriptHook for StructTest{
         fn on_proto_methods(vm:&mut Vm, obj:Object){
-            vm.add_fn(obj, id_lut!(method), args_lut!(o = 1.0), |_vm, _args|{
-                println!("METHOD");
-                //let fnptr = value!(vm, args.this.on_click);
-                //vm.call(fnptr, args!())\\
-                NIL
+            vm.add_fn(obj, id_lut!(return_two), args_lut!(o = 1.0), |_vm, _args|{
+                return 2.into()
             });
         }
     }    
@@ -252,9 +286,10 @@ pub fn test(){
         
         // struct tests
         let x = #(StructTest::script_api(vm_ref!(vm)));
-        try{x{field:2}} assert(false) ok assert(true)
+        try{x{field:5}} assert(false) ok assert(true)
         try{x{field:true}} assert(true) ok assert(false)
-        x.method()
+        assert(x.return_two() == 2)
+        
     };
     
     let _code = script!{
