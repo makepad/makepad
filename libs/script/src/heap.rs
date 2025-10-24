@@ -124,7 +124,7 @@ impl ScriptHeap{
         else{
             None
         }
-    }    
+    }
         
     pub fn register_type(&mut self, type_id:Option<ScriptTypeId>, ty_check:ScriptTypeCheck)-> ScriptTypeIndex{
         let index = ScriptTypeIndex(self.type_check.len() as _);
@@ -225,6 +225,19 @@ impl ScriptHeap{
      
     pub fn proto(&self, ptr:Object)->Value{
         self.objects[ptr.index as usize].proto
+    }
+    
+    pub fn root_proto(&self, ptr:Object)->Value{
+        let mut ptr = ptr;
+        loop{
+            let object = &self.objects[ptr.index as usize];
+            if let Some(next_ptr) = object.proto.as_object(){
+                ptr = next_ptr
+            }
+            else{
+                return object.proto
+            } 
+        }
     }
                 
     //pub fn object(&self, ptr:Object)->&Object{

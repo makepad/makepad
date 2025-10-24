@@ -136,13 +136,10 @@ impl ScriptTrap{
     pub fn err_invalid_var_name(&self)->Value{self.err(Value::err_invalid_var_name(self.ip))}
     pub fn err_not_proto(&self)->Value{self.err(Value::err_not_proto(self.ip))}
     pub fn err_type_not_registered(&self)->Value{self.err(Value::err_type_not_registered(self.ip))}
+    pub fn err_enum_unknown_variant(&self)->Value{self.err(Value::err_enum_unknown_variant(self.ip))}
     pub fn err_user(&self)->Value{self.err(Value::err_user(self.ip))}
 }
 
-pub enum ScriptHook{
-    SysCall(usize),
-    RustCall
-}
 
 impl ScriptThread{
     
