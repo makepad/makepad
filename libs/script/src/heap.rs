@@ -5,6 +5,8 @@ use std::fmt::Write;
 use crate::object::*;
 use crate::string::*;
 use crate::thread::*;
+use crate::script::*;
+use std::collections::HashMap;
 
 pub struct ScriptHeap{
     pub modules: Object,
@@ -13,7 +15,9 @@ pub struct ScriptHeap{
     pub(crate) roots: Vec<usize>,
     pub(crate) objects_free: Vec<usize>,
     pub(crate) strings: Vec<HeapStringData>,
-    pub(crate) strings_free: Vec<usize>
+    pub(crate) strings_free: Vec<usize>,
+    pub(crate) _types: Vec<ScriptTypeData>,
+    pub(crate) _type_index: HashMap<ScriptTypeId, ScriptTypeIndex>,
 }
 
 impl ScriptHeap{
@@ -28,6 +32,8 @@ impl ScriptHeap{
             // index 0 is always an empty string
             strings: vec![Default::default()],
             strings_free: Default::default(),
+            _types: Default::default(),
+            _type_index: Default::default()
         };
         v.objects[0].tag.set_alloced();
         v.objects[0].tag.set_static();
@@ -63,7 +69,18 @@ impl ScriptHeap{
         self.objects[obj.index as usize].tag.set_tracked();
         obj
     }
-             
+    
+    pub fn new_with_proto_check(&mut self, proto:Value, trap:&ScriptTrap)->Object{
+        if let Some(ptr) = proto.as_object(){
+            let object = &mut self.objects[ptr.index as usize];
+            if object.tag.is_notproto(){
+                trap.err_notproto();
+                return Object::ZERO;
+            }
+        }
+        self.new_with_proto(proto)
+    }
+    
     pub fn new_with_proto(&mut self, proto:Value)->Object{
         let (proto_fwd, proto_index) = if let Some(ptr) = proto.as_object(){
             let object = &mut self.objects[ptr.index as usize];
@@ -87,7 +104,7 @@ impl ScriptHeap{
             object.tag.set_proto_fwd(proto_fwd);
             object.proto = proto;
             // only copy vec if we are 'auto' otherwise we proto inherit normally
-            if proto_object.tag.get_type().is_auto(){
+            if proto_object.tag.get_storage_type().is_auto(){
                 object.vec.extend_from_slice(&proto_object.vec);
             }
             Object{index: index as _}
@@ -97,7 +114,7 @@ impl ScriptHeap{
             let mut object = ObjectData::with_proto(proto);
             object.tag.set_proto_fwd(proto_fwd);
             let proto_object = &self.objects[proto_index];
-            if proto_object.tag.get_type().is_auto(){
+            if proto_object.tag.get_storage_type().is_auto(){
                 object.vec.extend_from_slice(&proto_object.vec);
             }
             self.objects.push(object);
@@ -317,8 +334,8 @@ impl ScriptHeap{
          self.objects[ptr.index as usize].tag.set_deep()
     }
     
-    pub fn set_object_type(&mut self, ptr:Object, ty: ObjectType){
-        self.objects[ptr.index as usize].set_type(ty)
+    pub fn set_object_storage_type(&mut self, ptr:Object, ty: ObjectStorageType){
+        self.objects[ptr.index as usize].set_storage_type(ty)
     }
     
     pub fn set_first_applied_and_clean(&mut self, ptr:Object){
@@ -344,8 +361,10 @@ impl ScriptHeap{
     pub fn freeze_api(&mut self, ptr: Object){
         self.objects[ptr.index as usize].tag.freeze_api()
     }
-            
-        
+    
+    pub fn freeze_with_type(&mut self, ptr: Object, ty:ScriptTypeIndex){
+        self.objects[ptr.index as usize].tag.freeze_type(ty)
+    }
     // Writing object values 
         
         
@@ -358,7 +377,7 @@ impl ScriptHeap{
     fn set_value_index(&mut self, ptr: Object, index:Value, value: Value, trap:&ScriptTrap)->Value{
         // alright so. now what.
         let object = &mut self.objects[ptr.index as usize];
-        let ty = object.tag.get_type();
+        let ty = object.tag.get_storage_type();
         
         if object.tag.is_vec_frozen(){ // has rw flags
             return trap.err_vecfrozen()
@@ -412,10 +431,10 @@ impl ScriptHeap{
         let mut ptr = ptr;
         loop{
             let object = &mut self.objects[ptr.index as usize];
-            if object.tag.has_freeze(){
-                return trap.err_vecfrozen()
+            if object.tag.is_frozen(){
+                return trap.err_frozen()
             }
-            if object.tag.get_type().is_vec2(){
+            if object.tag.get_storage_type().is_vec2(){
                 for chunk in object.vec.rchunks_mut(2){
                     if chunk[0] == key{
                         chunk[1] = value;
@@ -435,7 +454,7 @@ impl ScriptHeap{
         }
         // alright nothing found
         let object = &mut self.objects[ptr.index as usize];
-        if object.tag.get_type().is_vec2(){
+        if object.tag.get_storage_type().is_vec2(){
             object.vec.extend_from_slice(&[key, value]);
         }
         else{
@@ -444,20 +463,28 @@ impl ScriptHeap{
         NIL
     }
     
+    fn validate_type(&self, lhs:Value, rhs:Value)->bool{
+        lhs.value_type().to_redux() == rhs.value_type().to_redux()
+    }
+    
     fn set_value_shallow_checked(&mut self, ptr:Object, key:Value, value:Value, trap:&ScriptTrap)->Value{
         let object = &self.objects[ptr.index as usize];
         if object.tag.is_frozen(){
             return trap.err_frozen()
         }
-        // check against prototype
+        if let Some(_rust_type) = object.tag.as_type_index(){
+            // we can check a value write against typeinfo
+            // todo check!
+        }
+        // check against prototype or type
         if object.tag.is_validated(){
             let mut ptr = ptr;
             loop{
                 let object = &self.objects[ptr.index as usize];
-                if object.tag.get_type().is_vec2(){
+                if object.tag.get_storage_type().is_vec2(){
                     for chunk in object.vec.rchunks(2){
                         if chunk[0] == key{
-                            if chunk[1].value_type().to_redux() != value.value_type().to_redux(){
+                            if !self.validate_type(chunk[1], value){
                                 return trap.err_invalidproptype()
                             }
                             return self.set_value_shallow(ptr, key, value, trap);
@@ -465,7 +492,7 @@ impl ScriptHeap{
                     }
                 }
                 if let Some(set_value) = object.map_get(&key){
-                    if set_value.value_type().to_redux() != value.value_type().to_redux(){
+                    if !self.validate_type(*set_value, value){
                         return trap.err_invalidproptype()
                     }
                     return self.set_value_shallow(ptr, key, value, trap);
@@ -480,7 +507,7 @@ impl ScriptHeap{
         }
         let object = &mut self.objects[ptr.index as usize];
         if object.tag.is_map_add(){
-            if object.tag.get_type().is_vec2(){
+            if object.tag.get_storage_type().is_vec2(){
                 for chunk in object.vec.rchunks_mut(2){
                     if chunk[0] == key{
                         return trap.err_keyalreadyexists()
@@ -496,23 +523,13 @@ impl ScriptHeap{
                 object.map_insert(key, value);
                 return NIL    
             }
-            /*
-            match object.map.entry(key) {
-                Entry::Occupied(_) => {
-                    return trap.err_keyalreadyexists()
-                }
-                Entry::Vacant(vac) => {
-                    vac.insert(value);
-                    return NIL
-                }
-            }*/
         }
         trap.err_unexpected()
     }
     
     fn set_value_shallow(&mut self, ptr:Object, key:Value, value:Value, _trap:&ScriptTrap)->Value{
         let object = &mut self.objects[ptr.index as usize];
-        if object.tag.get_type().is_vec2(){
+        if object.tag.get_storage_type().is_vec2(){
             for chunk in object.vec.rchunks_mut(2){
                 if chunk[0] == key{
                     chunk[1] = value;
@@ -541,7 +558,7 @@ impl ScriptHeap{
             }
             let object = &self.objects[ptr.index as usize];
             if !object.tag.is_deep(){
-                if object.tag.has_freeze(){
+                if object.tag.needs_checking(){
                     return self.set_value_shallow_checked(ptr, key, value, trap)
                 }
                 return self.set_value_shallow(ptr, key, value, trap);
@@ -556,7 +573,7 @@ impl ScriptHeap{
         if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             let object = &mut self.objects[ptr.index as usize];
             if !object.tag.is_deep(){
-                if object.tag.has_freeze(){
+                if object.tag.needs_checking(){
                     return self.set_value_shallow_checked(ptr, key, value, trap)
                 }
                 return self.set_value_shallow(ptr, key, value, trap);
@@ -599,7 +616,7 @@ impl ScriptHeap{
             if let Some(value) = object.map.get(&key){
                 return *value
             }
-            if object.tag.get_type().is_vec2(){
+            if object.tag.get_storage_type().is_vec2(){
                 for chunk in object.vec.rchunks(2){
                     if chunk[0] == key{
                         return chunk[1]
@@ -641,7 +658,7 @@ impl ScriptHeap{
     fn value_index(&self, ptr: Object, index: Value, trap:&ScriptTrap)->Value{
         let object = &self.objects[ptr.index as usize];
         
-        let ty = object.tag.get_type();
+        let ty = object.tag.get_storage_type();
         // most used path
         if ty.uses_vec2(){
             let index = index.as_index();
@@ -677,7 +694,7 @@ impl ScriptHeap{
     
     fn value_prefixed(&self, ptr: Object, key: Value, trap:&ScriptTrap)->Value{
         let object = &self.objects[ptr.index as usize];
-        if object.tag.get_type().uses_vec2(){
+        if object.tag.get_storage_type().uses_vec2(){
             for chunk in object.vec.rchunks(2){
                 if chunk[0] == key{
                     return chunk[1]
@@ -711,7 +728,7 @@ impl ScriptHeap{
             if let Some(value) = object.map_get(&key){
                 return *value
             }
-            if object.tag.get_type().is_vec2(){
+            if object.tag.get_storage_type().is_vec2(){
                 for chunk in object.vec.rchunks(2){
                     if chunk[0] == key{
                         return chunk[1]
@@ -807,12 +824,12 @@ impl ScriptHeap{
     
     pub fn vec_key_value(&self, ptr:Object, index:usize, trap:&ScriptTrap)->(Value,Value){
         let object = &self.objects[ptr.index as usize];
-        if object.tag.get_type().has_paired_vec(){
+        if object.tag.get_storage_type().has_paired_vec(){
             if let Some(value) = object.vec.get(index * 2 + 1){
                 return (object.vec[index * 2], *value)
             }
         }
-        else if object.tag.get_type().is_vec1(){
+        else if object.tag.get_storage_type().is_vec1(){
             if let Some(value) = object.vec.get(index){
                 return (NIL,*value)
             }
@@ -822,12 +839,12 @@ impl ScriptHeap{
         
     pub fn vec_value(&self, ptr:Object, index:usize, trap:&ScriptTrap)->Value{
         let object = &self.objects[ptr.index as usize];
-        if object.tag.get_type().has_paired_vec(){
+        if object.tag.get_storage_type().has_paired_vec(){
             if let Some(value) = object.vec.get(index * 2 + 1){
                 return *value
             }
         }
-        else if object.tag.get_type().is_vec1(){
+        else if object.tag.get_storage_type().is_vec1(){
             if let Some(value) = object.vec.get(index){
                 return *value
             }
@@ -837,10 +854,10 @@ impl ScriptHeap{
         
     pub fn vec_len(&self, ptr:Object)->usize{
         let object = &self.objects[ptr.index as usize];
-        if object.tag.get_type().has_paired_vec(){
+        if object.tag.get_storage_type().has_paired_vec(){
             object.vec.len() >> 1
         }
-        else if object.tag.get_type().is_vec1(){
+        else if object.tag.get_storage_type().is_vec1(){
             object.vec.len()
         }
         else{
@@ -911,7 +928,7 @@ impl ScriptHeap{
         if object.tag.is_vec_frozen(){
             return trap.err_vecfrozen()
         }
-        let ty = object.tag.get_type();
+        let ty = object.tag.get_storage_type();
         if ty.has_paired_vec(){
             object.vec.extend_from_slice(&[key, value]);
             if let Some(obj) = value.as_object(){
@@ -936,14 +953,14 @@ impl ScriptHeap{
         if object.tag.is_vec_frozen(){
             return trap.err_vecfrozen()
         }
-        if object.tag.get_type().has_paired_vec(){
+        if object.tag.get_storage_type().has_paired_vec(){
             if index >= object.vec.len() * 2{
                 return trap.err_vecbound()
             }
             object.vec.remove(index * 2);
             return object.vec.remove(index * 2);
         }
-        else if object.tag.get_type().is_vec1(){
+        else if object.tag.get_storage_type().is_vec1(){
             if index >= object.vec.len(){
                 return trap.err_vecbound()
             }
@@ -959,12 +976,12 @@ impl ScriptHeap{
         if object.tag.is_vec_frozen(){
             return trap.err_vecfrozen()
         }
-        if object.tag.get_type().has_paired_vec(){
+        if object.tag.get_storage_type().has_paired_vec(){
             object.vec.pop();
             
             object.vec.pop().unwrap_or_else(|| trap.err_vecbound())
         }
-        else if object.tag.get_type().is_vec1(){
+        else if object.tag.get_storage_type().is_vec1(){
             object.vec.pop().unwrap_or_else(|| trap.err_vecbound())
         }
         else{
@@ -1181,7 +1198,7 @@ impl ScriptHeap{
         false
     }
     
-    pub fn print_key_value(&self, key:Value, value:Value, deep:bool, str:&mut String){
+    pub fn print_key_value(&self, key:Value, value:Value,str:&mut String){
         if let Some(obj) = value.as_object(){
             if !key.is_nil(){
                 str.clear();self.cast_to_string(key, str);
@@ -1190,14 +1207,14 @@ impl ScriptHeap{
             let object = &self.objects[obj.index as usize];
             if object.tag.is_script_fn(){
                 print!("Fn");
-                self.print(obj,false);
+                self.print(obj);
             }
             else if object.tag.is_native_fn(){
                 print!("Native");
-                self.print(obj,false);
+                self.print(obj);
             }
             else{
-                self.print(obj, deep);
+                self.print(obj);
             }
         }
         else{
@@ -1210,8 +1227,7 @@ impl ScriptHeap{
         }
     }
     
-    
-    pub fn print(&self, set_ptr:Object, deep:bool){
+    pub fn print(&self, set_ptr:Object){
         let mut ptr = set_ptr;
         let mut str = String::new();
         // scan up the chain to set the proto value
@@ -1221,29 +1237,21 @@ impl ScriptHeap{
             let object = &self.objects[ptr.index as usize];
             object.map_iter(|key,value|{
                 if !first{print!(",")}
-                self.print_key_value(key, value, deep, &mut str);
+                self.print_key_value(key, value, &mut str);
                 first = false;
             });
-            /*for (key, value) in object.map.iter(){
-                if !first{print!(",")}
-                self.print_key_value(*key, *value, deep, &mut str);
-                first = false;
-            }*/
-            if object.tag.get_type().has_paired_vec(){
+            if object.tag.get_storage_type().has_paired_vec(){
                 for chunk in object.vec.chunks(2){
                     if !first{print!(",")}
-                    self.print_key_value(chunk[0], chunk[1], deep, &mut str);
+                    self.print_key_value(chunk[0], chunk[1], &mut str);
                     first = false;
                 }
             }
-            else if !object.tag.get_type().is_typed(){
+            else if !object.tag.get_storage_type().is_typed(){
             }else{
             }
                 
             if let Some(next_ptr) = object.proto.as_object(){
-                if !deep{
-                    break
-                }
                 if !first{print!(",")}
                 print!("^");
                 ptr = next_ptr

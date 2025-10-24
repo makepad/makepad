@@ -3,6 +3,8 @@ use proc_macro::{TokenStream};
 use makepad_micro_proc_macro::{
     TokenBuilder,
     TokenParser,
+    Attribute,
+    StructField,
     error_result,
 };
 
@@ -43,6 +45,10 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             }
         }
         
+        
+        // Deref
+        
+        
         let deref_field = fields.iter().find( | field | field.attrs.iter().any( | a | a.name == "deref"));
         
         if let Some(deref_field) = deref_field {
@@ -79,12 +85,14 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("}");
                 
         
-        // Script
+        // ScriptApply
         
         
         
         tb.add("impl").stream(generic.clone());
         tb.add("ScriptApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        
+        tb.add("    fn script_type_id(&self)->std::any::TypeId{ ScriptTypeId::of::<Self>()}");
         
         tb.add("    fn script_apply(&mut self, vm:&mut Vm, apply:&mut ApplyScope, value:Value) {");
         tb.add("       if <Self as ScriptHook>::on_skip_apply(self, vm, apply, value) || value.is_nil(){return};");
@@ -107,8 +115,46 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    }");
         tb.add("}");
         
+        
+        // ScriptToValue
+        
+        
+        
         tb.add("impl").stream(generic.clone());
-        tb.add("ScriptNew for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
+        tb.add("ScriptToValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                
+        tb.add("    fn script_to_value_props(&self, vm: &mut Vm, obj:Object) {");
+        
+        for field in &fields {
+                        
+            if field.attrs.iter().find(|a| a.name == "deref").is_some(){
+                tb.add("self.").ident(&field.name).add(".script_to_value_props(vm, obj)");
+            }
+            if let Some(_) = field.attrs.iter().find(|a| a.name == "script" || a.name == "live"){
+                tb.add("let value:Value = self.").ident(&field.name).add(".script_to_value(vm); ");
+                tb.add("vm.heap.set_value(obj, Value::from_id(id_lut!(")
+                .ident(&field.name).add(")), value, &vm.thread.trap);");
+            }
+        }
+        
+        tb.add("    }");
+        tb.add("}");
+        
+        
+        // ScriptTypeInfo
+        /*
+        tb.add("impl").stream(generic.clone());
+        tb.add("ScriptTypeInfo for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        tb.add("    fn script_type_index(_vm:&mut Vm)->ScriptTypeIndex{ScriptTypeIndex(0)}");
+        tb.add("}");
+        */
+         
+        // ScriptNew
+        
+        
+        
+        tb.add("impl").stream(generic.clone());
+        tb.add("ScriptNew for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
         tb.add("    fn script_new(vm: &mut Vm) -> Self {");
         tb.add("        let mut ret = Self {");
@@ -137,6 +183,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("        <Self as ScriptHook>::on_new(&mut ret, vm);");
         tb.add("        ret");
         tb.add("    }");
+        
          
         tb.add("    fn script_def_props(vm: &mut Vm, obj:Object) {");
         for field in &fields {
@@ -150,7 +197,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("").stream(Some(field.ty.clone())).add("::script_def(vm);");
                 }
                 else {
-                    tb.add("(").stream(attr.args.clone()).add(").into();");
+                    tb.add("(").stream(attr.args.clone()).add(").script_to_value(vm);");
                 }  
                 tb.add("vm.heap.set_value(obj, Value::from_id(id_lut!(")
                     .ident(&field.name).add(")), value,&vm.thread.trap);");
@@ -165,8 +212,6 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         return Ok(())
     }
-    Ok(())
-    /*
     else if parser.eat_ident("enum") {
         let enum_name = parser.expect_any_ident() ?;
         let generic = parser.eat_generic();
@@ -196,6 +241,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 match &self.kind {
                     EnumKind::Bare => (),
                     EnumKind::Named(_) => {
+                        
                         if self.attributes.len() != 1 {
                             return error_result("For named and typle enums please provide default values");
                         }
@@ -217,7 +263,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             let attributes = parser.eat_attributes();
             // check if we have a default attribute
             if let Some(name) = parser.eat_any_ident() {
-                if !attributes.is_empty() && attributes[0].name == "pick" {
+                if attributes.iter().any(|a| a.name == "pick"){
                     if pick.is_some() {
                         return error_result("Enum can only have a single field marked pick");
                     }
@@ -241,9 +287,8 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             return error_result("Enum needs atleast one field marked pick");
         }
         
-        
         tb.add("impl").stream(generic.clone());
-        tb.add("LiveNew for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        tb.add("ScriptNew for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
         tb.add("    fn new(cx:&mut Cx) -> Self {");
         tb.add("        let mut ret = ");
@@ -415,7 +460,6 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
     }
     else {
         error_result("Not enum or struct")
-    }*/
-    
+    }    
 }
 

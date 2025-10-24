@@ -450,14 +450,14 @@ impl ScriptThread{
             
             Opcode::BEGIN_PROTO=>{
                 let proto = self.pop_stack_resolved(heap);
-                let me = heap.new_with_proto(proto);
+                let me = heap.new_with_proto_check(proto, &self.trap);
                 self.mes.push(ScriptMe::object(me));
                 self.trap.goto_next();
             }
             Opcode::BEGIN_PROTO_ME=>{
                 let field = self.peek_stack_value();
                 let me = self.mes.last().unwrap();
-                let proto = heap.value(me.object, field, &mut self.trap);
+                let proto = heap.value(me.object, field, &self.trap);
                 let me = heap.new_with_proto(proto);
                 self.mes.push(ScriptMe::object(me));
                 self.trap.goto_next();
@@ -503,7 +503,7 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                heap.set_object_type(scope, ObjectType::AUTO);
+                heap.set_object_storage_type(scope, ObjectStorageType::AUTO);
                                 
                 if let Some(fnptr) = heap.parent_as_fn(scope){
                     match fnptr{
@@ -584,7 +584,7 @@ impl ScriptThread{
                 let me = heap.new_with_proto(scope.into());
                                 
                 // set it to a vec type to ensure ordered inserts
-                heap.set_object_type(me, ObjectType::VEC2);
+                heap.set_object_storage_type(me, ObjectStorageType::VEC2);
                 heap.clear_object_deep(me);
                                                 
                 self.mes.push(ScriptMe::object(me));
@@ -800,7 +800,7 @@ impl ScriptThread{
                         }
                         else if let Some(obj) = value.as_object(){
                             print!("{} ", loc);
-                            heap.print(obj, true);
+                            heap.print(obj);
                             println!("");
                         }
                         else if let Some(nanip) = value.as_f64_traced_nan(){
