@@ -162,7 +162,7 @@ impl ScriptTypeMethods{
                 }
                 return NIL
             }
-            vm.thread.trap.err_notimpl()
+            vm.thread.trap.err_not_impl()
         });
     }     
 }    

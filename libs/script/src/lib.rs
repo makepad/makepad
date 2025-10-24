@@ -25,6 +25,7 @@ pub use vm::ScriptVm;
 pub use makepad_script_derive::*;
 pub use vm::ScriptBlock;
 pub use script::*;
+pub use heap::*;
 // can we refcount object roots on the heap?
 // yea why not 
 // we can make a super convenient ObjectRef type you can use to hold onto script objects
@@ -119,9 +120,10 @@ pub fn test(){
     pub struct StructTest{
         #[live(1.0)] field:f64,
         //#[live(EnumTest::Bare)] enm:EnumTest,
-        #[live] this: Object,
-        #[live] onclick: Object,
+        //#[live] this: Object,
+        //#[live] onclick: Object,
     }
+    
     
     let s = StructTest::script_new(vm_ref!(vm));
     let v = s.script_to_value(vm_ref!(vm)).into();
@@ -131,14 +133,11 @@ pub fn test(){
     use crate::vm::*;
     use crate::value::*;
     
-    impl ScriptTypeInfo for StructTest{
-        
-    }
     
     impl ScriptHook for StructTest{
-        fn on_script_def(vm:&mut Vm, obj:Object){
+        fn on_proto_methods(vm:&mut Vm, obj:Object){
             vm.add_fn(obj, id_lut!(method), args_lut!(o = 1.0), |_vm, _args|{
-                //println!("METHOD");
+                println!("METHOD");
                 //let fnptr = value!(vm, args.this.on_click);
                 //vm.call(fnptr, args!())\\
                 NIL
@@ -173,6 +172,7 @@ pub fn test(){
     
     // Our unit tests :)
     let code = script!{
+        let t = mod.std;
         scope.import(mod.std)
         
         // array operations
@@ -255,7 +255,6 @@ pub fn test(){
         try{x{field:2}} assert(false) ok assert(true)
         try{x{field:true}} assert(true) ok assert(false)
         x.method()
-        
     };
     
     let _code = script!{

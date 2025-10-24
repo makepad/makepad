@@ -147,30 +147,31 @@ impl ValueType{
     pub const INLINE_STRING_END: Self = Self(15);
     
     pub const ERR_FIRST: Self = Self(16);
-    pub const ERR_NOTFOUND: Self = Self(16);
-    pub const ERR_NOTFN: Self = Self(17);
-    pub const ERR_NOTINDEX: Self = Self(19);
-    pub const ERR_NOTOBJECT: Self = Self(20);
-    pub const ERR_STACKUNDERFLOW: Self = Self(21);
-    pub const ERR_STACKOVERFLOW: Self = Self(22);
-    pub const ERR_INVALIDARGS: Self = Self(23);
-    pub const ERR_NOTASSIGNABLE: Self = Self(24);
+    pub const ERR_NOT_FOUND: Self = Self(16);
+    pub const ERR_NOT_FN: Self = Self(17);
+    pub const ERR_NOT_INDEX: Self = Self(19);
+    pub const ERR_NOT_OBJECT: Self = Self(20);
+    pub const ERR_STACK_UNDERFLOW: Self = Self(21);
+    pub const ERR_STACK_OVERFLOW: Self = Self(22);
+    pub const ERR_INVALID_ARGS: Self = Self(23);
+    pub const ERR_NOT_ASSIGNABLE: Self = Self(24);
     pub const ERR_UNEXPECTED: Self = Self(25);
-    pub const ERR_ASSERTFAIL: Self = Self(26);
-    pub const ERR_NOTIMPL: Self = Self(27);
+    pub const ERR_ASSERT_FAIL: Self = Self(26);
+    pub const ERR_NOT_IMPL: Self = Self(27);
     pub const ERR_FROZEN: Self = Self(28);
     pub const ERR_VEC_FROZEN: Self = Self(29);
-    pub const ERR_INVALIDPROPTYPE: Self = Self(30);
-    pub const ERR_INVALIDPROPNAME: Self = Self(31);
-    pub const ERR_KEYALREADYEXISTS: Self = Self(32);
-    pub const ERR_INVALIDKEYTYPE: Self = Self(33);
-    pub const ERR_INVALIDVARNAME: Self = Self(34);
+    pub const ERR_INVALID_PROP_TYPE: Self = Self(30);
+    pub const ERR_INVALID_PROP_NAME: Self = Self(31);
+    pub const ERR_KEY_ALREADY_EXISTS: Self = Self(32);
+    pub const ERR_INVALID_KEY_TYPE: Self = Self(33);
+    pub const ERR_INVALID_VAR_NAME: Self = Self(34);
     pub const ERR_USER: Self = Self(35);
-    pub const ERR_VECBOUND: Self = Self(36);
-    pub const ERR_INVALIDARGTYPE: Self = Self(37);
-    pub const ERR_INVALIDARGNAME: Self = Self(38);
-    pub const ERR_NOTPROTO: Self = Self(39);
-    pub const ERR_LAST: Self = Self(39);
+    pub const ERR_VEC_BOUND: Self = Self(36);
+    pub const ERR_INVALID_ARG_TYPE: Self = Self(37);
+    pub const ERR_INVALID_ARG_NAME: Self = Self(38);
+    pub const ERR_NOT_PROTO: Self = Self(39);
+    pub const ERR_TYPE_NOT_REGISTERED: Self = Self(40);
+    pub const ERR_LAST: Self = Self(40);
     
     pub const ID: Self = Self(0x80);
         
@@ -242,29 +243,29 @@ impl fmt::Display for ValueType {
             Self::INLINE_STRING_3=>write!(f,"string3"),
             Self::INLINE_STRING_4=>write!(f,"string4"),
             Self::INLINE_STRING_5=>write!(f,"string5"),
-            Self::ERR_NOTFOUND=>write!(f,"NotFound"),
-            Self::ERR_NOTFN=>write!(f,"NotAFunction"),
-            Self::ERR_NOTINDEX=>write!(f,"IndexNotFound"),
-            Self::ERR_NOTOBJECT=>write!(f,"NotAnObject"),
-            Self::ERR_STACKUNDERFLOW=>write!(f,"StackUnderflow"),
-            Self::ERR_STACKOVERFLOW=>write!(f,"StackOverflow"),
-            Self::ERR_INVALIDARGS=>write!(f,"InvalidArgs"),
-            Self::ERR_NOTASSIGNABLE=>write!(f,"NotAssignable"),
+            Self::ERR_NOT_FOUND=>write!(f,"NotFound"),
+            Self::ERR_NOT_FN=>write!(f,"NotAFunction"),
+            Self::ERR_NOT_INDEX=>write!(f,"IndexNotFound"),
+            Self::ERR_NOT_OBJECT=>write!(f,"NotAnObject"),
+            Self::ERR_STACK_UNDERFLOW=>write!(f,"StackUnderflow"),
+            Self::ERR_STACK_OVERFLOW=>write!(f,"StackOverflow"),
+            Self::ERR_INVALID_ARGS=>write!(f,"InvalidArgs"),
+            Self::ERR_NOT_ASSIGNABLE=>write!(f,"NotAssignable"),
             Self::ERR_UNEXPECTED=>write!(f,"Unexpected"),
-            Self::ERR_ASSERTFAIL=>write!(f,"AssertFailure"),
-            Self::ERR_NOTIMPL=>write!(f,"NotImplemented"),
+            Self::ERR_ASSERT_FAIL=>write!(f,"AssertFailure"),
+            Self::ERR_NOT_IMPL=>write!(f,"NotImplemented"),
             Self::ERR_FROZEN=>write!(f,"ObjectFrozen"),
             Self::ERR_VEC_FROZEN=>write!(f,"VecFrozen"),
-            Self::ERR_INVALIDPROPTYPE=>write!(f,"InvalidPropertyType"),
-            Self::ERR_INVALIDPROPNAME=>write!(f,"InvalidPropertyName"),
-            Self::ERR_KEYALREADYEXISTS=>write!(f,"KeyAlreadyExists"),
-            Self::ERR_INVALIDKEYTYPE=>write!(f,"UnsupportedKeyType"),
-            Self::ERR_VECBOUND=>write!(f,"VecBoundFail"),
-            Self::ERR_INVALIDARGTYPE=>write!(f,"InvalidArgumentType"),
-            Self::ERR_INVALIDARGNAME=>write!(f,"InvalidArgumentName"),
-            Self::ERR_INVALIDVARNAME=>write!(f,"InvalidVariableName"),
-            Self::ERR_NOTPROTO=>write!(f,"NotAllowedAsPrototype"),
-                                                                                    
+            Self::ERR_INVALID_PROP_TYPE=>write!(f,"InvalidPropertyType"),
+            Self::ERR_INVALID_PROP_NAME=>write!(f,"InvalidPropertyName"),
+            Self::ERR_KEY_ALREADY_EXISTS=>write!(f,"KeyAlreadyExists"),
+            Self::ERR_INVALID_KEY_TYPE=>write!(f,"UnsupportedKeyType"),
+            Self::ERR_VEC_BOUND=>write!(f,"VecBoundFail"),
+            Self::ERR_INVALID_ARG_TYPE=>write!(f,"InvalidArgumentType"),
+            Self::ERR_INVALID_ARG_NAME=>write!(f,"InvalidArgumentName"),
+            Self::ERR_INVALID_VAR_NAME=>write!(f,"InvalidVariableName"),
+            Self::ERR_NOT_PROTO=>write!(f,"NotAllowedAsPrototype"),
+            Self::ERR_TYPE_NOT_REGISTERED=>write!(f,"TypeNotRegistered"),
             Self::ERR_USER=>write!(f,"UserGenerated"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ValueType?")
@@ -326,31 +327,31 @@ impl Value{
         
     // TODO: make this behave like javascript as much as is sensible
         
-    pub const fn err_notfound(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTFOUND.to_u64() | ip.to_u40())}
-    pub const fn err_notfn(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTFN.to_u64() | ip.to_u40())}
-    pub const fn err_notindex(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTINDEX.to_u64() | ip.to_u40())}
-    pub const fn err_notobject(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTOBJECT.to_u64()| ip.to_u40())}
-    pub const fn err_stackunderflow(ip:ScriptIp)->Self{Self(ValueType::ERR_STACKUNDERFLOW.to_u64() | ip.to_u40())}
-    pub const fn err_stackoverflow(ip:ScriptIp)->Self{Self(ValueType::ERR_STACKOVERFLOW.to_u64() | ip.to_u40())}
-    pub const fn err_invalidargs(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDARGS.to_u64() | ip.to_u40())}
-    pub const fn err_notassignable(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTASSIGNABLE.to_u64() | ip.to_u40())}
+    pub const fn err_not_found(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_FOUND.to_u64() | ip.to_u40())}
+    pub const fn err_not_fn(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_FN.to_u64() | ip.to_u40())}
+    pub const fn err_not_index(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_INDEX.to_u64() | ip.to_u40())}
+    pub const fn err_not_object(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_OBJECT.to_u64()| ip.to_u40())}
+    pub const fn err_stack_underflow(ip:ScriptIp)->Self{Self(ValueType::ERR_STACK_UNDERFLOW.to_u64() | ip.to_u40())}
+    pub const fn err_stack_overflow(ip:ScriptIp)->Self{Self(ValueType::ERR_STACK_OVERFLOW.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_args(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_ARGS.to_u64() | ip.to_u40())}
+    pub const fn err_not_assignable(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_ASSIGNABLE.to_u64() | ip.to_u40())}
     pub const fn err_unexpected(ip:ScriptIp)->Self{Self(ValueType::ERR_UNEXPECTED.to_u64() | ip.to_u40())}
-    pub const fn err_assertfail(ip:ScriptIp)->Self{Self(ValueType::ERR_ASSERTFAIL.to_u64() | ip.to_u40())}
-    pub const fn err_notimpl(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTIMPL.to_u64() | ip.to_u40())}
+    pub const fn err_assert_fail(ip:ScriptIp)->Self{Self(ValueType::ERR_ASSERT_FAIL.to_u64() | ip.to_u40())}
+    pub const fn err_not_impl(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_IMPL.to_u64() | ip.to_u40())}
     pub const fn err_frozen(ip:ScriptIp)->Self{Self(ValueType::ERR_FROZEN.to_u64() | ip.to_u40())}
-    pub const fn err_vecfrozen(ip:ScriptIp)->Self{Self(ValueType::ERR_VEC_FROZEN.to_u64() | ip.to_u40())}
-    pub const fn err_invalidproptype(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDPROPTYPE.to_u64() | ip.to_u40())}
-    pub const fn err_invalidpropname(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDPROPNAME.to_u64() | ip.to_u40())}
-    pub const fn err_keyalreadyexists(ip:ScriptIp)->Self{Self(ValueType::ERR_KEYALREADYEXISTS.to_u64() | ip.to_u40())}
-    pub const fn err_invalidkeytype(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDKEYTYPE.to_u64() | ip.to_u40())}
-    pub const fn err_vecbound(ip:ScriptIp)->Self{Self(ValueType::ERR_VECBOUND.to_u64() | ip.to_u40())}
-    pub const fn err_invalidargtype(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDARGTYPE.to_u64() | ip.to_u40())}            
-    pub const fn err_invalidargname(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDARGNAME.to_u64() | ip.to_u40())}
-    pub const fn err_invalidvarname(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALIDVARNAME.to_u64() | ip.to_u40())} 
+    pub const fn err_vec_frozen(ip:ScriptIp)->Self{Self(ValueType::ERR_VEC_FROZEN.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_prop_type(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_PROP_TYPE.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_prop_name(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_PROP_NAME.to_u64() | ip.to_u40())}
+    pub const fn err_key_already_exists(ip:ScriptIp)->Self{Self(ValueType::ERR_KEY_ALREADY_EXISTS.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_key_type(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_KEY_TYPE.to_u64() | ip.to_u40())}
+    pub const fn err_vec_bound(ip:ScriptIp)->Self{Self(ValueType::ERR_VEC_BOUND.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_arg_type(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_ARG_TYPE.to_u64() | ip.to_u40())}            
+    pub const fn err_invalid_arg_name(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_ARG_NAME.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_var_name(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_VAR_NAME.to_u64() | ip.to_u40())} 
         
     pub const fn err_user(ip:ScriptIp)->Self{Self(ValueType::ERR_USER.to_u64() | ip.to_u40())}
-    pub const fn err_notproto(ip:ScriptIp)->Self{Self(ValueType::ERR_NOTPROTO.to_u64() | ip.to_u40())}
-        
+    pub const fn err_not_proto(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_PROTO.to_u64() | ip.to_u40())}
+    pub const fn err_type_not_registered(ip:ScriptIp)->Self{Self(ValueType::ERR_TYPE_NOT_REGISTERED.to_u64() | ip.to_u40())}
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ValueType::ERR_LAST.to_u64()}
     
     pub const fn as_err(&self)->Option<ValueError>{
