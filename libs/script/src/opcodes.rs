@@ -24,7 +24,7 @@ macro_rules! f64_scope_assign_op_impl{
             }
         }
         else{
-            let value = $obj.trap.err_notassignable();
+            let value = $obj.trap.err_not_assignable();
             $obj.push_stack_value_nc(value);
         }
         $obj.trap.ip.index += 1;
@@ -48,7 +48,7 @@ macro_rules! fu64_scope_assign_op_impl{
             }
         }
         else{
-            let value = $obj.trap.err_notassignable();
+            let value = $obj.trap.err_not_assignable();
             $obj.push_stack_value_nc(value);
         }
         $obj.trap.ip.index += 1;
@@ -68,7 +68,7 @@ macro_rules! f64_field_assign_op_impl{
             $obj.push_stack_value_nc(value);
         }
         else{
-            let value = $obj.trap.err_notassignable();
+            let value = $obj.trap.err_not_assignable();
             $obj.push_stack_value_nc(value);
         }
         $obj.trap.ip.index += 1;
@@ -89,7 +89,7 @@ macro_rules! fu64_field_assign_op_impl{
             $obj.push_stack_value_nc(value);
         }
         else{
-            let value = $obj.trap.err_notassignable();
+            let value = $obj.trap.err_not_assignable();
             $obj.push_stack_value_nc(value);
         }
         $obj.trap.ip.index += 1;
@@ -109,7 +109,7 @@ macro_rules! f64_index_assign_op_impl{
             $obj.push_stack_value_nc(value);
         }
         else{
-            let value = $obj.trap.err_notassignable();
+            let value = $obj.trap.err_not_assignable();
             $obj.push_stack_value_nc(value);
         }
         $obj.trap.ip.index += 1;
@@ -129,7 +129,7 @@ macro_rules! fu64_index_assign_op_impl{
             $obj.push_stack_value_nc(value);
         }
         else{
-            let value = $obj.trap.err_notassignable();
+            let value = $obj.trap.err_not_assignable();
             $obj.push_stack_value_nc(value);
         }
         $obj.trap.ip.index += 1;
@@ -322,7 +322,7 @@ impl ScriptThread{
                     self.push_stack_value_nc(value);
                 }
                 else{
-                    let value = self.trap.err_notassignable();
+                    let value = self.trap.err_not_assignable();
                     self.push_stack_value_nc(value);
                 }
                 self.trap.goto_next();
@@ -351,7 +351,7 @@ impl ScriptThread{
                     }
                 }
                 else{
-                    let value = self.trap.err_notassignable();
+                    let value = self.trap.err_not_assignable();
                     self.push_stack_value_nc(value);
                 }
                 self.trap.goto_next();
@@ -366,7 +366,7 @@ impl ScriptThread{
                     self.push_stack_value_nc(value);
                 }
                 else{
-                    let value = self.trap.err_notobject();
+                    let value = self.trap.err_not_object();
                     self.push_stack_value_nc(value);
                 }
                 self.trap.goto_next();
@@ -397,7 +397,7 @@ impl ScriptThread{
                     }
                 }
                 else{
-                    let value = self.trap.err_notobject();
+                    let value = self.trap.err_not_object();
                     self.push_stack_value_nc(value);
                 }
                 self.trap.goto_next();
@@ -412,7 +412,7 @@ impl ScriptThread{
                     self.push_stack_value_nc(value);
                 }
                 else{
-                    let value = self.trap.err_notobject();
+                    let value = self.trap.err_not_object();
                     self.push_stack_value_nc(value);
                 }
                 self.trap.goto_next();
@@ -442,7 +442,7 @@ impl ScriptThread{
                     }
                 }
                 else{
-                    let value = self.trap.err_notobject();
+                    let value = self.trap.err_not_object();
                     self.push_stack_value_nc(value);
                 }
                 self.trap.goto_next();
@@ -538,7 +538,7 @@ impl ScriptThread{
                     }
                 }
                 else{
-                    let value = self.trap.err_notfn();
+                    let value = self.trap.err_not_fn();
                     self.push_stack_value_nc(value);
                     self.trap.goto_next();
                 }
@@ -564,7 +564,7 @@ impl ScriptThread{
                         scope
                     }
                     else{ 
-                        self.trap.err_notfound();
+                        self.trap.err_not_found();
                         heap.new_with_proto(id!(undefined_function).into())
                     }
                 }
@@ -691,7 +691,7 @@ impl ScriptThread{
                     self.push_stack_value_nc(value);
                 }
                 else{
-                    let value = self.trap.err_notobject();
+                    let value = self.trap.err_not_object();
                     self.push_stack_value_nc(value);
                 }
                 self.trap.goto_next();
@@ -722,7 +722,7 @@ impl ScriptThread{
                     self.push_stack_value_nc(value)
                 }
                 else{
-                    let value = self.trap.err_notobject();
+                    let value = self.trap.err_not_object();
                     self.push_stack_value_nc(value);
                 }
                 self.trap.goto_next();
@@ -741,7 +741,7 @@ impl ScriptThread{
                     self.push_stack_value_nc(value)
                 }
                 else{
-                    let value = self.trap.err_notobject();
+                    let value = self.trap.err_not_object();
                     self.push_stack_value_nc(value);
                 }
                 self.trap.goto_next();

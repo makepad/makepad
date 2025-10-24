@@ -113,28 +113,29 @@ impl ScriptTrap{
         err
     }
     
-    pub fn err_notfound(&self)->Value{self.err(Value::err_notfound(self.ip))}
-    pub fn err_notfn(&self)->Value{self.err(Value::err_notfn(self.ip))}
-    pub fn err_notindex(&self)->Value{self.err(Value::err_notindex(self.ip))}
-    pub fn err_notobject(&self)->Value{self.err(Value::err_notobject(self.ip))}
-    pub fn err_stackunderflow(&self)->Value{self.err(Value::err_stackunderflow(self.ip))}
-    pub fn err_stackoverflow(&self)->Value{self.err(Value::err_stackoverflow(self.ip))}
-    pub fn err_invalidargs(&self)->Value{self.err(Value::err_invalidargs(self.ip))}
-    pub fn err_notassignable(&self)->Value{self.err(Value::err_notassignable(self.ip))}
+    pub fn err_not_found(&self)->Value{self.err(Value::err_not_found(self.ip))}
+    pub fn err_not_fn(&self)->Value{self.err(Value::err_not_fn(self.ip))}
+    pub fn err_not_index(&self)->Value{self.err(Value::err_not_index(self.ip))}
+    pub fn err_not_object(&self)->Value{self.err(Value::err_not_object(self.ip))}
+    pub fn err_stack_underflow(&self)->Value{self.err(Value::err_stack_underflow(self.ip))}
+    pub fn err_stack_overflow(&self)->Value{self.err(Value::err_stack_overflow(self.ip))}
+    pub fn err_invalid_args(&self)->Value{self.err(Value::err_invalid_args(self.ip))}
+    pub fn err_not_assignable(&self)->Value{self.err(Value::err_not_assignable(self.ip))}
     pub fn err_unexpected(&self)->Value{self.err(Value::err_unexpected(self.ip))}
-    pub fn err_assertfail(&self)->Value{self.err(Value::err_assertfail(self.ip))}
-    pub fn err_notimpl(&self)->Value{self.err(Value::err_notimpl(self.ip))}
+    pub fn err_assert_fail(&self)->Value{self.err(Value::err_assert_fail(self.ip))}
+    pub fn err_not_impl(&self)->Value{self.err(Value::err_not_impl(self.ip))}
     pub fn err_frozen(&self)->Value{self.err(Value::err_frozen(self.ip))}
-    pub fn err_vecfrozen(&self)->Value{self.err(Value::err_vecfrozen(self.ip))}
-    pub fn err_invalidproptype(&self)->Value{self.err(Value::err_invalidproptype(self.ip))}
-    pub fn err_invalidpropname(&self)->Value{self.err(Value::err_invalidpropname(self.ip))}
-    pub fn err_keyalreadyexists(&self)->Value{self.err(Value::err_keyalreadyexists(self.ip))}
-    pub fn err_invalidkeytype(&self)->Value{self.err(Value::err_invalidkeytype(self.ip))}
-    pub fn err_vecbound(&self)->Value{self.err(Value::err_vecbound(self.ip))}
-    pub fn err_invalidargtype(&self)->Value{self.err(Value::err_invalidargtype(self.ip))}
-    pub fn err_invalidargname(&self)->Value{self.err(Value::err_invalidargname(self.ip))}
-    pub fn err_invalidvarname(&self)->Value{self.err(Value::err_invalidvarname(self.ip))}
-    pub fn err_notproto(&self)->Value{self.err(Value::err_notproto(self.ip))}
+    pub fn err_vec_frozen(&self)->Value{self.err(Value::err_vec_frozen(self.ip))}
+    pub fn err_invalid_prop_type(&self)->Value{self.err(Value::err_invalid_prop_type(self.ip))}
+    pub fn err_invalid_prop_name(&self)->Value{self.err(Value::err_invalid_prop_name(self.ip))}
+    pub fn err_key_already_exists(&self)->Value{self.err(Value::err_key_already_exists(self.ip))}
+    pub fn err_invalid_key_type(&self)->Value{self.err(Value::err_invalid_key_type(self.ip))}
+    pub fn err_vec_bound(&self)->Value{self.err(Value::err_vec_bound(self.ip))}
+    pub fn err_invalid_arg_type(&self)->Value{self.err(Value::err_invalid_arg_type(self.ip))}
+    pub fn err_invalid_arg_name(&self)->Value{self.err(Value::err_invalid_arg_name(self.ip))}
+    pub fn err_invalid_var_name(&self)->Value{self.err(Value::err_invalid_var_name(self.ip))}
+    pub fn err_not_proto(&self)->Value{self.err(Value::err_not_proto(self.ip))}
+    pub fn err_type_not_registered(&self)->Value{self.err(Value::err_type_not_registered(self.ip))}
     pub fn err_user(&self)->Value{self.err(Value::err_user(self.ip))}
 }
 
@@ -194,7 +195,7 @@ impl ScriptThread{
             return val    
         }
         else{
-            self.trap.err_stackunderflow()
+            self.trap.err_stack_underflow()
         }
     }
     
@@ -209,7 +210,7 @@ impl ScriptThread{
             return *val    
         }
         else{
-            self.trap.err_stackunderflow()
+            self.trap.err_stack_underflow()
         }
     }
     
@@ -218,7 +219,7 @@ impl ScriptThread{
             return *value
         }
         else{
-            self.trap.err_stackunderflow()
+            self.trap.err_stack_underflow()
         }
     }
     
@@ -227,13 +228,13 @@ impl ScriptThread{
             return value
         }
         else{
-            self.trap.err_stackunderflow()
+            self.trap.err_stack_underflow()
         }
     }
     
     pub fn push_stack_value(&mut self, value:Value){
         if self.stack.len() > self.stack_limit{
-            self.trap.err_stackoverflow();
+            self.trap.err_stack_overflow();
         }
         else{
             self.stack.push(value);
@@ -311,7 +312,7 @@ impl ScriptThread{
             }
         }
         else{
-            return self.trap.err_notfn()
+            return self.trap.err_not_fn()
         }
     }
     
