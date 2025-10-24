@@ -126,9 +126,11 @@ impl ScriptHeap{
         }
     }    
         
-    pub fn register_type(&mut self, type_id:ScriptTypeId, ty_check:ScriptTypeCheck)-> ScriptTypeIndex{
+    pub fn register_type(&mut self, type_id:Option<ScriptTypeId>, ty_check:ScriptTypeCheck)-> ScriptTypeIndex{
         let index = ScriptTypeIndex(self.type_check.len() as _);
-        self.type_index.insert(type_id, index);
+        if let Some(type_id) = type_id{
+            self.type_index.insert(type_id, index);
+        }
         self.type_check.push(ty_check);
         index
     }
@@ -136,11 +138,11 @@ impl ScriptHeap{
     pub fn type_matches_id(&self, ptr:Object, type_id:ScriptTypeId)->bool{
         let obj = &self.objects[ptr.index as usize];
         if let Some(ti) = obj.tag.as_type_index(){
-            self.type_check[ti.0 as usize].type_id == type_id
+            if let Some(object) = &self.type_check[ti.0 as usize].object{
+                return object.type_id == type_id
+            }
         }
-        else{
-            false
-        }
+        false
     }
     
     pub fn new_if_reffed(&mut self, ptr:Object)->Object{
@@ -501,8 +503,10 @@ impl ScriptHeap{
             if let Some(ty_id) = check.props.props.get(&key_id){
                 if let Some(ty_index) = self.type_index.get(ty_id){
                     let check_prop = &self.type_check[ty_index.0 as usize];
-                    if !(*check_prop.check)(self, value){
-                        return trap.err_invalid_prop_type()
+                    if let Some(object) = &check_prop.object{
+                        if !(*object.check)(self, value){
+                            return trap.err_invalid_prop_type()
+                        }
                     }
                 }
                 else{
@@ -513,6 +517,9 @@ impl ScriptHeap{
             else{
                 return trap.err_invalid_prop_name()
             }
+            let object = &mut self.objects[ptr.index as usize];
+            object.map_insert(key, value);
+            return NIL    
         }
         // check against prototype or type
         if object.tag.is_validated(){
@@ -1112,7 +1119,7 @@ impl ScriptHeap{
         }
         trap.err_unexpected()
     }
-            
+    
     pub fn push_all_fn_args(&mut self, top_ptr:Object, args:&[Value], trap:&ScriptTrap)->Value{
         let object = &self.objects[top_ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
