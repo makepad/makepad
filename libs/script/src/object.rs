@@ -1,21 +1,22 @@
 use std::fmt;
 use crate::value::*;
 use crate::value_map::*;
+use crate::script::*;
 use std::collections::hash_map::Entry;
 
 #[derive(Default)]
 pub struct ObjectTag(u64); 
 
 #[derive(Copy,Clone,Eq,PartialEq, Ord, PartialOrd)]
-pub struct ObjectType(u8);
+pub struct ObjectStorageType(u8);
 
-impl fmt::Debug for ObjectType {
+impl fmt::Debug for ObjectStorageType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-impl fmt::Display for ObjectType {
+impl fmt::Display for ObjectStorageType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self{
             Self::AUTO=>write!(f, "AUTO"),
@@ -35,7 +36,7 @@ impl fmt::Display for ObjectType {
     }
 }
 
-impl ObjectType{
+impl ObjectStorageType{
     pub const AUTO: Self = Self(0);
     pub const VEC2: Self = Self(1);
     pub const MAP: Self = Self(2);
@@ -110,30 +111,42 @@ impl ObjectTag{
     pub const STATIC: u64 = 0x20<<40;
     // object dirty
     pub const DIRTY: u64 = 0x40<<40;
+    
     // set when the object has been first applied
     pub const FIRST_APPLIED: u64 = 0x80<<40;
     // marks object readonly
     pub const FROZEN: u64 = 0x100<<40;
-    // for readonly allow writes if checked passes
+    // checks base types against prototype
     pub const VALIDATED: u64 = 0x200<<40;
     // for read only allow writes only if map item doesnt exist
     pub const MAP_ADD: u64 = 0x400<<40;
     // vec is frozen
     pub const VEC_FROZEN: u64 = 0x800<<40;
+    // type checked
+    pub const TYPE_CHECKED: u64 = 0x1000<<40;
+    // cant be a prototype
+    pub const NOTPROTO: u64 = 0x2000<<40;
+    
     
     pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
-
-    pub const FLAG_MASK: u64 = 0xFFF<<40;
-                
-    pub const SCRIPT_FN: u64 = 0x1<<52;
-    pub const NATIVE_FN: u64 = 0x2<<52;
-    pub const RUST_REF:  u64 = 0x3<<52;
-    pub const REF_MASK:  u64 = 0xF<<52;
         
-    pub const TYPE_SHIFT: u64 = 56;
-    pub const TYPE_MASK: u64 = 0xF<<Self::TYPE_SHIFT;
+    pub const NEED_CHECK_MASK: u64 = Self::FREEZE_MASK|Self::TYPE_CHECKED;
+    
+        
+    
+    pub const FLAG_MASK: u64 = 0xFFFF<<40;
+        
+    pub const REF_SCRIPT_FN: u64 = 0x1<<56;
+    pub const REF_NATIVE_FN: u64 = 0x2<<56;
+    pub const REF_TYPE_INDEX: u64 = 0x3<<56;
+    pub const REF_MASK:  u64 = 0xF<<56;
+    pub const DATA_MASK: u64 = 0xFF_FFFF_FFFF;    
             
-    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN|Self::TRACKED;
+    pub const STORAGE_SHIFT: u64 = 60;
+    pub const STORAGE_MASK: u64 = 0xF<<Self::STORAGE_SHIFT;
+            
+    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::STORAGE_MASK|Self::VALIDATED|
+        Self::MAP_ADD|Self::VEC_FROZEN|Self::TRACKED|Self::REF_MASK|Self::DATA_MASK|Self::TYPE_CHECKED;
     
     pub fn set_first_applied_and_clean(&mut self){
         self.0 &= !Self::DIRTY;
@@ -171,8 +184,15 @@ impl ObjectTag{
     }
     
     pub fn freeze(&mut self){
-        self.0 &= !(Self::FREEZE_MASK);
+        self.0 &= !(Self::NEED_CHECK_MASK);
         self.0  |= Self::FROZEN
+    }
+    
+    pub fn freeze_type(&mut self, ty:ScriptTypeIndex){
+        self.0 &= !(Self::FREEZE_MASK);
+        self.0 &= !(Self::DATA_MASK);
+        self.0 &= !(Self::REF_MASK);
+        self.0 |= ty.0 as u64|Self::FROZEN|Self::VEC_FROZEN|Self::REF_TYPE_INDEX|Self::TYPE_CHECKED
     }
     
     pub fn freeze_api(&mut self){
@@ -182,7 +202,7 @@ impl ObjectTag{
 
     pub fn freeze_module(&mut self){
         self.0 &= !(Self::FREEZE_MASK);
-        self.0  |= Self::MAP_ADD|Self::VEC_FROZEN
+        self.0  |= Self::MAP_ADD|Self::VEC_FROZEN|Self::NOTPROTO
     }
     
     pub fn freeze_component(&mut self){
@@ -190,14 +210,18 @@ impl ObjectTag{
         self.0 |= Self::FROZEN|Self::VALIDATED
     }
     
-    pub fn has_freeze(&self)->bool{
-        self.0 & Self::FREEZE_MASK != 0
+    pub fn needs_checking(&self)->bool{
+        self.0 & (Self::NEED_CHECK_MASK) != 0
+    }
+        
+    pub fn is_notproto(&self)->bool{
+        self.0 & Self::NOTPROTO != 0
     }
     
     pub fn is_frozen(&self)->bool{
         self.0 & Self::FROZEN != 0
     }
-            
+          
     pub fn is_validated(&self)->bool{
         self.0 & Self::VALIDATED != 0
     }
@@ -210,7 +234,6 @@ impl ObjectTag{
         self.0 & (Self::VEC_FROZEN|Self::FROZEN) != 0
     }
     
-    
     pub fn is_static(&mut self)->bool{
         self.0  & Self::STATIC != 0
     }
@@ -219,21 +242,30 @@ impl ObjectTag{
         self.0 &= !(Self::REF_MASK);
         match ptr{
             ScriptFnPtr::Script(ip)=>{
-                self.0 |= ip.to_u40()|Self::SCRIPT_FN
+                self.0 |= ip.to_u40()|Self::REF_SCRIPT_FN
             }
             ScriptFnPtr::Native(ni)=>{
-                self.0 |= ((ni.index as u64)) | Self::NATIVE_FN 
+                self.0 |= ((ni.index as u64)) | Self::REF_NATIVE_FN 
             }
         }
         
     }
     
     pub fn as_fn(&self)->Option<ScriptFnPtr>{
-        if self.0 & Self::REF_MASK == Self::SCRIPT_FN{
+        if self.0 & Self::REF_MASK == Self::REF_SCRIPT_FN{
             Some(ScriptFnPtr::Script(ScriptIp::from_u40(self.0)))
         }
-        else if self.0 & Self::REF_MASK == Self::NATIVE_FN{
+        else if self.0 & Self::REF_MASK == Self::REF_NATIVE_FN{
             Some(ScriptFnPtr::Native(NativeId{index:self.0 as u32}))
+        }
+        else{
+            None
+        }
+    }
+    
+    pub fn as_type_index(&self)->Option<ScriptTypeIndex>{
+        if self.0 & Self::REF_MASK == Self::REF_TYPE_INDEX{
+            Some(ScriptTypeIndex(self.0 as u32))
         }
         else{
             None
@@ -241,11 +273,11 @@ impl ObjectTag{
     }
         
     pub fn is_script_fn(&self)->bool{
-        self.0 & Self::REF_MASK == Self::SCRIPT_FN
+        self.0 & Self::REF_MASK == Self::REF_SCRIPT_FN
     }
         
     pub fn is_native_fn(&self)->bool{
-        self.0 & Self::REF_MASK == Self::NATIVE_FN
+        self.0 & Self::REF_MASK == Self::REF_NATIVE_FN
     }
     
     pub fn is_fn(&self)->bool{
@@ -260,13 +292,13 @@ impl ObjectTag{
         self.0 |= fwd
     }
         
-    pub fn set_type_unchecked(&mut self, ty:ObjectType){
-        self.0 &= !Self::TYPE_MASK;
-        self.0 |= ((ty.0 as u64) << Self::TYPE_SHIFT) & Self::TYPE_MASK;
+    pub fn set_storage_type_unchecked(&mut self, ty:ObjectStorageType){
+        self.0 &= !Self::STORAGE_MASK;
+        self.0 |= ((ty.0 as u64) << Self::STORAGE_SHIFT) & Self::STORAGE_MASK;
     }
         
-    pub fn get_type(&self)->ObjectType{
-        return ObjectType( ((self.0 & Self::TYPE_MASK)>>Self::TYPE_SHIFT) as u8 )
+    pub fn get_storage_type(&self)->ObjectStorageType{
+        return ObjectStorageType( ((self.0 & Self::STORAGE_MASK)>>Self::STORAGE_SHIFT) as u8 )
     }
         
     pub fn set_deep(&mut self){
@@ -323,7 +355,7 @@ impl fmt::Debug for ObjectTag {
 impl fmt::Display for ObjectTag {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ObjectType(").ok();
-        write!(f, "{}|",self.get_type()).ok();
+        write!(f, "{}|",self.get_storage_type()).ok();
         if self.is_marked(){write!(f,"MARK|").ok();}
         if self.is_alloced(){write!(f,"ALLOCED|").ok();}
         if self.is_deep(){write!(f,"DEEP|").ok();}
@@ -450,8 +482,8 @@ impl ObjectData{
      
     pub fn push_vec_from_other(&mut self, other:&ObjectData){
         // alright lets go and push the vec from other
-        let ty_self = self.tag.get_type();
-        let ty_other = other.tag.get_type();
+        let ty_self = self.tag.get_storage_type();
+        let ty_other = other.tag.get_storage_type();
         if ty_self.has_paired_vec() && ty_other.has_paired_vec(){
             self.vec.extend_from_slice(&other.vec);
             return
@@ -472,8 +504,8 @@ impl ObjectData{
         println!("implement push_vec_from_other {} {}", ty_self, ty_other);
     }
     
-    pub fn set_type(&mut self, ty_new:ObjectType){
-        let ty_now = self.tag.get_type();
+    pub fn set_storage_type(&mut self, ty_new:ObjectStorageType){
+        let ty_now = self.tag.get_storage_type();
         // block flipping from raw data mode to gc'ed mode
         if !ty_now.is_gc() && ty_new.is_gc(){
             self.vec.clear();
@@ -483,7 +515,7 @@ impl ObjectData{
                 self.vec.push(NIL)
             }
         }
-        self.tag.set_type_unchecked(ty_new)
+        self.tag.set_storage_type_unchecked(ty_new)
     }
     //const DONT_RECYCLE_WHEN: usize = 1000;
     pub fn with_proto(proto:Value)->Self{

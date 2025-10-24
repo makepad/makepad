@@ -26,7 +26,7 @@ impl ScriptHeap{
         let len = obj.vec.len();
         for i in 0..len{
             let object = &self.objects[index];
-            if object.tag.get_type().is_gc(){
+            if object.tag.get_storage_type().is_gc(){
                 let field = &object.vec[i];
                 if let Some(ptr) = field.as_object(){
                     self.mark_vec.push(ptr.index as usize);
