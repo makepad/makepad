@@ -129,6 +129,14 @@ pub trait ScriptReset{
 }
 
 pub trait ScriptToValue: ScriptNew{
+    fn enum_named_to_value_create(vm:&mut Vm, variant:Id)->Object{
+        let rt = vm.heap.registered_type(Self::script_type_id_static()).unwrap();
+        let obj = rt.object.as_ref().unwrap().proto.into();
+        let named = vm.heap.value(obj, variant.into(), &vm.thread.trap);
+        let named = vm.heap.new_with_proto(named);
+        named
+    }
+    
     fn script_to_value(&self, vm:&mut Vm)->Value{
         let proto = Self::script_proto(vm).into();
         let obj = vm.heap.new_with_proto(proto);
