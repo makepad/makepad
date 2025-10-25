@@ -221,7 +221,7 @@ impl Window {
         self.main_draw_list.begin_always(cx);
         
         let size = cx.current_pass_size();
-        cx.begin_sized_turtle(size, Layout::flow_down());
+        cx.begin_root_turtle(size, Layout::flow_down());
         
         self.overlay.begin(cx);
         
@@ -279,7 +279,9 @@ impl Window {
     pub fn set_fullscreen(&mut self, cx: &mut Cx) {
         self.window.fullscreen(cx);
     }
-    
+    pub fn configure_window(&mut self, cx: &mut Cx, inner_size: DVec2, position: DVec2, is_fullscreen: bool, title: String) {
+        self.window.configure_window(cx, inner_size, position, is_fullscreen, title);
+    }
 }
 
 impl WindowRef{
@@ -319,7 +321,27 @@ impl WindowRef{
             inner.reposition(cx, size);
         }
     }
-
+    pub fn fullscreen(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_fullscreen(cx);
+        }
+    }
+    /// Configure the window's size and position, and whether it's fullscreen or not.
+    ///
+    /// If `fullscreen` is `true`, the window will be set to the monitor's size and the
+    /// `inner_size` and `position` arguments will be ignored.
+    ///
+    /// If `fullscreen` is `false`, the window will be set to the specified `inner_size`
+    /// and positioned at `position` on the screen.
+    ///
+    /// The `title` argument sets the window's title bar text.
+    /// 
+    /// This only works in app startup. 
+    pub fn configure_window(&self, cx: &mut Cx, inner_size: DVec2, position: DVec2, fullscreen: bool, title: String) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.configure_window(cx, inner_size, position, fullscreen, title);
+        }
+    }
 }
 
 impl Widget for Window {
@@ -369,6 +391,11 @@ impl Widget for Window {
                         }
                         _ => ()
                     }
+
+                    // Update the display context if the screen size has changed
+                    cx.display_context.screen_size = ev.new_geom.inner_size;
+                    cx.display_context.updated_on_event_id = cx.event_id();
+
                     cx.widget_action(uid, &scope.path, WindowAction::WindowGeomChange(ev.clone()));
                     return
                 }
@@ -482,7 +509,7 @@ impl Widget for Window {
         self.main_draw_list.begin_always(cx);
         
         let size = dvec2(1500.0,1200.0);
-        cx.begin_sized_turtle(size, Layout::flow_down());
+        cx.begin_root_turtle(size, Layout::flow_down());
                 
         self.overlay.begin(cx);
         

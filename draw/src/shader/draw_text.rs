@@ -11,8 +11,8 @@ use {
             fonts::Fonts,
             geom::{Point, Rect, Size, Transform},
             layouter::{
-                BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, Span,
-                Style,
+                BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions,
+                SelectionRect, Style,
             },
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
@@ -104,7 +104,10 @@ pub struct DrawText {
     pub draw_depth: f32,
     #[live]
     pub debug: bool,
-
+    
+    #[live]
+    pub temp_y_shift: f32,
+    
     #[deref]
     pub draw_vars: DrawVars,
     #[calc]
@@ -152,7 +155,7 @@ impl DrawText {
         align: Align,
         text: &str,
     ) -> makepad_platform::Rect {
-        let turtle_rect = cx.turtle().padded_rect();
+        let turtle_rect = cx.turtle().inner_rect();
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
@@ -212,14 +215,33 @@ impl DrawText {
     pub fn draw_walk_resumable_with(
         &mut self,
         cx: &mut Cx2d,
-        text: &str,
-        mut f: impl FnMut(&mut Cx2d, makepad_platform::Rect),
+        text_str: &str,
+        mut f: impl FnMut(&mut Cx2d, makepad_platform::Rect, f32),
     ) {
         let turtle_pos = cx.turtle().pos();
-        let turtle_rect = cx.turtle().padded_rect();
+        let turtle_rect = cx.turtle().inner_rect();
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
         let row_height = cx.turtle().row_height();
+        
+        // lets draw a debug rect
+        /*
+        if text_str.starts_with("markdownedited"){
+            let mut area = Area::Empty;
+            cx.add_aligned_rect_area(
+                &mut area,
+                makepad_platform::rect(
+                    origin_in_lpxs.x as f64,
+                    origin_in_lpxs.y as f64,
+                    100.0 as f64,
+                    row_height as f64,
+                ),
+            );
+            cx.cx
+            .debug
+            .area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
+        }*/
+        
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
@@ -234,7 +256,7 @@ impl DrawText {
             max_width_in_lpxs,
             wrap,
             Align::default(),
-            text,
+            text_str,
         );
         self.draw_text(cx, origin_in_lpxs, &text);
 
@@ -246,12 +268,17 @@ impl DrawText {
             ) * self.font_scale;
         let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
         let new_turtle_pos = dvec2(new_turtle_pos.x as f64, new_turtle_pos.y as f64);
-        cx.turtle_mut().set_pos(new_turtle_pos);
-        cx.turtle_mut()
-            .update_width_max(origin_in_lpxs.x as f64, used_size_in_lpxs.width as f64);
-        cx.turtle_mut()
-            .update_height_max(origin_in_lpxs.y as f64, used_size_in_lpxs.height as f64);
+        let turtle = cx.turtle_mut();
+        
+        turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
+        turtle.allocate_width(used_size_in_lpxs.width as f64);
+        turtle.allocate_height(used_size_in_lpxs.height as f64);
+        turtle.move_to(new_turtle_pos);
 
+        turtle.set_wrap_spacing((
+           last_row.line_spacing_above_in_lpxs - last_row.ascender_in_lpxs
+        )as f64);
+        
         cx.emit_turtle_walk(makepad_platform::Rect {
             pos: new_turtle_pos,
             size: dvec2(
@@ -259,8 +286,16 @@ impl DrawText {
                 used_size_in_lpxs.height as f64,
             ),
         });
-
-        for rect_in_lpxs in text.selection_rects_in_lpxs(Selection {
+        
+        let shift = if let Some(row) = text.rows.get(0){
+            if let Some(glyph) = row.glyphs.get(0){
+                glyph.font_size_in_lpxs * self.temp_y_shift
+            }
+            else{0.0}
+        }
+        else{0.0};
+                
+        for SelectionRect { rect_in_lpxs, ascender_in_lpxs, } in text.selection_rects(Selection {
             anchor: Cursor {
                 index: 0,
                 prefer_next_row: false,
@@ -278,10 +313,11 @@ impl DrawText {
                 cx,
                 makepad_platform::rect(
                     rect_in_lpxs.origin.x as f64,
-                    rect_in_lpxs.origin.y as f64,
+                    rect_in_lpxs.origin.y as f64 + shift as f64,
                     rect_in_lpxs.size.width as f64,
                     rect_in_lpxs.size.height as f64,
                 ),
+                ascender_in_lpxs,
             )
         }
     }
@@ -300,17 +336,13 @@ impl DrawText {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 
-        let text_len = text.len();
         fonts.get_or_layout(BorrowedLayoutParams {
             text,
-            spans: &[Span {
-                style: Style {
-                    font_family_id: self.text_style.font_family.to_font_family_id(),
-                    font_size_in_pts: self.text_style.font_size,
-                    color: None,
-                },
-                len: text_len,
-            }],
+            style: Style {
+                font_family_id: self.text_style.font_family.to_font_family_id(),
+                font_size_in_pts: self.text_style.font_size,
+                color: None,
+            },
             options: LayoutOptions {
                 first_row_indent_in_lpxs,
                 first_row_min_line_spacing_below_in_lpxs,
@@ -479,7 +511,7 @@ impl DrawText {
                 .translate(origin_in_lpxs.x, origin_in_lpxs.y),
         );
 
-        self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y);
+        self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y) + vec2(0.0,self.temp_y_shift* font_size_in_lpxs);
         self.rect_size = vec2(bounds_in_lpxs.size.width, bounds_in_lpxs.size.height);
         if let Some(color) = color {
             self.color = vec4(
@@ -551,10 +583,23 @@ impl LiveHook for FontFamily {
                 if let LiveValue::Font(font) = &nodes[child_index].value {
                     let font_id: FontId = (font.to_live_id().0).into();
                     if !fonts.is_font_known(font_id) {
+                        // alright so if we have a multipart font we have to combine it here
+                        let data = if font.paths.len()>1{
+                            // combine them. TODO do this better.
+                            let mut data = Vec::new();
+                            for path in &*font.paths{
+                                let dep = cx.get_dependency(path).unwrap();
+                                data.extend(&*dep);
+                            }
+                            Rc::new(data)
+                        }
+                        else{
+                            cx.get_dependency(font.paths[0].as_str()).unwrap().into()
+                        };
                         fonts.define_font(
                             font_id,
                             FontDefinition {
-                                data: cx.get_dependency(font.path.as_str()).unwrap().into(),
+                                data,
                                 index: 0,
                                 ascender_fudge_in_ems: font.ascender_fudge,
                                 descender_fudge_in_ems: font.descender_fudge,

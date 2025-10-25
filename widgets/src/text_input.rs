@@ -9,7 +9,10 @@ use {
                     CursorPosition,
                     Selection
                 },
-                layouter::LaidoutText,
+                layouter::{
+                    LaidoutText,
+                    SelectionRect,
+                },
             },
             *
         },
@@ -28,7 +31,7 @@ live_design! {
 
     pub TextInputBase = {{TextInput}} {}
     
-    pub TextInput = <TextInputBase> {
+    pub TextInputFlat = <TextInputBase> {
         width: Fill, height: Fit,
         padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
         margin: <THEME_MSPACE_V_1> {}
@@ -42,11 +45,14 @@ live_design! {
             instance hover: 0.0
             instance focus: 0.0
             instance down: 0.0
-            instance empty: 0.0
             instance disabled: 0.0
+            instance empty: 0.0
 
             uniform border_radius: (THEME_CORNER_RADIUS)
             uniform border_size: (THEME_BEVELING)
+
+            uniform gradient_border_horizontal: 0.0; 
+            uniform gradient_fill_horizontal: 0.0; 
 
             uniform color_dither: 1.0
 
@@ -57,23 +63,62 @@ live_design! {
             uniform color_empty: (THEME_COLOR_INSET_EMPTY)
             uniform color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-            uniform border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-            uniform border_color_1_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
+            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
+            uniform color_2_down: (THEME_COLOR_INSET_2_DOWN)
+            uniform color_2_empty: (THEME_COLOR_INSET_2_EMPTY)
+            uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
 
-            uniform border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            uniform border_color_2_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+            uniform border_color: (THEME_COLOR_BEVEL)
+            uniform border_color_hover: (THEME_COLOR_BEVEL_HOVER)
+            uniform border_color_focus: (THEME_COLOR_BEVEL_FOCUS)
+            uniform border_color_down: (THEME_COLOR_BEVEL_DOWN)
+            uniform border_color_empty: (THEME_COLOR_BEVEL_EMPTY)
+            uniform border_color_disabled: (THEME_COLOR_BEVEL_DISABLED)
+
+            uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+            uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+            uniform border_color_2_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
+            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                let color_2 = self.color;
+                let color_2_hover = self.color_hover;
+                let color_2_focus = self.color_focus;
+                let color_2_down = self.color_down;
+                let color_2_empty = self.color_empty;
+                let color_2_disabled = self.color_disabled;
+
+                let border_color_2 = self.border_color;
+                let border_color_2_hover = self.border_color_hover;
+                let border_color_2_focus = self.border_color_focus;
+                let border_color_2_down = self.border_color_down;
+                let border_color_2_empty = self.border_color_empty;
+                let border_color_2_disabled = self.border_color_disabled;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2;
+                    color_2_hover = self.color_2_hover;
+                    color_2_focus = self.color_2_focus;
+                    color_2_down = self.color_2_down;
+                    color_2_empty = self.color_2_empty;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                if (self.border_color_2.x > -0.5) {
+                    border_color_2 = self.border_color_2;
+                    border_color_2_hover = self.border_color_2_hover;
+                    border_color_2_focus = self.border_color_2_focus;
+                    border_color_2_down = self.border_color_2_down;
+                    border_color_2_empty = self.border_color_2_empty;
+                    border_color_2_disabled = self.border_color_2_disabled;
+                }
                 
                 let border_sz_uv = vec2(
                     self.border_size / self.rect_size.x,
@@ -104,6 +149,16 @@ live_design! {
                     self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
                     self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                 )
+                
+                let gradient_border_dir = gradient_border.y;
+                if (self.gradient_border_horizontal > 0.5) {
+                    gradient_border_dir = gradient_border.x;
+                }
+
+                let gradient_fill_dir = gradient_fill.y;
+                if (self.gradient_fill_horizontal > 0.5) {
+                    gradient_fill_dir = gradient_fill.x;
+                }
 
                 sdf.box(
                     self.border_size,
@@ -118,21 +173,21 @@ live_design! {
                         mix(
                             mix(
                                 mix(
-                                    self.color,
-                                    self.color_empty,
+                                    mix(self.color, color_2, gradient_fill_dir),
+                                    mix(self.color_empty, color_2_empty, gradient_fill_dir),
                                     self.empty
                                 ),
-                                self.color_focus,
+                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
                                 self.focus
                             ),
                             mix(
-                                self.color_hover,
-                                self.color_down,
+                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
+                                mix(self.color_down, color_2_down, gradient_fill_dir),
                                 self.down
                             ),
                             self.hover
                         ),
-                        self.color_disabled,
+                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
                         self.disabled
                     )
                 );
@@ -142,28 +197,27 @@ live_design! {
                         mix(
                             mix(
                                 mix(
-                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_empty, self.border_color_2_empty, gradient_border.y),
+                                    mix(self.border_color, border_color_2, gradient_border_dir),
+                                    mix(self.border_color_empty, border_color_2_empty, gradient_border_dir),
                                     self.empty
                                 ),
-                                mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
+                                mix(self.border_color_focus, border_color_2_focus, gradient_border_dir),
                                 self.focus
                             ),
                             mix(
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
+                                mix(self.border_color_hover, border_color_2_hover, gradient_border_dir),
+                                mix(self.border_color_down, border_color_2_down, gradient_border_dir),
                                 self.down
                             ),
                             self.hover
                         ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
+                        mix(self.border_color_disabled, border_color_2_disabled, gradient_border_dir),
                         self.disabled
                     ),
                     self.border_size
                 );
-
                 
-                return sdf.result;
+                return sdf.result
             }
         }
 
@@ -221,7 +275,9 @@ live_design! {
             instance empty: 0.0
             instance disabled: 0.0
 
+            uniform color_dither: 1.0
             uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+            uniform gradient_fill_horizontal: 0.0
 
             uniform color: (THEME_COLOR_SELECTION)
             uniform color_hover: (THEME_COLOR_SELECTION_HOVER)
@@ -230,35 +286,67 @@ live_design! {
             uniform color_empty: (THEME_COLOR_SELECTION_EMPTY)
             uniform color_disabled: (THEME_COLOR_SELECTION_DISABLED)
 
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_2_hover: (THEME_COLOR_SELECTION_HOVER)
+            uniform color_2_focus: (THEME_COLOR_SELECTION_FOCUS)
+            uniform color_2_down: (THEME_COLOR_SELECTION_DOWN)
+            uniform color_2_empty: (THEME_COLOR_SELECTION_EMPTY)
+            uniform color_2_disabled: (THEME_COLOR_SELECTION_DISABLED)
+
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+
+                let color_2 = self.color;
+                let color_2_hover = self.color_hover;
+                let color_2_focus = self.color_focus;
+                let color_2_down = self.color_down;
+                let color_2_empty = self.color_empty;
+                let color_2_disabled = self.color_disabled;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2;
+                    color_2_hover = self.color_2_hover;
+                    color_2_focus = self.color_2_focus;
+                    color_2_down = self.color_2_down;
+                    color_2_empty = self.color_2_empty;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                let gradient_fill_dir = self.pos.y + dither;
+                if (self.gradient_fill_horizontal > 0.5) {
+                    gradient_fill_dir = self.pos.x + dither;
+                }
+
                 sdf.box(
                     0.0,
                     0.0,
                     self.rect_size.x,
                     self.rect_size.y,
                     self.border_radius
-                );
+                )
+
                 sdf.fill(
                     mix(
                         mix(
                             mix(
                                 mix(
-                                    self.color,
-                                    self.color_empty,
+                                    mix(self.color, color_2, gradient_fill_dir),
+                                    mix(self.color_empty, color_2_empty, gradient_fill_dir),
                                     self.empty
                                 ),
-                                self.color_focus,
+                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
                                 self.focus
                             ),
                             mix(
-                                self.color_hover,
-                                self.color_down,
+                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
+                                mix(self.color_down, color_2_down, gradient_fill_dir),
                                 self.down
                             ),
                             self.hover
                         ),
-                        self.color_disabled,
+                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
                         self.disabled
                     )
                 );
@@ -435,361 +523,62 @@ live_design! {
         }
     }
 
-    pub TextInputFlat = <TextInput> {
+    pub TextInput = <TextInputFlat> {
         draw_bg: {
-            border_color_1: (THEME_COLOR_BEVEL)
-            border_color_1_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_1_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_1_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_1_empty: (THEME_COLOR_BEVEL_EMPTY)
-            border_color_1_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            border_color: (THEME_COLOR_BEVEL_INSET_1)
+            border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+            border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+            border_color_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
+            border_color_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
+            border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
-            border_color_2: (THEME_COLOR_BEVEL)
-            border_color_2_hover: (THEME_COLOR_BEVEL_HOVER)
-            border_color_2_focus: (THEME_COLOR_BEVEL_FOCUS)
-            border_color_2_down: (THEME_COLOR_BEVEL_DOWN)
-            border_color_2_empty: (THEME_COLOR_BEVEL_EMPTY)
-            border_color_2_disabled: (THEME_COLOR_BEVEL_DISABLED)
+            border_color_2: (THEME_COLOR_BEVEL_INSET_1)
         }
     }
 
-    pub TextInputFlatter = <TextInputFlat> { draw_bg: { border_size: 0. } }
-
     pub TextInputGradientX = <TextInput> {
         draw_bg: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance down: 0.0
-            instance disabled: 0.0
-            instance empty: 0.0
+            gradient_border_horizontal: 1.0; 
+            gradient_fill_horizontal: 1.0; 
 
-            uniform border_radius: (THEME_CORNER_RADIUS)
-            uniform border_size: (THEME_BEVELING)
+            color: (THEME_COLOR_INSET_1)
+            color_hover: (THEME_COLOR_INSET_1_HOVER)
+            color_focus: (THEME_COLOR_INSET_1_FOCUS)
+            color_down: (THEME_COLOR_INSET_1_DOWN)
+            color_empty: (THEME_COLOR_INSET_1_EMPTY)
+            color_disabled: (THEME_COLOR_INSET_1_DISABLED)
 
-            uniform color_dither: 1.0
-
-            uniform color_1: (THEME_COLOR_INSET_1)
-            uniform color_1_hover: (THEME_COLOR_INSET_1_HOVER)
-            uniform color_1_focus: (THEME_COLOR_INSET_1_FOCUS)
-            uniform color_1_down: (THEME_COLOR_INSET_1_DOWN)
-            uniform color_1_empty: (THEME_COLOR_INSET_1_EMPTY)
-            uniform color_1_disabled: (THEME_COLOR_INSET_1_DISABLED)
-
-            uniform color_2: (THEME_COLOR_INSET_2)
-            uniform color_2_hover: (THEME_COLOR_INSET_2_HOVER)
-            uniform color_2_focus: (THEME_COLOR_INSET_2_FOCUS)
-            uniform color_2_down: (THEME_COLOR_INSET_2_DOWN)
-            uniform color_2_empty: (THEME_COLOR_INSET_2_EMPTY)
-            uniform color_2_disabled: (THEME_COLOR_INSET_2_DISABLED)
-
-            uniform border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-            uniform border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-            uniform border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-            uniform border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-            uniform border_color_1_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
-            uniform border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
-
-            uniform border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-            uniform border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-            uniform border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-            uniform border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-            uniform border_color_2_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
-            uniform border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
-                    self.border_size / self.rect_size.y
-                )
-
-                let scale_factor_border = vec2(
-                    self.rect_size.x / self.rect_size.x,
-                    self.rect_size.y / self.rect_size.y
-                );
-
-                let gradient_border = vec2(
-                    self.pos.x * scale_factor_border.x + dither,
-                    self.pos.y * scale_factor_border.y + dither
-                )
-
-                let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.
-                );
-
-                let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
-                    self.rect_size.y / sz_inner_px.y
-                );
-
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
-                )
-                
-                sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
-                    self.border_radius
-                )
-
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, gradient_fill.x),
-                                    mix(self.color_1_empty, self.color_2_empty, gradient_fill.x),
-                                    self.empty
-                                ),
-                                mix(self.color_1_focus, self.color_2_focus, gradient_fill.x),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.x),
-                                mix(self.color_1_down, self.color_2_down, gradient_fill.x),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.x),
-                        self.disabled
-                    )
-                );
-
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_empty, self.border_color_2_empty, gradient_border.y),
-                                    self.empty
-                                ),
-                                mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                        self.disabled
-                    ),
-                    self.border_size
-                );
-                
-                return sdf.result
-            }
+            color_2: (THEME_COLOR_INSET_2)
         }
 
         draw_selection: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance down: 0.0
-            instance disabled: 0.0
-            instance empty: 0.0
+            gradient_fill_horizontal: 1.0; 
 
-            uniform border_radius: (THEME_TEXTSELECTION_CORNER_RADIUS)
+            color: (THEME_COLOR_SELECTION)
+            color_hover: (THEME_COLOR_SELECTION_HOVER)
+            color_focus: (THEME_COLOR_SELECTION_FOCUS)
+            color_down: (THEME_COLOR_SELECTION_DOWN)
+            color_empty: (THEME_COLOR_SELECTION_EMPTY)
+            color_disabled: (THEME_COLOR_SELECTION_DISABLED)
 
-            uniform color_1: (THEME_COLOR_SELECTION)
-            uniform color_1_hover: (THEME_COLOR_SELECTION_HOVER)
-            uniform color_1_focus: (THEME_COLOR_SELECTION_FOCUS)
-            uniform color_1_down: (THEME_COLOR_SELECTION_DOWN)
-            uniform color_1_empty: (THEME_COLOR_SELECTION_EMPTY)
-            uniform color_1_disabled: (THEME_COLOR_SELECTION_DISABLED)
-
-            uniform color_2: (THEME_COLOR_SELECTION)
-            uniform color_2_hover: (THEME_COLOR_SELECTION_HOVER)
-            uniform color_2_focus: (THEME_COLOR_SELECTION_FOCUS)
-            uniform color_2_down: (THEME_COLOR_SELECTION_DOWN)
-            uniform color_2_empty: (THEME_COLOR_SELECTION_EMPTY)
-            uniform color_2_disabled: (THEME_COLOR_SELECTION_DISABLED)
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-
-                sdf.box(
-                    0.0,
-                    0.0,
-                    self.rect_size.x,
-                    self.rect_size.y,
-                    self.border_radius
-                )
-
-                sdf.fill(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, self.pos.x),
-                                    mix(self.color_1_empty, self.color_2_empty, self.pos.x),
-                                    self.empty
-                                ),
-                                mix(self.color_1_focus, self.color_2_focus, self.pos.x),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.x),
-                                mix(self.color_1_down, self.color_2_down, self.pos.x),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, self.pos.x),
-                        self.disabled
-                    )
-                );
-
-                return sdf.result
-            }
+            color_2: (THEME_COLOR_SELECTION)
+            color_2_hover: (THEME_COLOR_SELECTION_HOVER)
+            color_2_focus: (THEME_COLOR_SELECTION_FOCUS)
+            color_2_down: (THEME_COLOR_SELECTION_DOWN)
+            color_2_empty: (THEME_COLOR_SELECTION_EMPTY)
+            color_2_disabled: (THEME_COLOR_SELECTION_DISABLED)
         }
     }
         
 
     pub TextInputGradientY = <TextInputGradientX> {
         draw_bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
-
-                let border_sz_uv = vec2(
-                    self.border_size / self.rect_size.x,
-                    self.border_size / self.rect_size.y
-                )
-
-                let scale_factor_border = vec2(
-                    self.rect_size.x / self.rect_size.x,
-                    self.rect_size.y / self.rect_size.y
-                );
-
-                let gradient_border = vec2(
-                    self.pos.x * scale_factor_border.x + dither,
-                    self.pos.y * scale_factor_border.y + dither
-                )
-
-                let sz_inner_px = vec2(
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.
-                );
-
-                let scale_factor_fill = vec2(
-                    self.rect_size.x / sz_inner_px.x,
-                    self.rect_size.y / sz_inner_px.y
-                );
-
-                let gradient_fill = vec2(
-                    self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither,
-                    self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
-                )
-                
-                sdf.box(
-                    self.border_size,
-                    self.border_size,
-                    self.rect_size.x - self.border_size * 2.,
-                    self.rect_size.y - self.border_size * 2.,
-                    self.border_radius
-                )
-
-                sdf.fill_keep(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, gradient_fill.y),
-                                    mix(self.color_1_empty, self.color_2_empty, gradient_fill.y),
-                                    self.empty
-                                ),
-                                mix(self.color_1_focus, self.color_2_focus, gradient_fill.y),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.color_1_hover, self.color_2_hover, gradient_fill.y),
-                                mix(self.color_1_down, self.color_2_down, gradient_fill.y),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, gradient_fill.y),
-                        self.disabled
-                    )
-                );
-
-                sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.border_color_1, self.border_color_2, gradient_border.y),
-                                    mix(self.border_color_1_empty, self.border_color_2_empty, gradient_border.y),
-                                    self.empty
-                                ),
-                                mix(self.border_color_1_focus, self.border_color_2_focus, gradient_border.y),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.border_color_1_hover, self.border_color_2_hover, gradient_border.y),
-                                mix(self.border_color_1_down, self.border_color_2_down, gradient_border.y),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.border_color_1_disabled, self.border_color_2_disabled, gradient_border.y),
-                        self.disabled
-                    ),
-                    self.border_size
-                );
-                
-                return sdf.result
-            }
+            gradient_border_horizontal: 0.0; 
+            gradient_fill_horizontal: 0.0; 
         }
 
         draw_selection: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-
-                sdf.box(
-                    0.0,
-                    0.0,
-                    self.rect_size.x,
-                    self.rect_size.y,
-                    self.border_radius
-                )
-
-                sdf.fill(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, self.pos.y),
-                                    mix(self.color_1_empty, self.color_2_empty, self.pos.y),
-                                    self.empty
-                                ),
-                                mix(self.color_1_focus, self.color_2_focus, self.pos.y),
-                                self.focus
-                            ),
-                            mix(
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.y),
-                                mix(self.color_1_down, self.color_2_down, self.pos.y),
-                                self.down
-                            ),
-                            self.hover
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, self.pos.y),
-                        self.disabled
-                    )
-                );
-
-                return sdf.result
-            }
+            gradient_fill_horizontal: 0.0; 
         }
     }
 }
@@ -810,8 +599,9 @@ pub struct TextInput {
     #[live] is_password: bool,
     #[live] is_read_only: bool,
     #[live] is_numeric_only: bool,
+    #[live] scroll_y: f64,
     #[live] empty_text: String,
-    #[live] text: String,
+    #[rust] text: String,
     #[live(0.5)] blink_speed: f64,
 
     #[rust] password_text: String,
@@ -822,11 +612,22 @@ pub struct TextInput {
     #[rust] blink_timer: Timer,
 }
 
-// impl LiveHook for TextInput{
-//     fn after_update_from_doc(&mut self, _cx:&mut Cx){
-//         self.selection = Selection::default();
-//     }
-// }
+ impl LiveHook for TextInput{
+     fn apply_value_unknown(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+        if nodes[index].id == live_id!(text){
+            if !apply.from.is_update_from_doc(){
+                return self.text.apply(cx, apply, index, nodes)
+            }
+        }
+        else{
+            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+        }
+        nodes.skip_node(index)
+     }
+     fn after_new_from_doc(&mut self, cx:&mut Cx){
+         self.check_text_is_empty(cx);
+     }
+ }
 
 impl TextInput {
     pub fn is_password(&self) -> bool {
@@ -882,7 +683,6 @@ impl TextInput {
         }
     }
 
-
     pub fn selection(&self) -> Selection {
         self.selection
     }
@@ -890,7 +690,6 @@ impl TextInput {
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
         self.selection = selection;
         self.history.force_new_edit_group();
-        self.reset_blink_timer(cx);
         self.draw_bg.redraw(cx);
     }
 
@@ -1020,7 +819,7 @@ impl TextInput {
         } else {
             &self.text
         };
-        let turtle_rect = cx.turtle().padded_rect();
+        let turtle_rect = cx.turtle().inner_rect();
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
@@ -1095,7 +894,7 @@ impl TextInput {
             .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
         
         self.draw_selection.begin_many_instances(cx);
-        for rect_in_lpxs in laidout_text.selection_rects_in_lpxs(
+        for SelectionRect { rect_in_lpxs, .. } in laidout_text.selection_rects(
             self.selection_to_password_selection(self.selection)
         ) {
             self.draw_selection.draw_abs(
@@ -1111,7 +910,49 @@ impl TextInput {
         self.draw_selection.end_many_instances(cx);
     }
 
-    pub fn move_cursor_left(&mut self, cx: &mut Cx, keep_selection: bool) {
+    fn scroll_to_cursor(&mut self, cx: &mut Cx2d) {
+        // Compute the final size of the turtle, and obtain its inner height.
+        cx.compute_final_size();
+        let height = cx.turtle().inner_rect().size.y;
+
+        // Compute the min and max y of the row that the cursor is on.
+        let laidout_text = self.laidout_text.as_ref().unwrap();
+        let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
+        let position = self.cursor_to_position(self.cursor()).unwrap();
+        let laidout_row = &laidout_text.rows[position.row_index];
+        let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
+        let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
+
+        // If the min y of the row is less than the scroll position, scroll up so that the top of
+        // the row appears at the top.
+        if y_min < self.scroll_y {
+            self.scroll_y = y_min;
+        }
+
+        // If the max y of the row is greater than the scroll position, scroll down so that the
+        // bottom of the row appears at the bottom.
+        if y_max > self.scroll_y + height {
+            self.scroll_y = y_max - height;
+        }
+
+        // Clamp the scroll position so that we cannot scroll past the start or end of the text.
+        let max_scroll_y = laidout_text_height.max(height) - height;
+        self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+
+        // Shift the align range of the turtle with the scroll position, but do not include the
+        // begin entry, since that would also scroll the background.
+        let align_range: TurtleAlignRange = cx.get_turtle_align_range();
+        cx.shift_align_range(&TurtleAlignRange {
+            start: align_range.start + 1,
+            end: align_range.end,
+        }, dvec2(0.0, -self.scroll_y));
+    }
+
+    /// Moves the cursor one column to the left.
+    ///
+    /// Returns `true` if the cursor/selection actually changed.
+    pub fn move_cursor_left(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
         self.set_cursor(
             cx,
             Cursor {
@@ -1120,9 +961,14 @@ impl TextInput {
             },
             keep_selection
         );
+        !initial.index_eq(self.selection)
     }
 
-    pub fn move_cursor_right(&mut self, cx: &mut Cx, keep_selection: bool) {
+    /// Moves the cursor one column to the right.
+    ///
+    /// Returns `true` if the cursor/selection actually changed.
+    pub fn move_cursor_right(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
         self.set_cursor(
             cx,
             Cursor {
@@ -1131,9 +977,17 @@ impl TextInput {
             },
             keep_selection,
         );
+        !initial.index_eq(self.selection)
     }
 
-    pub fn move_cursor_up(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<(), ()> {
+    /// Moves the cursor one line (row) up.
+    ///
+    /// * Returns Ok(`true`) if the cursor/selection actually changed.
+    /// * Returns Ok(`false`) if the cursor/selection movement was properly handled but did not change,
+    ///   e.g., if the cursor was already at the top-most row.
+    /// * Returns `Err` if the cursor/selection failed to be calculated due to a prior layout invalidation.
+    pub fn move_cursor_up(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<bool, ()> {
+        let initial = self.selection;
         let position = self.cursor_to_position(self.selection.cursor)?;
         self.set_cursor(
             cx,
@@ -1147,10 +1001,17 @@ impl TextInput {
             })?,
             keep_selection
         );
-        Ok(())
+        Ok(!initial.index_eq(self.selection))
     }
 
-    pub fn move_cursor_down(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<(), ()> {
+    /// Moves the cursor one line (row) down.
+    ///
+    /// * Returns Ok(`true`) if the cursor/selection actually changed.
+    /// * Returns Ok(`false`) if the cursor/selection movement was properly handled but did not change,
+    ///   e.g., if the cursor was already at the bottom-most row.
+    /// * Returns Err(`()`) if the cursor/selection failed to be calculated due to a prior layout invalidation.
+    pub fn move_cursor_down(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<bool, ()> {
+        let initial = self.selection;
         let laidout_text = self.laidout_text.as_ref().unwrap();
         let position = self.cursor_to_position(self.selection.cursor)?;
         self.set_cursor(
@@ -1165,7 +1026,7 @@ impl TextInput {
             })?,
             keep_selection
         );
-        Ok(())
+        Ok(!initial.index_eq(self.selection))
     }
 
     pub fn select_all(&mut self, cx: &mut Cx) {
@@ -1241,6 +1102,10 @@ impl TextInput {
     }
 
     fn filter_input(&self, input: &str, is_set_text: bool) -> String {
+        // strip out escape sequences and tabs sometimes sent from the IME
+        if input.len() == 1 && input.chars().next().unwrap() <= '\u{1d}'{
+            return String::new();
+        }
         if self.is_numeric_only {
             let mut contains_dot = if is_set_text {
                 false   
@@ -1305,22 +1170,6 @@ impl TextInput {
         }
     }
     
-    fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
-        if self.is_read_only{
-            self.animator_cut(cx, id!(blink.off));
-        }
-        else{
-            self.animator_cut(cx, id!(blink.off));
-            cx.stop_timer(self.blink_timer);
-            self.blink_timer = cx.start_timeout(self.blink_speed)
-        }
-    }
-}
-
-impl LiveHook for TextInput {
-    fn after_new_from_doc(&mut self, cx:&mut Cx){
-        self.check_text_is_empty(cx);
-    }
 }
 
 impl Widget for TextInput {
@@ -1357,11 +1206,12 @@ impl Widget for TextInput {
         let text_rect = self.draw_text(cx);
         let cursor_pos = self.draw_cursor(cx, text_rect);
         self.draw_selection(cx, text_rect);
+        self.scroll_to_cursor(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
             cx.show_text_ime(
                 self.draw_bg.area(), 
-                cursor_pos,
+                cursor_pos - self.scroll_y,
             );
         }
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
@@ -1400,7 +1250,7 @@ impl Widget for TextInput {
             }
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, id!(focus.on));
-                self.reset_cursor_blinker(cx);
+                self.reset_blink_timer(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
             Hit::KeyFocusLost(_) => {
@@ -1410,7 +1260,7 @@ impl Widget for TextInput {
                 cx.hide_text_ime();
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocusLost);
             }
-            Hit::KeyDown(KeyEvent {
+            Hit::KeyDown(kev @ KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers: KeyModifiers {
                     shift: keep_selection,
@@ -1419,8 +1269,14 @@ impl Widget for TextInput {
                     control: false
                 },
                 ..
-            }) => self.move_cursor_left(cx, keep_selection),
-            Hit::KeyDown(KeyEvent {
+            }) => {
+                self.reset_blink_timer(cx);
+                let did_move = self.move_cursor_left(cx, keep_selection);
+                if !did_move {
+                    cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev));
+                }
+            }
+            Hit::KeyDown(kev @ KeyEvent {
                 key_code: KeyCode::ArrowRight,
                 modifiers: KeyModifiers {
                     shift: keep_selection,
@@ -1429,8 +1285,14 @@ impl Widget for TextInput {
                     control: false
                 },
                 ..
-            }) => self.move_cursor_right(cx, keep_selection),
-            Hit::KeyDown(KeyEvent {
+            }) => {
+                self.reset_blink_timer(cx);
+                let did_move = self.move_cursor_right(cx, keep_selection);
+                if !did_move {
+                    cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev));
+                }
+            }
+            Hit::KeyDown(kev @ KeyEvent {
                 key_code: KeyCode::ArrowUp,
                 modifiers: KeyModifiers {
                     shift: keep_selection,
@@ -1440,11 +1302,14 @@ impl Widget for TextInput {
                 },
                 ..
             }) => {
-                if self.move_cursor_up(cx, keep_selection).is_err() {
-                    warning!("can't move cursor because layout was invalidated by earlier event");
+                self.reset_blink_timer(cx);
+                match self.move_cursor_up(cx, keep_selection) {
+                    Ok(true) => { }
+                    Ok(false) => cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev)),
+                    Err(_) => warning!("can't move cursor up because layout was invalidated by earlier event"),
                 }
             },
-            Hit::KeyDown(KeyEvent {
+            Hit::KeyDown(kev @ KeyEvent {
                 key_code: KeyCode::ArrowDown,
                 modifiers: KeyModifiers {
                     shift: keep_selection,
@@ -1454,8 +1319,11 @@ impl Widget for TextInput {
                 },
                 ..
             }) => {
-                if self.move_cursor_down(cx, keep_selection).is_err() {
-                    warning!("can't move cursor because layout was invalidated by earlier event");
+                self.reset_blink_timer(cx);
+                match self.move_cursor_down(cx, keep_selection) {
+                    Ok(true) => { }
+                    Ok(false) => cx.widget_action(uid, &scope.path, TextInputAction::KeyDownUnhandled(kev)),
+                    Err(_) => warning!("can't move cursor down because layout was invalidated by earlier event"),
                 }
             }
             Hit::KeyDown(KeyEvent {
@@ -1469,6 +1337,7 @@ impl Widget for TextInput {
                 device,
                 ..
             }) if device.is_primary_hit() => {
+                self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
                 let Ok(cursor) = self.point_in_lpxs_to_cursor(
@@ -1507,6 +1376,7 @@ impl Widget for TextInput {
                 device,
                 ..
             }) if device.is_primary_hit() => {
+                self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
                 let Ok(cursor) = self.point_in_lpxs_to_cursor(
@@ -1528,14 +1398,21 @@ impl Widget for TextInput {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
-                modifiers: KeyModifiers {
+                modifiers: mods @ KeyModifiers {
                     shift: false,
                     ..
                 },
                 ..
             }) => {
                 cx.hide_text_ime();
-                cx.widget_action(uid, &scope.path, TextInputAction::Returned(self.text.clone()));
+                cx.widget_action(
+                    uid,
+                    &scope.path,
+                    TextInputAction::Returned(
+                        self.text.clone(),
+                        mods,
+                    ),
+                );
             },
 
             Hit::KeyDown(KeyEvent {
@@ -1552,6 +1429,7 @@ impl Widget for TextInput {
                 },
                 ..
             }) if !self.is_read_only => {
+                self.reset_blink_timer(cx);
                 self.create_or_extend_edit_group(EditKind::Other);
                 self.apply_edit(
                     cx,
@@ -1568,6 +1446,7 @@ impl Widget for TextInput {
                 key_code: KeyCode::Backspace,
                 ..
             }) if !self.is_read_only => {
+                self.reset_blink_timer(cx);
                 let mut start = self.selection.start().index;
                 let end = self.selection.end().index;
                 if start == end {
@@ -1589,6 +1468,7 @@ impl Widget for TextInput {
                 key_code: KeyCode::Delete,
                 ..
             }) if !self.is_read_only => {
+                self.reset_blink_timer(cx);
                 let start = self.selection.start().index;
                 let mut end = self.selection.end().index;
                 if start == end {
@@ -1808,10 +1688,10 @@ impl TextInputRef {
         }
     }
 
-    pub fn returned(&self, actions: &Actions) -> Option<String> {
+    pub fn returned(&self, actions: &Actions) -> Option<(String, KeyModifiers)> {
         for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()){
-            if let TextInputAction::Returned(text) = action{
-                return Some(text);
+            if let TextInputAction::Returned(text, modifiers) = action {
+                return Some((text, modifiers));
             }
         }
         None
@@ -1843,6 +1723,41 @@ impl TextInputRef {
         }
         None
     }
+
+    /// Saves the internal state of this text input widget
+    /// to a new `TextInputState` object.
+    pub fn save_state(&self) -> TextInputState {
+        if let Some(inner) = self.borrow() {
+            TextInputState {
+                text: inner.text.clone(),
+                password_text: inner.password_text.clone(),
+                selection: inner.selection.clone(),
+                history: inner.history.clone(),
+            }
+        } else {
+            TextInputState::default()
+        }
+    }
+
+    /// Restores the internal state of this text input widget
+    /// from the given `TextInputState` object.
+    pub fn restore_state(&self, cx: &mut Cx, state: TextInputState) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_text(cx, &state.text);
+            inner.password_text = state.password_text;
+            inner.history = state.history;
+            inner.set_selection(cx, state.selection);
+        }
+    }
+}
+
+/// The saved (checkpointed) state of a text input widget.
+#[derive(Clone, Debug, Default)]
+pub struct TextInputState {
+    text: String,
+    password_text: String,
+    selection: Selection,
+    history: History,
 }
 
 #[derive(Clone, Debug, DefaultNone)]
@@ -1850,7 +1765,7 @@ pub enum TextInputAction {
     None,
     KeyFocus,
     KeyFocusLost,
-    Returned(String),
+    Returned(String, KeyModifiers),
     Escaped,
     Changed(String),
     KeyDownUnhandled(KeyEvent),

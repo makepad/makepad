@@ -67,7 +67,7 @@ impl XlibWindow {
         }
     }
     
-    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>, visual_info: x11_sys::XVisualInfo, custom_window_chrome: bool) {
+    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>, is_fullscreen: bool, visual_info: x11_sys::XVisualInfo, custom_window_chrome: bool) {
         unsafe {
             let display = get_xlib_app_global().display;
             
@@ -224,6 +224,9 @@ impl XlibWindow {
                     new_geom: new_geom
                 })
             );
+            if is_fullscreen {
+                self.maximize();
+            }
         }
     }
     
@@ -391,7 +394,19 @@ impl XlibWindow {
         }
     }
     
-    pub fn set_position(&mut self, _pos: DVec2) {
+    pub fn set_position(&mut self, pos: DVec2) {
+        unsafe {
+            let display = get_xlib_app_global().display;
+            let dpi_factor = self.get_dpi_factor();
+            x11_sys::XMoveWindow(  
+                display,  
+                self.window.unwrap(),  
+                (pos.x * dpi_factor) as i32,  
+                (pos.y * dpi_factor) as i32  
+            );  
+            x11_sys::XFlush(display);
+            self.last_window_geom.position = pos;  
+        }
     }
     
     pub fn set_outer_size(&self, _size: DVec2) {

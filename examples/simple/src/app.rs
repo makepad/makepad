@@ -15,60 +15,21 @@ live_design!{
                     spacing:30,
                     align: {
                         x: 0.5,
-                        y: 0.5
+                        y: 0.5,
                     },
-                    show_bg: true,
-                    draw_bg:{
-                        fn pixel(self) -> vec4 {
-                                                        
-                            let center = vec2(0.5, 0.5);
-                            let uv = self.pos - center;
-                            let radius = length(uv);
-                            let angle = atan(uv.y, uv.x);
-                            let color1 = mix(#f00, #00f, 0.5 + 10.5 * cos(angle + self.time));
-                            let color2 = mix(#0f0, #ff0, 0.5 + 0.5 * sin(angle + self.time));
-                            let color = mix(color1, color2, radius);
-                            return depth_clip(self.world, color, self.depth_clip);
-                        }
-                    }
-                    <Rotary>{
-                        text:"hi"
-                    }
-                    button_1 = <Button> {
-                        text: "Click me 😊"
-                        draw_text:{color:#fff, text_style:{font_size:18}}
-                    }
-                    text_input = <TextInput> {
-                        width: 100,
-                        flow: RightWrap,
-                        text: "Lorem ipsum"
-                        draw_text:{color:#fff, text_style:{font_size:18}}
-                    }/*
-                    button_2 = <Button> {
-                        text: "Click me 345 1234"
-                        draw_text:{color:#fff, text_style:{font_size:18}}
-                    }*/
-                /*
+                    <TextInput> {
+                        height: 100.0,
+                        padding: 20.0,
+                        text: r#"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Donec vitae lectus vitae tortor vulputate efficitur. Praesent dictum ultricies odio nec laoreet. Aliquam semper mi at nisl hendrerit fringilla. Donec eleifend tellus a elit congue lacinia. Nam ut nunc eleifend, tincidunt quam vel, feugiat quam. Vestibulum at vulputate ipsum, sed hendrerit elit. Integer metus tortor, interdum id est quis, laoreet semper ipsum. Donec tincidunt enim a nunc suscipit, sollicitudin commodo lacus porttitor.
 
-                    <SliderRound> {
-                        text: "Short label",
-                        draw_bg: {
-                            val_color_1: #FFCC00
-                            val_color_1_hover: #FF9944
-                            val_color_1_focus: #FFCC44
-                            val_color_1_drag: #FFAA00
+Nullam volutpat sem ante, vel condimentum metus tincidunt sit amet. Fusce sed accumsan eros. Aliquam erat volutpat. Proin quis sapien et orci malesuada convallis vel ut orci. Fusce cursus ipsum id diam sagittis, at vulputate purus viverra. Praesent pulvinar, turpis sit amet auctor bibendum, quam mi varius massa, et euismod nunc justo nec lorem. Vestibulum tellus lectus, ultrices molestie gravida sit amet, ultrices quis magna. Maecenas a hendrerit felis. In et tellus viverra, ullamcorper odio at, pharetra dui. Phasellus pulvinar augue non aliquam imperdiet. Sed purus ante, finibus ac sodales non, sodales ac dui. Sed porta mauris ante, ac bibendum ante ullamcorper sit amet. Praesent a semper mauris, eget sollicitudin justo. Donec ut efficitur justo, ac bibendum sapien.
 
-                            val_color_2: #F00
-                            val_color_2_hover: #F00
-                            val_color_2_focus: #F00
-                            val_color_2_drag: #F00
+Proin non venenatis diam. Aenean interdum urna vitae leo pulvinar, nec cursus nisl rhoncus. Etiam ullamcorper finibus convallis. Quisque eget neque nisi. Maecenas vitae venenatis erat. Donec ac faucibus nisl. In in tempus ipsum. Maecenas vitae arcu auctor, varius arcu vel, efficitur turpis.
 
-                            handle_color: #0000
-                            handle_color_hover: #0008
-                            handle_color_focus: #000C
-                            handle_color_drag: #000F
-                        }
-                    }*/
+Morbi et erat nulla. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Proin congue placerat lacinia. Integer posuere, turpis vel efficitur interdum, urna risus pretium velit, eget tempor metus purus non erat. Phasellus euismod sapien magna, vel vehicula est aliquam sed. Phasellus semper sed mauris et aliquam. Maecenas arcu ex, porta sed tempor et, sodales at elit. Curabitur varius tortor vitae lectus aliquam, quis consequat sapien mattis. Curabitur sed varius ex. Mauris at diam urna. Nam congue fermentum viverra.
+
+Morbi eget urna sit amet ex sollicitudin euismod. Quisque suscipit euismod semper. Mauris mollis velit sapien, vitae porta nisl condimentum et. Maecenas id diam at tellus sagittis auctor. Curabitur placerat molestie nulla, ultricies volutpat libero congue ut. Aenean venenatis, leo in commodo mollis, eros eros blandit odio, eget mollis nunc urna non dolor. Cras molestie aliquet finibus. Suspendisse iaculis posuere nulla in molestie. Nullam lacinia nibh non elit pretium accumsan. Suspendisse eros tortor, auctor nec rhoncus et, dapibus et est. Quisque varius mollis mauris at ornare."#
+                    }
                 }
             }
         }
@@ -93,8 +54,9 @@ impl MatchEvent for App{
     fn handle_startup(&mut self, _cx:&mut Cx){
     }
         
-    fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
+    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
         if self.ui.button(id!(button_1)).clicked(&actions) {
+            self.ui.button(id!(button_1)).set_text(cx, "Clicked 😀");
             log!("hi");
             self.counter += 1;
         }

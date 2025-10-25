@@ -296,12 +296,12 @@ impl Splitter {
             }
         }
         
-        self.rect = cx.turtle().padded_rect();
+        self.rect = cx.turtle().inner_rect();
         self.position = self.align.to_position(self.axis, self.rect);
         
         let walk = match self.axis {
-            SplitterAxis::Horizontal => Walk::size(Size::Fixed(self.position), Size::Fill),
-            SplitterAxis::Vertical => Walk::size(Size::Fill, Size::Fixed(self.position)),
+            SplitterAxis::Horizontal => Walk::new(Size::Fixed(self.position), Size::fill()),
+            SplitterAxis::Vertical => Walk::new(Size::fill(), Size::Fixed(self.position)),
         };
         cx.begin_turtle(walk, Layout::flow_down());
     }
@@ -311,11 +311,11 @@ impl Splitter {
         match self.axis {
             SplitterAxis::Horizontal => {
                 self.draw_bg.is_vertical = 1.0;
-                self.draw_bg.draw_walk(cx, Walk::size(Size::Fixed(self.size), Size::Fill));
+                self.draw_bg.draw_walk(cx, Walk::new(Size::Fixed(self.size), Size::fill()));
             }
             SplitterAxis::Vertical => {
                 self.draw_bg.is_vertical = 0.0;
-                self.draw_bg.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.size)));
+                self.draw_bg.draw_walk(cx, Walk::new(Size::fill(), Size::Fixed(self.size)));
             }
         }
         cx.begin_turtle(Walk::default(), Layout::flow_down());

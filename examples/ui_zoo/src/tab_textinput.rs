@@ -59,19 +59,19 @@ live_design!{
                     color_empty: (THEME_COLOR_INSET_EMPTY)
                     color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-                    border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-                    border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-                    border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-                    border_color_1_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
-                    border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+                    border_color: (THEME_COLOR_BEVEL_INSET_1)
+                    border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+                    border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+                    border_color_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
+                    border_color_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
+                    border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
-                    border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-                    border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-                    border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-                    border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-                    border_color_2_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
-                    border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+                    border_color_2: (THEME_COLOR_BEVEL_INSET_2)
+                    border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+                    border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+                    border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+                    border_color_2_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
+                    border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
                 }
 
                 draw_text: {
@@ -121,10 +121,6 @@ live_design!{
             <TextInputFlat> { empty_text: "Inline Label" }
 
             <Hr> {}
-            <H4> { text: "TextInputFlatter" }
-            <TextInputFlatter> { empty_text: "Inline Label" }
-
-            <Hr> {}
             <H4> { text: "TextInputGradientX" }
             <TextInputGradientX> { empty_text: "Inline Label" }
 
@@ -158,19 +154,19 @@ live_design!{
                     color_empty: (THEME_COLOR_INSET_EMPTY)
                     color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-                    border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-                    border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-                    border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-                    border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-                    border_color_1_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
-                    border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+                    border_color: (THEME_COLOR_BEVEL_INSET_1)
+                    border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+                    border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+                    border_color_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
+                    border_color_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
+                    border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
-                    border_color_2: (THEME_COLOR_BEVEL_INSET_1)
-                    border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-                    border_color_2_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-                    border_color_2_down: (THEME_COLOR_BEVEL_INSET_1_DOWN)
-                    border_color_2_empty: (THEME_COLOR_BEVEL_INSET_1_EMPTY)
-                    border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+                    border_color_2: (THEME_COLOR_BEVEL_INSET_2)
+                    border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+                    border_color_2_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+                    border_color_2_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+                    border_color_2_empty: (THEME_COLOR_BEVEL_INSET_2_EMPTY)
+                    border_color_2_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
                 }
 
                 draw_text: {
@@ -185,11 +181,6 @@ live_design!{
 
                     text_style: {
                         font_size: (THEME_FONT_SIZE_P)
-                        font_family: {
-                            latin = font("crate://makepad_widgets/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-                            chinese = font("crate://makepad_widgets/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
-                            emoji = font("crate://makepad_widgets/resources/NotoColorEmoji.ttf", 0.0, 0.0)
-                        },
                         line_spacing: 1.2
                     }
 

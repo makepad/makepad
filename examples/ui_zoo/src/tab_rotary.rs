@@ -22,6 +22,8 @@ live_design!{
                 <Rotary> {
                     text: "Label",
                     draw_bg: {
+                        val_size: 10.,
+                        val_padding: 2.,
                         gap: 0.,
                     }
                 }
@@ -29,12 +31,19 @@ live_design!{
                 <Rotary> {
                     text: "Label",
                     draw_bg: {
+                        val_size: 5.,
+                        val_padding: 2.5,
                         gap: 180.,
                     }
                 }
 
                 <Rotary> {
                     text: "Label"
+                    draw_bg: {
+                        val_size: 5.,
+                        val_padding: 0.,
+                        gap: 180.,
+                    }
                     animator: {
                         disabled = {
                             default: on
@@ -47,8 +56,8 @@ live_design!{
                     height: 150
                     text: "Label",
                     draw_bg: {
-                        val_size: 30.
-                        val_padding: 20.,
+                        val_size: 10.
+                        val_padding: 5.,
                     }
                 }
 
@@ -73,10 +82,16 @@ live_design!{
                         gap: 180.,
                     }
                 }
+
                 <RotaryGradientY> {
                     text: "Label",
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
                     draw_bg: {
-                        val_size: 30.
+                        val_size: 20.
                     }
                 }
                 <RotaryGradientY> {
@@ -84,8 +99,8 @@ live_design!{
                     height: 150
                     text: "Label",
                     draw_bg: {
-                        val_size: 30.
-                        val_padding: 20.,
+                        val_size: 10.,
+                        val_padding: 5.,
                     }
                 }
             }
@@ -112,8 +127,13 @@ live_design!{
                 }
                 <RotaryFlat> {
                     text: "Label",
+                    animator: {
+                        disabled = {
+                            default: on
+                        }
+                    }
                     draw_bg: {
-                        val_size: 30.
+                        val_size: 10.
                     }
                 }
                 <RotaryFlat> {
@@ -121,47 +141,12 @@ live_design!{
                     height: 150
                     text: "Label",
                     draw_bg: {
-                        val_size: 30.
-                        val_padding: 20.,
+                        val_size: 10.
+                        val_padding: 8.,
                     }
                 }
             }
 
-            <Hr> {}
-            <H4> { text: "RotaryFlatter" }
-            <UIZooRowH> {
-                align: { x: 0. , y: 0.}
-                <RotaryFlatter> {
-                    text: "Label",
-                }
-                <RotaryFlatter> {
-                    text: "Label",
-                    draw_bg: {
-                        gap: 0.,
-                    }
-                }
-                <RotaryFlatter> {
-                    text: "Label",
-                    draw_bg: {
-                        gap: 180.,
-                    }
-                }
-                <RotaryFlatter> {
-                    text: "Label",
-                    draw_bg: {
-                        val_size: 30.
-                    }
-                }
-                <RotaryFlatter> {
-                    width: Fill,
-                    height: 150
-                    text: "Label",
-                    draw_bg: {
-                        val_size: 30.
-                        val_padding: 20.,
-                    }
-                }
-            }
 
             <Hr> {}
             <H4> { text: "Styling Attributes Reference" }
@@ -193,11 +178,6 @@ live_design!{
 
                         text_style: {
                             font_size: (THEME_FONT_SIZE_P)
-                            font_family: {
-                                latin = font("crate://makepad_widgets/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-                                chinese = font("crate://makepad_widgets/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
-                                emoji = font("crate://makepad_widgets/resources/NotoColorEmoji.ttf", 0.0, 0.0)
-                            },
                             line_spacing: 1.2
                         }
 
@@ -218,11 +198,11 @@ live_design!{
                         color_disabled: (THEME_COLOR_INSET_DISABLED)
                         color_drag: (THEME_COLOR_INSET_DRAG)
 
-                        border_color_1: (THEME_COLOR_BEVEL_INSET_1)
-                        border_color_1_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
-                        border_color_1_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
-                        border_color_1_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
-                        border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
+                        border_color: (THEME_COLOR_BEVEL_INSET_1)
+                        border_color_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
+                        border_color_drag: (THEME_COLOR_BEVEL_INSET_1_DRAG)
+                        border_color_focus: (THEME_COLOR_BEVEL_INSET_1_FOCUS)
+                        border_color_disabled: (THEME_COLOR_BEVEL_INSET_1_DISABLED)
 
                         border_color_2: (THEME_COLOR_BEVEL_INSET_2)
                         border_color_2_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
@@ -236,11 +216,11 @@ live_design!{
                         handle_color_disabled: (THEME_COLOR_HANDLE_DISABLED);
                         handle_color_drag: (THEME_COLOR_HANDLE_DRAG);
 
-                        val_color_1: (THEME_COLOR_VAL_1);
-                        val_color_1_hover: (THEME_COLOR_VAL_1);
-                        val_color_1_focus: (THEME_COLOR_VAL_1);
-                        val_color_1_disabled: (THEME_COLOR_VAL_1);
-                        val_color_1_drag: (THEME_COLOR_VAL_1_DRAG);
+                        val_color: (THEME_COLOR_VAL_1);
+                        val_color_hover: (THEME_COLOR_VAL_1);
+                        val_color_focus: (THEME_COLOR_VAL_1);
+                        val_color_disabled: (THEME_COLOR_VAL_1);
+                        val_color_drag: (THEME_COLOR_VAL_1_DRAG);
 
                         val_color_2: (THEME_COLOR_VAL_2);
                         val_color_2_hover: (THEME_COLOR_VAL_2);

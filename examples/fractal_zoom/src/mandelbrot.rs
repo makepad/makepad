@@ -29,13 +29,13 @@ live_design!{
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
             //return mix(#f00,#ff0,self.pos.y);
-            return vec4(Pal::iq1(index - self.color_cycle*-1.0),1);
+            return vec4(Pal::iq2(index - self.color_cycle*-1.0),1);
             
         }
     }
     
     pub Mandelbrot = {{Mandelbrot}} {
-        max_iter: 2560,
+        max_iter: 1256,
     }
 }
 
@@ -409,9 +409,11 @@ pub struct Mandelbrot {
     // and they dont get DSL accessors
     #[rust] next_frame: NextFrame,
     // where your finger/mouse was when moved
-    #[rust] finger_abs: DVec2,
+    #[rust] finger_abs: Option<DVec2>,
     // set to true when the fractal is actively zoom animating
     #[rust] is_zooming: bool,
+    
+    #[rust(1.0)] zoom_factor: f64,
     
     // this bool flips wether or not you were zooming in or out
     // used to decide tile generation strategy
@@ -463,7 +465,9 @@ impl Widget for Mandelbrot {
                         // this is the common path for initiating a tile render
                         if self.tile_cache.generate_completed() && self.tile_cache.next_zoom != self.space.zoom {
                             let zoom = self.space.zoom * if self.is_zooming {if self.is_zoom_in {0.8}else {2.0}}else {1.0};
-                            self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
+                            if let Some(finger_abs) = self.finger_abs{
+                                self.generate_tiles_around_finger(cx, zoom, finger_abs);
+                            }
                         }
                                                 
                         tiles_received += 1;
@@ -479,17 +483,36 @@ impl Widget for Mandelbrot {
             }
                         
             // We are zooming, so animate the zoom
-            if self.is_zooming {
-                if let OsType::LinuxDirect = cx.os_type() {
-                    self.space.zoom_around(if self.is_zoom_in {0.92} else {1.08}, self.finger_abs);
+            if let Some(finger_abs) = self.finger_abs{
+                if self.is_zooming {
+                    if self.is_zoom_in{
+                        self.zoom_factor = (self.zoom_factor * 0.9999).max(0.98);
+                    }
+                    else{
+                        self.zoom_factor = (self.zoom_factor * 1.0001).min(1.08);
+                    }
+                    if let OsType::LinuxDirect = cx.os_type() {
+                        
+                        self.space.zoom_around(self.zoom_factor, finger_abs);
+                    }
+                    else {
+                        self.space.zoom_around(self.zoom_factor, finger_abs);
+                    }
                 }
-                else {
-                    self.space.zoom_around(if self.is_zoom_in {0.98} else {1.02}, self.finger_abs);
+                else{
+                    self.zoom_factor = (self.zoom_factor * 1.0005).min(1.00);
+                    if (self.zoom_factor-1.00).abs()>0.001{
+                        log!("ZOOM AROUND");
+                        self.space.zoom_around(self.zoom_factor, finger_abs);
+                    }
                 }
-                // this kickstarts the tile cache generation when zooming, only happens once per zoom
-                if self.tile_cache.generate_completed() {
-                    let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
-                    self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
+            }
+            // this kickstarts the tile cache generation when zooming, only happens once per zoom
+            if self.tile_cache.generate_completed() && (self.zoom_factor-1.00).abs()>0.00001 {
+                log!("COMPLETED");
+                let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
+                if let Some(finger_abs) = self.finger_abs{
+                    self.generate_tiles_around_finger(cx, zoom, finger_abs);
                 }
             }
                         
@@ -507,7 +530,7 @@ impl Widget for Mandelbrot {
             Hit::FingerDown(fe) => {
                 // ok so we get multiple finger downs
                 self.is_zooming = true;
-                self.finger_abs = fe.abs;
+                self.finger_abs = Some(fe.abs);
                 self.is_zoom_in = true;
                 cx.set_key_focus(self.view_area);
                 self.view_area.redraw(cx);
@@ -530,7 +553,7 @@ impl Widget for Mandelbrot {
             }
             Hit::FingerMove(fe) => {
             //if fe.digit.index == 0 { // only respond to digit 0
-                self.finger_abs = fe.abs;
+                self.finger_abs = Some(fe.abs);
                 //}
             }
             Hit::FingerUp(_) => {

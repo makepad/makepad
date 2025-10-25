@@ -135,6 +135,7 @@ pub struct BuildManager {
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
     pub tick_timer: Timer,
     pub designer_state: DesignerState,
+    pub websocket_alive_timer: Timer,
     //pub send_file_change: FromUISender<LiveFileChange>,
     pub active_build_websockets: Arc<Mutex<RefCell<ActiveBuildWebSockets>>>,
 }
@@ -261,6 +262,7 @@ impl BuildManager {
         self.clients = vec![BuildClient::new_with_local_server(self.roots.clone())];
         self.designer_state.load_state();
         self.update_run_list(cx);
+        self.websocket_alive_timer = cx.start_interval(1.0);
         //self.recompile_timer = cx.start_timeout(self.recompile_timeout);
     }
 
@@ -419,7 +421,17 @@ impl BuildManager {
         if let Some(_) = self.tick_timer.is_event(event) {
             self.broadcast_to_stdin(HostToStdin::Tick);
         }
-
+        
+        if let Some(_) = self.websocket_alive_timer.is_event(event){
+            if let Ok(d) = self.active_build_websockets.lock() {
+                for socket in d.borrow_mut().sockets.iter_mut() {
+                    let data = StudioToAppVec(vec![StudioToApp::KeepAlive])
+                    .serialize_bin();
+                    let _ = socket.sender.send(data.clone());
+                }
+            }
+        }
+        
         match event {
             Event::MouseDown(e) => {
                 // we should only send this if it was captured by one of our runviews
@@ -541,7 +553,6 @@ impl BuildManager {
                             cx.action(AppAction::RedrawLog)
                         }
                         AppToStudio::Screenshot(screenshot)=>{
-                                                        
                             // lets throw the screenshot to disk as jpg
                             // alright lets save it for fun
                             if let Some(build) = active.builds.get(&build_id){
@@ -860,6 +871,8 @@ impl BuildManager {
                             "image/jpg"
                         } else if path.ends_with(".svg") {
                             "image/svg+xml"
+                        } else if path.ends_with(".md") {
+                            "text/markdown"
                         } else {
                             continue;
                         };

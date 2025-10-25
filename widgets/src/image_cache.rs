@@ -30,7 +30,7 @@ impl Default for ImageFit {
     }
 }
 
-#[derive(Debug, Default, Clone)] 
+#[derive(Debug, Default, Clone)]
 pub struct ImageBuffer {
     pub width: usize,
     pub height: usize,
@@ -69,7 +69,7 @@ impl ImageBuffer {
             }
             unsupported => {
                 return Err(ImageError::InvalidPixelAlignment(unsupported));
-            }     
+            }
         }
         Ok(ImageBuffer {
             width,
@@ -78,7 +78,7 @@ impl ImageBuffer {
             animation: None
         })
     }
-    
+
     pub fn into_new_texture(self, cx:&mut Cx)->Texture{
         let texture = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
             width: self.width,
@@ -89,11 +89,11 @@ impl ImageBuffer {
         texture.set_animation(cx, self.animation);
         texture
     }
-    
+
     pub fn from_png(data: &[u8]) -> Result<Self, ImageError> {
         let mut decoder = PngDecoder::new(data);
         decoder.decode_headers()?;
-        
+
         if decoder.is_animated() {
             return Ok(Self::decode_animated_png(&mut decoder)?);
         }
@@ -198,13 +198,13 @@ impl ImageBuffer {
                 }
                 _ => {
                     return Err(ImageError::InvalidPixelAlignment(num_components));
-                }     
+                }
             }
             cx += width;
             if cx >= total_width {
                 cy += height;
                 cx = 0
-            } 
+            }
         }
         Ok(final_buffer)
     }
@@ -292,7 +292,7 @@ impl std::fmt::Display for ImageError {
 pub trait ImageCacheImpl {
     fn get_texture(&self, id:usize) -> &Option<Texture>;
     fn set_texture(&mut self, texture: Option<Texture>,id: usize);
-    
+
     fn lazy_create_image_cache(&mut self,cx: &mut Cx) {
         if !cx.has_global::<ImageCache>() {
             cx.set_global(ImageCache::new());
@@ -310,7 +310,7 @@ pub trait ImageCacheImpl {
             }
         }
     }
-    
+
     fn load_jpg_from_data(&mut self, cx: &mut Cx, data: &[u8], id:usize) -> Result<(), ImageError> {
         match ImageBuffer::from_jpg(&*data){
             Ok(data)=>{
@@ -322,14 +322,18 @@ pub trait ImageCacheImpl {
             }
         }
     }
-    
+
     fn image_size_by_data(data:&[u8], image_path:&Path)-> Result<(usize,usize), ImageError> {
         if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
             let mut decoder = JpegDecoder::new(&*data);
-            decoder.decode_headers().unwrap();
-            let image_info = decoder.info().unwrap();
+            decoder.decode_headers().map_err(ImageError::JpgDecode)?;
+            let image_info = decoder.info().ok_or_else(||
+                ImageError::JpgDecode(JpgDecodeErrors::FormatStatic(
+                    "Failed to get JPG image info after decoding headers"
+                ))
+            )?;
             return Ok((image_info.width as usize,image_info.height as usize))
-        } 
+        }
         else if image_path.extension().map(|s| s == "png").unwrap_or(false) {
             let mut decoder = PngDecoder::new(data);
             decoder.decode_headers()?;
@@ -339,31 +343,31 @@ pub trait ImageCacheImpl {
                 ))
             )?;
             return Ok((width,height))
-                                                            
+
         } else {
             return Err(ImageError::UnsupportedFormat)
         }
     }
-    
+
     fn image_size_by_path(image_path:&Path)-> Result<(usize,usize), ImageError> {
-        if let Ok(mut f) = File::open(image_path){
-            let mut data = vec![0u8;1024]; // yolo chunk size
-            match f.read(&mut data) {
-                Ok(_len) => {
-                    Self::image_size_by_data(&data, image_path)
-                }
-                Err(err) => {
-                    error!("load_image_file_by_path: Resource not found {:?} {}", image_path, err);
-                    return Err(ImageError::PathNotFound(image_path.into()))
-                }
-            }
+        if let Ok(data) = std::fs::read(image_path){
+            //let mut data = vec![0u8;1024]; // yolo chunk size
+            //match f.read(&mut data) {
+            //    Ok(_len) => {
+            Self::image_size_by_data(&data, image_path)
+            //    }
+            //    Err(err) => {
+            //        error!("load_image_file_by_path: Resource not found {:?} {}", image_path, err);
+            //        return Err(ImageError::PathNotFound(image_path.into()))
+            //    }
+            // }
         }
         else{
             error!("load_image_file_by_path: File not found {:?}", image_path);
             return Err(ImageError::PathNotFound(image_path.into()))
         }
     }
-        
+
     fn process_async_image_load(&mut self, cx:&mut Cx, image_path: &Path, result: Result<ImageBuffer, ImageError>)->bool{
         // alright now we should stuff this thing into our cache
         if let Ok(data) = result{
@@ -372,7 +376,7 @@ pub trait ImageCacheImpl {
         }
         false
     }
-    
+
     fn load_image_from_cache(&mut self, cx:&mut Cx, image_path: &Path, id: usize)->bool{
         if let Some(texture) = cx.get_global::<ImageCache>().map.get(image_path){
             match texture{
@@ -385,7 +389,7 @@ pub trait ImageCacheImpl {
         }
         false
     }
-    
+
     fn load_image_from_data_async_impl(
         &mut self,
         cx: &mut Cx,
@@ -414,19 +418,19 @@ pub trait ImageCacheImpl {
             let (w,h) = Self::image_size_by_data(&*data, image_path)?;
             // open image file and read the headers
             cx.get_global::<ImageCache>().map.insert(image_path.into(), ImageCacheEntry::Loading(w,h));
-                        
+
             cx.get_global::<ImageCache>().thread_pool.as_mut().unwrap().execute_rev(image_path.into(), move |image_path|{
                 if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
                     match ImageBuffer::from_jpg(&*data){
                         Ok(data)=>{
                             Cx::post_action(AsyncImageLoad{
-                                image_path, 
+                                image_path,
                                 result: RefCell::new(Some(Ok(data)))
                             });
                         }
                         Err(err)=>{
                             Cx::post_action(AsyncImageLoad{
-                                image_path, 
+                                image_path,
                                 result: RefCell::new(Some(Err(err)))
                             });
                         }
@@ -435,20 +439,20 @@ pub trait ImageCacheImpl {
                     match ImageBuffer::from_png(&*data){
                         Ok(data)=>{
                             Cx::post_action(AsyncImageLoad{
-                                image_path, 
+                                image_path,
                                 result: RefCell::new(Some(Ok(data)))
                             });
                         }
                         Err(err)=>{
                             Cx::post_action(AsyncImageLoad{
-                                image_path, 
+                                image_path,
                                 result: RefCell::new(Some(Err(err)))
                             });
                         }
                     }
                 } else {
                     Cx::post_action(AsyncImageLoad{
-                        image_path, 
+                        image_path,
                         result: RefCell::new(Some(Err(ImageError::UnsupportedFormat)))
                     });
                 }
@@ -456,7 +460,7 @@ pub trait ImageCacheImpl {
             Ok(AsyncLoadResult::Loading(w, h))
         }
     }
-    
+
     fn load_image_file_by_path_async_impl(
         &mut self,
         cx: &mut Cx,
@@ -484,23 +488,23 @@ pub trait ImageCacheImpl {
             let (w,h) = Self::image_size_by_path(image_path)?;
             // open image file and read the headers
             cx.get_global::<ImageCache>().map.insert(image_path.into(), ImageCacheEntry::Loading(w,h));
-            
+
             cx.get_global::<ImageCache>().thread_pool.as_mut().unwrap().execute_rev(image_path.into(), move |image_path|{
                 if let Ok(mut f) = File::open(&image_path){
                     let mut data = Vec::new();
                     match f.read_to_end(&mut data) {
-                        Ok(_len) => {        
+                        Ok(_len) => {
                             if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
                                 match ImageBuffer::from_jpg(&*data){
                                     Ok(data)=>{
                                         Cx::post_action(AsyncImageLoad{
-                                            image_path, 
+                                            image_path,
                                             result: RefCell::new(Some(Ok(data)))
                                         });
                                     }
                                     Err(err)=>{
                                         Cx::post_action(AsyncImageLoad{
-                                            image_path, 
+                                            image_path,
                                             result: RefCell::new(Some(Err(err)))
                                         });
                                     }
@@ -509,27 +513,27 @@ pub trait ImageCacheImpl {
                                 match ImageBuffer::from_png(&*data){
                                     Ok(data)=>{
                                         Cx::post_action(AsyncImageLoad{
-                                            image_path, 
+                                            image_path,
                                             result: RefCell::new(Some(Ok(data)))
                                         });
                                     }
                                     Err(err)=>{
                                         Cx::post_action(AsyncImageLoad{
-                                            image_path, 
+                                            image_path,
                                             result: RefCell::new(Some(Err(err)))
                                         });
                                     }
                                 }
                             } else {
                                 Cx::post_action(AsyncImageLoad{
-                                    image_path, 
+                                    image_path,
                                     result: RefCell::new(Some(Err(ImageError::UnsupportedFormat)))
                                 });
                             }
                         }
                         Err(_err) => {
                             Cx::post_action(AsyncImageLoad{
-                                image_path: image_path.clone(), 
+                                image_path: image_path.clone(),
                                 result: RefCell::new(Some(Err(ImageError::PathNotFound(image_path))))
                             });
                         }
@@ -537,7 +541,7 @@ pub trait ImageCacheImpl {
                 }
                 else{
                     Cx::post_action(AsyncImageLoad{
-                        image_path: image_path.clone(), 
+                        image_path: image_path.clone(),
                         result: RefCell::new(Some(Err(ImageError::PathNotFound(image_path))))
                     });
                 }
@@ -545,7 +549,7 @@ pub trait ImageCacheImpl {
             Ok(AsyncLoadResult::Loading(w, h))
         }
     }
-    
+
     fn load_image_file_by_path_and_data(&mut self, cx:&mut Cx, data:&[u8], id:usize, image_path:&Path)-> Result<(), ImageError> {
         if image_path.extension().map(|s| s == "jpg").unwrap_or(false) {
             match ImageBuffer::from_jpg(&*data){
@@ -578,7 +582,7 @@ pub trait ImageCacheImpl {
             Err(ImageError::UnsupportedFormat)
         }
     }
-        
+
     fn load_image_file_by_path(
         &mut self,
         cx: &mut Cx,
@@ -608,7 +612,7 @@ pub trait ImageCacheImpl {
             }
         }
     }
-    
+
     fn load_image_dep_by_path(
         &mut self,
         cx: &mut Cx,
@@ -619,7 +623,7 @@ pub trait ImageCacheImpl {
         if let Some(ImageCacheEntry::Loaded(texture)) = cx.get_global::<ImageCache>().map.get(p_image_path){
             self.set_texture(Some(texture.clone()), id);
             Ok(())
-        } 
+        }
         else{
             match cx.take_dependency(image_path) {
                 Ok(data) => {

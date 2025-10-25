@@ -358,8 +358,8 @@ impl LiveHook for Video {
         self.lazy_create_image_cache(cx);
         self.thumbnail_texture = Some(Texture::new(cx));
 
-        let target_w = self.walk.width.fixed_or_zero();
-        let target_h = self.walk.height.fixed_or_zero();
+        let target_w = self.walk.width.to_fixed().unwrap_or(0.0);
+        let target_h = self.walk.height.to_fixed().unwrap_or(0.0);
         self.draw_bg
             .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
 

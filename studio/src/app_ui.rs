@@ -73,7 +73,7 @@ live_design!{
             icon_walk: {width: 11., margin: {top: 1.75, right: 3. }}
             padding: { right: 0, left: 0.}
             draw_icon: {
-                color: (THEME_COLOR_D_2),
+                color: (THEME_COLOR_LABEL_OUTER),
                 color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_tab_app.svg"),
             }
@@ -85,7 +85,7 @@ live_design!{
             icon_walk: {width: 12., margin: {top: 1.0 }}
             padding: { right: 0, left: 0.}
             draw_icon: {
-                color: (THEME_COLOR_D_2),
+                color: (THEME_COLOR_LABEL_OUTER),
                 color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_designer.svg"),
             }
@@ -98,7 +98,7 @@ live_design!{
             icon_walk: {width: 6., margin: {top: 0.5, left: 3. }}
             padding: { right: 0., left: 0.}
             draw_icon: {
-                color: (THEME_COLOR_D_2),
+                color: ((THEME_COLOR_LABEL_OUTER)),
                 color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_editor.svg"),
             }
@@ -110,7 +110,7 @@ live_design!{
             icon_walk: {width: 11.5, margin: {top: 1.5 } }
             padding: { right: 5., left: 0.}
             draw_icon: {
-                color: (THEME_COLOR_D_2),
+                color: ((THEME_COLOR_LABEL_OUTER)),
                 color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE),
                 svg_file: dep("crate://self/resources/icons/icon_outliner.svg"),
             }
@@ -119,8 +119,8 @@ live_design!{
 
     pub AppUI =  <Window> {
         margin: 5.
-        caption_bar = { margin: {left: -100}, visible: true, caption_label = {label = {text: "Makepad"}} 
-        <View>{
+        caption_bar = { margin: {top: 2,left: -190}, visible: true, caption_label = {label = {text: "Makepad"}} 
+       /* <View>{
             width: Fit,
             spacing: (THEME_SPACE_2)
             padding: <THEME_MSPACE_1> { right: (THEME_SPACE_2)  }
@@ -128,7 +128,7 @@ live_design!{
             preset_2 = <ButtonFlatter> { text: "C" }
             preset_3 = <ButtonFlatter> { text: "D" }
             preset_4 = <ButtonFlatter> { text: "P" }
-            }
+            }*/
         },
         window: { inner_size: vec2(1600, 900), /*dpi_override:3.0 */},
         show_bg: true,
@@ -588,7 +588,7 @@ live_design!{
                                     draw_bg: { check_type: None }
                                     icon_walk: {width: 7.}
                                     draw_icon: {
-                                        color: (THEME_COLOR_D_2),
+                                        color: ((THEME_COLOR_LABEL_OUTER)),
                                         color_active: (STUDIO_PALETTE_4),
                                         svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
                                     }
@@ -599,7 +599,7 @@ live_design!{
                                     draw_bg: { check_type: None }
                                     icon_walk: {width: 7.}
                                     draw_icon: {
-                                        color: (THEME_COLOR_D_2),
+                                        color: ((THEME_COLOR_LABEL_OUTER)),
                                         color_active: (STUDIO_PALETTE_1),
                                         svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
                                     }
@@ -610,7 +610,7 @@ live_design!{
                                     draw_bg: { check_type: None }
                                     icon_walk: {width: 7.}
                                     draw_icon: {
-                                        color: (THEME_COLOR_D_2),
+                                        color: ((THEME_COLOR_LABEL_OUTER)),
                                         color_active: (THEME_COLOR_U_5),
                                         svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
                                     }
@@ -621,7 +621,7 @@ live_design!{
                                     draw_bg: { check_type: None }
                                     icon_walk: {width: 7.}
                                     draw_icon: {
-                                        color: (THEME_COLOR_D_2),
+                                        color: ((THEME_COLOR_LABEL_OUTER)),
                                         color_active: (STUDIO_PALETTE_2),
                                         svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
                                     }
@@ -632,7 +632,7 @@ live_design!{
                                     draw_bg: { check_type: None }
                                     icon_walk: {width: 7.}
                                     draw_icon: {
-                                        color: (THEME_COLOR_D_2),
+                                        color: ((THEME_COLOR_LABEL_OUTER)),
                                         color_active: (STUDIO_PALETTE_5),
                                         svg_file: dep("crate://self/resources/icons/icon_log_bullet.svg"),
                                     }

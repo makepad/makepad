@@ -22,7 +22,7 @@ impl Trapezoidator {
 
     /// Returns an iterator over trapezoids corresponding to the given iterator over line path
     /// commands.
-    pub fn trapezoidate<P: LinePathIterator>(&mut self, path: P) -> Option<Trapezoidate> {
+    pub fn trapezoidate<P: LinePathIterator>(&mut self, path: P) -> Option<Trapezoidate<'_>> {
         let mut initial_point = None;
         let mut current_point = None;
         if !path.for_each(&mut |command| {

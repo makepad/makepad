@@ -62,6 +62,20 @@ live_design!{
                     text: "Click me!"
                     draw_icon: {
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
+                        gradient_fill_horizontal: 1.0
+
+                        color: #f00
+                        color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+                        color_down: (THEME_COLOR_LABEL_INNER_DOWN)
+                        color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+                        color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+
+                        color_2: #0ff
+                        color_2_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+                        color_2_down: (THEME_COLOR_LABEL_INNER_DOWN)
+                        color_2_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+                        color_2_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+
                     }
 
                     icon_walk: {
@@ -91,7 +105,6 @@ live_design!{
                         text_style: {
                             font_size: 20.,
                             line_spacing: 1.4,
-                            font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
                         }
                         wrap: Word
                     }

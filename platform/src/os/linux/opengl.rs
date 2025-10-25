@@ -440,7 +440,7 @@ impl Cx {
 
             (gl.glViewport)(x as i32, y as i32, width as i32, height as i32);
             
-            assert_eq!((gl.glGetError)(), 0, "glViewport({x}, {y}, {width}, {height}) failed");
+           //assert_eq!((gl.glGetError)(), 0, "glViewport({x}, {y}, {width}, {height}) failed");
         }
 
         if clear_flags != 0 {
@@ -536,6 +536,8 @@ const NUM_SHADER_VARIANTS:usize = 2;
 
 pub struct CxOsDrawShader {
     pub gl_shader: [Option<GlShader>;NUM_SHADER_VARIANTS],
+    pub in_vertex: String,
+    pub in_pixel: String,
     pub vertex: [String;NUM_SHADER_VARIANTS],
     pub pixel: [String;NUM_SHADER_VARIANTS],
     //pub const_table_uniforms: OpenglBuffer,
@@ -671,7 +673,7 @@ impl GlShader{
                     // crate::debug!("File was not in shader cache: {filename}");
                 }
             } else {
-                crate::warning!("No cache directory available for shader cache");
+                //crate::warning!("No cache directory available for shader cache");
             }
             None
         }
@@ -930,7 +932,7 @@ impl GlShader{
 }
 
 impl CxOsDrawShader {
-    pub fn new(gl:&LibGl, vertex: &str, pixel: &str, os_type: &OsType) -> Self {
+    pub fn new(gl:&LibGl, in_vertex: &str, in_pixel: &str, os_type: &OsType) -> Self {
         // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
         let available_extensions = get_gl_string(gl, gl_sys::EXTENSIONS);
         let is_external_texture_supported = available_extensions.split_whitespace().any(|ext| ext == "GL_OES_EGL_image_external");
@@ -1058,7 +1060,7 @@ impl CxOsDrawShader {
             {sampler}
             {tex_ext_sampler}
             {vertex_defs}
-            {vertex}\0",
+            {in_vertex}\0",
         );
         //crate::log!("{}", vertex.replace("int mvo = 0;","int mvo = gl_ViewID_OVR==0?0:16;"));
         let pixel = format!("{version}
@@ -1070,12 +1072,14 @@ impl CxOsDrawShader {
             {sampler}
             {tex_ext_sampler}
             {pixel_defs}
-            {pixel}
+            {in_pixel}
             {nop_depth_clip}
             \0",
         );
         // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
+            in_vertex: in_vertex.to_string(),
+            in_pixel: in_pixel.to_string(),
             vertex: [
                 vertex.clone(), 
                 vertex.replace("#define VIEW_ID 0","#define VIEW_ID gl_ViewID_OVR")
@@ -1299,7 +1303,9 @@ impl CxTexture {
             };
 
             // Partial texture updates don't (yet) work on OHOS simulators/emulators.
-            const DO_PARTIAL_TEXTURE_UPDATES: bool = cfg!(not(ohos_sim));
+            
+            // DISABLE PARTIAL TEXTURE UPDATES ENTIRELY. Its broken.
+            const DO_PARTIAL_TEXTURE_UPDATES: bool = false;//cfg!(not(ohos_sim));
 
             match updated {
                 TextureUpdated::Partial(rect) if DO_PARTIAL_TEXTURE_UPDATES => {

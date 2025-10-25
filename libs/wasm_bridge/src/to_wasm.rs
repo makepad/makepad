@@ -123,14 +123,14 @@ impl ToWasmMsg {
         }
     }
     
-    pub fn as_ref(&self) ->ToWasmMsgRef{
+    pub fn as_ref(&self) ->ToWasmMsgRef<'_>{
         ToWasmMsgRef{
             data: &self.data,
             u32_offset: 2
         }
     }
     
-    pub fn as_ref_at(&self, offset:usize) ->ToWasmMsgRef{
+    pub fn as_ref_at(&self, offset:usize) ->ToWasmMsgRef<'_>{
         ToWasmMsgRef{
             data: &self.data,
             u32_offset: offset

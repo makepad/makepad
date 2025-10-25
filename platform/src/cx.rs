@@ -1,5 +1,6 @@
 use {
     makepad_futures::{executor, executor::{Executor, Spawner}},
+    makepad_script::ScriptVm,
     std::{
         collections::{
             HashMap,
@@ -54,6 +55,9 @@ use {
 //pub use makepad_shader_compiler::makepad_math::*;
  
 pub struct Cx {
+    
+    pub vm: Option<Box<ScriptVm>>,
+    
     pub (crate) os_type: OsType,
     pub in_makepad_studio: bool,
     pub demo_time_repaint: bool,
@@ -113,6 +117,7 @@ pub struct Cx {
     pub (crate) self_ref: Option<Rc<RefCell<Cx>>>,
     pub (crate) in_draw_event: bool,
 
+    /// Display context for the main window, used by AdaptiveView
     pub display_context: DisplayContext,
     
     pub debug: Debug,
@@ -145,12 +150,20 @@ pub struct CxDependency {
 #[derive(Clone, Debug)]
 pub struct AndroidParams {
     pub cache_path: String,
+    pub data_path: String,
     pub density: f64,
     pub is_emulator: bool,
     pub has_xr_mode: bool,
     pub android_version: String,
     pub build_number: String,
     pub kernel_version: String
+}
+
+#[derive(Clone, Debug)]
+pub struct IosParams {
+    pub data_path: String,
+    pub device_model: String,
+    pub system_version: String,
 }
 
 #[derive(Clone, Debug)]
@@ -183,7 +196,7 @@ pub enum OsType {
     Unknown,
     Windows,
     Macos,
-    Ios,
+    Ios(IosParams),
     Android(AndroidParams),
     OpenHarmony(OpenHarmonyParams),
     LinuxWindow (LinuxWindowParams),
@@ -201,7 +214,7 @@ impl OsType {
     pub fn is_single_window(&self)->bool{
         match self{
             OsType::Web(_) => true,
-            OsType::Ios=>true,
+            OsType::Ios(_)=>true,
             OsType::Android(_) => true,
             OsType::LinuxDirect=> true,
             _=> false
@@ -232,6 +245,21 @@ impl OsType {
             None
         }
     }
+    
+    pub fn get_data_dir(&self)->Option<String>{
+        if let OsType::Android(params) = self {
+            Some(params.data_path.clone())
+        }
+        else if let OsType::Ios(params) = self {
+            Some(params.data_path.clone())
+        }
+        else if let OsType::OpenHarmony(params) = self {
+            Some(params.files_dir.clone())
+        }
+        else {
+            None
+        }
+    }
 }
 
 impl Cx {
@@ -255,6 +283,7 @@ impl Cx {
         }
         
         Self {
+            vm: Some(Box::new(ScriptVm::new())),
             demo_time_repaint: false,
             null_texture,
             cpu_cores: 8,

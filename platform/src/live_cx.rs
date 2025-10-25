@@ -11,6 +11,7 @@ use {
             LiveProp,
             LiveError,
             LiveModuleId,
+            LiveNodeSliceApi,
            /*LiveToken,*/
             LivePtr,
             /*LiveTokenId,*/
@@ -231,6 +232,21 @@ impl Cx {
         });
     }
     
+    pub fn reload_ui_dsl(&mut self){
+        let send = self.live_file_change_sender.clone();
+        send.send(vec![]).ok();
+    }
+    
+    pub fn set_dsl_value(&self, crate_id:LiveId, file:LiveId, node:LiveId, value:LiveValue){
+        let mut live_registry = self.live_registry.borrow_mut();
+        let file_id = live_registry.module_id_to_file_id(LiveModuleId(crate_id, file)).unwrap();
+        let file = live_registry.file_id_to_file_mut(file_id);
+        // lets find the child
+        if let Some(index) = file.original.nodes.child_by_name(0, LiveProp::instance(node)){
+            file.original.nodes[index].value = value;
+        }
+    }
+    
     pub fn handle_live_edit(&mut self)->bool{
         // lets poll our studio connection
         let mut all_changes:Vec<LiveFileChange> = Vec::new();
@@ -249,6 +265,7 @@ impl Cx {
                                     StudioToApp::Screenshot(req)=>{
                                         self.screenshot_requests.push(req);
                                     }
+                                    StudioToApp::KeepAlive=>{}
                                     x=>{
                                         actions.push(x);
                                     }
@@ -269,12 +286,15 @@ impl Cx {
         // now what. now we need to 'reload' our entire live system.. how.
         // what we can do is tokenize the entire file
         // then find the token-slice we need
-        
+        let mut reload_dsl = false;
         while let Ok(changes) = self.live_file_change_receiver.try_recv(){
+            if changes.len() == 0{
+                reload_dsl = true;
+            }
             all_changes.extend(changes);
         }
+        let mut live_registry = self.live_registry.borrow_mut();
         if all_changes.len()>0{
-            let mut live_registry = self.live_registry.borrow_mut();
             let mut errs = Vec::new();
             live_registry.process_file_changes(all_changes, &mut errs);
             for err in errs {
@@ -295,6 +315,11 @@ impl Cx {
                 }
                 error!("check_live_file_watcher: Error expanding live file {}", err);
             }
+            self.draw_shaders.reset_for_live_reload();
+            true
+        }
+        else if reload_dsl{
+            live_registry.re_expand_all_files();
             self.draw_shaders.reset_for_live_reload();
             true
         }
@@ -354,9 +379,11 @@ impl Cx {
                             });
                         }, 
                         LiveValue::Font(font)=>{
-                            self.dependencies.insert(font.path.as_str().to_string(), CxDependency {
-                                data: None
-                            });
+                            for path in &*font.paths{
+                                self.dependencies.insert(path.as_str().to_string(), CxDependency {
+                                    data: None
+                                });
+                            }
                         }
                         _ => {
                         }

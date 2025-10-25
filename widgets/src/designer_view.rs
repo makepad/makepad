@@ -93,11 +93,11 @@ live_design!{
                         let body_transp = vec4(body.xyz, 0.0);
                         let top_gradient = mix(
                             body_transp,
-                            mix(THEME_COLOR_BEVEL_OUTSET_1, THEME_COLOR_BEVEL_1, self.down),
+                            mix(THEME_COLOR_BEVEL_OUTSET_1, THEME_COLOR_BEVEL_OUTSET_1_DOWN, self.down),
                             max(0.0, grad_top - sdf.pos.y) / grad_top
                         );
                         let bot_gradient = mix(
-                            mix(THEME_COLOR_BEVEL_2, THEME_COLOR_BEVEL_OUTSET_1, self.down),
+                            mix(THEME_COLOR_BEVEL_OUTSET_2, THEME_COLOR_BEVEL_OUTSET_2_DOWN, self.down),
                             top_gradient,
                             clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                         );
@@ -760,7 +760,7 @@ impl Widget for DesignerView {
                         
             self.draw_list.begin_always(cx);
             let size = cx.current_pass_size();
-            cx.begin_sized_turtle_no_clip(size, Layout::flow_down());
+            cx.begin_unclipped_root_turtle(size, Layout::flow_down());
             
             let data = scope.data.get_mut::<DesignerData>().unwrap();
             

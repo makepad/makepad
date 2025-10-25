@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, widget::*, widget_match_event::WidgetMatchEvent,
-    WindowAction,
+    makepad_derive_widget::*, makepad_draw::*, widget::*, WidgetMatchEvent, WindowAction
 };
 
 live_design! {
@@ -104,6 +103,10 @@ pub struct AdaptiveView {
     /// setting up a custom selector, so we should create a default widget.
     #[rust]
     has_custom_templates: bool,
+
+    /// The most recent size of the parent.
+    #[rust]
+    parent_size: DVec2,
 }
 
 pub struct WidgetVariant {
@@ -214,9 +217,13 @@ impl Widget for AdaptiveView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if self.should_reapply_selector {
-            let parent_size = cx.peek_walk_turtle(walk).size;
-            self.apply_selector(cx, &parent_size);
+        let parent_size = cx.peek_walk_turtle(walk).size;
+        let parent_size_has_changed = parent_size != self.parent_size;
+
+        if parent_size_has_changed || self.should_reapply_selector {
+            self.parent_size = parent_size;
+            self.apply_selector(cx);
+            self.should_reapply_selector = false;
         }
 
         if let Some(active_widget) = self.active_widget.as_mut() {
@@ -230,21 +237,10 @@ impl Widget for AdaptiveView {
 impl WidgetMatchEvent for AdaptiveView {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         for action in actions {
-            // Handle window geom change events, this is triggered at startup and on window resize.
-            if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
-                let event_id = cx.event_id();
-
-                // Skip if the display context was already updated on this event
-                if cx.display_context.updated_on_event_id == event_id { return }
-                // Update the current context if the screen size has changed
-                if cx.display_context.screen_size != ce.new_geom.inner_size {
-                    cx.display_context.updated_on_event_id = event_id;
-                    cx.display_context.screen_size = ce.new_geom.inner_size;
-
-                    self.should_reapply_selector = true;
-                }
-
-                cx.redraw_all();
+            // Window geometry has changed, reapply the selector. 
+            // Will use the most recent parent size, might be updated on next draw call.
+            if let WindowAction::WindowGeomChange(_ce) = action.as_widget_action().cast() {
+                self.apply_selector(cx);
             }
         }
     }
@@ -252,12 +248,12 @@ impl WidgetMatchEvent for AdaptiveView {
 
 impl AdaptiveView {
     /// Apply the variant selector to determine which template to use.
-    fn apply_selector(&mut self, cx: &mut Cx, parent_size: &DVec2) {
+    fn apply_selector(&mut self, cx: &mut Cx) {
         let Some(variant_selector) = self.variant_selector.as_mut() else {
             return;
         };
 
-        let template_id = variant_selector(cx, parent_size);
+        let template_id = variant_selector(cx, &self.parent_size);
 
         // If the selector resulted in a widget that is already active, do nothing
         if let Some(active_widget) = self.active_widget.as_mut() {
@@ -314,9 +310,10 @@ impl AdaptiveView {
     }
 
     pub fn set_default_variant_selector(&mut self) {
-        // TODO(Julian): setup a more comprehensive default
+        // TODO(Julian): setup a more comprehensive default, currently defaults to Desktop even if the screen size is unknown
+        // (happens on startup for macOS due to a regression, first few WindowGeomChange events report size 0)
         self.set_variant_selector(|cx, _parent_size| {
-            if cx.display_context.is_desktop() {
+            if cx.display_context.is_desktop() || !cx.display_context.is_screen_size_known() {
                 live_id!(Desktop)
             } else {
                 live_id!(Mobile)

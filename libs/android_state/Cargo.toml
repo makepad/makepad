@@ -10,7 +10,9 @@ license = "MIT"
 readme = "README.md"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
+metadata.makepad-auto-version = "Xn0xvOdZChZbltM8tMBk0zLdOBc="
 
 [dependencies]
-makepad-jni-sys = "0.4.0"
+## Note: we must not use local 'path' dependencies on `makepad-jni-sys`
+## in order to guarantee that only one instance of each crate exists in the app binary.
+makepad-jni-sys = {version = "0.4.0"}

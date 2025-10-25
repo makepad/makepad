@@ -32,10 +32,6 @@ live_design!{
             <CheckBoxFlat> { text:"<CheckBoxFlat>" }
 
             <Hr> {}
-            <H4> { text: "CheckBoxFlatter"}
-            <CheckBoxFlatter> { text:"<CheckBoxFlat>" }
-
-            <Hr> {}
             <H4> { text: "CheckBoxGradientX"}
             <CheckBoxGradientX> { text:"<CheckBoxGradientX>" }
 
@@ -54,12 +50,6 @@ live_design!{
             <H4> { text: "ToggleFlat"}
             <UIZooRowH> {
                 <ToggleFlat> {text:"<ToggleFlat>" }
-            }
-
-            <Hr> {}
-            <H4> { text: "ToggleFlatter"}
-            <UIZooRowH> {
-                <ToggleFlatter> {text:"<ToggleFlatter>" }
             }
 
             <Hr> {}
@@ -87,8 +77,8 @@ live_design!{
             <Hr> {}
             <H4> { text: "Custom Checkbox"}
             <UIZooRowH> {
-                <CheckBox> {
-                    text:"<CheckBox>"
+                <CheckBoxCustom> {
+                    text:"<CheckBoxCustom>"
                     align: { x: 0., y: .5}
                     padding: { top: 0., left: 0., bottom: 0., right: 0.}
                     margin: { top: 0., left: 0., bottom: 0., right: 0.}
@@ -98,12 +88,12 @@ live_design!{
                         margin: <THEME_MSPACE_H_1> { left: 5.5 }
                     }
 
-                    draw_bg: { check_type: None }  
+                    // draw_bg: { check_type: None }  
 
                     draw_icon: {
-                        color: #0
-                        color_active: #f00
-                        color_disabled: #8
+                        // color: #0
+                        // color_active: #f00
+                        // color_disabled: #8
                     
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
@@ -147,12 +137,12 @@ live_design!{
                         color_focus: (THEME_COLOR_INSET_FOCUS)
                         color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-                        border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-                        border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-                        border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-                        border_color_1_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
-                        border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-                        border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+                        border_color: (THEME_COLOR_BEVEL_INSET_2)
+                        border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+                        border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+                        border_color_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+                        border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+                        border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
                         border_color_2: (THEME_COLOR_BEVEL_INSET_1)
                         border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
@@ -181,11 +171,6 @@ live_design!{
 
                     text_style: {
                         font_size: (THEME_FONT_SIZE_P)
-                        font_family: {
-                            latin = font("crate://makepad_widgets/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-                            chinese = font("crate://makepad_widgets/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
-                            emoji = font("crate://makepad_widgets/resources/NotoColorEmoji.ttf", 0.0, 0.0)
-                        },
                         line_spacing: 1.2
                     }
                 }

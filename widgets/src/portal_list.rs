@@ -362,7 +362,7 @@ impl PortalList {
                         );
                     }
 
-                    let viewport = cx.turtle().padded_rect();
+                    let viewport = cx.turtle().inner_rect();
                     self.draw_state.set(ListDrawState::Down {
                         index: self.first_id,
                         pos: self.first_scroll,
@@ -373,16 +373,16 @@ impl PortalList {
                             cx.begin_turtle(Walk {
                                 abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + self.first_scroll)),
                                 margin: Default::default(),
-                                width: Size::Fill,
-                                height: Size::Fit
+                                width: Size::fill(),
+                                height: Size::fit()
                             }, layout);
                         }
                         Vec2Index::X => {
                             cx.begin_turtle(Walk {
                                 abs_pos: Some(dvec2(viewport.pos.x + self.first_scroll, viewport.pos.y)),
                                 margin: Default::default(),
-                                width: Size::Fit,
-                                height: Size::Fill
+                                width: Size::fit(),
+                                height: Size::fill()
                             }, layout);
                         }
                     }
@@ -414,16 +414,16 @@ impl PortalList {
                                     cx.begin_turtle(Walk {
                                         abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                                         margin: Default::default(),
-                                        width: Size::Fill,
-                                        height: Size::Fit
+                                        width: Size::fill(),
+                                        height: Size::fit()
                                     }, layout);
                                 }
                                 Vec2Index::X => {
                                     cx.begin_turtle(Walk {
                                         abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                                         margin: Default::default(),
-                                        width: Size::Fit,
-                                        height: Size::Fill
+                                        width: Size::fit(),
+                                        height: Size::fill()
                                     }, layout);
                                 }
                             }
@@ -453,16 +453,16 @@ impl PortalList {
                             cx.begin_turtle(Walk {
                                 abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + pos + rect.size.index(vi))),
                                 margin: Default::default(),
-                                width: Size::Fill,
-                                height: Size::Fit
+                                width: Size::fill(),
+                                height: Size::fit()
                             }, layout);
                         }
                         Vec2Index::X => {
                             cx.begin_turtle(Walk {
                                 abs_pos: Some(dvec2(viewport.pos.x + pos + rect.size.index(vi), viewport.pos.y)),
                                 margin: Default::default(),
-                                width: Size::Fit,
-                                height: Size::Fill
+                                width: Size::fit(),
+                                height: Size::fill()
                             }, layout);
                         }
                     }
@@ -495,8 +495,8 @@ impl PortalList {
                                 cx.begin_turtle(Walk {
                                     abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + total_height)),
                                     margin: Default::default(),
-                                    width: Size::Fill,
-                                    height: Size::Fit
+                                    width: Size::fill(),
+                                    height: Size::fit()
                                 }, Layout::flow_down());
                                 return Some(last_index + 1);
                             }
@@ -520,8 +520,8 @@ impl PortalList {
                     cx.begin_turtle(Walk {
                         abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                         margin: Default::default(),
-                        width: Size::Fill,
-                        height: Size::Fit
+                        width: Size::fill(),
+                        height: Size::fit()
                     }, Layout::flow_down());
                     
                     return Some(index - 1);
@@ -598,7 +598,7 @@ impl PortalList {
                 }
             }
         } else {
-            warning!("Template not found: {template}. Did you add it to the <PortalList> instance in `live_design!{{}}`?");
+            error!("Template not found: {template}. Did you add it to the <PortalList> instance in `live_design!{{}}`?");
             (WidgetRef::empty(), false)
         }
     }
@@ -781,9 +781,13 @@ impl PortalList {
     ///    If `None`, the default value of 20 is used.
     pub fn smooth_scroll_to_end(&mut self, cx: &mut Cx, speed: f64, max_items_to_show: Option<usize>) {
         if self.items.is_empty() { return };
+        let speed = speed * self.range_end as f64;
+        self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show);
+    }
 
-	let speed = speed * self.range_end as f64;
-	self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show);
+    /// Returns whether this PortalList is currently filling the viewport.
+    pub fn is_filling_viewport(&self) -> bool {
+        !self.not_filling_viewport
     }
 }
 
@@ -1234,7 +1238,7 @@ impl PortalListRef {
     /// ```
     pub fn smooth_scroll_to(&self, cx: &mut Cx, target_id: usize, speed: f64, max_items_to_show: Option<usize>) {
         let Some(mut inner) = self.borrow_mut() else { return };
-	inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show);
+	    inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show);
     }
 
     /// Returns the ID of the item that is currently being smoothly scrolled to, if any.
@@ -1267,8 +1271,13 @@ impl PortalListRef {
     ///    If `None`, the default value of 20 is used.
     pub fn smooth_scroll_to_end(&self, cx: &mut Cx, speed: f64, max_items_to_show: Option<usize>) {
         let Some(mut inner) = self.borrow_mut() else { return };
+	    inner.smooth_scroll_to_end(cx, speed, max_items_to_show);
+    }
 
-	inner.smooth_scroll_to_end(cx, speed, max_items_to_show);
+    /// Returns whether this PortalList is currently filling the viewport.
+    pub fn is_filling_viewport(&self) -> bool {
+        let Some(inner) = self.borrow() else { return false };
+        inner.is_filling_viewport()
     }
 
     /// It indicates if we have items not displayed towards the end of the list (below)

@@ -23,8 +23,9 @@ live_design!{
         align: { x: 0.0, y: 0.5 }
         padding: 50.
         draw_bg: {
-            color: (THEME_COLOR_D_4),
-            border_radius: (THEME_CONTAINER_CORNER_RADIUS)
+            color: (THEME_COLOR_INSET_1),
+            color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            border_radius: (THEME_CONTAINER_CORNER_RADIUS)    
         }
         title = <H1> {
             text: "SlideTitle",
@@ -42,6 +43,7 @@ live_design!{
         padding: 50,
         draw_bg: {
             color: (THEME_COLOR_MAKEPAD),
+            color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             border_radius: (THEME_CONTAINER_CORNER_RADIUS)
         }
         title = <H1> {
@@ -223,8 +225,8 @@ impl Widget for SlidesView {
             cx.begin_turtle(Walk {
                 abs_pos: None,
                 margin: Default::default(),
-                width: Size::Fill,
-                height: Size::Fill
+                width: Size::fill(),
+                height: Size::fill()
             }, Layout::flow_down().with_scroll(
                 dvec2(rect.size.x * self.current_slide.fract(), 0.0)
             ));
@@ -245,8 +247,8 @@ impl Widget for SlidesView {
             cx.begin_turtle(Walk {
                 abs_pos: None,
                 margin: Default::default(),
-                width: Size::Fill,
-                height: Size::Fill
+                width: Size::fill(),
+                height: Size::fill()
             }, Layout::flow_down().with_scroll(
                 dvec2(-rect.size.x * (1.0-self.current_slide.fract()), 0.0)
             ));

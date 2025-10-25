@@ -26,26 +26,59 @@ live_design!{
             instance focus: 0.0
             instance disabled: 0.0
 
+            uniform color_dither: 1.0
+            uniform gradient_fill_horizontal: 0.0
+
             uniform color: (THEME_COLOR_LABEL_INNER)
             uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
             uniform color_down: (THEME_COLOR_LABEL_INNER_DOWN)
             uniform color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
             uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
 
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_2_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+            uniform color_2_down: (THEME_COLOR_LABEL_INNER_DOWN)
+            uniform color_2_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+            uniform color_2_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+
             fn get_color(self) -> vec4 {
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+                let color_2 = self.color;
+                let color_2_hover = self.color_hover;
+                let color_2_down = self.color_down;
+                let color_2_focus = self.color_focus;
+                let color_2_disabled = self.color_disabled;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2
+                    color_2_hover = self.color_2_hover
+                    color_2_down = self.color_2_down;
+                    color_2_focus = self.color_2_focus;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                let gradient_fill_dir = self.pos.y + dither;
+                if (self.gradient_fill_horizontal > 0.5) {
+                    gradient_fill_dir = self.pos.x + dither;
+                }
+
                 return mix(
                     mix(
                         mix(
-                            mix(self.color, self.color_focus, self.focus),
-                            self.color_hover,
+                            mix(
+                                mix(self.color, color_2, gradient_fill_dir),
+                                mix(self.color_focus, color_2_focus, gradient_fill_dir),
+                                self.focus
+                            ),
+                            mix(self.color_hover, color_2_hover, gradient_fill_dir),
                             self.hover
                         ),
-                        self.color_down,
+                        mix(self.color_down, color_2_down, gradient_fill_dir),
                         self.down
                     ),
-                    self.color_disabled,
+                    mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
                     self.disabled
-                )
+                );
             }
         }
         
@@ -55,32 +88,66 @@ live_design!{
             instance focus: 0.0
             instance disabled: 0.0
 
+            uniform color_dither: 1.0
+            uniform gradient_fill_horizontal: 0.0
+
             uniform color: (THEME_COLOR_LABEL_INNER)
             uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
             uniform color_down: (THEME_COLOR_LABEL_INNER_DOWN)
             uniform color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
             uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
             
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_2_hover: #F00
+            uniform color_2_down: #000
+            uniform color_2_focus: #f00
+            uniform color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
+            
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let offset_y = 1.0
+
+                let color_2 = self.color;
+                let color_2_hover = self.color_hover;
+                let color_2_down = self.color_down;
+                let color_2_focus = self.color_focus;
+                let color_2_disabled = self.color_disabled;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2
+                    color_2_hover = self.color_2_hover
+                    color_2_down = self.color_2_down;
+                    color_2_focus = self.color_2_focus;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                let gradient_border_dir = self.pos.y + dither;
+                if (self.gradient_fill_horizontal > 0.5) {
+                    gradient_border_dir = self.pos.x + dither;
+                }
+
                 sdf.move_to(0., self.rect_size.y - offset_y);
                 sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+
                 return sdf.stroke(
                     mix(
                         mix(
                             mix(
-                                mix(self.color, self.color_focus, self.focus),
-                                self.color_hover,
+                                mix(
+                                    mix(self.color, color_2, gradient_border_dir),
+                                    mix(self.color_focus, color_2_focus, gradient_border_dir),
+                                    self.focus
+                                ),
+                                mix(self.color_hover, color_2_hover, gradient_border_dir),
                                 self.hover
                             ),
-                            self.color_down,
+                            mix(self.color_down, color_2_down, gradient_border_dir),
                             self.down
                         ),
-                        self.color_disabled,
+                        mix(self.color_disabled, color_2_disabled, gradient_border_dir),
                         self.disabled
-                    ), mix(.7, 1., self.hover)
-                );
+                    ), mix(.7, 1., self.hover));
             }
         }
         
@@ -90,31 +157,65 @@ live_design!{
             instance focus: 0.0,
             instance disabled: 0.0
 
+            wrap: Word
+            text_style: <THEME_FONT_REGULAR>{
+                font_size: (THEME_FONT_SIZE_P)
+            }
+
+            uniform color_dither: 1.0
+            uniform gradient_fill_horizontal: 0.0
+
             uniform color: (THEME_COLOR_LABEL_INNER),
             uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER),
             uniform color_down: (THEME_COLOR_LABEL_INNER_DOWN),
             uniform color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
             uniform color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
 
-            wrap: Word
-            text_style: <THEME_FONT_REGULAR>{
-                font_size: (THEME_FONT_SIZE_P)
-            }
+            uniform color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            uniform color_2_hover: #FA0
+            uniform color_2_down: #0A0
+            uniform color_2_focus: #0F0
+            uniform color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
+
             fn get_color(self) -> vec4 {
+                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
+                let color_2 = self.color;
+                let color_2_hover = self.color_hover;
+                let color_2_down = self.color_down;
+                let color_2_focus = self.color_focus;
+                let color_2_disabled = self.color_disabled;
+
+                if (self.color_2.x > -0.5) {
+                    color_2 = self.color_2
+                    color_2_hover = self.color_2_hover
+                    color_2_down = self.color_2_down;
+                    color_2_focus = self.color_2_focus;
+                    color_2_disabled = self.color_2_disabled;
+                }
+
+                let gradient_fill_dir = self.pos.y + dither;
+                if (self.gradient_fill_horizontal > 0.5) {
+                    gradient_fill_dir = self.pos.x + dither;
+                }
+
                 return
-                mix(
                     mix(
                         mix(
-                            mix(self.color, self.color_focus, self.focus),
-                            self.color_hover,
-                            self.hover
+                            mix(
+                                mix(
+                                    mix(self.color, color_2, gradient_fill_dir),
+                                    mix(self.color_focus, color_2_focus, gradient_fill_dir),
+                                    self.focus
+                                ),
+                                mix(self.color_hover, color_2_hover, gradient_fill_dir),
+                                self.hover
+                            ),
+                            mix(self.color_down, color_2_down, gradient_fill_dir),
+                            self.down
                         ),
-                        self.color_down,
-                        self.down
-                    ),
-                    self.color_disabled,
-                    self.disabled
-                )
+                        mix(self.color_disabled, color_2_disabled, gradient_fill_dir),
+                        self.disabled
+                    );
             }
         }
         
@@ -206,121 +307,103 @@ live_design!{
                 }
             }
         }
-        
     }
 
     pub LinkLabelGradientY = <LinkLabel> {
+        draw_icon: {
+            gradient_fill_horizontal: 0.0
+
+            color: (THEME_COLOR_LABEL_INNER)
+            color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+            color_down: (THEME_COLOR_LABEL_INNER_DOWN)
+            color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+            color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+
+            color_2: #0ff
+            color_2_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+            color_2_down: (THEME_COLOR_LABEL_INNER_DOWN)
+            color_2_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+            color_2_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+        }
+
         draw_bg: {
-            instance down: 0.0
-            instance hover: 0.0
-            instance focus: 0.0
-            instance disabled: 0.0
+            color: #0ff,
+            color_hover: #0ff,
+            color_down: #0ff,
+            color_focus: #0ff,
+            color_disabled: (THEME_COLOR_TEXT_DISABLED)
 
-            uniform color_1: #0ff,
-            uniform color_1_hover: #0ff,
-            uniform color_1_down: #0ff,
-            uniform color_1_focus: #0ff,
-            uniform color_1_disabled: (THEME_COLOR_TEXT_DISABLED)
-
-            uniform color_2: #A00
-            uniform color_2_hover: #F00
-            uniform color_2_down: #000
-            uniform color_2_focus: #f00
-            uniform color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
+            color_2: #A00
+            color_2_hover: #F00
+            color_2_down: #000
+            color_2_focus: #f00
+            color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
             
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let offset_y = 1.0
-                sdf.move_to(0., self.rect_size.y - offset_y);
-                sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
-                return sdf.stroke(
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, self.pos.y),
-                                    mix(self.color_1_focus, self.color_2_focus, self.pos.y),
-                                    self.focus
-                                ),
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.y),
-                                self.hover
-                            ),
-                            mix(self.color_1_down, self.color_2_down, self.pos.y),
-                            self.down
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, self.pos.y),
-                        self.disabled
-                    ), mix(.7, 1., self.hover));
-            }
         }
         
         draw_text: {
-            instance down: 0.0
-            instance hover: 0.0
-            instance focus: 0.0
-            instance disabled: 0.0
+            color: #0ff,
+            color_hover: #0ff,
+            color_down: #0ff,
+            color_focus: #f00,
+            color_disabled: (THEME_COLOR_TEXT_DISABLED)
 
-            uniform color_1: #0ff,
-            uniform color_1_hover: #0ff,
-            uniform color_1_down: #0ff,
-            uniform color_1_focus: #f00,
-            uniform color_1_disabled: (THEME_COLOR_TEXT_DISABLED)
+            color_2: #F00
+            color_2_hover: #FA0
+            color_2_down: #0A0
+            color_2_focus: #0F0
+            color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
 
-            uniform color_2: #A40
-            uniform color_2_hover: #FA0
-            uniform color_2_down: #0A0
-            uniform color_2_focus: #0F0
-            uniform color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
-
-            wrap: Word
-            text_style: <THEME_FONT_REGULAR>{
-                font_size: (THEME_FONT_SIZE_P)
-            }
-            fn get_color(self) -> vec4 {
-                return
-                    mix(
-                        mix(
-                            mix(
-                                mix(
-                                    mix(self.color_1, self.color_2, self.pos.y),
-                                    mix(self.color_1_focus, self.color_2_focus, self.pos.y),
-                                    self.focus
-                                ),
-                                mix(self.color_1_hover, self.color_2_hover, self.pos.y),
-                                self.hover
-                            ),
-                            mix(self.color_1_down, self.color_2_down, self.pos.y),
-                            self.down
-                        ),
-                        mix(self.color_1_disabled, self.color_2_disabled, self.pos.y),
-                        self.disabled
-                    );
-            }
         }
     }
     
-    pub LinkLabelGradientX = <LinkLabelGradientY> {
+    pub LinkLabelGradientX = <LinkLabel> {
+        draw_icon: {
+            gradient_fill_horizontal: 1.0
+
+            color: (THEME_COLOR_LABEL_INNER)
+            color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+            color_down: (THEME_COLOR_LABEL_INNER_DOWN)
+            color_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+            color_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+
+            color_2: #0ff
+            color_2_hover: (THEME_COLOR_LABEL_INNER_HOVER)
+            color_2_down: (THEME_COLOR_LABEL_INNER_DOWN)
+            color_2_focus: (THEME_COLOR_LABEL_INNER_FOCUS)
+            color_2_disabled: (THEME_COLOR_LABEL_INNER_DISABLED)
+        }
+
+        draw_bg: {
+            gradient_fill_horizontal: 1.0
+
+            color: #0ff,
+            color_hover: #0ff,
+            color_down: #0ff,
+            color_focus: #0ff,
+            color_disabled: (THEME_COLOR_TEXT_DISABLED)
+
+            color_2: #A00
+            color_2_hover: #F00
+            color_2_down: #000
+            color_2_focus: #f00
+            color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
+        }
+
         draw_text: {
-            fn get_color(self) -> vec4 {
-                return
-                mix(
-                    mix(
-                        mix(
-                            mix(
-                                mix(self.color_1, self.color_2, self.pos.x),
-                                mix(self.color_1_focus, self.color_2_focus, self.pos.x),
-                                self.focus
-                            ),
-                            mix(self.color_1_hover, self.color_2_hover, self.pos.x),
-                            self.hover
-                        ),
-                        mix(self.color_1_down, self.color_2_down, self.pos.x),
-                        self.down
-                    ),
-                    mix(self.color_1_disabled, self.color_2_disabled, self.pos.x),
-                    self.disabled
-                );
-            }
+            gradient_fill_horizontal: 1.0
+
+            color: #0ff,
+            color_hover: #0ff,
+            color_down: #0ff,
+            color_focus: #f00,
+            color_disabled: (THEME_COLOR_TEXT_DISABLED)
+
+            color_2: #F00
+            color_2_hover: #FA0
+            color_2_down: #0A0
+            color_2_focus: #0F0
+            color_2_disabled: (THEME_COLOR_TEXT_DISABLED)
         }
     }
 

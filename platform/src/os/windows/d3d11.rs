@@ -189,13 +189,13 @@ impl Cx {
                 draw_call.draw_call_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
                 
-                draw_item.os.draw_call_uniforms.update_with_f32_constant_data(d3d11_cx, draw_call.draw_call_uniforms.as_slice());
-                
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
-                    if draw_call.user_uniforms.len() != 0 {
-                        draw_item.os.user_uniforms.update_with_f32_constant_data(d3d11_cx, &mut draw_call.user_uniforms);
-                    }
+                    draw_item.os.draw_call_uniforms.update_with_f32_constant_data(d3d11_cx, draw_call.draw_call_uniforms.as_slice());
+                    
+                }
+                if draw_call.user_uniforms.len() != 0 {
+                    draw_item.os.user_uniforms.update_with_f32_constant_data(d3d11_cx, &mut draw_call.user_uniforms);
                 }
                 
                 let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
@@ -523,11 +523,11 @@ pub struct D3d11Window {
 }
 
 impl D3d11Window {
-    pub fn new(window_id: WindowId, d3d11_cx: &D3d11Cx, inner_size: DVec2, position: Option<DVec2>, title: &str) -> D3d11Window {
+    pub fn new(window_id: WindowId, d3d11_cx: &D3d11Cx, inner_size: DVec2, position: Option<DVec2>, title: &str, is_fullscreen: bool) -> D3d11Window {
 
         // create window, and then initialize it; this is needed because
         // GWLP_USERDATA needs to reference a stable and existing window
-        let mut win32_window = Box::new(Win32Window::new(window_id, title, position));
+        let mut win32_window = Box::new(Win32Window::new(window_id, title, position, is_fullscreen));
         win32_window.init(inner_size);
         
         let wg = win32_window.get_window_geom();

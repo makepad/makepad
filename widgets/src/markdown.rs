@@ -142,6 +142,7 @@ live_design!{
         pre_code_spacing: 8,
         inline_code_padding: <THEME_MSPACE_1> {},
         inline_code_margin: <THEME_MSPACE_1> {},
+        heading_base_scale: 1.8,
                 
         draw_normal: {
             text_style: <THEME_FONT_REGULAR> {
@@ -172,6 +173,7 @@ live_design!{
         }
         
         draw_fixed: {
+            temp_y_shift: 0.25
             text_style: <THEME_FONT_CODE> {
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -180,7 +182,7 @@ live_design!{
         
         code_layout: {
             flow: RightWrap,
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3), bottom:10 }
         }
         code_walk: { width: Fill, height: Fit }
         
@@ -306,7 +308,8 @@ pub struct Markdown{
     #[live(false)] use_code_block_widget:bool,
     #[rust] in_code_block: bool,
     #[rust] code_block_string: String,
-    #[rust] auto_id: u64
+    #[rust] auto_id: u64,
+    #[live] heading_base_scale: f64,
 }
 
 impl Widget for Markdown {
@@ -339,22 +342,27 @@ impl Markdown {
         let tf = &mut self.text_flow;
         // Track state for nested formatting
         let mut list_stack = Vec::new();
+        let mut is_first_block = true;
 
         let parser = Parser::new_ext(self.body.as_ref(), Options::ENABLE_TABLES);        
         
         for event in parser.into_iter() {
             match event {
                 MdEvent::Start(Tag::Heading { level, .. }) => {
-                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
-                    let levelf64 = match level {
-                        HeadingLevel::H1 => 1.0,
-                        HeadingLevel::H2 => 2.0,
-                        HeadingLevel::H3 => 3.0,
-                        HeadingLevel::H4 => 4.0,
-                        HeadingLevel::H5 => 5.0,
-                        HeadingLevel::H6 => 6.0,
+                    if !is_first_block {
+                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    }
+                    is_first_block = false; 
+                    let heading_base = self.heading_base_scale;
+                    let scale = match level {
+                        HeadingLevel::H1 => heading_base,
+                        HeadingLevel::H2 => heading_base * 0.75,
+                        HeadingLevel::H3 => heading_base * 0.58,
+                        HeadingLevel::H4 => heading_base * 0.5, 
+                        HeadingLevel::H5 => heading_base * 0.42,
+                        HeadingLevel::H6 => heading_base * 0.33,
                     };
-                    tf.push_size_abs_scale(4.5 / levelf64);
+                    tf.push_size_abs_scale(scale);
                     tf.bold.push();
                 }
                 MdEvent::End(TagEnd::Heading(_level)) => {
@@ -363,13 +371,19 @@ impl Markdown {
                     cx.turtle_new_line();
                 }
                 MdEvent::Start(Tag::Paragraph) => {
-                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    if !is_first_block {
+                         cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    }
+                    is_first_block = false;
                 }
                 MdEvent::End(TagEnd::Paragraph) => {
-                    // No special handling needed
+                    // No special handling needed, turtle position is managed by content/following blocks
                 }
                 MdEvent::Start(Tag::BlockQuote(_)) => {
-                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                     if !is_first_block {
+                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    }
+                    is_first_block = false;
                     tf.begin_quote(cx);
                 }
                 MdEvent::End(TagEnd::BlockQuote(_quote_kind)) => {
@@ -382,7 +396,10 @@ impl Markdown {
                     list_stack.pop();
                 }
                 MdEvent::Start(Tag::Item) => {
-                    cx.turtle_new_line();
+                     if !is_first_block {
+                         cx.turtle_new_line();
+                     }
+                     is_first_block = false;
                     let marker = if let Some(Some(n)) = list_stack.last() {
                         format!("{}.", n)
                     } else {
@@ -428,10 +445,13 @@ impl Markdown {
                     tf.draw_text(cx, "]");
                 }
                 MdEvent::Start(Tag::CodeBlock(_kind)) => {
+                    if !is_first_block {
+                         cx.turtle_new_line_with_spacing(self.pre_code_spacing);
+                    }
+                    is_first_block = false;
                     if self.use_code_block_widget {
                         self.in_code_block = true;
                         self.code_block_string.clear();
-                        cx.turtle_new_line_with_spacing(self.pre_code_spacing);
                         
                         // TODO: Handle language info if available for syntax highlighting
                         // if let CodeBlockKind::Fenced(lang) = kind {
@@ -439,8 +459,6 @@ impl Markdown {
                     } else {
                         const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
                         tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
-                        // alright lets check if we need to use a widget
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                         tf.combine_spaces.push(false);
                         tf.fixed.push();
                                 
@@ -456,6 +474,7 @@ impl Markdown {
                         self.in_code_block = false;
                         let entry_id = tf.new_counted_id();
                         let cbs = &self.code_block_string;
+                        
                         tf.item_with(cx, entry_id, live_id!(code_block), |cx, item, _tf|{
                             item.widget(id!(code_view)).set_text(cx, cbs);
                             item.draw_all_unscoped(cx);
@@ -484,26 +503,36 @@ impl Markdown {
                     if self.in_code_block {
                         self.code_block_string.push_str(&text);
                     } else {
-                        tf.draw_text(cx, &text);
+                        tf.draw_text(cx, &text.trim_end_matches("\n"));
                     }
                 }
                 MdEvent::SoftBreak => {
                     if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
-                        cx.turtle_new_line();
+                        // Soft break should typically render as a space or wrap, not a full newline.
+                        // TextFlow handles wrapping, so we might not need to do anything specific here,
+                        // or perhaps just ensure a space if the rendering context needs it.
+                        // For now, let's treat it like a space.
+                        tf.draw_text(cx, " ");
                     }
                 }
                 MdEvent::HardBreak => {
                     if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
-                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                        // Internal break within a block, do not add spacing
+                         cx.turtle_new_line();
                     }
                 }
                 MdEvent::Rule => {
-                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                     if !is_first_block {
+                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    }
+                     is_first_block = false;
                     tf.sep(cx);
+                    // Add spacing after the separator rule as well
+                    cx.turtle_new_line_with_spacing(self.paragraph_spacing);
                 }
                 MdEvent::TaskListMarker(_) => {
                     // TODO: Implement task list markers

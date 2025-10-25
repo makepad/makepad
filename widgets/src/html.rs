@@ -83,7 +83,9 @@ live_design!{
         width:Fill,
         height:Fit,
         padding: <THEME_MSPACE_1> {}
-        
+        heading_margin: {top:1.0, bottom:0.1}
+        paragraph_margin: {top: 0.33, bottom:0.33}
+
         font_size: (THEME_FONT_SIZE_P),
         font_color: (THEME_COLOR_LABEL_OUTER),
         
@@ -116,6 +118,7 @@ live_design!{
         }
         
         draw_fixed: {
+            temp_y_shift: 0.24
             text_style: <THEME_FONT_CODE> {
                 font_size: (THEME_FONT_SIZE_P)
             }
@@ -124,7 +127,7 @@ live_design!{
         
         code_layout: {
             flow: RightWrap,
-            padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
+            padding: <THEME_MSPACE_2> {left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
         }
         code_walk: { width: Fill, height: Fit }
         
@@ -136,7 +139,7 @@ live_design!{
         
         list_item_layout: {
             flow: RightWrap,
-            //padding: <THEME_MSPACE_1> {}
+            padding: <THEME_MSPACE_1> {}
         }
         list_item_walk: {
             height: Fit, width: Fill,
@@ -261,7 +264,7 @@ pub struct Html {
     #[deref] pub text_flow: TextFlow,
     #[live] pub body: ArcStringMut,
     #[rust] pub doc: HtmlDoc,
-
+    
     /// Markers used for unordered lists, indexed by the list's nesting level.
     /// The marker can be an arbitrary string, such as a bullet point or a custom icon.
     #[live] ul_markers: Vec<String>,
@@ -306,7 +309,8 @@ impl Html {
             *trim = TrimWhitespaceInText::Trim;
             tf.bold.push();
             tf.push_size_abs_scale(scale);
-            cx.turtle_new_line();
+            let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
+            tf.new_line_collapsed_with_spacing(cx, fs * tf.heading_margin.top);
         }
 
         match node.open_tag_lc() {
@@ -319,8 +323,10 @@ impl Html {
 
             some_id!(p) => {
                 // there's probably a better way to do this by setting margins...
-                cx.turtle_new_line();
-                cx.turtle_new_line();
+                let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
+                
+                tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.top);
+                //tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(code) => {
@@ -332,28 +338,28 @@ impl Html {
                 tf.inline_code.push();
             }
             some_id!(pre) => {
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
                 tf.fixed.push();
                 tf.ignore_newlines.push(false);
                 tf.combine_spaces.push(false);
                 tf.begin_code(cx);
             }
             some_id!(blockquote) => {
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
                 tf.ignore_newlines.push(false);
                 tf.combine_spaces.push(false);
                 tf.begin_quote(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(br) => {
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(hr)
             | some_id!(sep) => {
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
                 tf.sep(cx);
-                cx.turtle_new_line();
+                tf.new_line_collapsed(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(u) => tf.underline.push(),
@@ -450,7 +456,8 @@ impl Html {
                 
                 // Now, actually emit the list item.
                 // log!("marker: {marker}, pad: {pad}");
-                cx.turtle_new_line();
+                // ok so what if we only have drawn whitespace here
+                tf.new_line_collapsed(cx);
                 tf.begin_list_item(cx, marker, pad);
             }
             Some(x) => return (Some(x), trim_whitespace_in_text),
@@ -472,17 +479,20 @@ impl Html {
             | some_id!(h4)
             | some_id!(h5)
             | some_id!(h6) => {
-                tf.font_sizes.pop();
+                let size = tf.font_sizes.pop();
                 tf.bold.pop();
-                cx.turtle_new_line();
+                tf.new_line_collapsed_with_spacing(cx, size.unwrap_or(0.0) as f64 * tf.heading_margin.bottom);
+                // we wanna add extra spacing here
+                
             }
             some_id!(b)
             | some_id!(strong) => tf.bold.pop(),
             some_id!(i)
             | some_id!(em) => tf.italic.pop(),
             some_id!(p) => {
-                cx.turtle_new_line();
-                cx.turtle_new_line();
+                let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
+                 tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.bottom);
+                //tf.new_line_collapsed(cx);
             }
             some_id!(blockquote) => {
                 tf.ignore_newlines.pop();

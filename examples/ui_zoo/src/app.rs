@@ -14,6 +14,7 @@
         // use crate::tab_desktopbutton::*;
         use crate::tab_dropdown::*;
         use crate::tab_filetree::*;
+        use crate::tab_spinner::*;
         // use crate::tab_foldbutton::*;
         use crate::tab_html::*;
         use crate::tab_icon::*;
@@ -91,6 +92,7 @@
                                 // tDesktopButton,
                                 tDropDown,
                                 tFiletree,
+                                tSpinner,
                                 // tFoldButton,
                                 tHTML,
                                 tIcon,
@@ -123,6 +125,7 @@
                         // tDesktopButton = Tab { name: "DesktopButton", template: PermanentTab, kind: TabDesktopButton }
                         tDropDown = Tab { name: "DropDown & PopupMenu", template: PermanentTab, kind: TabDropDown }
                         tFiletree = Tab { name: "FileTree", template: PermanentTab, kind: TabFiletree }
+                        tSpinner = Tab { name: "Spinner", template: PermanentTab, kind: TabSpinner }
                         // tFoldButton = Tab { name: "FoldButton", template: PermanentTab, kind: TabFoldButton }
                         tHTML = Tab { name: "HTML", template: PermanentTab, kind: TabHTML }
                         tIcon = Tab { name: "Icon", template: PermanentTab, kind: TabIcon }
@@ -151,6 +154,7 @@
                         // TabDesktopButton = <UIZooTab> { <DemoDesktopButton> {} }
                         TabDropDown = <UIZooTab> { <DemoDropdown> {} }
                         TabFiletree = <UIZooTab> { <DemoFT> {} }
+                        TabSpinner = <UIZooTab> { <DemoSpinner> {} }
                         // TabFoldButton = <UIZooTab> { <DemoFoldButton> {} }
                         TabHTML = <UIZooTab> { <DemoHtml> {} }
                         TabIcon = <UIZooTab> { <DemoIcon> {} }
@@ -203,7 +207,7 @@
                                     self.rect_size.y + 30.
                                 )
 
-                                sdf.fill_keep((THEME_COLOR_U_1));
+                                sdf.fill_keep((THEME_COLOR_BG_HIGHLIGHT));
 
                                 sdf.stroke(
                                     mix((THEME_COLOR_BEVEL_OUTSET_1), #fff0, pow(self.pos.y, 0.1)), self.border_size
@@ -212,26 +216,27 @@
                             }
                         }
 
-                        <Slider> { text: "Contrast" }
+                        theme_contrast = <Slider> { text: "Contrast", default: 1.0, min: 0.5 max: 2.0 }
                         <View> {
                             flow: Down
                             spacing: 0.
                             <Label> { margin: {top: (THEME_SPACE_1)}, padding: 0., width: Fit, text: "Tint Color"}
-                            <TextInput> { empty_text: "Hex color", text: "#f00" }
+                            theme_tint_color = <TextInput> { empty_text: "Hex color", text: "00f" }
                         }
-                        <Slider> { text: "Tint Amount" }
+                        theme_tint_amount = <Slider> { text: "Tint Amount", default: 0.0, min:0.0 max: 1.0  }
                         <Vr> {}
                         <Pbold> {
                             width: Fit,
                             text: "Font"
                         }
-                        <Slider> { text: "Size" }
-                        <Slider> { text: "Size Contrast" }
+                        theme_font_size = <Slider> { text: "Size", default: 10.0, min: 3.0 max: 12.0  }
+                        theme_font_size_contrast = <Slider> { text: "Size Contrast", default: 2.5, min:1.0 max: 5.0  }
                         <Vr> {}
-                        <Slider> { text: "Bevel" }
-                        <Slider> { text: "Rounding" }
-                        <Slider> { text: "Space" }
-                        <ButtonFlatterIcon> {
+                        theme_bevel = <Slider> { text: "Bevel", default: 0.75, min:0.0 max: 1.5   }
+                        theme_rounding = <Slider> { text: "Rounding", default: 2.5, min: 1.0 max: 2.5   }
+                        theme_space = <Slider> { text: "Space", default: 6.0, min: 1.0 max: 10.0   }
+                        /*
+                        reload_button = <ButtonFlatterIcon> {
                             height: Fill, width: Fit,
                             margin: { right: (THEME_SPACE_1) }
                             icon_walk: { width: 12.5, height: Fit, }
@@ -241,7 +246,7 @@
                                 color_down: (THEME_COLOR_LABEL_INNER_DOWN),
                                 svg_file: dep("crate://self/resources/Icon_Reload.svg"),
                             }
-                        }
+                        }*/
                     }
 
 
@@ -268,12 +273,11 @@
         #[live] fnumber: f32,
         #[live] inumber: i32,
         #[live] dropdown: DropDownEnum,
-        #[live] dropdown_customized: DropDownEnum,
         #[live] dropdown_below: DropDownEnum,
+        #[live] dropdown_disabled: DropDownEnum,
+        #[live] dropdown_customized: DropDownEnum,
         #[live] dropdown_flat: DropDownEnum,
         #[live] dropdown_flat_below: DropDownEnum,
-        #[live] dropdown_flatter: DropDownEnum,
-        #[live] dropdown_flatter_below: DropDownEnum,
         #[live] dropdown_gradient_x: DropDownEnum,
         #[live] dropdown_gradient_x_below: DropDownEnum,
         #[live] dropdown_gradient_y: DropDownEnum,
@@ -300,6 +304,7 @@ impl LiveRegister for App {
             // crate::tab_desktopbutton::live_design(cx);
             crate::tab_dropdown::live_design(cx);
             crate::tab_filetree::live_design(cx);
+            crate::tab_spinner::live_design(cx);
             // crate::tab_foldbutton::live_design(cx);
             crate::tab_html::live_design(cx);
             crate::tab_icon::live_design(cx);
@@ -355,6 +360,38 @@ impl LiveRegister for App {
                 self.counter += 1;
                 let lbl = self.ui.label(id!(simpletextinput_outputbox));
                 lbl.set_text(cx,&format!("{} {}" , self.counter, txt));
+            }
+            
+            for slider in [
+                (id!(theme_contrast), live_id!(THEME_COLOR_CONTRAST)),
+                (id!(theme_tint_amount), live_id!(THEME_COLOR_TINT_AMOUNT)),
+                (id!(theme_font_size), live_id!(THEME_FONT_SIZE_BASE)),
+                (id!(theme_font_size_contrast), live_id!(THEME_FONT_SIZE_CONTRAST)),
+                (id!(theme_bevel), live_id!(THEME_BEVELING)),
+                (id!(theme_rounding), live_id!(THEME_CORNER_RADIUS)),
+                (id!(theme_space), live_id!(THEME_SPACE_FACTOR)),
+            ]{
+                if let Some(value) = self.ui.slider(slider.0).end_slide(&actions){
+                    cx.set_dsl_value(
+                        live_id!(makepad_widgets),
+                        live_id!(theme_desktop_dark),
+                        slider.1,
+                        LiveValue::Float64(value)
+                    );
+                    cx.reload_ui_dsl(); 
+                }
+            }
+            
+            use makepad_platform::makepad_live_tokenizer::colorhex::hex_bytes_to_u32;
+            
+            if let Some(txt) = self.ui.text_input(id!(theme_tint_color)).changed(&actions){
+                cx.set_dsl_value(
+                    live_id!(makepad_widgets),
+                    live_id!(theme_desktop_dark),
+                    live_id!(THEME_COLOR_TINT),
+                    LiveValue::Color(hex_bytes_to_u32(&txt.into_bytes()).unwrap_or(0x777777ff))
+                );
+                cx.reload_ui_dsl(); 
             }
 
             if self.ui.button(id!(basicbutton)).clicked(&actions) {
@@ -429,12 +466,14 @@ impl AppMain for App {
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
         db.bind(id!(dropdown), ids!(dropdown));
+        db.bind(id!(dropdown_below), ids!(dropdown_below));
         db.bind(id!(dropdown_disabled), ids!(dropdown_disabled));
-        db.bind(id!(dropdown_demo), ids!(dropdown_demo));
+        db.bind(id!(dropdown_customized), ids!(dropdown_customized));
         db.bind(id!(dropdown_flat), ids!(dropdown_flat));
-        db.bind(id!(dropdown_flatter), ids!(dropdown_flatter));
+        db.bind(id!(dropdown_flat_below), ids!(dropdown_flat_below));
         db.bind(id!(dropdown_gradient_x), ids!(dropdown_gradient_x));
+        db.bind(id!(dropdown_gradient_x_below), ids!(dropdown_gradient_x_below));
         db.bind(id!(dropdown_gradient_y), ids!(dropdown_gradient_y));
-        db.bind(id!(dropdown_custom), ids!(dropdown_custom));
+        db.bind(id!(dropdown_gradient_y_below), ids!(dropdown_gradient_y_below));
     }
 }

@@ -156,9 +156,9 @@ impl Cx {
                 if vao.inst_vb_id != draw_item.os.inst_vb_id
                     || vao.geom_vb_id != geometry.os.vb_id
                     || vao.geom_ib_id != geometry.os.ib_id
-                    || vao.shader_id != Some(draw_call.draw_shader.draw_shader_id) {
+                    || vao.shader_id != sh.os_shader_id {
                     
-                    vao.shader_id = Some(draw_call.draw_shader.draw_shader_id);
+                    vao.shader_id = sh.os_shader_id.clone();
                     vao.inst_vb_id = draw_item.os.inst_vb_id;
                     vao.geom_vb_id = geometry.os.vb_id;
                     vao.geom_ib_id = geometry.os.ib_id;
@@ -180,8 +180,9 @@ impl Cx {
                         textures[index] = Some(texture.texture_id().0)
                     }
                 }
+                
                 self.os.from_wasm(FromWasmDrawCall {
-                    shader_id: draw_call.draw_shader.draw_shader_id,
+                    shader_id: sh.os_shader_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
                     draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
@@ -360,24 +361,24 @@ impl Cx {
                 }
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                    if ds.vertex == vertex && ds.pixel == pixel {
+                    
+                    if ds.in_vertex == vertex && ds.in_pixel == pixel {
                         cx_shader.os_shader_id = Some(index);
                         break;
                     }
                 }
                 if cx_shader.os_shader_id.is_none() {
                     let shp = CxOsDrawShader::new(vertex.clone(), pixel.clone());
-                    
-
+                    cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.os.from_wasm(FromWasmCompileWebGLShader{
-                        shader_id: item.draw_shader_id,
+                        shader_id:  cx_shader.os_shader_id.unwrap(),
                         vertex: shp.vertex.clone(), 
                         pixel: shp.pixel.clone(),
                         geometry_slots: cx_shader.mapping.geometries.total_slots,
                         instance_slots: cx_shader.mapping.instances.total_slots,
                         textures:cx_shader.mapping.textures.iter().map(|v| v.to_from_wasm_texture_input()).collect()
                     });
-                    cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                    
                     self.draw_shaders.os_shaders.push(shp);
                 }
             }
@@ -388,33 +389,35 @@ impl Cx {
 
 impl CxOsDrawShader{
     pub fn new(
-        vertex: String,
-        pixel: String,
+        in_vertex: String,
+        in_pixel: String,
     ) -> Self {
         
         let vertex = format!("
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}} 
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0 - pos.y));}}             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}", vertex);
+            {}", in_vertex);
             
         let pixel = format!("
             #extension GL_OES_standard_derivatives : enable
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y));}}
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0 - pos.y));}}
             vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}", pixel);
+            {}", in_pixel);
         
         
         Self{
+            in_vertex,
+            in_pixel,
             vertex,
             pixel,
         }
@@ -447,6 +450,8 @@ pub struct CxOsDrawCall {
 
 #[derive(Clone)]
 pub struct CxOsDrawShader {
+    pub in_vertex: String,
+    pub in_pixel: String,
     pub vertex: String,
     pub pixel: String,
 }

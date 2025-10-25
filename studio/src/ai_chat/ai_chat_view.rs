@@ -22,7 +22,7 @@ live_design!{
         flow: Down,
         margin: <THEME_MSPACE_3> {}
         padding: <THEME_MSPACE_2> { top: (THEME_SPACE_1+4), bottom: (THEME_SPACE_2) } 
-        draw_bg: { color: (THEME_COLOR_U_1) }
+        draw_bg: { color: (THEME_COLOR_BG_HIGHLIGHT) }
 
         <View> {
             height: Fit, width: Fill,
@@ -83,7 +83,7 @@ live_design!{
         padding: <THEME_MSPACE_H_2> { bottom: (THEME_SPACE_2) }
 
         draw_bg: {
-            color: (THEME_COLOR_D_2)
+            color: (THEME_COLOR_INSET)
         }
         flow: Down
         busy = <View>{
@@ -131,7 +131,7 @@ live_design!{
                             width: 12, height: Fit,
                             margin: { left: 10 }
                         }
-                                                
+                        text:"",
                         draw_icon: {
                             color: (THEME_COLOR_U_4),
                             svg_file: dep("crate://self/resources/icons/icon_run.svg"),
@@ -139,7 +139,11 @@ live_design!{
                         icon_walk: { width: 9. }
                     }
                     copy_button = <ButtonFlat> {
-                        margin:{right:20}
+                        width: Fit,
+                        height: Fit,
+                        padding: <THEME_MSPACE_2> {}
+                        margin:{top:0,right:20}
+                        text:"",
                         icon_walk: {
                             width: 12, height: Fit,
                             margin: { left: 10 }
@@ -183,7 +187,7 @@ live_design!{
                     padding: <THEME_MSPACE_V_2> {}
                     icon_walk: { width: 10. }
                     draw_icon: {
-                        color: (THEME_COLOR_D_4),
+                        color: (THEME_COLOR_LABEL_OUTER),
                         //color_active: (STUDIO_PALETTE_6),
                         svg_file: dep("crate://self/resources/icons/icon_auto.svg"),
                     }
@@ -317,9 +321,8 @@ impl AiChatView{
                 
                 // items with actions
                 let chat_list = self.view.portal_list(id!(list));
-                let items_len = doc.file.history[self.history_slot].messages.len();
                 for (item_id, _item) in chat_list.items_with_actions(&actions) {
-                    let item_id = items_len - item_id - 1;
+                    //let item_id = items_len - item_id - 1;
                     if let Some(wa) = actions.widget_action(id!(copy_button)){
                         if wa.widget().as_button().pressed(actions){
                             //let code_view = wa.widget_nth(2).widget(id!(code_view));
@@ -365,9 +368,8 @@ impl AiChatView{
                 }
                                 
                 let list = self.view.portal_list(id!(list));
-                let items_len = doc.file.history[self.history_slot].messages.len();
                 for (item_id,item) in list.items_with_actions(actions){
-                    let item_id = items_len - item_id - 1;
+                    //let item_id = items_len - item_id - 1;
                     let message_input = item.text_input(id!(message_input));
                     if let Some(text) = message_input.changed(actions){
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, text);
@@ -487,9 +489,9 @@ impl Widget for AiChatView {
                         list.set_item_range(cx, 0, items_len);
                         
                         while let Some(item_id) = list.next_visible_item(cx) {
-                            match doc.file.history[self.history_slot].messages.get(items_len-item_id-1){
+                            match doc.file.history[self.history_slot].messages.get(item_id){
                                 Some(AiChatMessage::Assistant(val))=>{
-                                    let busy = item_id == 0 && 
+                                    let busy = item_id == items_len - 1 && 
                                     doc.in_flight.is_some();
                                     let item = list.item(cx, item_id, live_id!(Assistant));
                                     // alright we got the assistant. lets set the markdown stuff

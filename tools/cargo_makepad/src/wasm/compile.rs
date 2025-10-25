@@ -196,6 +196,9 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
         if config.small_fonts{
             rename.insert("GoNotoKurrent-Bold.ttf".into(), "IBMPlexSans-SemiBold.ttf".into());
             rename.insert("GoNotoKurrent-Regular.ttf".into(), "IBMPlexSans-Text.ttf".into());
+            rename.insert("LXGWWenKaiBold.ttf".into(), "IBMPlexSans-Text.ttf".into());
+            rename.insert("LXGWWenKaiRegular.ttf".into(), "IBMPlexSans-Text.ttf".into());
+            rename.insert("NotoColorEmoji.ttf".into(), "IBMPlexSans-Text.ttf".into());
         }
         
         if resources_path.is_dir(){
@@ -278,6 +281,7 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
     println!("*.png => image/png");
     println!("*.jpg => image/jpg");
     println!("*.svg => image/svg+xml");
+    println!("*.md => text/markdown");
     Ok(WasmBuildResult{
         app_dir
     })
@@ -332,9 +336,11 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
                     else if path.ends_with(".css") {"text/css"}
                     else if path.ends_with(".js") {"text/javascript"}
                     else if path.ends_with(".ttf") {"application/ttf"}
+                    else if path.ends_with(".ttf.2") {"application/ttf"}
                     else if path.ends_with(".png") {"image/png"}
                     else if path.ends_with(".jpg") {"image/jpg"}
                     else if path.ends_with(".svg") {"image/svg+xml"}
+                    else if path.ends_with(".md") {"text/markdown"}
                     else {continue};
                                             
                     if path.contains("..") || path.contains('\\') {

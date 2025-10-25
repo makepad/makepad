@@ -139,7 +139,10 @@ impl Cx{
                         }
                         WebSocketThreadMsg::SendMessage{socket_id, message}=>{
                             if let Some(socket) = sockets.get_mut(&socket_id){
-                                socket.send_message(message).unwrap();
+                                if socket.send_message(message).is_err(){
+                                    crate::log!("Websocket sender closed unexpectedly");
+                                    return
+                                }
                             }
                         }
                         WebSocketThreadMsg::AppToStudio{message}=>{
@@ -173,7 +176,11 @@ impl Cx{
                     if Instant::now().duration_since(first_time) >= collect_time{
                         // lets send it
                         if let Some(socket) = sockets.get_mut(&0){
-                            socket.send_message(WebSocketMessage::Binary(app_to_studio.serialize_bin())).unwrap();
+                            if socket.send_message(WebSocketMessage::Binary(app_to_studio.serialize_bin())).is_err(){
+                                println!("Studio websocket disconnected!");
+                                // studio disconnected, just stop the threadloop
+                                break;
+                            };
                         }
                         app_to_studio.0.clear();
                         first_message = None;

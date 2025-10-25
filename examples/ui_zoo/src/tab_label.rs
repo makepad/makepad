@@ -21,8 +21,8 @@ live_design!{
             <LabelGradientX> { text: "<LabelGradientY>" }
             <LabelGradientX> {
                 draw_text: {
-                    color_1: #0ff
-                    color_1: #088
+                    color: #0ff
+                    color: #088
                     text_style: {
                         font_size: 20,
                     }
@@ -36,8 +36,8 @@ live_design!{
             <LabelGradientY> { text: "<LabelGradientY>" }
             <LabelGradientY> {
                 draw_text: {
-                    color_1: #0ff
-                    color_1: #088
+                    color: #0ff
+                    color: #088
                     text_style: {
                         font_size: 20,
                     }
@@ -77,7 +77,6 @@ live_design!{
                     text_style: {
                         font_size: 20.,
                         line_spacing: 1.4,
-                        font_family:{ latin = font("crate://makepad_widgets/resources/IBMPlexSans-Italic.ttf", 0.0, 0.0) }
                     }
                     wrap: Word
                 }

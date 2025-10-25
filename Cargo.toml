@@ -4,6 +4,7 @@ workspace.members = [
     "examples/ironfish",
     "examples/teamtalk",
     "examples/fractal_zoom",
+    "examples/layout",
     "examples/simple",
     "examples/ui_zoo",
     "examples/news_feed",
@@ -13,15 +14,14 @@ workspace.members = [
     "examples/websocket_image",
     "examples/snake",
     "examples/slides",
+    "examples/xr_net",
+    "examples/script",
     "studio",
     "tools/cargo_makepad",
-    "tools/auto_version",
 ]
 
 workspace.exclude = [
-    "code_editor",
     "libs/stitch",
-    "libs/futures",
     "libs/wasm_bridge/test",
     "tools/windows_strip",
     "tools/web_server",

@@ -84,7 +84,6 @@ live_design!{
                 }
             }
 
-            <Hr> {}
             <H4> { text: "Custom styled marker"}
             radios_demo_8 = <UIZooRowH> {
                 radio1 = <RadioButtonCustom> {
@@ -99,9 +98,9 @@ live_design!{
                     label_align: { x: 0., y: 0. }
                     
                     draw_icon: {
-                        color_1: #A00
-                        color_1_active: #F00
-                        color_1_disabled: #4
+                        color: #A00
+                        color_active: #F00
+                        color_disabled: #4
 
                         color_2: #0
                         color_2_active: #F00
@@ -121,89 +120,13 @@ live_design!{
                     label_align: { x: 0., y: 0. }
                     
                     draw_icon: {
-                        color_1: #A00
-                        color_1_active: #F00
-                        color_1_disabled: #4
+                        color: #A00
+                        color_active: #F00
+                        color_disabled: #4
 
                         color_2: #0
                         color_2_active: #F00
                         color_2_disabled: #4
-                    }
-                }
-            }
-
-            <Hr> {}
-            <H4> { text: "Textual"}
-            <UIZooRowH> {
-                radios_demo_9 = <View> {
-                    width: Fit, height: Fit,
-                    flow: Right,
-                    spacing: (THEME_SPACE_2)
-                    radio1 = <RadioButtonTextual> { text: "Option 1" }
-                    radio2 = <RadioButtonTextual> { text: "Option 2" }
-                    radio3 = <RadioButtonTextual> { text: "Option 3" }
-                    radio4 = <RadioButtonTextual> { text: "Option 4" }
-                }
-            }
-
-            <Hr> {}
-            <H4> { text: "Textual Customized"}
-            <UIZooRowH> {
-                 radios_demo_10 = <View> {
-                    width: Fit, height: Fit,
-                    flow: Right,
-                    spacing: (THEME_SPACE_2)
-                    radio1 = <RadioButtonTextual> { 
-                        text: "Option 1"
-
-                        draw_text: {
-                            color: #C80,
-                            color_hover: #FC0,
-                            color_active: #FF4,
-                                
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-                    }
-                    radio2 = <RadioButtonTextual> { 
-                        text: "Option 2"
-
-                        draw_text: {
-                            color: #C80,
-                            color_hover: #FC0,
-                            color_active: #FF4,
-                                
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-                    }
-                    radio3 = <RadioButtonTextual> { 
-                        text: "Option 3"
-
-                        draw_text: {
-                            color: #C80,
-                            color_hover: #FC0,
-                            color_active: #FF4,
-                                
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
-                    }
-                    radio4 = <RadioButtonTextual> { 
-                        text: "Option 4"
-
-                        draw_text: {
-                            color: #C80,
-                            color_hover: #FC0,
-                            color_active: #FF4,
-                                
-                            text_style: <THEME_FONT_REGULAR> {
-                                font_size: (THEME_FONT_SIZE_P)
-                            }
-                        }
                     }
                 }
             }
@@ -231,15 +154,6 @@ live_design!{
                 radio2 = <RadioButtonTabFlat> { text: "Option 2" }
                 radio3 = <RadioButtonTabFlat> { text: "Option 3" }
                 radio4 = <RadioButtonTabFlat> { text: "Option 4" }
-            }
-
-            <Hr> {}
-            <H4> { text: "Button Group Flatter"}
-            radios_demo_13 = <ButtonGroup> {
-                radio1 = <RadioButtonTabFlatter> { text: "Option 1" }
-                radio2 = <RadioButtonTabFlatter> { text: "Option 2" }
-                radio3 = <RadioButtonTabFlatter> { text: "Option 3" }
-                radio4 = <RadioButtonTabFlatter> { text: "Option 4" }
             }
 
             <Hr> {}
@@ -274,9 +188,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -302,9 +216,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -330,9 +244,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -358,9 +272,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -379,7 +293,7 @@ live_design!{
             }
 
             <Hr> {}
-            <H4> { text: "Button Group GradientX" }
+            <H4> { text: "Button Group GradientX Styled" }
             radios_demo_18 = <ButtonGroup> {
                 radio1 = <RadioButtonTabGradientX> {
                     text: "Option 1"
@@ -399,9 +313,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -426,9 +340,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -453,9 +367,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -480,9 +394,9 @@ live_design!{
                         color_hover: #F44
                         color_active: #300
 
-                        border_color_1: #0
-                        border_color_1_hover: #F
-                        border_color_1_active: #8
+                        border_color: #0
+                        border_color_hover: #F
+                        border_color_active: #8
 
                         border_color_2: #0
                         border_color_2_hover: #F
@@ -527,12 +441,12 @@ live_design!{
                             color_focus: (THEME_COLOR_INSET_FOCUS)
                             color_disabled: (THEME_COLOR_INSET_DISABLED)
 
-                            border_color_1: (THEME_COLOR_BEVEL_INSET_2)
-                            border_color_1_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
-                            border_color_1_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
-                            border_color_1_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
-                            border_color_1_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
-                            border_color_1_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
+                            border_color: (THEME_COLOR_BEVEL_INSET_2)
+                            border_color_hover: (THEME_COLOR_BEVEL_INSET_2_HOVER)
+                            border_color_down: (THEME_COLOR_BEVEL_INSET_2_DOWN)
+                            border_color_active: (THEME_COLOR_BEVEL_INSET_2_ACTIVE)
+                            border_color_focus: (THEME_COLOR_BEVEL_INSET_2_FOCUS)
+                            border_color_disabled: (THEME_COLOR_BEVEL_INSET_2_DISABLED)
 
                             border_color_2: (THEME_COLOR_BEVEL_INSET_1)
                             border_color_2_hover: (THEME_COLOR_BEVEL_INSET_1_HOVER)
@@ -556,20 +470,15 @@ live_design!{
 
                             text_style: {
                                 font_size: (THEME_FONT_SIZE_P)
-                                font_family: {
-                                    latin = font("crate://makepad_widgets/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-                                    chinese = font("crate://makepad_widgets/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
-                                    emoji = font("crate://makepad_widgets/resources/NotoColorEmoji.ttf", 0.0, 0.0)
-                                },
                                 line_spacing: 1.2
                             }
                         }
 
                         draw_icon: {
                             color_dither: 1.0
-                            color_1: (THEME_COLOR_LABEL_OUTER)
-                            color_1_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
-                            color_1_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
+                            color: (THEME_COLOR_LABEL_OUTER)
+                            color_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)
+                            color_disabled: (THEME_COLOR_LABEL_OUTER_DISABLED)
 
                             color_2: (THEME_COLOR_LABEL_OUTER)
                             color_2_active: (THEME_COLOR_LABEL_OUTER_ACTIVE)

@@ -11,9 +11,9 @@ metadata.makepad-auto-version = "m8yBeDTFgP94sjS9iuzJbB6npak="
 metadata.makepad-check-platform = "desktop"
 
 [dependencies]
-makepad-digest = {path = "../../libs/digest", version = "0.4.0"}
-makepad-toml-parser = {path = "../../libs/toml_parser", version = "0.4.0"}
-makepad-base64 = {path = "../../libs/base64", version = "0.4.0"}
+makepad-digest = {path = "../../libs/digest", version = "1.0.0"}
+makepad-toml-parser = {path = "../../libs/toml_parser", version = "1.0.0"}
+makepad-base64 = {path = "../../libs/base64", version = "1.0.0"}
 
 [features]
 nightly=[]

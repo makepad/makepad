@@ -254,7 +254,7 @@ impl<'a> HtmlWalker<'a>{
  }
  
  impl HtmlDoc{
-     pub fn new_walker(&self)->HtmlWalker{
+     pub fn new_walker(&self)->HtmlWalker<'_>{
          HtmlWalker{
              decoded:&self.decoded,
              index: 0,
@@ -262,7 +262,7 @@ impl<'a> HtmlWalker<'a>{
          }
      }
      
-     pub fn new_walker_with_index(&self, index: usize)->HtmlWalker{
+     pub fn new_walker_with_index(&self, index: usize)->HtmlWalker<'_>{
          HtmlWalker{
              decoded:&self.decoded,
              index,
@@ -273,7 +273,12 @@ impl<'a> HtmlWalker<'a>{
 
  pub fn parse_html(body:&str, errors:  &mut Option<Vec<HtmlError>>, intern:InternLiveId)->HtmlDoc{
      enum State{
-         Text(usize, usize, usize),
+         Text{
+             start: usize,
+             dec_start: usize,
+             last_non_whitespace: usize,
+             collapse_ws: bool,
+         },
          ElementName(usize),
          ElementClose(usize),
          ElementAttrs,
@@ -295,7 +300,7 @@ impl<'a> HtmlWalker<'a>{
          CommentBody
      }
              
-     fn process_entity(c:char, in_entity:&mut Option<usize>,  decoded:&mut String, last_non_whitespace:&mut usize){
+     fn process_entity(c:char, in_entity:&mut Option<usize>,  decoded:&mut String, last_non_whitespace:&mut usize, collapse_ws:bool){
          if let Some(start) = *in_entity{ // scan entity
              if c == ';'{ // potential end of entity
                  match match_entity(&decoded[start+1..]){
@@ -317,15 +322,27 @@ impl<'a> HtmlWalker<'a>{
         }
         if c=='&'{
             *in_entity = Some(decoded.len());
-        } 
-        decoded.push(c);                      
-        if !c.is_whitespace() {
-            *last_non_whitespace = decoded.len();
         }
-     }
+        if collapse_ws && c.is_whitespace(){
+            if *last_non_whitespace == decoded.len(){
+                decoded.push(' ');
+            }
+        }
+        else{
+            decoded.push(c);
+            if !c.is_whitespace() {
+                *last_non_whitespace = decoded.len();
+            }
+        }
+    }
      
      let mut nodes = Vec::new();
-     let mut state = State::Text(0, 0, 0);
+     let mut state = State::Text{
+         start: 0,
+         dec_start: 0,
+         last_non_whitespace: 0,
+         collapse_ws: true,
+     };
      let mut decoded = String::new();
      let mut in_entity = None;
      
@@ -333,7 +350,12 @@ impl<'a> HtmlWalker<'a>{
          state = match state{
              State::DocType=>{
                  if c == '>'{
-                     State::Text(i+1, decoded.len(), decoded.len())
+                     State::Text{
+                        start:i+1, 
+                        dec_start: decoded.len(), 
+                        last_non_whitespace: decoded.len(),
+                        collapse_ws: true
+                    }
                  }
                  else{
                      State::DocType
@@ -349,13 +371,18 @@ impl<'a> HtmlWalker<'a>{
              }
              State::HeaderAngle=>{
                  if c == '>'{
-                     State::Text(i+1, decoded.len(), decoded.len())
+                     State::Text{
+                         start:i+1, 
+                         dec_start: decoded.len(), 
+                         last_non_whitespace: decoded.len(),
+                         collapse_ws: true
+                     }
                  }
                  else{
                      State::HeaderQuestion
                  }
              }
-             State::Text(start, dec_start, last_non_whitespace)=>{ 
+             State::Text{start, dec_start, last_non_whitespace, collapse_ws}=>{ 
                  if c == '<'{
                     if let Some(start) = in_entity{
                         if let Some(errors) = errors{errors.push(HtmlError{message:"Unterminated entity".into(), position:start})};
@@ -365,8 +392,8 @@ impl<'a> HtmlWalker<'a>{
                  }
                  else{
                      let mut last_non_whitespace = last_non_whitespace;
-                     process_entity(c, &mut in_entity, &mut decoded, &mut last_non_whitespace);
-                     State::Text(start, dec_start, last_non_whitespace)
+                     process_entity(c, &mut in_entity, &mut decoded, &mut last_non_whitespace, collapse_ws);
+                     State::Text{start, dec_start, last_non_whitespace, collapse_ws}
                  }
              }
              State::ElementName(start)=>{
@@ -382,7 +409,12 @@ impl<'a> HtmlWalker<'a>{
                  else if c.is_whitespace(){
                      if start == i{
                           if let Some(errors) = errors{errors.push(HtmlError{message:"Found whitespace at beginning of tag".into(), position:i})};
-                         State::Text(i+1, decoded.len(), decoded.len())
+                        State::Text{
+                            start:i+1, 
+                            dec_start:decoded.len(), 
+                            last_non_whitespace: decoded.len(),
+                            collapse_ws: true
+                        }
                      }
                      else{
                         nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i],intern)});
@@ -394,8 +426,15 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementSelfClose
                  }
                  else if c == '>'{
-                     nodes.push(HtmlNode::OpenTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i], intern)});
-                     State::Text(i+1, decoded.len(), decoded.len())
+                     let lc = LiveId::from_str_lc(&body[start..i]);
+                     let nc = LiveId::from_str_with_intern(&body[start..i], intern);
+                     nodes.push(HtmlNode::OpenTag{lc, nc});
+                     State::Text{
+                         start:i+1, 
+                         dec_start:decoded.len(), 
+                         last_non_whitespace: decoded.len(),
+                         collapse_ws: lc != live_id!(pre) && lc != live_id!(code)
+                     }
                  }
                  else{
                      State::ElementName(start)
@@ -403,8 +442,15 @@ impl<'a> HtmlWalker<'a>{
              }
              State::ElementClose(start)=>{
                  if c == '>'{
-                     nodes.push(HtmlNode::CloseTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i], intern)});
-                     State::Text(i+1, decoded.len(), decoded.len())
+                     let lc = LiveId::from_str_lc(&body[start..i]);
+                     let nc = LiveId::from_str_with_intern(&body[start..i], intern);
+                     nodes.push(HtmlNode::CloseTag{lc, nc});
+                     State::Text{
+                         start:i+1, 
+                         dec_start:decoded.len(), 
+                         last_non_whitespace: decoded.len(),
+                         collapse_ws: true
+                     }
                  }
                  else if c.is_whitespace(){
                      nodes.push(HtmlNode::CloseTag{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i], intern)});
@@ -416,11 +462,21 @@ impl<'a> HtmlWalker<'a>{
              }
              State::ElementCloseScanSpaces=>{
                  if c == '>'{
-                     State::Text(i+1, decoded.len(), decoded.len())
+                     State::Text{
+                         start:i+1, 
+                         dec_start:decoded.len(), 
+                         last_non_whitespace: decoded.len(),
+                         collapse_ws: true
+                     }
                  }
                  else if !c.is_whitespace(){
                       if let Some(errors) = errors{errors.push(HtmlError{message:"Unexpected character after whitespace whilst looking for closing tag >".into(), position:i})};
-                     State::Text(i+1, decoded.len(), decoded.len())
+                      State::Text{
+                          start:i+1, 
+                          dec_start:decoded.len(), 
+                          last_non_whitespace: decoded.len(),
+                          collapse_ws: true
+                      }
                  }
                  else{
                      State::ElementCloseScanSpaces
@@ -433,7 +489,12 @@ impl<'a> HtmlWalker<'a>{
                  // look backwards to the OpenTag
                  let begin = nodes.iter().rev().find_map(|v| if let HtmlNode::OpenTag{lc,nc} = v{Some((lc,nc))}else{None}).unwrap();
                  nodes.push(HtmlNode::CloseTag{lc:*begin.0,nc:*begin.1});
-                 State::Text(i+1, decoded.len(), decoded.len())
+                 State::Text{
+                     start:i+1, 
+                     dec_start:decoded.len(), 
+                     last_non_whitespace: decoded.len(),
+                     collapse_ws: true
+                 }
              }
              State::ElementAttrs=>{
                  if c == '/'{
@@ -441,7 +502,15 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementSelfClose
                  }
                  else if c == '>'{
-                     State::Text(i+1, decoded.len(), decoded.len())
+                     
+                     let begin = nodes.iter().rev().find_map(|v| if let HtmlNode::OpenTag{lc,nc:_} = v{Some(*lc)}else{None});
+                     
+                     State::Text{
+                         start:i+1, 
+                         dec_start:decoded.len(), 
+                         last_non_whitespace: decoded.len(),
+                         collapse_ws: if let Some(lc) = begin{lc != live_id!(pre) && lc != live_id!(code)}else{true}
+                     }
                  }
                  else if !c.is_whitespace(){
                      State::AttribName(i)
@@ -463,7 +532,12 @@ impl<'a> HtmlWalker<'a>{
                  }
                  else if c == '>'{
                      nodes.push(HtmlNode::Attribute{lc:LiveId::from_str_lc(&body[start..i]),nc:LiveId::from_str_with_intern(&body[start..i], intern),start:0,end:0});
-                     State::Text(i+1, decoded.len(), decoded.len())
+                    State::Text{
+                         start:i+1, 
+                         dec_start:decoded.len(), 
+                         last_non_whitespace: decoded.len(),
+                         collapse_ws: true
+                    }
                  }
                  else{
                      State::AttribName(start)
@@ -476,7 +550,12 @@ impl<'a> HtmlWalker<'a>{
                  }
                  else if c == '>'{
                      nodes.push(HtmlNode::Attribute{lc,nc,start:0,end:0});
-                     State::Text(i+1, decoded.len(), decoded.len())
+                     State::Text{
+                         start:i+1, 
+                         dec_start:decoded.len(), 
+                         last_non_whitespace: decoded.len(),
+                         collapse_ws: true
+                     }
                  }
                  else if c == '='{
                      State::AttribValueStart(lc,nc)
@@ -515,7 +594,7 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementAttrs
                  }
                  else{
-                     process_entity(c, &mut in_entity, &mut decoded, &mut 0);
+                     process_entity(c, &mut in_entity, &mut decoded, &mut 0, false);
                      State::AttribValueSq(lc,nc, start)
                  }
              }
@@ -528,7 +607,7 @@ impl<'a> HtmlWalker<'a>{
                      State::ElementAttrs
                  }
                  else{
-                     process_entity(c, &mut in_entity, &mut decoded, &mut 0);
+                     process_entity(c, &mut in_entity, &mut decoded, &mut 0, false);
                      State::AttribValueDq(lc,nc, start)
                  }
              }
@@ -539,7 +618,12 @@ impl<'a> HtmlWalker<'a>{
                  }
                  else if c == '>'{
                      nodes.push(HtmlNode::Attribute{lc,nc, start, end:decoded.len()});
-                     State::Text(i+1, decoded.len(), decoded.len())
+                     State::Text{
+                         start:i+1, 
+                         dec_start:decoded.len(), 
+                         last_non_whitespace: decoded.len(),
+                         collapse_ws: true
+                     }
                  }
                  else if c.is_whitespace(){
                      nodes.push(HtmlNode::Attribute{lc,nc, start, end:decoded.len()});
@@ -584,7 +668,12 @@ impl<'a> HtmlWalker<'a>{
              },
              State::CommentEnd=>{
                  if c == '>'{
-                     State::Text(i+1, decoded.len(), decoded.len())
+                     State::Text{
+                         start:i+1, 
+                         dec_start:decoded.len(), 
+                         last_non_whitespace: decoded.len(),
+                         collapse_ws: true
+                     }
                  }
                  else{
                      State::CommentBody
@@ -592,7 +681,7 @@ impl<'a> HtmlWalker<'a>{
              }
          }
      }
-     if let State::Text(_, dec_start, last_non_whitespace) = state{
+     if let State::Text{start:_, dec_start, last_non_whitespace, collapse_ws:_} = state{
         nodes.push(HtmlNode::Text{start:dec_start, end:decoded.len(), all_ws:dec_start == last_non_whitespace});
      }
      else{ // if we didnt end in text state something is wrong

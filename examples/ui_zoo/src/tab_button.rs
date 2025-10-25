@@ -15,11 +15,30 @@ live_design!{
         demos = {
             <H4> { text: "Standard"}
             <UIZooRowH> {
-                basicbutton = <Button> { text: "<Button>" }
+                <Button> {}
+                <Button> {
+                    draw_bg: {
+                        let color_2 = #f00;
+                        let color_2_hover = #f00;
+                        let color_2_down = #f00;
+                        let color_2_focus = #f00;
+                        let color_2_disabled = #f00;
+
+                        let border_color_2 = #f00;
+                        let border_color_2_hover = #f00;
+                        let border_color_2_down = #f00;
+                        let border_color_2_focus = #f00;
+                        let border_color_2_disabled = #f00;
+                    }
+                }
+
+                basicbutton = <Button> { }
 
                 iconbutton = <Button> {
                     draw_icon: {
+                        gradient_fill_horizontal: 1.0
                         color: #f00,
+                        color_2: #00f,
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
                     text: "<Button>"
@@ -44,10 +63,11 @@ live_design!{
             <UIZooRowH> {
                 <ButtonIcon> {
                     draw_icon: {
+                        gradient_fill_horizontal: 1.0
                         color: #f00,
+                        color_2: #00f,
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
                     }
-                    text: ""
                 }
             }
 
@@ -60,17 +80,17 @@ live_design!{
                         border_radius: 1.0,
                         border_radius: 4.0
 
-                        color_1: #C00
-                        color_1_hover: #F0F
-                        color_1_down: #800
+                        color: #C00
+                        color_hover: #F0F
+                        color_down: #800
 
                         color_2: #0CC
                         color_2_hover: #0FF
                         color_2_down: #088
 
-                        border_color_1: #C
-                        border_color_1_hover: #F
-                        border_color_1_down: #0
+                        border_color: #C
+                        border_color_hover: #F
+                        border_color_down: #0
 
                         border_color_2: #3
                         border_color_2_hover: #6
@@ -103,17 +123,17 @@ live_design!{
                         border_radius: 1.0,
                         border_radius: 4.0
 
-                        color_1: #C00
-                        color_1_hover: #F0F
-                        color_1_down: #800
+                        color: #C00
+                        color_hover: #F0F
+                        color_down: #800
 
                         color_2: #0CC
                         color_2_hover: #0FF
                         color_2_down: #088
 
-                        border_color_1: #C
-                        border_color_1_hover: #F
-                        border_color_1_down: #0
+                        border_color: #C
+                        border_color_hover: #F
+                        border_color_down: #0
 
                         border_color_2: #3
                         border_color_2_hover: #6
@@ -183,7 +203,7 @@ live_design!{
             <Hr> {}
             <H4> { text: "ButtonFlatterIcon"}
             <UIZooRowH> {
-                <ButtonFlatIcon> {
+                <ButtonFlatterIcon> {
                     draw_icon: {
                         color: #f00,
                         svg_file: dep("crate://self/resources/Icon_Favorite.svg"),
@@ -207,11 +227,6 @@ live_design!{
 
                         text_style: {
                             font_size: (THEME_FONT_SIZE_P)
-                            font_family: {
-                                latin = font("crate://makepad_widgets/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-                                chinese = font("crate://makepad_widgets/resources/LXGWWenKaiRegular.ttf", 0.0, 0.0)
-                                emoji = font("crate://makepad_widgets/resources/NotoColorEmoji.ttf", 0.0, 0.0)
-                            },
                             line_spacing: 1.2
                         }
                     }
@@ -243,11 +258,11 @@ live_design!{
                         color_focus: (THEME_COLOR_OUTSET_FOCUS)
                         color_disabled: (THEME_COLOR_OUTSET_DISABLED)
 
-                        border_color_1: (THEME_COLOR_BEVEL_OUTSET_1)
-                        border_color_1_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
-                        border_color_1_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
-                        border_color_1_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
-                        border_color_1_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
+                        border_color: (THEME_COLOR_BEVEL_OUTSET_1)
+                        border_color_hover: (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
+                        border_color_down: (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
+                        border_color_focus: (THEME_COLOR_BEVEL_OUTSET_1_FOCUS)
+                        border_color_disabled: (THEME_COLOR_BEVEL_OUTSET_1_DISABLED)
 
                         border_color_2: (THEME_COLOR_BEVEL_OUTSET_2)
                         border_color_2_hover: (THEME_COLOR_BEVEL_OUTSET_2_HOVER)

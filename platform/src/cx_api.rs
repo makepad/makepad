@@ -233,6 +233,19 @@ impl Cx {
     pub fn os_type(&self) -> &OsType {
         &self.os_type
     }
+    
+    /// Returns the app's writable data directory path.
+    /// 
+    /// On Android, this is the directory returned by Activity's getFilesDir().
+    /// On iOS, this is the Application Support directory.
+    /// Returns None on unsupported platforms (e.g. wasm).
+    /// 
+    /// Note that this path is not guaranteed to exist (it doesn't by default on iOS simulators),
+    /// so you might need to create it.
+    pub fn get_data_dir(&self) -> Option<String> {
+        self.os_type.get_data_dir()
+    }
+
     pub fn in_makepad_studio(&self) -> bool {
         self.in_makepad_studio
     }

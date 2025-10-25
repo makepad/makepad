@@ -310,7 +310,7 @@ impl LiveRegistry {
                 Some(v.as_str().to_string())
             }
             LiveValue::Font (v) => {
-                Some(v.path.as_str().to_string())
+                Some(v.paths[0].as_str().to_string())
             }
             _ => None
         }
@@ -629,6 +629,16 @@ impl LiveRegistry {
         }
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
         Ok(tokens)
+    }
+    
+    pub fn re_expand_all_files(&mut self){
+        for file in &mut self.live_files{
+            
+            file.reexpand = true;
+            file.generation.next_gen();
+        }
+        let mut errors = Vec::new();
+        self.expand_all_documents(&mut errors);
     }
     
     pub fn process_file_changes(&mut self, changes: Vec<LiveFileChange>, errors:&mut Vec<LiveError >){
@@ -955,9 +965,11 @@ impl LiveRegistry {
         let fixup_file_id = self.path_end_to_file_id("draw_trapezoid.rs").unwrap();
         self.doc_original_raw_imports_to_resolved_recur(fixup_file_id, errors, &mut dep_order);
         
+        /*
+        for dep in &dep_order{
+            let mi = self.file_id_to_module_id(*dep);
         
-        /*for dep in &dep_order{
-            println!("{}", self.file_id_to_file_name(*dep));
+            println!("{:?}", mi);
         }*/
                 
         for file_id in dep_order.iter().rev() {

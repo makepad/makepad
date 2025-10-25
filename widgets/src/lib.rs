@@ -80,6 +80,7 @@ pub mod touch_gesture;
 #[macro_use]
 pub mod data_binding;
 
+pub mod theme_desktop_skeleton;
 pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
 pub mod theme_mobile_dark;
@@ -98,8 +99,6 @@ pub mod designer_data;
 pub mod designer_toolbox;
 
 pub mod defer_with_redraw;
-
-pub mod xr_hands;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
@@ -178,13 +177,18 @@ pub fn live_design(cx: &mut Cx) {
     else{
         cx.link(live_id!(designer), live_id!(designer_dummy));
     }
-
+    makepad_fonts_emoji::live_design(cx);
+    makepad_fonts_chinese_regular::live_design(cx);
+    makepad_fonts_chinese_regular_2::live_design(cx);
+    makepad_fonts_chinese_bold::live_design(cx);
+    makepad_fonts_chinese_bold_2::live_design(cx);
     makepad_draw::live_design(cx);
     crate::page_flip::live_design(cx);
     crate::debug_view::live_design(cx);
     crate::performance_view::live_design(cx);
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
+    crate::theme_desktop_skeleton::live_design(cx);
     crate::theme_desktop_dark::live_design(cx);
     crate::theme_desktop_light::live_design(cx);
     crate::theme_mobile_dark::live_design(cx);
@@ -245,7 +249,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::command_text_input::live_design(cx);
     crate::loading_spinner::live_design(cx);
     crate::web_view::live_design(cx);
-    crate::xr_hands::live_design(cx);
         
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);

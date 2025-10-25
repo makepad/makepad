@@ -16,7 +16,6 @@ live_design!{
     pub RootBase = {{Root}} {}
     pub Root = <RootBase> {
         design_window = <Designer> {}
-        xr_hands = <XrHands>{}
     }
 }
 
@@ -25,8 +24,14 @@ pub struct Root {
     #[rust] components: ComponentMap<LiveId, WidgetRef>,
     #[rust(DrawList::new(cx))] xr_draw_list: DrawList,
     #[live] xr_pass: Pass,
+    #[rust] draw_state: DrawStateWrap<DrawState>,
 }
- 
+
+#[derive(Clone)]
+enum DrawState {
+    Component(usize),
+}
+
 impl LiveHook for Root {
     fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
@@ -130,9 +135,19 @@ impl Widget for Root {
         DrawStep::done()
     }
     
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        for component in self.components.values(){
-            component.draw_walk_all(cx, scope, walk);
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        self.draw_state.begin(cx, DrawState::Component(0));
+                
+        while let Some(DrawState::Component(step)) = self.draw_state.get() {
+                        
+            if let Some(component) = self.components.values_mut().nth(step){
+                let walk = component.walk(cx);
+                component.draw_walk(cx, scope, walk)?; 
+                self.draw_state.set(DrawState::Component(step+1));
+            }
+            else{
+                self.draw_state.end();
+            }
         }
         DrawStep::done()
     }

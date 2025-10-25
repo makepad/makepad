@@ -1,4 +1,3 @@
-
 use crate::{
     makepad_widgets::*,
 };
@@ -18,7 +17,10 @@ live_design!{
         desc = <RoundedView> {
             width: 350., height: Fill,
             show_bg: true,
-            draw_bg: { color: (THEME_COLOR_D_1) }
+            draw_bg: {
+                color: (THEME_COLOR_INSET)
+                border_radius: (THEME_CORNER_RADIUS)
+            }
             padding: <THEME_MSPACE_3> { top: 0., right: (THEME_SPACE_2) }
             margin: <THEME_MSPACE_V_2> { }
 
