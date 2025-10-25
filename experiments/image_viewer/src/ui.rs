@@ -64,7 +64,7 @@ impl Widget for Ui {
 
                 while let Some(index) = img_list.next_visible_item(cx) {
                     if index < range_end {
-                        let item = img_list.item(cx, index, live_id!(img_btn)).unwrap();
+                        let item = img_list.item(cx, index, live_id!(img_btn));
                         item.set_text(&filenames[index]);
                         item.draw_all(cx, scope);
                     }
