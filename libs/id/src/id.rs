@@ -151,7 +151,11 @@ impl Id {
         // truncate to 45 bits fitting in a NaN box
         Self((x & 0x0000_1fff_ffff_ffff)|or)
     }
-        
+    
+    pub fn seeded()->Self{
+        Self(Self::SEED)
+    }
+    
     pub const fn from_str(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
         if bytes.len() > 0 && bytes[0] == b'$'{
@@ -160,6 +164,34 @@ impl Id {
         else{
             Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), 0)
         }
+    }
+    
+    pub const fn from_bytes_lc(seed:u64, id_bytes: &[u8], start: usize, end: usize) -> Self {
+        let mut x = seed;
+        let mut i = start;
+        while i < end {
+            let byte = id_bytes[i];
+            let byte = if byte >= 65 && byte <=90{
+                byte + 32
+            }
+            else{
+                byte
+            };
+            x = x.overflowing_add(byte as u64).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            i += 1;
+        }
+        // mark high bit as meaning that this is a hash id
+        Self(x & 0x0000_1fff_ffff_ffff)
+    }
+            
+    pub const fn from_str_lc(id_str: &str) -> Self {
+        let bytes = id_str.as_bytes();
+        Self::from_bytes_lc(Self::SEED, bytes, 0, bytes.len())
     }
     
     pub fn is_prefixed(&self)->bool{
@@ -190,6 +222,14 @@ impl Id {
         self.0 != 0
     }
     
+    pub fn from_str_with_intern(id_str: &str, intern:IdIntern) -> Self{
+        let id = Self::from_str(id_str);
+        if let IdIntern::Yes = intern{
+            IdToString::with( | idmap | {idmap.id_to_string.insert(id, id_str.to_string())});
+        }
+        id
+    }
+    
     pub fn from_str_with_lut(id_str: &str) -> Result<Self,
     String> {
         let id = Self::from_str(id_str);
@@ -204,6 +244,30 @@ impl Id {
             }
             Ok(id)
         })
+    }
+        
+    pub const fn str_append(self, id_str: &str) -> Self {
+        let bytes = id_str.as_bytes();
+        Self::from_bytes(self.0, bytes, 0, bytes.len(), 0)
+    }
+    
+    pub const fn bytes_append(self, bytes: &[u8]) -> Self {
+        Self::from_bytes(self.0, bytes, 0, bytes.len(), 0)
+    }
+            
+    pub const fn id_append(self, id: Id) -> Self {
+        let bytes = id.0.to_be_bytes();
+        Self::from_bytes(self.0, &bytes, 0, bytes.len(), 0)
+    }
+        
+    pub const fn from_str_num(id_str: &str, num:u64) -> Self {
+        let bytes = id_str.as_bytes();
+        let id = Self::from_bytes(Self::SEED, bytes, 0, bytes.len(),0);
+        Self::from_bytes(id.0, &num.to_be_bytes(), 0, 8, 0)
+    }
+        
+    pub const fn from_num(seed:u64, num:u64) -> Self {
+        Self::from_bytes(seed, &num.to_be_bytes(), 0, 8, 0)
     }
     
     pub fn as_string<F, R>(&self, f: F) -> R
@@ -220,8 +284,18 @@ impl Id {
     pub fn counted() -> Self {
         Id(COUNTED_ID.fetch_add(1, Ordering::SeqCst))
     }
+    
+    pub fn unique() -> Self {
+        Self::counted()
+    }
 }
- 
+
+#[derive(Clone, Copy)]
+pub enum IdIntern{
+    Yes,
+    No
+}
+
 pub (crate) static COUNTED_ID: AtomicU64 = AtomicU64::new(1);
 
 impl fmt::Debug for Id {
