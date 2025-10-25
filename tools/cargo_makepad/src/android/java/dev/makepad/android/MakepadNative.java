@@ -40,6 +40,9 @@ public class MakepadNative {
 
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);
+    
+    // permissions
+    public native static void onPermissionResult(String permission, int requestId, int status);
 
     // video playback
     public static native void onVideoPlaybackPrepared(long videoId, int videoWidth, int videoHeight, long duration, VideoPlayer surfaceTexture);

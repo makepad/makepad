@@ -1,51 +1,20 @@
 use {
-    std::{
-        rc::Rc,
-        cell::RefCell,
-        time::Instant
-    },
-    makepad_objc_sys::{
-        msg_send,
-        sel,
-        sel_impl,
-    },
     crate::{
-        makepad_live_id::*,
-        makepad_math::*,
-        os::{
-            cx_native::EventFlow,
+        cx::{Cx, OsType}, cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace}, cx_stdin::PollTimers, event::{
+            Event, MouseButton, MouseUpEvent, NetworkResponseChannel, WindowGeom
+        }, makepad_live_id::*, makepad_math::*, os::{
             apple::{
-                apple_sys::*,
-                macos::{
-                    macos_event::MacosEvent,
+                apple_classes::init_apple_classes_global, apple_sys::*, macos::{
                     macos_app::{
-                        MacosApp,
-                        with_macos_app,
-                        init_macos_app_global
-                    },
-                    macos_window::MacosWindow
-                },
-                apple_classes::init_apple_classes_global,
-                url_session::AppleHttpRequests,
-            },
-            metal_xpc::start_xpc_service,
-            apple_media::CxAppleMedia,
-            metal::{MetalCx, DrawPassMode},
-        },
-        pass::CxPassParent,
-        thread::SignalToUI,
-        cx_stdin::PollTimers,
-        window::WindowId,
-        event::{
-            WindowGeom,
-            MouseButton,
-            MouseUpEvent,
-            Event,
-            NetworkResponseChannel
-        },
-        window::CxWindowPool,
-        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        cx::{Cx, OsType},
+                        init_macos_app_global, with_macos_app, MacosApp
+                    }, macos_event::MacosEvent, macos_window::MacosWindow
+                }, url_session::AppleHttpRequests
+            }, apple_media::CxAppleMedia, cx_native::EventFlow, metal::{DrawPassMode, MetalCx}, metal_xpc::start_xpc_service
+        }, pass::CxPassParent, permission::{Permission}, thread::SignalToUI, window::{CxWindowPool, WindowId}
+    }, makepad_objc_sys::{
+        msg_send, objc_block, sel, sel_impl
+    }, std::{
+        cell::RefCell, rc::Rc, time::Instant
     }
 };
 
@@ -434,6 +403,9 @@ impl Cx {
             MacosEvent::MacosMenuCommand(e) => {
                 self.call_event_handler(&Event::MacosMenuCommand(e))
             }
+            MacosEvent::PermissionResult(result) => {
+                self.call_event_handler(&Event::PermissionResult(result))
+            }
         }
         
         //if self.any_passes_dirty() || self.need_redrawing()/* || self.new_next_frames.len() != 0*/ || paint_dirty {
@@ -573,13 +545,134 @@ impl Cx {
                 }
                 CxOsOp::ShowInDock(show) => {
                     with_macos_app(|app| app.show_in_dock(show));
-                }
+                },
+                CxOsOp::CheckPermission {permission, request_id} => {
+                    self.handle_permission_check(permission, request_id);
+                },
+                CxOsOp::RequestPermission {permission, request_id} => {
+                    self.handle_permission_request(permission, request_id);
+                },
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
             }
         }
         EventFlow::Poll
+    }
+
+    fn check_audio_permission_status(&self) -> crate::permission::PermissionStatus {
+        unsafe {
+            let permission_status: i32 = msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: AVMediaTypeAudio];
+            match permission_status {
+                3 => crate::permission::PermissionStatus::Granted, // AVAuthorizationStatusAuthorized
+                2 => crate::permission::PermissionStatus::DeniedPermanent,  // AVAuthorizationStatusDenied - macOS doesn't re-prompt
+                1 => crate::permission::PermissionStatus::DeniedPermanent,  // AVAuthorizationStatusRestricted
+                _ => crate::permission::PermissionStatus::NotDetermined, // AVAuthorizationStatusNotDetermined (0) or unknown
+            }
+        }
+    }
+
+    fn handle_permission_check(&mut self, permission: Permission, request_id: i32) {
+        let status = match permission {
+            Permission::AudioInput => self.check_audio_permission_status(),
+            #[allow(unreachable_patterns)] // Future permissions will be added
+            _ => {
+                crate::log!("macOS permission check not implemented for: {:?}", permission);
+                crate::permission::PermissionStatus::DeniedPermanent
+            }
+        };
+        
+        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
+            permission,
+            request_id,
+            status,
+        }));
+    }
+
+    fn handle_permission_request(&mut self, permission: Permission, request_id: i32) {
+        match permission {
+            Permission::AudioInput => {
+                let status = self.check_audio_permission_status();
+                match status {
+                    crate::permission::PermissionStatus::Granted => {
+                        // Already granted, don't re-ask
+                        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status,
+                        }));
+                    },
+                    crate::permission::PermissionStatus::DeniedPermanent => {
+                        // Previously denied, send denied event
+                        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status,
+                        }));
+                    },
+                    crate::permission::PermissionStatus::NotDetermined => {
+                        // Need to request permission
+                        self.macos_request_audio_permission(permission, request_id);
+                    }
+                    _ => {
+                        // For other statuses, send the result directly
+                        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status,
+                        }));
+                    }
+                }
+            },
+            #[allow(unreachable_patterns)] // Future permissions will be added
+            _ => {
+                // For other permissions, auto-deny with warning
+                crate::log!("macOS permission not implemented for: {:?}", permission);
+                self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
+                    permission,
+                    request_id,
+                    status: crate::permission::PermissionStatus::DeniedPermanent,
+                }));
+            }
+        }
+    }
+
+    fn macos_request_audio_permission(&mut self, permission: Permission, request_id: i32) {
+        unsafe {
+            let completion_handler = objc_block!(move |granted: BOOL| {
+                let permission_result = crate::permission::PermissionResult {
+                    permission,
+                    request_id,
+                    status: if granted == YES { 
+                        crate::permission::PermissionStatus::Granted 
+                    } else { 
+                        crate::permission::PermissionStatus::DeniedPermanent 
+                    },
+                };
+
+                // Dispatch callback to main thread
+                // AVCaptureDevice completion handlers run on arbitrary background threads
+                Self::dispatch_permission_result_to_main_thread(permission_result);
+            });
+            
+            let () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType:AVMediaTypeAudio completionHandler:&completion_handler];
+        }
+    }
+
+    fn dispatch_permission_result_to_main_thread(permission_result: crate::permission::PermissionResult) {
+        unsafe {
+            let result_clone = permission_result.clone();
+            
+            // Create a block that will be executed on the main thread
+            let main_thread_block = objc_block!(move | | {
+                MacosApp::do_callback(MacosEvent::PermissionResult(result_clone.clone()));
+            });
+            
+            // Use NSOperationQueue.mainQueue to dispatch to main thread
+            let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
+            let block_operation: ObjcId = msg_send![class!(NSBlockOperation), blockOperationWithBlock: &main_thread_block];
+            let () = msg_send![main_queue, addOperation: block_operation];
+        }
     }
 }
 

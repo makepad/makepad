@@ -26,6 +26,7 @@ use {
         midi::MidiPortsEvent,
         video::VideoInputsEvent,
         draw_list::DrawListId,
+        permission::{PermissionResult},
     },
 };
 
@@ -218,6 +219,10 @@ pub enum Event {
     BackPressed {
         handled: Cell<bool>,
     },
+    
+    /// Permission check or request result
+    PermissionResult(PermissionResult),
+    
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
     
@@ -292,12 +297,13 @@ impl Event{
             49=>"MouseLeave",
             50=>"Actions",
             51=>"BackPressed",
+            52=>"PermissionResult",
 
             #[cfg(target_arch = "wasm32")]
-            52=>"ToWasmMsg",
+            55=>"ToWasmMsg",
             
-            53=>"DesignerPick",
-            54=>"XrLocal",
+            56=>"DesignerPick",
+            57=>"XrLocal",
             _=>panic!()
         }
     }
@@ -365,12 +371,13 @@ impl Event{
             Self::MouseLeave(_)=>49,
             Self::Actions(_)=>50,
             Self::BackPressed{..}=>51,
+            Self::PermissionResult(_)=>52,
             
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>52,
+            Self::ToWasmMsg(_)=>55,
             
-            Self::DesignerPick(_) =>53,
-            Self::XrLocal(_)=>54
+            Self::DesignerPick(_) =>56,
+            Self::XrLocal(_)=>57
         }
     }
 

@@ -603,6 +603,127 @@ export class WasmWebBrowser extends WasmBridge {
         req.send(body);
         this.free_data_u8(args.body);
     }
+
+    FromWasmCancelHTTPRequest(args) {
+        // Web doesn't provide a way to cancel XHR requests by ID
+        // This would require tracking requests, which we don't currently do
+    }
+
+    async FromWasmCheckPermission(args) {
+        try {
+            if (args.permission === 'microphone') {
+                // Check if Permissions API is available
+                if (navigator.permissions && navigator.permissions.query) {
+                    const result = await navigator.permissions.query({ name: 'microphone' });
+                    let status;
+                    switch (result.state) {
+                        case 'granted':
+                            status = 1; // Granted
+                            break;
+                        case 'denied':
+                            status = 3; // DeniedPermanent (browsers don't distinguish)
+                            break;
+                        case 'prompt':
+                        default:
+                            status = 0; // NotDetermined
+                            break;
+                    }
+                    this.to_wasm.ToWasmPermissionResult({
+                        permission: args.permission,
+                        request_id: args.request_id,
+                        status: status
+                    });
+                } else {
+                    // Fallback: try to check if we already have a stream
+                    try {
+                        const devices = await navigator.mediaDevices.enumerateDevices();
+                        const hasAudioInput = devices.some(device => device.kind === 'audioinput' && device.label !== '');
+                        this.to_wasm.ToWasmPermissionResult({
+                            permission: args.permission,
+                            request_id: args.request_id,
+                            status: hasAudioInput ? 1 : 0 // Granted if we see labels, NotDetermined otherwise
+                        });
+                    } catch {
+                        // Can't determine, assume not determined
+                        this.to_wasm.ToWasmPermissionResult({
+                            permission: args.permission,
+                            request_id: args.request_id,
+                            status: 0 // NotDetermined
+                        });
+                    }
+                }
+            } else {
+                // Unknown permission type
+                this.to_wasm.ToWasmPermissionResult({
+                    permission: args.permission,
+                    request_id: args.request_id,
+                    status: 3 // DeniedPermanent
+                });
+            }
+        } catch (error) {
+            console.error('Permission check failed:', error);
+            this.to_wasm.ToWasmPermissionResult({
+                permission: args.permission,
+                request_id: args.request_id,
+                status: 3 // DeniedPermanent on error
+            });
+        }
+        this.do_wasm_pump();
+    }
+
+    async FromWasmRequestPermission(args) {
+        try {
+            if (args.permission === 'microphone') {
+                try {
+                    // Request microphone access
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    // Successfully got permission, close the stream immediately
+                    stream.getTracks().forEach(track => track.stop());
+                    
+                    this.to_wasm.ToWasmPermissionResult({
+                        permission: args.permission,
+                        request_id: args.request_id,
+                        status: 1 // Granted
+                    });
+                } catch (error) {
+                    // Permission was denied or error occurred
+                    let status = 3; // DeniedPermanent (default)
+                    
+                    if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+                        // User explicitly denied permission
+                        status = 3; // DeniedPermanent (browsers don't re-prompt)
+                    } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+                        // No microphone device found
+                        status = 3; // DeniedPermanent (can't grant without device)
+                    } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+                        // Device is in use or hardware error
+                        status = 2; // DeniedCanRetry
+                    }
+                    
+                    this.to_wasm.ToWasmPermissionResult({
+                        permission: args.permission,
+                        request_id: args.request_id,
+                        status: status
+                    });
+                }
+            } else {
+                // Unknown permission type
+                this.to_wasm.ToWasmPermissionResult({
+                    permission: args.permission,
+                    request_id: args.request_id,
+                    status: 3 // DeniedPermanent
+                });
+            }
+        } catch (error) {
+            console.error('Permission request failed:', error);
+            this.to_wasm.ToWasmPermissionResult({
+                permission: args.permission,
+                request_id: args.request_id,
+                status: 3 // DeniedPermanent on error
+            });
+        }
+        this.do_wasm_pump();
+    }
     
     // calling into wasm
     

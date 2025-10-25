@@ -392,6 +392,28 @@ impl Cx {
             FromJavaMessage::MidiDeviceOpened {name, midi_device} => {
                 self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device);
             }
+            FromJavaMessage::PermissionResult {permission, request_id, status} => {
+                // Convert string permission back to enum
+                let perm = string_to_permission(&permission);
+                if let Some(perm) = perm {
+                    let permission_status = match status {
+                        0 => crate::permission::PermissionStatus::NotDetermined,
+                        1 => crate::permission::PermissionStatus::Granted,
+                        2 => crate::permission::PermissionStatus::DeniedCanRetry,
+                        3 => crate::permission::PermissionStatus::DeniedPermanent,
+                        _ => {
+                            crate::log!("Unknown permission status code: {}", status);
+                            crate::permission::PermissionStatus::DeniedPermanent // Default to most restrictive
+                        }
+                    };
+                    
+                    self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
+                        permission: perm,
+                        request_id,
+                        status: permission_status,
+                    }));
+                }
+            }
             FromJavaMessage::VideoPlaybackPrepared {video_id, video_width, video_height, duration, surface_texture} => {
                 let e = Event::VideoPlaybackPrepared(
                     VideoPlaybackPreparedEvent {
@@ -897,6 +919,12 @@ impl Cx {
                 CxOsOp::CopyToClipboard(content) => {
                     unsafe {android_jni::to_java_copy_to_clipboard(content);}
                 },
+                CxOsOp::CheckPermission {permission, request_id} => {
+                    self.handle_permission_check(permission, request_id);
+                },
+                CxOsOp::RequestPermission {permission, request_id} => {
+                    self.handle_permission_request(permission, request_id);
+                },
                 CxOsOp::HttpRequest {request_id, request} => {
                     unsafe {android_jni::to_java_http_request(request_id, request);}
                 },
@@ -1013,6 +1041,102 @@ impl CxOsApi for Cx {
         else{
             0.00001
         }
+    }
+}
+
+fn to_android_permission(permission: crate::permission::Permission) -> &'static str {
+    match permission {
+        crate::permission::Permission::AudioInput => "android.permission.RECORD_AUDIO",
+        _ => "",
+    }
+}
+
+impl Cx {
+    fn check_audio_permission_status(&self) -> crate::permission::PermissionStatus {
+        unsafe {
+            let status = android_jni::to_java_check_permission("android.permission.RECORD_AUDIO");
+            match status {
+                0 => crate::permission::PermissionStatus::NotDetermined, // Never asked or permanently denied
+                1 => crate::permission::PermissionStatus::Granted,
+                2 => crate::permission::PermissionStatus::DeniedCanRetry, // User denied but can retry with rationale
+                _ => {
+                    crate::log!("Unknown permission check status: {}", status);
+                    crate::permission::PermissionStatus::NotDetermined // Default to safest assumption
+                }
+            }
+        }
+    }
+
+    fn handle_permission_check(&mut self, permission: crate::permission::Permission, request_id: i32) {
+        let status = match permission {
+            crate::permission::Permission::AudioInput => self.check_audio_permission_status(),
+            #[allow(unreachable_patterns)]
+            _ => {
+                crate::log!("Android permission check not implemented for: {:?}", permission);
+                crate::permission::PermissionStatus::DeniedPermanent
+            }
+        };
+        
+        self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
+            permission,
+            request_id,
+            status,
+        }));
+    }
+
+    fn handle_permission_request(&mut self, permission: crate::permission::Permission, request_id: i32) {
+        match permission {
+            crate::permission::Permission::AudioInput => {
+                let status = self.check_audio_permission_status();
+                match status {
+                    crate::permission::PermissionStatus::Granted => {
+                        // Already granted, don't re-ask
+                        self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status,
+                        }));
+                    },
+                    crate::permission::PermissionStatus::DeniedCanRetry => {
+                        // Can request again - Android will show the permission dialog
+                        unsafe {
+                            android_jni::to_java_request_permission(to_android_permission(permission), request_id);
+                        }
+                    },
+                    crate::permission::PermissionStatus::NotDetermined => {
+                        // Need to request permission
+                        unsafe {
+                            android_jni::to_java_request_permission(to_android_permission(permission), request_id);
+                        }
+                    }
+                    _ => {
+                        // For other statuses (like DeniedPermanent), send the result directly
+                        self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status,
+                        }));
+                    }
+                }
+            },
+            #[allow(unreachable_patterns)]
+            _ => {
+                // For other permissions, auto-deny with warning
+                crate::log!("Android permission not implemented for: {:?}", permission);
+                self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
+                    permission,
+                    request_id,
+                    status: crate::permission::PermissionStatus::DeniedPermanent,
+                }));
+            }
+        }
+    }
+}
+
+fn string_to_permission(permission_str: &str) -> Option<crate::permission::Permission> {
+    match permission_str {
+        "android.permission.RECORD_AUDIO" => Some(crate::permission::Permission::AudioInput),
+        _ => None,
     }
 }
 

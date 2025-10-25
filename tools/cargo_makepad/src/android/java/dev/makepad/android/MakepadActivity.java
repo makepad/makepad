@@ -9,6 +9,8 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.Manifest;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Rect;
@@ -420,6 +422,64 @@ public class MakepadActivity
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         //% MAIN_ACTIVITY_ON_ACTIVITY_RESULT
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestId, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestId, permissions, grantResults);
+
+        for (int i = 0; i < permissions.length; i++) {
+            int status;
+            if (grantResults[i] == PackageManager.PERMISSION_GRANTED) {
+                status = 1; // Granted
+            } else {
+                // Permission denied - check if we can ask again
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && shouldShowRequestPermissionRationale(permissions[i])) {
+                    status = 2; // DeniedCanRetry (can show rationale and retry)
+                } else {
+                    status = 3; // DeniedPermanent (user selected "Don't ask again" or hit limit)
+                }
+            }
+            
+            // Use the new unified callback
+            MakepadNative.onPermissionResult(permissions[i], requestId, status);
+        }
+    }
+
+    public int checkPermission(String permission) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) {
+                return 1; // Granted
+            } else {
+                // Check if permission was previously denied
+                if (shouldShowRequestPermissionRationale(permission)) {
+                    return 2; // DeniedCanRetry (user previously declined but can show rationale)
+                } else {
+                    // This could be either:
+                    // - NotDetermined (never asked before) 
+                    // - DeniedPermanent (user selected "Don't ask again" or hit Android 11+ limit)
+                    // We return 0 for NotDetermined as the safest assumption - let the app request and find out
+                    return 0; // NotDetermined (assume we can still ask)
+                }
+            }
+        } else {
+            // Permissions are granted at install time on older Android versions
+            return 1; // Granted
+        }
+    }
+
+    public void requestPermission(String permission, int requestId) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{permission}, requestId);
+            } else {
+                // Permission already granted
+                MakepadNative.onPermissionResult(permission, requestId, 1); // 1 = Granted
+            }
+        } else {
+            // Permissions are granted at install time on older Android versions
+            MakepadNative.onPermissionResult(permission, requestId, 1); // 1 = Granted
+        }
     }
 
     @SuppressWarnings("deprecation")

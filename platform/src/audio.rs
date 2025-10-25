@@ -15,7 +15,8 @@ pub struct AudioDeviceId(pub LiveId);
 #[derive(Clone, Copy, Debug)]
 pub struct AudioInfo{
     pub device_id: AudioDeviceId,
-    pub time: Option<AudioTime>
+    pub time: Option<AudioTime>,
+    pub sample_rate: f64,
 }
 
 #[derive(Clone, Debug)]
