@@ -6,7 +6,7 @@ use crate::makepad_live_id::*;
 use crate::object::*;
 
 #[macro_export]
-macro_rules! value_f64{
+macro_rules! script_value_f64{
     ($ctx:ident, $args:ident.$id: ident)=>{
         $ctx.heap.cast_to_f64($ctx.heap.value($args, id!($id).into(),&$ctx.thread.trap), $ctx.thread.trap.ip)
     };
@@ -17,14 +17,14 @@ macro_rules! value_f64{
 
 
 #[macro_export]
-macro_rules! vm_ref{
+macro_rules! script_vm_ref{
     ($vm:ident)=>{
         &mut $vm.new_ref(&mut 0)
     };
 }
 
 #[macro_export]
-macro_rules! value_bool{
+macro_rules! script_value_bool{
     ($ctx:ident, $args:ident.$id: ident)=>{
         $ctx.heap.cast_to_bool($ctx.heap.value($args, id!($id).into(),NIL), $ctx.thread.ip())
     };
@@ -34,7 +34,7 @@ macro_rules! value_bool{
 }
         
 #[macro_export]
-macro_rules! value{
+macro_rules! script_value{
     ($vm:ident, $obj:ident.$id: ident)=>{
         $vm.heap.value(($obj).into(), id!($id).into(),&$vm.thread.trap)
     };
@@ -47,7 +47,7 @@ macro_rules! value{
 }
 
 #[macro_export]
-macro_rules! set_value{
+macro_rules! script_set_value{
     ($vm:ident, $obj:ident.$id: ident=$value:expr)=>{
         $vm.heap.set_value($obj, id!($id).into(), ($value).into(), &$vm.thread.trap)
     };
@@ -58,14 +58,14 @@ macro_rules! set_value{
 
 
 #[macro_export]
-macro_rules! args{
+macro_rules! script_args{
     ($($id:ident=$val:expr),*)=>{
         &[$((id!($id), ($val).into()),)*]
     }
 }
 
 #[macro_export]
-macro_rules! args_lut{
+macro_rules! script_args_lut{
     ($($id:ident=$val:expr),*)=>{
         &[$((id_lut!($id), ($val).into()),)*]
     }

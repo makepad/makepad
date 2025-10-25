@@ -65,9 +65,9 @@ pub fn test(){
     let mut vm = ScriptVmBase::new();
     
     let net = vm.new_module(id!(test));
-    vm.add_fn(net, id!(fetch), args!(url=NIL, options=NIL), |vm, args|{
+    vm.add_fn(net, id!(fetch), script_args!(url=NIL, options=NIL), |vm, args|{
         // how do we construct our options
-        let _options = StructTest::script_from_value(vm, value!(vm, args.options));
+        let _options = StructTest::script_from_value(vm, script_value!(vm, args.options));
         NIL
     });
     
@@ -94,14 +94,14 @@ pub fn test(){
     
     impl ScriptHook for StructTest{
         fn on_proto_methods(vm:&mut ScriptVm, obj:ScriptObject){
-            vm.add_fn(obj, id_lut!(return_two), args_lut!(o = 1.0), |_vm, _args|{
+            vm.add_fn(obj, id_lut!(return_two), script_args_lut!(o = 1.0), |_vm, _args|{
                 return 2.into()
             });
         }
     }    
     
     let _code = script!{
-        let EnumTest = #(EnumTest::script_api(vm_ref!(vm)));
+        let EnumTest = #(EnumTest::script_api(script_vm_ref!(vm)));
         let x = EnumTest.Named{namedfield:1.0}
     };
     
@@ -187,13 +187,13 @@ pub fn test(){
         let t = 0 try{t = 1} assert(false) ok assert(true)
         
         // struct tests
-        let s = #(StructTest::script_api(vm_ref!(vm)));
+        let s = #(StructTest::script_api(script_vm_ref!(vm)));
         try{s{field:5}} assert(false) ok assert(true)
         try{s{field:true}} assert(true) ok assert(false)
         assert(s.return_two() == 2)
         
         // check enum
-        let EnumTest = #(EnumTest::script_api(vm_ref!(vm)));
+        let EnumTest = #(EnumTest::script_api(script_vm_ref!(vm)));
         let x = EnumTest.Bare
         // test tuple typechecking
         try{EnumTest.Tuple(1.0)} assert(false) ok assert(true)
