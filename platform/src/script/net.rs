@@ -6,8 +6,8 @@ use makepad_script::id;
 
 pub fn define_net_module(vm:&mut ScriptVmBase){
     let net = vm.new_module(id!(net));
-    vm.add_fn(net, id!(fetch), args!(url=NIL, options=NIL), |vm, args|{
-        let _options =  value!(vm, args.options);
+    vm.add_fn(net, id!(fetch), script_args!(url=NIL, options=NIL), |vm, args|{
+        let _options =  script_value!(vm, args.options);
         //FetchOptions::new(vm,options);
         // we have an options object
         /*
