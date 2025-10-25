@@ -1,5 +1,11 @@
 #[cfg(not(any(linux_direct, target_env="ohos", target_os="android")))]
-pub mod x11; 
+pub mod opengl_cx;
+#[cfg(not(any(linux_direct, target_env="ohos", target_os="android")))]
+pub mod x11;
+#[cfg(not(any(linux_direct, target_env="ohos", target_os="android")))]
+pub mod wayland;
+#[cfg(not(any(linux_direct, target_env="ohos", target_os="android")))]
+pub mod windowing_backend;
 
 #[cfg(linux_direct)]
 pub mod direct;
@@ -40,8 +46,8 @@ pub mod alsa_midi;
 #[cfg(not(target_os="android"))]
 pub mod select_timer;
 
-#[cfg(not(any(target_env="ohos", target_os="android")))] 
-pub mod pulse_audio; 
+#[cfg(not(any(target_env="ohos", target_os="android")))]
+pub mod pulse_audio;
 #[cfg(not(any(target_env="ohos", target_os="android")))]
 pub mod pulse_sys;
 
@@ -55,7 +61,7 @@ pub mod android;
 pub(crate) use self::android::android::CxOs;
 
 #[cfg(not(any(linux_direct, target_os="android", target_env="ohos")))]
-pub(crate) use self::x11::linux_x11::*;
+pub(crate) use self::windowing_backend::*;
 
 #[cfg(target_env="ohos")]
 pub(crate) use self::open_harmony::open_harmony::*;
