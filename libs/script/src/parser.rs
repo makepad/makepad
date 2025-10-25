@@ -1224,7 +1224,17 @@ impl ScriptParser{
                             break;
                         }
                     }
-                                        
+                    if let Some(last) = self.state.pop(){
+                        if let State::EmitOp{what_op:id!(.),index} = last{
+                            self.push_code(State::operator_to_opcode(id!(.)), index);
+                        }
+                        else if let State::EmitOp{what_op:id!(.?),index} = last{
+                            self.push_code(State::operator_to_opcode(id!(.?)), index);
+                        }
+                        else{
+                            self.state.push(last);
+                        }
+                    }
                     self.push_code(Opcode::BEGIN_PROTO.into(), self.index);
                     self.state.push(State::EndProto);
                     self.state.push(State::BeginStmt{last_was_sep:false});

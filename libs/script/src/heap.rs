@@ -512,6 +512,7 @@ impl ScriptHeap{
             return trap.err_frozen()
         }
         if let Some(ty) = object.tag.as_type_index(){
+            
             let check = &self.type_check[ty.0 as usize];
             if let Some(ty_id) = check.props.props.get(&key_id){
                 if let Some(ty_index) = self.type_index.get(ty_id){
@@ -908,6 +909,21 @@ impl ScriptHeap{
             }
         }
         return trap.err_vec_bound()
+    }
+    
+    pub fn vec_value_if_exist(&self, ptr:Object, index:usize)->Option<Value>{
+        let object = &self.objects[ptr.index as usize];
+        if object.tag.get_storage_type().has_paired_vec(){
+            if let Some(value) = object.vec.get(index * 2 + 1){
+                return Some(*value)
+            }
+        }
+        else if object.tag.get_storage_type().is_vec1(){
+            if let Some(value) = object.vec.get(index){
+                return Some(*value)
+            }
+        }
+        return None
     }
         
     pub fn vec_len(&self, ptr:Object)->usize{
@@ -1315,6 +1331,7 @@ impl ScriptHeap{
                 ptr = next_ptr
             }
             else{
+                print!("/{}", object.proto);
                 break;
             }
         }
