@@ -377,21 +377,21 @@ impl fmt::Display for ObjectTag {
 #[derive(Default, Debug)]
 pub struct ObjectData{
     pub tag: ObjectTag,
-    pub proto: Value,
+    pub proto: ScriptValue,
     
-    pub map: ValueMap<Value, Value>,
-    pub vec: Vec<Value>,
+    pub map: ValueMap<ScriptValue, ScriptValue>,
+    pub vec: Vec<ScriptValue>,
 }
 
 impl ObjectData{
-    pub fn map_insert(&mut self, key:Value, value:Value){
+    pub fn map_insert(&mut self, key:ScriptValue, value:ScriptValue){
         if self.tag.is_tracked(){
             match self.map.entry(key) {
                 Entry::Occupied(mut occ) => {
                     let old_value = occ.get_mut();
                     if *old_value != value{
                         *old_value = value;
-                        self.map.insert(key.add(1), Value::TRUE);
+                        self.map.insert(key.add(1), ScriptValue::TRUE);
                         self.tag.set_dirty();
                     }
                     return 
@@ -407,14 +407,14 @@ impl ObjectData{
         }
     }
     
-    pub fn map_set_if_exist(&mut self, key:Value, value:Value)->bool{
+    pub fn map_set_if_exist(&mut self, key:ScriptValue, value:ScriptValue)->bool{
         if self.tag.is_tracked(){
             match self.map.entry(key) {
                 Entry::Occupied(mut occ) => {
                     let old_value = occ.get_mut();
                     if *old_value != value{
                         *old_value = value;
-                        self.map.insert(key.add(1), Value::TRUE);
+                        self.map.insert(key.add(1), ScriptValue::TRUE);
                         self.tag.set_dirty();
                     }
                     return true
@@ -429,16 +429,16 @@ impl ObjectData{
         false
     }
     
-    pub fn map_get(&self, key:&Value)->Option<&Value>{
+    pub fn map_get(&self, key:&ScriptValue)->Option<&ScriptValue>{
         self.map.get(key)
     }
     
-    pub fn map_get_if_dirty(&mut self, key:&Value)->Option<&Value>{
+    pub fn map_get_if_dirty(&mut self, key:&ScriptValue)->Option<&ScriptValue>{
         if self.tag.is_tracked(){
             let dirty = match self.map.entry(key.add(1)) {
                 Entry::Occupied(mut occ) => {
-                    if *occ.get() == Value::TRUE{
-                        occ.insert(Value::FALSE);
+                    if *occ.get() == ScriptValue::TRUE{
+                        occ.insert(ScriptValue::FALSE);
                         true
                     }
                     else{
@@ -446,7 +446,7 @@ impl ObjectData{
                     }
                 }
                 Entry::Vacant(vac) => {
-                    vac.insert(Value::FALSE);
+                    vac.insert(ScriptValue::FALSE);
                     true
                 }
             };
@@ -461,7 +461,7 @@ impl ObjectData{
         self.map.len()
     }
     
-    pub fn map_iter_ret<T,F:FnMut(Value,Value)->Option<T>>(&self, mut f:F)->Option<T>{
+    pub fn map_iter_ret<T,F:FnMut(ScriptValue,ScriptValue)->Option<T>>(&self, mut f:F)->Option<T>{
         for (key,value) in self.map.iter(){
             let r = f(*key,*value);
             if r.is_some(){
@@ -471,7 +471,7 @@ impl ObjectData{
         None
     }
     
-    pub fn map_iter<F:FnMut(Value,Value)>(&self, mut f:F){
+    pub fn map_iter<F:FnMut(ScriptValue,ScriptValue)>(&self, mut f:F){
         for (key,value) in self.map.iter(){
             f(*key,*value);
         }
@@ -519,7 +519,7 @@ impl ObjectData{
         self.tag.set_storage_type_unchecked(ty_new)
     }
     //const DONT_RECYCLE_WHEN: usize = 1000;
-    pub fn with_proto(proto:Value)->Self{
+    pub fn with_proto(proto:ScriptValue)->Self{
         Self{
             proto,
             ..Default::default()
