@@ -14,6 +14,7 @@ use {
                     SelectionRect,
                 },
             },
+            event::finger::TouchState,
             *
         },
         widget::*,
@@ -1079,6 +1080,14 @@ impl TextInput {
         self.history.force_new_edit_group();
     }
 
+    fn handle_focus_lost(&mut self, cx: &mut Cx, scope_path: &HeapLiveIdPath, uid: WidgetUid) {
+        self.animator_play(cx, id!(focus.off));
+        self.animator_play(cx, id!(blink.on));
+        cx.stop_timer(self.blink_timer);
+        cx.hide_text_ime();
+        cx.widget_action(uid, scope_path, TextInputAction::KeyFocusLost);
+    }
+
     fn ceil_word_boundary(&self, index: usize) -> usize {
         let mut prev_word_boundary_index = 0;
         for (word_boundary_index, _) in self.text.split_word_bound_indices() {
@@ -1241,6 +1250,33 @@ impl Widget for TextInput {
         }
 
         let uid = self.widget_uid();
+
+        // Self-detect focus loss from taps outside our area
+        if cx.has_key_focus(self.draw_bg.area()) {
+            let rect = self.draw_bg.area().rect(cx);
+            let should_lose_focus = match event {
+                // Handle desktop mouse clicks
+                Event::MouseUp(mu) => {
+                    !rect.contains(mu.abs)
+                }
+                // Handle mobile touch events
+                Event::TouchUpdate(tu) => {
+                    // Check if any touch ended outside our area
+                    tu.touches.iter().any(|touch| {
+                        matches!(touch.state, TouchState::Stop) && !rect.contains(touch.abs)
+                    })
+                }
+                _ => false
+            };
+
+            if should_lose_focus {
+                // Update focus state in cx
+                cx.set_key_focus(Area::Empty);
+                // Handle focus loss locally
+                self.handle_focus_lost(cx, &scope.path, uid);
+            }
+        }
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, id!(hover.on));
@@ -1254,11 +1290,7 @@ impl Widget for TextInput {
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
             Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, id!(focus.off));
-                self.animator_play(cx, id!(blink.on));
-                cx.stop_timer(self.blink_timer);
-                cx.hide_text_ime();
-                cx.widget_action(uid, &scope.path, TextInputAction::KeyFocusLost);
+                self.handle_focus_lost(cx, &scope.path, uid);
             }
             Hit::KeyDown(kev @ KeyEvent {
                 key_code: KeyCode::ArrowLeft,
