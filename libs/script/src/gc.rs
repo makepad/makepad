@@ -38,7 +38,7 @@ impl ScriptHeap{
         }
     }
                 
-    pub fn mark(&mut self, stack:&[Value]){
+    pub fn mark(&mut self, stack:&[ScriptValue]){
         self.mark_vec.clear();
         for i in 0..self.roots.len(){
             self.mark_inner(self.mark_vec[i]);
@@ -82,7 +82,7 @@ impl ScriptHeap{
     }
     
         
-    pub fn free_object_if_unreffed(&mut self, ptr:Object){
+    pub fn free_object_if_unreffed(&mut self, ptr:ScriptObject){
         let obj = &mut self.objects[ptr.index as usize];
         if !obj.tag.is_reffed(){
             obj.clear();

@@ -45,7 +45,7 @@ pub trait ScriptLife{
         }
         
         if let Some(object) = cx.vm.call(self.rsid(), id!(on_draw), &[item.into()]).as_object(){
-            // we have an Object. can we read a value
+            // we have an ScriptObject. can we read a value
             object.get(id!(myfield))
             object.set(id!(my_field), 2.0.into())
         }
@@ -62,7 +62,7 @@ pub enum EnumTest{
 
 
 pub fn test(){
-    let mut vm = ScriptVm::new();
+    let mut vm = ScriptVmBase::new();
     
     let net = vm.new_module(id!(test));
     vm.add_fn(net, id!(fetch), args!(url=NIL, options=NIL), |vm, args|{
@@ -93,7 +93,7 @@ pub fn test(){
     use crate::value::*;
     
     impl ScriptHook for StructTest{
-        fn on_proto_methods(vm:&mut Vm, obj:Object){
+        fn on_proto_methods(vm:&mut ScriptVm, obj:ScriptObject){
             vm.add_fn(obj, id_lut!(return_two), args_lut!(o = 1.0), |_vm, _args|{
                 return 2.into()
             });
