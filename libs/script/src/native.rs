@@ -71,7 +71,7 @@ macro_rules! args_lut{
     }
 }
 
-pub type NativeFnType = Box<dyn Fn(&mut Vm, Object)->Value + 'static>;
+pub type NativeFnType = Box<dyn Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static>;
 
 pub struct NativeFnEntry{
     pub fn_ptr: NativeFnType
@@ -79,7 +79,7 @@ pub struct NativeFnEntry{
 
 impl NativeFnEntry{
     pub fn new<F>(f: F)->Self 
-    where F: Fn(&mut Vm, Object)->Value + 'static{
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         Self{fn_ptr:Box::new(f)}
     }
 }
@@ -90,8 +90,8 @@ pub struct ScriptNative{
 }
 
 impl ScriptNative{
-    pub fn add<F>(&mut self, heap:&mut ScriptHeap, args:&[(LiveId,Value)], f: F)-> Object
-    where F: Fn(&mut Vm, Object)->Value + 'static{
+    pub fn add<F>(&mut self, heap:&mut ScriptHeap, args:&[(LiveId,ScriptValue)], f: F)-> ScriptObject
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         let fn_index = self.fn_table.len();
         let fn_obj = heap.new_with_proto(id!(native).into());
         heap.set_object_storage_type(fn_obj, ObjectStorageType::VEC2);
@@ -106,8 +106,8 @@ impl ScriptNative{
         fn_obj
     }
     
-    pub fn add_fn<F>(&mut self, heap:&mut ScriptHeap, module:Object, method:LiveId, args:&[(LiveId, Value)], f: F) 
-    where F: Fn(&mut Vm, Object)->Value + 'static{
+    pub fn add_fn<F>(&mut self, heap:&mut ScriptHeap, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         // lets get the 
         let fn_obj = self.add(heap, args, f);
         heap.set_value_def(module, method.into(), fn_obj.into());

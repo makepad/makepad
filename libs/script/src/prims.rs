@@ -12,9 +12,9 @@ macro_rules!script_primitive {
         impl ScriptNew for $ty{
             fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}
             $ type_check
-            fn script_default(vm:&mut Vm)->Value{Self::script_new(vm).script_to_value(vm)}
-            fn script_new(_vm:&mut Vm)->Self{Default::default()}
-            fn script_proto_build(vm:&mut Vm, _props:&mut ScriptTypeProps)->Value{
+            fn script_default(vm:&mut ScriptVm)->ScriptValue{Self::script_new(vm).script_to_value(vm)}
+            fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
+            fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{
                  Self::script_default(vm)
             }
         }
@@ -28,63 +28,63 @@ macro_rules!script_primitive {
 
 script_primitive!(
     f64, 
-    fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{value.is_number()},
-    fn script_apply(&mut self, vm:&mut Vm, _apply:&mut ApplyScope, value:Value){
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_number()},
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
         *self = vm.cast_to_f64(value);
     },
-    fn script_to_value(&self, _vm:&mut Vm)->Value{Value::from_f64(*self)}
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{ScriptValue::from_f64(*self)}
 );
 
 script_primitive!(
     u32, 
-    fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{value.is_number()},
-    fn script_apply(&mut self, vm:&mut Vm, _apply:&mut ApplyScope, value:Value){
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_number()},
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
         *self = vm.cast_to_f64(value) as u32;
     },
-    fn script_to_value(&self, _vm:&mut Vm)->Value{Value::from_f64(*self as f64)}
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{ScriptValue::from_f64(*self as f64)}
 );
 
 script_primitive!(
     bool, 
-    fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{value.is_bool()},
-    fn script_apply(&mut self, vm:&mut Vm, _apply:&mut ApplyScope, value:Value){
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_bool()},
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
         *self = vm.heap.cast_to_bool(value);
     },
-    fn script_to_value(&self, _vm:&mut Vm)->Value{Value::from_bool(*self)}
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{ScriptValue::from_bool(*self)}
 );
 
 script_primitive!(
     String, 
-    fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{value.is_string()},
-    fn script_apply(&mut self, vm:&mut Vm, _apply:&mut ApplyScope, value:Value){
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_string()},
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
         self.clear();
         vm.heap.cast_to_string(value,self);
     },
-    fn script_to_value(&self, vm:&mut Vm)->Value{
+    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         vm.heap.new_string_from_str(self).into()
     }
 );
 
 script_primitive!(
     LiveId, 
-    fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{value.is_id()},
-    fn script_apply(&mut self, _vm:&mut Vm, _apply:&mut ApplyScope, value:Value){
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_id()},
+    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
         if let Some(id) = value.as_id(){
             *self = id
         }
     },
-    fn script_to_value(&self, _vm:&mut Vm)->Value{self.into()}
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{self.into()}
 );
 
 script_primitive!(
-    Object, 
-    fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{value.is_object()},
-    fn script_apply(&mut self, _vm:&mut Vm, _apply:&mut ApplyScope, value:Value){
+    ScriptObject, 
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_object()},
+    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
         if let Some(object) = value.as_object(){
             *self = object
         }
     },
-    fn script_to_value(&self, _vm:&mut Vm)->Value{(*self).into()}
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{(*self).into()}
 );
 
 
@@ -95,16 +95,16 @@ script_primitive!(
 impl<T> ScriptHook for Option<T> where T: ScriptApply + ScriptNew  + 'static{}
 impl<T> ScriptNew for  Option<T> where T: ScriptApply + ScriptNew + 'static{
     fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_type_check(heap:&ScriptHeap, value:Value)->bool{
+    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
         value.is_nil() || T::script_type_check(heap, value)
     }
-    fn script_default(_vm:&mut Vm)->Value{NIL}
-    fn script_new(_vm:&mut Vm)->Self{Default::default()}
-    fn script_proto_build(_vm:&mut Vm, _props:&mut ScriptTypeProps)->Value{NIL}
+    fn script_default(_vm:&mut ScriptVm)->ScriptValue{NIL}
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
+    fn script_proto_build(_vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{NIL}
 }
 impl<T> ScriptApply for Option<T> where T: ScriptApply + ScriptNew  + 'static{
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut Vm, apply:&mut ApplyScope, value:Value){
+    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){
         if let Some(v) = self{
             if value.is_nil(){
                 *self = None
@@ -121,7 +121,7 @@ impl<T> ScriptApply for Option<T> where T: ScriptApply + ScriptNew  + 'static{
             }
         }
     }
-    fn script_to_value(&self, vm:&mut Vm)->Value{
+    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         if let Some(s) = self{
             s.script_to_value(vm)
         }
@@ -139,7 +139,7 @@ impl<T> ScriptApply for Option<T> where T: ScriptApply + ScriptNew  + 'static{
 impl<T> ScriptHook for Vec<T> where T: ScriptApply + ScriptNew + 'static{}
 impl<T> ScriptNew for  Vec<T> where T: ScriptApply + ScriptNew + 'static{
     fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_type_check(heap:&ScriptHeap, value:Value)->bool{
+    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
         if let Some(obj) = value.as_object(){
             for i in 0..heap.vec_len(obj){
                 if let Some(v) = heap.vec_value_if_exist(obj, i){
@@ -154,17 +154,17 @@ impl<T> ScriptNew for  Vec<T> where T: ScriptApply + ScriptNew + 'static{
             value.is_nil()
         }
     }
-    fn script_default(vm:&mut Vm)->Value{
+    fn script_default(vm:&mut ScriptVm)->ScriptValue{
         vm.heap.new().into()
     }
-    fn script_new(_vm:&mut Vm)->Self{Default::default()}
-    fn script_proto_build(vm:&mut Vm, _props:&mut ScriptTypeProps)->Value{
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
+    fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{
         vm.heap.new().into()
     }
 }
 impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static{
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut Vm, apply:&mut ApplyScope, value:Value){
+    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){
         if let Some(obj) = value.as_object(){
             let len = vm.heap.vec_len(obj);
             self.resize_with(len, || ScriptNew::script_new(vm));
@@ -178,7 +178,7 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static{
             self.clear()
         }
     }
-    fn script_to_value(&self, vm:&mut Vm)->Value{
+    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
         let obj = vm.heap.new();
         for v in self.iter(){
             let v = v.script_to_value(vm);
