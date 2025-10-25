@@ -59,7 +59,7 @@ impl Walk {
         Self::fixed(0.0, 0.0)
     }
 
-    /// Returns a `Walk` with both `width` and `height` set to `Size::Fill`, and no margin.
+    /// Returns a `Walk` with both `width` and `height` set to `Size::fill()`, and no margin.
     pub fn fill() -> Self {
         Self {
             abs_pos: None,
@@ -79,24 +79,24 @@ impl Walk {
         }
     }
 
-    /// Returns a `Walk` with both `width` and `height` set to `Size::Fit`, and no margin.
+    /// Returns a `Walk` with both `width` and `height` set to `Size::fit()`, and no margin.
     pub fn fit() -> Self {
         Self {
             abs_pos: None,
             margin: Margin::default(),
-            width: Size::Fit,
-            height: Size::Fit,
+            width: Size::fit(),
+            height: Size::fit(),
         }
     }
 
-    /// Returns a `Walk` with `width` set to `Size::Fill`, `height` set to `Size::Fit`, and no
+    /// Returns a `Walk` with `width` set to `Size::fill()`, `height` set to `Size::fit()`, and no
     /// margin.
     pub fn fill_fit() -> Self {
         Self {
             abs_pos: None,
             margin: Margin::default(),
             width: Size::fill(),
-            height: Size::Fit,
+            height: Size::fit(),
         }
     }
 
@@ -160,14 +160,30 @@ pub enum Size {
     },
     #[live(200.0)]
     Fixed(f64),
-    Fit,
+    #[live {
+        min: None,
+        max: None,
+    }]
+    Fit {
+        min: Option<FitBound>,
+        max: Option<FitBound>,
+    }
 }
 
 impl Size {
-    /// Returns a `Size::Fill` with a default `weight` of `100.0``, and no `min` or `max` constraints.
+    /// Returns a `Size::Fill` with a default `weight` of `100.0``, and without `min` or `max`
+    /// constraints.
     pub fn fill() -> Self {
         Self::Fill {
             weight: 100.0,
+            min: None,
+            max: None,
+        }
+    }
+
+    /// Returns a `Size::Fit` without `min` or `max` constraints.
+    pub fn fit() -> Self {
+        Self::Fit {
             min: None,
             max: None,
         }
@@ -192,7 +208,7 @@ impl Size {
     /// Returns `true` if this is a `Size::Fit`, or `false` otherwise.
     pub fn is_fit(self) -> bool {
         match self {
-            Self::Fit => true,
+            Self::Fit { .. } => true,
             _ => false
         }
     }
@@ -209,6 +225,43 @@ impl Size {
 impl Default for Size {
     fn default() -> Self {
         Size::fill()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Live)]
+pub enum FitBound {
+    #[pick(100.0)]
+    Abs(f64),
+    #[live(100.0)]
+    Rel(f64),
+}
+
+impl FitBound {
+    fn eval(self, parent_size: Option<f64>) -> Option<f64> {
+        match self {
+            FitBound::Abs(abs) => Some(abs),
+            FitBound::Rel(rel) => parent_size.map(|parent_size| rel * parent_size),
+        }
+    }
+}
+
+impl LiveHook for FitBound {
+    fn skip_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+        match nodes[index].value {
+            LiveValue::Int64(value) => {
+                *self = Self::Abs(value as f64);
+                Some(index + 1)
+            }
+            LiveValue::Float32(value) => {
+                *self = Self::Abs(value as f64);
+                Some(index + 1)
+            }
+            LiveValue::Float64(value) => {
+                *self = Self::Abs(value);
+                Some(index + 1)
+            }
+            _ => None
+        }
     }
 }
 
@@ -913,7 +966,7 @@ impl Turtle {
                 outer_width - margin.width()
             },
             Size::Fixed(width) => width.max(0.0),
-            Size::Fit => f64::NAN,
+            Size::Fit { .. } => f64::NAN,
         }
     }
     
@@ -956,7 +1009,7 @@ impl Turtle {
                 outer_height - margin.height()
             }
             Size::Fixed(height) => height.max(0.0),
-            Size::Fit => f64::NAN,
+            Size::Fit { .. } => f64::NAN,
         }
     }
 
@@ -1134,6 +1187,16 @@ impl<'a,'b> Cx2d<'a,'b> {
         self.turtles.last_mut().unwrap()
     }
 
+    /// Returns the width of the first ancestor whose width is known.
+    pub fn first_known_ancestor_width(&self) -> Option<f64> {
+        self.turtles.iter().rev().skip(1).map(|turtle| turtle.width).find(|width| !width.is_nan())
+    }
+
+    /// Returns the height of the first ancestor whose height is known.
+    pub fn first_known_ancestor_height(&self) -> Option<f64> {
+        self.turtles.iter().rev().skip(1).map(|turtle| turtle.height).find(|height| !height.is_nan())
+    }
+
     /// Starts a root turtle.
     pub fn begin_root_turtle(&mut self, size: DVec2, layout: Layout) {
         self.align_list.push(AlignEntry::BeginTurtle(dvec2(0.0,0.0), size));
@@ -1275,6 +1338,8 @@ impl<'a,'b> Cx2d<'a,'b> {
     /// 
     /// The current turtle should be finished with the same guard area that was used to start it.
     pub fn end_turtle_with_guard(&mut self, guard: Area) -> Rect {
+        self.compute_final_size();
+
         let mut turtle = self.turtles.last_mut().unwrap();
         if guard != turtle.guard {
             panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard, guard)
@@ -1282,20 +1347,26 @@ impl<'a,'b> Cx2d<'a,'b> {
         
         let turtle_align_start = turtle.align_start;
         let turtle_walks_start = turtle.finished_walks_start;
-                
-        // If the current turtle's width is not yet known, we can now compute it based on the used width.
-        if turtle.width.is_nan() {
-            turtle.width = turtle.used_width() + turtle.padding().right;
-
-            if let AlignEntry::BeginTurtle(clip_min,clip_max) = &mut self.align_list[turtle.align_start] {
-                clip_max.x = clip_min.x + turtle.width();
-            }
-        };
         
         // If the current turtle's height is not yet known, we can now compute it based on the used height.
         if turtle.height.is_nan() {
             turtle.height = turtle.used_height() + turtle.padding().bottom;
-
+            if let Size::Fit { min, max } = turtle.walk.height {
+                if let Some(min) = min {
+                    let height = self.first_known_ancestor_height();
+                    turtle = self.turtles.last_mut().unwrap();
+                    if let Some(min) = min.eval(height) { 
+                        turtle.height = turtle.height.max(min);
+                    }
+                }
+                if let Some(max) = max {
+                    let height = self.first_known_ancestor_height();
+                    turtle = self.turtles.last_mut().unwrap();
+                    if let Some(max) = max.eval(height) {
+                        turtle.height = turtle.height.min(max);
+                    }
+                }
+            }
             if let AlignEntry::BeginTurtle(clip_min, clip_max) = &mut self.align_list[turtle.align_start] {
                 clip_max.y = clip_min.y + turtle.height();
             }
@@ -1449,6 +1520,58 @@ impl<'a,'b> Cx2d<'a,'b> {
                 turtle_align_start
             )
         }
+    }
+
+    pub fn compute_final_size(&mut self) {
+        let mut turtle = self.turtles.last_mut().unwrap();
+        
+        // If the current turtle's width is not yet known, we can now compute it based on the used width.
+        if turtle.width.is_nan() {
+            turtle.width = turtle.used_width() + turtle.padding().right;
+            if let Size::Fit { min, max } = turtle.walk.width {
+                if let Some(min) = min {
+                    let width = self.first_known_ancestor_width();
+                    turtle = self.turtles.last_mut().unwrap();
+                    if let Some(min) = min.eval(width) {
+                        turtle.width = turtle.width.max(min);
+                    }
+                }
+                if let Some(max) = max {
+                    let width = self.first_known_ancestor_width();
+                    turtle = self.turtles.last_mut().unwrap();
+                    if let Some(max) = max.eval(width) {
+                        turtle.width = turtle.width.min(max);
+                    }
+                }
+            }
+            if let AlignEntry::BeginTurtle(clip_min,clip_max) = &mut self.align_list[turtle.align_start] {
+                clip_max.x = clip_min.x + turtle.width();
+            }
+        };
+        
+        // If the current turtle's height is not yet known, we can now compute it based on the used height.
+        if turtle.height.is_nan() {
+            turtle.height = turtle.used_height() + turtle.padding().bottom;
+            if let Size::Fit { min, max } = turtle.walk.height {
+                if let Some(min) = min {
+                    let height = self.first_known_ancestor_height();
+                    turtle = self.turtles.last_mut().unwrap();
+                    if let Some(min) = min.eval(height) { 
+                        turtle.height = turtle.height.max(min);
+                    }
+                }
+                if let Some(max) = max {
+                    let height = self.first_known_ancestor_height();
+                    turtle = self.turtles.last_mut().unwrap();
+                    if let Some(max) = max.eval(height) {
+                        turtle.height = turtle.height.min(max);
+                    }
+                }
+            }
+            if let AlignEntry::BeginTurtle(clip_min, clip_max) = &mut self.align_list[turtle.align_start] {
+                clip_max.y = clip_min.y + turtle.height();
+            }
+        };
     }
 
     // Returns the end of the align list of the finished walk with the given index.
@@ -1877,8 +2000,8 @@ impl<'a,'b> Cx2d<'a,'b> {
 }
 
 pub struct TurtleAlignRange{
-    start: usize,
-    end: usize
+    pub start: usize,
+    pub end: usize
 }
 
 impl Turtle {
@@ -2045,6 +2168,10 @@ impl LiveHook for Size {
             }
             LiveValue::BareEnum(live_id!(Fill))=>{
                 *self = Self::fill();
+                Some(index + 1)
+            }
+            LiveValue::BareEnum(live_id!(Fit))=>{
+                *self = Self::fit();
                 Some(index + 1)
             }
             LiveValue::Expr {..} => {

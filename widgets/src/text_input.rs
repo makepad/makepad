@@ -9,7 +9,10 @@ use {
                     CursorPosition,
                     Selection
                 },
-                layouter::LaidoutText,
+                layouter::{
+                    LaidoutText,
+                    SelectionRect,
+                },
             },
             *
         },
@@ -596,6 +599,7 @@ pub struct TextInput {
     #[live] is_password: bool,
     #[live] is_read_only: bool,
     #[live] is_numeric_only: bool,
+    #[live] scroll_y: f64,
     #[live] empty_text: String,
     #[rust] text: String,
     #[live(0.5)] blink_speed: f64,
@@ -678,7 +682,6 @@ impl TextInput {
             self.draw_bg.redraw(cx);
         }
     }
-
 
     pub fn selection(&self) -> Selection {
         self.selection
@@ -891,7 +894,7 @@ impl TextInput {
             .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
         
         self.draw_selection.begin_many_instances(cx);
-        for rect_in_lpxs in laidout_text.selection_rects_in_lpxs(
+        for SelectionRect { rect_in_lpxs, .. } in laidout_text.selection_rects(
             self.selection_to_password_selection(self.selection)
         ) {
             self.draw_selection.draw_abs(
@@ -905,6 +908,44 @@ impl TextInput {
             );
         }
         self.draw_selection.end_many_instances(cx);
+    }
+
+    fn scroll_to_cursor(&mut self, cx: &mut Cx2d) {
+        // Compute the final size of the turtle, and obtain its inner height.
+        cx.compute_final_size();
+        let height = cx.turtle().inner_rect().size.y;
+
+        // Compute the min and max y of the row that the cursor is on.
+        let laidout_text = self.laidout_text.as_ref().unwrap();
+        let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
+        let position = self.cursor_to_position(self.cursor()).unwrap();
+        let laidout_row = &laidout_text.rows[position.row_index];
+        let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
+        let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
+
+        // If the min y of the row is less than the scroll position, scroll up so that the top of
+        // the row appears at the top.
+        if y_min < self.scroll_y {
+            self.scroll_y = y_min;
+        }
+
+        // If the max y of the row is greater than the scroll position, scroll down so that the
+        // bottom of the row appears at the bottom.
+        if y_max > self.scroll_y + height {
+            self.scroll_y = y_max - height;
+        }
+
+        // Clamp the scroll position so that we cannot scroll past the start or end of the text.
+        let max_scroll_y = laidout_text_height.max(height) - height;
+        self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+
+        // Shift the align range of the turtle with the scroll position, but do not include the
+        // begin entry, since that would also scroll the background.
+        let align_range: TurtleAlignRange = cx.get_turtle_align_range();
+        cx.shift_align_range(&TurtleAlignRange {
+            start: align_range.start + 1,
+            end: align_range.end,
+        }, dvec2(0.0, -self.scroll_y));
     }
 
     /// Moves the cursor one column to the left.
@@ -1165,11 +1206,12 @@ impl Widget for TextInput {
         let text_rect = self.draw_text(cx);
         let cursor_pos = self.draw_cursor(cx, text_rect);
         self.draw_selection(cx, text_rect);
+        self.scroll_to_cursor(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
             cx.show_text_ime(
                 self.draw_bg.area(), 
-                cursor_pos,
+                cursor_pos - self.scroll_y,
             );
         }
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());

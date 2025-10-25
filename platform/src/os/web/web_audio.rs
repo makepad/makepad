@@ -137,7 +137,7 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(context_ptr: u32, frames: 
     let mut output_fn = output_fn.lock().unwrap();
     
     if let Some(output_fn) = &mut *output_fn {
-        output_fn(AudioInfo {device_id, time: None}, &mut output_buffer);
+        output_fn(AudioInfo {device_id, time: None, sample_rate: 48000.0}, &mut output_buffer);
     }
     let ptr = output_buffer.data.as_ptr();
     

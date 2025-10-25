@@ -1,10 +1,32 @@
 use {
-    self::super::{super::{
+    std::cell::RefCell,
+    std::time::Instant,
+    std::rc::Rc,
+    self::super::opengl_x11::{
+        OpenglWindow,
+        OpenglCx
+    },
+    self::super::super::{
         egl_sys,
-        x11::{x11_sys, xlib_app::*, xlib_event::*},
-    }, opengl_x11::OpenglWindow}, crate::{
-        cx::{Cx, LinuxWindowParams, OsType}, cx_api::CxOsOp, event::*, gpu_info::GpuPerformance, makepad_live_id::*, makepad_math::dvec2, opengl_cx::OpenglCx, os::cx_native::EventFlow, pass::CxPassParent, thread::SignalToUI
-    }, std::{cell::RefCell, rc::Rc}
+        gl_sys::LibGl,
+        x11::xlib_event::*,
+        x11::xlib_app::*,
+        x11::x11_sys,
+        linux_media::CxLinuxMedia
+    },
+    crate::{
+        cx_api::{CxOsOp, CxOsApi, OpenUrlInPlace}, 
+        makepad_math::dvec2,
+        makepad_live_id::*,
+        thread::SignalToUI,
+        event::*,
+        permission::{PermissionResult, PermissionStatus},
+        pass::CxPassParent,
+        cx::{Cx, OsType,LinuxWindowParams}, 
+        os::cx_stdin::PollTimers,
+        gpu_info::GpuPerformance,
+        os::cx_native::EventFlow,
+    }
 };
 
 pub fn x11_event_loop(cx:Rc<RefCell<Cx>>) {
@@ -350,29 +372,47 @@ impl X11Cx {
                             }
                         }
                     }
-                    CxOsOp::SetCursor(cursor) => {
-                        xlib_app.set_mouse_cursor(cursor);
-                    },
-                    CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                        xlib_app.start_timer(timer_id, interval, repeats);
-                    },
-                    CxOsOp::StopTimer(timer_id) => {
-                        xlib_app.stop_timer(timer_id);
-                    },
-                    CxOsOp::ShowTextIME(area, pos) => {
-                        let pos = area.clipped_rect(&self.cx.borrow()).pos + pos;
-                        opengl_windows.iter_mut().for_each(|w| {
-                            w.xlib_window.set_ime_spot(pos);
-                        });
-                    },
-                    CxOsOp::HideTextIME => {
-                        opengl_windows.iter_mut().for_each(|w| {
-                            w.xlib_window.set_ime_spot(dvec2(0.0,0.0));
-                        });
-                    },
-                    e=>{
-                        crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
-                    }
+                }
+                CxOsOp::SetCursor(cursor) => {
+                    xlib_app.set_mouse_cursor(cursor);
+                },
+                CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                    xlib_app.start_timer(timer_id, interval, repeats);
+                },
+                CxOsOp::StopTimer(timer_id) => {
+                    xlib_app.stop_timer(timer_id);
+                },
+                CxOsOp::ShowTextIME(area, pos) => {
+                    let pos = area.clipped_rect(self).pos + pos;
+                    opengl_windows.iter_mut().for_each(|w| {
+                        w.xlib_window.set_ime_spot(pos);
+                    });
+                },
+                CxOsOp::HideTextIME => {
+                    opengl_windows.iter_mut().for_each(|w| {
+                        w.xlib_window.set_ime_spot(dvec2(0.0,0.0));
+                    });
+                },
+                CxOsOp::CheckPermission {permission, request_id} => {
+                    // Linux desktop apps have all permissions granted by default (handled at system level)
+                    // TODO: Handle sandbox cases like flatpak
+                    self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
+                        permission,
+                        request_id,
+                        status: crate::permission::PermissionStatus::Granted,
+                    }));
+                },
+                CxOsOp::RequestPermission {permission, request_id} => {
+                    // Linux desktop apps have all permissions granted by default (handled at system level)
+                    // TODO: Handle sandbox cases like flatpak
+                    self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
+                        permission,
+                        request_id,
+                        status: crate::permission::PermissionStatus::Granted,
+                    }));
+                },
+                e=>{
+                    crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
             }
             ret

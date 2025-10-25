@@ -209,7 +209,8 @@ impl AndroidAudioOutput {
             data.audio_buffer.resize(frame_count as usize, data.channel_count);
             output_fn(AudioInfo {
                 device_id: data.device_id,
-                time: None
+                time: None,
+                sample_rate: 48000.0,
             }, &mut data.audio_buffer);
             let output = std::slice::from_raw_parts_mut(audio_data as *mut f32, frame_count as usize * data.actual_channel_count);
             if data.channel_count != data.actual_channel_count {
@@ -280,7 +281,8 @@ impl AndroidAudioInput {
             data.audio_buffer.copy_from_interleaved(data.channel_count, &input_data);
             input_fn(AudioInfo {
                 device_id: data.device_id,
-                time: None
+                time: None,
+                sample_rate: 48000.0,
             }, &data.audio_buffer);
         }
         AAUDIO_CALLBACK_RESULT_CONTINUE

@@ -1,23 +1,7 @@
 use crate::{
-    makepad_live_id::*,
-    window::WindowId,
-    //menu::MenuCommand,
     event::{
-        MouseDownEvent,
-        MouseUpEvent,
-        MouseMoveEvent,
-        ScrollEvent,
-        WindowGeomChangeEvent,
-        WindowDragQueryEvent,
-        WindowCloseRequestedEvent,
-        WindowClosedEvent,
-        TextInputEvent,
-        KeyEvent,
-        DragEvent,
-        DropEvent,
-        TextClipboardEvent,
-        TimerEvent,
-    },
+        DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent, WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent
+    }, makepad_live_id::*, permission::PermissionResult, window::WindowId
 };
 
 #[derive(Debug, Clone)]
@@ -47,4 +31,5 @@ pub enum MacosEvent {
     TextCut(TextClipboardEvent),
     Timer(TimerEvent),
     MacosMenuCommand(LiveId),
+    PermissionResult(PermissionResult),
 }
