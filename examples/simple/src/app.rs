@@ -9,7 +9,10 @@ live_design!{
     App = {{App}} {
         ui: <Root>{
             main_window = <Window>{
-                body = <View> {
+                window: {title: "你好，こんにちは, Привет, Hello"},
+                body = <View>{
+                    flow: Down,
+                    spacing:30,
                     align: {
                         x: 0.5,
                         y: 0.5,
