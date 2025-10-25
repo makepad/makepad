@@ -1,6 +1,6 @@
 use {
     makepad_futures::{executor, executor::{Executor, Spawner}},
-    makepad_script::ScriptVm,
+    makepad_script::ScriptVmBase,
     std::{
         collections::{
             HashMap,
@@ -56,7 +56,7 @@ use {
  
 pub struct Cx {
     
-    pub vm: Option<Box<ScriptVm>>,
+    pub vm: Option<Box<ScriptVmBase>>,
     
     pub (crate) os_type: OsType,
     pub in_makepad_studio: bool,
@@ -284,7 +284,7 @@ impl Cx {
         }
         
         Self {
-            vm: Some(Box::new(ScriptVm::new())),
+            vm: Some(Box::new(ScriptVmBase::new())),
             demo_time_repaint: false,
             null_texture,
             cpu_cores: 8,

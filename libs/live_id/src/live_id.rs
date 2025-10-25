@@ -187,7 +187,6 @@ impl LiveId {
             x ^= x >> 32;
             i += 1;
         }
-        // mark high bit as meaning that this is a hash id
         Self((x & 0x0000_1fff_ffff_ffff)|or)
     }
     
