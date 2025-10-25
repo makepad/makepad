@@ -96,7 +96,7 @@ impl LiveRegister for App {
                     max_tokens:1000,
                     stream:true
                     messages:[{content:"msg",role:"user"}]
-                }.to_json()
+                }.from_json()
             }
             let x = net.http_request(req)
         };
