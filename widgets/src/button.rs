@@ -528,11 +528,11 @@ pub struct Button {
 
 impl Widget for Button {
     fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
-        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
     }
                 
     fn disabled(&self, cx:&Cx) -> bool {
-        self.animator_in_state(cx, id!(disabled.on))
+        self.animator_in_state(cx, ids!(disabled.on))
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -554,10 +554,10 @@ impl Widget for Button {
         // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
-                self.animator_play(cx, id!(focus.on));
+                self.animator_play(cx, ids!(focus.on));
             }
             Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, id!(focus.off));
+                self.animator_play(cx, ids!(focus.off));
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerDown(fe) if self.enabled && fe.is_primary_hit() => {
@@ -565,19 +565,19 @@ impl Widget for Button {
                     cx.set_key_focus(self.draw_bg.area());
                 }
                 cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Pressed(fe.modifiers));
-                    self.animator_play(cx, id!(hover.down));
+                    self.animator_play(cx, ids!(hover.down));
                     self.set_key_focus(cx);
             }
             Hit::FingerHoverIn(_) => {
                 if self.enabled {
                     cx.set_cursor(MouseCursor::Hand);
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 } else {
                     cx.set_cursor(MouseCursor::NotAllowed);
                 }
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerLongPress(_lp) if self.enabled && self.enable_long_press => {
                 cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::LongPressed);
@@ -587,15 +587,15 @@ impl Widget for Button {
                 if was_clicked {
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Clicked(fe.modifiers));
                     if self.reset_hover_on_click {
-                        self.animator_cut(cx, id!(hover.off));
+                        self.animator_cut(cx, ids!(hover.off));
                     } else if fe.has_hovers() {
-                        self.animator_play(cx, id!(hover.on));
+                        self.animator_play(cx, ids!(hover.on));
                     } else {
-                        self.animator_play(cx, id!(hover.off));
+                        self.animator_play(cx, ids!(hover.off));
                     }
                 } else {
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, ButtonAction::Released(fe.modifiers));
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
             }
             _ => (),
@@ -759,7 +759,7 @@ impl ButtonRef {
     /// (cleared) regardelss of whether the mouse is over it.
     pub fn reset_hover(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_cut(cx, id!(hover.off));
+            inner.animator_cut(cx, ids!(hover.off));
         }
     }
 }

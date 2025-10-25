@@ -252,7 +252,7 @@ impl Widget for DesignerContainer {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
         let data = scope.props.get::<ContainerData>().unwrap();
         // alright lets draw the container, then the child
-        let _turtle_step = self.view.turtle_step(id!(inner));
+        let _turtle_step = self.view.turtle_step(ids!(inner));
         self.walk = Walk{
             abs_pos: Some(data.rect.pos),
             width: Size::Fixed(data.rect.size.x),
@@ -366,11 +366,11 @@ impl DesignerView{
         /*for (id, comp) in self.containers.iter_mut(){
             if what_id == Some(*id){
                 comp.container.as_designer_container().borrow_mut().unwrap()
-                    .animator_cut(cx, id!(active.on));
+                    .animator_cut(cx, ids!(active.on));
             }
             else{
                 comp.container.as_designer_container().borrow_mut().unwrap()
-                    .animator_cut(cx, id!(active.off));
+                    .animator_cut(cx, ids!(active.off));
             }
         }
         */

@@ -1,6 +1,6 @@
 
 
-use crate::makepad_id::Id;
+use crate::makepad_live_id::LiveId;
 
 use {
     std::{
@@ -53,7 +53,7 @@ pub struct ValueMap<K, V> {
 }
 
 impl<K, V> Default for ValueMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<Id> + std::fmt::Debug {
+where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug {
     fn default() -> Self {
         Self {
             map: HashMap::with_hasher(ValueHasherBuilder {}),
@@ -63,20 +63,20 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<Id> + std::fmt::Debug {
 }
 
 impl<K, V> Deref for ValueMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<Id>
+where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 {
     type Target = HashMap<K, V, ValueHasherBuilder>;
     fn deref(&self) -> &Self::Target {&self.map}
 }
 
 impl<K, V> DerefMut for ValueMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<Id>
+where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.map}
 }
 
 impl<K, V> Index<K> for ValueMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<Id>
+where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 {
     type Output = V;
     fn index(&self, index: K) -> &Self::Output {
@@ -85,7 +85,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<Id>
 }
 
 impl<K, V> IndexMut<K> for ValueMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<Id>
+where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 {
     fn index_mut(&mut self, index: K) -> &mut Self::Output {
         self.map.get_mut(&index).unwrap()

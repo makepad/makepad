@@ -374,9 +374,9 @@ impl AppMain for App {
                             3 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
                             _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea", item_id),
                         };
-                        item.label(id!(content.text)).set_text(&text);
-                        item.button(id!(likes)).set_text(&format!("{}", item_id % 23));
-                        item.button(id!(comments)).set_text(&format!("{}", item_id % 6));
+                        item.label(ids!(content.text)).set_text(&text);
+                        item.button(ids!(likes)).set_text(&format!("{}", item_id % 23));
+                        item.button(ids!(comments)).set_text(&format!("{}", item_id % 6));
                         item.draw_widget_all(cx);
                     }
                 }
@@ -387,7 +387,7 @@ impl AppMain for App {
         let actions = self.ui.handle_widget_event(cx, event);
         
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
-            if item.button(id!(likes)).clicked(&actions) {
+            if item.button(ids!(likes)).clicked(&actions) {
                 log!("Test {}", item_id);
             }
         }

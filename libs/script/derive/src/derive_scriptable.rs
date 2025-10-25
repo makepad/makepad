@@ -659,7 +659,7 @@ impl ScriptApply for EnumTest{
         }
         if let Some(object) = value.as_object(){
             let root_proto = vm.heap.root_proto(object);
-            // we now have to fetch the proto Id of the object
+            // we now have to fetch the proto LiveId of the object
             if let Some(id) = root_proto.as_id(){
                 match id{
                     id!(Bare)=>{

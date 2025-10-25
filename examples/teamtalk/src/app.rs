@@ -92,8 +92,8 @@ impl App{
     }
     
     pub fn data_bind_map(mut db: DataBindingMap) {
-        db.bind(id!(global_volume), ids!(global_volume));
-        db.bind(id!(min_volume), ids!(min_volume));
+        db.bind(ids!(global_volume), ids!(global_volume));
+        db.bind(ids!(min_volume), ids!(min_volume));
     }
 }
 
@@ -103,7 +103,7 @@ impl MatchEvent for App{
         let mut db = DataBindingStore::new();
         db.data_bind(cx, actions, &self.ui, Self::data_bind_map);
         self.store.apply_over(cx, &db.nodes);
-        if db.contains(id!(global_volume)){
+        if db.contains(ids!(global_volume)){
             self.volume_changed_by_ui.set();
         }
     }

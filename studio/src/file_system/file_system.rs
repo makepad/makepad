@@ -337,7 +337,7 @@ impl FileSystem {
                             match result {
                                 Ok(response) => {
                                     let file_id = LiveId(response.id);
-                                    let dock = ui.dock(id!(dock));
+                                    let dock = ui.dock(ids!(dock));
                                     for (tab_id, file_id) in &self.tab_id_to_file_node_id {
                                         if response.id == file_id.0 {
                                             dock.redraw_tab(cx, *tab_id);

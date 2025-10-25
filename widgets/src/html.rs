@@ -721,7 +721,7 @@ impl Widget for HtmlLink {
                         if self.grab_key_focus {
                             cx.set_key_focus(self.area());
                         }
-                        self.animator_play(cx, id!(hover.pressed));
+                        self.animator_play(cx, ids!(hover.pressed));
                     }
                     // Fire a secondary click action on a right-click *down* event.
                     else if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
@@ -737,10 +737,10 @@ impl Widget for HtmlLink {
                 }
                 Hit::FingerHoverIn(_) => {
                     cx.set_cursor(MouseCursor::Hand);
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 }
                 Hit::FingerHoverOut(_) => {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
                 Hit::FingerLongPress(_) => {
                     cx.widget_action(
@@ -755,9 +755,9 @@ impl Widget for HtmlLink {
                 Hit::FingerUp(fu) => {
                     if fu.is_over {
                         cx.set_cursor(MouseCursor::Hand);
-                        self.animator_play(cx, id!(hover.on));
+                        self.animator_play(cx, ids!(hover.on));
                     } else {
-                        self.animator_play(cx, id!(hover.off));
+                        self.animator_play(cx, ids!(hover.off));
                     }
 
                     if fu.is_over

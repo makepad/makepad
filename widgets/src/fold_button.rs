@@ -110,7 +110,7 @@ pub enum FoldButtonAction {
 impl FoldButton {
     
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
-        self.animator_toggle(cx, is_open, animate, id!(active.on), id!(active.off))
+        self.animator_toggle(cx, is_open, animate, ids!(active.on), ids!(active.off))
     }
     
     pub fn draw_walk_fold_button(&mut self, cx: &mut Cx2d, walk: Walk) {
@@ -163,9 +163,9 @@ impl Widget for FoldButton {
         let uid = self.widget_uid();
         let res = self.animator_handle_event(cx, event);
         if res.is_animating() {
-            if self.animator.is_track_animating(cx, id!(active)) {
+            if self.animator.is_track_animating(cx, ids!(active)) {
                 let mut value = [0.0];
-                self.draw_bg.get_instance(cx, id!(active),&mut value);
+                self.draw_bg.get_instance(cx, ids!(active),&mut value);
                 cx.widget_action(uid, &scope.path, FoldButtonAction::Animating(value[0] as f64))
             }
             if res.must_redraw(){
@@ -175,33 +175,33 @@ impl Widget for FoldButton {
                 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
-                if self.animator_in_state(cx, id!(active.on)) {
-                    self.animator_play(cx, id!(active.off));
+                if self.animator_in_state(cx, ids!(active.on)) {
+                    self.animator_play(cx, ids!(active.off));
                     cx.widget_action(uid, &scope.path, FoldButtonAction::Closing)
                 }
                 else {
-                    self.animator_play(cx, id!(active.on));
+                    self.animator_play(cx, ids!(active.on));
                     cx.widget_action(uid, &scope.path, FoldButtonAction::Opening)
                 }
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             },
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerUp(fe) => if fe.is_over {
                 if fe.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 }
                 else{
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
             }
             else {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             _ => ()
         };

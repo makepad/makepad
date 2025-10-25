@@ -413,7 +413,7 @@ impl WidgetRef {
     ///                  cx.set_key_focus(self.sweep_area);
     ///             }
     ///             cx.widget_action(uid, &scope.path, GButtonEvent::Pressed(f_down.modifiers));
-    ///             self.animator_play(cx, id!(hover.pressed));
+    ///             self.animator_play(cx, ids!(hover.pressed));
     ///         }
     ///         _ =>()
     ///     }
@@ -945,7 +945,7 @@ pub trait WidgetActionsApi {
     /// ```rust
     /// let actions = cx.capture_actions(|cx| self.super_widget.handle_event(cx, event, scope));
     ///
-    /// self.gbutton(id!(auto_connect)).borrow().map(|x| {
+    /// self.gbutton(ids!(auto_connect)).borrow().map(|x| {
     ///     let mut actions = actions.filter_widget_actions(x.widget_uid());
     ///     actions.find(|action| {
     ///         if let GButtonEvent::Clicked(_) = action.cast(){
@@ -962,7 +962,7 @@ pub trait WidgetActionsApi {
     /// ```rust
     /// let actions = cx.capture_actions(|cx| self.super_widget.handle_event(cx, event, scope));
     ///
-    /// self.gbutton(id!(auto_connect)).borrow().map(|x| {
+    /// self.gbutton(ids!(auto_connect)).borrow().map(|x| {
     /// let actions = actions.filter_widget_actions(x.widget_uid());
     ///     actions.for_each(|action| {
     ///         if let GButtonEvent::Clicked(param) = action.cast(){
@@ -978,7 +978,7 @@ pub trait WidgetActionsApi {
     /// - back `Iterator<Item = T>` not `Iterator<Item = &T>`
     /// ### Example
     /// ```rust
-    /// self.gbutton(id!(auto_connect)).borrow().map(|x| {
+    /// self.gbutton(ids!(auto_connect)).borrow().map(|x| {
     /// let actions = actions.filter_widget_actions_cast::<GButtonEvent>(x.widget_uid());
     ///     actions.for_each(|action| {
     ///         if let GButtonEvent::Clicked(param) = action{

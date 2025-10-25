@@ -74,21 +74,21 @@ impl MatchEvent for App{
         // lets connect the websoc ket
         self.open_websocket(cx);
         self.timer = cx.start_interval(1.0);
-        //self.ui.label(id!(time)).set_text_and_redraw(cx, "A");
+        //self.ui.label(ids!(time)).set_text_and_redraw(cx, "A");
     }
     
     fn handle_timer(&mut self, _cx:&mut Cx, _e:&TimerEvent){
         let _ = self.web_socket.as_mut().unwrap().send_binary("HI".into());
-        //self.ui.label(id!(time)).set_text_and_redraw(cx, &format!("{:?}", e));
+        //self.ui.label(ids!(time)).set_text_and_redraw(cx, &format!("{:?}", e));
     }
     
     fn handle_signal(&mut self, cx: &mut Cx){
         if let Some(socket) = &mut self.web_socket{
             match socket.try_recv(){
                 Ok(WebSocketMessage::Binary(data))=>{
-                    self.ui.label(id!(time)).set_text(cx, &format!("GOT BINARY {}", data.len()));
+                    self.ui.label(ids!(time)).set_text(cx, &format!("GOT BINARY {}", data.len()));
                     // we got a new image. lets decode and show it
-                    let img = self.ui.image_blend(id!(image));
+                    let img = self.ui.image_blend(ids!(image));
                     let _ = img.load_png_from_data(cx, &data);
                     img.redraw(cx);
                 }

@@ -198,26 +198,26 @@ impl Widget for Splitter {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                     SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
                 }
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             },
             Hit::FingerDown(_) => {
                 match self.axis {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                     SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
                 }
-                self.animator_play(cx, id!(hover.drag));
+                self.animator_play(cx, ids!(hover.drag));
                 self.drag_start_align = Some(self.align);
             }
             Hit::FingerUp(f) => {
                 self.drag_start_align = None;
                 if f.is_over && f.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 }
                 else {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
             }
             Hit::FingerMove(f) => {

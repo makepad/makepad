@@ -1,8 +1,8 @@
 use crate::vm::*;
 use crate::value::*;
-use crate::makepad_id::id::*;
+use crate::makepad_live_id::live_id::*;
 use crate::heap::*;
-use crate::makepad_id_derive::*;
+use crate::makepad_live_id::*;
 use crate::object::*;
 
 #[macro_export]
@@ -90,7 +90,7 @@ pub struct ScriptNative{
 }
 
 impl ScriptNative{
-    pub fn add<F>(&mut self, heap:&mut ScriptHeap, args:&[(Id,Value)], f: F)-> Object
+    pub fn add<F>(&mut self, heap:&mut ScriptHeap, args:&[(LiveId,Value)], f: F)-> Object
     where F: Fn(&mut Vm, Object)->Value + 'static{
         let fn_index = self.fn_table.len();
         let fn_obj = heap.new_with_proto(id!(native).into());
@@ -106,7 +106,7 @@ impl ScriptNative{
         fn_obj
     }
     
-    pub fn add_fn<F>(&mut self, heap:&mut ScriptHeap, module:Object, method:Id, args:&[(Id, Value)], f: F) 
+    pub fn add_fn<F>(&mut self, heap:&mut ScriptHeap, module:Object, method:LiveId, args:&[(LiveId, Value)], f: F) 
     where F: Fn(&mut Vm, Object)->Value + 'static{
         // lets get the 
         let fn_obj = self.add(heap, args, f);

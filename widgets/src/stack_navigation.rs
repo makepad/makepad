@@ -225,10 +225,10 @@ impl Widget for StackNavigationView {
 impl StackNavigationView {
     fn hide_stack_view(&mut self, cx: &mut Cx) {
         if self.full_screen {
-            self.animator_play(cx, id!(slide.hide));
+            self.animator_play(cx, ids!(slide.hide));
         } else {
             // Cut straight into the hide state without animating the slide-out.
-            self.animator_cut(cx, id!(slide.hide));
+            self.animator_cut(cx, ids!(slide.hide));
         }
         
         cx.widget_action(
@@ -246,7 +246,7 @@ impl StackNavigationView {
         // TODO: in the future, handle a swipe right gesture on touchscreen, or two-finger swipe on trackpad
         if matches!(self.state, StackNavigationViewState::Active) {
             if event.back_pressed()
-                || matches!(event, Event::Actions(actions) if self.button(id!(left_button)).clicked(&actions))
+                || matches!(event, Event::Actions(actions) if self.button(ids!(left_button)).clicked(&actions))
                 || matches!(event, Event::MouseUp(mouse) if mouse.button.is_back())
             {
                 cx.widget_action(
@@ -260,7 +260,7 @@ impl StackNavigationView {
 
     fn finish_closure_animation_if_done(&mut self, cx: &mut Cx) {
         if self.state == StackNavigationViewState::Active
-            && self.animator.animator_in_state(cx, id!(slide.hide))
+            && self.animator.animator_in_state(cx, ids!(slide.hide))
         {
             if self.offset > self.offset_to_hide {
                 self.apply_over(cx, live! { visible: false });
@@ -279,7 +279,7 @@ impl StackNavigationView {
                     hide_end_action,
                 );
 
-                self.animator_cut(cx, id!(slide.hide));
+                self.animator_cut(cx, ids!(slide.hide));
                 self.state = StackNavigationViewState::Inactive;
             }
         }
@@ -287,12 +287,12 @@ impl StackNavigationView {
 
     fn trigger_action_post_opening_if_done(&mut self, cx: &mut Cx) {
         if self.state == StackNavigationViewState::Inactive &&
-            self.animator.animator_in_state(cx, id!(slide.show))
+            self.animator.animator_in_state(cx, ids!(slide.show))
         {
             const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
             // If the stack view is not full screen, we can consider it fully opened at any offset (offset ignored in draw_walk).
             // Since for non-full screen we ignore the offset and animation, we "cut" to the fully opened state.
-            // TODO: Ideally this should be done by calling `self.animator_cut(cx, id!(slide.show));` at self.show instead, 
+            // TODO: Ideally this should be done by calling `self.animator_cut(cx, ids!(slide.show));` at self.show instead, 
             // however that introduces some bugs in the animator (it does work for slide.hide though).
             if self.offset < OPENING_OFFSET_THRESHOLD || !self.full_screen {
                 cx.widget_action(
@@ -311,14 +311,14 @@ impl StackNavigationViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.apply_over(cx, live! {offset: (root_width), visible: true});
             inner.offset_to_hide = root_width;
-            inner.animator_play(cx, id!(slide.show));
+            inner.animator_play(cx, ids!(slide.show));
         }
     }
 
     pub fn is_showing(&self, cx: &mut Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator.animator_in_state(cx, id!(slide.show))
-                || inner.animator.is_track_animating(cx, id!(slide))
+            inner.animator.animator_in_state(cx, ids!(slide.show))
+                || inner.animator.is_track_animating(cx, ids!(slide))
         } else {
             false
         }
@@ -326,7 +326,7 @@ impl StackNavigationViewRef {
 
     pub fn is_animating(&self, cx: &mut Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator.is_track_animating(cx, id!(slide))
+            inner.animator.is_track_animating(cx, ids!(slide))
         } else {
             false
         }
@@ -438,7 +438,7 @@ impl Widget for StackNavigation {
         // ensuring that we don't forward it to the root view twice.
         let mut visible_views = self.get_visible_views(cx);
         if !event.requires_visibility() {
-            let root_view = self.view.widget(id!(root_view));
+            let root_view = self.view.widget(ids!(root_view));
             if !visible_views.contains(&root_view) {
                 visible_views.insert(0, root_view);
             }
@@ -582,7 +582,7 @@ impl StackNavigation {
         match self.navigation_stack.current() {
             None => {
                 // No views in stack, show root view
-                vec![self.view.widget(id!(root_view))]
+                vec![self.view.widget(ids!(root_view))]
             },
             Some(current_entry) => {
                 let current_view_ref = self.stack_navigation_view(&[current_entry.view_id]);
@@ -596,7 +596,7 @@ impl StackNavigation {
                         views.push(previous_view_ref.0.clone());
                     } else {
                         // Show the root view if there's no previous stack view
-                        views.push(self.view.widget(id!(root_view)));
+                        views.push(self.view.widget(ids!(root_view)));
                     }
                 }
 
@@ -686,7 +686,7 @@ impl StackNavigationRef {
     pub fn set_title(&self, cx: &mut Cx, view_id: LiveId, title: &str) {
         if let Some(inner) = self.borrow_mut() {
             let stack_view_ref = inner.stack_navigation_view(&[view_id]);
-            stack_view_ref.label(id!(title)).set_text(cx, title);
+            stack_view_ref.label(ids!(title)).set_text(cx, title);
         }
     }
 

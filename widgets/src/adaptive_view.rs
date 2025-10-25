@@ -44,7 +44,7 @@ live_design! {
 /// }
 ///
 /// fn setup_adaptive_view(cx: &mut Cx) {;
-///     self.adaptive_view(id!(adaptive)).set_variant_selector(|cx, parent_size| {
+///     self.adaptive_view(ids!(adaptive)).set_variant_selector(|cx, parent_size| {
 ///         if cx.display_context.screen_size.x >= 1280.0 {
 ///             live_id!(Desktop)
 ///         } else {

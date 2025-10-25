@@ -1,4 +1,4 @@
-use crate::makepad_id::*;
+use crate::makepad_live_id::*;
 use crate::heap::*;
 use crate::value::*;
 use crate::native::*;
@@ -7,7 +7,7 @@ use crate::*;
 
 #[derive(Default)]
 pub struct ScriptTypeMethods{
-    pub type_table: Vec<IdMap<Id, Object>>,
+    pub type_table: Vec<LiveIdMap<LiveId, Object>>,
 }
 
 impl ScriptTypeMethods{
@@ -18,7 +18,7 @@ impl ScriptTypeMethods{
         t
     }
     
-    pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, args:&[(Id,Value)], ty_redux:usize, method:Id, f: F) 
+    pub fn add<F>(&mut self, heap:&mut ScriptHeap, native:&mut ScriptNative, args:&[(LiveId,Value)], ty_redux:usize, method:LiveId, f: F) 
     where F: Fn(&mut Vm, Object)->Value + 'static{
         let fn_obj = native.add(heap, args, f);
                 

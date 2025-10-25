@@ -3,7 +3,7 @@ use crate::vm::*;
 use crate::value::*;
 use crate::heap::*;
 use crate::traits::*;
-use makepad_id::*;
+use makepad_live_id::*;
 
 #[macro_export]
 macro_rules!script_primitive {
@@ -66,7 +66,7 @@ script_primitive!(
 );
 
 script_primitive!(
-    Id, 
+    LiveId, 
     fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{value.is_id()},
     fn script_apply(&mut self, _vm:&mut Vm, _apply:&mut ApplyScope, value:Value){
         if let Some(id) = value.as_id(){

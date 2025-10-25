@@ -55,8 +55,8 @@ impl MatchEvent for App{
     }
         
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button_1)).clicked(&actions) {
-            self.ui.button(id!(button_1)).set_text(cx, "Clicked 😀");
+        if self.ui.button(ids!(button_1)).clicked(&actions) {
+            self.ui.button(ids!(button_1)).set_text(cx, "Clicked 😀");
             log!("hi");
             self.counter += 1;
         }

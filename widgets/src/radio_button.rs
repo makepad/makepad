@@ -807,33 +807,33 @@ impl Widget for RadioButton {
                 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
-                self.animator_play(cx, id!(focus.on));
+                self.animator_play(cx, ids!(focus.on));
             }
             Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, id!(focus.off));
+                self.animator_play(cx, ids!(focus.off));
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             },
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                if self.animator_in_state(cx, id!(active.off)) {
-                    self.animator_play(cx, id!(hover.down));
+                if self.animator_in_state(cx, ids!(active.off)) {
+                    self.animator_play(cx, ids!(hover.down));
                 }
                 self.set_key_focus(cx);
             },
             Hit::FingerUp(_fe) => {
-                self.animator_play(cx, id!(hover.on));
-                if self.animator_in_state(cx, id!(active.off)) {
-                    self.animator_play(cx, id!(active.on));
+                self.animator_play(cx, ids!(hover.on));
+                if self.animator_in_state(cx, ids!(active.off)) {
+                    self.animator_play(cx, ids!(active.on));
                     cx.widget_action(uid, &scope.path, RadioButtonAction::Clicked);
                 } else {
-                    self.animator_play(cx, id!(active.off));
+                    self.animator_play(cx, ids!(active.off));
                 }
             }
             Hit::FingerMove(_fe) => {
@@ -845,11 +845,11 @@ impl Widget for RadioButton {
     }
     
     fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
-        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
     }
                 
     fn disabled(&self, cx:&Cx) -> bool {
-        self.animator_in_state(cx, id!(disabled.on))
+        self.animator_in_state(cx, ids!(disabled.on))
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope:&mut Scope, walk: Walk) -> DrawStep {
@@ -870,14 +870,14 @@ impl Widget for RadioButton {
 impl RadioButtonRef{
     fn unselect(&self, cx:&mut Cx){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.animator_play(cx, id!(active.off));
+            inner.animator_play(cx, ids!(active.off));
         }
     }
 
     pub fn select(&self, cx: &mut Cx, scope: &mut Scope){
         if let Some(mut inner) = self.borrow_mut(){
-            if inner.animator_in_state(cx, id!(active.off)) {
-                inner.animator_play(cx, id!(active.on));
+            if inner.animator_in_state(cx, ids!(active.off)) {
+                inner.animator_play(cx, ids!(active.on));
                 cx.widget_action(inner.widget_uid(), &scope.path, RadioButtonAction::Clicked);
             }
         }

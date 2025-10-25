@@ -1,5 +1,5 @@
-pub use makepad_id;
-pub use makepad_id::makepad_id_derive;
+pub use makepad_live_id;
+pub use makepad_live_id::makepad_live_id_macros;
 pub mod tokenizer; 
 pub mod object;
 pub mod colorhex;
@@ -20,8 +20,7 @@ pub mod value_map;
 pub mod traits;
 pub mod prims;
 
-pub use makepad_id_derive::*;
-pub use makepad_id::id::*;
+pub use makepad_live_id::*;
 pub use value::*;
 pub use vm::*;
 pub use makepad_script_derive::*;

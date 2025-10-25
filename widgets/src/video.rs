@@ -361,12 +361,12 @@ impl LiveHook for Video {
         let target_w = self.walk.width.to_fixed().unwrap_or(0.0);
         let target_h = self.walk.height.to_fixed().unwrap_or(0.0);
         self.draw_bg
-            .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
+            .set_uniform(cx, ids!(target_size), &[target_w as f32, target_h as f32]);
 
         if self.show_thumbnail_before_playback {
             self.load_thumbnail_image(cx);
             self.draw_bg
-            .set_uniform(cx, id!(show_thumbnail), &[1.0]);
+            .set_uniform(cx, ids!(show_thumbnail), &[1.0]);
         }
     }
 }
@@ -410,7 +410,7 @@ impl Widget for Video {
                     self.playback_state = PlaybackState::Playing;
                     cx.widget_action(uid, &scope.path, VideoAction::PlaybackBegan);
                     self.draw_bg
-                    .set_uniform(cx, id!(show_thumbnail), &[0.0]);
+                    .set_uniform(cx, ids!(show_thumbnail), &[0.0]);
                 }
                 if self.should_dispatch_texture_updates {
                     cx.widget_action(uid, &scope.path, VideoAction::TextureUpdated);
@@ -495,7 +495,7 @@ impl Video {
         self.total_duration = event.duration;
 
         self.draw_bg
-            .set_uniform(cx, id!(source_size), &[self.video_width as f32, self.video_height as f32]);
+            .set_uniform(cx, ids!(source_size), &[self.video_width as f32, self.video_height as f32]);
 
         if self.mute && self.audio_state != AudioState::Muted {
             cx.mute_video_playback(self.id);

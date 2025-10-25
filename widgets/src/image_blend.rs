@@ -107,12 +107,12 @@ impl ImageBlend {
     }
     
     fn flip_animate(&mut self, cx: &mut Cx)->usize{
-        if self.animator_in_state(cx, id!(blend.one)) {
-            self.animator_play(cx, id!(blend.zero));
+        if self.animator_in_state(cx, ids!(blend.one)) {
+            self.animator_play(cx, ids!(blend.zero));
             0
         }
         else{
-            self.animator_play(cx, id!(blend.one));
+            self.animator_play(cx, ids!(blend.one));
             1
         }
     }

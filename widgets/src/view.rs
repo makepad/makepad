@@ -725,7 +725,7 @@ impl Widget for View {
                     }
                     cx.widget_action(uid, &scope.path, ViewAction::FingerDown(e));
                     if self.animator.live_ptr.is_some() {
-                        self.animator_play(cx, id!(down.on));
+                        self.animator_play(cx, ids!(down.on));
                     }
                 }
                 Hit::FingerMove(e) => cx.widget_action(uid, &scope.path, ViewAction::FingerMove(e)),
@@ -733,7 +733,7 @@ impl Widget for View {
                 Hit::FingerUp(e) => {
                     cx.widget_action(uid, &scope.path, ViewAction::FingerUp(e));
                     if self.animator.live_ptr.is_some() {
-                        self.animator_play(cx, id!(down.off));
+                        self.animator_play(cx, ids!(down.off));
                     }
                 }
                 Hit::FingerHoverIn(e) => {
@@ -742,13 +742,13 @@ impl Widget for View {
                         cx.set_cursor(*cursor);
                     }
                     if self.animator.live_ptr.is_some() {
-                        self.animator_play(cx, id!(hover.on));
+                        self.animator_play(cx, ids!(hover.on));
                     }
                 }
                 Hit::FingerHoverOut(e) => {
                     cx.widget_action(uid, &scope.path, ViewAction::FingerHoverOut(e));
                     if self.animator.live_ptr.is_some() {
-                        self.animator_play(cx, id!(hover.off));
+                        self.animator_play(cx, ids!(hover.off));
                     }
                 }
                 Hit::KeyDown(e) => cx.widget_action(uid, &scope.path, ViewAction::KeyDown(e)),
@@ -929,10 +929,10 @@ impl Widget for View {
                         let texture_cache = self.texture_cache.as_mut().unwrap();
                         cx.end_pass(&texture_cache.pass);
                         /*if cache.pass.id_equals(4){
-                            self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[1.0]);
+                            self.draw_bg.draw_vars.set_uniform(cx, ids!(marked),&[1.0]);
                         }
                         else{
-                            self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[0.0]);
+                            self.draw_bg.draw_vars.set_uniform(cx, ids!(marked),&[0.0]);
                         }*/
                         self.draw_bg
                             .draw_vars

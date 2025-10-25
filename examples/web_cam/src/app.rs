@@ -81,10 +81,10 @@ impl MatchEvent for App{
                 self.video_input[id].swap_vec_u32(cx, buf);
             }
             let image_size = [vfb.format.width as f32, vfb.format.height as f32];
-            let v = self.ui.view(id!(video_input0));
+            let v = self.ui.view(ids!(video_input0));
             v.as_image().set_texture(cx, Some(self.video_input[id].clone()));
-            v.set_uniform(cx, id!(image_size), &image_size);
-            v.set_uniform(cx, id!(is_rgb), &[0.0]);
+            v.set_uniform(cx, ids!(image_size), &image_size);
+            v.set_uniform(cx, ids!(is_rgb), &[0.0]);
             v.redraw(cx);
         }
     }

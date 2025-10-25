@@ -299,7 +299,7 @@ impl PortalList {
                         self.first_scroll = start_pos;
                     }
                 }
-                if !self.scroll_bar.animator_in_state(cx, id!(hover.pressed)){
+                if !self.scroll_bar.animator_in_state(cx, ids!(hover.pressed)){
                     self.update_scroll_bar(cx);
                 }
             }

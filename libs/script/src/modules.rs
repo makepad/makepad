@@ -1,7 +1,7 @@
-use crate::makepad_id::id::*;
+use crate::makepad_live_id::live_id::*;
 use crate::heap::*;
 use crate::value::*;
-use crate::makepad_id_derive::*;
+use crate::makepad_live_id_macros::*;
 use crate::native::*;
 use crate::*;
 
