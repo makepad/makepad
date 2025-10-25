@@ -220,7 +220,7 @@ pub struct ScrollBar {
     /// The decay factor for the flick animation
     #[live(0.97)] flick_scroll_decay: f64,
     /// Whether to enable drag scrolling
-    #[live(true)] drag_scrolling: bool,
+    #[live(false)] drag_scrolling: bool,
 
     #[animator] animator: Animator,
     
