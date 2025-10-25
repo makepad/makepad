@@ -77,6 +77,7 @@ pub fn test(){
        #[live(1.0)] field:f64,
        #[live(EnumTest::Bare)] enm:EnumTest,
        #[live] opt: Option<f64>,
+       #[live] vec: Vec<f64>
     }
     
     #[derive(Script, ScriptHook)]
@@ -187,10 +188,10 @@ pub fn test(){
         let t = 0 try{t = 1} assert(false) ok assert(true)
         
         // struct tests
-        let strct = #(StructTest::script_api(vm_ref!(vm)));
-        try{strct{field:5}} assert(false) ok assert(true)
-        try{strct{field:true}} assert(true) ok assert(false)
-        assert(strct.return_two() == 2)
+        let s = #(StructTest::script_api(vm_ref!(vm)));
+        try{s{field:5}} assert(false) ok assert(true)
+        try{s{field:true}} assert(true) ok assert(false)
+        assert(s.return_two() == 2)
         
         // check enum
         let EnumTest = #(EnumTest::script_api(vm_ref!(vm)));
@@ -203,13 +204,24 @@ pub fn test(){
         try{EnumTest.Named{named_field:1.0}} assert(false) ok assert(true)
         try{EnumTest.Named{named_field:true}} assert(true) ok assert(false)
         
-        assert(strct.enm == EnumTest.Bare)
-        try{strct{enm: EnumTest.Bare}} assert(false) ok assert(true)
-        try{strct{enm: 1.0}} assert(true) ok assert(false)
-        try{strct{enm: EnumTest.Named{named_field:1.0}}} assert(false) ok assert(true)
-        try{strct{enm: EnumTest.Tuple(1.0)}} assert(false) ok assert(true)
+        assert(s.enm == EnumTest.Bare)
+        try{s{enm: EnumTest.Bare}} assert(false) ok assert(true)
+        try{s{enm: 1.0}} assert(true) ok assert(false)
+        try{s{enm: EnumTest.Named{named_field:1.0}}} assert(false) ok assert(true)
+        try{s{enm: EnumTest.Tuple(1.0)}} assert(false) ok assert(true)
         ~EnumTest
         
+        // check the option
+        try{s{opt:nil}} assert(false) ok assert(true)
+        try{s{opt:1.0}} assert(false) ok assert(true)
+        try{s{opt:false}} assert(true) ok assert(false)
+        
+        // check the vec
+        let x = s{vec:[1,2,3,4]}
+        assert(x.vec == [1,2,3,4])
+        // check typechecking in a vec
+        try{s{vec:[false]}} assert(true) ok assert(false)
+        try{s{vec:[1,2]}} assert(false) ok assert(true)
     };
     
     let _code = script!{
