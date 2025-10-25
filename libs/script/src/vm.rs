@@ -1,4 +1,4 @@
-use crate::makepad_id::*;
+use crate::makepad_live_id::*;
 use crate::heap::*;
 use crate::value::*;
 use crate::parser::*;
@@ -112,7 +112,7 @@ impl <'a> Vm<'a>{
         self.heap.cast_to_f64(v, self.thread.trap.ip)
     }
           
-    pub fn add_fn<F>(&mut self, module:Object, method:Id, args:&[(Id, Value)], f: F) 
+    pub fn add_fn<F>(&mut self, module:Object, method:LiveId, args:&[(LiveId, Value)], f: F) 
     where F: Fn(&mut Vm, Object)->Value + 'static{
         self.code.native.borrow_mut().add_fn(&mut self.heap, module, method, args, f)
     }
@@ -158,11 +158,11 @@ impl ScriptVm{
         }
     }
         
-    pub fn new_module(&mut self, id:Id)->Object{
+    pub fn new_module(&mut self, id:LiveId)->Object{
         self.heap.new_module(id)
     }
     
-    pub fn add_fn<F>(&mut self, module:Object, method:Id, args:&[(Id, Value)], f: F) 
+    pub fn add_fn<F>(&mut self, module:Object, method:LiveId, args:&[(LiveId, Value)], f: F) 
     where F: Fn(&mut Vm, Object)->Value + 'static{
         self.code.native.borrow_mut().add_fn(&mut self.heap, module, method, args, f)
     }

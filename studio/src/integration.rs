@@ -70,7 +70,7 @@ struct Integration{
 
 impl WidgetMatchEvent for Integration {
     fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions, _scope: &mut Scope){
-        if self.view.button(id!(run_button)).clicked(actions){
+        if self.view.button(ids!(run_button)).clicked(actions){
             println!("run button clicked");
             // Handle the run button click event
             // You can add your custom code here to respond to the button click

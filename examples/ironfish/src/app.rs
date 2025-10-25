@@ -254,219 +254,219 @@ impl App {
     
     pub fn data_bind(mut db: DataBindingMap) {
         // sequencer
-        db.bind(id!(sequencer.playing), ids!(playpause));
-        db.bind(id!(sequencer.bpm), ids!(speed.slider));
-        db.bind(id!(sequencer.rootnote), ids!(rootnote.dropdown));
-        db.bind(id!(sequencer.scale), ids!(scaletype.dropdown));
-        db.bind(id!(arp.enabled), ids!(arp.checkbox));
-        db.bind(id!(arp.octaves), ids!(arpoctaves.slider));
+        db.bind(ids!(sequencer.playing), ids_array!(playpause));
+        db.bind(ids!(sequencer.bpm), ids_array!(speed.slider));
+        db.bind(ids!(sequencer.rootnote), ids_array!(rootnote.dropdown));
+        db.bind(ids!(sequencer.scale), ids_array!(scaletype.dropdown));
+        db.bind(ids!(arp.enabled), ids_array!(arp.checkbox));
+        db.bind(ids!(arp.octaves), ids_array!(arpoctaves.slider));
 
         // Mixer panel
-        db.bind(id!(osc_balance), ids!(balance.slider));
-        db.bind(id!(noise), ids!(noise.slider));
-        db.bind(id!(sub_osc), ids!(sub.slider));
-        db.bind(id!(portamento), ids!(porta.slider));
+        db.bind(ids!(osc_balance), ids_array!(balance.slider));
+        db.bind(ids!(noise), ids_array!(noise.slider));
+        db.bind(ids!(sub_osc), ids_array!(sub.slider));
+        db.bind(ids!(portamento), ids_array!(porta.slider));
 
         // DelayFX Panel
-        db.bind(id!(delay.delaysend), ids!(delaysend.slider));
-        db.bind(id!(delay.delayfeedback), ids!(delayfeedback.slider));
+        db.bind(ids!(delay.delaysend), ids_array!(delaysend.slider));
+        db.bind(ids!(delay.delayfeedback), ids_array!(delayfeedback.slider));
 
-        db.bind(id!(bitcrush.enable), ids!(crushenable.checkbox));
-        db.bind(id!(bitcrush.amount), ids!(crushamount.slider));
+        db.bind(ids!(bitcrush.enable), ids_array!(crushenable.checkbox));
+        db.bind(ids!(bitcrush.amount), ids_array!(crushamount.slider));
 
-        db.bind(id!(delay.difference), ids!(delaydifference.slider));
-        db.bind(id!(delay.cross), ids!(delaycross.slider));
-        db.bind(id!(delay.length), ids!(delaylength.slider));
+        db.bind(ids!(delay.difference), ids_array!(delaydifference.slider));
+        db.bind(ids!(delay.cross), ids_array!(delaycross.slider));
+        db.bind(ids!(delay.length), ids_array!(delaylength.slider));
 
         // Chorus panel
-        db.bind(id!(chorus.mix), ids!(chorusmix.slider));
-        db.bind(id!(chorus.mindelay), ids!(chorusdelay.slider));
-        db.bind(id!(chorus.moddepth), ids!(chorusmod.slider));
-        db.bind(id!(chorus.rate), ids!(chorusrate.slider));
-        db.bind(id!(chorus.phasediff), ids!(chorusphase.slider));
-        db.bind(id!(chorus.feedback), ids!(chorusfeedback.slider));
+        db.bind(ids!(chorus.mix), ids_array!(chorusmix.slider));
+        db.bind(ids!(chorus.mindelay), ids_array!(chorusdelay.slider));
+        db.bind(ids!(chorus.moddepth), ids_array!(chorusmod.slider));
+        db.bind(ids!(chorus.rate), ids_array!(chorusrate.slider));
+        db.bind(ids!(chorus.phasediff), ids_array!(chorusphase.slider));
+        db.bind(ids!(chorus.feedback), ids_array!(chorusfeedback.slider));
 
         // Reverb panel
-        db.bind(id!(reverb.mix), ids!(reverbmix.slider));
-        db.bind(id!(reverb.feedback), ids!(reverbfeedback.slider));
+        db.bind(ids!(reverb.mix), ids_array!(reverbmix.slider));
+        db.bind(ids!(reverb.feedback), ids_array!(reverbfeedback.slider));
 
         //LFO Panel
-        db.bind(id!(lfo.rate), ids!(rate.slider));
-        db.bind(id!(filter1.lfo_amount), ids!(lfoamount.slider));
-        db.bind(id!(lfo.synconkey), ids!(sync.checkbox));
+        db.bind(ids!(lfo.rate), ids_array!(rate.slider));
+        db.bind(ids!(filter1.lfo_amount), ids_array!(lfoamount.slider));
+        db.bind(ids!(lfo.synconkey), ids_array!(sync.checkbox));
         
         //Volume Envelope
-        db.bind(id!(volume_envelope.a), ids!(vol_env.attack.slider));
-        db.bind(id!(volume_envelope.h), ids!(vol_env.hold.slider));
-        db.bind(id!(volume_envelope.d), ids!(vol_env.decay.slider));
-        db.bind(id!(volume_envelope.s), ids!(vol_env.sustain.slider));
-        db.bind(id!(volume_envelope.r), ids!(vol_env.release.slider));
+        db.bind(ids!(volume_envelope.a), ids_array!(vol_env.attack.slider));
+        db.bind(ids!(volume_envelope.h), ids_array!(vol_env.hold.slider));
+        db.bind(ids!(volume_envelope.d), ids_array!(vol_env.decay.slider));
+        db.bind(ids!(volume_envelope.s), ids_array!(vol_env.sustain.slider));
+        db.bind(ids!(volume_envelope.r), ids_array!(vol_env.release.slider));
 
         //Mod Envelope
-        db.bind(id!(mod_envelope.a), ids!(mod_env.attack.slider));
-        db.bind(id!(mod_envelope.h), ids!(mod_env.hold.slider));
-        db.bind(id!(mod_envelope.d), ids!(mod_env.decay.slider));
-        db.bind(id!(mod_envelope.s), ids!(mod_env.sustain.slider));
-        db.bind(id!(mod_envelope.r), ids!(mod_env.release.slider));
-        db.bind(id!(filter1.envelope_amount), ids!(modamount.slider));
+        db.bind(ids!(mod_envelope.a), ids_array!(mod_env.attack.slider));
+        db.bind(ids!(mod_envelope.h), ids_array!(mod_env.hold.slider));
+        db.bind(ids!(mod_envelope.d), ids_array!(mod_env.decay.slider));
+        db.bind(ids!(mod_envelope.s), ids_array!(mod_env.sustain.slider));
+        db.bind(ids!(mod_envelope.r), ids_array!(mod_env.release.slider));
+        db.bind(ids!(filter1.envelope_amount), ids_array!(modamount.slider));
 
         // Filter panel
-        //db.bind(id!(filter1.filter_type), ids!(filter_type.dropdown));
-        db.bind(id!(filter1.cutoff), ids!(cutoff.slider));
-        db.bind(id!(filter1.resonance), ids!(resonance.slider));
+        //db.bind(ids!(filter1.filter_type), ids_array!(filter_type.dropdown));
+        db.bind(ids!(filter1.cutoff), ids_array!(cutoff.slider));
+        db.bind(ids!(filter1.resonance), ids_array!(resonance.slider));
 
         // Osc1 panel
-        db.bind(id!(supersaw1.spread), ids!(osc1.supersaw.spread.slider));
-        db.bind(id!(supersaw1.diffuse), ids!(osc1.supersaw.diffuse.slider));
-        db.bind(id!(supersaw1.spread), ids!(osc1.supersaw.spread.slider));
-        db.bind(id!(supersaw1.diffuse), ids!(osc1.supersaw.diffuse.slider));
-        db.bind(id!(supersaw1.spread), ids!(osc1.hypersaw.spread.slider));
-        db.bind(id!(supersaw1.diffuse), ids!(osc1.hypersaw.diffuse.slider));
+        db.bind(ids!(supersaw1.spread), ids_array!(osc1.supersaw.spread.slider));
+        db.bind(ids!(supersaw1.diffuse), ids_array!(osc1.supersaw.diffuse.slider));
+        db.bind(ids!(supersaw1.spread), ids_array!(osc1.supersaw.spread.slider));
+        db.bind(ids!(supersaw1.diffuse), ids_array!(osc1.supersaw.diffuse.slider));
+        db.bind(ids!(supersaw1.spread), ids_array!(osc1.hypersaw.spread.slider));
+        db.bind(ids!(supersaw1.diffuse), ids_array!(osc1.hypersaw.diffuse.slider));
 
-        db.bind(id!(osc1.osc_type), ids!(osc1.type.dropdown));
-        db.bind(id!(osc1.transpose), ids!(osc1.transpose.slider));
-        db.bind(id!(osc1.detune), ids!(osc1.detune.slider));
-        db.bind(id!(osc1.harmonic), ids!(osc1.harmonicshift.slider));
-        db.bind(id!(osc1.harmonicenv), ids!(osc1.harmonicenv.slider));
-        db.bind(id!(osc1.harmoniclfo), ids!(osc1.harmoniclfo.slider));
+        db.bind(ids!(osc1.osc_type), ids_array!(osc1.type.dropdown));
+        db.bind(ids!(osc1.transpose), ids_array!(osc1.transpose.slider));
+        db.bind(ids!(osc1.detune), ids_array!(osc1.detune.slider));
+        db.bind(ids!(osc1.harmonic), ids_array!(osc1.harmonicshift.slider));
+        db.bind(ids!(osc1.harmonicenv), ids_array!(osc1.harmonicenv.slider));
+        db.bind(ids!(osc1.harmoniclfo), ids_array!(osc1.harmoniclfo.slider));
 
         // Osc2 panel
-        db.bind(id!(supersaw2.spread), ids!(osc2.supersaw.spread.slider));
-        db.bind(id!(supersaw2.diffuse), ids!(osc2.supersaw.diffuse.slider));
-        db.bind(id!(supersaw2.spread), ids!(osc2.supersaw.spread.slider));
-        db.bind(id!(supersaw2.diffuse), ids!(osc2.supersaw.diffuse.slider));
-        db.bind(id!(supersaw2.spread), ids!(osc2.hypersaw.spread.slider));
-        db.bind(id!(supersaw2.diffuse), ids!(osc2.hypersaw.diffuse.slider));
+        db.bind(ids!(supersaw2.spread), ids_array!(osc2.supersaw.spread.slider));
+        db.bind(ids!(supersaw2.diffuse), ids_array!(osc2.supersaw.diffuse.slider));
+        db.bind(ids!(supersaw2.spread), ids_array!(osc2.supersaw.spread.slider));
+        db.bind(ids!(supersaw2.diffuse), ids_array!(osc2.supersaw.diffuse.slider));
+        db.bind(ids!(supersaw2.spread), ids_array!(osc2.hypersaw.spread.slider));
+        db.bind(ids!(supersaw2.diffuse), ids_array!(osc2.hypersaw.diffuse.slider));
 
-        db.bind(id!(osc2.osc_type), ids!(osc2.type.dropdown));
-        db.bind(id!(osc2.transpose), ids!(osc2.transpose.slider));
-        db.bind(id!(osc2.detune), ids!(osc2.detune.slider));
-        db.bind(id!(osc2.harmonic), ids!(osc2.harmonicshift.slider));
-        db.bind(id!(osc2.harmonicenv), ids!(osc2.harmonicenv.slider));
-        db.bind(id!(osc2.harmoniclfo), ids!(osc2.harmoniclfo.slider));
+        db.bind(ids!(osc2.osc_type), ids_array!(osc2.type.dropdown));
+        db.bind(ids!(osc2.transpose), ids_array!(osc2.transpose.slider));
+        db.bind(ids!(osc2.detune), ids_array!(osc2.detune.slider));
+        db.bind(ids!(osc2.harmonic), ids_array!(osc2.harmonicshift.slider));
+        db.bind(ids!(osc2.harmonicenv), ids_array!(osc2.harmonicenv.slider));
+        db.bind(ids!(osc2.harmoniclfo), ids_array!(osc2.harmoniclfo.slider));
 
-        db.bind(id!(blur.size), ids!(blursize.slider));
-        db.bind(id!(blur.std), ids!(blurstd.slider));
-
-
+        db.bind(ids!(blur.size), ids_array!(blursize.slider));
+        db.bind(ids!(blur.std), ids_array!(blurstd.slider));
 
 
-        db.bind(id!(shadow.opacity), ids!(shadowopacity.slider));
-        db.bind(id!(shadow.x), ids!(shadowx.slider));
-        db.bind(id!(shadow.y), ids!(shadowy.slider));
+
+
+        db.bind(ids!(shadow.opacity), ids_array!(shadowopacity.slider));
+        db.bind(ids!(shadow.x), ids_array!(shadowx.slider));
+        db.bind(ids!(shadow.y), ids_array!(shadowy.slider));
 
         // sequencer
-        db.bind(id!(sequencer.steps), ids!(sequencer));
+        db.bind(ids!(sequencer.steps), ids_array!(sequencer));
 
-        db.apply(id!(osc1.osc_type), ids!(osc1.supersaw, visible), |v| {
-            v.enum_eq(id!(SuperSaw))
+        db.apply(ids!(osc1.osc_type), ids_array!(osc1.supersaw, visible), |v| {
+            v.enum_eq(ids!(SuperSaw))
         });
-        db.apply(id!(osc2.osc_type), ids!(osc2.supersaw, visible), |v| {
-            v.enum_eq(id!(SuperSaw))
+        db.apply(ids!(osc2.osc_type), ids_array!(osc2.supersaw, visible), |v| {
+            v.enum_eq(ids!(SuperSaw))
         });
-        db.apply(id!(osc1.osc_type), ids!(osc1.hypersaw, visible), |v| {
-            v.enum_eq(id!(HyperSaw))
+        db.apply(ids!(osc1.osc_type), ids_array!(osc1.hypersaw, visible), |v| {
+            v.enum_eq(ids!(HyperSaw))
         });
-        db.apply(id!(osc2.osc_type), ids!(osc2.hypersaw, visible), |v| {
-            v.enum_eq(id!(HyperSaw))
+        db.apply(ids!(osc2.osc_type), ids_array!(osc2.hypersaw, visible), |v| {
+            v.enum_eq(ids!(HyperSaw))
         });
-        db.apply(id!(osc1.osc_type), ids!(osc1.harmonic, visible), |v| {
-            v.enum_eq(id!(HarmonicSeries))
+        db.apply(ids!(osc1.osc_type), ids_array!(osc1.harmonic, visible), |v| {
+            v.enum_eq(ids!(HarmonicSeries))
         });
-        db.apply(id!(osc2.osc_type), ids!(osc2.harmonic, visible), |v| {
-            v.enum_eq(id!(HarmonicSeries))
+        db.apply(ids!(osc2.osc_type), ids_array!(osc2.harmonic, visible), |v| {
+            v.enum_eq(ids!(HarmonicSeries))
         });
 
         db.apply(
-            id!(mod_envelope.a),
-            ids!(mod_env.display, draw_bg.attack),
+            ids!(mod_envelope.a),
+            ids_array!(mod_env.display, draw_bg.attack),
             |v| v,
         );
         db.apply(
-            id!(mod_envelope.h),
-            ids!(mod_env.display, draw_bg.hold),
+            ids!(mod_envelope.h),
+            ids_array!(mod_env.display, draw_bg.hold),
             |v| v,
         );
         db.apply(
-            id!(mod_envelope.d),
-            ids!(mod_env.display, draw_bg.decay),
+            ids!(mod_envelope.d),
+            ids_array!(mod_env.display, draw_bg.decay),
             |v| v,
         );
         db.apply(
-            id!(mod_envelope.s),
-            ids!(mod_env.display, draw_bg.sustain),
+            ids!(mod_envelope.s),
+            ids_array!(mod_env.display, draw_bg.sustain),
             |v| v,
         );
         db.apply(
-            id!(mod_envelope.r),
-            ids!(mod_env.display, draw_bg.release),
+            ids!(mod_envelope.r),
+            ids_array!(mod_env.display, draw_bg.release),
             |v| v,
         );
         db.apply(
-            id!(volume_envelope.a),
-            ids!(vol_env.display, draw_bg.attack),
+            ids!(volume_envelope.a),
+            ids_array!(vol_env.display, draw_bg.attack),
             |v| v,
         );
         db.apply(
-            id!(volume_envelope.h),
-            ids!(vol_env.display, draw_bg.hold),
+            ids!(volume_envelope.h),
+            ids_array!(vol_env.display, draw_bg.hold),
             |v| v,
         );
         db.apply(
-            id!(volume_envelope.d),
-            ids!(vol_env.display, draw_bg.decay),
+            ids!(volume_envelope.d),
+            ids_array!(vol_env.display, draw_bg.decay),
             |v| v,
         );
         db.apply(
-            id!(volume_envelope.s),
-            ids!(vol_env.display, draw_bg.sustain),
+            ids!(volume_envelope.s),
+            ids_array!(vol_env.display, draw_bg.sustain),
             |v| v,
         );
         db.apply(
-            id!(volume_envelope.r),
-            ids!(vol_env.display, draw_bg.release),
+            ids!(volume_envelope.r),
+            ids_array!(vol_env.display, draw_bg.release),
             |v| v,
         );
 
-        /*db.apply(id!(shadow.opacity), ids!(shadowstep, draw_bg.shadowopacity), |v| v);
-        db.apply(id!(shadow.x), ids!(shadowstep, draw_bg.shadowx), |v| v);
-        db.apply(id!(shadow.y), ids!(shadowstep, draw_bg.shadowy), |v| v);
+        /*db.apply(ids!(shadow.opacity), ids_array!(shadowstep, draw_bg.shadowopacity), |v| v);
+        db.apply(ids!(shadow.x), ids_array!(shadowstep, draw_bg.shadowx), |v| v);
+        db.apply(ids!(shadow.y), ids_array!(shadowstep, draw_bg.shadowy), |v| v);
 
-        db.apply(id!(blur.size), ids!(step1, draw_bg.blursize), |v| v);
-        db.apply(id!(blur.std), ids!(step1, draw_bg.blurstd), |v| v);
-        db.apply(id!(blur.size), ids!(step2, draw_bg.blursize), |v| v);
-        db.apply(id!(blur.std), ids!(step2, draw_bg.blurstd), |v| v);
-        db.apply(id!(blur.size), ids!(step3, draw_bg.blursize), |v| v);
-        db.apply(id!(blur.std), ids!(step3, draw_bg.blurstd), |v| v);
-        db.apply(id!(blur.size), ids!(step4, draw_bg.blursize), |v| v);
-        db.apply(id!(blur.std), ids!(step4, draw_bg.blurstd), |v| v);*/
+        db.apply(ids!(blur.size), ids_array!(step1, draw_bg.blursize), |v| v);
+        db.apply(ids!(blur.std), ids_array!(step1, draw_bg.blurstd), |v| v);
+        db.apply(ids!(blur.size), ids_array!(step2, draw_bg.blursize), |v| v);
+        db.apply(ids!(blur.std), ids_array!(step2, draw_bg.blurstd), |v| v);
+        db.apply(ids!(blur.size), ids_array!(step3, draw_bg.blursize), |v| v);
+        db.apply(ids!(blur.std), ids_array!(step3, draw_bg.blurstd), |v| v);
+        db.apply(ids!(blur.size), ids_array!(step4, draw_bg.blursize), |v| v);
+        db.apply(ids!(blur.std), ids_array!(step4, draw_bg.blurstd), |v| v);*/
     }
 }
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.preset(cx,0,false);
-        self.ui.piano(id!(piano)).set_key_focus(cx);
+        self.ui.piano(ids!(piano)).set_key_focus(cx);
         self.midi_input = cx.midi_input();
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         
         let ui = self.ui.clone();
-        let piano = ui.piano(id!(piano));
+        let piano = ui.piano(ids!(piano));
 
-        ui.radio_button_set(ids!(oscillators.tab1, oscillators.tab2,))
-            .selected_to_visible(cx, &ui, actions, ids!(oscillators.osc1, oscillators.osc2,));
+        ui.radio_button_set(ids_array!(oscillators.tab1, oscillators.tab2,))
+            .selected_to_visible(cx, &ui, actions, ids_array!(oscillators.osc1, oscillators.osc2,));
 
-        ui.radio_button_set(ids!(filter_modes.tab1, filter_modes.tab2,))
+        ui.radio_button_set(ids_array!(filter_modes.tab1, filter_modes.tab2,))
             .selected_to_visible(
                 cx,
                 &ui,
                 actions,
-                ids!(preset_pages.tab1_frame, preset_pages.tab2_frame,),
+                ids_array!(preset_pages.tab1_frame, preset_pages.tab2_frame,),
             );
 
-        ui.radio_button_set(ids!(
+        ui.radio_button_set(ids_array!(
             mobile_modes.tab1,
             mobile_modes.tab2,
             mobile_modes.tab3,
@@ -475,7 +475,7 @@ impl MatchEvent for App {
             cx,
             &ui,
             actions,
-            ids!(
+            ids_array!(
                 application_pages.tab1_frame,
                 application_pages.tab2_frame,
                 application_pages.tab3_frame,
@@ -494,29 +494,29 @@ impl MatchEvent for App {
             );
         }
 
-        if ui.button_set(ids!(panic)).clicked(&actions) {
+        if ui.button_set(ids_array!(panic)).clicked(&actions) {
             //log!("hello world");
             cx.midi_reset();
             self.audio_graph.all_notes_off();
         }
 
-        let sequencer = ui.sequencer(id!(sequencer));
+        let sequencer = ui.sequencer(ids!(sequencer));
         // lets fetch and update the tick.
 
-        if ui.button_set(ids!(clear_grid)).clicked(&actions) {
+        if ui.button_set(ids_array!(clear_grid)).clicked(&actions) {
             sequencer.clear_grid(cx);
         }
 
-        if ui.button_set(ids!(grid_down)).clicked(&actions) {
+        if ui.button_set(ids_array!(grid_down)).clicked(&actions) {
             sequencer.grid_down(cx);
         }
 
-        if ui.button_set(ids!(grid_up)).clicked(&actions) {
+        if ui.button_set(ids_array!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx);
         }
         
       
-        if let Some((index,km)) = ui.button_set(ids!(preset_1, preset_2, preset_3, preset_4, preset_5, preset_6, preset_7,preset_8)).which_clicked_modifiers(&actions){
+        if let Some((index,km)) = ui.button_set(ids_array!(preset_1, preset_2, preset_3, preset_4, preset_5, preset_6, preset_7,preset_8)).which_clicked_modifiers(&actions){
             self.preset(cx, index, km.shift);
         }
         
@@ -540,7 +540,7 @@ impl MatchEvent for App {
     }
 
     fn handle_signal(&mut self, cx: &mut Cx) {
-        let piano = self.ui.piano_set(ids!(piano));
+        let piano = self.ui.piano_set(ids_array!(piano));
         while let Some((_, data)) = self.midi_input.receive() {
             self.audio_graph.send_midi_data(data);
             if let Some(note) = data.decode().on_note() {
@@ -602,7 +602,7 @@ impl AppMain for App {
 
         self.audio_graph
             .handle_event_with(cx, event, &mut |cx, action| {
-                let display_audio = self.ui.display_audio_set(ids!(display_audio));
+                let display_audio = self.ui.display_audio_set(ids_array!(display_audio));
                 match action {
                     AudioGraphAction::DisplayAudio { buffer, voice, .. } => {
                         display_audio.process_buffer(cx, None, voice, buffer, 1.0);

@@ -24,7 +24,7 @@ impl Widget for DesignerOutline {
     }
     
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, _walk: Walk) -> DrawStep {
-        let file_tree = self.view.designer_outline_tree(id!(outline_tree));
+        let file_tree = self.view.designer_outline_tree(ids!(outline_tree));
         let data =if let Some(data) = scope.data.get::<DesignerData>(){
             data
         }

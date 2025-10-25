@@ -619,10 +619,10 @@ impl CodeEditor {
 
     pub fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
         if self.read_only{
-            self.animator_cut(cx, id!(blink.off));
+            self.animator_cut(cx, ids!(blink.off));
         }
         else{
-            self.animator_cut(cx, id!(blink.off));
+            self.animator_cut(cx, ids!(blink.off));
             cx.stop_timer(self.blink_timer);
             self.blink_timer = cx.start_timeout(self.blink_speed)
         }
@@ -646,20 +646,20 @@ impl CodeEditor {
         };
         
         if self.blink_timer.is_event(event).is_some() {
-            if self.animator_in_state(cx, id!(blink.off)) {
-                self.animator_play(cx, id!(blink.on));
+            if self.animator_in_state(cx, ids!(blink.off)) {
+                self.animator_play(cx, ids!(blink.on));
             } else {
-                self.animator_play(cx, id!(blink.off));
+                self.animator_play(cx, ids!(blink.off));
             }
             self.blink_timer = cx.start_timeout(self.blink_speed)
         }
         let mut keyboard_moved_cursor = false;
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, id!(focus.off));
+                self.animator_play(cx, ids!(focus.off));
             }
             Hit::KeyFocus(_) => {
-                self.animator_play(cx, id!(focus.on));
+                self.animator_play(cx, ids!(focus.on));
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
@@ -951,7 +951,7 @@ impl CodeEditor {
                     },
                 ..
             }) => {
-                self.animator_play(cx, id!(focus.on));
+                self.animator_play(cx, ids!(focus.on));
                 cx.set_key_focus(self.scroll_bars.area());
                 let ((cursor, affinity), is_in_gutter) = self.pick(session, abs);
                 session.set_selection(
@@ -984,7 +984,7 @@ impl CodeEditor {
                     },
                 ..
             }) => {
-                self.animator_play(cx, id!(focus.on));
+                self.animator_play(cx, ids!(focus.on));
                 cx.set_key_focus(self.scroll_bars.area());
                 let ((cursor, affinity), is_in_gutter) = self.pick(session, abs);
                 session.add_selection(

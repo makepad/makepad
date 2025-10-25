@@ -5,7 +5,7 @@ use crate::{
     //makepad_live_compiler::LiveTokenId,
 };
 use std::collections::HashMap;
-use std::fmt::Write;
+//use std::fmt::Write;
 
 pub enum OutlineNode{
     Virtual{
@@ -171,8 +171,8 @@ impl DesignerData{
                             let uid = uid.into();
                             parent_children.push(uid);
                             
-                            let mut name = String::new();
-                            
+                            let name = String::new();
+                            /*
                             if !id.is_unique(){
                                 if let LivePropType::Field = prop_type {
                                     write!(name, "{}: <{}>", id, class).unwrap();
@@ -183,7 +183,7 @@ impl DesignerData{
                             }
                             else {
                                 write!(name, "<{}>", class).unwrap();
-                            }
+                            }*/
                                 
                             map.insert(uid, OutlineNode::Component {
                                 id,

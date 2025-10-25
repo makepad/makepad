@@ -128,27 +128,27 @@ impl SlidePanel {
 impl SlidePanelRef {
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_play(cx, id!(active.off))
+            inner.animator_play(cx, ids!(active.off))
         }
     }
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_play(cx, id!(active.on))
+            inner.animator_play(cx, ids!(active.on))
         }
     }
     pub fn toggle(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            if inner.animator_in_state(cx, id!(active.on)){
-                inner.animator_play(cx, id!(active.on))
+            if inner.animator_in_state(cx, ids!(active.on)){
+                inner.animator_play(cx, ids!(active.on))
             }
             else{
-                inner.animator_play(cx, id!(active.off))
+                inner.animator_play(cx, ids!(active.off))
             }
         }
     }
     pub fn is_animating(&self, cx: &mut Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator.is_track_animating(cx, id!(active))
+            inner.animator.is_track_animating(cx, ids!(active))
         } else {
             false
         }

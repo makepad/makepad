@@ -441,7 +441,7 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_actions(&mut self, _cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button1)).clicked(&actions) {
+        if self.ui.button(ids!(button1)).clicked(&actions) {
             self.counter += 1;
         }
     }

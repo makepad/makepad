@@ -1,6 +1,5 @@
-use crate::makepad_id::id::*;
+use crate::makepad_live_id::*;
 use crate::value::*;
-use crate::makepad_id_derive::*;
 use std::fmt::Write;
 use crate::object::*;
 use crate::string::*;
@@ -154,7 +153,7 @@ impl ScriptHeap{
         return ptr;
     }
     
-    pub fn new_module(&mut self, id:Id)->Object{
+    pub fn new_module(&mut self, id:LiveId)->Object{
         let md = self.new_with_proto(id.into());
         self.set_value_def(self.modules, id.into(), md.into());
         md
@@ -506,7 +505,7 @@ impl ScriptHeap{
         lhs.value_type().to_redux() == rhs.value_type().to_redux()
     }
     
-    fn set_value_shallow_checked(&mut self, ptr:Object, key:Value, key_id:Id, value:Value, trap:&ScriptTrap)->Value{
+    fn set_value_shallow_checked(&mut self, ptr:Object, key:Value, key_id:LiveId, value:Value, trap:&ScriptTrap)->Value{
         let object = &self.objects[ptr.index as usize];
         if object.tag.is_frozen(){
             return trap.err_frozen()
@@ -648,7 +647,7 @@ impl ScriptHeap{
     // scope specific value get/set
     
     
-    pub fn set_scope_value(&mut self, ptr:Object, key:Id, value:Value, trap:&ScriptTrap)->Value{
+    pub fn set_scope_value(&mut self, ptr:Object, key:LiveId, value:Value, trap:&ScriptTrap)->Value{
         let mut ptr = ptr;
         loop{
             let object = &mut self.objects[ptr.index as usize];
@@ -667,7 +666,7 @@ impl ScriptHeap{
         trap.err_not_found()
     }
     
-    pub fn scope_value(&self, ptr:Object, key: Id, trap:&ScriptTrap)->Value{
+    pub fn scope_value(&self, ptr:Object, key: LiveId, trap:&ScriptTrap)->Value{
         let mut ptr = ptr;
         let key = key.into();
         loop{
@@ -693,7 +692,7 @@ impl ScriptHeap{
         trap.err_not_found()
     }
     
-    pub fn def_scope_value(&mut self, ptr:Object, key:Id, value:Value)->Option<Object>{
+    pub fn def_scope_value(&mut self, ptr:Object, key:LiveId, value:Value)->Option<Object>{
         // if we already have this value we have to shadow the scope
         let object = &mut self.objects[ptr.index as usize];
         if let Some(_) = object.map.get(&key.into()){
@@ -809,7 +808,7 @@ impl ScriptHeap{
         return self.value_deep_map(ptr, key, trap)
     }
     
-    pub fn value_path(&self, ptr:Object, keys:&[Id], trap:&ScriptTrap)->Value{
+    pub fn value_path(&self, ptr:Object, keys:&[LiveId], trap:&ScriptTrap)->Value{
         let mut value:Value = ptr.into();
         for key in keys{
             if let Some(obj) = value.as_object(){

@@ -355,21 +355,21 @@ impl LiveRegister for App {
             ui.radio_button_set(ids!(radios_demo_19.radio1, radios_demo_19.radio2, radios_demo_19.radio3, radios_demo_19.radio4)).selected(cx, actions);
             ui.radio_button_set(ids!(radios_demo_20.radio1, radios_demo_20.radio2, radios_demo_20.radio3, radios_demo_20.radio4)).selected(cx, actions);
 
-            if let Some(txt) = self.ui.text_input(id!(simpletextinput)).changed(&actions){
+            if let Some(txt) = self.ui.text_input(ids!(simpletextinput)).changed(&actions){
                 log!("TEXTBOX CHANGED {}", self.counter);
                 self.counter += 1;
-                let lbl = self.ui.label(id!(simpletextinput_outputbox));
+                let lbl = self.ui.label(ids!(simpletextinput_outputbox));
                 lbl.set_text(cx,&format!("{} {}" , self.counter, txt));
             }
             
             for slider in [
-                (id!(theme_contrast), live_id!(THEME_COLOR_CONTRAST)),
-                (id!(theme_tint_amount), live_id!(THEME_COLOR_TINT_AMOUNT)),
-                (id!(theme_font_size), live_id!(THEME_FONT_SIZE_BASE)),
-                (id!(theme_font_size_contrast), live_id!(THEME_FONT_SIZE_CONTRAST)),
-                (id!(theme_bevel), live_id!(THEME_BEVELING)),
-                (id!(theme_rounding), live_id!(THEME_CORNER_RADIUS)),
-                (id!(theme_space), live_id!(THEME_SPACE_FACTOR)),
+                (ids!(theme_contrast), live_id!(THEME_COLOR_CONTRAST)),
+                (ids!(theme_tint_amount), live_id!(THEME_COLOR_TINT_AMOUNT)),
+                (ids!(theme_font_size), live_id!(THEME_FONT_SIZE_BASE)),
+                (ids!(theme_font_size_contrast), live_id!(THEME_FONT_SIZE_CONTRAST)),
+                (ids!(theme_bevel), live_id!(THEME_BEVELING)),
+                (ids!(theme_rounding), live_id!(THEME_CORNER_RADIUS)),
+                (ids!(theme_space), live_id!(THEME_SPACE_FACTOR)),
             ]{
                 if let Some(value) = self.ui.slider(slider.0).end_slide(&actions){
                     cx.set_dsl_value(
@@ -384,7 +384,7 @@ impl LiveRegister for App {
             
             use makepad_platform::makepad_live_tokenizer::colorhex::hex_bytes_to_u32;
             
-            if let Some(txt) = self.ui.text_input(id!(theme_tint_color)).changed(&actions){
+            if let Some(txt) = self.ui.text_input(ids!(theme_tint_color)).changed(&actions){
                 cx.set_dsl_value(
                     live_id!(makepad_widgets),
                     live_id!(theme_desktop_dark),
@@ -394,52 +394,52 @@ impl LiveRegister for App {
                 cx.reload_ui_dsl(); 
             }
 
-            if self.ui.button(id!(basicbutton)).clicked(&actions) {
+            if self.ui.button(ids!(basicbutton)).clicked(&actions) {
                 log!("BASIC BUTTON CLICKED {}", self.counter);
                 self.counter += 1;
-                let btn = self.ui.button(id!(basicbutton));
+                let btn = self.ui.button(ids!(basicbutton));
                 btn.set_text(cx,&format!("Clicky clicky! {}", self.counter));
             }
 
-            if self.ui.button(id!(blendbutton)).clicked(&actions) {
-                self.ui.image_blend(id!(blendimage)).switch_image(cx);
+            if self.ui.button(ids!(blendbutton)).clicked(&actions) {
+                self.ui.image_blend(ids!(blendimage)).switch_image(cx);
             }
 
-            if self.ui.button(id!(pageflipbutton_a)).clicked(&actions) {
-                self.ui.page_flip(id!(page_flip)).set_active_page(cx, live_id!(page_a));
+            if self.ui.button(ids!(pageflipbutton_a)).clicked(&actions) {
+                self.ui.page_flip(ids!(page_flip)).set_active_page(cx, live_id!(page_a));
             }
 
-            if self.ui.button(id!(pageflipbutton_b)).clicked(&actions) {
-                self.ui.page_flip(id!(page_flip)).set_active_page(cx, live_id!(page_b));
+            if self.ui.button(ids!(pageflipbutton_b)).clicked(&actions) {
+                self.ui.page_flip(ids!(page_flip)).set_active_page(cx, live_id!(page_b));
             }
 
-            if self.ui.button(id!(pageflipbutton_c)).clicked(&actions) {
-                self.ui.page_flip(id!(page_flip)).set_active_page(cx, live_id!(page_c));
+            if self.ui.button(ids!(pageflipbutton_c)).clicked(&actions) {
+                self.ui.page_flip(ids!(page_flip)).set_active_page(cx, live_id!(page_c));
             }
 
-            if self.ui.button(id!(styledbutton)).clicked(&actions) {
+            if self.ui.button(ids!(styledbutton)).clicked(&actions) {
                 log!("STYLED BUTTON CLICKED {}", self.counter);
                 self.counter += 1;
-                let btn = self.ui.button(id!(styledbutton));
+                let btn = self.ui.button(ids!(styledbutton));
                 btn.set_text(cx,&format!("Styled button clicked: {}", self.counter));
             }
 
-            if self.ui.button(id!(find)).clicked(&actions) {
+            if self.ui.button(ids!(find)).clicked(&actions) {
                 
             }
 
-            if self.ui.button(id!(iconbutton)).clicked(&actions) {
+            if self.ui.button(ids!(iconbutton)).clicked(&actions) {
                 log!("ICON BUTTON CLICKED {}", self.counter);
                 self.counter += 1;
-                let btn = self.ui.button(id!(iconbutton));
+                let btn = self.ui.button(ids!(iconbutton));
                 btn.set_text(cx,&format!("Icon button clicked: {}", self.counter));
             }
 
 
-            if let Some(check) = self.ui.check_box(id!(simplecheckbox)).changed(actions) {
+            if let Some(check) = self.ui.check_box(ids!(simplecheckbox)).changed(actions) {
                 log!("CHECK BUTTON CLICKED {} {}", self.counter, check);
                 self.counter += 1;
-                let lbl = self.ui.label(id!(simplecheckbox_output));
+                let lbl = self.ui.label(ids!(simplecheckbox_output));
                 lbl.set_text(cx,&format!("{} {}" , self.counter, check));
             }
 
@@ -465,15 +465,15 @@ impl AppMain for App {
 
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
-        db.bind(id!(dropdown), ids!(dropdown));
-        db.bind(id!(dropdown_below), ids!(dropdown_below));
-        db.bind(id!(dropdown_disabled), ids!(dropdown_disabled));
-        db.bind(id!(dropdown_customized), ids!(dropdown_customized));
-        db.bind(id!(dropdown_flat), ids!(dropdown_flat));
-        db.bind(id!(dropdown_flat_below), ids!(dropdown_flat_below));
-        db.bind(id!(dropdown_gradient_x), ids!(dropdown_gradient_x));
-        db.bind(id!(dropdown_gradient_x_below), ids!(dropdown_gradient_x_below));
-        db.bind(id!(dropdown_gradient_y), ids!(dropdown_gradient_y));
-        db.bind(id!(dropdown_gradient_y_below), ids!(dropdown_gradient_y_below));
+        db.bind(ids!(dropdown), ids!(dropdown));
+        db.bind(ids!(dropdown_below), ids!(dropdown_below));
+        db.bind(ids!(dropdown_disabled), ids!(dropdown_disabled));
+        db.bind(ids!(dropdown_customized), ids!(dropdown_customized));
+        db.bind(ids!(dropdown_flat), ids!(dropdown_flat));
+        db.bind(ids!(dropdown_flat_below), ids!(dropdown_flat_below));
+        db.bind(ids!(dropdown_gradient_x), ids!(dropdown_gradient_x));
+        db.bind(ids!(dropdown_gradient_x_below), ids!(dropdown_gradient_x_below));
+        db.bind(ids!(dropdown_gradient_y), ids!(dropdown_gradient_y));
+        db.bind(ids!(dropdown_gradient_y_below), ids!(dropdown_gradient_y_below));
     }
 }

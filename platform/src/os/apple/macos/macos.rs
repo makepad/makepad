@@ -203,6 +203,7 @@ impl Cx {
 
     fn ensure_timer0_started(&mut self) {
         if !self.os.timer0_armed {
+            with_macos_app(|app| app.stop_timer(0));
             with_macos_app(|app| app.start_timer(0, 0.008, true));
             self.os.timer0_armed = true;
         }
@@ -211,6 +212,7 @@ impl Cx {
     fn ensure_timer0_stopped(&mut self) {
         if self.os.timer0_armed {
             with_macos_app(|app| app.stop_timer(0));
+            with_macos_app(|app| app.start_timer(0, 0.2, true));
             self.os.timer0_armed = false;
         }
     }
@@ -336,11 +338,10 @@ impl Cx {
             }
             MacosEvent::Paint => {
                 let has_next_frames = self.new_next_frames.len() != 0;
-                let needs_redrawing = self.need_redrawing();
-
                 if has_next_frames {
                     self.call_next_frame_event(with_macos_app(|app| app.time_now()));
                 }
+                let needs_redrawing = self.need_redrawing();
                 if needs_redrawing {
                     self.call_draw_event();
                     self.mtl_compile_shaders(&metal_cx);

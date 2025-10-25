@@ -717,7 +717,7 @@ impl TextInput {
     }
 
     pub fn reset_blink_timer(&mut self, cx: &mut Cx) {
-        self.animator_cut(cx, id!(blink.off));
+        self.animator_cut(cx, ids!(blink.off));
         if !self.is_read_only {
             cx.stop_timer(self.blink_timer);
             self.blink_timer = cx.start_timeout(self.blink_speed)
@@ -1081,8 +1081,8 @@ impl TextInput {
     }
 
     fn handle_focus_lost(&mut self, cx: &mut Cx, scope_path: &HeapLiveIdPath, uid: WidgetUid) {
-        self.animator_play(cx, id!(focus.off));
-        self.animator_play(cx, id!(blink.on));
+        self.animator_play(cx, ids!(focus.off));
+        self.animator_play(cx, ids!(blink.on));
         cx.stop_timer(self.blink_timer);
         cx.hide_text_ime();
         cx.widget_action(uid, scope_path, TextInputAction::KeyFocusLost);
@@ -1173,9 +1173,9 @@ impl TextInput {
 
     fn check_text_is_empty(&mut self, cx: &mut Cx) {
         if self.text.is_empty() {
-            self.animator_play(cx, id!(empty.on));
+            self.animator_play(cx, ids!(empty.on));
         } else {
-            self.animator_play(cx, id!(empty.off));
+            self.animator_play(cx, ids!(empty.off));
         }
     }
     
@@ -1228,11 +1228,11 @@ impl Widget for TextInput {
     }
 
     fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
-        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
     }
                 
     fn disabled(&self, cx:&Cx) -> bool {
-        self.animator_in_state(cx, id!(disabled.on))
+        self.animator_in_state(cx, ids!(disabled.on))
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -1241,10 +1241,10 @@ impl Widget for TextInput {
         }
 
         if self.blink_timer.is_event(event).is_some() {
-            if self.animator_in_state(cx, id!(blink.off)) {
-                self.animator_play(cx, id!(blink.on));
+            if self.animator_in_state(cx, ids!(blink.off)) {
+                self.animator_play(cx, ids!(blink.on));
             } else {
-                self.animator_play(cx, id!(blink.off));
+                self.animator_play(cx, ids!(blink.off));
             }
             self.blink_timer = cx.start_timeout(self.blink_speed)
         }
@@ -1279,13 +1279,13 @@ impl Widget for TextInput {
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             Hit::KeyFocus(_) => {
-                self.animator_play(cx, id!(focus.on));
+                self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
@@ -1389,17 +1389,17 @@ impl Widget for TextInput {
                     _ => {}
                 }
 
-                self.animator_play(cx, id!(hover.down));
+                self.animator_play(cx, ids!(hover.down));
             }
             Hit::FingerUp(fe) => {
                 if fe.is_over && fe.was_tap() {
                     if fe.has_hovers() {
-                        self.animator_play(cx, id!(hover.on));
+                        self.animator_play(cx, ids!(hover.on));
                     } else {
-                        self.animator_play(cx, id!(hover.off));
+                        self.animator_play(cx, ids!(hover.off));
                     }
                 } else {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
             }
             Hit::FingerMove(FingerMoveEvent {
@@ -1571,7 +1571,7 @@ impl Widget for TextInput {
                         replace_with: input
                     }
                 );
-                self.animator_play(cx, id!(empty.off));
+                self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
             }
