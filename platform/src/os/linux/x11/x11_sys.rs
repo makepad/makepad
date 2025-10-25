@@ -366,12 +366,18 @@ extern "C" {
     );
     
     pub fn XFlush(arg1: *mut Display) -> c_int;
-    
-    pub fn XStoreName(
-        arg1: *mut Display,
-        arg2: Window,
-        arg3: *const c_char,
-    ) -> c_int;
+
+    pub fn Xutf8SetWMProperties(  
+        arg1: *mut Display,  
+        arg2: Window,  
+        arg3: *const c_char,  
+        arg4: *const c_char,  
+        arg5: *mut *mut c_char,  
+        arg6: c_int,  
+        arg7: *mut XSizeHints,  
+        arg8: *mut XWMHints,  
+        arg9: *mut XClassHint,  
+    );
     
     pub fn XCreateIC(arg1: XIM, ...) -> XIC;
     
@@ -1123,3 +1129,51 @@ pub union _XEvent {
     _bindgen_union_align: [u64; 24usize],
 }
 
+#[repr(C)]  
+#[derive(Debug, Copy, Clone)]  
+pub struct XSizeHints {  
+    pub flags: c_long,  
+    pub x: c_int,  
+    pub y: c_int,  
+    pub width: c_int,  
+    pub height: c_int,  
+    pub min_width: c_int,  
+    pub min_height: c_int,  
+    pub max_width: c_int,  
+    pub max_height: c_int,  
+    pub width_inc: c_int,  
+    pub height_inc: c_int,  
+    pub min_aspect: XsizeHintsBindgenTy1,  
+    pub max_aspect: XsizeHintsBindgenTy1,  
+    pub base_width: c_int,  
+    pub base_height: c_int,  
+    pub win_gravity: c_int,  
+}  
+
+#[repr(C)]  
+#[derive(Debug, Copy, Clone)]  
+pub struct XsizeHintsBindgenTy1 {  
+    pub x: c_int,  
+    pub y: c_int,  
+}  
+  
+#[repr(C)]  
+#[derive(Debug, Copy, Clone)]  
+pub struct XWMHints {  
+    pub flags: c_long,  
+    pub input: c_int,  
+    pub initial_state: c_int,  
+    pub icon_pixmap: Pixmap,  
+    pub icon_window: Window,  
+    pub icon_x: c_int,  
+    pub icon_y: c_int,  
+    pub icon_mask: Pixmap,  
+    pub window_group: XID,  
+}  
+
+#[repr(C)]  
+#[derive(Debug, Copy, Clone)]  
+pub struct XClassHint {  
+    pub res_name: *mut c_char,  
+    pub res_class: *mut c_char,  
+}
