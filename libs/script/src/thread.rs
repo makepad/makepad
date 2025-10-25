@@ -1,4 +1,4 @@
-use crate::makepad_id::id::*;
+use crate::makepad_live_id::*;
 use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
@@ -17,9 +17,9 @@ pub struct StackBases{
 
 #[derive(Debug)]
 pub struct LoopValues{
-    pub value_id: Id,
-    pub key_id: Option<Id>,
-    pub index_id: Option<Id>,
+    pub value_id: LiveId,
+    pub key_id: Option<LiveId>,
+    pub index_id: Option<LiveId>,
     pub source: Value,
     pub index: f64,
 }
@@ -252,15 +252,15 @@ impl ScriptThread{
     }
     
     // lets resolve an id to a Value
-    pub fn scope_value(&mut  self, heap:&ScriptHeap, id: Id)->Value{
+    pub fn scope_value(&mut  self, heap:&ScriptHeap, id: LiveId)->Value{
         heap.scope_value(*self.scopes.last().unwrap(), id.into(),&mut self.trap)
     }
     
-    pub fn set_scope_value(&mut self, heap:&mut ScriptHeap, id: Id, value:Value)->Value{
+    pub fn set_scope_value(&mut self, heap:&mut ScriptHeap, id: LiveId, value:Value)->Value{
         heap.set_scope_value(*self.scopes.last().unwrap(), id.into(),value,&mut self.trap)
     }
     
-    pub fn def_scope_value(&mut self, heap:&mut ScriptHeap, id: Id, value:Value){
+    pub fn def_scope_value(&mut self, heap:&mut ScriptHeap, id: LiveId, value:Value){
         // alright if we are shadowing a value, we need to make a new scope
         if let Some(new_scope) = heap.def_scope_value(*self.scopes.last().unwrap(), id, value){
             self.scopes.push(new_scope);

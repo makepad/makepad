@@ -84,7 +84,7 @@ impl LiveHook for RunView {
     fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc{..} = apply.from{
             self.last_rect = Default::default();
-            self.animator_cut(cx, id!(started.on));
+            self.animator_cut(cx, ids!(started.on));
         }
     }
 }
@@ -135,18 +135,18 @@ impl RunView {
                 let drawn = swapchain.get_image(presentable_draw.target_id)?;
                         
                 self.draw_app.set_texture(0, &drawn.image);
-                self.draw_app.draw_vars.set_var_instance(cx, id!(tex_scale), &[
+                self.draw_app.draw_vars.set_var_instance(cx, ids!(tex_scale), &[
                     (presentable_draw.width as f32) / (swapchain.alloc_width as f32),
                     (presentable_draw.height as f32) / (swapchain.alloc_height as f32),
                 ]);
-                self.draw_app.draw_vars.set_var_instance(cx, id!(tex_size), &[
+                self.draw_app.draw_vars.set_var_instance(cx, ids!(tex_size), &[
                     (swapchain.alloc_width as f32),
                     (swapchain.alloc_height as f32),
                 ]);
                 
                 if !self.started {
                     self.started = true;
-                    self.animator_play(cx, id!(started.on));
+                    self.animator_play(cx, ids!(started.on));
                 }
                 self.redraw_countdown = 20;
                 self.redraw(cx);
@@ -167,14 +167,14 @@ impl RunView {
     }
     
     pub fn ready_to_start(&mut self, cx: &mut Cx){
-        self.animator_play(cx, id!(recompiling.off));
+        self.animator_play(cx, ids!(recompiling.off));
         // cause a resize event to fire
         self.last_rect = Default::default();
         self.redraw(cx);
     }
     
     pub fn recompile_started(&mut self, cx: &mut Cx) {
-        self.animator_play(cx, id!(recompiling.on));
+        self.animator_play(cx, ids!(recompiling.on));
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {

@@ -131,9 +131,9 @@ impl LiveHook for Designer {
     }
     
     fn after_update_from_doc(&mut self, cx:&mut Cx){
-        //let designer_view = self.ui.designer_view(id!(designer_view));
+        //let designer_view = self.ui.designer_view(ids!(designer_view));
         //designer_view.reload_view(cx);
-        let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
+        let outline_tree = self.ui.designer_outline_tree(ids!(outline_tree));
         outline_tree.redraw(cx);
         self.data.pending_revision = false;
     }
@@ -207,8 +207,8 @@ impl Designer{
 
 impl WidgetMatchEvent for Designer{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope){
-        let outline_tree = self.ui.designer_outline_tree(id!(outline_tree));
-        let designer_view = self.ui.designer_view(id!(designer_view));
+        let outline_tree = self.ui.designer_outline_tree(ids!(outline_tree));
+        let designer_view = self.ui.designer_view(ids!(designer_view));
         if let Some((outline_id, km, tap_count)) = designer_view.selected(&actions){
             // select the right node in the filetree
             let path_ids = self.data.construct_path_ids(outline_id);

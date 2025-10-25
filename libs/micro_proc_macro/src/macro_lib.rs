@@ -4,9 +4,9 @@ use proc_macro::{TokenTree, Span, TokenStream, Delimiter, Group, Literal, Ident,
 use proc_macro::token_stream::IntoIter;
 
 #[derive(Clone, Default, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
-pub struct Id(pub u64);
+pub struct LiveId(pub u64);
 
-impl Id {
+impl LiveId {
     pub const SEED:u64 = 0xd6e8_feb8_6659_fd93;
     pub const ARRAY:u64 = 0x0000_2000_0000_0000;
     // from https://nullprogram.com/blog/2018/07/31/

@@ -121,7 +121,7 @@ impl App {
             max_tokens: 1000,
             stream: true,
         });
-        self.ui.label(id!(message_label)).set_text(cx, "Answering:..\n");
+        self.ui.label(ids!(message_label)).set_text(cx, "Answering:..\n");
         cx.http_request(request_id, request);
     }
 }
@@ -129,16 +129,16 @@ impl App {
 impl MatchEvent for App {
     
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(send_button)).clicked(&actions) || 
-        self.ui.text_input(id!(message_input)).returned(&actions).is_some()
+        if self.ui.button(ids!(send_button)).clicked(&actions) || 
+        self.ui.text_input(ids!(message_input)).returned(&actions).is_some()
         {
-            let user_prompt = self.ui.text_input(id!(message_input)).text();
+            let user_prompt = self.ui.text_input(ids!(message_input)).text();
             self.send_message(cx, user_prompt);
         }
     }
         
     fn handle_network_responses(&mut self, cx: &mut Cx, responses:&NetworkResponsesEvent ){
-        let label = self.ui.label(id!(message_label));
+        let label = self.ui.label(ids!(message_label));
         for event in responses{
             match &event.response {
                 NetworkResponse::HttpStreamResponse(response)=>{
@@ -179,7 +179,7 @@ impl MatchEvent for App {
                     }
                 }
                 NetworkResponse::HttpRequestError(error) => {
-                    let label = self.ui.label(id!(message_label));
+                    let label = self.ui.label(ids!(message_label));
                     label.set_text(cx, &format!("Failed to connect with OpenAI {:?}", error));
                 }
                 _ => ()

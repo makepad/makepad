@@ -338,7 +338,7 @@ impl Tab {
     
     pub fn set_is_active(&mut self, cx: &mut Cx, is_active: bool, animate: Animate) {
         self.is_active = is_active;
-        self.animator_toggle(cx, is_active, animate, id!(active.on), id!(active.off));
+        self.animator_toggle(cx, is_active, animate, ids!(active.on), ids!(active.off));
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
@@ -376,16 +376,16 @@ impl Tab {
         match self.close_button.handle_event(cx, event) {
             TabCloseButtonAction::WasPressed if self.closeable => dispatch_action(cx, TabAction::CloseWasPressed),
             TabCloseButtonAction::HoverIn => block_hover_out = true,
-            TabCloseButtonAction::HoverOut => self.animator_play(cx, id!(hover.off)),
+            TabCloseButtonAction::HoverOut => self.animator_play(cx, ids!(hover.off)),
             _ => ()
         };
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => if !block_hover_out {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerMove(e) => {
                 if !self.is_dragging && (e.abs - e.abs_start).length() > self.min_drag_dist {

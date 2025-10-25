@@ -2,7 +2,7 @@
 use crate::vm::*;
 use crate::value::*;
 use crate::heap::*;
-use makepad_id::*;
+use makepad_live_id::*;
 
 pub type ScriptTypeId = std::any::TypeId;
 
@@ -24,7 +24,7 @@ pub trait ScriptHookDeref {
 
 #[derive(Default)]
 pub struct ScriptTypeProps{
-    pub(crate) props: IdMap<Id, ScriptTypeId>
+    pub(crate) props: LiveIdMap<LiveId, ScriptTypeId>
 }
 
 pub struct ScriptTypeObject{
@@ -111,7 +111,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         val
     }
     
-    fn script_enum_lookup_variant(vm:&mut Vm, variant:Id)->Value{
+    fn script_enum_lookup_variant(vm:&mut Vm, variant:LiveId)->Value{
         let rt = vm.heap.registered_type(Self::script_type_id_static()).unwrap();
         let obj = rt.object.as_ref().unwrap().proto.into();
         vm.heap.value(obj, variant.into(), &vm.thread.trap)

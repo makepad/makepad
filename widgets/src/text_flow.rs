@@ -827,7 +827,7 @@ impl Widget for TextFlowLink {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area());
                     }
-                    self.animator_play(cx, id!(hover.down));
+                    self.animator_play(cx, ids!(hover.down));
                     if self.click_on_down{
                         cx.widget_action_with_data(
                             &self.action_data,
@@ -841,10 +841,10 @@ impl Widget for TextFlowLink {
                 }
                 Hit::FingerHoverIn(_) => {
                     cx.set_cursor(MouseCursor::Hand);
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 }
                 Hit::FingerHoverOut(_) => {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
                     if fe.is_over {
@@ -860,12 +860,12 @@ impl Widget for TextFlowLink {
                         }
                         
                         if fe.device.has_hovers() {
-                            self.animator_play(cx, id!(hover.on));
+                            self.animator_play(cx, ids!(hover.on));
                         } else {
-                            self.animator_play(cx, id!(hover.off));
+                            self.animator_play(cx, ids!(hover.off));
                         }
                     } else {
-                        self.animator_play(cx, id!(hover.off));
+                        self.animator_play(cx, ids!(hover.off));
                     }
                 }
                 _ => (),

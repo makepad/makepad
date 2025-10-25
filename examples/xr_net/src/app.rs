@@ -82,8 +82,8 @@ impl AppMain for App {
             let compr = makepad_miniz::compress_to_vec(&data,10);
             log!("{:?} {:?}", data.len(), compr.len());
             */
-            let lasers = self.ui.xr_lasers(id!(xr_lasers));
-            if let Some(mut xr_hands) = self.ui.xr_hands(id!(xr_hands)).borrow_mut(){
+            let lasers = self.ui.xr_lasers(ids!(xr_lasers));
+            if let Some(mut xr_hands) = self.ui.xr_hands(ids!(xr_hands)).borrow_mut(){
                 if let Some(mut xr_lasers) = lasers.borrow_mut(){
                     while let Ok(msg) = self.xr_net.incoming_receiver.try_recv(){
                         match msg{

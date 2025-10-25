@@ -65,7 +65,7 @@ impl Widget for ExpandablePanel {
             touch_gesture.set_mode(ScrollMode::Swipe);
 
             // Limit the amount of dragging allowed for the panel
-            let panel_height = self.view(id!(panel)).area().rect(cx).size.y;
+            let panel_height = self.view(ids!(panel)).area().rect(cx).size.y;
             touch_gesture.set_range(0.0, panel_height - self.initial_offset);
 
             touch_gesture.reset_scrolled_at();

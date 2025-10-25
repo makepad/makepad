@@ -238,7 +238,7 @@ impl Widget for CommandTextInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if cx.has_key_focus(self.key_controller_text_input_ref().area()) {
             if let Event::KeyDown(key_event) = event {
-                let popup_visible = self.view(id!(popup)).visible();
+                let popup_visible = self.view(ids!(popup)).visible();
 
                 if popup_visible {
                     let mut eat_the_event = true;
@@ -375,11 +375,11 @@ impl Widget for CommandTextInput {
 impl CommandTextInput {
     // Ensure popup state consistency
     fn ensure_popup_consistent(&mut self, cx: &mut Cx) {
-        if self.view(id!(popup)).visible() {
+        if self.view(ids!(popup)).visible() {
             if self.inline_search {
-                self.view(id!(search_input_wrapper)).set_visible(cx, false);
+                self.view(ids!(search_input_wrapper)).set_visible(cx, false);
             } else {
-                self.view(id!(search_input_wrapper)).set_visible(cx, true);
+                self.view(ids!(search_input_wrapper)).set_visible(cx, true);
             }
         }
     }
@@ -404,9 +404,9 @@ impl CommandTextInput {
             self.trigger_position = Some(get_head(&self.text_input_ref()));
 
             if self.inline_search {
-                self.view(id!(search_input_wrapper)).set_visible(cx, false);
+                self.view(ids!(search_input_wrapper)).set_visible(cx, false);
             } else {
-                self.view(id!(search_input_wrapper)).set_visible(cx, true);
+                self.view(ids!(search_input_wrapper)).set_visible(cx, true);
                 self.is_search_input_focus_pending = true;
             }
 
@@ -486,17 +486,17 @@ impl CommandTextInput {
 
     fn show_popup(&mut self, cx: &mut Cx) {
         if self.inline_search {
-            self.view(id!(search_input_wrapper)).set_visible(cx, false);
+            self.view(ids!(search_input_wrapper)).set_visible(cx, false);
         } else {
-            self.view(id!(search_input_wrapper)).set_visible(cx, true);
+            self.view(ids!(search_input_wrapper)).set_visible(cx, true);
         }
-        self.view(id!(popup)).set_visible(cx, true);
-        self.view(id!(popup)).redraw(cx);
+        self.view(ids!(popup)).set_visible(cx, true);
+        self.view(ids!(popup)).redraw(cx);
     }
 
     fn hide_popup(&mut self, cx: &mut Cx) {
         self.clear_popup(cx);
-        self.view(id!(popup)).set_visible(cx, false);
+        self.view(ids!(popup)).set_visible(cx, false);
     }
 
     /// Clear all text and hide the popup going back to initial state.
@@ -523,7 +523,7 @@ impl CommandTextInput {
     ///
     /// Normally called as response to `should_build_items`.
     pub fn clear_items(&mut self) {
-        self.list(id!(list)).clear();
+        self.list(ids!(list)).clear();
         self.selectable_widgets.clear();
         self.keyboard_focus_index = None;
         self.pointer_hover_index = None;
@@ -533,7 +533,7 @@ impl CommandTextInput {
     ///
     /// Normally called after clearing the previous items.
     pub fn add_item(&mut self, widget: WidgetRef) {
-        self.list(id!(list)).add(widget.clone());
+        self.list(ids!(list)).add(widget.clone());
         self.selectable_widgets.push(widget);
         self.keyboard_focus_index = self.keyboard_focus_index.or(Some(0));
     }
@@ -544,7 +544,7 @@ impl CommandTextInput {
     ///
     /// Normally called after clearing the previous items.
     pub fn add_unselectable_item(&mut self, widget: WidgetRef) {
-        self.list(id!(list)).add(widget);
+        self.list(ids!(list)).add(widget);
     }
 
     /// Get the current search query.
@@ -688,12 +688,12 @@ impl CommandTextInput {
 
     /// Returns a reference to the inner `TextInput` widget.
     pub fn text_input_ref(&self) -> TextInputRef {
-        self.text_input(id!(text_input))
+        self.text_input(ids!(text_input))
     }
 
     /// Returns a reference to the inner `TextInput` widget used for search.
     pub fn search_input_ref(&self) -> TextInputRef {
-        self.text_input(id!(search_input))
+        self.text_input(ids!(search_input))
     }
 
     fn trigger_grapheme(&self) -> Option<&str> {

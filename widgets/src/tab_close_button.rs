@@ -89,11 +89,11 @@ impl TabCloseButton {
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_button.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
                 return TabCloseButtonAction::HoverIn;
             }
             Hit::FingerHoverOut(_)=>{
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
                 return TabCloseButtonAction::HoverOut;
             }
             // Pressing the tab close button with a primary button/touch

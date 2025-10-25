@@ -135,11 +135,11 @@ impl SeqButton {
     }
     
     fn set_is_active(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(active.on), id!(active.off))
+        self.animator_toggle(cx, is, animate, ids!(active.on), ids!(active.off))
     }
     
     fn is_active(&self, cx: &Cx) -> bool {
-        self.animator_in_state(cx, id!(active.on))
+        self.animator_in_state(cx, ids!(active.on))
     }
     
     pub fn handle_event_changed(
@@ -158,28 +158,28 @@ impl SeqButton {
         ) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerDown(_) => {
-                self.animator_play(cx, id!(hover.on));
-                if self.animator_in_state(cx, id!(active.on)) {
-                    self.animator_play(cx, id!(active.off));
+                self.animator_play(cx, ids!(hover.on));
+                if self.animator_in_state(cx, ids!(active.on)) {
+                    self.animator_play(cx, ids!(active.off));
                     return true
                 }
                 else {
-                    self.animator_play(cx, id!(active.on));
+                    self.animator_play(cx, ids!(active.on));
                     return true
                 }
             }
             Hit::FingerUp(se) => {
                 if !se.is_sweep && se.is_over && se.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 }
                 else {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
             }
             _ => {}

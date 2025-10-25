@@ -539,11 +539,11 @@ impl DropDown {
 
 impl Widget for DropDown {
     fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
-        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
     }
                 
     fn disabled(&self, cx:&Cx) -> bool {
-        self.animator_in_state(cx, id!(disabled.on))
+        self.animator_in_state(cx, ids!(disabled.on))
     }
     
     fn widget_to_data(&self, _cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
@@ -603,7 +603,7 @@ impl Widget for DropDown {
             if let Event::MouseDown(e) = event {
                 if !menu.menu_contains_pos(cx, e.abs) {
                     self.set_closed(cx);
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                     return;
                 }
             }
@@ -611,13 +611,13 @@ impl Widget for DropDown {
                 
         match event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
             Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, id!(focus.off));
+                self.animator_play(cx, ids!(focus.off));
                 self.set_closed(cx);
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
                 self.draw_bg.redraw(cx);
             }
             Hit::KeyFocus(_) => {
-                self.animator_play(cx, id!(focus.on));
+                self.animator_play(cx, ids!(focus.on));
             }
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::ArrowUp => {
@@ -639,28 +639,28 @@ impl Widget for DropDown {
                 _ => ()
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                if self.animator.animator_in_state(cx, id!(disabled.off)) {
+                if self.animator.animator_in_state(cx, ids!(disabled.off)) {
                     cx.set_key_focus(self.draw_bg.area());
-                    self.animator_play(cx, id!(hover.down));
+                    self.animator_play(cx, ids!(hover.down));
                     self.set_active(cx);
                 }
-                // self.animator_play(cx, id!(hover.down));
+                // self.animator_play(cx, ids!(hover.down));
             },
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 if fe.is_over {
                     if fe.device.has_hovers() {
-                        self.animator_play(cx, id!(hover.on));
+                        self.animator_play(cx, ids!(hover.on));
                     }
                 }
                 else {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
             }
             _ => ()

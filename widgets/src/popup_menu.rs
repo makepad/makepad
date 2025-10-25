@@ -511,15 +511,15 @@ impl PopupMenuItem {
             HitOptions::new().with_sweep_area(sweep_area)
         ) {
             Hit::FingerHoverIn(_) => {
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 dispatch_action(cx, PopupMenuItemAction::WasSweeped);
-                self.animator_play(cx, id!(hover.on));
-                self.animator_play(cx, id!(active.on));
+                self.animator_play(cx, ids!(hover.on));
+                self.animator_play(cx, ids!(active.on));
             }
             Hit::FingerUp(se) if se.is_primary_hit() => {
                 if !se.is_sweep {
@@ -532,8 +532,8 @@ impl PopupMenuItem {
                     //}
                 }
                 else {
-                    self.animator_play(cx, id!(hover.off));
-                    self.animator_play(cx, id!(active.off));
+                    self.animator_play(cx, ids!(hover.off));
+                    self.animator_play(cx, ids!(active.off));
                 }
             }
             _ => {}
@@ -605,12 +605,12 @@ impl PopupMenu {
     fn select_item_state(&mut self, cx: &mut Cx, which_id: PopupMenuItemId) {
         for (id, item) in &mut *self.menu_items {
             if *id == which_id {
-                item.animator_cut(cx, id!(active.on));
-                item.animator_cut(cx, id!(hover.on));
+                item.animator_cut(cx, ids!(active.on));
+                item.animator_cut(cx, ids!(hover.on));
             }
             else {
-                item.animator_cut(cx, id!(active.off));
-                item.animator_cut(cx, id!(hover.off));
+                item.animator_cut(cx, ids!(active.off));
+                item.animator_cut(cx, ids!(hover.off));
             }
         }
     }

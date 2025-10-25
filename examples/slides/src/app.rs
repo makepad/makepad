@@ -111,7 +111,7 @@ impl LiveHook for App{
         if let Ok(contents) = std::fs::read_to_string("makepad_slides_state.ron") {
             match AppStateRon::deserialize_ron(&contents) {
                 Ok(state)=>{
-                    self.ui.slides_view(id!(slides_view)).set_current_slide(cx, state.slide);
+                    self.ui.slides_view(ids!(slides_view)).set_current_slide(cx, state.slide);
                 }
                 _=>()
             }
@@ -132,7 +132,7 @@ struct AppStateRon{
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
-        let slides_view = self.ui.slides_view(id!(slides_view));
+        let slides_view = self.ui.slides_view(ids!(slides_view));
         if let Some(slide) = slides_view.flipped(&actions){
             let saved = AppStateRon{slide}.serialize_ron();
             let mut f = File::create("makepad_slides_state.ron").expect("Unable to create file");
