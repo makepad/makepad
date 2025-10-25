@@ -114,20 +114,15 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("        if let Some(o) = value.as_object(){vm.heap.set_first_applied_and_clean(o);}");
         tb.add("        self.on_deref_after_apply(vm, apply, value);");
         tb.add("    }");
-        tb.add("}");
         
         
-        // ScriptToValue
+        tb.add("    fn script_to_value(&self, vm: &mut Vm)->Value {");
         
-        
-        
-        tb.add("impl").stream(generic.clone());
-        tb.add("ScriptToValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-                
-        tb.add("    fn script_to_value_props(&self, vm: &mut Vm, obj:Object) {");
-        
-        for field in &fields {
+        tb.add("        let proto = Self::script_proto(vm).into();");
+        tb.add("        let obj = vm.heap.new_with_proto(proto);");
                         
+        for field in &fields {
+                                    
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
                 tb.add("self.").ident(&field.name).add(".script_to_value_props(vm, obj)");
             }
@@ -137,10 +132,11 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 .ident(&field.name).add(")), value, &vm.thread.trap);");
             }
         }
-        
+                
+        tb.add("         obj.into()");
         tb.add("    }");
         tb.add("}");
-        
+                
         
          
         // ScriptNew
@@ -392,57 +388,6 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    }");
         tb.add("}");
         
-        
-        // ScriptToValue
-        
-        
-        
-        tb.add("impl").stream(generic.clone());
-        tb.add("ScriptToValue for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-        
-        tb.add("    fn script_to_value(&self, vm:&mut Vm)->Value{");
-        tb.add("        match self{");
-        for item in &items {
-            match &item.kind {
-                EnumKind::Bare => {
-                    tb.add("Self::").ident(&item.name).add("=>{");
-                    tb.add("    Self::script_enum_lookup_variant(vm,id!(").ident(&item.name).add("))");
-                    tb.add("}");
-                }
-                EnumKind::Tuple(args) => {
-                    tb.add("Self::").ident(&item.name).add("(");
-                    for i in 0..args.len(){
-                        tb.ident(&format!("v{i}")).add(",");
-                    }
-                    tb.add(")=>{");
-                    tb.add("    let tuple = vm.heap.new_with_proto(id!(").ident(&item.name).add(").into());");
-                    for i in 0..args.len(){
-                        tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
-                        tb.add("vm.heap.vec_push(tuple, NIL, value, &vm.thread.trap);");
-                    }
-                    tb.add("    tuple.into()");
-                    tb.add("}");
-                }
-                EnumKind::Named(fields) =>{
-                    tb.add("Self::").ident(&item.name).add("{");
-                    for (i, field) in fields.iter().enumerate(){
-                        tb.ident(&field.name).add(":").ident(&format!("v{i}")).add(",");
-                    }
-                    tb.add("}=>{");
-                    tb.add("    let proto = Self::script_enum_lookup_variant(vm,id!(").ident(&item.name).add("));");
-                    tb.add("    let named = vm.heap.new_with_proto(proto);");
-                    for (i, field) in fields.iter().enumerate(){
-                        tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
-                        tb.add("vm.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, &vm.thread.trap);");
-                    }
-                    tb.add("    named.into()");
-                    tb.add("}");
-                }
-            }
-        }
-        tb.add("        }");
-        tb.add("    }");
-        tb.add("}");
                         
                 
         // ScriptApply
@@ -518,6 +463,51 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("        }");
         tb.add("        vm.thread.trap.err_enum_unknown_variant();");
         tb.add("    }");
+        
+                
+        tb.add("    fn script_to_value(&self, vm:&mut Vm)->Value{");
+        tb.add("        match self{");
+        for item in &items {
+            match &item.kind {
+                EnumKind::Bare => {
+                    tb.add("Self::").ident(&item.name).add("=>{");
+                    tb.add("    Self::script_enum_lookup_variant(vm,id!(").ident(&item.name).add("))");
+                    tb.add("}");
+                }
+                EnumKind::Tuple(args) => {
+                    tb.add("Self::").ident(&item.name).add("(");
+                    for i in 0..args.len(){
+                        tb.ident(&format!("v{i}")).add(",");
+                    }
+                    tb.add(")=>{");
+                    tb.add("    let tuple = vm.heap.new_with_proto(id!(").ident(&item.name).add(").into());");
+                    for i in 0..args.len(){
+                        tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
+                        tb.add("vm.heap.vec_push(tuple, NIL, value, &vm.thread.trap);");
+                    }
+                    tb.add("    tuple.into()");
+                    tb.add("}");
+                }
+                EnumKind::Named(fields) =>{
+                    tb.add("Self::").ident(&item.name).add("{");
+                    for (i, field) in fields.iter().enumerate(){
+                        tb.ident(&field.name).add(":").ident(&format!("v{i}")).add(",");
+                    }
+                    tb.add("}=>{");
+                    tb.add("    let proto = Self::script_enum_lookup_variant(vm,id!(").ident(&item.name).add("));");
+                    tb.add("    let named = vm.heap.new_with_proto(proto);");
+                    for (i, field) in fields.iter().enumerate(){
+                        tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
+                        tb.add("vm.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, &vm.thread.trap);");
+                    }
+                    tb.add("    named.into()");
+                    tb.add("}");
+                }
+            }
+        }
+        tb.add("        }");
+        tb.add("    }");
+        
         tb.add("}");
                             
         Ok(())

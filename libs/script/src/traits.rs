@@ -22,19 +22,6 @@ pub trait ScriptHookDeref {
     fn on_deref_after_apply(&mut self,_vm:&mut Vm, _apply:&mut ApplyScope, _value:Value){}
 }
 
-pub trait ScriptFromValue{
-    fn script_from_value(vm:&mut Vm, value:Value)->Self;   
-}
-
-impl<T:ScriptNew> ScriptFromValue for T{
-    fn script_from_value(vm:&mut Vm, value:Value)->Self where Self:Sized{
-        let mut s = Self::script_new(vm);
-        s.on_new(vm);
-        s.script_apply(vm, &mut ApplyScope::default(), value);
-        s
-    }    
-}
-
 #[derive(Default)]
 pub struct ScriptTypeProps{
     pub(crate) props: IdMap<Id, ScriptTypeId>
@@ -58,9 +45,20 @@ pub struct ScriptTypeIndex(pub(crate) u32);
 // implementation is procmacro generated
 pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
+    fn script_type_check(_heap:&ScriptHeap, value:Value)->bool;
     fn script_type_id_static()->ScriptTypeId;
-    
     fn script_new(vm:&mut Vm)->Self;
+    fn script_default(vm:&mut Vm)->Value;
+    
+    // default impls    
+    
+    fn script_from_value(vm:&mut Vm, value:Value)->Self where Self:Sized{
+        let mut s = Self::script_new(vm);
+        s.on_new(vm);
+        s.script_apply(vm, &mut ApplyScope::default(), value);
+        s
+    }    
+    
     fn script_new_apply(vm:&mut Vm, apply:&mut ApplyScope, value:Value)->Self where Self: Sized{
         let mut s = Self::script_new(vm);
         s.on_new(vm);
@@ -68,7 +66,6 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         s
     }
     
-    fn script_default(vm:&mut Vm)->Value;
     fn script_proto(vm:&mut Vm)->Value{  
         let type_id = Self::script_type_id_static();
         if let Some(check) = vm.heap.registered_type(type_id){
@@ -102,17 +99,22 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_proto_props(_vm:&mut Vm, _object:Object, _props:&mut ScriptTypeProps){}
     
-    fn script_type_check(_heap:&ScriptHeap, value:Value)->bool;
-    
     fn script_api(vm:&mut Vm)->Value{
         let val = Self::script_proto(vm);
         vm.heap.freeze_api(val.into());
         val
     }
+    
     fn script_component(vm:&mut Vm)->Value{
         let val = Self::script_proto(vm);
         vm.heap.freeze_component(val.into());
         val
+    }
+    
+    fn script_enum_lookup_variant(vm:&mut Vm, variant:Id)->Value{
+        let rt = vm.heap.registered_type(Self::script_type_id_static()).unwrap();
+        let obj = rt.object.as_ref().unwrap().proto.into();
+        vm.heap.value(obj, variant.into(), &vm.thread.trap)
     }
 }
 
@@ -120,30 +122,13 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
 pub trait ScriptApply{
     fn script_type_id(&self)->ScriptTypeId;
     fn script_apply(&mut self, vm:&mut Vm, apply:&mut ApplyScope, value:Value);
+    fn script_to_value(&self, vm:&mut Vm)->Value;
 }
 
 pub trait ScriptReset{
     fn script_reset(&mut self, vm:&mut Vm, apply:&mut ApplyScope, value:Value);
 }
 
-pub trait ScriptToValue: ScriptNew{
-
-    fn script_enum_lookup_variant(vm:&mut Vm, variant:Id)->Value{
-        let rt = vm.heap.registered_type(Self::script_type_id_static()).unwrap();
-        let obj = rt.object.as_ref().unwrap().proto.into();
-        vm.heap.value(obj, variant.into(), &vm.thread.trap)
-    }
-    
-    fn script_to_value(&self, vm:&mut Vm)->Value{
-        let proto = Self::script_proto(vm).into();
-        let obj = vm.heap.new_with_proto(proto);
-        self.script_to_value_props(vm, obj);
-        obj.into()
-    }
-    
-    fn script_to_value_props(&self, _vm:&mut Vm, _object:Object){
-    } 
-}
 
 #[derive(Default)]
 pub struct ApplyScope{
