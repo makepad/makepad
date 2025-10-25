@@ -83,7 +83,8 @@ pub struct Cx {
     pub (crate) event_id: u64,
     pub (crate) timer_id: u64,
     pub (crate) next_frame_id: u64,
-    
+    pub (crate) permissions_request_id: i32,
+
     pub keyboard: CxKeyboard,
     pub fingers: CxFingers,
     pub (crate) ime_area: Area,
@@ -311,6 +312,7 @@ impl Cx {
             repaint_id: 1,
             timer_id: 1,
             next_frame_id: 1,
+            permissions_request_id: 0,
             
             keyboard: Default::default(),
             fingers: Default::default(),

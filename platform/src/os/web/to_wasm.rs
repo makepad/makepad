@@ -549,6 +549,13 @@ pub struct ToWasmHttpUploadProgress {
     pub loaded: u32,
     pub total: u32
 }
+
+#[derive(ToWasm)]
+pub struct ToWasmPermissionResult {
+    pub permission: String,
+    pub request_id: u32,
+    pub status: u32, // 0=NotDetermined, 1=Granted, 2=DeniedCanRetry, 3=DeniedPermanent
+}
 /*
 #[derive(ToWasm)]
 pub struct ToWasmWebSocketClose {

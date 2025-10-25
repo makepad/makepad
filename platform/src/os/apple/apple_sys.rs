@@ -192,6 +192,7 @@ extern "C" {
     pub static AVAudioChannelLayout: ObjcId;
     pub static AVAudioSession: ObjcId;
     pub static AVMediaTypeVideo: ObjcId;
+    pub static AVMediaTypeAudio: ObjcId;
     pub static AVCaptureSession: ObjcId;
     pub static AVCaptureDeviceInput: ObjcId;
     pub static AVCaptureVideoDataOutput: ObjcId;
@@ -1168,6 +1169,7 @@ pub enum AudioObjectPropertySelector {
     DefaultInputDevice = four_char_as_u32("dIn "),
     DefaultOutputDevice = four_char_as_u32("dOut"),
     DeviceIsAlive = four_char_as_u32("livn"),
+    NominalSampleRate = four_char_as_u32("nsrt"),
 }
 
 #[repr(u32)]
@@ -1180,6 +1182,9 @@ pub enum AudioObjectPropertyScope {
 pub enum AVAudioSessionCategoryOption {
     AllowBluetooth = 0x4,
     DefaultToSpeaker = 0x8,
+    AllowBluetoothA2DP = 0x20,
+    AllowAirPlay = 0x40,
+    MixWithOthers = 0x1,
 }
 
 #[repr(u32)]
@@ -1269,6 +1274,10 @@ unsafe extern "system" fn(
     inAddresses: *const AudioObjectPropertyAddress,
     inClientData: *mut ()
 ) -> OSStatus>;
+
+// AVAudioSessionPortOverride values
+pub const AVAudioSessionPortOverrideNone: u64 = 0;
+pub const AVAudioSessionPortOverrideSpeaker: u64 = 1936747378; // 'spkr'
 
 #[link(name = "CoreAudio", kind = "framework")]
 extern "C" {

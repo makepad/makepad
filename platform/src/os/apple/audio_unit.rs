@@ -149,16 +149,65 @@ impl AudioUnitAccess {
     }
     
     #[cfg(target_os = "ios")]
+    fn update_ios_audio_route() {
+        unsafe {
+            let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
+            let current_route: ObjcId = msg_send![session, currentRoute];
+            let outputs: ObjcId = msg_send![current_route, outputs];
+            let count: usize = msg_send![outputs, count];
+
+            // Check if we have external audio (headphones, AirPods, Bluetooth)
+            let mut has_external_audio = false;
+            for i in 0..count {
+                let output: ObjcId = msg_send![outputs, objectAtIndex: i];
+                let port_type: ObjcId = msg_send![output, portType];
+                let port_type_str = nsstring_to_string(port_type);
+
+                // Check for external audio devices
+                if port_type_str == "BluetoothA2DPOutput"
+                    || port_type_str == "BluetoothHFP"
+                    || port_type_str == "BluetoothLE"
+                    || port_type_str == "HeadsetMic"
+                    || port_type_str == "Headphones"
+                    || port_type_str == "AirPlay" {
+                    has_external_audio = true;
+                    break;
+                }
+            }
+
+            let mut error: ObjcId = nil;
+            if has_external_audio {
+                // External audio connected - use default routing (no override)
+                let () = msg_send![session, overrideOutputAudioPort: 0u32 error: &mut error]; // AVAudioSessionPortOverrideNone
+            } else {
+                // No external audio - force speaker instead of earpiece
+                let () = msg_send![session, overrideOutputAudioPort: 1936747378u32 error: &mut error]; // AVAudioSessionPortOverrideSpeaker
+            }
+        }
+    }
+
+    #[cfg(target_os = "ios")]
     pub fn init_ios_access(){
         unsafe{
             let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
             let mut error: ObjcId = nil;
             let _success: bool = msg_send![
-                session, 
+                session,
                 setCategory:AVAudioSessionCategoryPlayAndRecord
-                withOptions:AVAudioSessionCategoryOption::DefaultToSpeaker as usize// | AVAudioSessionCategoryOption::AllowBluetooth as usize
+                withOptions:AVAudioSessionCategoryOption::DefaultToSpeaker as usize | AVAudioSessionCategoryOption::AllowBluetooth as usize
                 error:&mut error
             ];
+            // Use VoiceChat mode with VoiceProcessingIO for both input and output
+            // This provides AEC/AGC/NS with proper volume
+            let mode: ObjcId = str_to_nsstring("AVAudioSessionModeVoiceChat");
+            let () = msg_send![session, setMode: mode error:&mut error];
+            // Prefer 48 kHz to avoid 48k↔44.1k drift on AirPods, however this might
+            // be overriden by the system or some other configuration.
+            let () = msg_send![session, setPreferredSampleRate: 48000.0 error:&mut error];
+            let () = msg_send![session, setPreferredIOBufferDuration:0.005 error:&mut error];
+            let () = msg_send![session, setActive: true error: &mut error];
+            // Set initial audio route based on connected devices
+            Self::update_ios_audio_route();
         }
     }
         
@@ -223,11 +272,13 @@ impl AudioUnitAccess {
                         
                         let running = audio_inputs.iter_mut().find( | v | v.device_id == device_id).unwrap();
                         let audio_input_cb = audio_input_cb.clone();
+                        let sample_rate = audio_unit.sample_rate;
                         audio_unit.set_input_handler(move | time, output | {
                             if let Some(audio_input_cb) = &mut *audio_input_cb.lock().unwrap() {
                                 return audio_input_cb(AudioInfo{
-                                    device_id, 
-                                    time: Some(time)
+                                    device_id,
+                                    time: Some(time),
+                                    sample_rate,
                                 }, output)
                             }
                         });
@@ -291,11 +342,13 @@ impl AudioUnitAccess {
                         
                         let running = audio_outputs.iter_mut().find( | v | v.device_id == device_id).unwrap();
                         let audio_output_cb = audio_output_cb.clone();
+                        let sample_rate = audio_unit.sample_rate;
                         audio_unit.set_output_provider(move | time, output | {
                             if let Some(audio_output_cb) = &mut *audio_output_cb.lock().unwrap() {
                                 audio_output_cb(AudioInfo{
-                                    device_id, 
-                                    time:Some(time)
+                                    device_id,
+                                    time:Some(time),
+                                    sample_rate,
                                 }, output)
                             }
                         });
@@ -318,10 +371,12 @@ impl AudioUnitAccess {
         unsafe {
             let mut err: ObjcId = nil;
             let audio_session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
-            let () = msg_send![audio_session, setCategory: AVAudioSessionCategoryMultiRoute error: &mut err];
+            // Do not force MultiRoute; keep the app's configured category/mode active
             let () = msg_send![audio_session, setActive: true error: &mut err];
         }
         let block = objc_block!(move | _note: ObjcId | {
+            #[cfg(target_os = "ios")]
+            AudioUnitAccess::update_ios_audio_route();
             device_change.set();
         });
         let () = unsafe {msg_send![
@@ -506,7 +561,7 @@ impl AudioUnitAccess {
         Ok(())
     }
     
-     #[cfg(any(target_os = "ios", target_os = "tvos"))]
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
     pub fn update_device_list(&mut self) -> Result<(), OSError> {
         self.device_descs.clear();
 
@@ -516,9 +571,9 @@ impl AudioUnitAccess {
                 has_failed:false,
                 device_id:AudioDeviceId(live_id!(default_input)),
                 device_type: AudioDeviceType::Input,
-                channel_count: 2,
+                channel_count: 1, // iOS/tvOS microphone is mono by default
                 is_default: true,
-                name: "Default Output".to_string(),
+                name: "Default Input".to_string(),
             }
         });
          
@@ -530,7 +585,7 @@ impl AudioUnitAccess {
                 device_type: AudioDeviceType::Output,
                 channel_count: 2,
                 is_default: true,
-                name: "Default Input".to_string(),
+                name: "Default Output".to_string(),
             }
         });
         Ok(())
@@ -556,7 +611,7 @@ impl AudioUnitAccess {
             AudioUnitQuery::Output => {
                 AudioComponentDescription::new_all_manufacturers(
                     AudioUnitType::IO,
-                    AudioUnitSubType::RemoteIO, 
+                    AudioUnitSubType::VoiceProcessingIO,
                 )
             }
             #[cfg(target_os = "tvos")]
@@ -566,10 +621,18 @@ impl AudioUnitAccess {
                     AudioUnitSubType::RemoteIO, 
                 )
             }
+            #[cfg(target_os = "macos")]
             AudioUnitQuery::Input => {
                 AudioComponentDescription::new_all_manufacturers(
                     AudioUnitType::IO,
                     AudioUnitSubType::HalOutput,
+                )
+            }
+            #[cfg(any(target_os = "ios", target_os = "tvos"))]
+            AudioUnitQuery::Input => {
+                AudioComponentDescription::new_all_manufacturers(
+                    AudioUnitType::IO,
+                    AudioUnitSubType::VoiceProcessingIO,
                 )
             }
             AudioUnitQuery::Effect => {
@@ -609,16 +672,18 @@ impl AudioUnitAccess {
         let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
             let () = unsafe {msg_send![av_audio_unit, retain]};
             unsafe fn inner(_change_signal: SignalToUI, core_device_id: AudioDeviceID, av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
+                #[cfg(not(target_os="macos"))]
+                let _ = core_device_id; // silence unused on iOS/tvOS
                 OSError::from_nserror(error) ?;
                 let au_audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
                 let () = msg_send![av_audio_unit, retain];
                 
-                let mut err: ObjcId = nil;
-                let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
-                OSError::from_nserror(err) ?;
+                // Configure stream format before allocating resources
                 let mut render_block = None;
                 
-                let stream_desc = CAudioStreamBasicDescription {
+                // Default stream desc; on iOS we'll pull the AVAudioSession sample rate
+                #[allow(unused_mut)] // mut needed on iOS/tvOS but not macOS
+                let mut stream_desc = CAudioStreamBasicDescription {
                     mSampleRate: 48000.0,
                     mFormatID: AudioFormatId::LinearPCM,
                     mFormatFlags: LinearPcmFlags::IS_FLOAT as u32
@@ -632,11 +697,46 @@ impl AudioUnitAccess {
                     mReserved: 0
                 };
                 
+                // If on iOS/tvOS, fetch AVAudioSession sample rate
+                #[cfg(any(target_os="ios", target_os="tvos"))]
+                {
+                    let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
+                    // After setting preferred sample rate, query actual rate
+                    let sr: f64 = msg_send![session, sampleRate];
+                    if sr > 0.0 { stream_desc.mSampleRate = sr; }
+                }
+
+                // If on macOS, query the device's nominal sample rate
+                #[cfg(target_os = "macos")]
+                {
+                    let prop_addr = AudioObjectPropertyAddress {
+                        mSelector: AudioObjectPropertySelector::NominalSampleRate,
+                        mScope: AudioObjectPropertyScope::Global,
+                        mElement: AudioObjectPropertyElement::Master,
+                    };
+                    let mut sample_rate: f64 = 48000.0;
+                    let data_size = std::mem::size_of::<f64>();
+                    let result = unsafe {AudioObjectGetPropertyData(
+                        core_device_id,
+                        &prop_addr,
+                        0,
+                        std::ptr::null(),
+                        &data_size as *const _ as *mut _,
+                        &mut sample_rate as *mut f64 as *mut _,
+                    )};
+                    if result == 0 && sample_rate > 0.0 {
+                        stream_desc.mSampleRate = sample_rate;
+                    }
+                }
+
                 let av_audio_format: ObjcId = msg_send![class!(AVAudioFormat), alloc];
                 let () = msg_send![av_audio_format, initWithStreamDescription: &stream_desc];
                 
                 match unit_query {
                     AudioUnitQuery::Output => {
+                        let mut err: ObjcId = nil;
+                        let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
+                        OSError::from_nserror(err) ?;
                         let busses: ObjcId = msg_send![au_audio_unit, inputBusses];
                         let count: usize = msg_send![busses, count];
                         if count > 0 {
@@ -644,10 +744,11 @@ impl AudioUnitAccess {
                             let mut err: ObjcId = nil;
                             let () = msg_send![bus, setFormat: av_audio_format error: &mut err];
                             OSError::from_nserror(err) ?;
+                            let () = msg_send![bus, setEnabled: true];
                         }
                         
-                        let () = msg_send![au_audio_unit, setOutputEnabled: true];
-                        let () = msg_send![au_audio_unit, setInputEnabled: false];
+                        let () = msg_send![au_audio_unit, setOutputEnabled: false];
+                        let () = msg_send![au_audio_unit, setInputEnabled: true];
                         
                         #[cfg(target_os = "macos")]
                         {
@@ -656,31 +757,66 @@ impl AudioUnitAccess {
                             OSError::from_nserror(err) ?;
                         }
                         
-                        let mut err: ObjcId = nil;
+                        let () = msg_send![au_audio_unit, setOutputEnabled: true];
+                        let () = msg_send![au_audio_unit, setInputEnabled: false];
+                        
+                        #[cfg(target_os="macos")]
+                        {
+                            let mut err: ObjcId = nil;
+                            let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
+                            OSError::from_nserror(err) ?;
+                        }
+                        // Ensure final state for output units before allocation
+                        let () = msg_send![au_audio_unit, setOutputEnabled: true];
+                        let () = msg_send![au_audio_unit, setInputEnabled: false];
+                        
+                        #[cfg(target_os="macos")]
+                        {
+                            let mut err: ObjcId = nil;
+                            let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
+                            OSError::from_nserror(err) ?;
+                        }
                         let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
                         OSError::from_nserror(err) ?;
                     }
                     AudioUnitQuery::Input => {
-                        // lets hardcode the format to 44100 float
+                        // On iOS/tvOS, mic is commonly mono. Prefer 1 channel there.
+                        #[cfg(any(target_os="ios", target_os="tvos"))]
+                        {
+                            stream_desc.mChannelsPerFrame = 1;
+                        }
+                        // Recreate AVAudioFormat with possibly adjusted channel count
+                        let av_audio_format: ObjcId = msg_send![class!(AVAudioFormat), alloc];
+                        let () = msg_send![av_audio_format, initWithStreamDescription: &stream_desc];
+                        
                         let busses: ObjcId = msg_send![au_audio_unit, outputBusses];
                         let count: usize = msg_send![busses, count];
-                        if count > 1 {
-                            let bus: ObjcId = msg_send![busses, objectAtIndexedSubscript: 1];
-                            //let format: ObjcId = msg_send![bus, format];
-                            //let format: *const CAudioStreamBasicDescription = msg_send![format, streamDescription];
-                            let mut err: ObjcId = nil;
-                            let () = msg_send![bus, setFormat: av_audio_format error: &mut err];
-                            OSError::from_nserror(err) ?;
-                            let () = msg_send![bus, setEnabled: true];
+                        if count > 0 {
+                            // RemoteIO/VoiceProcessingIO uses bus 1 for input on iOS/tvOS
+                            #[cfg(any(target_os="ios", target_os="tvos", target_os="macos"))]
+                            let bus_index = 1;
+                            if count > bus_index{
+                                let bus: ObjcId = msg_send![busses, objectAtIndexedSubscript: bus_index];
+                                let mut err: ObjcId = nil;
+                                let () = msg_send![bus, setFormat: av_audio_format error: &mut err];
+                                OSError::from_nserror(err) ?;
+                                let () = msg_send![bus, setEnabled: true];
+                            }
                         }
                         let () = msg_send![au_audio_unit, setOutputEnabled: false];
                         let () = msg_send![au_audio_unit, setInputEnabled: true];
                         
-                        let mut err: ObjcId = nil;
-                        let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
-                        OSError::from_nserror(err) ?;
+                        #[cfg(target_os="macos")]
+                        {
+                            let mut err: ObjcId = nil;
+                            let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
+                            OSError::from_nserror(err) ?;
+                        }
                         
+                        // Allocate after configuration
                         let mut err: ObjcId = nil;
+                        let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
+                        OSError::from_nserror(err) ?;
                         let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
                         OSError::from_nserror(err) ?;
                         
@@ -698,7 +834,8 @@ impl AudioUnitAccess {
                     render_block,
                     unit_query,
                     av_audio_unit,
-                    au_audio_unit
+                    au_audio_unit,
+                    sample_rate: stream_desc.mSampleRate,
                 })
             }
             let change_signal = change_signal.clone();
@@ -763,10 +900,11 @@ impl AudioUnitAccess {
                     render_block,
                     unit_query,
                     av_audio_unit,
-                    au_audio_unit
+                    au_audio_unit,
+                    sample_rate: 48000.0, // Default for plugins, not device-dependent
                 })
             }
-            
+
             match unsafe {inner(av_audio_unit, error, unit_query)} {
                 Err(err) => unit_callback(Err(AudioError::System(format!("{:?}", err)))),
                 Ok(device) => unit_callback(Ok(device))
@@ -809,9 +947,9 @@ pub struct AudioUnit {
     au_audio_unit: ObjcId,
     render_block: Option<ObjcId>,
     view_controller: Arc<Mutex<Option<ObjcId >> >,
-    unit_query: AudioUnitQuery
+    unit_query: AudioUnitQuery,
+    sample_rate: f64,
 }
-
 unsafe impl Send for AudioUnitClone {}
 unsafe impl Sync for AudioUnitClone {}
 pub struct AudioUnitClone {
@@ -1168,15 +1306,22 @@ impl AudioUnit {
                     time_stamp: *const AudioTimeStamp,
                     frame_count: u32,
                     _input_bus_number: u64 | {
+                        // iOS/tvOS input is mono when using VoiceProcessingIO
+                        #[cfg(any(target_os="ios", target_os="tvos"))]
+                        let mut buffer = AudioBuffer::new_with_size(frame_count as usize, 1);
+                        #[cfg(not(any(target_os="ios", target_os="tvos")))]
                         let mut buffer = AudioBuffer::new_with_size(frame_count as usize, 2);
                         let mut flags = 0u32;
                         let mut buffer_list = buffer.to_audio_buffer_list();
                         
+                        // For RemoteIO/VoiceProcessingIO input, use bus 1
+                        let bus_index = 1u64;
+
                         objc_block_invoke!(render_block, invoke(
                             (&mut flags as *mut u32): *mut u32,
                             (time_stamp): *const AudioTimeStamp,
                             (frame_count): u32,
-                            (1): u64,
+                            (bus_index): u64,
                             (&mut buffer_list as *mut AudioBufferList): *mut AudioBufferList,
                             (nil): ObjcId
                         ) -> i32);
@@ -1312,4 +1457,3 @@ impl AudioUnit {
     }*/
     
 }
-

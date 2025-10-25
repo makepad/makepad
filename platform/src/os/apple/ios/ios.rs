@@ -3,9 +3,10 @@ use {
         time::Instant,
         rc::Rc,
         cell::{RefCell},
+        sync::mpsc::{channel, Receiver, Sender},
     },
-
     crate::{
+        makepad_objc_sys::objc_block,
         makepad_live_id::*,
         os::{
             cx_native::EventFlow,
@@ -23,6 +24,7 @@ use {
             metal::{MetalCx, DrawPassMode},
         },
         pass::{CxPassParent},
+        permission::PermissionResult,
         thread::SignalToUI,
         window::CxWindowPool,
         event::{
@@ -119,6 +121,12 @@ impl Cx {
         }
     }
 
+    pub(crate) fn handle_permission_events(&mut self) {
+        while let Ok(result) = self.os.permission_response.receiver.try_recv(){
+            self.call_event_handler(&Event::PermissionResult(result));
+        }
+    }
+
     fn ios_event_callback(
         &mut self,
         event: IosEvent,
@@ -157,6 +165,7 @@ impl Cx {
                         self.redraw_all();
                     }
                     self.handle_networking_events();
+                    self.handle_permission_events();
                 }
             }
             _ => ()
@@ -253,6 +262,9 @@ impl Cx {
             IosEvent::Timer(e) => if e.timer_id != 0 {
                 self.call_event_handler(&Event::Timer(e))
             }
+            IosEvent::PermissionResult(result) => {
+                self.call_event_handler(&Event::PermissionResult(result))
+            }
         }
 
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty|| self.demo_time_repaint{
@@ -282,6 +294,12 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     with_ios_app(|app| app.stop_timer(timer_id));
                 },
+                CxOsOp::CheckPermission {permission, request_id} => {
+                    self.handle_permission_check(permission, request_id);
+                },
+                CxOsOp::RequestPermission {permission, request_id} => {
+                    self.handle_permission_request(permission, request_id);
+                },
                 CxOsOp::HttpRequest {request_id, request} => {
                     self.os.http_requests.make_http_request(request_id, request, self.os.network_response.sender.clone());
                 },
@@ -310,6 +328,105 @@ impl Cx {
         file_name:file_name.to_string(),
         content
     }]);*/
+    
+    fn check_audio_permission_status(&self) -> crate::permission::PermissionStatus {
+        unsafe {
+            let av_audio_session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
+            let permission_status: i32 = msg_send![av_audio_session, recordPermission];
+            
+            match permission_status {
+                2 => crate::permission::PermissionStatus::Granted, // AVAudioSessionRecordPermissionGranted
+                1 => crate::permission::PermissionStatus::DeniedPermanent,  // AVAudioSessionRecordPermissionDenied - iOS doesn't re-prompt
+                _ => crate::permission::PermissionStatus::NotDetermined, // AVAudioSessionRecordPermissionUndetermined (0) or unknown
+            }
+        }
+    }
+
+    fn handle_permission_check(&mut self, permission: crate::permission::Permission, request_id: i32) {
+        let status = match permission {
+            crate::permission::Permission::AudioInput => self.check_audio_permission_status(),
+            _ => {
+                crate::log!("iOS permission check not implemented for: {:?}", permission);
+                crate::permission::PermissionStatus::DeniedPermanent
+            }
+        };
+        
+        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
+            permission,
+            request_id,
+            status,
+        }));
+    }
+
+    fn handle_permission_request(&mut self, permission: crate::permission::Permission, request_id: i32) {
+        match permission {
+            crate::permission::Permission::AudioInput => {
+                let status = self.check_audio_permission_status();
+                match status {
+                    crate::permission::PermissionStatus::Granted => {
+                        // Already granted, don't re-ask
+                        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status,
+                        }));
+                    },
+                    crate::permission::PermissionStatus::DeniedPermanent => {
+                        // Previously denied, send denied event
+                        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status,
+                        }));
+                    },
+                    crate::permission::PermissionStatus::NotDetermined => {
+                        // Need to request permission
+                        self.ios_request_audio_permission(permission, request_id);
+                    }
+                    _ => {
+                        // For other statuses, send the result directly
+                        self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status,
+                        }));
+                    }
+                }
+            },
+            _ => {
+                // For other permissions, auto-deny with warning
+                crate::log!("iOS permission not implemented for: {:?}", permission);
+                self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
+                    permission,
+                    request_id,
+                    status: crate::permission::PermissionStatus::DeniedPermanent,
+                }));
+            }
+        }
+    }
+    
+    fn ios_request_audio_permission(&mut self, permission: crate::permission::Permission, request_id: i32) {
+        let sender = self.os.permission_response.sender.clone();
+        unsafe {
+            let av_audio_session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
+
+            let completion_handler = objc_block!(move |granted: BOOL| {
+                let permission_result = crate::permission::PermissionResult {
+                    permission,
+                    request_id,
+                    status: if granted == YES {
+                        crate::permission::PermissionStatus::Granted
+                    } else {
+                        crate::permission::PermissionStatus::DeniedPermanent // iOS doesn't re-prompt
+                    },
+                };
+
+                let _ = sender.send(permission_result);
+            });
+
+            let () = msg_send![av_audio_session, requestRecordPermission: &completion_handler];
+        }
+    }
 
 }
 
@@ -368,5 +485,20 @@ pub struct CxOs {
     pub (crate) draw_calls_done: usize,
     pub (crate) network_response: NetworkResponseChannel,
     pub (crate) http_requests: AppleHttpRequests,
+    pub (crate) permission_response: PermissionResultChannel,
 }
 
+pub struct PermissionResultChannel {
+    pub receiver: Receiver<PermissionResult>,
+    pub sender: Sender<PermissionResult>,
+}
+
+impl Default for PermissionResultChannel {
+    fn default() -> Self {
+        let (sender, receiver) = channel();
+        Self {
+            sender,
+            receiver
+        }
+    }
+}
