@@ -46,7 +46,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
 
 
 pub struct ScriptBuiltins{
-    pub range: Object,
+    pub range: ScriptObject,
 }
 
 impl ScriptBuiltins{

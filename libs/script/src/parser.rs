@@ -182,7 +182,7 @@ impl State{
         }*/
     }
     
-    fn operator_to_field_assign(op:LiveId)->Value{
+    fn operator_to_field_assign(op:LiveId)->ScriptValue{
         match op{
             id!(=) => Opcode::ASSIGN_FIELD,
             id!(+=) => Opcode::ASSIGN_FIELD_ADD,
@@ -200,7 +200,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_index_assign(op:LiveId)->Value{
+    fn operator_to_index_assign(op:LiveId)->ScriptValue{
         match op{
             id!(=) => Opcode::ASSIGN_INDEX,
             id!(+=) => Opcode::ASSIGN_INDEX_ADD,
@@ -218,7 +218,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_unary(op:LiveId)->Value{
+    fn operator_to_unary(op:LiveId)->ScriptValue{
         match op{
             id!(~)=> Opcode::LOG,
             id!(!)=> Opcode::NOT,
@@ -228,7 +228,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_opcode(op:LiveId)->Value{
+    fn operator_to_opcode(op:LiveId)->ScriptValue{
         match op{
             id!(*) => Opcode::MUL,
             id!(/) => Opcode::DIV,
@@ -301,7 +301,7 @@ impl State{
 
 pub struct ScriptParser{
     pub index: u32,
-    pub opcodes: Vec<Value>,
+    pub opcodes: Vec<ScriptValue>,
     pub source_map: Vec<Option<u32>>,
     
     state: Vec<State>,
@@ -326,7 +326,7 @@ impl ScriptParser{
         self.opcodes.len() as _
     }
     
-    fn code_last(&self)->Option<&Value>{
+    fn code_last(&self)->Option<&ScriptValue>{
         self.opcodes.last()
     }
     
@@ -335,12 +335,12 @@ impl ScriptParser{
         self.source_map.pop();
     }
     
-    fn push_code(&mut self, code: Value, index: u32){
+    fn push_code(&mut self, code: ScriptValue, index: u32){
         self.opcodes.push(code);
         self.source_map.push(Some(index));
     }
     
-    fn push_code_none(&mut self, code: Value){
+    fn push_code_none(&mut self, code: ScriptValue){
         self.opcodes.push(code);
         self.source_map.push(None);
     }
@@ -384,7 +384,7 @@ impl ScriptParser{
         self.state.push(state)
     }
     
-    fn parse_step(&mut self, tok:ScriptToken, heap:&mut ScriptHeap, values: &[Value])->u32{
+    fn parse_step(&mut self, tok:ScriptToken, heap:&mut ScriptHeap, values: &[ScriptValue])->u32{
         
         let op = tok.operator();
         let sep = tok.separator();
@@ -515,7 +515,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{
-                    self.push_code(Value::from_opcode_args(Opcode::LET_DYN, OpcodeArgs::NIL), index);
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::LET_DYN, OpcodeArgs::NIL), index);
                 }
             }
             State::LetType{index}=>{
@@ -536,7 +536,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{
-                    self.push_code(Value::from_opcode_args(Opcode::LET_TYPED, OpcodeArgs::NIL), index);
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::LET_TYPED, OpcodeArgs::NIL), index);
                 }
             }
             State::EmitLetDyn{index}=>{
@@ -557,10 +557,10 @@ impl ScriptParser{
                 }
             }
             State::EmitFnArgTyped{index}=>{
-                self.push_code(Value::from_opcode_args(Opcode::FN_ARG_TYPED, OpcodeArgs::NIL), index);
+                self.push_code(ScriptValue::from_opcode_args(Opcode::FN_ARG_TYPED, OpcodeArgs::NIL), index);
             }
             State::EmitFnArgDyn{index}=>{
-                self.push_code(Value::from_opcode_args(Opcode::FN_ARG_DYN, OpcodeArgs::NIL), index);
+                self.push_code(ScriptValue::from_opcode_args(Opcode::FN_ARG_DYN, OpcodeArgs::NIL), index);
             }
             State::FnArgType{index}=>{
                 if id.not_empty(){
@@ -634,7 +634,7 @@ impl ScriptParser{
                 }
                                  
                 else{
-                    self.push_code(Value::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL), index);
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL), index);
                 }
                 self.set_opcode_args(fn_slot as _, OpcodeArgs::from_u32(self.code_len() as u32 -fn_slot));
                 
@@ -1009,7 +1009,7 @@ impl ScriptParser{
                     return 1
                 }
                 if let Some(v) = tok.as_number(){
-                    self.push_code(Value::from_f64(v), self.index);
+                    self.push_code(ScriptValue::from_f64(v), self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
@@ -1059,12 +1059,12 @@ impl ScriptParser{
                     return 1;
                 }
                 if id == id!(true){
-                    self.push_code(Value::from_bool(true), self.index);
+                    self.push_code(ScriptValue::from_bool(true), self.index);
                     self.state.push(State::EndExpr);
                     return 1;
                 }
                 if id == id!(false){
-                    self.push_code(Value::from_bool(false), self.index);
+                    self.push_code(ScriptValue::from_bool(false), self.index);
                     self.state.push(State::EndExpr);
                     return 1;
                 }
@@ -1084,7 +1084,7 @@ impl ScriptParser{
                     return 1
                 }
                 if id.not_empty(){
-                    self.push_code(Value::from_id(id), self.index);
+                    self.push_code(ScriptValue::from_id(id), self.index);
                     if starts_with_ds{
                         self.push_code(Opcode::SEARCH_TREE.into(), self.index);
                     }
@@ -1092,18 +1092,18 @@ impl ScriptParser{
                     return 1
                 }
                 if let Some(v) = tok.as_color(){
-                    self.push_code(Value::from_color(v), self.index);
+                    self.push_code(ScriptValue::from_color(v), self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
                 if let Some(ptr) = tok.as_string(){
                     // maybe make the string inline
                     let str = heap.string(ptr);
-                    if let Some(value) = Value::from_inline_string(str){
+                    if let Some(value) = ScriptValue::from_inline_string(str){
                         self.push_code(value, self.index);
                     }
                     else{
-                        self.push_code(Value::from_string(ptr), self.index);
+                        self.push_code(ScriptValue::from_string(ptr), self.index);
                     }
                     self.state.push(State::EndExpr);
                     return 1
@@ -1340,7 +1340,7 @@ impl ScriptParser{
         0
     }
     
-    pub fn parse(&mut self, tokens:&[ScriptTokenPos], heap:&mut ScriptHeap, values: &[Value]){
+    pub fn parse(&mut self, tokens:&[ScriptTokenPos], heap:&mut ScriptHeap, values: &[ScriptValue]){
         // wait for the tokens to be consumed
         let mut steps_zero = 0;
         while self.index < tokens.len() as u32 && self.state.len()>0{

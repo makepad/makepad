@@ -3,11 +3,11 @@ use crate::opcode::*;
 use std::fmt;
 
 #[derive(PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
-pub struct Value(u64);
+pub struct ScriptValue(u64);
 
-pub const NIL:Value = Value::NIL;
+pub const NIL:ScriptValue = ScriptValue::NIL;
 
-impl Default for Value{
+impl Default for ScriptValue{
     fn default()->Self{
         Self::NIL
     }
@@ -32,101 +32,101 @@ impl ScriptIp{
 }
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Object{
+pub struct ScriptObject{
     pub(crate) index: u32    
 }
-impl Object{
-    pub const ZERO:Object = Object{index:0};
+impl ScriptObject{
+    pub const ZERO:ScriptObject = ScriptObject{index:0};
 }
 
-impl From<Object> for Value{
-    fn from(v:Object) -> Self{
-        Value::from_object(v)
+impl From<ScriptObject> for ScriptValue{
+    fn from(v:ScriptObject) -> Self{
+        ScriptValue::from_object(v)
     }
 }
 
 
-impl From<Value> for Object{
-    fn from(v:Value) -> Self{
+impl From<ScriptValue> for ScriptObject{
+    fn from(v:ScriptValue) -> Self{
         if let Some(obj) = v.as_object(){
             obj
         }
         else{
-            Object{index:0}
+            ScriptObject{index:0}
         }
     }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct HeapString{
+pub struct ScriptString{
     pub index: u32    
 }
 
-impl From<HeapString> for Value{
-    fn from(v:HeapString) -> Self{
-        Value::from_string(v)
+impl From<ScriptString> for ScriptValue{
+    fn from(v:ScriptString) -> Self{
+        ScriptValue::from_string(v)
     }
 }
 
-impl From<f64> for Value{
+impl From<f64> for ScriptValue{
     fn from(v:f64) -> Self{
-        Value::from_f64(v)
+        ScriptValue::from_f64(v)
     }
 }
 
-impl From<u32> for Value{
+impl From<u32> for ScriptValue{
     fn from(v:u32) -> Self{
-        Value::from_f64(v as f64)
+        ScriptValue::from_f64(v as f64)
     }
 }
 
-impl From<i32> for Value{
+impl From<i32> for ScriptValue{
     fn from(v:i32) -> Self{
-        Value::from_f64(v as f64)
+        ScriptValue::from_f64(v as f64)
     }
 }
 
-impl From<usize> for Value{
+impl From<usize> for ScriptValue{
     fn from(v:usize) -> Self{
-        Value::from_f64(v as f64)
+        ScriptValue::from_f64(v as f64)
     }
 }
 
-impl From<bool> for Value{
+impl From<bool> for ScriptValue{
     fn from(v:bool) -> Self{
-        Value::from_bool(v)
+        ScriptValue::from_bool(v)
     }
 }
 
-impl From<LiveId> for Value{
+impl From<LiveId> for ScriptValue{
     fn from(v:LiveId) -> Self{
-        Value::from_id(v)
+        ScriptValue::from_id(v)
     }
 }
 
-impl From<&LiveId> for Value{
+impl From<&LiveId> for ScriptValue{
     fn from(v:&LiveId) -> Self{
-        Value::from_id(*v)
+        ScriptValue::from_id(*v)
     }
 }
 
-impl From<Opcode> for Value{
+impl From<Opcode> for ScriptValue{
     fn from(v:Opcode) -> Self{
-        Value::from_opcode(v)
+        ScriptValue::from_opcode(v)
     }
 }
 // NaN box value
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ValueError{
-    pub ty: ValueType,
+    pub ty: ScriptValueType,
     pub ip: ScriptIp
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct ValueType(u8);
+pub struct ScriptValueType(u8);
 
-impl ValueType{
+impl ScriptValueType{
     pub const NUMBER: Self = Self(0);
     pub const NAN: Self = Self(1);
     pub const BOOL: Self = Self(2);
@@ -220,14 +220,14 @@ impl ValueType{
 }
 
 
-impl fmt::Debug for ValueType {
+impl fmt::Debug for ScriptValueType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
 
-impl fmt::Display for ValueType {
+impl fmt::Display for ScriptValueType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self{
             Self::NUMBER=>write!(f,"number"),
@@ -272,49 +272,49 @@ impl fmt::Display for ValueType {
             Self::ERR_ENUM_UNKNOWN_VARIANT=>write!(f,"EnumUnknownVariant"),
             Self::ERR_USER=>write!(f,"UserGenerated"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
-            _=>write!(f,"ValueType?")
+            _=>write!(f,"ScriptValueType?")
         }
     }
 }
 
 pub trait IdExt{
-    fn escape(&self)->Value;
+    fn escape(&self)->ScriptValue;
 }
 
 impl IdExt for LiveId{
-    fn escape(&self)->Value{
-        Value::from_escaped_id(*self)
+    fn escape(&self)->ScriptValue{
+        ScriptValue::from_escaped_id(*self)
     }
 }
 
-impl Value{
+impl ScriptValue{
     pub const TYPE_MASK: u64 = 0xFFFF_FF00_0000_0000;
         
-    pub const TYPE_NAN: u64 = ValueType::NAN.to_u64();
-    pub const TYPE_TRACED_NAN_MAX: u64 = ValueType::NAN.to_u64() | 0xFF_FFFF_FFFF;
-    pub const NAN: Value = Value( Self::TYPE_NAN);
+    pub const TYPE_NAN: u64 = ScriptValueType::NAN.to_u64();
+    pub const TYPE_TRACED_NAN_MAX: u64 = ScriptValueType::NAN.to_u64() | 0xFF_FFFF_FFFF;
+    pub const NAN: ScriptValue = ScriptValue( Self::TYPE_NAN);
     
-    pub const TYPE_BOOL: u64 = ValueType::BOOL.to_u64();
-    pub const FALSE: Value = Value( Self::TYPE_BOOL | 0x0000_0000);
-    pub const TRUE: Value = Value(Self::TYPE_BOOL | 0x0000_0001);
+    pub const TYPE_BOOL: u64 = ScriptValueType::BOOL.to_u64();
+    pub const FALSE: ScriptValue = ScriptValue( Self::TYPE_BOOL | 0x0000_0000);
+    pub const TRUE: ScriptValue = ScriptValue(Self::TYPE_BOOL | 0x0000_0001);
     
-    pub const TYPE_NIL: u64 = ValueType::NIL.to_u64();
-    pub const NIL: Value = Value(Self::TYPE_NIL);
-    pub const OBJECT_ZERO: Value = Value::from_object(Object::ZERO);
-    pub const TYPE_COLOR: u64 = ValueType::COLOR.to_u64();
-    pub const TYPE_STRING: u64 = ValueType::STRING.to_u64();
-    pub const TYPE_OBJECT: u64 = ValueType::OBJECT.to_u64();
-    pub const TYPE_TRACKID: u64 = ValueType::TRACKID.to_u64();
+    pub const TYPE_NIL: u64 = ScriptValueType::NIL.to_u64();
+    pub const NIL: ScriptValue = ScriptValue(Self::TYPE_NIL);
+    pub const OBJECT_ZERO: ScriptValue = ScriptValue::from_object(ScriptObject::ZERO);
+    pub const TYPE_COLOR: u64 = ScriptValueType::COLOR.to_u64();
+    pub const TYPE_STRING: u64 = ScriptValueType::STRING.to_u64();
+    pub const TYPE_OBJECT: u64 = ScriptValueType::OBJECT.to_u64();
+    pub const TYPE_TRACKID: u64 = ScriptValueType::TRACKID.to_u64();
     
-    pub const TYPE_INLINE_STRING_0: u64 = ValueType::INLINE_STRING_0.to_u64();
-    pub const TYPE_INLINE_STRING_1: u64 = ValueType::INLINE_STRING_1.to_u64();
-    pub const TYPE_INLINE_STRING_2: u64 = ValueType::INLINE_STRING_2.to_u64();
-    pub const TYPE_INLINE_STRING_3: u64 = ValueType::INLINE_STRING_3.to_u64();
-    pub const TYPE_INLINE_STRING_4: u64 = ValueType::INLINE_STRING_4.to_u64();
-    pub const TYPE_INLINE_STRING_5: u64 = ValueType::INLINE_STRING_5.to_u64();
-    pub const TYPE_INLINE_STRING_END: u64 = ValueType::INLINE_STRING_END.to_u64();
+    pub const TYPE_INLINE_STRING_0: u64 = ScriptValueType::INLINE_STRING_0.to_u64();
+    pub const TYPE_INLINE_STRING_1: u64 = ScriptValueType::INLINE_STRING_1.to_u64();
+    pub const TYPE_INLINE_STRING_2: u64 = ScriptValueType::INLINE_STRING_2.to_u64();
+    pub const TYPE_INLINE_STRING_3: u64 = ScriptValueType::INLINE_STRING_3.to_u64();
+    pub const TYPE_INLINE_STRING_4: u64 = ScriptValueType::INLINE_STRING_4.to_u64();
+    pub const TYPE_INLINE_STRING_5: u64 = ScriptValueType::INLINE_STRING_5.to_u64();
+    pub const TYPE_INLINE_STRING_END: u64 = ScriptValueType::INLINE_STRING_END.to_u64();
 
-    pub const TYPE_ID: u64 = ValueType::ID.to_u64();
+    pub const TYPE_ID: u64 = ScriptValueType::ID.to_u64();
     
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
     
@@ -323,7 +323,7 @@ impl Value{
     
     
     // opcodes
-    pub const TYPE_OPCODE: u64 = ValueType::OPCODE.to_u64();
+    pub const TYPE_OPCODE: u64 = ScriptValueType::OPCODE.to_u64();
     
     pub const fn from_opcode(op:Opcode)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32)}
     
@@ -331,37 +331,37 @@ impl Value{
         
     // TODO: make this behave like javascript as much as is sensible
         
-    pub const fn err_not_found(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_FOUND.to_u64() | ip.to_u40())}
-    pub const fn err_not_fn(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_FN.to_u64() | ip.to_u40())}
-    pub const fn err_not_index(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_INDEX.to_u64() | ip.to_u40())}
-    pub const fn err_not_object(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_OBJECT.to_u64()| ip.to_u40())}
-    pub const fn err_stack_underflow(ip:ScriptIp)->Self{Self(ValueType::ERR_STACK_UNDERFLOW.to_u64() | ip.to_u40())}
-    pub const fn err_stack_overflow(ip:ScriptIp)->Self{Self(ValueType::ERR_STACK_OVERFLOW.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_args(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_ARGS.to_u64() | ip.to_u40())}
-    pub const fn err_not_assignable(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_ASSIGNABLE.to_u64() | ip.to_u40())}
-    pub const fn err_unexpected(ip:ScriptIp)->Self{Self(ValueType::ERR_UNEXPECTED.to_u64() | ip.to_u40())}
-    pub const fn err_assert_fail(ip:ScriptIp)->Self{Self(ValueType::ERR_ASSERT_FAIL.to_u64() | ip.to_u40())}
-    pub const fn err_not_impl(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_IMPL.to_u64() | ip.to_u40())}
-    pub const fn err_frozen(ip:ScriptIp)->Self{Self(ValueType::ERR_FROZEN.to_u64() | ip.to_u40())}
-    pub const fn err_vec_frozen(ip:ScriptIp)->Self{Self(ValueType::ERR_VEC_FROZEN.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_prop_type(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_PROP_TYPE.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_prop_name(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_PROP_NAME.to_u64() | ip.to_u40())}
-    pub const fn err_key_already_exists(ip:ScriptIp)->Self{Self(ValueType::ERR_KEY_ALREADY_EXISTS.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_key_type(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_KEY_TYPE.to_u64() | ip.to_u40())}
-    pub const fn err_vec_bound(ip:ScriptIp)->Self{Self(ValueType::ERR_VEC_BOUND.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_arg_type(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_ARG_TYPE.to_u64() | ip.to_u40())}            
-    pub const fn err_invalid_arg_name(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_ARG_NAME.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_arg_count(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_ARG_COUNT.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_var_name(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_VAR_NAME.to_u64() | ip.to_u40())} 
+    pub const fn err_not_found(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_FOUND.to_u64() | ip.to_u40())}
+    pub const fn err_not_fn(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_FN.to_u64() | ip.to_u40())}
+    pub const fn err_not_index(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_INDEX.to_u64() | ip.to_u40())}
+    pub const fn err_not_object(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_OBJECT.to_u64()| ip.to_u40())}
+    pub const fn err_stack_underflow(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_STACK_UNDERFLOW.to_u64() | ip.to_u40())}
+    pub const fn err_stack_overflow(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_STACK_OVERFLOW.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_args(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_ARGS.to_u64() | ip.to_u40())}
+    pub const fn err_not_assignable(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_ASSIGNABLE.to_u64() | ip.to_u40())}
+    pub const fn err_unexpected(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_UNEXPECTED.to_u64() | ip.to_u40())}
+    pub const fn err_assert_fail(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_ASSERT_FAIL.to_u64() | ip.to_u40())}
+    pub const fn err_not_impl(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_IMPL.to_u64() | ip.to_u40())}
+    pub const fn err_frozen(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_FROZEN.to_u64() | ip.to_u40())}
+    pub const fn err_vec_frozen(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_VEC_FROZEN.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_prop_type(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_PROP_TYPE.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_prop_name(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_PROP_NAME.to_u64() | ip.to_u40())}
+    pub const fn err_key_already_exists(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_KEY_ALREADY_EXISTS.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_key_type(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_KEY_TYPE.to_u64() | ip.to_u40())}
+    pub const fn err_vec_bound(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_VEC_BOUND.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_arg_type(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_ARG_TYPE.to_u64() | ip.to_u40())}            
+    pub const fn err_invalid_arg_name(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_ARG_NAME.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_arg_count(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_ARG_COUNT.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_var_name(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_VAR_NAME.to_u64() | ip.to_u40())} 
         
-    pub const fn err_user(ip:ScriptIp)->Self{Self(ValueType::ERR_USER.to_u64() | ip.to_u40())}
-    pub const fn err_not_proto(ip:ScriptIp)->Self{Self(ValueType::ERR_NOT_PROTO.to_u64() | ip.to_u40())}
-    pub const fn err_type_not_registered(ip:ScriptIp)->Self{Self(ValueType::ERR_TYPE_NOT_REGISTERED.to_u64() | ip.to_u40())}
+    pub const fn err_user(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_USER.to_u64() | ip.to_u40())}
+    pub const fn err_not_proto(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_PROTO.to_u64() | ip.to_u40())}
+    pub const fn err_type_not_registered(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_TYPE_NOT_REGISTERED.to_u64() | ip.to_u40())}
     
-    pub const fn err_enum_unknown_variant(ip:ScriptIp)->Self{Self(ValueType::ERR_ENUM_UNKNOWN_VARIANT.to_u64() | ip.to_u40())}
+    pub const fn err_enum_unknown_variant(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_ENUM_UNKNOWN_VARIANT.to_u64() | ip.to_u40())}
         
     
-    pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ValueType::ERR_LAST.to_u64()}
+    pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ScriptValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()}
     
     pub const fn as_err(&self)->Option<ValueError>{
         if self.is_err(){
@@ -375,11 +375,11 @@ impl Value{
         }
     }
         
-    pub const fn value_type(&self)->ValueType{
+    pub const fn value_type(&self)->ScriptValueType{
         if self.is_non_nan_number(){
-            return ValueType::NUMBER
+            return ScriptValueType::NUMBER
         }
-        ValueType::from_u64(self.0 & Self::TYPE_MASK)
+        ScriptValueType::from_u64(self.0 & Self::TYPE_MASK)
     }
     
     pub const fn from_f64(val:f64)->Self{
@@ -415,7 +415,7 @@ impl Value{
         }
     }
     
-    pub const fn from_object(ptr: Object)->Self{
+    pub const fn from_object(ptr: ScriptObject)->Self{
          Self(ptr.index as u64 | Self::TYPE_OBJECT)
     }
         
@@ -470,7 +470,7 @@ impl Value{
         Self(val.0|Self::TYPE_ID|Self::ESCAPED_ID)
     }
         
-    pub const fn from_string(ptr: HeapString)->Self{
+    pub const fn from_string(ptr: ScriptString)->Self{
          Self(ptr.index as u64 | Self::TYPE_STRING)
     }
     
@@ -570,9 +570,9 @@ impl Value{
         self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
     }
         
-    pub const fn as_object(&self)->Option<Object>{
+    pub const fn as_object(&self)->Option<ScriptObject>{
         if self.is_object(){
-            return Some(Object{
+            return Some(ScriptObject{
                 index: (self.0 & 0xffff_ffff) as u32
             })
         }
@@ -636,9 +636,9 @@ impl Value{
     }*/
         
         
-    pub const fn as_string(&self)->Option<HeapString>{
+    pub const fn as_string(&self)->Option<ScriptString>{
         if self.is_string(){
-            return Some(HeapString{
+            return Some(ScriptString{
                 index: (self.0 & 0xffff_ffff) as u32
             })
         }
@@ -710,14 +710,14 @@ impl Value{
     }
 }
 
-impl fmt::Debug for Value {
+impl fmt::Debug for ScriptValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
 
-impl fmt::Display for Value {
+impl fmt::Display for ScriptValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if let Some(v) = self.as_f64(){
             return write!(f, "{}", v)
@@ -737,7 +737,7 @@ impl fmt::Display for Value {
             return r;
         }
         if let Some(ptr) = self.as_object(){
-            return write!(f, "[Object:{}]",ptr.index)
+            return write!(f, "[ScriptObject:{}]",ptr.index)
         }
         if let Some(index) = self.as_trackid(){
             return write!(f, "[TrackID:{}]",index)
