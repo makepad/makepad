@@ -29,17 +29,18 @@ live_design!{
         }
 
         draw_fill: {
-            uniform color_dither: 1.0
+            uniform color_dither: 0.0
             uniform border_radius: (THEME_CORNER_RADIUS)
             uniform border_size: (THEME_BEVELING)
             uniform gradient_fill_horizontal: 0.0
             uniform gradient_border_horizontal: 0.0
-            uniform color_2: #f00
+            uniform color_2: #0000
             uniform border_color: #fff0
             uniform border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             
 
             fn pixel(self) -> vec4 {
+                
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.color_dither;
                 let color_2 = self.color;
