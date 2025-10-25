@@ -36,6 +36,7 @@ use {
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         cx::{Cx},
+        permission::{Permission, PermissionStatus, PermissionResult},
     }
 };
 
@@ -254,6 +255,28 @@ impl Cx {
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::HttpProgress(HttpProgress{loaded:tw.loaded as u64, total:tw.total as u64})
                     });
+                }
+                live_id!(ToWasmPermissionResult) => {
+                    let tw = ToWasmPermissionResult::read_to_wasm(&mut to_wasm);
+                    let permission = match tw.permission.as_str() {
+                        "microphone" => Permission::AudioInput,
+                        _ => {
+                            crate::log!("Unknown web permission: {}", tw.permission);
+                            continue;
+                        }
+                    };
+                    let status = match tw.status {
+                        0 => PermissionStatus::NotDetermined,
+                        1 => PermissionStatus::Granted,
+                        2 => PermissionStatus::DeniedCanRetry,
+                        3 => PermissionStatus::DeniedPermanent,
+                        _ => PermissionStatus::DeniedPermanent,
+                    };
+                    self.call_event_handler(&Event::PermissionResult(PermissionResult {
+                        permission,
+                        request_id: tw.request_id as i32,
+                        status,
+                    }));
                 }
                 /*
                 live_id!(ToWasmWebSocketClose) => {
@@ -475,6 +498,24 @@ impl Cx {
                         request_id_hi: request_id.hi(),
                     });
                 },
+                CxOsOp::CheckPermission {permission, request_id} => {
+                    let permission_str = match permission {
+                        Permission::AudioInput => "microphone",
+                    };
+                    self.os.from_wasm(FromWasmCheckPermission {
+                        permission: permission_str.to_string(),
+                        request_id: request_id as u32,
+                    });
+                },
+                CxOsOp::RequestPermission {permission, request_id} => {
+                    let permission_str = match permission {
+                        Permission::AudioInput => "microphone",
+                    };
+                    self.os.from_wasm(FromWasmRequestPermission {
+                        permission: permission_str.to_string(),
+                        request_id: request_id as u32,
+                    });
+                },
                 e=>{
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
@@ -541,6 +582,7 @@ impl CxOsApi for Cx {
             ToWasmHttpRequestError::to_js_code(),
             ToWasmHttpResponseProgress::to_js_code(),
             ToWasmHttpUploadProgress::to_js_code(),
+            ToWasmPermissionResult::to_js_code(),
             /*ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
@@ -566,6 +608,9 @@ impl CxOsApi for Cx {
             FromWasmHideTextIME::to_js_code(),
             FromWasmCreateThread::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
+            FromWasmCancelHTTPRequest::to_js_code(),
+            FromWasmCheckPermission::to_js_code(),
+            FromWasmRequestPermission::to_js_code(),
             /*FromWasmWebSocketOpen::to_js_code(),
             FromWasmWebSocketSendString::to_js_code(),
             FromWasmWebSocketSendBinary::to_js_code(),*/

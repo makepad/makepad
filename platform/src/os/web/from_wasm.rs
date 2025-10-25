@@ -178,6 +178,18 @@ pub struct FromWasmCancelHTTPRequest {
     pub request_id_hi: u32,
 }
 
+#[derive(FromWasm)]
+pub struct FromWasmCheckPermission {
+    pub permission: String,
+    pub request_id: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmRequestPermission {
+    pub permission: String,
+    pub request_id: u32,
+}
+
 // WebGL API
 
 #[derive(FromWasm)]
