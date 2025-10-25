@@ -59,12 +59,7 @@ pub (crate) static HAS_STUDIO_WEB_SOCKET: AtomicBool = AtomicBool::new(false);
 
 impl Drop for WebSocket{
     fn drop(&mut self){
-        let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
-        if let Some(sender) = &*sender{
-            sender.send(WebSocketThreadMsg::Close{
-                socket_id: self.socket_id,
-            }).unwrap();
-        }
+        self.close();
     }
 }
 impl Cx{
@@ -244,6 +239,15 @@ impl Cx{
 
 impl WebSocket{    
     
+    pub fn close(&mut self){
+        if let Ok(sender) = WEB_SOCKET_THREAD_SENDER.lock(){
+            if let Some(sender) = &*sender{
+                let _ = sender.send(WebSocketThreadMsg::Close{
+                    socket_id: self.socket_id,
+                });
+            }
+        }
+    }
     
     pub fn open(request:HttpRequest)->WebSocket {
         let (rx_sender, rx_receiver) = channel();
