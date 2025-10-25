@@ -60,7 +60,19 @@ pub fn define_mtk_view() -> *const Class {
                     touch_id as u64
                 };
                 let p: NSPoint = msg_send![ios_touch, locationInView: this];
-                with_ios_app(|app| app.update_touch(uid, dvec2(p.x, p.y), state));
+
+                // Get touch radius and force from UITouch
+                // majorRadius is in points, representing the radius of the touch area
+                let major_radius: f64 = msg_send![ios_touch, majorRadius];
+                let force: f64 = msg_send![ios_touch, force];
+
+                with_ios_app(|app| app.update_touch_with_details(
+                    uid,
+                    dvec2(p.x, p.y),
+                    state,
+                    dvec2(major_radius, major_radius),
+                    force
+                ));
             }
         }
     }
