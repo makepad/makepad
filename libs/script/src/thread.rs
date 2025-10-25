@@ -133,6 +133,7 @@ impl ScriptTrap{
     pub fn err_vec_bound(&self)->Value{self.err(Value::err_vec_bound(self.ip))}
     pub fn err_invalid_arg_type(&self)->Value{self.err(Value::err_invalid_arg_type(self.ip))}
     pub fn err_invalid_arg_name(&self)->Value{self.err(Value::err_invalid_arg_name(self.ip))}
+    pub fn err_invalid_arg_count(&self)->Value{self.err(Value::err_invalid_arg_count(self.ip))}
     pub fn err_invalid_var_name(&self)->Value{self.err(Value::err_invalid_var_name(self.ip))}
     pub fn err_not_proto(&self)->Value{self.err(Value::err_not_proto(self.ip))}
     pub fn err_type_not_registered(&self)->Value{self.err(Value::err_type_not_registered(self.ip))}

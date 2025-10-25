@@ -12,6 +12,7 @@ pub trait ScriptHook{
     fn on_before_apply(&mut self, _vm:&mut Vm, _apply:&mut ApplyScope, _value:Value){}
     fn on_after_apply(&mut self, _vm:&mut Vm, _apply:&mut ApplyScope, _value:Value){}
     fn on_skip_apply(&mut self, _vm:&mut Vm, _apply:&mut ApplyScope, _value:Value)->bool{false}
+    fn on_type_check(_heap:&ScriptHeap, _value:Value)->bool{false}
     fn on_proto_build(_vm:&mut Vm, _obj:Object, _props:&mut ScriptTypeProps){}
     fn on_proto_methods(_vm:&mut Vm, _obj:Object){}
 }
@@ -55,7 +56,7 @@ pub struct ScriptTypeIndex(pub(crate) u32);
 
 
 // implementation is procmacro generated
-pub trait ScriptNew: ScriptApply + ScriptHook where Self:'static{
+pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_type_id_static()->ScriptTypeId;
     
@@ -67,10 +68,7 @@ pub trait ScriptNew: ScriptApply + ScriptHook where Self:'static{
         s
     }
     
-    fn script_default(vm:&mut Vm)->Value{
-        return Self::script_proto(vm);
-    }
-    
+    fn script_default(vm:&mut Vm)->Value;
     fn script_proto(vm:&mut Vm)->Value{  
         let type_id = Self::script_type_id_static();
         if let Some(check) = vm.heap.registered_type(type_id){
@@ -129,12 +127,11 @@ pub trait ScriptReset{
 }
 
 pub trait ScriptToValue: ScriptNew{
-    fn enum_named_to_value_create(vm:&mut Vm, variant:Id)->Object{
+
+    fn script_enum_lookup_variant(vm:&mut Vm, variant:Id)->Value{
         let rt = vm.heap.registered_type(Self::script_type_id_static()).unwrap();
         let obj = rt.object.as_ref().unwrap().proto.into();
-        let named = vm.heap.value(obj, variant.into(), &vm.thread.trap);
-        let named = vm.heap.new_with_proto(named);
-        named
+        vm.heap.value(obj, variant.into(), &vm.thread.trap)
     }
     
     fn script_to_value(&self, vm:&mut Vm)->Value{
@@ -163,6 +160,7 @@ impl ScriptNew for f64{
     fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{
         value.is_number()
     }
+    fn script_default(vm:&mut Vm)->Value{Self::script_new(vm).script_to_value(vm)}
     fn script_new(_vm:&mut Vm)->Self{Default::default()}
     fn script_proto_build(_vm:&mut Vm, _props:&mut ScriptTypeProps)->Value{Value::from_f64(0.0)}
 }

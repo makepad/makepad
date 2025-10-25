@@ -22,6 +22,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                 return NIL
             }
         }
+        vm.thread.trap.in_rust = false;
         vm.thread.trap.err_assert_fail()
     });
     
