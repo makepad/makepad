@@ -70,49 +70,49 @@ impl ScriptTypeMethods{
     
     pub fn add_object(&mut self, h: &mut ScriptHeap, native:&mut ScriptNative){
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(proto), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
+            if let Some(this) = script_value!(vm, args.this).as_object(){
                 return vm.heap.proto(this)
             }
             vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(push), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
+            if let Some(this) = script_value!(vm, args.this).as_object(){
                 return vm.heap.vec_push_vec(this, args, &mut vm.thread.trap);
             }
             vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(pop), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
+            if let Some(this) = script_value!(vm, args.this).as_object(){
                 return vm.heap.vec_pop(this, &mut vm.thread.trap)
             }
             vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(len), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
+            if let Some(this) = script_value!(vm, args.this).as_object(){
                 return vm.heap.vec_len(this).into()
             }
             vm.thread.trap.err_unexpected()
         });
             
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(extend), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
+            if let Some(this) = script_value!(vm, args.this).as_object(){
                 return vm.heap.vec_push_vec_of_vec(this, args, false, &mut vm.thread.trap);
             }
             vm.thread.trap.err_unexpected()
         });
             
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(import), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
+            if let Some(this) = script_value!(vm, args.this).as_object(){
                 return vm.heap.vec_push_vec_of_vec(this, args, true, &mut vm.thread.trap);
             }
             vm.thread.trap.err_unexpected()
         });
         
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(freeze), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
+            if let Some(this) = script_value!(vm, args.this).as_object(){
                 vm.heap.freeze(this);
                 return this.into()
             }
@@ -120,7 +120,7 @@ impl ScriptTypeMethods{
         });
         
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(freeze_api), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
+            if let Some(this) = script_value!(vm, args.this).as_object(){
                 vm.heap.freeze_api(this);
                 return this.into()
             }
@@ -128,7 +128,7 @@ impl ScriptTypeMethods{
         });
         
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(freeze_module), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
+            if let Some(this) = script_value!(vm, args.this).as_object(){
                 vm.heap.freeze_module(this);
                 return this.into()
             }
@@ -136,19 +136,19 @@ impl ScriptTypeMethods{
         });
         
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(freeze_component), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
+            if let Some(this) = script_value!(vm, args.this).as_object(){
                 vm.heap.freeze_component(this);
                 return this.into()
             }
             vm.thread.trap.err_unexpected()
         });
         
-        self.add(h, native, args!(cb=NIL), ScriptValueType::REDUX_OBJECT, id!(retain), |vm, args|{
-            if let Some(this) = value!(vm, args.this).as_object(){
-                let fnptr = value!(vm, args.cb);
+        self.add(h, native, script_args!(cb=NIL), ScriptValueType::REDUX_OBJECT, id!(retain), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                let fnptr = script_value!(vm, args.cb);
                 let mut i = 0;
                 while i < vm.heap.vec_len(this){
-                    let value = value!(vm, this[i]);
+                    let value = script_value!(vm, this[i]);
                     let ret = vm.call(fnptr, &[value]);
                     if ret.is_err(){
                         return ret;
