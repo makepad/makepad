@@ -55,7 +55,7 @@ pub trait ScriptLife{
 pub enum EnumTest{
     Bare,
     Tuple(u32),
-    Fields{field:u32}
+    Named{named:u32}
 }
 
 
@@ -69,144 +69,24 @@ pub fn test(){
         NIL
     });
     
-    //#[derive(Script)]
-    #[allow(unused)]
-    pub enum EnumTest{
-      //  #[pick]
-        Bare,
-        Tuple(f64),
-        Named{field:f64}
-    }
-    
-    impl ScriptHook for EnumTest{
-    }
-    
-    impl ScriptNew for EnumTest{
-        fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}
-        fn script_new(_vm:&mut Vm)->Self{Self::Bare}
-        fn script_default(vm:&mut Vm)->Value{
-            let proto = Self::script_proto(vm);
-            vm.heap.value(proto.into(), id!(Bare).into(), &vm.thread.trap)
-        }
-        
-        // alright so. hows this work
-        fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{
-            // if its an id its a bare one. so lets check
-            if let Some(id) = value.as_id(){
-                if id == id!(Bare){return true}
-            }
-            // alright its an object
-            else if let Some(_o) = value.as_object(){
-                // we now have to fetch the proto Id of the object
-                // the arguments have been checked by the function or the type checker
-            }
-            false
-        }
-        
-        fn script_proto_build(vm:&mut Vm, _props:&mut ScriptTypeProps)->Value{
-            let obj = vm.heap.new();
-            
-            // how do we typecheck an enum type eh
-            vm.heap.set_value(obj, id_lut!(Bare).into(), id!(Bare).into(), &vm.thread.trap);
-            
-            // alright next one the tuple
-            vm.add_fn(obj, id!(Tuple), &[], |vm, args|{
-                let tuple = vm.heap.new_with_proto(id!(Tuple).into());
-                // lets typecheck the args here codegenerated
-                vm.heap.vec_push_vec(tuple, args, &vm.thread.trap);
-                tuple.into()
-            });
-            
-            // we can make a type index prop check for this thing
-            let named = vm.heap.new_with_proto(id!(Named).into());
-            let mut props = ScriptTypeProps::default();
-            let value = (1.0).script_to_value(vm);
-            props.props.insert(id!(field), f64::script_type_id_static());
-            vm.heap.set_value(named, id_lut!(field).into(), value, &vm.thread.trap);
-            let ty_check = ScriptTypeCheck{
-                props,
-                object: None
-            };
-            let ty_index = vm.heap.register_type(None, ty_check);
-            vm.heap.freeze_with_type(named, ty_index);
-            
-            vm.heap.set_value(obj, id_lut!(Named).into(), named.into(), &vm.thread.trap);
-            obj.into()
-        }
-    }
-    
-    impl ScriptToValue for EnumTest{
-        fn script_to_value(&self, vm:&mut Vm)->Value{
-            match self{
-                Self::Bare=>{
-                    id!(Bare).into()
-                }
-                Self::Tuple(x)=>{
-                    let tuple = vm.heap.new_with_proto(id!(Tuple).into());
-                    vm.heap.vec_push(tuple, NIL, (*x).into(), &vm.thread.trap);
-                    tuple.into()
-                }
-                Self::Named{field}=>{
-                    let named = Self::enum_named_to_value_create(vm, id!(Named));
-                    vm.heap.set_value(named, id_lut!(field).into(), (*field).into(), &vm.thread.trap);
-                    named.into()
-                }
-            }
-        }
-    }
-    
-    impl ScriptApply for EnumTest{
-        fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-        fn script_apply(&mut self, vm:&mut Vm, _apply:&mut ApplyScope, value:Value){
-            if let Some(id) = value.as_id(){
-                if id == id!(Bare){
-                    *self = Self::Bare
-                }
-                else{
-                    vm.thread.trap.err_enum_unknown_variant();
-                }
-            }
-            // alright its an object
-            else if let Some(o) = value.as_object(){
-                let root_proto = vm.heap.root_proto(o);
-                // we now have to fetch the proto Id of the object
-                if let Some(id) = root_proto.as_id(){
-                    if id == id!(Field){
-                        
-                    }
-                    else if id == id!(Tuple){
-                        
-                    }
-                    else{
-                        vm.thread.trap.err_enum_unknown_variant();
-                    }
-                }
-            }
-            else{
-                vm.thread.trap.err_enum_unknown_variant();
-            }
-        }
-    }
-    
-    //impl ScriptHook for EnumTest{}
-    
     #[derive(Script)]
     pub struct StructTest{
         #[live(1.0)] field:f64,
-        //#[live(EnumTest::Bare)] enm:EnumTest,
-        //#[live] this: Object,
-        //#[live] onclick: Object,
+        #[live(EnumTest::Bare)] enm:EnumTest,
     }
     
+    #[derive(Script, ScriptHook)]
+    pub enum EnumTest{
+        #[pick]
+        Bare,
+        #[live(1.0)] 
+        Tuple(f64),
+        #[live{named_field:1.0}] 
+        Named{named_field:f64}
+    }
     
-    let s = StructTest::script_new(vm_ref!(vm));
-    let v = s.script_to_value(vm_ref!(vm)).into();
-    vm.heap.print(v);
-    
-    //use crate::scriptable::*;
     use crate::vm::*;
     use crate::value::*;
-    
     
     impl ScriptHook for StructTest{
         fn on_proto_methods(vm:&mut Vm, obj:Object){
@@ -217,28 +97,8 @@ pub fn test(){
     }    
     
     let _code = script!{
-        let x = Button{
-            draw_bg:{
-                pixel: ||{
-                    let x = 1
-                    return t(x)
-                }
-            }
-        }
-        
-        let x = [@view,@bla]
-        for sym in x t[sym]
-        
-        let View = {@view}
-        let Window = {@window}
-        let Button = {@button}
-        let x = MyWindow{
-            $b1 : Checkbox{}
-        }
-        let x = if true 1 else 0
-        let x = x{};
-        for v in [1 2 3 4] ~v
-        ~x;
+        let EnumTest = #(EnumTest::script_api(vm_ref!(vm)));
+        let x = EnumTest.Named{namedfield:1.0}
     };
     
     // Our unit tests :)
@@ -322,24 +182,30 @@ pub fn test(){
         let t = 0 try{t = 1} assert(false) ok assert(true)
         
         // struct tests
-        let x = #(StructTest::script_api(vm_ref!(vm)));
-        try{x{field:5}} assert(false) ok assert(true)
-        try{x{field:true}} assert(true) ok assert(false)
-        assert(x.return_two() == 2)
+        let strct = #(StructTest::script_api(vm_ref!(vm)));
+        try{strct{field:5}} assert(false) ok assert(true)
+        try{strct{field:true}} assert(true) ok assert(false)
+        assert(strct.return_two() == 2)
         
-    };
-    
-    let _code = script!{
-        scope.import(mod.std)
-        mod.test.fetch();
-    };
-    
-    let _code = script!{
-        scope.import(mod.std)
-        let a = [1,2,3];
-        a.retain(|v| v!=2);
-        ~a;
-        a.retain(|v|{~v;v>=3}) assert(a==[3 4]);
+        // check enum
+        let EnumTest = #(EnumTest::script_api(vm_ref!(vm)));
+        let x = EnumTest.Bare
+        // test tuple typechecking
+        try{EnumTest.Tuple(1.0)} assert(false) ok assert(true)
+        try{EnumTest.Tuple(false)} assert(true) ok assert(false)
+        try{EnumTest.Tuple()} assert(true) ok assert(false)
+        try{EnumTest.Tuple(1,2)} assert(true) ok assert(false)
+        try{EnumTest.Named{named_field:1.0}} assert(false) ok assert(true)
+        try{EnumTest.Named{named_field:true}} assert(true) ok assert(false)
+        
+        assert(strct.enm == EnumTest.Bare)
+        try{strct{enm: EnumTest.Bare}} assert(false) ok assert(true)
+        try{strct{enm: 1.0}} assert(true) ok assert(false)
+        strct{enm: EnumTest.Named{named_field:1.0}}
+        try{strct{enm: EnumTest.Named{named_field:1.0}}} assert(false) ok assert(true)
+        try{strct{enm: EnumTest.Tuple(1.0)}} assert(false) ok assert(true)
+        ~EnumTest
+        
     };
     
     let _code = script!{
