@@ -36,7 +36,7 @@ impl CxPassPool {
     fn alloc(&mut self) -> Pass {
         Pass(self.0.alloc())
     }
-    
+
     pub fn id_iter(&self) -> PassIterator {
         PassIterator {
             cur: 0,
@@ -82,7 +82,7 @@ impl LiveNew for Pass {
         let pass = cx.passes.alloc();
         pass
     }
-    
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
@@ -96,14 +96,14 @@ impl LiveNew for Pass {
 }
 
 impl LiveApply for Pass {
-    
+
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
-        
+
         if !nodes[start_index].value.is_structy_type() {
             cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, live_id!(View));
             return nodes.skip_node(start_index);
         }
-        
+
         let mut index = start_index + 1;
         loop {
             if nodes[index].value.is_close() {
@@ -127,36 +127,36 @@ impl Pass {
     pub fn id_equals(&self, id:usize)->bool{
         self.0.id == id
     }
-    
+
     pub fn new_with_name(cx: &mut Cx, name:&str) -> Self {
         let pass = cx.passes.alloc();
         pass.set_pass_name(cx, name);
         pass
     }
-    
+
     pub fn pass_id(&self) -> PassId {PassId(self.0.id)}
-    
-        
+
+
     pub fn set_as_xr_pass(&self, cx: &mut Cx) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.parent = CxPassParent::Xr;
     }
-    
+
     pub fn set_pass_parent(&self, cx: &mut Cx, pass: &Pass) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.parent = CxPassParent::Pass(pass.pass_id());
     }
-    
+
     pub fn set_pass_name(&self, cx: &mut Cx, name: &str) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.debug_name = name.to_string();
     }
-    
+
     pub fn pass_name<'a>(&self, cx: &'a mut Cx)->&'a str{
         let cxpass = &mut cx.passes[self.pass_id()];
         &cxpass.debug_name
     }
-    
+
     pub fn set_size(&self, cx: &mut Cx, pass_size: DVec2) {
         let mut pass_size = pass_size;
         if pass_size.x < 1.0 {pass_size.x = 1.0};
@@ -169,20 +169,20 @@ impl Pass {
         let cxpass = &mut cx.passes[self.pass_id()];
         if let Some(CxPassRect::Size(size)) = &cxpass.pass_rect{
             return Some(*size)
-        } 
+        }
         None
     }
-        
+
     pub fn set_window_clear_color(&self, cx: &mut Cx, clear_color: Vec4) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.clear_color = clear_color;
     }
-    
+
     pub fn clear_color_textures(&self, cx: &mut Cx) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.color_textures.truncate(0);
     }
-    
+
     pub fn add_color_texture(&self, cx: &mut Cx, texture: &Texture, clear_color: PassClearColor) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.color_textures.push(CxPassColorTexture {
@@ -190,7 +190,7 @@ impl Pass {
             clear_color: clear_color
         })
     }
-    
+
     pub fn set_color_texture(&self, cx: &mut Cx, texture: &Texture, clear_color: PassClearColor) {
         let cxpass = &mut cx.passes[self.pass_id()];
         if cxpass.color_textures.len()!=0{
@@ -206,24 +206,24 @@ impl Pass {
             })
         }
     }
-        
+
     pub fn set_depth_texture(&self, cx: &mut Cx, texture: &Texture, clear_depth: PassClearDepth) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.depth_texture = Some(texture.clone());
         cxpass.clear_depth = clear_depth;
     }
-    
+
     pub fn set_debug(&mut self, cx: &mut Cx, debug: bool) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.debug = debug;
     }
-    
-        
+
+
     pub fn set_dpi_factor(&mut self, cx: &mut Cx, dpi: f64) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.dpi_factor = Some(dpi);
     }
-    
+
 }
 
 #[derive(Clone)]
@@ -275,7 +275,7 @@ impl PassUniforms {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum CxPassRect {
     Area(Area),
     AreaOrigin(Area, DVec2),
@@ -341,18 +341,18 @@ impl CxPass {
     pub fn set_time(&mut self, time: f32) {
         self.pass_uniforms.time = time;
     }
-    
+
     pub fn set_dpi_factor(&mut self, dpi_factor: f64) {
         let dpi_dilate = (2. - dpi_factor).max(0.).min(1.);
         self.pass_uniforms.dpi_factor = dpi_factor as f32;
         self.pass_uniforms.dpi_dilate = dpi_dilate as f32;
     }
-    
+
     pub fn set_ortho_matrix(&mut self, offset: DVec2, size: DVec2) {
-        
+
         let offset = offset + self.view_shift;
         let size = size * self.view_scale;
-        
+
         let ortho = Mat4::ortho(
             offset.x as f32,
             (offset.x + size.x) as f32,

@@ -48,7 +48,7 @@ pub type GLbitfield = raw::c_uint;
 pub type GLboolean = raw::c_uchar;
 pub type GLchar = raw::c_char;
 pub type GLubyte = raw::c_uchar;
-pub type GLsizeiptr = isize; 
+pub type GLsizeiptr = isize;
 
 pub const TRUE: GLboolean = 1;
 pub const ARRAY_BUFFER: GLenum = 0x8892;
@@ -174,6 +174,7 @@ pub type TglGenBuffers = unsafe extern "C" fn(n: GLsizei, buffers: *mut GLuint) 
 pub type TglBufferData = unsafe extern "C" fn(target: GLenum, size: GLsizeiptr, data: *const raw::c_void, usage: GLenum) -> () ;
 pub type TglUniform1i = unsafe extern "C" fn(location: GLint, v0: GLint) -> () ;
 pub type TglGetError = unsafe extern "C" fn() -> GLenum ;
+pub type TglFlush = unsafe extern "C" fn() -> () ;
 pub type TglFinish = unsafe extern "C" fn() -> () ;
 pub type TglGetProgramBinary = unsafe extern "C" fn(program: GLuint, bufSize: GLsizei, length: *mut GLsizei, binaryFormat: *mut GLenum, binary: *mut raw::c_void) -> () ;
 pub type TglProgramBinary = unsafe extern "C" fn(program: GLuint, binaryFormat: GLenum, binary: *const raw::c_void, length: GLsizei) -> () ;
@@ -189,6 +190,9 @@ pub type TglFramebufferTextureMultiviewOVR = unsafe extern "C" fn(target:GLenum 
 pub type TglColorMask = unsafe extern "C" fn(r: GLboolean, g:GLboolean, b:GLboolean, a:GLboolean);
 pub type TglDepthMask = unsafe extern "C" fn(d: GLboolean);
 pub type TglScissor = unsafe extern "C" fn(x:GLint, y:GLint, width:GLsizei, height:GLsizei);
+pub type TglReadPixels = unsafe extern "C" fn(x:GLint, y:GLint, width:GLsizei, height:GLsizei, format:GLenum, ty:GLenum, pixels:*mut raw::c_void);
+pub type TglDrawArrays = unsafe extern "C" fn(mode:GLenum, first:GLint, count:GLsizei);
+pub type TglDisableVertexAttribArray = unsafe extern "C" fn(index:GLuint);
 
 pub type TglInvalidateFramebuffer = unsafe extern "C" fn(target:GLenum, num_attachments:GLsizei, attachments: *const GLenum);
 pub type TglDebugMessageCallback = unsafe extern "C" fn(ptr: TglDebugMessageCallbackFn, param: *const raw::c_void);
@@ -207,7 +211,7 @@ pub type TglGetDebugMessageLog = unsafe extern "C" fn(count:GLuint,
     severities: *mut GLenum,
     lengths: *mut GLsizei,
     message_log: *mut GLchar);
-    
+
 pub type TglDebugMessageControl = unsafe extern "C" fn(
     source:GLenum,
     ty: GLenum,
@@ -215,7 +219,7 @@ pub type TglDebugMessageControl = unsafe extern "C" fn(
     count: GLsizei,
     ids: *const GLuint,
     enabled: GLboolean);
-    
+
 pub struct LibGl{
     pub glGenVertexArrays: TglGenVertexArrays,
     pub glBindVertexArray: TglBindVertexArray,
@@ -267,6 +271,10 @@ pub struct LibGl{
     pub glBufferData: TglBufferData,
     pub glUniform1i: TglUniform1i,
     pub glGetError: TglGetError,
+    pub glDisableVertexAttribArray: TglDisableVertexAttribArray,
+    pub glDrawArrays: TglDrawArrays,
+    pub glReadPixels: TglReadPixels,
+    pub glFlush: TglFlush,
     pub glFinish: TglFinish,
     pub glGetProgramBinary: TglGetProgramBinary,
     pub glProgramBinary: TglProgramBinary,
@@ -314,11 +322,11 @@ macro_rules! load {
 impl LibGl{
     pub fn enable_debugging(&self){
         unsafe{(self.glEnable)(self::DEBUG_OUTPUT)};
-                                
+
         unsafe extern "C" fn debug(_source: self::GLenum, _ty: self::GLenum, _id: self::GLuint, _severity:self::GLenum, _length:self::GLsizei, msg: *const self::GLchar, _param: *const std::ffi::c_void){
             crate::log!("GL Debug info: {:?}", std::ffi::CStr::from_ptr(msg));
         }
-                                
+
         unsafe{(self.glDebugMessageControl)(
             self::DONT_CARE,
             self::DONT_CARE,
@@ -329,7 +337,7 @@ impl LibGl{
         )};
         unsafe{(self.glDebugMessageCallback)(debug, 0 as *const _)};
     }
-    
+
     pub fn try_load<F>(mut loadfn: F)->Result<LibGl, String>
     where F: FnMut(&[&'static str]) -> *const raw::c_void
     {
@@ -384,6 +392,7 @@ impl LibGl{
             glBufferData: load!(loadfn, TglBufferData, "glBufferData", "glBufferDataARB")?,
             glUniform1i: load!(loadfn, TglUniform1i, "glUniform1i", "glUniform1iARB")?,
             glGetError: load!(loadfn, TglGetError, "glGetError")?,
+            glFlush: load!(loadfn, TglFlush, "glFlush")?,
             glFinish: load!(loadfn, TglFinish, "glFinish")?,
             glClearDepthf: load!(loadfn, TglClearDepthf, "glClearDepthf", "glClearDepthfOES")?,
             glGetProgramBinary: load!(loadfn, TglGetProgramBinary, "glGetProgramBinary", "glGetProgramBinaryOES")?,
@@ -406,7 +415,10 @@ impl LibGl{
             glGetUniformBlockIndex: load!(loadfn, TglGetUniformBlockIndex, "glGetUniformBlockIndex")?,
             glUniformBlockBinding: load!(loadfn, TglUniformBlockBinding, "glUniformBlockBinding")?,
             glBindBufferBase: load!(loadfn, TglBindBufferBase, "glBindBufferBase")?,
-            
+            glReadPixels: load!(loadfn, TglReadPixels, "glReadPixels")?,
+            glDrawArrays: load!(loadfn, TglDrawArrays, "glDrawArrays")?,
+            glDisableVertexAttribArray: load!(loadfn, TglDisableVertexAttribArray, "glDisableVertexAttribArray")?,
+
             // optional fns
             glFramebufferTextureMultiviewOVR: load!(loadfn, TglFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR").ok(),
             glFramebufferTextureMultisampleMultiviewOVR: load!(loadfn, TglFramebufferTextureMultisampleMultiviewOVR, "glFramebufferTextureMultisampleMultiviewOVR").ok()
