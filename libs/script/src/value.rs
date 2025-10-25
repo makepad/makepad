@@ -1,4 +1,4 @@
-use crate::makepad_id::*;
+use crate::makepad_live_id::*;
 use crate::opcode::*;
 use std::fmt;
 
@@ -98,14 +98,14 @@ impl From<bool> for Value{
     }
 }
 
-impl From<Id> for Value{
-    fn from(v:Id) -> Self{
+impl From<LiveId> for Value{
+    fn from(v:LiveId) -> Self{
         Value::from_id(v)
     }
 }
 
-impl From<&Id> for Value{
-    fn from(v:&Id) -> Self{
+impl From<&LiveId> for Value{
+    fn from(v:&LiveId) -> Self{
         Value::from_id(*v)
     }
 }
@@ -281,7 +281,7 @@ pub trait IdExt{
     fn escape(&self)->Value;
 }
 
-impl IdExt for Id{
+impl IdExt for LiveId{
     fn escape(&self)->Value{
         Value::from_escaped_id(*self)
     }
@@ -462,11 +462,11 @@ impl Value{
         }
     }
     
-    pub const fn from_id(val: Id)->Self{
+    pub const fn from_id(val: LiveId)->Self{
         Self(val.0|Self::TYPE_ID)
     }
     
-    pub const fn from_escaped_id(val: Id)->Self{
+    pub const fn from_escaped_id(val: LiveId)->Self{
         Self(val.0|Self::TYPE_ID|Self::ESCAPED_ID)
     }
         
@@ -555,9 +555,9 @@ impl Value{
         0
     }
         
-    pub const fn as_id(&self)->Option<Id>{
+    pub const fn as_id(&self)->Option<LiveId>{
         if self.is_id(){
-            return Some(Id(self.0&0x0000_3fff_ffff_ffff))
+            return Some(LiveId(self.0&0x0000_3fff_ffff_ffff))
         }
         None
     }
@@ -686,11 +686,11 @@ impl Value{
     }
     
     pub const fn is_prefixed_id(&self)->bool{
-        self.0 >= Self::TYPE_ID && self.0 & Id::PREFIXED != 0
+        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED != 0
     }
     
     pub const fn is_unprefixed_id(&self)->bool{
-        self.0 >= Self::TYPE_ID && self.0 & Id::PREFIXED == 0
+        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED == 0
     }
             
     pub const fn is_opcode(&self)->bool{

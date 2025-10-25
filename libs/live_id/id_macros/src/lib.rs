@@ -1,29 +1,6 @@
 use proc_macro::{TokenStream};
 
-use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
-
-const LIVE_ID_SEED:u64 = 0xd6e8_feb8_6659_fd93;
-
-const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize) -> u64 {
-    let mut x = seed;
-    let mut i = start;
-    while i < end {
-        x = x.overflowing_add(id_bytes[i] as u64).0;
-        x ^= x >> 32;
-        x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
-        x ^= x >> 32;
-        x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
-        x ^= x >> 32;
-        i += 1;
-    }
-    // mark high bit as meaning that this is a hash id
-    (x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000
-}
-
-const fn from_str_unchecked(id_str: &str) -> u64 {
-    let bytes = id_str.as_bytes();
-    from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len())
-}
+use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error, LiveId};
 
 mod derive_from_live_id;
 use crate::derive_from_live_id::*;
@@ -32,8 +9,8 @@ use crate::derive_from_live_id::*;
 pub fn live_id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let v = item.to_string();
-    let id = from_str_unchecked(&v);
-    tb.add("LiveId (").suf_u64(id).add(")");
+    let id = LiveId::from_str(&v);
+    tb.add("LiveId (").suf_u64(id.0).add(")");
     tb.end()
 }
 
@@ -41,13 +18,27 @@ pub fn live_id(item: TokenStream) -> TokenStream {
 pub fn some_id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let v = item.to_string();
-    let id = from_str_unchecked(&v);
-    tb.add("Some(LiveId (").suf_u64(id).add("))");
+    let id = LiveId::from_str(&v);
+    tb.add("Some(LiveId (").suf_u64(id.0).add("))");
     tb.end()
 }
 
 #[proc_macro] 
 pub fn id(item: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new(); 
+    let v = item.to_string();
+    if v != ""{
+        let id = LiveId::from_str(&v);
+        tb.add("LiveId (").suf_u64(id.0).add(")");
+    }
+    else {
+        tb.add("LiveId (0)");
+    }
+    tb.end()
+}
+
+#[proc_macro] 
+pub fn ids(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let mut parser = TokenParser::new(item);
     fn parse(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{
@@ -60,8 +51,8 @@ pub fn id(item: TokenStream) -> TokenStream {
             }
             else{
                 let ident = parser.expect_any_ident()?;
-                let id = from_str_unchecked(&ident);
-                tb.add("LiveId (").suf_u64(id).add("),");
+                let id = LiveId::from_str(&ident);
+                tb.add("LiveId (").suf_u64(id.0).add("),");
             }
                 
             if parser.eat_eot(){
@@ -78,7 +69,7 @@ pub fn id(item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro] 
-pub fn ids(item: TokenStream) -> TokenStream {
+pub fn ids_array(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let mut parser = TokenParser::new(item);
     fn parse(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{
@@ -87,8 +78,8 @@ pub fn ids(item: TokenStream) -> TokenStream {
             tb.add("&[");
             loop{
                 let ident = parser.expect_any_ident()?;
-                let id = from_str_unchecked(&ident);
-                tb.add("LiveId (").suf_u64(id).add("),");
+                let id = LiveId::from_str(&ident);
+                tb.add("LiveId (").suf_u64(id.0).add("),");
                 if parser.eat_eot(){
                     tb.add("]");
                     break 'outer
@@ -126,8 +117,8 @@ pub fn live_id_num(item: TokenStream) -> TokenStream {
         }
         // then eat the next bit
         let arg = parser.eat_level();
-        let id = from_str_unchecked(&name);
-        tb.add("LiveId::from_num(").suf_u64(id).add(",").stream(Some(arg)).add(")");
+        let id = LiveId::from_str(&name);
+        tb.add("LiveId::from_num(").suf_u64(id.0).add(",").stream(Some(arg)).add(")");
         tb.end()
     }
     else{

@@ -123,10 +123,10 @@ impl LiveRegister for App {
 
 impl MatchEvent for App{
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        if self.ui.button(id!(button1)).clicked(&actions) {
+        if self.ui.button(ids!(button1)).clicked(&actions) {
             log!("BUTTON CLICKED {}", self.counter); 
             self.counter += 1;
-            let label = self.ui.label(id!(label1));
+            let label = self.ui.label(ids!(label1));
             label.set_text(cx,&format!("Counter: {}", self.counter));
             //log!("TOTAL : {}",TrackingHeap.total());
             

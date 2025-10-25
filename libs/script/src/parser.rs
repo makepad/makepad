@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 use crate::tokenizer::*;
-use crate::makepad_id::id::*;
+use crate::makepad_live_id::live_id::*;
 
 use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
-use crate::makepad_id_derive::*;
+use crate::makepad_live_id::makepad_live_id_macros::*;
 
 #[derive(Debug, Eq, PartialEq)]
 enum State{
@@ -52,10 +52,10 @@ enum State{
     EmitFnArgTyped{index:u32},
     EmitFnArgDyn{index:u32},
     
-    EmitUnary{what_op:Id, index:u32},
-    EmitOp{what_op:Id, index:u32},
-    EmitFieldAssign{what_op:Id, index:u32},
-    EmitIndexAssign{what_op:Id, index:u32},
+    EmitUnary{what_op:LiveId, index:u32},
+    EmitOp{what_op:LiveId, index:u32},
+    EmitFieldAssign{what_op:LiveId, index:u32},
+    EmitIndexAssign{what_op:LiveId, index:u32},
     
     EndBare,
     EndBareSquare,
@@ -106,7 +106,7 @@ Order list from highest prio to lowest
 */
 
 impl State{
-    fn operator_order(op:Id)->usize{
+    fn operator_order(op:LiveId)->usize{
         match op{
             id!(.) => 3,
             id!(.?) => 3,
@@ -129,7 +129,7 @@ impl State{
         }
     }
     
-    fn is_assign_operator(op:Id)->bool{
+    fn is_assign_operator(op:LiveId)->bool{
         match op{
             id!(=) | id!(:) | id!(+=) | id!(<:) | id!(+=) |
             id!(-=) | id!(*=) | id!(/=) |
@@ -140,7 +140,7 @@ impl State{
         }
     }
     
-    fn operator_supports_inline_number(op:Id)->bool{
+    fn operator_supports_inline_number(op:LiveId)->bool{
         match op{
             id!(*) | id!(/) | id!(%) |
             id!(+)| id!(-) | id!(<<) |id!(>>) | 
@@ -182,7 +182,7 @@ impl State{
         }*/
     }
     
-    fn operator_to_field_assign(op:Id)->Value{
+    fn operator_to_field_assign(op:LiveId)->Value{
         match op{
             id!(=) => Opcode::ASSIGN_FIELD,
             id!(+=) => Opcode::ASSIGN_FIELD_ADD,
@@ -200,7 +200,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_index_assign(op:Id)->Value{
+    fn operator_to_index_assign(op:LiveId)->Value{
         match op{
             id!(=) => Opcode::ASSIGN_INDEX,
             id!(+=) => Opcode::ASSIGN_INDEX_ADD,
@@ -218,7 +218,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_unary(op:Id)->Value{
+    fn operator_to_unary(op:LiveId)->Value{
         match op{
             id!(~)=> Opcode::LOG,
             id!(!)=> Opcode::NOT,
@@ -228,7 +228,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_opcode(op:Id)->Value{
+    fn operator_to_opcode(op:LiveId)->Value{
         match op{
             id!(*) => Opcode::MUL,
             id!(/) => Opcode::DIV,
@@ -305,7 +305,7 @@ pub struct ScriptParser{
     pub source_map: Vec<Option<u32>>,
     
     state: Vec<State>,
-    opstack: Vec<Id>
+    opstack: Vec<LiveId>
 }
 
 impl Default for ScriptParser{

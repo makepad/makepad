@@ -320,7 +320,7 @@ fn generate_outputs_from_file( file: &str, output: &mut Node, cache: &mut Vec<(S
 
     let source = parse_file(file, cache).unwrap();
     let symbols = source.parse_use();
-    let symbols = filter_symbols(symbols, id!(crate.windows));
+    let symbols = filter_symbols(symbols, ids!(crate.windows));
     
 
     fn add_impl(out: &mut String, input: &[TokenWithString], at: String,) -> bool {
@@ -534,7 +534,7 @@ fn main() {
     }
 
     // lets just copy in collections 
-    remove_node(&mut output, id!(Foundation));
+    remove_node(&mut output, ids!(Foundation));
     
     // ok lets recursively walk the tree now
     let mut gen = String::new();

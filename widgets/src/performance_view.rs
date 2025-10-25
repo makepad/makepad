@@ -110,7 +110,7 @@ impl PerformanceView {
                         .time_spent
                         * 1000.) as i64;
 
-                    self.performance_live_graph(id!(graph))
+                    self.performance_live_graph(ids!(graph))
                         .add_y_entry(cx, time);
                 }
             }
@@ -142,7 +142,7 @@ pub struct PerformanceLiveGraph {
 
 impl LiveHook for PerformanceLiveGraph {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.label(id!(graph_label))
+        self.label(ids!(graph_label))
             .set_text(cx, &format!("{}", self.graph_label));
     }
 }
@@ -164,7 +164,7 @@ impl PerformanceLiveGraph {
             self.data.pop_front();
         }
 
-        self.label(id!(current_y_entry))
+        self.label(ids!(current_y_entry))
             .set_text(cx, &format!("{}{}", y_entry, self.data_y_suffix));
 
         self.redraw(cx);
@@ -180,7 +180,7 @@ impl PerformanceLiveGraph {
         let graph_height = self.walk(cx).height.to_fixed().unwrap_or(0.0);
         let graph_zero_baseline = graph_height - 20.;
 
-        self.label(id!(graph_label))
+        self.label(ids!(graph_label))
             .set_text(cx, &format!("{}", self.graph_label));
 
         self.draw_graph.begin(cx, walk, Layout::default());

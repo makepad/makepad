@@ -135,10 +135,10 @@ impl Snapshot{
         while let Some(item_id) = list.next_visible_item(cx) {
             let item = if let Some(commit) = git_log.commits.get(item_id){
                 let item = list.item(cx, item_id, live_id!(SnapshotItem)).as_view();
-                item.label(id!(message)).set_text(cx, &commit.message);
+                item.label(ids!(message)).set_text(cx, &commit.message);
                 // lets construct a snapshot image filepath from the commit message
                 // check if we have a image path or not
-                let image = item.image(id!(image));
+                let image = item.image(ids!(image));
                 
                 let load = match file_system.snapshot_image_data.borrow().get(&commit.hash){
                     Some(SnapshotImageData::Loading)=>{
@@ -169,7 +169,7 @@ impl Snapshot{
     }
     
     fn load_snapshot(&mut self, _cx:&mut Cx, data:&mut AppData, item_id:usize){
-        let root_id = self.drop_down(id!(roots_dropdown)).selected_item();
+        let root_id = self.drop_down(ids!(roots_dropdown)).selected_item();
         let git_log = data.file_system.git_logs.get(root_id).unwrap();
         if let Some(commit) = git_log.commits.get(item_id){
             data.file_system.load_snapshot(git_log.root.clone(), commit.hash.clone());
@@ -177,14 +177,14 @@ impl Snapshot{
     }
     
     fn make_snapshot(&mut self, _cx:&mut Cx, data:&mut AppData){
-        let root_id = self.drop_down(id!(roots_dropdown)).selected_item();
+        let root_id = self.drop_down(ids!(roots_dropdown)).selected_item();
         let git_log = data.file_system.git_logs.get(root_id).unwrap();
         // we should find all active build ids with the same root
                         
         let mut iter = data.build_manager.active.builds_with_root(git_log.root.clone());
         if let Some(item) = iter.next(){
             // we should do a shell git commit at the right path
-            let message = self.view(id!(message_input)).text();
+            let message = self.view(ids!(message_input)).text();
             if message.len() == 0{
                 return
             }
@@ -202,7 +202,7 @@ impl Widget for Snapshot {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope:&mut Scope, walk:Walk)->DrawStep{
         let data = scope.data.get_mut::<AppData>().unwrap();
         
-        let dd = self.drop_down(id!(roots_dropdown));
+        let dd = self.drop_down(ids!(roots_dropdown));
         let mut i = data.file_system.git_logs.iter();
         dd.set_labels_with(cx, |label|{
             i.next().map(|m| label.push_str(&m.root));
@@ -217,17 +217,17 @@ impl Widget for Snapshot {
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
-        let snapshots = self.view.portal_list(id!(list));
+        let snapshots = self.view.portal_list(ids!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get_mut::<AppData>().unwrap();
         if let Event::Actions(actions) = event{
-            if self.view.button(id!(snapshot_button)).clicked(actions){
+            if self.view.button(ids!(snapshot_button)).clicked(actions){
                 self.make_snapshot(cx, data);
             }
-            if let Some(_search) = self.view.text_input(id!(search_input)).changed(&actions){
+            if let Some(_search) = self.view.text_input(ids!(search_input)).changed(&actions){
             }
             for (item_id, _item) in snapshots.items_with_actions(&actions) {
-                if let Some(wa) = actions.widget_action(id!(run_button)){
+                if let Some(wa) = actions.widget_action(ids!(run_button)){
                     if wa.widget().as_button().pressed(actions){
                         self.load_snapshot(cx, data, item_id);
                     }
@@ -240,7 +240,7 @@ impl Widget for Snapshot {
 impl SnapshotRef{
     pub fn set_message(&self, cx:&mut Cx, message:String){
         if let Some(inner) = self.borrow_mut(){
-            inner.view(id!(message_input)).set_text(cx, &message);
+            inner.view(ids!(message_input)).set_text(cx, &message);
         }
     }
 }

@@ -217,9 +217,9 @@ impl RunList{
                 draw_bg: {is_even: (if is_even {1.0} else {0.0})}
             });
             
-            item.fold_button(id!(fold)).set_action_data(ActionData::FoldBinary{binary_id});
+            item.fold_button(ids!(fold)).set_action_data(ActionData::FoldBinary{binary_id});
             
-            let cb =  item.check_box(id!(check));
+            let cb =  item.check_box(ids!(check));
             cb.set_active(cx, build_manager.active.any_binary_active(&binary.name));
             cb.set_action_data(ActionData::RunMain{binary_id});
             
@@ -237,7 +237,7 @@ impl RunList{
                         draw_bg: {is_even: (if is_even {1.0} else {0.0})}
                         check = {text: (BuildTarget::from_id(i).name())}
                     });
-                    let cb = item.check_box(id!(check));
+                    let cb = item.check_box(ids!(check));
                     cb.set_active(cx, build_manager.active.item_id_active(item_id));
                     
                     cb.set_action_data(ActionData::RunTarget{target:BuildTarget::from_id(i), binary_id});
@@ -264,10 +264,10 @@ impl RunList{
 impl WidgetMatchEvent for RunList{
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope){
         let build_manager = &mut scope.data.get_mut::<AppData>().unwrap().build_manager;
-        let run_list = self.view.flat_list(id!(list));
+        let run_list = self.view.flat_list(ids!(list));
         for (_item_id, item) in run_list.items_with_actions(&actions) {
-            let fb = item.fold_button(id!(fold));
-            if let Some(v) = item.fold_button(id!(fold)).animating(&actions) {
+            let fb = item.fold_button(ids!(fold));
+            if let Some(v) = item.fold_button(ids!(fold)).animating(&actions) {
                 // lets find the binary thing to store it on
                 if let ActionData::FoldBinary{binary_id} = fb.action_data().cast_ref(){
                     build_manager.binaries[*binary_id].open = v;
@@ -275,7 +275,7 @@ impl WidgetMatchEvent for RunList{
                 }
             }
             
-            let cb = item.check_box(id!(check));
+            let cb = item.check_box(ids!(check));
             if let Some(change) = cb.changed(&actions) {
                 item.redraw(cx);
                 match cb.action_data().cast_ref(){

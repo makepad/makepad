@@ -65,7 +65,7 @@ enum DrawState {
 impl Widget for FoldHeader {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
-            if self.animator.is_track_animating(cx, id!(active)) {
+            if self.animator.is_track_animating(cx, ids!(active)) {
                 self.area.redraw(cx);
             }
         };
@@ -73,12 +73,12 @@ impl Widget for FoldHeader {
         self.header.handle_event(cx,  event, scope);
         
         if let Event::Actions(actions) = event{
-            match actions.find_widget_action(self.header.widget(id!(fold_button)).widget_uid()).cast() {
+            match actions.find_widget_action(self.header.widget(ids!(fold_button)).widget_uid()).cast() {
                 FoldButtonAction::Opening => {
-                    self.animator_play(cx, id!(active.on))
+                    self.animator_play(cx, ids!(active.on))
                 }
                 FoldButtonAction::Closing => {
-                    self.animator_play(cx, id!(active.off))
+                    self.animator_play(cx, ids!(active.off))
                 }
                 _ => ()
             }

@@ -565,7 +565,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.draw_bg.area()) {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                    self.animator_play(cx, id!(hover.drag));
+                    self.animator_play(cx, ids!(hover.drag));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
                         ScrollAxis::Horizontal => rel.x,
@@ -585,18 +585,18 @@ impl ScrollBar {
                     }
                 },
                 Hit::FingerHoverIn(_) => {
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 },
                 Hit::FingerHoverOut(_) => {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 },
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
                     self.drag_point = None;
                     if fe.is_over && fe.device.has_hovers() {
-                        self.animator_play(cx, id!(hover.on));
+                        self.animator_play(cx, ids!(hover.on));
                     }
                     else {
-                        self.animator_play(cx, id!(hover.off));
+                        self.animator_play(cx, ids!(hover.off));
                     }
                     return;
                 },

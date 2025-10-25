@@ -129,8 +129,8 @@ impl Widget for TogglePanel {
         };
 
         if let Event::Actions(actions) = event {
-            let open = self.button(id!(open));
-            let close = self.button(id!(close));
+            let open = self.button(ids!(open));
+            let close = self.button(ids!(close));
 
             if open.clicked(actions) {
                 open.set_visible(cx, false);
@@ -162,15 +162,15 @@ impl Widget for TogglePanel {
 impl TogglePanel {
     /// Returns whether the panel is currently open.
     pub fn is_open(&self, cx: &Cx) -> bool {
-        self.animator_in_state(cx, id!(panel.open))
+        self.animator_in_state(cx, ids!(panel.open))
     }
 
     /// Sets whether the panel is open. Causes the panel to animate to the new state.
     pub fn set_open(&mut self, cx: &mut Cx, open: bool) {
         if open {
-            self.animator_play(cx, id!(panel.open));
+            self.animator_play(cx, ids!(panel.open));
         } else {
-            self.animator_play(cx, id!(panel.close));
+            self.animator_play(cx, ids!(panel.close));
         }
     }
 }

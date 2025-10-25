@@ -226,13 +226,13 @@ impl Widget for ColorPicker {
                 
         match event.hits(cx, self.draw_wheel.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             },
             Hit::FingerDown(fe) => {
-                self.animator_play(cx, id!(hover.down));
+                self.animator_play(cx, ids!(hover.down));
                 let rsize = (self.size * 0.28) / 2.0f64.sqrt();
                 let rel = fe.abs - fe.rect.pos;
                 let vx = rel.x - 0.5 * self.size;
@@ -251,10 +251,10 @@ impl Widget for ColorPicker {
             },
             Hit::FingerUp(fe) => {
                 if fe.is_over && fe.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 }
                 else {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
                 let uid = self.widget_uid();

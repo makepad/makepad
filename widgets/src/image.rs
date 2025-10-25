@@ -149,7 +149,7 @@ impl Widget for Image {
                     if self.async_image_size.is_some() && self.async_image_path.clone() == Some(image_path.to_path_buf()){ // see if we can load from cache
                         self.load_image_from_cache(cx, image_path, 0);
                         self.async_image_size = None;
-                        self.animator_play(cx, id!(async_load.off));
+                        self.animator_play(cx, ids!(async_load.off));
                         self.redraw(cx);
                     }
                 }
@@ -241,7 +241,7 @@ impl Widget for Image {
                     self.draw_bg.image_pan = vec2(xpos, ypos);
                     if self.draw_bg.image_pan != last_pan{
                         // patch it into the area
-                        self.draw_bg.update_instance_area_value(cx, id!(image_pan))
+                        self.draw_bg.update_instance_area_value(cx, ids!(image_pan))
                     }
                 }
             }
@@ -348,7 +348,7 @@ impl Image {
                 AsyncLoadResult::Loading(w,h)=>{
                     self.async_image_size = Some((w,h));
                     self.async_image_path = Some(image_path.into());
-                    self.animator_play(cx, id!(async_load.on));
+                    self.animator_play(cx, ids!(async_load.on));
                     self.redraw(cx);
                 }
                 AsyncLoadResult::Loaded=>{
@@ -365,7 +365,7 @@ impl Image {
                 AsyncLoadResult::Loading(w,h)=>{
                     self.async_image_size = Some((w,h));
                     self.async_image_path = Some(image_path.into());
-                    self.animator_play(cx, id!(async_load.on));
+                    self.animator_play(cx, ids!(async_load.on));
                     self.redraw(cx);
                 }
                 AsyncLoadResult::Loaded=>{

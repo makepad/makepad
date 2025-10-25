@@ -269,7 +269,7 @@ struct Profiler{
 impl WidgetMatchEvent for Profiler{
     fn handle_actions(&mut self, _cx: &mut Cx, actions: &Actions, scope: &mut Scope ){
         let _data = scope.data.get_mut::<AppData>().unwrap();
-        if self.button(id!(clear_button)).clicked(&actions){
+        if self.button(ids!(clear_button)).clicked(&actions){
             
             crate::log!("CLICK");
         }

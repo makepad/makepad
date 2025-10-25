@@ -495,7 +495,7 @@ impl Markdown {
                         let cbs = &self.code_block_string;
                         
                         tf.item_with(cx, entry_id, live_id!(code_block), |cx, item, _tf|{
-                            item.widget(id!(code_view)).set_text(cx, cbs);
+                            item.widget(ids!(code_view)).set_text(cx, cbs);
                             item.draw_all_unscoped(cx);
                         });
                     }

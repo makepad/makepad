@@ -413,11 +413,11 @@ impl DesignerOutlineTreeNode {
     }
     
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(select.on), id!(select.off))
+        self.animator_toggle(cx, is, animate, ids!(select.on), ids!(select.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(focus.on), id!(focus.off))
+        self.animator_toggle(cx, is, animate, ids!(focus.on), ids!(focus.off))
     }
     
     pub fn set_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
@@ -427,11 +427,11 @@ impl DesignerOutlineTreeNode {
         else{
             self.opened = 0.0
         }
-        self.button_open.animator_toggle(cx, is, animate, id!(active.on), id!(active.off));
+        self.button_open.animator_toggle(cx, is, animate, ids!(active.on), ids!(active.off));
     }
     
     pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(active.on), id!(active.off));
+        self.animator_toggle(cx, is, animate, ids!(active.on), ids!(active.off));
     }
     
     pub fn handle_event(
@@ -467,10 +467,10 @@ impl DesignerOutlineTreeNode {
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-               self.animator_play(cx, id!(hover.on));
+               self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
@@ -478,16 +478,16 @@ impl DesignerOutlineTreeNode {
                 }
             }
             Hit::FingerDown(e) => {
-                self.animator_play(cx, id!(active.on));
+                self.animator_play(cx, ids!(active.on));
                 actions_out.push((node_id, OutlineTreeNodeAction::Selected(e.modifiers)));
                 /*
                 if self.is_folder {
-                    if self.animator_in_state(cx, id!(active.on)) {
-                        self.animator_play(cx, id!(active.off));
+                    if self.animator_in_state(cx, ids!(active.on)) {
+                        self.animator_play(cx, ids!(active.off));
                         actions.push((node_id, OutlineTreeNodeAction::Closing));
                     }
                     else {
-                        self.animator_play(cx, id!(active.on));
+                        self.animator_play(cx, ids!(active.on));
                         actions.push((node_id, OutlineTreeNodeAction::Opening));
                     }
                 }

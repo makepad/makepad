@@ -191,11 +191,11 @@ impl PianoKey {
     }
     
     fn set_is_pressed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(pressed.on), id!(pressed.off))
+        self.animator_toggle(cx, is, animate, ids!(pressed.on), ids!(pressed.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.animator_toggle(cx, is, animate, id!(focus.on), id!(focus.off))
+        self.animator_toggle(cx, is, animate, ids!(focus.on), ids!(focus.off))
     }
     
     pub fn handle_event(
@@ -212,24 +212,24 @@ impl PianoKey {
         match event.hits_with_sweep_area(cx, self.draw_key.area(), sweep_area) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerDown(_) => {
-                self.animator_play(cx, id!(hover.on));
-                self.animator_play(cx, id!(pressed.on));
+                self.animator_play(cx, ids!(hover.on));
+                self.animator_play(cx, ids!(pressed.on));
                 actions.push((key_id, PianoKeyAction::Pressed(127)));
             }
             Hit::FingerUp(e) => {
                 if !e.is_sweep && e.device.has_hovers(){
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 }
                 else{
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
-                self.animator_play(cx, id!(pressed.off));
+                self.animator_play(cx, ids!(pressed.off));
                 actions.push((key_id, PianoKeyAction::Up));
             }
             _ => {}

@@ -221,11 +221,11 @@ impl Widget for Search {
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
-        let search_results = self.view.portal_list(id!(list));
+        let search_results = self.view.portal_list(ids!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get_mut::<AppData>().unwrap();
         if let Event::Actions(actions) = event{
-            if let Some(search) = self.view.text_input(id!(search_input)).changed(&actions){
+            if let Some(search) = self.view.text_input(ids!(search_input)).changed(&actions){
                 let mut set = Vec::new();
                 for item in search.split("|"){
                     if let Some(item) = item.strip_suffix("\\b"){

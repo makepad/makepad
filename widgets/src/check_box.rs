@@ -938,7 +938,7 @@ pub struct CheckBox {
 impl LiveHook for CheckBox{
     fn after_new_from_doc(&mut self, cx: &mut Cx){
         if let Some(active) = self.active.take() {
-            self.animator_toggle(cx, active, Animate::No, id!(active.on), id!(active.off));
+            self.animator_toggle(cx, active, Animate::No, ids!(active.on), ids!(active.off));
         }
     }
 }
@@ -964,11 +964,11 @@ impl CheckBox {
 impl Widget for CheckBox {
 
     fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
-        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
     }
                 
     fn disabled(&self, cx:&Cx) -> bool {
-        self.animator_in_state(cx, id!(disabled.on))
+        self.animator_in_state(cx, ids!(disabled.on))
     }
     
     fn widget_to_data(&self, _cx: &mut Cx, actions: &Actions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
@@ -984,7 +984,7 @@ impl Widget for CheckBox {
     fn data_to_widget(&mut self, cx: &mut Cx, nodes: &[LiveNode], path: &[LiveId]) {
         if let Some(value) = nodes.read_field_value(path) {
             if let Some(value) = value.as_bool() {
-                self.animator_toggle(cx, value, Animate::Yes, id!(active.on), id!(active.off));
+                self.animator_toggle(cx, value, Animate::Yes, ids!(active.on), ids!(active.off));
             }
         }
     }
@@ -995,27 +995,27 @@ impl Widget for CheckBox {
                 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
-                self.animator_play(cx, id!(focus.on));
+                self.animator_play(cx, ids!(focus.on));
             }
             Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, id!(focus.off));
+                self.animator_play(cx, ids!(focus.off));
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             },
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.set_key_focus(cx);
-                if self.animator_in_state(cx, id!(active.on)) {
-                    self.animator_play(cx, id!(active.off));
+                if self.animator_in_state(cx, ids!(active.on)) {
+                    self.animator_play(cx, ids!(active.off));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(false));
                 }
                 else {
-                    self.animator_play(cx, id!(active.on));
+                    self.animator_play(cx, ids!(active.on));
                     cx.widget_action_with_data(&self.action_data, uid, &scope.path, CheckBoxAction::Change(true));
                 }
             },
@@ -1064,7 +1064,7 @@ impl CheckBoxRef {
     
     pub fn active(&self, cx: &Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator_in_state(cx, id!(active.on))
+            inner.animator_in_state(cx, ids!(active.on))
         }
         else {
             false
@@ -1073,7 +1073,7 @@ impl CheckBoxRef {
     
     pub fn set_active(&self, cx: &mut Cx, value: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_toggle(cx, value, Animate::Yes, id!(active.on), id!(active.off));
+            inner.animator_toggle(cx, value, Animate::Yes, ids!(active.on), ids!(active.off));
         }
     }
 }

@@ -1,8 +1,8 @@
 // Makepad script streaming tokenizer
 
-use crate::makepad_id::id::Id;
+use crate::makepad_live_id::LiveId;
 use crate::colorhex::hex_bytes_to_u32;
-use crate::makepad_id_derive::*;
+use crate::makepad_live_id_macros::*;
 use crate::heap::*;
 use crate::value::*;
  
@@ -11,9 +11,9 @@ use crate::value::*;
 pub enum ScriptToken{
     End,
     StreamEnd,
-    Identifier{id:Id, starts_with_ds:bool},
-    Operator(Id),
-    Separator(Id),
+    Identifier{id:LiveId, starts_with_ds:bool},
+    Operator(LiveId),
+    Separator(LiveId),
     OpenCurly,
     CloseCurly,
     OpenRound,
@@ -28,9 +28,9 @@ pub enum ScriptToken{
 }
 
 impl ScriptToken{
-    pub fn identifier(&self)->(Id, bool){match self{ScriptToken::Identifier{id,starts_with_ds}=>(*id,*starts_with_ds),_=>(id!(),false)}}
-    pub fn operator(&self)->Id{match self{ScriptToken::Operator(id)=>*id,_=>id!()}}
-    pub fn separator(&self)->Id{match self{ScriptToken::Separator(id)=>*id,_=>id!()}}
+    pub fn identifier(&self)->(LiveId, bool){match self{ScriptToken::Identifier{id,starts_with_ds}=>(*id,*starts_with_ds),_=>(id!(),false)}}
+    pub fn operator(&self)->LiveId{match self{ScriptToken::Operator(id)=>*id,_=>id!()}}
+    pub fn separator(&self)->LiveId{match self{ScriptToken::Separator(id)=>*id,_=>id!()}}
     pub fn number(&self)->f64{match self{ScriptToken::Number(v)=>*v,_=>0.0}}
     pub fn as_number(&self)->Option<f64>{match self{ScriptToken::Number(v)=>Some(*v),_=>None}}
     pub fn as_color(&self)->Option<u32>{match self{ScriptToken::Color(v)=>Some(*v),_=>None}}
@@ -198,10 +198,10 @@ impl ScriptTokenizer{
     }
     
     fn emit_identifier(&mut self, starts_with_ds:bool){
-        let id = match Id::from_str_with_lut(&self.temp){
+        let id = match LiveId::from_str_with_lut(&self.temp){
             Err(str)=>{
-                println!("--WARNING-- Id LUT collision between {} and {}", self.temp, str);
-                Id::from_str(&self.temp)
+                println!("--WARNING-- LiveId LUT collision between {} and {}", self.temp, str);
+                LiveId::from_str(&self.temp)
             }
             Ok(id)=>{
                 id
@@ -219,10 +219,10 @@ impl ScriptTokenizer{
         if self.temp.len() == 0{
             return
         }
-        let id = match Id::from_str_with_lut(&self.temp){
+        let id = match LiveId::from_str_with_lut(&self.temp){
             Err(str)=>{
-                println!("--WARNING-- Id LUT collision between {} and {}", self.temp, str);
-                Id::from_str(&self.temp)
+                println!("--WARNING-- LiveId LUT collision between {} and {}", self.temp, str);
+                LiveId::from_str(&self.temp)
             }
             Ok(id)=>{
                 id
@@ -241,10 +241,10 @@ impl ScriptTokenizer{
             panic!()
         }
         self.temp.push(c);
-        let id = match Id::from_str_with_lut(&self.temp){
+        let id = match LiveId::from_str_with_lut(&self.temp){
             Err(str)=>{
-                println!("--WARNING-- Id LUT collision between {} and {}", self.temp, str);
-                Id::from_str(&self.temp)
+                println!("--WARNING-- LiveId LUT collision between {} and {}", self.temp, str);
+                LiveId::from_str(&self.temp)
             }
             Ok(id)=>{
                 id
