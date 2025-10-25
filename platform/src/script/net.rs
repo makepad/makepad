@@ -4,7 +4,7 @@ use makepad_script::id;
 
 
 
-pub fn define_net_module(vm:&mut ScriptVm){
+pub fn define_net_module(vm:&mut ScriptVmBase){
     let net = vm.new_module(id!(net));
     vm.add_fn(net, id!(fetch), args!(url=NIL, options=NIL), |vm, args|{
         let _options =  value!(vm, args.options);
