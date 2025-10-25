@@ -504,32 +504,26 @@ impl TextFlow{
         self.draw_normal.text_style.font_size = *fs as _;
         let fc = self.font_colors.last().unwrap_or(&self.font_color);
         self.draw_normal.color = *fc;
-        let pad = self.draw_normal.text_style.font_size as f64 * pad;
-        // we should add the line spacing of the turlte
-        
+
+        // Use the provided padding to reserve space for the marker
+        let font_based_padding = self.draw_normal.text_style.font_size as f64 * pad;
+
         cx.begin_turtle(self.list_item_walk, Layout{
             padding:Padding{
-                left: self.list_item_layout.padding.left + pad,
+                left: self.list_item_layout.padding.left + font_based_padding,
                 ..self.list_item_layout.padding
             },
             ..self.list_item_layout
         });
-        // lets draw the 'marker' at -x 
-        // lets get the turtle position and abs draw 
-        
-        let marker_len = dot.chars().count();
-        let pos = match marker_len {
-            1 => {
-                cx.turtle().pos() - dvec2(pad, 0.0)
-            },
-            _ => {
-                // This calculation takes into account when numbers have more than one digit
-                // making sure they are properly aligned.
-                let pad = pad + self.draw_normal.text_style.font_size as f64 * (marker_len - 2) as f64;
-                cx.turtle().pos() - dvec2(pad, 0.0)
-            }
-        };
-        self.draw_normal.draw_abs(cx, pos, dot);
+
+        // Move turtle back to draw the marker
+        cx.turtle_mut().move_right_down(dvec2(-font_based_padding, 0.0));
+
+        // Draw the marker and space using the turtle system
+        self.draw_text(cx, dot);
+        self.draw_text(cx, " ");
+
+        // The turtle is now positioned after the marker+space, content will flow naturally
         
         self.area_stack.push(self.draw_block.draw_vars.area);
     }
