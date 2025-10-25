@@ -5,7 +5,7 @@ use std::fmt::Write;
 use crate::object::*;
 use crate::string::*;
 use crate::thread::*;
-use crate::script::*;
+use crate::traits::*;
 use std::collections::HashMap;
 
 pub struct ScriptHeap{

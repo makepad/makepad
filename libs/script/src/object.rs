@@ -1,7 +1,7 @@
 use std::fmt;
 use crate::value::*;
 use crate::value_map::*;
-use crate::script::*;
+use crate::traits::*;
 use std::collections::hash_map::Entry;
 
 #[derive(Default)]

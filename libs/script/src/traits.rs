@@ -148,27 +148,3 @@ pub trait ScriptToValue: ScriptNew{
 #[derive(Default)]
 pub struct ApplyScope{
 }
-
-
-// f64
-
-
-impl ScriptToValue for f64{fn script_to_value(&self, _vm:&mut Vm)->Value{Value::from_f64(*self)}}
-impl ScriptHook for f64{}
-impl ScriptNew for f64{
-    fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_type_check(_heap:&ScriptHeap, value:Value)->bool{
-        value.is_number()
-    }
-    fn script_default(vm:&mut Vm)->Value{Self::script_new(vm).script_to_value(vm)}
-    fn script_new(_vm:&mut Vm)->Self{Default::default()}
-    fn script_proto_build(_vm:&mut Vm, _props:&mut ScriptTypeProps)->Value{Value::from_f64(0.0)}
-}
-impl ScriptApply for f64{
-    fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut Vm, _apply:&mut ApplyScope, value:Value){
-        if !value.is_nil(){
-            *self = vm.cast_to_f64(value);
-        }
-    }
-}
