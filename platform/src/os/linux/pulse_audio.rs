@@ -138,7 +138,8 @@ impl PulseInputStream {
             input.audio_buffer.copy_from_interleaved(2, interleaved);
             input_fn(AudioInfo {
                 device_id: input.device_id,
-                time: None
+                time: None,
+                sample_rate: 48000.0,
             }, &input.audio_buffer);
         }        
         pa_stream_drop(stream);
@@ -285,7 +286,8 @@ impl PulseOutputStream {
             if let Some(output_fn) = &mut *output_fn {
                 output_fn(AudioInfo {
                     device_id: output.device_id,
-                    time: None
+                    time: None,
+                    sample_rate: 48000.0,
                 }, &mut output.audio_buffer);
                 // lets copy it to interleaved format
                 let interleaved = std::slice::from_raw_parts_mut(write_ptr as *mut f32, output.write_byte_count / 4);

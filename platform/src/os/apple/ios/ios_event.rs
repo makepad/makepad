@@ -14,6 +14,7 @@ use {
             TouchUpdateEvent,
             VirtualKeyboardEvent,
         },
+        permission::PermissionResult,
     }
 };
 
@@ -39,4 +40,5 @@ pub enum IosEvent {
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
     Timer(TimerEvent),
+    PermissionResult(PermissionResult),
 }

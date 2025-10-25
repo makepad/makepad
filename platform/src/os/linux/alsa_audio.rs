@@ -216,6 +216,7 @@ impl AlsaAudioAccess {
                                 AudioInfo {
                                     device_id,
                                     time: None,
+                                    sample_rate: 48000.0,
                                 },
                                 &audio_buffer
                             );
@@ -275,6 +276,7 @@ impl AlsaAudioAccess {
                                 AudioInfo {
                                     device_id,
                                     time: None,
+                                    sample_rate: 48000.0,
                                 },
                                 &mut audio_buffer
                             );

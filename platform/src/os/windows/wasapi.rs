@@ -151,7 +151,8 @@ impl WasapiAccess {
                             fbox(
                                 AudioInfo {
                                     device_id,
-                                    time: None
+                                    time: None,
+                                    sample_rate: 48000.0,
                                 },
                                 &buffer
                             );
@@ -210,6 +211,7 @@ impl WasapiAccess {
                                 AudioInfo {
                                     device_id,
                                     time: None,
+                                    sample_rate: 48000.0,
                                 },
                                 &mut buffer.audio_buffer
                             );

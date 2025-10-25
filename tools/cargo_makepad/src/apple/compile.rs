@@ -279,6 +279,8 @@ impl PlistValues{
                 <false/>
                 <key>NSFaceIDUsageDescription</key>
                 <string>For biometric authentication</string>
+                <key>NSMicrophoneUsageDescription</key>
+                <string>This app needs access to the microphone for audio recording functionality.</string>
             </dict>
             </plist>"#,
             identifier = self.identifier,

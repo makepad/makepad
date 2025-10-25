@@ -1,5 +1,6 @@
 workspace.members = [
     # === examples ===
+    "examples/audio",
     "examples/chatgpt",
     "examples/ironfish",
     "examples/teamtalk",
