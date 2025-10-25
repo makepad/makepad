@@ -17,15 +17,18 @@ pub mod value;
 pub mod opcodes;
 pub mod gc;
 pub mod value_map;
-pub mod script;
+pub mod traits;
+pub mod prims;
+
 pub use makepad_id_derive::*;
 pub use makepad_id::id::*;
 pub use value::*;
 pub use vm::*;
 pub use makepad_script_derive::*;
-pub use script::*;
+pub use traits::*;
 pub use thread::*;
 pub use heap::*;
+
 // can we refcount object roots on the heap?
 // yea why not 
 // we can make a super convenient ObjectRef type you can use to hold onto script objects
@@ -111,6 +114,7 @@ pub fn test(){
         let iv = [1 2 3 4] let ov = []
         for v in iv ov.push(v) assert(iv == ov)
         ov.pop() assert(iv != ov)
+        assert(ov[2] == 3);
         
         // shallow and deep compare
         let oa = {y:1 z:2}
@@ -201,7 +205,6 @@ pub fn test(){
         assert(strct.enm == EnumTest.Bare)
         try{strct{enm: EnumTest.Bare}} assert(false) ok assert(true)
         try{strct{enm: 1.0}} assert(true) ok assert(false)
-        strct{enm: EnumTest.Named{named_field:1.0}}
         try{strct{enm: EnumTest.Named{named_field:1.0}}} assert(false) ok assert(true)
         try{strct{enm: EnumTest.Tuple(1.0)}} assert(false) ok assert(true)
         ~EnumTest
