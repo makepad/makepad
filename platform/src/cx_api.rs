@@ -33,24 +33,24 @@ pub trait CxOsApi {
     fn spawn_thread<F>(&mut self, f: F)
     where
         F: FnOnce() + Send + 'static;
-        
+
     fn start_stdin_service(&mut self) {}
     fn pre_start() -> bool {
         false
     }
-    
+
     fn open_url(&mut self, url:&str, in_place:OpenUrlInPlace);
-    
+
     fn seconds_since_app_start(&self)->f64;
-    
+
     fn default_window_size(&self)->DVec2{dvec2(800.,600.)}
-    
+
     fn max_texture_width()->usize{4096}
-    
+
     fn in_xr_mode(&self)->bool{false}
-    
+
     fn micro_zbias_step(&self)->f32{0.00001}
-    
+
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -113,7 +113,7 @@ pub enum CxOsOp {
     UnmuteVideoPlayback(LiveId),
     CleanupVideoPlaybackResources(LiveId),
     UpdateVideoSurfaceTexture(LiveId),
-    
+
     CreateWebView{
         id: LiveId,
         area: Area,
@@ -130,14 +130,14 @@ pub enum CxOsOp {
     SaveFileDialog(FileDialog),
     SelectFileDialog(FileDialog),
     SaveFolderDialog(FileDialog),
-    SelectFolderDialog(FileDialog),    
-    
+    SelectFolderDialog(FileDialog),
+
     XrStartPresenting,
     XrSetLocalAnchor(XrAnchor),
     XrAdvertiseAnchor(XrAnchor),
     XrDiscoverAnchor(u8),
     XrStopPresenting,
-    
+
 }
 
 impl std::fmt::Debug for CxOsOp {
@@ -154,24 +154,25 @@ impl std::fmt::Debug for CxOsOp {
             Self::HideWindow(..)=>write!(f, "HideWindow"),
             Self::SetTopmost(..)=>write!(f, "SetTopmost"),
             Self::ShowInDock(..)=>write!(f, "ShowInDock"),
-            
+
             Self::ShowTextIME(..)=>write!(f, "ShowTextIME"),
             Self::HideTextIME=>write!(f, "HideTextIME"),
             Self::SetCursor(..)=>write!(f, "SetCursor"),
             Self::StartTimer{..}=>write!(f, "StartTimer"),
             Self::StopTimer(..)=>write!(f, "StopTimer"),
             Self::Quit=>write!(f, "Quit"),
-            
+
             Self::StartDragging(..)=>write!(f, "StartDragging"),
             Self::UpdateMacosMenu(..)=>write!(f, "UpdateMacosMenu"),
             Self::ShowClipboardActions(..)=>write!(f, "ShowClipboardActions"),
             Self::CopyToClipboard(..)=>write!(f, "CopyToClipboard"),
+
             Self::CheckPermission{..}=>write!(f, "CheckPermission"),
             Self::RequestPermission{..}=>write!(f, "RequestPermission"),
             
             Self::HttpRequest{..}=>write!(f, "HttpRequest"),
             Self::CancelHttpRequest{..}=>write!(f, "CancelHttpRequest"),
-            
+
             Self::PrepareVideoPlayback(..)=>write!(f, "PrepareVideoPlayback"),
             Self::BeginVideoPlayback(..)=>write!(f, "BeginVideoPlayback"),
             Self::PauseVideoPlayback(..)=>write!(f, "PauseVideoPlayback"),
@@ -189,7 +190,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::SelectFolderDialog(..)=>write!(f, "SelectFolderDialog"),
             Self::ResizeWindow(..)=>write!(f, "ResizeWindow"),
             Self::RepositionWindow(..)=>write!(f, "RepositionWindow"),
-            
+
             Self::XrStartPresenting=>write!(f, "XrStartPresenting"),
             Self::XrStopPresenting=>write!(f, "XrStopPresenting"),
             Self::XrAdvertiseAnchor(_)=>write!(f, "XrAdvertiseAnchor"),
@@ -210,7 +211,7 @@ impl Cx {
     pub fn get_ref(&self) -> CxRef {
         CxRef(self.self_ref.clone().unwrap())
     }
-    
+
     pub fn take_dependency(&mut self, path: &str) -> Result<Rc<Vec<u8>>, String> {
         if let Some(data) = self.dependencies.get_mut(path) {
             if let Some(data) = data.data.take() {
@@ -222,7 +223,7 @@ impl Cx {
         }
         Err(format!("Dependency not loaded {}", path))
     }
-    
+
     pub fn get_dependency(&self, path: &str) -> Result<Rc<Vec<u8>>, String> {
         if let Some(data) = self.dependencies.get(path) {
             if let Some(data) = &data.data {
@@ -244,13 +245,13 @@ impl Cx {
     pub fn os_type(&self) -> &OsType {
         &self.os_type
     }
-    
+
     /// Returns the app's writable data directory path.
-    /// 
+    ///
     /// On Android, this is the directory returned by Activity's getFilesDir().
     /// On iOS, this is the Application Support directory.
     /// Returns None on unsupported platforms (e.g. wasm).
-    /// 
+    ///
     /// Note that this path is not guaranteed to exist (it doesn't by default on iOS simulators),
     /// so you might need to create it.
     pub fn get_data_dir(&self) -> Option<String> {
@@ -271,29 +272,29 @@ impl Cx {
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
         self.platform_ops.push(CxOsOp::UpdateMacosMenu(menu));
     }
-    
+
     pub fn xr_start_presenting(&mut self) {
         self.platform_ops.push(CxOsOp::XrStartPresenting);
     }
-    
+
     pub fn xr_advertise_anchor(&mut self, anchor:XrAnchor) {
         self.platform_ops.push(CxOsOp::XrAdvertiseAnchor(anchor));
     }
-    
+
     pub fn xr_set_local_anchor(&mut self,  anchor:XrAnchor) {
         self.platform_ops.push(CxOsOp::XrSetLocalAnchor(anchor));
     }
-            
+
     pub fn xr_discover_anchor(&mut self, id: u8) {
         self.platform_ops.push(CxOsOp::XrDiscoverAnchor(id));
     }
-        
-        
+
+
     pub fn quit(&mut self) {
         self.platform_ops.push(CxOsOp::Quit);
     }
-    // Determines whether to show your application in the dock when it runs. The default value is true. 
-    // You can remove the dock icon by setting this value to false. 
+    // Determines whether to show your application in the dock when it runs. The default value is true.
+    // You can remove the dock icon by setting this value to false.
     pub fn show_in_dock(&mut self, show: bool) {
         self.platform_ops.push(CxOsOp::ShowInDock(show));
     }
@@ -326,7 +327,7 @@ impl Cx {
     }
 
     /// Copies the given string to the clipboard.
-    /// 
+    ///
     /// Due to lack of platform clipboard support, it does not work on Web or tvOS.
     pub fn copy_to_clipboard(&mut self, content: &str) {
         self.platform_ops.push(CxOsOp::CopyToClipboard(content.to_owned()));
@@ -403,7 +404,7 @@ impl Cx {
         }
         return 1.0;
     }
-    
+
     pub fn get_pass_window_id(&self, pass_id: PassId) -> Option<WindowId> {
          let mut pass_id_walk = pass_id;
          for _ in 0..25 {
@@ -421,7 +422,7 @@ impl Cx {
          }
          None
      }
-    
+
     pub fn get_delegated_dpi_factor(&mut self, pass_id: PassId) -> f64 {
         let mut pass_id_walk = pass_id;
         for _ in 0..25 {
@@ -536,13 +537,13 @@ impl Cx {
             self.redraw_list(draw_list_id);
         }
     }
-    
+
     pub fn redraw_area_in_draw(&mut self, area: Area) {
         if let Some(draw_list_id) = area.draw_list_id() {
             self.redraw_list_in_draw(draw_list_id);
         }
     }
-    
+
     pub fn redraw_area_and_children(&mut self, area: Area) {
         if let Some(draw_list_id) = area.draw_list_id() {
             self.redraw_list_and_children(draw_list_id);
@@ -555,7 +556,7 @@ impl Cx {
         }
         self.redraw_list_in_draw(draw_list_id);
     }
-    
+
     pub fn redraw_list_in_draw(&mut self, draw_list_id: DrawListId) {
         if self
         .new_draw_event
@@ -673,7 +674,7 @@ impl Cx {
             request,
         });
     }
-    
+
     pub fn cancel_http_request(&mut self, request_id: LiveId) {
         self.platform_ops.push(CxOsOp::CancelHttpRequest {
             request_id,

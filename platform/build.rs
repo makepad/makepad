@@ -15,25 +15,25 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines, use_gles_3, linux_direct,quest,no_android_choreographer,ohos_sim,use_unstable_unix_socket_ancillary_data_2021)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
-    
+
     if let Ok(configs) = env::var("MAKEPAD"){
         for config in configs.split(['+', ',']){
             match config{
-                "lines"=>println!("cargo:rustc-cfg=lines"), 
-                "linux_direct"=>println!("cargo:rustc-cfg=linux_direct"), 
-                "no_android_choreographer"=>println!("cargo:rustc-cfg=no_android_choreographer"), 
+                "lines"=>println!("cargo:rustc-cfg=lines"),
+                "linux_direct"=>println!("cargo:rustc-cfg=linux_direct"),
+                "no_android_choreographer"=>println!("cargo:rustc-cfg=no_android_choreographer"),
                 "quest"=>{
-                    println!("cargo:rustc-cfg=quest"); 
-                    println!("cargo:rustc-cfg=use_gles_3"); 
+                    println!("cargo:rustc-cfg=quest");
+                    println!("cargo:rustc-cfg=use_gles_3");
                 },
-                "apple_bundle"=>println!("cargo:rustc-cfg=apple_bundle"), 
+                "apple_bundle"=>println!("cargo:rustc-cfg=apple_bundle"),
                 "ohos_sim"=>println!("cargo:rustc-cfg=ohos_sim"),
-                "use_gles_3"=>println!("cargo:rustc-cfg=use_gles_3"), 
+                "use_gles_3"=>println!("cargo:rustc-cfg=use_gles_3"),
                 _=>{}
             }
         }
     }
-    
+
     match target_os.as_str(){
         "macos"=>{
             use std::process::Command;
@@ -43,30 +43,33 @@ fn main() {
                 .status().unwrap().success() {
                 panic!("CLANG FAILED");
             };
-            
+
             if !Command::new("ar").args(&["crus", "libmetal_xpc.a", "metal_xpc.o"])
                 .current_dir(&Path::new(&out_dir))
                 .status().unwrap().success() {
-                panic!("AR FAILED"); 
+                panic!("AR FAILED");
             };
-            
+
             println!("cargo:rustc-link-search=native={}", out_dir);
             println!("cargo:rustc-link-lib=static=metal_xpc");
             println!("cargo:rerun-if-changed=src/os/apple/metal_xpc.m");
         }
         "ios"=>{
             if target == "aarch64-apple-ios-sim"{
-                println!("cargo:rustc-cfg=apple_sim"); 
-                //println!("cargo:rustc-cfg=apple_bundle"); 
+                println!("cargo:rustc-cfg=apple_sim");
+                //println!("cargo:rustc-cfg=apple_bundle");
             }
             println!("cargo:rustc-link-lib=framework=MetalKit");
         }
         "tvos"=>{
             if target == "aarch64-apple-tvos-sim"{
-                println!("cargo:rustc-cfg=apple_sim"); 
-                //println!("cargo:rustc-cfg=apple_bundle"); 
+                println!("cargo:rustc-cfg=apple_sim");
+                //println!("cargo:rustc-cfg=apple_bundle");
             }
             println!("cargo:rustc-link-lib=framework=MetalKit");
+        }
+        "linux"=>{
+            println!("cargo:rustc-link-lib=xkbcommon");
         }
         _=>()
     }
