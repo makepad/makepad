@@ -74,8 +74,9 @@ pub fn test(){
     
     #[derive(Script)]
     pub struct StructTest{
-        #[live(1.0)] field:f64,
-        #[live(EnumTest::Bare)] enm:EnumTest,
+       #[live(1.0)] field:f64,
+       #[live(EnumTest::Bare)] enm:EnumTest,
+       #[live] opt: Option<f64>,
     }
     
     #[derive(Script, ScriptHook)]

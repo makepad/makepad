@@ -89,6 +89,7 @@ pub use {
     
     makepad_script::vm::*,
     makepad_script::traits::*,
+    makepad_script::script,
     log::*,
     makepad_math::*,
     makepad_live_id::*,

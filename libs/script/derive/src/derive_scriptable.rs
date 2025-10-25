@@ -99,6 +99,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         tb.add("        self.on_deref_before_apply(vm, apply, value);");
         
+        
         for field in &fields {
             if field.attrs.iter().any( | a | a.name == "live" || a.name =="script"){
                 tb.add("if let Some(v) = vm.heap.value_apply_if_dirty(value, Value::from_id(id!(")
@@ -200,20 +201,22 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             }
             if let Some(attr) = field.attrs.iter().find(|a| a.name == "script" || a.name == "live"){
                 // lets make sure the type is defined
-                tb.stream(Some(field.ty.clone())).add("::script_proto(vm);");
+                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto(vm);");
                 
                 tb.add("let value:Value = ");
                 if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                    tb.add("").stream(Some(field.ty.clone())).add("::script_default(vm);");
+                                        
+                    tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_default(vm);");
                 }
                 else {
                     tb.add("(").stream(attr.args.clone()).add(").script_to_value(vm);");
                 }  
                 tb.add("vm.heap.set_value(obj, Value::from_id(id_lut!(")
                     .ident(&field.name).add(")), value,&vm.thread.trap);");
-                tb.add("props.props.insert(id!(").ident(&field.name).add("),").stream(Some(field.ty.clone())).add("::script_type_id_static());");
+                tb.add("props.props.insert(id!(").ident(&field.name).add("),<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
             }
         }
+        
         tb.add("    }");
         tb.add("}");
         
@@ -351,7 +354,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("    }");
                     for (i, arg) in args.iter().enumerate(){
                         tb.add("if let Some(a) = vm.heap.vec_value_if_exist(args, ").unsuf_usize(i).add("){");
-                        tb.add("    if!").stream(Some(arg.clone())).add("::script_type_check(vm.heap, a){");
+                        tb.add("    if!<").stream(Some(arg.clone())).add(" as ScriptNew>::script_type_check(vm.heap, a){");
                         tb.add("        vm.thread.trap.err_invalid_arg_type();");
                         tb.add("    }");
                         tb.add("}");
@@ -373,7 +376,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("} = def{");
                     for (i, field) in fields.iter().enumerate(){
                         tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
-                        tb.add("props.props.insert(id_lut!(").ident(&field.name).add("), ").stream(Some(field.ty.clone())).add("::script_type_id_static());");
+                        tb.add("props.props.insert(id_lut!(").ident(&field.name).add("), <").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
                         tb.add(" vm.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, &vm.thread.trap);");
                     }
                     tb.add("}");
