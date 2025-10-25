@@ -169,9 +169,10 @@ impl ValueType{
     pub const ERR_VEC_BOUND: Self = Self(36);
     pub const ERR_INVALID_ARG_TYPE: Self = Self(37);
     pub const ERR_INVALID_ARG_NAME: Self = Self(38);
-    pub const ERR_NOT_PROTO: Self = Self(39);
-    pub const ERR_TYPE_NOT_REGISTERED: Self = Self(40);
-    pub const ERR_ENUM_UNKNOWN_VARIANT: Self = Self(41);
+    pub const ERR_INVALID_ARG_COUNT: Self = Self(39);
+    pub const ERR_NOT_PROTO: Self = Self(40);
+    pub const ERR_TYPE_NOT_REGISTERED: Self = Self(41);
+    pub const ERR_ENUM_UNKNOWN_VARIANT: Self = Self(42);
     pub const ERR_LAST: Self = Self(42);
     
     pub const ID: Self = Self(0x80);
@@ -264,6 +265,7 @@ impl fmt::Display for ValueType {
             Self::ERR_VEC_BOUND=>write!(f,"VecBoundFail"),
             Self::ERR_INVALID_ARG_TYPE=>write!(f,"InvalidArgumentType"),
             Self::ERR_INVALID_ARG_NAME=>write!(f,"InvalidArgumentName"),
+            Self::ERR_INVALID_ARG_COUNT=>write!(f,"InvalidArgumentCount"),
             Self::ERR_INVALID_VAR_NAME=>write!(f,"InvalidVariableName"),
             Self::ERR_NOT_PROTO=>write!(f,"NotAllowedAsPrototype"),
             Self::ERR_TYPE_NOT_REGISTERED=>write!(f,"TypeNotRegistered"),
@@ -349,6 +351,7 @@ impl Value{
     pub const fn err_vec_bound(ip:ScriptIp)->Self{Self(ValueType::ERR_VEC_BOUND.to_u64() | ip.to_u40())}
     pub const fn err_invalid_arg_type(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_ARG_TYPE.to_u64() | ip.to_u40())}            
     pub const fn err_invalid_arg_name(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_ARG_NAME.to_u64() | ip.to_u40())}
+    pub const fn err_invalid_arg_count(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_ARG_COUNT.to_u64() | ip.to_u40())}
     pub const fn err_invalid_var_name(ip:ScriptIp)->Self{Self(ValueType::ERR_INVALID_VAR_NAME.to_u64() | ip.to_u40())} 
         
     pub const fn err_user(ip:ScriptIp)->Self{Self(ValueType::ERR_USER.to_u64() | ip.to_u40())}
