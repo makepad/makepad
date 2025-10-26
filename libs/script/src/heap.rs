@@ -13,6 +13,8 @@ pub struct ScriptHeap{
     pub(crate) objects: Vec<ObjectData>,
     pub(crate) roots: Vec<usize>,
     pub(crate) objects_free: Vec<usize>,
+    pub(crate) string_swap: String,
+    pub(crate) string_intern: HashMap<String, u32>,
     pub(crate) strings: Vec<HeapStringData>,
     pub(crate) strings_free: Vec<usize>,
     pub(crate) type_check: Vec<ScriptTypeCheck>,
@@ -24,11 +26,12 @@ impl ScriptHeap{
     pub fn empty()->Self{
         let mut v = Self{
             modules: ScriptObject{index:0},
+            string_swap: Default::default(),
             mark_vec: Default::default(),
             objects: vec![Default::default()],
             roots: vec![0],
             objects_free: Default::default(),
-            // index 0 is always an empty string
+            string_intern: Default::default(),
             strings: vec![Default::default()],
             strings_free: Default::default(),
             type_check: Default::default(),
@@ -159,48 +162,43 @@ impl ScriptHeap{
         md
     }
     
-    pub fn new_empty_string(&mut self)->ScriptString{
-        if let Some(index) = self.strings_free.pop(){
+    pub fn new_string_from_str(&mut self,value:&str)->ScriptValue{
+        self.new_string_with(|_,out|{
+            out.push_str(value);
+        })
+    }
+            
+    pub fn new_string_with<F:FnOnce(&mut Self, &mut String)>(&mut self,cb:F)->ScriptValue{
+        let mut out = String::new();
+        self.string_swap.clear();
+        std::mem::swap(&mut out, &mut self.string_swap);
+        cb(self, &mut out);
+        if let Some(v) = ScriptValue::from_inline_string(&out){
+            std::mem::swap(&mut out, &mut self.string_swap);
+            return v
+        }
+        // check intern table
+        if let Some(index) = self.string_intern.get(&out){
+            std::mem::swap(&mut out, &mut self.string_swap);
+            return ScriptString{index:*index}.into();
+        }
+        // fetch a free string
+        let index = if let Some(index) = self.strings_free.pop(){
             self.strings[index].tag.set_alloced();
-            ScriptString{index: index as _}
+            index
         }
         else{
             let index = self.strings.len();
             let mut string = HeapStringData::default();
             string.tag.set_alloced();
             self.strings.push(string);
-            ScriptString{index: index as _}
-        }
-    }
-        
-    pub fn new_string_from_str(&mut self,value:&str)->ScriptString{
-        self.new_string_with(|_,out|{
-            out.push_str(value);
-        })
+            index
+        };
+        self.strings[index].string.push_str(&out);
+        self.string_intern.insert(out, index as u32);
+        ScriptString{index: index as _}.into()
     }
             
-    pub fn new_string_with<F:FnOnce(&mut Self, &mut String)>(&mut self,cb:F)->ScriptString{
-        let mut out = String::new();
-        let ptr = self.new_empty_string();
-        std::mem::swap(&mut out, &mut self.strings[ptr.index as usize].string);
-        cb(self, &mut out);
-        std::mem::swap(&mut out, &mut self.strings[ptr.index as usize].string);
-        ptr
-    }
-            
-    pub fn new_string_from_string(&mut self, string:String)->ScriptString{
-        let index = self.strings.len();
-        self.strings.push(HeapStringData{
-            tag: Default::default(),
-            string
-        });
-        ScriptString{index: index as u32}
-    }
-    
-    pub fn null_string(&self)->ScriptString{
-        ScriptString{index: 0}
-    }
-        
     
     
     // Accessors
@@ -242,22 +240,13 @@ impl ScriptHeap{
     //pub fn object(&self, ptr:ScriptObject)->&ScriptObject{
     //    &self.objects[ptr.index as usize]
     //}
-        
             
-    pub fn value_string(&self, value: ScriptValue)->&str{
-        if let Some(ptr) = value.as_string(){
-            return self.string(ptr)
-        }
-        else{
-            ""
-        }
-    }
-    
     pub fn string(&self, ptr: ScriptString)->&str{
         &self.strings[ptr.index as usize].string
     }
         
     pub fn cast_to_string(&self, v:ScriptValue, out:&mut String){
+        
         if v.as_inline_string(|s|{write!(out, "{s}")}).is_some(){
         }
         else if let Some(v) = v.as_string(){
@@ -550,7 +539,7 @@ impl ScriptHeap{
                     }
                 }
                 if let Some(set_value) = object.map_get(&key){
-                    if !self.validate_type(*set_value, value){
+                    if !self.validate_type(set_value, value){
                         return trap.err_invalid_prop_type()
                     }
                     return self.set_value_shallow(ptr, key, value, trap);
@@ -602,8 +591,8 @@ impl ScriptHeap{
     }
             
     
-    pub fn set_value_def(&mut self, ptr:ScriptObject, key:ScriptValue, value:ScriptValue)->ScriptValue{
-        self.set_value(ptr, key, value, &mut ScriptTrap::default())
+    pub fn set_value_def(&mut self, ptr:ScriptObject, key:LiveId, value:ScriptValue){
+        self.set_value(ptr, key.into(), value, &mut ScriptTrap::default());
     }
     
     pub fn set_value(&mut self, ptr:ScriptObject, key:ScriptValue, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
@@ -651,8 +640,8 @@ impl ScriptHeap{
         let mut ptr = ptr;
         loop{
             let object = &mut self.objects[ptr.index as usize];
-            if let Some(set_value) = object.map.get_mut(&key.into()){
-                *set_value = value;
+            if let Some(set) = object.map.get_mut(&key.into()){
+                set.value = value;
                 return NIL
             }
             if let Some(next_ptr) = object.proto.as_object(){
@@ -671,8 +660,8 @@ impl ScriptHeap{
         let key = key.into();
         loop{
             let object = &self.objects[ptr.index as usize];
-            if let Some(value) = object.map.get(&key){
-                return *value
+            if let Some(set) = object.map.get(&key){
+                return set.value
             }
             if object.tag.get_storage_type().is_vec2(){
                 for chunk in object.vec.rchunks(2){
@@ -698,11 +687,17 @@ impl ScriptHeap{
         if let Some(_) = object.map.get(&key.into()){
             let new_scope = self.new_with_proto(ptr.into());
             let object = &mut self.objects[new_scope.index as usize];
-            object.map.insert(key.into(), value);
+            object.map.insert(key.into(), ScriptMapValue{
+                tag: Default::default(),
+                value
+            });
             return Some(new_scope)
         }
         else{
-            object.map.insert(key.into(), value);
+            object.map.insert(key.into(), ScriptMapValue{
+                tag: Default::default(),
+                value
+            });
             return None
         }
     }
@@ -741,7 +736,7 @@ impl ScriptHeap{
         }
         if ty.is_map(){
             if let Some(value) = object.map_get(&index){
-                return *value
+                return value
             }
             else{
                 return trap.err_not_found()
@@ -767,7 +762,7 @@ impl ScriptHeap{
         loop{
             let object = &self.objects[ptr.index as usize];
             if let Some(value) = object.map_get(&key){
-                return *value
+                return value
             }
             if let Some(next_ptr) = object.proto.as_object(){
                 ptr = next_ptr
@@ -784,7 +779,7 @@ impl ScriptHeap{
         loop{
             let object = &self.objects[ptr.index as usize];
             if let Some(value) = object.map_get(&key){
-                return *value
+                return value
             }
             if object.tag.get_storage_type().is_vec2(){
                 for chunk in object.vec.rchunks(2){
@@ -844,7 +839,7 @@ impl ScriptHeap{
             // only do top level if dirty
             let object = &mut self.objects[ptr.index as usize];
             if let Some(value) = object.map_get_if_dirty(&key){
-                return Some(*value)
+                return Some(value)
             }
             // if we havent been applied before apply prototype chain too
             if !object.tag.is_first_applied(){
@@ -861,7 +856,7 @@ impl ScriptHeap{
                         return None
                     }
                     if let Some(value) = object.map_get(&key){
-                        return Some(*value)
+                        return Some(value)
                     }
                     if let Some(next_ptr) = object.proto.as_object(){
                         ptr = next_ptr
@@ -1208,7 +1203,7 @@ impl ScriptHeap{
                         }
                         if let Some(ret) = oa.map_iter_ret(|k,v1|{
                             if let Some(v2) = ob.map_get(&k){
-                                if !self.deep_eq(v1, *v2){
+                                if !self.deep_eq(v1, v2){
                                     return Some(false)
                                 }
                             }

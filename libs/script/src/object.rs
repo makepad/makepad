@@ -3,6 +3,7 @@ use crate::value::*;
 use crate::value_map::*;
 use crate::traits::*;
 use std::collections::hash_map::Entry;
+//use std::collections::btree_map::BTreeMap;
 
 #[derive(Default)]
 pub struct ObjectTag(u64); 
@@ -374,12 +375,36 @@ impl fmt::Display for ObjectTag {
     }
 }
 
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
+pub struct ScriptMapTag(u64);
+
+impl ScriptMapTag{
+    const DIRTY:u64 = 1;
+    fn dirty()->Self{
+        Self(1)
+    }
+    fn get_and_clear_dirty(&mut self)->bool{
+        let ret = self.0 & Self::DIRTY != 0;
+        self.0 &= !Self::DIRTY;
+        ret
+    }
+    fn set_dirty(&mut self){
+        self.0 |= Self::DIRTY;
+    }
+}
+
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
+pub struct ScriptMapValue{
+    pub tag: ScriptMapTag,
+    pub value: ScriptValue
+}
+
 #[derive(Default, Debug)]
 pub struct ObjectData{
     pub tag: ObjectTag,
     pub proto: ScriptValue,
     
-    pub map: ValueMap<ScriptValue, ScriptValue>,
+    pub map: ValueMap<ScriptValue, ScriptMapValue>,
     pub vec: Vec<ScriptValue>,
 }
 
@@ -388,22 +413,28 @@ impl ObjectData{
         if self.tag.is_tracked(){
             match self.map.entry(key) {
                 Entry::Occupied(mut occ) => {
-                    let old_value = occ.get_mut();
-                    if *old_value != value{
-                        *old_value = value;
-                        self.map.insert(key.add(1), ScriptValue::TRUE);
+                    let old = occ.get_mut();
+                    if old.value != value{
+                        old.tag.set_dirty();
                         self.tag.set_dirty();
+                        old.value = value;
                     }
                     return 
                 }
                 Entry::Vacant(vac) => {
-                    vac.insert(value);
+                    vac.insert(ScriptMapValue{
+                        value,
+                        tag: ScriptMapTag::dirty()
+                    });
                     return
                 }   
             }
         }
         else{
-            self.map.insert(key, value);
+            self.map.insert(key, ScriptMapValue{
+                value,
+                tag: ScriptMapTag::dirty()
+            });
         }
     }
     
@@ -411,11 +442,11 @@ impl ObjectData{
         if self.tag.is_tracked(){
             match self.map.entry(key) {
                 Entry::Occupied(mut occ) => {
-                    let old_value = occ.get_mut();
-                    if *old_value != value{
-                        *old_value = value;
-                        self.map.insert(key.add(1), ScriptValue::TRUE);
+                    let old = occ.get_mut();
+                    if old.value != value{
+                        old.tag.set_dirty();
                         self.tag.set_dirty();
+                        old.value = value;
                     }
                     return true
                 }
@@ -423,38 +454,37 @@ impl ObjectData{
             }
         }
         if let Some(val) = self.map.get_mut(&key){
-            *val = value;
+            val.value = value;
             return true
         }
         false
     }
     
-    pub fn map_get(&self, key:&ScriptValue)->Option<&ScriptValue>{
-        self.map.get(key)
+    pub fn map_get(&self, key:&ScriptValue)->Option<ScriptValue>{
+        if let Some(val) = self.map.get(key){
+            Some(val.value)
+        }
+        else{
+            None
+        }
     }
     
-    pub fn map_get_if_dirty(&mut self, key:&ScriptValue)->Option<&ScriptValue>{
+    pub fn map_get_if_dirty(&mut self, key:&ScriptValue)->Option<ScriptValue>{
         if self.tag.is_tracked(){
-            let dirty = match self.map.entry(key.add(1)) {
+            match self.map.entry(*key) {
                 Entry::Occupied(mut occ) => {
-                    if *occ.get() == ScriptValue::TRUE{
-                        occ.insert(ScriptValue::FALSE);
-                        true
+                    let val = occ.get_mut();
+                    if val.tag.get_and_clear_dirty(){
+                        return Some(val.value)
                     }
-                    else{
-                        false
-                    }
+                    return None
                 }
-                Entry::Vacant(vac) => {
-                    vac.insert(ScriptValue::FALSE);
-                    true
+                Entry::Vacant(_) => {
+                    return None
                 }
             };
-            if !dirty{
-                return None
-            }
         }
-        self.map.get(key)
+        self.map_get(key)
     }
         
     pub fn map_len(&self)->usize{
@@ -462,8 +492,8 @@ impl ObjectData{
     }
     
     pub fn map_iter_ret<T,F:FnMut(ScriptValue,ScriptValue)->Option<T>>(&self, mut f:F)->Option<T>{
-        for (key,value) in self.map.iter(){
-            let r = f(*key,*value);
+        for (key,val) in self.map.iter(){
+            let r = f(*key,val.value);
             if r.is_some(){
                 return r
             }
@@ -472,8 +502,8 @@ impl ObjectData{
     }
     
     pub fn map_iter<F:FnMut(ScriptValue,ScriptValue)>(&self, mut f:F){
-        for (key,value) in self.map.iter(){
-            f(*key,*value);
+        for (key,val) in self.map.iter(){
+            f(*key,val.value);
         }
     }
     
