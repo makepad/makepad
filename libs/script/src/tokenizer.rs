@@ -20,8 +20,8 @@ pub enum ScriptToken{
     CloseRound,
     OpenSquare,
     CloseSquare,
-    StringUnfinished(ScriptString),
-    String(ScriptString),
+    StringUnfinished,
+    String(ScriptValue),
     Number(f64),
     Color(u32),
     RustValue(u32),
@@ -34,7 +34,7 @@ impl ScriptToken{
     pub fn number(&self)->f64{match self{ScriptToken::Number(v)=>*v,_=>0.0}}
     pub fn as_number(&self)->Option<f64>{match self{ScriptToken::Number(v)=>Some(*v),_=>None}}
     pub fn as_color(&self)->Option<u32>{match self{ScriptToken::Color(v)=>Some(*v),_=>None}}
-    pub fn as_string(&self)->Option<ScriptString>{match self{ScriptToken::StringUnfinished(v)=>Some(*v),ScriptToken::String(v)=>Some(*v),_=>None}}
+    pub fn as_string(&self)->Option<ScriptValue>{match self{ScriptToken::String(v)=>Some(*v),_=>None}}
     pub fn as_rust_value(&self)->Option<u32>{match self{ScriptToken::RustValue(v)=>Some(*v),_=>None}}
             
     pub fn is_identifier(&self)->bool{match self{ScriptToken::Identifier{..}=>true,_=>false}}
@@ -45,7 +45,7 @@ impl ScriptToken{
     pub fn is_close_round(&self)->bool{match self{ScriptToken::CloseRound=>true,_=>false}}
     pub fn is_open_square(&self)->bool{match self{ScriptToken::OpenSquare=>true,_=>false}}
     pub fn is_close_square(&self)->bool{match self{ScriptToken::CloseSquare=>true,_=>false}}
-    pub fn is_string(&self)->bool{match self{ScriptToken::StringUnfinished(_)|ScriptToken::String(_)=>true,_=>false}}
+    pub fn is_string(&self)->bool{match self{ScriptToken::StringUnfinished|ScriptToken::String(_)=>true,_=>false}}
     pub fn is_number(&self)->bool{match self{ScriptToken::Number(_)=>true,_=>false}}
     pub fn is_color(&self)->bool{match self{ScriptToken::Color(_)=>true,_=>false}}
     pub fn is_rust_value(&self)->bool{match self{ScriptToken::RustValue(_)=>true,_=>false}}
@@ -80,6 +80,7 @@ pub struct ScriptTokenizer{
     pos: usize,
     pub tokens: Vec<ScriptTokenPos>,
     pub original: String,
+    unfinished: String,
     temp: String,
     state: State,
 }
@@ -87,6 +88,7 @@ pub struct ScriptTokenizer{
 impl Default for ScriptTokenizer{
     fn default()->Self{
         Self{
+            unfinished: Default::default(),
             tokens: Default::default(),
             temp: Default::default(),
             original: Default::default(),
@@ -136,8 +138,12 @@ impl ScriptTokenizer{
                 ScriptToken::CloseRound=>print!(")"),
                 ScriptToken::OpenSquare=>print!("["),
                 ScriptToken::CloseSquare=>print!("]"),
-                ScriptToken::StringUnfinished(ptr)=>print!("\"{}\"..",heap.string(ptr)),
-                ScriptToken::String(ptr)=>print!("\"{}\"",heap.string(ptr)),
+                ScriptToken::StringUnfinished=>print!("\"\".."),
+                ScriptToken::String(v)=>{
+                    let mut s = String::new();
+                    heap.cast_to_string(v,&mut s);
+                    print!("\"{}\"",s)
+                }
                 ScriptToken::Number(v)=>print!("{v}"),
                 ScriptToken::Color(v)=>print!("{:08x}", v),
                 ScriptToken::RustValue(v)=>print!("#({v})"),
@@ -283,24 +289,27 @@ impl ScriptTokenizer{
         })
     }
     
-    fn append_unfinished_string(&mut self, c:char, heap:&mut ScriptHeap){
-        if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(ptr),..}) = self.tokens.last_mut(){
-            heap.mut_string(*ptr).push(c);
+    fn append_unfinished_string(&mut self, c:char){
+        if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished,..}) = self.tokens.last_mut(){
+            self.unfinished.push(c);
         }
         else{
-            let ptr = heap.new_string_from_string(c.into());
-            self.tokens.push(ScriptTokenPos{pos: self.pos, token: ScriptToken::StringUnfinished(ptr)});
+            self.unfinished.clear();
+            self.unfinished.push(c);
+            self.tokens.push(ScriptTokenPos{pos: self.pos, token: ScriptToken::StringUnfinished});
         }
     }
     
     fn finish_string(&mut self, heap:&mut ScriptHeap){
-        if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(_),..}) = self.tokens.last(){
-            if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(ptr),pos}) = self.tokens.pop(){
-                self.tokens.push(ScriptTokenPos{token:ScriptToken::String(ptr), pos})
+        if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished,..}) = self.tokens.last(){
+            if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished,pos}) = self.tokens.pop(){
+                let v = heap.new_string_from_str(&self.unfinished);
+                self.unfinished.clear();
+                self.tokens.push(ScriptTokenPos{token:ScriptToken::String(v), pos})
             }
         }
         else{
-            self.tokens.push(ScriptTokenPos{token:ScriptToken::String(heap.null_string()), pos:self.pos})
+            self.tokens.push(ScriptTokenPos{token:ScriptToken::String(ScriptValue::EMPTY_STRING), pos:self.pos})
         }
     }
     
@@ -325,7 +334,7 @@ impl ScriptTokenizer{
             }
         }
         // unfinished string at the end
-        let start = if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished(_),..}) = self.tokens.last_mut(){
+        let start = if let Some(ScriptTokenPos{token:ScriptToken::StringUnfinished,..}) = self.tokens.last_mut(){
             self.tokens.len() - 1
         }
         else{
@@ -507,23 +516,23 @@ impl ScriptTokenizer{
                 State::EscapeInString(double)=>{
                     // ok lets see what we have for an escape character sequence
                     if c == '\\'{
-                        self.append_unfinished_string('\\', heap);
+                        self.append_unfinished_string('\\');
                         self.state = State::String(double);
                     }
                     else if c == 'r'{
-                        self.append_unfinished_string('\r', heap);
+                        self.append_unfinished_string('\r');
                         self.state = State::String(double);
                     }
                     else if c == 'n'{
-                        self.append_unfinished_string('\n', heap);
+                        self.append_unfinished_string('\n');
                         self.state = State::String(double);
                     }
                     else if c == 't'{
-                        self.append_unfinished_string('\t', heap);
+                        self.append_unfinished_string('\t');
                         self.state = State::String(double);
                     }
                     else if c == '0'{
-                        self.append_unfinished_string('\0', heap);
+                        self.append_unfinished_string('\0');
                         self.state = State::String(double);
                     }
                     else if c == 'x'{
@@ -537,7 +546,7 @@ impl ScriptTokenizer{
                     self.temp.push(c);
                     if self.temp.len() == 2{
                         if let Ok(v) = i64::from_str_radix(&self.temp, 16){
-                            self.append_unfinished_string(v as u8 as char, heap);                            
+                            self.append_unfinished_string(v as u8 as char);                            
                         }
                         self.temp.clear();
                         self.state = State::String(double);
@@ -552,7 +561,7 @@ impl ScriptTokenizer{
                         if self.temp.len() == 4{
                             if let Ok(v) = i64::from_str_radix(&self.temp, 16){
                                 if let Some(v) = char::from_u32(v as u32){
-                                    self.append_unfinished_string(v, heap);                            
+                                    self.append_unfinished_string(v);                            
                                 }
                             }
                             self.temp.clear();
@@ -564,7 +573,7 @@ impl ScriptTokenizer{
                     if c == '}'{
                         if let Ok(v) = i64::from_str_radix(&self.temp, 16){
                             if let Some(v) = char::from_u32(v as u32){
-                                self.append_unfinished_string(v, heap);                            
+                                self.append_unfinished_string(v);                            
                             }
                         }
                         self.temp.clear();
@@ -585,7 +594,7 @@ impl ScriptTokenizer{
                         self.state = State::Whitespace;
                     }
                     else{
-                        self.append_unfinished_string(c, heap);
+                        self.append_unfinished_string(c);
                     }
                 }
                 State::BlockComment(depth)=>{

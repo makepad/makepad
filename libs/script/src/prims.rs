@@ -61,7 +61,12 @@ script_primitive!(
         vm.heap.cast_to_string(value,self);
     },
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
-        vm.heap.new_string_from_str(self).into()
+        if let Some(val) = ScriptValue::from_inline_string(&self){
+            return val
+        }
+        else{
+            vm.heap.new_string_from_str(self).into()
+        }
     }
 );
 
@@ -183,6 +188,48 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static{
         for v in self.iter(){
             let v = v.script_to_value(vm);
             vm.heap.vec_push(obj, NIL, v, &vm.thread.trap);
+        }
+        obj.into()
+    } 
+}
+
+//Vec<u8>
+
+
+impl ScriptHook for Vec<u8> {}
+impl ScriptNew for Vec<u8> {
+    fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{
+        if let Some(_obj) = value.as_object(){
+            
+            return true
+        }
+        else{
+            value.is_nil()
+        }
+    }
+    fn script_default(vm:&mut ScriptVm)->ScriptValue{
+        vm.heap.new().into()
+    }
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
+    fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{
+        vm.heap.new().into()
+    }
+}
+impl ScriptApply for Vec<u8> {
+    fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
+    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        if let Some(_obj) = value.as_object(){
+            
+        }
+        else if value.is_nil(){
+            self.clear()
+        }
+    }
+    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
+        let obj = vm.heap.new();
+        for _v in self.iter(){
+            
         }
         obj.into()
     } 

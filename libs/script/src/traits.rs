@@ -24,7 +24,7 @@ pub trait ScriptHookDeref {
 
 #[derive(Default)]
 pub struct ScriptTypeProps{
-    pub(crate) props: LiveIdMap<LiveId, ScriptTypeId>
+    pub props: LiveIdMap<LiveId, ScriptTypeId>
 }
 
 pub struct ScriptTypeObject{
@@ -58,13 +58,6 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         s.script_apply(vm, &mut ApplyScope::default(), value);
         s
     }    
-    
-    fn script_new_apply(vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue)->Self where Self: Sized{
-        let mut s = Self::script_new(vm);
-        s.on_new(vm);
-        s.script_apply(vm, apply, value);
-        s
-    }
     
     fn script_proto(vm:&mut ScriptVm)->ScriptValue{  
         let type_id = Self::script_type_id_static();
