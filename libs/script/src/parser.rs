@@ -2,7 +2,6 @@
 use crate::tokenizer::*;
 use crate::makepad_live_id::live_id::*;
 
-use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
 use crate::makepad_live_id::makepad_live_id_macros::*;
@@ -384,7 +383,7 @@ impl ScriptParser{
         self.state.push(state)
     }
     
-    fn parse_step(&mut self, tok:ScriptToken, heap:&mut ScriptHeap, values: &[ScriptValue])->u32{
+    fn parse_step(&mut self, tok:ScriptToken, values: &[ScriptValue])->u32{
         
         let op = tok.operator();
         let sep = tok.separator();
@@ -1096,15 +1095,8 @@ impl ScriptParser{
                     self.state.push(State::EndExpr);
                     return 1
                 }
-                if let Some(ptr) = tok.as_string(){
-                    // maybe make the string inline
-                    let str = heap.string(ptr);
-                    if let Some(value) = ScriptValue::from_inline_string(str){
-                        self.push_code(value, self.index);
-                    }
-                    else{
-                        self.push_code(ScriptValue::from_string(ptr), self.index);
-                    }
+                if let Some(value) = tok.as_string(){
+                    self.push_code(value, self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
@@ -1340,7 +1332,7 @@ impl ScriptParser{
         0
     }
     
-    pub fn parse(&mut self, tokens:&[ScriptTokenPos], heap:&mut ScriptHeap, values: &[ScriptValue]){
+    pub fn parse(&mut self, tokens:&[ScriptTokenPos], values: &[ScriptValue]){
         // wait for the tokens to be consumed
         let mut steps_zero = 0;
         while self.index < tokens.len() as u32 && self.state.len()>0{
@@ -1352,7 +1344,7 @@ impl ScriptParser{
                 ScriptToken::StreamEnd
             };
             
-            let step = self.parse_step(tok, heap, values);
+            let step = self.parse_step(tok, values);
             if step == 0{
                 steps_zero += 1;
             }

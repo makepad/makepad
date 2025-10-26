@@ -15,14 +15,6 @@ macro_rules! script_value_f64{
     }
 }
 
-
-#[macro_export]
-macro_rules! script_vm_ref{
-    ($vm:ident)=>{
-        &mut $vm.new_ref(&mut 0)
-    };
-}
-
 #[macro_export]
 macro_rules! script_value_bool{
     ($ctx:ident, $args:ident.$id: ident)=>{

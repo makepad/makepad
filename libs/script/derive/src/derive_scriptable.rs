@@ -67,20 +67,21 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("impl").stream(generic.clone());
         tb.add("ScriptHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         tb.add("    fn on_deref_before_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){");
-        tb.add("        self.on_before_apply(vm, apply, value);");
+        tb.add("         <Self as ScriptHook>::on_before_apply(self, vm, apply, value);");
         
         if let Some(deref_field) = deref_field {
-            tb.add("    self.").ident(&deref_field.name).add(".on_deref_before_apply(&vm, apply, value);");
+            tb.add("<").stream(Some(deref_field.ty.clone())).add(" as ScriptHookDeref>::on_deref_before_apply(&mut self.").ident(&deref_field.name).add(", vm, apply, value);");
         }
         tb.add("    }");
         
         tb.add("    fn on_deref_after_apply(&mut self,vm: &mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){");
-        tb.add("        self.on_after_apply(vm, apply, value);");
+        
+        tb.add("        <Self as ScriptHook>::on_after_apply(self, vm, apply, value);");
         
         if let Some(deref_field) = deref_field {
-            tb.add("    self.").ident(&deref_field.name).add(".on_deref_after_apply(vm, apply, value);");
+            tb.add("<").stream(Some(deref_field.ty.clone())).add(" as ScriptHookDeref>::on_deref_after_apply(&mut self.").ident(&deref_field.name).add(", vm, apply, value);");
         }
-        tb.add("        self.on_after_apply(vm, apply, value);");
+        
         tb.add("    }");
         tb.add("}");
                 
@@ -95,24 +96,24 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    fn script_type_id(&self)->std::any::TypeId{ ScriptTypeId::of::<Self>()}");
         
         tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue) {");
-        tb.add("       if self.on_skip_apply(vm, apply, value) || value.is_nil(){return};");
+        tb.add("       if <Self as ScriptHook>::on_skip_apply(self, vm, apply, value) || value.is_nil(){return};");
         
-        tb.add("        self.on_deref_before_apply(vm, apply, value);");
+        tb.add("        <Self as ScriptHookDeref>::on_deref_before_apply(self, vm, apply, value);");
         
         
         for field in &fields {
             if field.attrs.iter().any( | a | a.name == "live" || a.name =="script"){
                 tb.add("if let Some(v) = vm.heap.value_apply_if_dirty(value, ScriptValue::from_id(id!(")
                     .ident(&field.name).add("))){");
-                tb.add("self.").ident(&field.name).add(".script_apply(vm, apply, v);");
+                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(",vm, apply, v);");
                 tb.add("}");
             }
             if field.attrs.iter().any( | a | a.name =="deref" || a.name == "splat" || a.name =="walk" || a.name=="layout"){
-                tb.add("self.").ident(&field.name).add(".script_apply(vm, apply, value);");
+                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(", apply, value);");
             }
         }
         tb.add("        if let Some(o) = value.as_object(){vm.heap.set_first_applied_and_clean(o);}");
-        tb.add("        self.on_deref_after_apply(vm, apply, value);");
+        tb.add("        <Self as ScriptHookDeref>::on_deref_after_apply(self, vm, apply, value);");
         tb.add("    }");
         
         
@@ -127,7 +128,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 tb.add("self.").ident(&field.name).add(".script_to_value_props(vm, obj)");
             }
             if let Some(_) = field.attrs.iter().find(|a| a.name == "script" || a.name == "live"){
-                tb.add("let value:ScriptValue = self.").ident(&field.name).add(".script_to_value(vm); ");
+                tb.add("let value:ScriptValue = <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_to_value( &self.").ident(&field.name).add(", vm); ");
                 tb.add("vm.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
                 .ident(&field.name).add(")), value, &vm.thread.trap);");
             }
@@ -154,7 +155,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    fn script_type_id_static()->std::any::TypeId{ ScriptTypeId::of::<Self>()}");
         
         tb.add("    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{");
-        tb.add("        if Self::on_type_check(heap, value){");
+        tb.add("        if  <Self as ScriptHook>::on_type_check(heap, value){");
         tb.add("            return true");
         tb.add("        }");
         tb.add("        if let Some(o) = value.as_object(){heap.type_matches_id(o, Self::script_type_id_static())}else{false}");
@@ -425,9 +426,9 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                         tb.ident(&format!("v{i}")).add(",");
                     }
                     tb.add(") = self{");
-                    for i in 0..args.len(){
+                    for (i, arg) in args.iter().enumerate(){
                         tb.add("            if let Some(v) = vm.heap.vec_value_if_exist(object, ").unsuf_usize(i).add("){");
-                        tb.ident(&format!("v{i}")).add(".script_apply(vm, apply, v);");
+                        tb.add("                 <").stream(Some(arg.clone())).add(" as ScriptApply>::script_apply(").ident(&format!("v{i}")).add(", vm, apply, v);");
                         tb.add("            }");
                     }
                     tb.add("            }");
@@ -448,7 +449,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("} = self{");
                     for (i, field) in fields.iter().enumerate(){
                         tb.add("if let Some(v) = vm.heap.value_apply_if_dirty(value, ScriptValue::from_id(id!(").ident(&field.name).add("))){");
-                        tb.ident(&format!("v{i}")).add(".script_apply(vm, apply, v);");
+                        tb.add("    <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(").ident(&format!("v{i}")).add(", vm, apply, v);");
                         tb.add("}");
                     }
                     tb.add("            }");
@@ -481,8 +482,8 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     }
                     tb.add(")=>{");
                     tb.add("    let tuple = vm.heap.new_with_proto(id!(").ident(&item.name).add(").into());");
-                    for i in 0..args.len(){
-                        tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
+                    for (i, arg) in args.iter().enumerate(){
+                        tb.add("let value = <").stream(Some(arg.clone())).add(" as ScriptApply>::script_to_value(").ident(&format!("v{i}")).add(",vm);");
                         tb.add("vm.heap.vec_push(tuple, NIL, value, &vm.thread.trap);");
                     }
                     tb.add("    tuple.into()");
@@ -497,7 +498,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("    let proto = Self::script_enum_lookup_variant(vm,id!(").ident(&item.name).add("));");
                     tb.add("    let named = vm.heap.new_with_proto(proto);");
                     for (i, field) in fields.iter().enumerate(){
-                        tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
+                        tb.add("let value = <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_to_value(").ident(&format!("v{i}")).add(", vm);");
                         tb.add("vm.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, &vm.thread.trap);");
                     }
                     tb.add("    named.into()");

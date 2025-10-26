@@ -111,7 +111,12 @@ impl <'a> ScriptVm<'a>{
     pub fn cast_to_f64(&self, v:ScriptValue)->f64{
         self.heap.cast_to_f64(v, self.thread.trap.ip)
     }
-          
+    
+        
+    pub fn new_module(&mut self, id:LiveId)->ScriptObject{
+        self.heap.new_module(id)
+    }
+    
     pub fn add_fn<F>(&mut self, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         self.code.native.borrow_mut().add_fn(&mut self.heap, module, method, args, f)
@@ -119,6 +124,7 @@ impl <'a> ScriptVm<'a>{
 }
 
 pub struct ScriptVmBase{
+    pub void: usize,
     pub code: ScriptCode,
     pub global: ScriptObject,
     pub heap: ScriptHeap,
@@ -126,7 +132,16 @@ pub struct ScriptVmBase{
 }
 
 impl ScriptVmBase{
-    pub fn new_ref<'a>(&'a mut self, host:&'a mut dyn Any)->ScriptVm<'a>{
+    pub fn as_ref<'a>(&'a mut self)->ScriptVm<'a>{
+        ScriptVm{
+            host: &mut self.void,
+            code: &self.code,
+            heap: &mut self.heap,
+            thread: &mut self.threads[0]
+        }
+    }
+    
+    pub fn as_ref_host<'a>(&'a mut self, host:&'a mut dyn Any)->ScriptVm<'a>{
         ScriptVm{
             host,
             code: &self.code,
@@ -146,6 +161,7 @@ impl ScriptVmBase{
         let builtins = ScriptBuiltins::new(&mut heap);
         
         Self{
+            void: 0,
             code:ScriptCode{
                 builtins,
                 type_methods,
@@ -158,14 +174,6 @@ impl ScriptVmBase{
         }
     }
         
-    pub fn new_module(&mut self, id:LiveId)->ScriptObject{
-        self.heap.new_module(id)
-    }
-    
-    pub fn add_fn<F>(&mut self, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
-    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
-        self.code.native.borrow_mut().add_fn(&mut self.heap, module, method, args, f)
-    }
         
     pub fn add_script_block(&mut self, new_block:ScriptBlock)->u16{
         let scope = self.heap.new_with_proto(id!(scope).into());
@@ -205,7 +213,7 @@ impl ScriptVmBase{
         
         if let ScriptSource::Block{block} = &body.source{
             body.tokenizer.tokenize(&block.code, &mut self.heap);
-            body.parser.parse(&body.tokenizer.tokens, &mut self.heap, &block.values);
+            body.parser.parse(&body.tokenizer.tokens, &block.values);
             // lets point our thread to it
             self.threads[0].run_root(&mut self.heap, &self.code, host, body_id)
         }

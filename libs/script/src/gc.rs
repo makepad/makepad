@@ -72,6 +72,7 @@ impl ScriptHeap{
         for i in 1..self.strings.len(){
             let str = &mut self.strings[i];
             if !str.tag.is_marked() && str.tag.is_alloced(){
+                self.string_intern.remove(&str.string);
                 str.clear();
                 self.strings_free.push(i)
             }
