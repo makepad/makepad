@@ -62,7 +62,9 @@ pub enum EnumTest{
 
 
 pub fn test(){
-    let mut vm = ScriptVmBase::new();
+    let mut vmbase = ScriptVmBase::new();
+    
+    let mut vm = vmbase.as_ref();
     
     let net = vm.new_module(id!(test));
     vm.add_fn(net, id!(fetch), script_args!(url=NIL, options=NIL), |vm, args|{
@@ -101,7 +103,7 @@ pub fn test(){
     }    
     
     let _code = script!{
-        let EnumTest = #(EnumTest::script_api(script_vm_ref!(vm)));
+        let EnumTest = #(EnumTest::script_api(&mut vm));
         let x = EnumTest.Named{namedfield:1.0}
     };
     
@@ -187,13 +189,13 @@ pub fn test(){
         let t = 0 try{t = 1} assert(false) ok assert(true)
         
         // struct tests
-        let s = #(StructTest::script_api(script_vm_ref!(vm)));
+        let s = #(StructTest::script_api(&mut vm));
         try{s{field:5}} assert(false) ok assert(true)
         try{s{field:true}} assert(true) ok assert(false)
         assert(s.return_two() == 2)
         
         // check enum
-        let EnumTest = #(EnumTest::script_api(script_vm_ref!(vm)));
+        let EnumTest = #(EnumTest::script_api(&mut vm));
         let x = EnumTest.Bare
         // test tuple typechecking
         try{EnumTest.Tuple(1.0)} assert(false) ok assert(true)
@@ -230,7 +232,7 @@ pub fn test(){
     
     let dt = std::time::Instant::now();
     
-    vm.eval(code, &mut 0);
+    vmbase.eval(code, &mut 0);
     println!("Duration {}", dt.elapsed().as_secs_f64())
     
 }

@@ -297,7 +297,7 @@ impl ScriptValue{
     pub const TYPE_BOOL: u64 = ScriptValueType::BOOL.to_u64();
     pub const FALSE: ScriptValue = ScriptValue( Self::TYPE_BOOL | 0x0000_0000);
     pub const TRUE: ScriptValue = ScriptValue(Self::TYPE_BOOL | 0x0000_0001);
-    
+    pub const EMPTY_STRING: ScriptValue = ScriptValue(Self::TYPE_INLINE_STRING_0);
     pub const TYPE_NIL: u64 = ScriptValueType::NIL.to_u64();
     pub const NIL: ScriptValue = ScriptValue(Self::TYPE_NIL);
     pub const OBJECT_ZERO: ScriptValue = ScriptValue::from_object(ScriptObject::ZERO);

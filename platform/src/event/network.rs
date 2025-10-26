@@ -1,5 +1,5 @@
 use crate::makepad_micro_serde::*;
-use crate::makepad_live_id::*;
+use crate::makepad_script::*;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::collections::BTreeMap;
 use std::str;
@@ -65,7 +65,6 @@ impl Default for NetworkResponseChannel {
     }
 }
 
-
 #[derive(PartialEq, Debug)]
 pub struct HttpRequest {
     pub metadata_id: LiveId,
@@ -74,8 +73,19 @@ pub struct HttpRequest {
     pub headers: BTreeMap<String, Vec<String>>,
     pub ignore_ssl_cert: bool,
     pub is_streaming: bool,
-    pub body: Option<Vec<u8>>,
+   pub body: Option<Vec<u8>>, 
 }
+/*
+#[derive(PartialEq, Debug, Script, ScriptHook)]
+pub struct HttpRequest {
+    #[live] pub metadata_id: LiveId,
+    #[live] pub url: String,
+    #[live] pub method: HttpMethod,
+    #[live] pub headers: BTreeMap<String, Vec<String>>,
+    #[live] pub ignore_ssl_cert: bool,
+    #[live] pub is_streaming: bool,
+    #[live] pub body: Option<Vec<u8>>, 
+}*/
 
 #[derive(Debug)]
 pub struct SplitUrl<'a>{
@@ -232,8 +242,9 @@ impl HttpResponse {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Script, ScriptHook)]
 pub enum HttpMethod{
+    #[pick]
     GET,
     HEAD,
     POST,
