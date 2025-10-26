@@ -13,10 +13,12 @@ pub struct ScriptHeap{
     pub(crate) objects: Vec<ObjectData>,
     pub(crate) roots: Vec<usize>,
     pub(crate) objects_free: Vec<usize>,
-    pub(crate) string_swap: String,
+    
     pub(crate) string_intern: HashMap<String, u32>,
+    pub(crate) string_intern_free: Vec<String>,
     pub(crate) strings: Vec<HeapStringData>,
     pub(crate) strings_free: Vec<usize>,
+    
     pub(crate) type_check: Vec<ScriptTypeCheck>,
     pub(crate) type_index: HashMap<ScriptTypeId, ScriptTypeIndex>,
 }
@@ -26,7 +28,6 @@ impl ScriptHeap{
     pub fn empty()->Self{
         let mut v = Self{
             modules: ScriptObject{index:0},
-            string_swap: Default::default(),
             mark_vec: Default::default(),
             objects: vec![Default::default()],
             roots: vec![0],
@@ -34,6 +35,7 @@ impl ScriptHeap{
             string_intern: Default::default(),
             strings: vec![Default::default()],
             strings_free: Default::default(),
+            string_intern_free: Default::default(),
             type_check: Default::default(),
             type_index: Default::default()
         };
@@ -169,17 +171,19 @@ impl ScriptHeap{
     }
             
     pub fn new_string_with<F:FnOnce(&mut Self, &mut String)>(&mut self,cb:F)->ScriptValue{
-        let mut out = String::new();
-        self.string_swap.clear();
-        std::mem::swap(&mut out, &mut self.string_swap);
+        let mut out = if let Some(s) = self.string_intern_free.pop(){s} else {String::new()};
+        
         cb(self, &mut out);
+        
         if let Some(v) = ScriptValue::from_inline_string(&out){
-            std::mem::swap(&mut out, &mut self.string_swap);
+            out.clear();
+            self.string_intern_free.push(out);
             return v
         }
         // check intern table
         if let Some(index) = self.string_intern.get(&out){
-            std::mem::swap(&mut out, &mut self.string_swap);
+            out.clear();
+            self.string_intern_free.push(out);
             return ScriptString{index:*index}.into();
         }
         // fetch a free string
@@ -194,6 +198,7 @@ impl ScriptHeap{
             self.strings.push(string);
             index
         };
+        // append out
         self.strings[index].string.push_str(&out);
         self.string_intern.insert(out, index as u32);
         ScriptString{index: index as _}.into()
