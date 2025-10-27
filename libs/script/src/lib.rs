@@ -19,6 +19,7 @@ pub mod gc;
 pub mod value_map;
 pub mod traits;
 pub mod prims;
+pub mod array;
 
 pub use makepad_live_id::*;
 pub use value::*;
