@@ -35,6 +35,16 @@ macro_rules! script_value{
     };
     ($vm:ident, $obj:ident[$index: expr])=>{
         $vm.heap.vec_value(($obj).into(), ($index) as usize,&$vm.thread.trap)
+    };
+    ($vm:ident, $obj:ident as array[$index: expr])=>{
+        $vm.heap.array_index(($obj).into(), ($index) as usize,&$vm.thread.trap)
+    }
+}
+
+#[macro_export]
+macro_rules! script_array_index{
+    ($vm:ident, $obj:ident[$index: expr])=>{
+        $vm.heap.array_index(($obj).into(), ($index) as usize,&$vm.thread.trap)
     }
 }
 

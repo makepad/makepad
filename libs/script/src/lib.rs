@@ -20,6 +20,7 @@ pub mod value_map;
 pub mod traits;
 pub mod prims;
 pub mod array;
+pub mod trap;
 
 pub use makepad_live_id::*;
 pub use value::*;
@@ -103,10 +104,6 @@ pub fn test(){
         }
     }    
     
-    let _code = script!{
-        let EnumTest = #(EnumTest::script_api(&mut vm));
-        let x = EnumTest.Named{namedfield:1.0}
-    };
     
     // Our unit tests :)
     let code = script!{
