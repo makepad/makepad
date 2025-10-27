@@ -128,7 +128,7 @@ impl ScriptThread{
                         
             match self.mes.last().unwrap(){
                 ScriptMe::Call(obj)=>{
-                    heap.unnamed_fn_arg(*obj, value, &self.trap);       
+                    heap.unnamed_fn_arg(*obj, value, &self.trap);
                 }
                 ScriptMe::Object(obj)=>{
                     if !value.is_nil() && !value.is_err(){
