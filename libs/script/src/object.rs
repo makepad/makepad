@@ -6,18 +6,18 @@ use std::collections::hash_map::Entry;
 //use std::collections::btree_map::BTreeMap;
 
 #[derive(Default)]
-pub struct ObjectTag(u64); 
+pub struct ScriptObjectTag(u64); 
 
 #[derive(Copy,Clone,Eq,PartialEq, Ord, PartialOrd)]
-pub struct ObjectStorageType(u8);
+pub struct ScriptObjectStorageType(u8);
 
-impl fmt::Debug for ObjectStorageType {
+impl fmt::Debug for ScriptObjectStorageType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-impl fmt::Display for ObjectStorageType {
+impl fmt::Display for ScriptObjectStorageType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self{
             Self::AUTO=>write!(f, "AUTO"),
@@ -28,7 +28,7 @@ impl fmt::Display for ObjectStorageType {
     }
 }
 
-impl ObjectStorageType{
+impl ScriptObjectStorageType{
     pub const AUTO: Self = Self(0);
     pub const VEC2: Self = Self(1);
     pub const MAP: Self = Self(2);
@@ -57,7 +57,7 @@ pub enum ScriptFnPtr{
     Native(NativeId)
 }
 
-impl ObjectTag{
+impl ScriptObjectTag{
     // marked in the mark-sweep gc
     pub const MARK:u64 = 0x1<<40;
     // object is not 'free'
@@ -254,13 +254,13 @@ impl ObjectTag{
         self.0 |= fwd
     }
         
-    pub fn set_storage_type_unchecked(&mut self, ty:ObjectStorageType){
+    pub fn set_storage_type_unchecked(&mut self, ty:ScriptObjectStorageType){
         self.0 &= !Self::STORAGE_MASK;
         self.0 |= ((ty.0 as u64) << Self::STORAGE_SHIFT) & Self::STORAGE_MASK;
     }
         
-    pub fn get_storage_type(&self)->ObjectStorageType{
-        return ObjectStorageType( ((self.0 & Self::STORAGE_MASK)>>Self::STORAGE_SHIFT) as u8 )
+    pub fn get_storage_type(&self)->ScriptObjectStorageType{
+        return ScriptObjectStorageType( ((self.0 & Self::STORAGE_MASK)>>Self::STORAGE_SHIFT) as u8 )
     }
         
     pub fn set_deep(&mut self){
@@ -308,13 +308,13 @@ impl ObjectTag{
     }
 }
 
-impl fmt::Debug for ObjectTag {
+impl fmt::Debug for ScriptObjectTag {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-impl fmt::Display for ObjectTag {
+impl fmt::Display for ScriptObjectTag {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ObjectType(").ok();
         write!(f, "{}|",self.get_storage_type()).ok();
@@ -367,7 +367,7 @@ pub struct ScriptVecValue{
 
 #[derive(Default, Debug)]
 pub struct ObjectData{
-    pub tag: ObjectTag,
+    pub tag: ScriptObjectTag,
     pub proto: ScriptValue,
     
     pub map: ValueMap<ScriptValue, ScriptMapValue>,
@@ -481,7 +481,7 @@ impl ObjectData{
         self.vec.extend_from_slice(&other.vec);
     }
     
-    pub fn set_storage_type(&mut self, ty_new:ObjectStorageType){
+    pub fn set_storage_type(&mut self, ty_new:ScriptObjectStorageType){
         self.tag.set_storage_type_unchecked(ty_new)
     }
     //const DONT_RECYCLE_WHEN: usize = 1000;

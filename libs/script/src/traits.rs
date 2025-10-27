@@ -82,7 +82,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     }
     
     fn script_proto_build(vm:&mut ScriptVm, props:&mut ScriptTypeProps)->ScriptValue{
-        let proto = vm.heap.new();
+        let proto = vm.heap.new_object();
         // build prototype here
         Self::script_proto_props(vm, proto, props);
         Self::on_proto_build(vm, proto, props);

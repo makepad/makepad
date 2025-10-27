@@ -468,7 +468,7 @@ impl ScriptThread{
                 self.trap.goto_next();
             }
             Opcode::BEGIN_BARE=>{ // bare object
-                let me = heap.new();
+                let me = heap.new_object();
                 self.mes.push(ScriptMe::object(me));
                 self.trap.goto_next();
             }
@@ -478,7 +478,7 @@ impl ScriptThread{
                 self.trap.goto_next();
             }
             Opcode::BEGIN_ARRAY=>{
-                let me = heap.new();
+                let me = heap.new_object();
                 self.mes.push(ScriptMe::array(me));
                 self.trap.goto_next();
             }
@@ -503,7 +503,7 @@ impl ScriptThread{
                 let scope = me.object;
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(scope);
-                heap.set_object_storage_type(scope, ObjectStorageType::AUTO);
+                heap.set_object_storage_type(scope, ScriptObjectStorageType::AUTO);
                                 
                 if let Some(fnptr) = heap.parent_as_fn(scope){
                     match fnptr{
@@ -584,7 +584,7 @@ impl ScriptThread{
                 let me = heap.new_with_proto(scope.into());
                                 
                 // set it to a vec type to ensure ordered inserts
-                heap.set_object_storage_type(me, ObjectStorageType::VEC2);
+                heap.set_object_storage_type(me, ScriptObjectStorageType::VEC2);
                 heap.clear_object_deep(me);
                                                 
                 self.mes.push(ScriptMe::object(me));
