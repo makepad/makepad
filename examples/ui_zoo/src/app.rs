@@ -334,26 +334,26 @@ impl LiveRegister for App {
         fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions) {
             let ui = self.ui.clone();
 
-            ui.radio_button_set(ids!(radios_demo_1.radio1, radios_demo_1.radio2, radios_demo_1.radio3, radios_demo_1.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_2.radio1, radios_demo_2.radio2, radios_demo_2.radio3, radios_demo_2.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_3.radio1, radios_demo_3.radio2, radios_demo_3.radio3, radios_demo_3.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_4.radio1, radios_demo_4.radio2, radios_demo_4.radio3, radios_demo_4.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_5.radio1, radios_demo_5.radio2, radios_demo_5.radio3, radios_demo_5.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_6.radio1, radios_demo_6.radio2, radios_demo_6.radio3, radios_demo_6.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_7.radio1, radios_demo_7.radio2, radios_demo_7.radio3, radios_demo_7.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_8.radio1, radios_demo_8.radio2)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_9.radio1, radios_demo_9.radio2, radios_demo_9.radio3, radios_demo_9.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_10.radio1, radios_demo_10.radio2, radios_demo_10.radio3, radios_demo_10.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_11.radio1, radios_demo_11.radio2, radios_demo_11.radio3, radios_demo_11.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_12.radio1, radios_demo_12.radio2, radios_demo_12.radio3, radios_demo_12.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_13.radio1, radios_demo_13.radio2, radios_demo_13.radio3, radios_demo_13.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_14.radio1, radios_demo_14.radio2, radios_demo_14.radio3, radios_demo_14.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_15.radio1, radios_demo_15.radio2, radios_demo_15.radio3, radios_demo_15.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_16.radio1, radios_demo_16.radio2, radios_demo_16.radio3, radios_demo_16.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_17.radio1, radios_demo_17.radio2, radios_demo_17.radio3, radios_demo_17.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_18.radio1, radios_demo_18.radio2, radios_demo_18.radio3, radios_demo_18.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_19.radio1, radios_demo_19.radio2, radios_demo_19.radio3, radios_demo_19.radio4)).selected(cx, actions);
-            ui.radio_button_set(ids!(radios_demo_20.radio1, radios_demo_20.radio2, radios_demo_20.radio3, radios_demo_20.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_1.radio1, radios_demo_1.radio2, radios_demo_1.radio3, radios_demo_1.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_2.radio1, radios_demo_2.radio2, radios_demo_2.radio3, radios_demo_2.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_3.radio1, radios_demo_3.radio2, radios_demo_3.radio3, radios_demo_3.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_4.radio1, radios_demo_4.radio2, radios_demo_4.radio3, radios_demo_4.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_5.radio1, radios_demo_5.radio2, radios_demo_5.radio3, radios_demo_5.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_6.radio1, radios_demo_6.radio2, radios_demo_6.radio3, radios_demo_6.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_7.radio1, radios_demo_7.radio2, radios_demo_7.radio3, radios_demo_7.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_8.radio1, radios_demo_8.radio2)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_9.radio1, radios_demo_9.radio2, radios_demo_9.radio3, radios_demo_9.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_10.radio1, radios_demo_10.radio2, radios_demo_10.radio3, radios_demo_10.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_11.radio1, radios_demo_11.radio2, radios_demo_11.radio3, radios_demo_11.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_12.radio1, radios_demo_12.radio2, radios_demo_12.radio3, radios_demo_12.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_13.radio1, radios_demo_13.radio2, radios_demo_13.radio3, radios_demo_13.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_14.radio1, radios_demo_14.radio2, radios_demo_14.radio3, radios_demo_14.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_15.radio1, radios_demo_15.radio2, radios_demo_15.radio3, radios_demo_15.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_16.radio1, radios_demo_16.radio2, radios_demo_16.radio3, radios_demo_16.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_17.radio1, radios_demo_17.radio2, radios_demo_17.radio3, radios_demo_17.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_18.radio1, radios_demo_18.radio2, radios_demo_18.radio3, radios_demo_18.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_19.radio1, radios_demo_19.radio2, radios_demo_19.radio3, radios_demo_19.radio4)).selected(cx, actions);
+            ui.radio_button_set(ids_array!(radios_demo_20.radio1, radios_demo_20.radio2, radios_demo_20.radio3, radios_demo_20.radio4)).selected(cx, actions);
 
             if let Some(txt) = self.ui.text_input(ids!(simpletextinput)).changed(&actions){
                 log!("TEXTBOX CHANGED {}", self.counter);
@@ -465,15 +465,15 @@ impl AppMain for App {
 
 impl App{
     pub fn data_bind(mut db: DataBindingMap) {
-        db.bind(ids!(dropdown), ids!(dropdown));
-        db.bind(ids!(dropdown_below), ids!(dropdown_below));
-        db.bind(ids!(dropdown_disabled), ids!(dropdown_disabled));
-        db.bind(ids!(dropdown_customized), ids!(dropdown_customized));
-        db.bind(ids!(dropdown_flat), ids!(dropdown_flat));
-        db.bind(ids!(dropdown_flat_below), ids!(dropdown_flat_below));
-        db.bind(ids!(dropdown_gradient_x), ids!(dropdown_gradient_x));
-        db.bind(ids!(dropdown_gradient_x_below), ids!(dropdown_gradient_x_below));
-        db.bind(ids!(dropdown_gradient_y), ids!(dropdown_gradient_y));
-        db.bind(ids!(dropdown_gradient_y_below), ids!(dropdown_gradient_y_below));
+        db.bind(ids!(dropdown), ids_array!(dropdown));
+        db.bind(ids!(dropdown_below), ids_array!(dropdown_below));
+        db.bind(ids!(dropdown_disabled), ids_array!(dropdown_disabled));
+        db.bind(ids!(dropdown_customized), ids_array!(dropdown_customized));
+        db.bind(ids!(dropdown_flat), ids_array!(dropdown_flat));
+        db.bind(ids!(dropdown_flat_below), ids_array!(dropdown_flat_below));
+        db.bind(ids!(dropdown_gradient_x), ids_array!(dropdown_gradient_x));
+        db.bind(ids!(dropdown_gradient_x_below), ids_array!(dropdown_gradient_x_below));
+        db.bind(ids!(dropdown_gradient_y), ids_array!(dropdown_gradient_y));
+        db.bind(ids!(dropdown_gradient_y_below), ids_array!(dropdown_gradient_y_below));
     }
 }
