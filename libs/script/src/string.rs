@@ -33,12 +33,12 @@ impl StringTag{
 }
 
 #[derive(Default)]
-pub struct HeapStringData{
+pub struct ScriptStringData{
     pub tag: StringTag,
     pub string: String
 }
 
-impl HeapStringData{
+impl ScriptStringData{
     pub fn clear(&mut self){
         self.tag.clear();
         self.string.clear()

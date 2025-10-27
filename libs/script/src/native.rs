@@ -86,7 +86,7 @@ impl ScriptNative{
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         let fn_index = self.fn_table.len();
         let fn_obj = heap.new_with_proto(id!(native).into());
-        heap.set_object_storage_type(fn_obj, ObjectStorageType::VEC2);
+        heap.set_object_storage_type(fn_obj, ScriptObjectStorageType::VEC2);
         heap.set_fn(fn_obj, ScriptFnPtr::Native(NativeId{index: fn_index as u32}));
 
         for (arg, def) in args{

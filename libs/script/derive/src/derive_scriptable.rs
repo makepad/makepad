@@ -334,7 +334,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    }");
         
         tb.add("    fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{");
-        tb.add("        let enum_object = vm.heap.new();");
+        tb.add("        let enum_object = vm.heap.new_object();");
 
         for item in &items {
             match &item.kind {
