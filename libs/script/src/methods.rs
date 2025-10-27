@@ -15,6 +15,7 @@ impl ScriptTypeMethods{
         let mut t = Self::default();
         t.add_shared(h, native);
         t.add_object(h, native);
+        t.add_array(h, native);
         t
     }
     
@@ -36,7 +37,7 @@ impl ScriptTypeMethods{
         self.add(h, native, &[], ScriptValueType::REDUX_COLOR, id!(ty), |_, _|{id!(color).escape()});
         self.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(ty), |_, _|{id!(string).escape()});
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(ty), |_, _|{id!(object).escape()});
-        self.add(h, native, &[], ScriptValueType::REDUX_RSID, id!(ty), |_, _|{id!(rsid).escape()});
+        self.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(ty), |_, _|{id!(rsid).escape()});
         self.add(h, native, &[], ScriptValueType::REDUX_OPCODE, id!(ty), |_, _|{id!(opcode).escape()});
         self.add(h, native, &[], ScriptValueType::REDUX_ERR, id!(ty), |_, _|{id!(err).escape()});
         self.add(h, native, &[], ScriptValueType::REDUX_ID, id!(ty), |_, _|{id!(id).escape()});
@@ -48,7 +49,7 @@ impl ScriptTypeMethods{
             (ScriptValueType::REDUX_COLOR, id!(is_color)),
             (ScriptValueType::REDUX_STRING, id!(is_string)),
             (ScriptValueType::REDUX_OBJECT, id!(is_object)),
-            (ScriptValueType::REDUX_RSID, id!(is_rsid)),
+            (ScriptValueType::REDUX_ARRAY, id!(is_array)),
             (ScriptValueType::REDUX_OPCODE, id!(is_opcode)),
             (ScriptValueType::REDUX_ERR, id!(is_err)),
             (ScriptValueType::REDUX_ID, id!(is_id))
@@ -60,12 +61,73 @@ impl ScriptTypeMethods{
             self.add(h, native, &[], ScriptValueType::REDUX_COLOR, id, move |_, _|{ (ty == ScriptValueType::REDUX_COLOR).into()});
             self.add(h, native, &[], ScriptValueType::REDUX_STRING, id, move |_, _|{ (ty == ScriptValueType::REDUX_STRING).into()});
             self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id, move |_, _|{ (ty == ScriptValueType::REDUX_OBJECT).into()});
-            self.add(h, native, &[], ScriptValueType::REDUX_RSID, id, move |_, _|{ (ty == ScriptValueType::REDUX_RSID).into()});
+            self.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id, move |_, _|{ (ty == ScriptValueType::REDUX_ARRAY).into()});
             self.add(h, native, &[], ScriptValueType::REDUX_OPCODE, id, move |_, _|{ (ty == ScriptValueType::REDUX_OPCODE).into()});
             self.add(h, native, &[], ScriptValueType::REDUX_ERR, id, move |_, _|{ (ty == ScriptValueType::REDUX_ERR).into()});
             self.add(h, native, &[], ScriptValueType::REDUX_ID, id, move |_, _|{ (ty == ScriptValueType::REDUX_ID).into()});
         }
         
+    }
+    
+    pub fn add_array(&mut self, h: &mut ScriptHeap, native:&mut ScriptNative){
+        self.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(proto), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                return vm.heap.proto(this)
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        self.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(push), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                vm.heap.array_push_vec(this, args, &vm.thread.trap);
+                return NIL
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        self.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(pop), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                return vm.heap.array_pop(this, &mut vm.thread.trap)
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        self.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(len), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                return vm.heap.array_len(this).into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+        
+        self.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(freeze), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                vm.heap.freeze_array(this);
+                return this.into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        self.add(h, native, script_args!(cb=NIL), ScriptValueType::REDUX_ARRAY, id!(retain), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                let fnptr = script_value!(vm, args.cb);
+                let mut i = 0;
+                while i < vm.heap.array_len(this){
+                    let value = script_array_index!(vm, this[i]);
+                    let ret = vm.call(fnptr, &[value]);
+                    if ret.is_err(){
+                        return ret;
+                    }
+                    if !vm.heap.cast_to_bool(ret){
+                        vm.heap.array_remove(this, i, &mut vm.thread.trap);
+                    }
+                    else{
+                        i += 1
+                    }
+                }
+                return NIL
+            }
+            vm.thread.trap.err_not_impl()
+        });
     }
     
     pub fn add_object(&mut self, h: &mut ScriptHeap, native:&mut ScriptNative){
