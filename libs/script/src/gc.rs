@@ -1,45 +1,57 @@
 use crate::value::*;
 use crate::heap::*;
+use crate::array::*;
+
+macro_rules! mark{
+    ($self:ident, $val:expr)=>{
+        if let Some(ptr) = $val.as_object(){
+            $self.mark_vec.push(ScriptGcMark::Object(ptr.index as usize));
+        }
+        else if let Some(ptr) = $val.as_string(){
+            $self.strings[ptr.index as usize].tag.set_mark();
+        }
+        else if let Some(ptr) = $val.as_array(){
+            $self.mark_vec.push(ScriptGcMark::Array(ptr.index as usize));
+        }
+    };
+}
 
 impl ScriptHeap{
         
-    pub fn mark_inner(&mut self, index:usize){
-        let obj = &mut self.objects[index];
-        if obj.tag.is_marked() || !obj.tag.is_alloced(){
-            return;
-        }
-        obj.tag.set_mark();
-        obj.map_iter(|key,value|{
-            if let Some(ptr) = key.as_object(){
-                self.mark_vec.push(ptr.index as usize);
+    pub fn mark_inner(&mut self, value:ScriptGcMark){
+        match value{
+            ScriptGcMark::Object(index)=>{
+                let obj = &mut self.objects[index];
+                if obj.tag.is_marked() || !obj.tag.is_alloced(){
+                    return;
+                }
+                obj.tag.set_mark();      
+                obj.map_iter(|key,value|{
+                    mark!(self, key);
+                    mark!(self, value);
+                });
+                let len = obj.vec.len();
+                for i in 0..len{
+                    let object = &self.objects[index];
+                    let kv = &object.vec[i];
+                    mark!(self, kv.key);
+                    mark!(self, kv.value);
+                }
             }
-            else if let Some(ptr) = key.as_string(){
-                self.strings[ptr.index as usize].tag.set_mark();
-            }
-            if let Some(ptr) = value.as_object(){
-                self.mark_vec.push(ptr.index as usize);
-            }
-            else if let Some(ptr) = value.as_string(){
-                self.strings[ptr.index as usize].tag.set_mark();
-            }
-        });
-        let len = obj.vec.len();
-        for i in 0..len{
-            let object = &self.objects[index];
-            let kv = &object.vec[i];
-            if let Some(ptr) = kv.key.as_object(){
-                self.mark_vec.push(ptr.index as usize);
-            }
-            else if let Some(ptr) = kv.key.as_string(){
-                self.strings[ptr.index as usize].tag.set_mark();
-            }
-            if let Some(ptr) = kv.value.as_object(){
-                self.mark_vec.push(ptr.index as usize);
-            }
-            else if let Some(ptr) = kv.value.as_string(){
-                self.strings[ptr.index as usize].tag.set_mark();
+            ScriptGcMark::Array(index)=>{
+                let tag = &self.arrays[index].tag;
+                if tag.is_marked() || !tag.is_alloced(){
+                    return
+                }
+                self.arrays[index].tag.set_mark();
+                if let ScriptArrayStorage::ScriptValue(values) = &self.arrays[index].storage{
+                    for v in values{
+                        mark!(self, v);
+                    }
+                }
             }
         }
+        
     }
                 
     pub fn mark(&mut self, stack:&[ScriptValue]){
@@ -49,12 +61,7 @@ impl ScriptHeap{
         }
         for i in 0..stack.len(){
             let value = stack[i];
-            if let Some(ptr) = value.as_object(){
-                self.mark_vec.push(ptr.index as usize);
-            }
-            else if let Some(ptr) = value.as_string(){
-                self.strings[ptr.index as usize].tag.set_mark();
-            }
+            mark!(self, value)
         }
         for i in 0..self.mark_vec.len(){
             self.mark_inner(self.mark_vec[i]);

@@ -160,11 +160,11 @@ impl<T> ScriptNew for  Vec<T> where T: ScriptApply + ScriptNew + 'static{
         }
     }
     fn script_default(vm:&mut ScriptVm)->ScriptValue{
-        vm.heap.new().into()
+        vm.heap.new_object().into()
     }
     fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
     fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{
-        vm.heap.new().into()
+        vm.heap.new_object().into()
     }
 }
 impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static{
@@ -184,7 +184,7 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static{
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
-        let obj = vm.heap.new();
+        let obj = vm.heap.new_object();
         for v in self.iter(){
             let v = v.script_to_value(vm);
             vm.heap.vec_push(obj, NIL, v, &vm.thread.trap);
@@ -209,11 +209,11 @@ impl ScriptNew for Vec<u8> {
         }
     }
     fn script_default(vm:&mut ScriptVm)->ScriptValue{
-        vm.heap.new().into()
+        vm.heap.new_object().into()
     }
     fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
     fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{
-        vm.heap.new().into()
+        vm.heap.new_object().into()
     }
 }
 impl ScriptApply for Vec<u8> {
@@ -227,7 +227,7 @@ impl ScriptApply for Vec<u8> {
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
-        let obj = vm.heap.new();
+        let obj = vm.heap.new_object();
         for _v in self.iter(){
             
         }
