@@ -51,6 +51,11 @@ impl From<ScriptObject> for ScriptValue{
     }
 }
 
+impl From<ScriptArray> for ScriptValue{
+    fn from(v:ScriptArray) -> Self{
+        ScriptValue::from_array(v)
+    }
+}
 
 impl From<ScriptValue> for ScriptObject{
     fn from(v:ScriptValue) -> Self{
@@ -88,6 +93,24 @@ impl From<u32> for ScriptValue{
 
 impl From<i32> for ScriptValue{
     fn from(v:i32) -> Self{
+        ScriptValue::from_f64(v as f64)
+    }
+}
+
+impl From<u16> for ScriptValue{
+    fn from(v:u16) -> Self{
+        ScriptValue::from_f64(v as f64)
+    }
+}
+
+impl From<u8> for ScriptValue{
+    fn from(v:u8) -> Self{
+        ScriptValue::from_f64(v as f64)
+    }
+}
+
+impl From<f32> for ScriptValue{
+    fn from(v:f32) -> Self{
         ScriptValue::from_f64(v as f64)
     }
 }
@@ -179,7 +202,10 @@ impl ScriptValueType{
     pub const ERR_NOT_PROTO: Self = Self(40);
     pub const ERR_TYPE_NOT_REGISTERED: Self = Self(41);
     pub const ERR_ENUM_UNKNOWN_VARIANT: Self = Self(42);
-    pub const ERR_LAST: Self = Self(42);
+    pub const ERR_NOT_ALLOWED_IN_ARRAY: Self = Self(43);
+    pub const ERR_NOT_ALLOWED_IN_ARGUMENTS: Self = Self(44);
+    pub const ERR_ARRAY_BOUND: Self = Self(45);
+    pub const ERR_LAST: Self = Self(45);
     
     pub const ID: Self = Self(0x80);
         
@@ -190,7 +216,7 @@ impl ScriptValueType{
     pub const REDUX_COLOR: usize = 4;
     pub const REDUX_STRING: usize = 5;
     pub const REDUX_OBJECT: usize = 6;
-    pub const REDUX_RSID: usize = 7;
+    pub const REDUX_ARRAY: usize = 7;
     pub const REDUX_OPCODE: usize = 8;
     pub const REDUX_ERR: usize = 9;
     pub const REDUX_ID: usize = 10;
@@ -268,7 +294,7 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_INVALID_PROP_NAME=>write!(f,"InvalidPropertyName"),
             Self::ERR_KEY_ALREADY_EXISTS=>write!(f,"KeyAlreadyExists"),
             Self::ERR_INVALID_KEY_TYPE=>write!(f,"UnsupportedKeyType"),
-            Self::ERR_VEC_BOUND=>write!(f,"VecBoundFail"),
+            Self::ERR_VEC_BOUND=>write!(f,"VecIndexOutOfBounds"),
             Self::ERR_INVALID_ARG_TYPE=>write!(f,"InvalidArgumentType"),
             Self::ERR_INVALID_ARG_NAME=>write!(f,"InvalidArgumentName"),
             Self::ERR_INVALID_ARG_COUNT=>write!(f,"InvalidArgumentCount"),
@@ -276,6 +302,9 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_NOT_PROTO=>write!(f,"NotAllowedAsPrototype"),
             Self::ERR_TYPE_NOT_REGISTERED=>write!(f,"TypeNotRegistered"),
             Self::ERR_ENUM_UNKNOWN_VARIANT=>write!(f,"EnumUnknownVariant"),
+            Self::ERR_NOT_ALLOWED_IN_ARRAY=>write!(f,"NotAllowedInArray"),
+            Self::ERR_NOT_ALLOWED_IN_ARGUMENTS=>write!(f,"NotAllowedInArguments"),
+            Self::ERR_ARRAY_BOUND=>write!(f,"ArrayIndexOutOfBounds"),
             Self::ERR_USER=>write!(f,"UserGenerated"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ScriptValueType?")
@@ -293,6 +322,12 @@ impl IdExt for LiveId{
     }
 }
 
+macro_rules! err_fn{
+    ($name:ident, $cnst:ident)=>{
+        pub const fn $name(ip:ScriptIp)->Self{Self(ScriptValueType::$cnst.to_u64() | ip.to_u40())}
+    }
+    
+}
 impl ScriptValue{
     pub const TYPE_MASK: u64 = 0xFFFF_FF00_0000_0000;
         
@@ -324,48 +359,54 @@ impl ScriptValue{
     
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
     
-    pub const TRACKID_VALUE_MASK: u64 = 0xffff_ffff;
-    pub const TRACKID_DIRTY_BIT: u64 = 0x1_0000_0000;
+    
+    pub const fn value_type(&self)->ScriptValueType{
+        if self.is_non_nan_number(){
+            return ScriptValueType::NUMBER
+        }
+        ScriptValueType::from_u64(self.0 & Self::TYPE_MASK)
+    }
     
     
-    // opcodes
-    pub const TYPE_OPCODE: u64 = ScriptValueType::OPCODE.to_u64();
     
-    pub const fn from_opcode(op:Opcode)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32)}
     
-    pub const fn from_opcode_args(op:Opcode, args:OpcodeArgs)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32 | (args.0 as u64))}
+    // Errors
+    
+    
+    
+    
+    err_fn!(err_not_found, ERR_NOT_FOUND);
+    err_fn!(err_not_fn, ERR_NOT_FN);
+    err_fn!(err_not_index, ERR_NOT_INDEX);
+    err_fn!(err_not_object, ERR_NOT_OBJECT);
+    err_fn!(err_stack_underflow, ERR_STACK_UNDERFLOW);
+    err_fn!(err_stack_overflow, ERR_STACK_OVERFLOW);
+    err_fn!(err_invalid_args, ERR_INVALID_ARGS);
+    err_fn!(err_not_assignable, ERR_NOT_ASSIGNABLE);
+    err_fn!(err_unexpected, ERR_UNEXPECTED);
+    err_fn!(err_assert_fail, ERR_ASSERT_FAIL);
+    err_fn!(err_not_impl, ERR_NOT_IMPL);
+    err_fn!(err_frozen, ERR_FROZEN);
+    err_fn!(err_vec_frozen, ERR_VEC_FROZEN);
+    err_fn!(err_invalid_prop_type, ERR_INVALID_PROP_TYPE);
+    err_fn!(err_invalid_prop_name, ERR_INVALID_PROP_NAME);
+    err_fn!(err_key_already_exists, ERR_KEY_ALREADY_EXISTS);
+    err_fn!(err_invalid_key_type, ERR_INVALID_KEY_TYPE);
+    err_fn!(err_vec_bound, ERR_VEC_BOUND);
+    err_fn!(err_invalid_arg_type, ERR_INVALID_ARG_TYPE);       
+    err_fn!(err_invalid_arg_name, ERR_INVALID_ARG_NAME);
+    err_fn!(err_invalid_arg_count, ERR_INVALID_ARG_COUNT);
+    err_fn!(err_invalid_var_name, ERR_INVALID_VAR_NAME);
         
-    // TODO: make this behave like javascript as much as is sensible
-        
-    pub const fn err_not_found(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_FOUND.to_u64() | ip.to_u40())}
-    pub const fn err_not_fn(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_FN.to_u64() | ip.to_u40())}
-    pub const fn err_not_index(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_INDEX.to_u64() | ip.to_u40())}
-    pub const fn err_not_object(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_OBJECT.to_u64()| ip.to_u40())}
-    pub const fn err_stack_underflow(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_STACK_UNDERFLOW.to_u64() | ip.to_u40())}
-    pub const fn err_stack_overflow(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_STACK_OVERFLOW.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_args(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_ARGS.to_u64() | ip.to_u40())}
-    pub const fn err_not_assignable(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_ASSIGNABLE.to_u64() | ip.to_u40())}
-    pub const fn err_unexpected(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_UNEXPECTED.to_u64() | ip.to_u40())}
-    pub const fn err_assert_fail(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_ASSERT_FAIL.to_u64() | ip.to_u40())}
-    pub const fn err_not_impl(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_IMPL.to_u64() | ip.to_u40())}
-    pub const fn err_frozen(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_FROZEN.to_u64() | ip.to_u40())}
-    pub const fn err_vec_frozen(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_VEC_FROZEN.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_prop_type(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_PROP_TYPE.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_prop_name(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_PROP_NAME.to_u64() | ip.to_u40())}
-    pub const fn err_key_already_exists(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_KEY_ALREADY_EXISTS.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_key_type(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_KEY_TYPE.to_u64() | ip.to_u40())}
-    pub const fn err_vec_bound(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_VEC_BOUND.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_arg_type(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_ARG_TYPE.to_u64() | ip.to_u40())}            
-    pub const fn err_invalid_arg_name(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_ARG_NAME.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_arg_count(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_ARG_COUNT.to_u64() | ip.to_u40())}
-    pub const fn err_invalid_var_name(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_INVALID_VAR_NAME.to_u64() | ip.to_u40())} 
-        
-    pub const fn err_user(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_USER.to_u64() | ip.to_u40())}
-    pub const fn err_not_proto(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_NOT_PROTO.to_u64() | ip.to_u40())}
-    pub const fn err_type_not_registered(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_TYPE_NOT_REGISTERED.to_u64() | ip.to_u40())}
+    err_fn!(err_user, ERR_USER);
+    err_fn!(err_not_proto, ERR_NOT_PROTO);
+    err_fn!(err_type_not_registered, ERR_TYPE_NOT_REGISTERED);
     
-    pub const fn err_enum_unknown_variant(ip:ScriptIp)->Self{Self(ScriptValueType::ERR_ENUM_UNKNOWN_VARIANT.to_u64() | ip.to_u40())}
-        
+    err_fn!(err_enum_unknown_variant, ERR_ENUM_UNKNOWN_VARIANT);
+    err_fn!(err_not_allowed_in_array, ERR_NOT_ALLOWED_IN_ARRAY);
+    err_fn!(err_not_allowed_in_arguments, ERR_NOT_ALLOWED_IN_ARGUMENTS);
+    err_fn!(err_array_bound, ERR_ARRAY_BOUND);
+    
     
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ScriptValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()}
     
@@ -381,12 +422,85 @@ impl ScriptValue{
         }
     }
         
-    pub const fn value_type(&self)->ScriptValueType{
-        if self.is_non_nan_number(){
-            return ScriptValueType::NUMBER
-        }
-        ScriptValueType::from_u64(self.0 & Self::TYPE_MASK)
+        
+        
+    // opcodes
+        
+        
+        
+    pub const TYPE_OPCODE: u64 = ScriptValueType::OPCODE.to_u64();
+        
+    pub const fn from_opcode(op:Opcode)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32)}
+            
+    pub const fn is_opcode(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_OPCODE
     }
+    
+    pub const fn from_opcode_args(op:Opcode, args:OpcodeArgs)->Self{ Self(Self::TYPE_OPCODE | (op.0 as u64)<<32 | (args.0 as u64))}
+    pub const fn as_opcode(&self)->Option<(Opcode,OpcodeArgs)>{
+        if self.is_opcode(){
+            return Some((Opcode(((self.0>>32) & 0xff) as u8),OpcodeArgs((self.0 & 0xffff_ffff) as u32)))
+        }
+        None
+    }
+            
+    pub const fn set_opcode_args(&mut self, args:OpcodeArgs){
+        if self.is_opcode(){
+            self.0 = (self.0 & 0xffff_ffff_0000_0000) | (args.0 as u64);
+        }
+    }
+            
+    pub const fn set_opcode_args_pop_to_me(&mut self){
+        if self.is_opcode(){
+            self.0 |= OpcodeArgs::POP_TO_ME_FLAG as u64;
+        }
+    }
+            
+    pub const fn clear_opcode_args_pop_to_me(&mut self){
+        if self.is_opcode(){
+            self.0 &= !(OpcodeArgs::POP_TO_ME_FLAG as u64);
+        }
+    }
+            
+    pub const fn has_opcode_args_pop_to_me(&self)->bool{
+        if self.is_opcode(){
+            self.0 & (OpcodeArgs::POP_TO_ME_FLAG as u64) != 0
+        }
+        else{
+            false
+        }
+    }
+                
+    pub const fn is_assign_opcode(&self)->bool{
+        if self.is_opcode(){
+            let code = Opcode(((self.0>>32) & 0xff) as u8);
+            return code.is_assign()
+        }
+        false
+    }
+            
+    pub const fn is_let_opcode(&self)->bool{
+        if self.is_opcode(){
+            let code = Opcode(((self.0>>32) & 0xff) as u8);
+            return code.0 == Opcode::LET_TYPED.0 || code.0 == Opcode::LET_DYN.0
+        }
+        false
+    }
+    
+    
+    // NIL
+    
+    
+    
+    pub const fn is_nil(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_NIL
+    }
+    
+    
+    // f64
+    
+    
+    
     
     pub const fn from_f64(val:f64)->Self{
         if val.is_nan(){
@@ -395,6 +509,13 @@ impl ScriptValue{
         else{
             Self(val.to_bits())
         }
+    }
+        
+    pub const fn as_f64(&self)->Option<f64>{
+        if self.is_number(){
+            return Some(f64::from_bits(self.0))
+        }
+        None    
     }
     
     pub const fn as_f64_traced_nan(&self)->Option<ScriptIp>{
@@ -421,23 +542,115 @@ impl ScriptValue{
         }
     }
     
+        
+    pub const fn is_number(&self)->bool{
+        self.0 <= Self::TYPE_TRACED_NAN_MAX
+    }
+        
+    pub const fn is_non_nan_number(&self)->bool{
+        self.0 < Self::TYPE_NAN
+    }
+        
+    pub const fn as_index(&self)->usize{
+        if let Some(f) = self.as_f64(){
+            return f as usize
+        }
+        if let Some(b) = self.as_bool(){
+            return if b{1} else{0}
+        }
+        0
+    }
+        
+    pub const fn is_index(&self)->bool{
+        self.0 <= Self::TYPE_NIL
+    }
+        
+    pub const fn is_nan(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_NAN
+    }
+    
+    
+    
+    // Object
+    
+    
+    
+    
     pub const fn from_object(ptr: ScriptObject)->Self{
          Self(ptr.index as u64 | Self::TYPE_OBJECT)
     }
-        
+    
+    pub const fn is_object(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
+    }
+    
+    pub const fn as_object(&self)->Option<ScriptObject>{
+        if self.is_object(){
+            return Some(ScriptObject{
+                index: (self.0 & 0xffff_ffff) as u32
+            })
+        }
+        None
+    }
+    
+    
+    
+    // bool
+    
+    
+    
     pub const fn from_bool(val: bool)->Self{
         if val{Self::TRUE}
         else{Self::FALSE}
     }
+        
+    pub const fn as_bool(&self)->Option<bool>{
+        if self.is_bool(){
+            return Some(self.0 == Self::TRUE.0)
+        }
+        None
+    }
+        
+    pub const fn is_bool(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_BOOL
+    }
+    
+    
+    
+    // color
+    
+    
     
     pub const fn from_color(val: u32)->Self{
         Self(val as u64|Self::TYPE_COLOR)
     }
+        
+    pub const fn as_color(&self)->Option<u32>{
+        if self.is_color(){
+            return Some((self.0&0xffff_ffff) as u32)
+        }
+        None
+    }
+            
+    pub const fn is_color(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_COLOR
+    }
     
-    pub const fn from_array(val: u32)->Self{
-        Self((val as u64)|Self::TYPE_ARRAY)
+    
+    
+    
+    // array
+    
+    
+    
+    pub const fn from_array(val: ScriptArray)->Self{
+        Self((val.index as u64)|Self::TYPE_ARRAY)
     }
         
+    pub const fn is_array(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_ARRAY
+    }
+    
     pub const fn as_array(&self)->Option<ScriptArray>{
         if self.is_array(){
             Some(ScriptArray{index:(self.0 &0xFFFF_FFFF) as u32})
@@ -447,16 +660,62 @@ impl ScriptValue{
         }
     }
     
+    
+    
+    // id
+    
+    
     pub const fn from_id(val: LiveId)->Self{
         Self(val.0|Self::TYPE_ID)
+    }
+        
+    pub const fn is_id(&self)->bool{
+        self.0 >= Self::TYPE_ID
     }
     
     pub const fn from_escaped_id(val: LiveId)->Self{
         Self(val.0|Self::TYPE_ID|Self::ESCAPED_ID)
     }
+    
+    pub const fn as_id(&self)->Option<LiveId>{
+        if self.is_id(){
+            return Some(LiveId(self.0&0x0000_3fff_ffff_ffff))
+        }
+        None
+    }
         
+    pub const fn is_escaped_id(&self)->bool{
+        self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
+    }
+        
+    pub const fn is_prefixed_id(&self)->bool{
+        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED != 0
+    }
+        
+    pub const fn is_unprefixed_id(&self)->bool{
+        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED == 0
+    }
+    
+    
+    // string
+    
+    
+    
     pub const fn from_string(ptr: ScriptString)->Self{
          Self(ptr.index as u64 | Self::TYPE_STRING)
+    }
+        
+    pub const fn as_string(&self)->Option<ScriptString>{
+        if self.is_string(){
+            return Some(ScriptString{
+                index: (self.0 & 0xffff_ffff) as u32
+            })
+        }
+        None
+    }
+        
+    pub const fn is_string(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_STRING
     }
     
     pub const fn from_inline_string(str: &str)->Option<Self>{
@@ -511,188 +770,11 @@ impl ScriptValue{
     pub const fn inline_string_not_empty(&self)->bool{
         self.0 >= Self::TYPE_INLINE_STRING_1  && self.0 <= Self::TYPE_INLINE_STRING_END
     }
-    
-    pub const fn add(&self, val:u64)->Self{
-        Self(self.0 + val)
-    }
-    
-    pub const fn as_bool(&self)->Option<bool>{
-        if self.is_bool(){
-            return Some(self.0 == Self::TRUE.0)
-        }
-        None
-    }
-    
-    pub const fn as_f64(&self)->Option<f64>{
-        if self.is_number(){
-            return Some(f64::from_bits(self.0))
-        }
-        None    
-    }
-    
-    pub const fn as_index(&self)->usize{
-        if let Some(f) = self.as_f64(){
-            return f as usize
-        }
-        if let Some(b) = self.as_bool(){
-            return if b{1} else{0}
-        }
-        0
-    }
         
-    pub const fn as_id(&self)->Option<LiveId>{
-        if self.is_id(){
-            return Some(LiveId(self.0&0x0000_3fff_ffff_ffff))
-        }
-        None
-    }
-    
     pub const fn is_inline_string(&self)->bool{
         self.0 >= Self::TYPE_INLINE_STRING_0  && self.0 < Self::TYPE_INLINE_STRING_END
     }
-    
-    pub const fn is_escaped_id(&self)->bool{
-        self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
-    }
-        
-    pub const fn as_object(&self)->Option<ScriptObject>{
-        if self.is_object(){
-            return Some(ScriptObject{
-                index: (self.0 & 0xffff_ffff) as u32
-            })
-        }
-        None
-    }
-        
-    pub const fn as_opcode(&self)->Option<(Opcode,OpcodeArgs)>{
-        if self.is_opcode(){
-            return Some((Opcode(((self.0>>32) & 0xff) as u8),OpcodeArgs((self.0 & 0xffff_ffff) as u32)))
-        }
-        None
-    }
-    
-    pub const fn set_opcode_args(&mut self, args:OpcodeArgs){
-        if self.is_opcode(){
-            self.0 = (self.0 & 0xffff_ffff_0000_0000) | (args.0 as u64);
-        }
-    }
-    
-    pub const fn set_opcode_args_pop_to_me(&mut self){
-        if self.is_opcode(){
-            self.0 |= OpcodeArgs::POP_TO_ME_FLAG as u64;
-        }
-    }
-    
-    pub const fn clear_opcode_args_pop_to_me(&mut self){
-        if self.is_opcode(){
-            self.0 &= !(OpcodeArgs::POP_TO_ME_FLAG as u64);
-        }
-    }
-    
-    pub const fn has_opcode_args_pop_to_me(&self)->bool{
-        if self.is_opcode(){
-            self.0 & (OpcodeArgs::POP_TO_ME_FLAG as u64) != 0
-        }
-        else{
-            false
-        }
-    }
-        
-    pub const fn is_assign_opcode(&self)->bool{
-        if self.is_opcode(){
-            let code = Opcode(((self.0>>32) & 0xff) as u8);
-            return code.is_assign()
-        }
-        false
-    }
-    
-    pub const fn is_let_opcode(&self)->bool{
-        if self.is_opcode(){
-            let code = Opcode(((self.0>>32) & 0xff) as u8);
-            return code.0 == Opcode::LET_TYPED.0 || code.0 == Opcode::LET_DYN.0
-        }
-        false
-    }
-    /*
-    pub const fn set_opcode_is_statement(&mut self){
-        if self.is_opcode(){
-            self.0 |= OpcodeArgs::STATEMENT_FLAG as u64;
-        }
-    }*/
-        
-        
-    pub const fn as_string(&self)->Option<ScriptString>{
-        if self.is_string(){
-            return Some(ScriptString{
-                index: (self.0 & 0xffff_ffff) as u32
-            })
-        }
-        None
-    }
-        
-    pub const fn as_color(&self)->Option<u32>{
-        if self.is_color(){
-            return Some((self.0&0xffff_ffff) as u32)
-        }
-        None
-    }
-    
-    
-    pub const fn is_number(&self)->bool{
-        self.0 <= Self::TYPE_TRACED_NAN_MAX
-    }
-    
-    pub const fn is_non_nan_number(&self)->bool{
-        self.0 < Self::TYPE_NAN
-    }
-    
-    pub const fn is_index(&self)->bool{
-        self.0 <= Self::TYPE_NIL
-    }
-    
-    pub const fn is_bool(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_BOOL
-    }
-    
-    pub const fn is_nan(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_NAN
-    }
-    
-    pub const fn is_nil(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_NIL
-    }
-    
-    pub const fn is_color(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_COLOR
-    }
-    
-    pub const fn is_id(&self)->bool{
-        self.0 >= Self::TYPE_ID
-    }
-    
-    pub const fn is_prefixed_id(&self)->bool{
-        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED != 0
-    }
-    
-    pub const fn is_unprefixed_id(&self)->bool{
-        self.0 >= Self::TYPE_ID && self.0 & LiveId::PREFIXED == 0
-    }
-            
-    pub const fn is_opcode(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_OPCODE
-    }
-    
-    pub const fn is_string(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_STRING
-    }
-    
-    pub const fn is_object(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
-    }
-    
-    pub const fn is_array(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_ARRAY
-    }
+
 }
 
 impl fmt::Debug for ScriptValue {

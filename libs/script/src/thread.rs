@@ -4,6 +4,7 @@ use crate::value::*;
 use crate::opcode::*;
 use crate::vm::*;
 use crate::object::*;
+use crate::trap::*;
 use std::any::Any;
 
 #[derive(Debug, Default)]
@@ -45,30 +46,23 @@ pub struct CallFrame{
     pub return_ip: Option<ScriptIp>,
 }
 
-pub struct ScriptMe{
-    pub(crate) ty: u32,
-    pub(crate) object: ScriptObject,
+pub enum ScriptMe{
+    Object(ScriptObject),
+    Call(ScriptObject),
+    Array(ScriptArray),
 }
- 
-impl ScriptMe{
-    pub const ARRAY: u32 = 1;
-    pub const CALL: u32 = 2;
-    pub const OBJ: u32 = 3;
-    pub fn object(object:ScriptObject)->Self{Self{object, ty: Self::OBJ}}
-    pub fn array(object:ScriptObject)->Self{Self{object, ty: Self::ARRAY}}
-    pub fn call(object:ScriptObject)->Self{Self{object, ty: Self::CALL}}
+
+impl Into<ScriptValue> for ScriptMe{
+    fn into(self)->ScriptValue{
+        match self{
+            Self::Object(v)=>v.into(),
+            Self::Call(v)=>v.into(),
+            Self::Array(v)=>v.into(),
+        }
+    }
 }
 
 pub struct ScriptThreadId(pub usize);
-
-#[derive(Debug, Clone, Copy)]
-pub enum ScriptTrapOn{
-    Error{
-        in_rust: bool,
-        value: ScriptValue
-    },
-    Return(ScriptValue),
-}
 
 pub struct ScriptThread{
     pub(crate) stack_limit: usize,
@@ -81,66 +75,6 @@ pub struct ScriptThread{
     pub trap: ScriptTrap,
     pub(crate) last_err: ScriptValue,
 }
-use std::cell::Cell;
-#[derive(Default, Debug)]
-pub struct ScriptTrap{
-    pub in_rust: bool,
-    pub(crate) on: Cell<Option<ScriptTrapOn>>,
-    pub ip: ScriptIp,
-}
-
-impl ScriptTrap{
-    pub fn ip(&self)->u32{
-        self.ip.index
-    }
-    pub fn goto(&mut self, wh:u32){
-        self.ip.index = wh;
-    }
-    pub fn goto_rel(&mut self, wh:u32){
-        self.ip.index += wh;
-    }
-    pub fn goto_next(&mut self){
-        self.ip.index += 1;
-    }
-}
-
-impl ScriptTrap{
-    pub fn err(&self, err:ScriptValue)->ScriptValue{
-        self.on.set(Some(ScriptTrapOn::Error{
-            in_rust:self.in_rust,
-            value:err
-        }));
-        err
-    }
-    
-    pub fn err_not_found(&self)->ScriptValue{self.err(ScriptValue::err_not_found(self.ip))}
-    pub fn err_not_fn(&self)->ScriptValue{self.err(ScriptValue::err_not_fn(self.ip))}
-    pub fn err_not_index(&self)->ScriptValue{self.err(ScriptValue::err_not_index(self.ip))}
-    pub fn err_not_object(&self)->ScriptValue{self.err(ScriptValue::err_not_object(self.ip))}
-    pub fn err_stack_underflow(&self)->ScriptValue{self.err(ScriptValue::err_stack_underflow(self.ip))}
-    pub fn err_stack_overflow(&self)->ScriptValue{self.err(ScriptValue::err_stack_overflow(self.ip))}
-    pub fn err_invalid_args(&self)->ScriptValue{self.err(ScriptValue::err_invalid_args(self.ip))}
-    pub fn err_not_assignable(&self)->ScriptValue{self.err(ScriptValue::err_not_assignable(self.ip))}
-    pub fn err_unexpected(&self)->ScriptValue{self.err(ScriptValue::err_unexpected(self.ip))}
-    pub fn err_assert_fail(&self)->ScriptValue{self.err(ScriptValue::err_assert_fail(self.ip))}
-    pub fn err_not_impl(&self)->ScriptValue{self.err(ScriptValue::err_not_impl(self.ip))}
-    pub fn err_frozen(&self)->ScriptValue{self.err(ScriptValue::err_frozen(self.ip))}
-    pub fn err_vec_frozen(&self)->ScriptValue{self.err(ScriptValue::err_vec_frozen(self.ip))}
-    pub fn err_invalid_prop_type(&self)->ScriptValue{self.err(ScriptValue::err_invalid_prop_type(self.ip))}
-    pub fn err_invalid_prop_name(&self)->ScriptValue{self.err(ScriptValue::err_invalid_prop_name(self.ip))}
-    pub fn err_key_already_exists(&self)->ScriptValue{self.err(ScriptValue::err_key_already_exists(self.ip))}
-    pub fn err_invalid_key_type(&self)->ScriptValue{self.err(ScriptValue::err_invalid_key_type(self.ip))}
-    pub fn err_vec_bound(&self)->ScriptValue{self.err(ScriptValue::err_vec_bound(self.ip))}
-    pub fn err_invalid_arg_type(&self)->ScriptValue{self.err(ScriptValue::err_invalid_arg_type(self.ip))}
-    pub fn err_invalid_arg_name(&self)->ScriptValue{self.err(ScriptValue::err_invalid_arg_name(self.ip))}
-    pub fn err_invalid_arg_count(&self)->ScriptValue{self.err(ScriptValue::err_invalid_arg_count(self.ip))}
-    pub fn err_invalid_var_name(&self)->ScriptValue{self.err(ScriptValue::err_invalid_var_name(self.ip))}
-    pub fn err_not_proto(&self)->ScriptValue{self.err(ScriptValue::err_not_proto(self.ip))}
-    pub fn err_type_not_registered(&self)->ScriptValue{self.err(ScriptValue::err_type_not_registered(self.ip))}
-    pub fn err_enum_unknown_variant(&self)->ScriptValue{self.err(ScriptValue::err_enum_unknown_variant(self.ip))}
-    pub fn err_user(&self)->ScriptValue{self.err(ScriptValue::err_user(self.ip))}
-}
-
 
 impl ScriptThread{
     
@@ -179,6 +113,32 @@ impl ScriptThread{
     pub fn free_unreffed_scopes(&mut self, bases:&StackBases, heap:&mut ScriptHeap){
         while self.scopes.len() > bases.scope{
             heap.free_object_if_unreffed(self.scopes.pop().unwrap());
+        }
+    }
+        
+    pub fn pop_to_me(&mut self, heap:&mut ScriptHeap){
+                
+        let value = self.pop_stack_value();
+        if self.call_has_me(){
+                        
+            let (key, value) = if let Some(id) = value.as_id(){
+                if value.is_escaped_id(){ (NIL, value) }
+                else{(value, self.scope_value(heap, id))}
+            }else{(NIL,value)};
+                        
+            match self.mes.last().unwrap(){
+                ScriptMe::Call(obj)=>{
+                    heap.unnamed_fn_arg(*obj, value, &self.trap);       
+                }
+                ScriptMe::Object(obj)=>{
+                    if !value.is_nil() && !value.is_err(){
+                        heap.vec_push(*obj, key, value, &self.trap);       
+                    }
+                }
+                ScriptMe::Array(arr)=>{
+                    heap.array_push(*arr, value, &self.trap)
+                }
+            }
         }
     }
     
@@ -239,7 +199,7 @@ impl ScriptThread{
         }
     }
     
-    pub fn push_stack_value_nc(&mut self, value:ScriptValue){
+    pub fn push_stack_unchecked(&mut self, value:ScriptValue){
         self.stack.push(value);
     }
     
@@ -253,11 +213,11 @@ impl ScriptThread{
     
     // lets resolve an id to a ScriptValue
     pub fn scope_value(&mut  self, heap:&ScriptHeap, id: LiveId)->ScriptValue{
-        heap.scope_value(*self.scopes.last().unwrap(), id.into(),&mut self.trap)
+        heap.scope_value(*self.scopes.last().unwrap(), id.into(),&self.trap)
     }
     
     pub fn set_scope_value(&mut self, heap:&mut ScriptHeap, id: LiveId, value:ScriptValue)->ScriptValue{
-        heap.set_scope_value(*self.scopes.last().unwrap(), id.into(),value,&mut self.trap)
+        heap.set_scope_value(*self.scopes.last().unwrap(), id.into(),value,&self.trap)
     }
     
     pub fn def_scope_value(&mut self, heap:&mut ScriptHeap, id: LiveId, value:ScriptValue){
@@ -275,7 +235,7 @@ impl ScriptThread{
             return fnobj
         }
         
-        let err = heap.push_all_fn_args(scope, args, &mut self.trap);
+        let err = heap.push_all_fn_args(scope, args, &self.trap);
         if err.is_err(){
             return err
         }
@@ -375,7 +335,7 @@ impl ScriptThread{
         });
                 
         self.scopes.push(code.bodies[body_id as usize].scope);
-        self.mes.push(ScriptMe::object(code.bodies[body_id as usize].me));
+        self.mes.push(ScriptMe::Object(code.bodies[body_id as usize].me));
         
         self.trap.ip.body = body_id;
         self.trap.ip.index = 0;
