@@ -691,18 +691,6 @@ impl TextInput {
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
         self.selection = selection;
         self.history.force_new_edit_group();
-        let position = self.cursor_to_position(selection.cursor).unwrap();
-        let laidout_text = self.laidout_text.as_ref().unwrap();
-        let laidout_row = &laidout_text.rows[position.row_index];
-        let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
-        let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
-        let height = self.draw_bg.area.rect(cx).size.y - self.layout.padding.height();
-        if y_min < self.scroll_y {
-            self.set_scroll_y(cx, y_min);
-        }
-        if y_max > self.scroll_y + height {
-            self.set_scroll_y(cx, y_max - height);
-        }
         self.draw_bg.redraw(cx);
     }
 
