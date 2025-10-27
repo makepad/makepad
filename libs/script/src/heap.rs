@@ -6,7 +6,6 @@ use crate::string::*;
 use crate::trap::*;
 use crate::traits::*;
 use crate::array::*;
-use crate::vm::*;
 use std::collections::HashMap;
 
 #[derive(Copy,Clone)]
@@ -1094,8 +1093,8 @@ impl ScriptHeap{
         let index = object.map_len();
         
         if let Some(ptr) = object.proto.as_object(){
-            let object = &self.objects[ptr.index as usize];
-            if let Some(kv) = object.vec.get(index){
+            let proto_object = &self.objects[ptr.index as usize];
+            if let Some(kv) = proto_object.vec.get(index){
                 let key = kv.key;
                 if let Some(def) = object.vec.get(index){
                     if !def.value.is_nil() && def.value.value_type().to_redux() != value.value_type().to_redux(){
