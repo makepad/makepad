@@ -4,11 +4,11 @@ use {
     std::rc::Rc,
     self::super::opengl_x11::{
         OpenglWindow,
-        OpenglCx
     },
     self::super::super::{
         egl_sys,
         gl_sys::LibGl,
+        opengl_cx::OpenglCx,
         x11::xlib_event::*,
         x11::xlib_app::*,
         x11::x11_sys,
@@ -335,7 +335,7 @@ impl X11Cx {
                     },
                     CxOsOp::Quit=>{
                         ret = EventFlow::Exit
-                    }
+                    },
                     CxOsOp::MinimizeWindow(window_id) => {
                         if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
                             window.xlib_window.minimize();
@@ -371,48 +371,48 @@ impl X11Cx {
                                 xlib_app.copy_to_clipboard(&content, window.xlib_window.window.unwrap(), x11_sys::CurrentTime as u64)
                             }
                         }
+                    },
+                    CxOsOp::SetCursor(cursor) => {
+                        xlib_app.set_mouse_cursor(cursor);
+                    },
+                    CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                        xlib_app.start_timer(timer_id, interval, repeats);
+                    },
+                    CxOsOp::StopTimer(timer_id) => {
+                        xlib_app.stop_timer(timer_id);
+                    },
+                    CxOsOp::ShowTextIME(area, pos) => {
+                        let pos = area.clipped_rect(&cx).pos + pos;
+                        opengl_windows.iter_mut().for_each(|w| {
+                            w.xlib_window.set_ime_spot(pos);
+                        });
+                    },
+                    CxOsOp::HideTextIME => {
+                        opengl_windows.iter_mut().for_each(|w| {
+                            w.xlib_window.set_ime_spot(dvec2(0.0,0.0));
+                        });
+                    },
+                    CxOsOp::CheckPermission {permission, request_id} => {
+                        // Linux desktop apps have all permissions granted by default (handled at system level)
+                        // TODO: Handle sandbox cases like flatpak
+                        cx.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status: crate::permission::PermissionStatus::Granted,
+                        }));
+                    },
+                    CxOsOp::RequestPermission {permission, request_id} => {
+                        // Linux desktop apps have all permissions granted by default (handled at system level)
+                        // TODO: Handle sandbox cases like flatpak
+                        cx.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status: crate::permission::PermissionStatus::Granted,
+                        }));
+                    },
+                    e=>{
+                        crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                     }
-                }
-                CxOsOp::SetCursor(cursor) => {
-                    xlib_app.set_mouse_cursor(cursor);
-                },
-                CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                    xlib_app.start_timer(timer_id, interval, repeats);
-                },
-                CxOsOp::StopTimer(timer_id) => {
-                    xlib_app.stop_timer(timer_id);
-                },
-                CxOsOp::ShowTextIME(area, pos) => {
-                    let pos = area.clipped_rect(self).pos + pos;
-                    opengl_windows.iter_mut().for_each(|w| {
-                        w.xlib_window.set_ime_spot(pos);
-                    });
-                },
-                CxOsOp::HideTextIME => {
-                    opengl_windows.iter_mut().for_each(|w| {
-                        w.xlib_window.set_ime_spot(dvec2(0.0,0.0));
-                    });
-                },
-                CxOsOp::CheckPermission {permission, request_id} => {
-                    // Linux desktop apps have all permissions granted by default (handled at system level)
-                    // TODO: Handle sandbox cases like flatpak
-                    self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
-                        permission,
-                        request_id,
-                        status: crate::permission::PermissionStatus::Granted,
-                    }));
-                },
-                CxOsOp::RequestPermission {permission, request_id} => {
-                    // Linux desktop apps have all permissions granted by default (handled at system level)
-                    // TODO: Handle sandbox cases like flatpak
-                    self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
-                        permission,
-                        request_id,
-                        status: crate::permission::PermissionStatus::Granted,
-                    }));
-                },
-                e=>{
-                    crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
             }
             ret
