@@ -105,7 +105,7 @@ pub fn test(){
     }    
 
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         let t = mod.std;
         scope.import(mod.std)
         
@@ -113,7 +113,7 @@ pub fn test(){
         let x = 1+2 assert(x == 3)
         let iv = [1 2 3 4] let ov = []
         for v in iv ov.push(v) assert(iv == ov)
-        ov.pop() assert(iv != ov)
+        assert(ov.pop() == 4) assert(iv != ov)
         assert(ov[2] == 3);
         
         // functions
@@ -226,7 +226,7 @@ pub fn test(){
         try{s{vec:[1,2]}} assert(false) ok assert(true)
     };
     
-    let code = script!{
+    let _code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     };

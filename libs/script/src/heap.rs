@@ -1,34 +1,31 @@
 use crate::makepad_live_id::*;
 use crate::value::*;
-use std::fmt::Write;
 use crate::object::*;
 use crate::string::*;
 use crate::trap::*;
 use crate::traits::*;
 use crate::array::*;
-use std::collections::HashMap;
+use crate::gc::*;
 
-#[derive(Copy,Clone)]
-pub enum ScriptGcMark{
-    Object(usize),
-    Array(usize)
-}
+use std::fmt::Write;
+use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct ScriptHeap{
     pub modules: ScriptObject,
     pub(crate) mark_vec: Vec<ScriptGcMark>,
-    pub(crate) objects: Vec<ObjectData>,
-    pub(crate) roots: Vec<usize>,
-    pub(crate) objects_free: Vec<usize>,
+    pub(crate) roots: Vec<ScriptObject>,
     
-    pub(crate) string_intern: HashMap<String, u32>,
+    pub(crate) objects: Vec<ObjectData>,
+    pub(crate) objects_free: Vec<ScriptObject>,
+    
+    pub(crate) string_intern: HashMap<String, ScriptString>,
     pub(crate) string_intern_free: Vec<String>,
     pub(crate) strings: Vec<ScriptStringData>,
-    pub(crate) strings_free: Vec<usize>,
+    pub(crate) strings_free: Vec<ScriptString>,
     
     pub(crate) arrays: Vec<ScriptArrayData>,
-    pub(crate) arrays_free: Vec<usize>,
+    pub(crate) arrays_free: Vec<ScriptArray>,
     
     pub(crate) type_check: Vec<ScriptTypeCheck>,
     pub(crate) type_index: HashMap<ScriptTypeId, ScriptTypeIndex>,
@@ -38,17 +35,22 @@ impl ScriptHeap{
     
     pub fn empty()->Self{
         let mut v = Self{
-            roots: vec![0],
-            modules: ScriptObject{index:0},
+            roots: vec![],
+            modules: ScriptObject::ZERO,
             objects: vec![Default::default()],
+            arrays: vec![Default::default()],
             ..Default::default()
         };
         // object zero
         v.objects[0].tag.set_alloced();
         v.objects[0].tag.set_static();
         v.objects[0].tag.freeze();
+        v.arrays[0].tag.set_alloced();
+        v.arrays[0].tag.freeze();
         
         v.modules = v.new_with_proto(id!(mod).into()); 
+        v.roots.push(v.modules);
+        
         v
     }
     
@@ -58,11 +60,11 @@ impl ScriptHeap{
     
     
     pub fn new_object(&mut self)->ScriptObject{
-        if let Some(index) = self.objects_free.pop(){
-            let object = &mut self.objects[index];
+        if let Some(obj) = self.objects_free.pop(){
+            let object = &mut self.objects[obj.index as usize];
             object.tag.set_alloced();
             object.proto = id!(object).into();
-            ScriptObject{index: index as _}
+            obj
         }
         else{
             let index = self.objects.len();
@@ -90,7 +92,7 @@ impl ScriptHeap{
         let (proto_fwd, proto_index) = if let Some(ptr) = proto.as_object(){
             let object = &mut self.objects[ptr.index as usize];
             object.tag.set_reffed();
-            (object.tag.proto_fwd(), ptr.index as usize)
+            (object.tag.proto_fwd(), ptr.index)
         }
         else{
             let ptr = self.new_object();
@@ -98,13 +100,13 @@ impl ScriptHeap{
             return ptr
         };
                         
-        if let Some(index) = self.objects_free.pop(){
-            let (object, proto_object) = if index > proto_index{
-                let (o1, o2) = self.objects.split_at_mut(index);
-                (&mut o2[0], &mut o1[proto_index])                    
+        if let Some(obj) = self.objects_free.pop(){
+            let (object, proto_object) = if obj.index > proto_index{
+                let (o1, o2) = self.objects.split_at_mut(obj.index as usize);
+                (&mut o2[0], &mut o1[proto_index as usize])                    
             }else{
-                let (o1, o2) = self.objects.split_at_mut(proto_index);
-                (&mut o1[index], &mut o2[0])                    
+                let (o1, o2) = self.objects.split_at_mut(proto_index as usize);
+                (&mut o1[obj.index as usize], &mut o2[0])                    
             };
             object.tag.set_proto_fwd(proto_fwd);
             object.proto = proto;
@@ -112,13 +114,13 @@ impl ScriptHeap{
             if proto_object.tag.get_storage_type().is_auto(){
                 object.vec.extend_from_slice(&proto_object.vec);
             }
-            ScriptObject{index: index as _}
+            obj
         }
         else{
             let index = self.objects.len();
             let mut object = ObjectData::with_proto(proto);
             object.tag.set_proto_fwd(proto_fwd);
-            let proto_object = &self.objects[proto_index];
+            let proto_object = &self.objects[proto_index as usize];
             if proto_object.tag.get_storage_type().is_auto(){
                 object.vec.extend_from_slice(&proto_object.vec);
             }
@@ -194,24 +196,26 @@ impl ScriptHeap{
         if let Some(index) = self.string_intern.get(&out){
             out.clear();
             self.string_intern_free.push(out);
-            return ScriptString{index:*index}.into();
+            return (*index).into();
         }
         // fetch a free string
-        let index = if let Some(index) = self.strings_free.pop(){
-            self.strings[index].tag.set_alloced();
-            index
+        if let Some(str) = self.strings_free.pop(){
+            let string = &mut self.strings[str.index as usize];
+            string.string.push_str(&out);
+            string.tag.set_alloced();
+            self.string_intern.insert(out, str);
+            str
         }
         else{
             let index = self.strings.len();
             let mut string = ScriptStringData::default();
             string.tag.set_alloced();
+            string.string.push_str(&out);
             self.strings.push(string);
-            index
-        };
-        // append out
-        self.strings[index].string.push_str(&out);
-        self.string_intern.insert(out, index as u32);
-        ScriptString{index: index as _}.into()
+            let ret = ScriptString{index: index as _};
+            self.string_intern.insert(out, ret);
+            ret
+        }.into()
     }
     
     
@@ -223,10 +227,10 @@ impl ScriptHeap{
     }
     
     pub fn new_array(&mut self)->ScriptArray{
-        if let Some(index) = self.arrays_free.pop(){
-            let array = &mut self.arrays[index];
+        if let Some(arr) = self.arrays_free.pop(){
+            let array = &mut self.arrays[arr.index as usize];
             array.tag.set_alloced();
-            ScriptArray{index: index as _}
+            arr
         }
         else{
             let index = self.arrays.len();
@@ -849,7 +853,6 @@ impl ScriptHeap{
         trap.err_not_found()
     }
 
-        
     pub fn object_method(&self, ptr:ScriptObject, key:ScriptValue, trap:&ScriptTrap)->ScriptValue{
         return self.value_deep_map(ptr, key, trap)
     }
@@ -1114,7 +1117,6 @@ impl ScriptHeap{
         return NIL
     }
     
-        
     pub fn named_fn_arg(&mut self, top_ptr:ScriptObject, key:ScriptValue, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
         let object = &self.objects[top_ptr.index as usize];
             
