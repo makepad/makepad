@@ -26,14 +26,18 @@ impl ScriptHeap{
         let len = obj.vec.len();
         for i in 0..len{
             let object = &self.objects[index];
-            if object.tag.get_storage_type().is_gc(){
-                let field = &object.vec[i];
-                if let Some(ptr) = field.as_object(){
-                    self.mark_vec.push(ptr.index as usize);
-                }
-                else if let Some(ptr) = field.as_string(){
-                    self.strings[ptr.index as usize].tag.set_mark();
-                }
+            let kv = &object.vec[i];
+            if let Some(ptr) = kv.key.as_object(){
+                self.mark_vec.push(ptr.index as usize);
+            }
+            else if let Some(ptr) = kv.key.as_string(){
+                self.strings[ptr.index as usize].tag.set_mark();
+            }
+            if let Some(ptr) = kv.value.as_object(){
+                self.mark_vec.push(ptr.index as usize);
+            }
+            else if let Some(ptr) = kv.value.as_string(){
+                self.strings[ptr.index as usize].tag.set_mark();
             }
         }
     }

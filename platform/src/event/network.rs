@@ -73,7 +73,7 @@ pub struct HttpRequest {
     pub headers: BTreeMap<String, Vec<String>>,
     pub ignore_ssl_cert: bool,
     pub is_streaming: bool,
-   pub body: Option<Vec<u8>>, 
+    pub body: Option<Vec<u8>>, 
 }
 /*
 #[derive(PartialEq, Debug, Script, ScriptHook)]
