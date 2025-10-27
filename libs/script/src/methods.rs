@@ -85,7 +85,7 @@ impl ScriptTypeMethods{
         
         self.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(pop), |vm, args|{
             if let Some(this) = script_value!(vm, args.this).as_object(){
-                return vm.heap.vec_pop(this, &mut vm.thread.trap)
+                return vm.heap.vec_pop(this, &mut vm.thread.trap).value
             }
             vm.thread.trap.err_unexpected()
         });

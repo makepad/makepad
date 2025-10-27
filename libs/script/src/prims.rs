@@ -147,8 +147,8 @@ impl<T> ScriptNew for  Vec<T> where T: ScriptApply + ScriptNew + 'static{
     fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
         if let Some(obj) = value.as_object(){
             for i in 0..heap.vec_len(obj){
-                if let Some(v) = heap.vec_value_if_exist(obj, i){
-                    if !T::script_type_check(heap, v){
+                if let Some(value) = heap.vec_value_if_exist(obj, i){
+                    if !T::script_type_check(heap, value){
                         return false
                     }
                 }
@@ -174,8 +174,8 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static{
             let len = vm.heap.vec_len(obj);
             self.resize_with(len, || ScriptNew::script_new(vm));
             for i in 0..len{
-                if let Some(v) = vm.heap.vec_value_if_exist(obj, i){
-                    self[i].script_apply(vm, apply, v);
+                if let Some(value) = vm.heap.vec_value_if_exist(obj, i){
+                    self[i].script_apply(vm, apply, value);
                 }
             }
         }
