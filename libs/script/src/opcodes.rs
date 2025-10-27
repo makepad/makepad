@@ -1042,9 +1042,9 @@ impl ScriptThread{
                 }
             }
             else{
-                let (key,value) = heap.vec_key_value(obj, 0,&mut self.trap);
+                let kv = heap.vec_key_value(obj, 0,&mut self.trap);
                 if heap.vec_len(obj)>0{
-                    self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, value, 0.0, key);
+                    self.begin_for_loop_inner(heap, jump, source, value_id, index_id, key_id, kv.value, 0.0, kv.key);
                     return
                 }
             }
@@ -1096,19 +1096,19 @@ impl ScriptThread{
                         self.break_for_loop(heap);
                         return
                     }
-                    let (key,value) = heap.vec_key_value(obj, values.index as usize,&mut self.trap);
+                    let kv = heap.vec_key_value(obj, values.index as usize,&mut self.trap);
                     
                     while self.scopes.len() > lf.bases.scope{
                         heap.free_object_if_unreffed(self.scopes.pop().unwrap());
                     }
                     let scope = heap.new_with_proto((*self.scopes.last().unwrap()).into());
                     self.scopes.push(scope);
-                    heap.set_value_def(scope, values.value_id.into(), value.into());
+                    heap.set_value_def(scope, values.value_id.into(), kv.value.into());
                     if let Some(index_id) = values.index_id{
                         heap.set_value_def(scope, index_id.into(), values.index.into());
                     }
                     if let Some(key_id) = values.key_id{
-                        heap.set_value_def(scope, key_id.into(), key);
+                        heap.set_value_def(scope, key_id.into(), kv.key);
                     }
                     
                     self.trap.goto(lf.start_ip);
