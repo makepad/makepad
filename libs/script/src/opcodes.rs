@@ -664,10 +664,10 @@ impl ScriptThread{
                 
                 match self.mes.last().unwrap(){
                     ScriptMe::Call(_) | ScriptMe::Array(_)=>{
-                        self.trap.err_unexpected()
+                        self.trap.err_unexpected();
                     }
                     ScriptMe::Object(obj)=>{
-                        heap.vec_insert_value_begin(*obj, id.into(), value, &self.trap)
+                        heap.set_value(*obj, id.into(), value, &mut self.trap);
                     }
                 };
                 self.trap.goto_next();                
@@ -683,10 +683,10 @@ impl ScriptThread{
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 match self.mes.last().unwrap(){
                     ScriptMe::Call(_) | ScriptMe::Array(_)=>{
-                        self.trap.err_unexpected()
+                        self.trap.err_unexpected();
                     }
                     ScriptMe::Object(obj)=>{
-                        heap.vec_insert_value_begin(*obj, id.into(), value, &self.trap)
+                        heap.set_value(*obj, id.into(), value, &mut self.trap);
                     }
                 };
                 self.trap.goto_next();

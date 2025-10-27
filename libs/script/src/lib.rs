@@ -103,10 +103,9 @@ pub fn test(){
             });
         }
     }    
-    
-    
+
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         let t = mod.std;
         scope.import(mod.std)
         
@@ -116,6 +115,10 @@ pub fn test(){
         for v in iv ov.push(v) assert(iv == ov)
         ov.pop() assert(iv != ov)
         assert(ov[2] == 3);
+        
+        // functions
+        let f = |x| x+1
+        assert( f(1) == 2)
         
         // shallow and deep compare
         let oa = {y:1 z:2}
@@ -223,7 +226,7 @@ pub fn test(){
         try{s{vec:[1,2]}} assert(false) ok assert(true)
     };
     
-    let _code = script!{
+    let code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     };
