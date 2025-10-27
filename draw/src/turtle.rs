@@ -1799,10 +1799,6 @@ impl<'a,'b> Cx2d<'a,'b> {
         rect
     }
     
-    pub fn walk_turtle_with_align(&mut self, walk: Walk, align_start: usize) -> Rect {
-        self.walk_turtle_internal(walk, align_start)
-    }
-    
     pub fn peek_walk_turtle(&self, walk: Walk) -> Rect {
         self.walk_turtle_peek(walk)
     }
