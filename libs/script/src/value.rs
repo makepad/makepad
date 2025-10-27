@@ -35,6 +35,12 @@ impl ScriptIp{
 pub struct ScriptObject{
     pub(crate) index: u32    
 }
+
+
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct ScriptArray{
+    pub(crate) index: u32    
+}
 impl ScriptObject{
     pub const ZERO:ScriptObject = ScriptObject{index:0};
 }
@@ -432,9 +438,9 @@ impl ScriptValue{
         Self((val as u64)|Self::TYPE_ARRAY)
     }
         
-    pub const fn as_array(&self)->Option<u32>{
+    pub const fn as_array(&self)->Option<ScriptArray>{
         if self.is_array(){
-            Some((self.0 &0xFFFF_FFFF) as u32)
+            Some(ScriptArray{index:(self.0 &0xFFFF_FFFF) as u32})
         }
         else{
             None
@@ -718,8 +724,8 @@ impl fmt::Display for ScriptValue {
         if let Some(ptr) = self.as_object(){
             return write!(f, "[ScriptObject:{}]",ptr.index)
         }
-        if let Some(index) = self.as_array(){
-            return write!(f, "[ScriptArray:{}]",index)
+        if let Some(ptr) = self.as_array(){
+            return write!(f, "[ScriptArray:{}]",ptr.index)
         }
         if let Some(error) = self.as_err(){
             return write!(f, "{}", error.ty)

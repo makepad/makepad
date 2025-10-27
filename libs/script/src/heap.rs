@@ -169,6 +169,10 @@ impl ScriptHeap{
         md
     }
     
+    
+    // Strings
+    
+    
     pub fn new_string_from_str(&mut self,value:&str)->ScriptValue{
         self.new_string_with(|_,out|{
             out.push_str(value);
@@ -208,7 +212,21 @@ impl ScriptHeap{
         self.string_intern.insert(out, index as u32);
         ScriptString{index: index as _}.into()
     }
-            
+    
+    
+    // Arrays
+    
+    
+    pub fn new_array(){
+        
+    }
+    
+    
+    
+    
+    
+    
+    
     
     
     // Accessors
@@ -250,7 +268,7 @@ impl ScriptHeap{
     //pub fn object(&self, ptr:ScriptObject)->&ScriptObject{
     //    &self.objects[ptr.index as usize]
     //}
-            
+    
     pub fn string(&self, ptr: ScriptString)->&str{
         &self.strings[ptr.index as usize].string
     }
