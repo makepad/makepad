@@ -307,7 +307,7 @@ impl Widget for LogList {
     }
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope){
-        let log_list = self.view.portal_list(id!(list));
+        let log_list = self.view.portal_list(ids!(list));
         self.view.handle_event(cx, event, scope);
         let data = scope.data.get::<AppData>().unwrap();
         if let Event::Actions(actions) = event{
@@ -338,7 +338,7 @@ impl Widget for LogList {
 impl LogListRef{
     pub fn reset_scroll(&self, cx:&mut Cx){
         if let Some(inner) = self.borrow_mut() {
-            let log_list = inner.view.portal_list(id!(list));
+            let log_list = inner.view.portal_list(ids!(list));
             log_list.set_first_id_and_scroll(0,0.0);
             log_list.redraw(cx);
         }

@@ -3,6 +3,41 @@ extern crate proc_macro;
 use proc_macro::{TokenTree, Span, TokenStream, Delimiter, Group, Literal, Ident, Punct, Spacing};
 use proc_macro::token_stream::IntoIter;
 
+#[derive(Clone, Default, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
+pub struct LiveId(pub u64);
+
+impl LiveId {
+    pub const SEED:u64 = 0xd6e8_feb8_6659_fd93;
+    pub const ARRAY:u64 = 0x0000_2000_0000_0000;
+    // from https://nullprogram.com/blog/2018/07/31/
+    // i have no idea what im doing with start value and finalisation.
+    pub const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize, or:u64) -> Self {
+        let mut x = seed;
+        let mut i = start;
+        while i < end {
+            x = x.overflowing_add(id_bytes[i] as u64).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            i += 1;
+        }
+        // truncate to 45 bits fitting in a NaN box
+        Self ((x & 0x0000_1fff_ffff_ffff) | or)
+    }
+                    
+    pub const fn from_str(id_str: &str) -> Self {
+        let bytes = id_str.as_bytes();
+        if bytes.len() > 0 && bytes[0] == b'$'{
+            Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), Self::ARRAY)
+        }
+        else{
+            Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), 0)
+        }
+    }
+}
+
 // little macro utility lib
 
 pub fn error_span(err: &str, span: Span) -> TokenStream {

@@ -315,62 +315,62 @@ impl AiChatView{
             let chat_id = *chat_id;
             if let Some(OpenDocument::AiChat(doc)) = data.file_system.open_documents.get_mut(&chat_id){
                                 
-                if let Some(value) = self.check_box(id!(auto_run)).changed(actions){
+                if let Some(value) = self.check_box(ids!(auto_run)).changed(actions){
                     doc.auto_run = value;
                 }
                 
                 // items with actions
-                let chat_list = self.view.portal_list(id!(list));
+                let chat_list = self.view.portal_list(ids!(list));
                 for (item_id, _item) in chat_list.items_with_actions(&actions) {
                     //let item_id = items_len - item_id - 1;
-                    if let Some(wa) = actions.widget_action(id!(copy_button)){
+                    if let Some(wa) = actions.widget_action(ids!(copy_button)){
                         if wa.widget().as_button().pressed(actions){
-                            //let code_view = wa.widget_nth(2).widget(id!(code_view));
+                            //let code_view = wa.widget_nth(2).widget(ids!(code_view));
                         }
                     }
-                    if let Some(wa) = actions.widget_action(id!(run_button)){
+                    if let Some(wa) = actions.widget_action(ids!(run_button)){
                         if wa.widget().as_button().pressed(actions){
                             cx.action(AppAction::RunAiChat{chat_id, history_slot:self.history_slot, item_id});
                         }
                     }
                 }
                     
-                if self.button(id!(history_left)).pressed(actions){
+                if self.button(ids!(history_left)).pressed(actions){
                     // first we check if our messages are the same as 'slot'.
                     // if not, we should create an undo item first
                     self.history_slot = self.history_slot.saturating_sub(1);
                     cx.action(AppAction::RedrawAiChat{chat_id});
                 }
-                if self.button(id!(history_right)).pressed(actions){
+                if self.button(ids!(history_right)).pressed(actions){
                     self.history_slot = (self.history_slot + 1).min(doc.file.history.len().saturating_sub(1));
                     cx.action(AppAction::RedrawAiChat{chat_id});
                 }
-                if self.button(id!(history_delete)).pressed(actions){
+                if self.button(ids!(history_delete)).pressed(actions){
                     doc.file.remove_slot(cx, &mut self.history_slot);
                     cx.action(AppAction::RedrawAiChat{chat_id});
                     cx.action(AppAction::SaveAiChat{chat_id});
                 }
                 
                                 
-                if let Some(ctx_id) = self.drop_down(id!(context_dropdown)).selected(actions){
+                if let Some(ctx_id) = self.drop_down(ids!(context_dropdown)).selected(actions){
                     let ctx_name = &data.ai_chat_manager.contexts[ctx_id].name;
                     doc.file.set_base_context(self.history_slot, ctx_name);
                 }
                                     
-                if let Some(model_id) = self.drop_down(id!(model_dropdown)).selected(actions){
+                if let Some(model_id) = self.drop_down(ids!(model_dropdown)).selected(actions){
                     let model = &data.ai_chat_manager.models[model_id].name;
                     doc.file.set_model(self.history_slot, model);
                 }
                                     
-                if let Some(project_id) = self.drop_down(id!(project_dropdown)).selected(actions){
+                if let Some(project_id) = self.drop_down(ids!(project_dropdown)).selected(actions){
                     let model = &data.ai_chat_manager.projects[project_id].name;
                     doc.file.set_project(self.history_slot, model);
                 }
                                 
-                let list = self.view.portal_list(id!(list));
+                let list = self.view.portal_list(ids!(list));
                 for (item_id,item) in list.items_with_actions(actions){
                     //let item_id = items_len - item_id - 1;
-                    let message_input = item.text_input(id!(message_input));
+                    let message_input = item.text_input(ids!(message_input));
                     if let Some(text) = message_input.changed(actions){
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, text);
                         cx.action(AppAction::RedrawAiChat{chat_id});
@@ -381,7 +381,7 @@ impl AiChatView{
                     }
                     
                     
-                    if let Some(ke) = item.text_input(id!(message_input)).key_down_unhandled(actions){
+                    if let Some(ke) = item.text_input(ids!(message_input)).key_down_unhandled(actions){
                         if ke.key_code == KeyCode::ReturnKey && ke.modifiers.logo{
                             // run it
                             cx.action(AppAction::RunAiChat{chat_id, history_slot: self.history_slot, item_id});
@@ -402,12 +402,12 @@ impl AiChatView{
                         }
                     }
                     
-                    if item.button(id!(run_button)).pressed(actions){
+                    if item.button(ids!(run_button)).pressed(actions){
                         cx.action(AppAction::RunAiChat{chat_id, history_slot: self.history_slot, item_id});
                     }
                     
-                    if item.button(id!(send_button)).pressed(actions) || 
-                    item.text_input(id!(message_input)).returned(actions).is_some(){
+                    if item.button(ids!(send_button)).pressed(actions) || 
+                    item.text_input(ids!(message_input)).returned(actions).is_some(){
                         // we'd already be forked
                         let text = message_input.text();
                         
@@ -424,7 +424,7 @@ impl AiChatView{
                         cx.action(AppAction::RedrawAiChat{chat_id});
                     }
                     // lets clear the messages
-                    if item.button(id!(clear_button)).pressed(actions){
+                    if item.button(ids!(clear_button)).pressed(actions){
                         doc.file.fork_chat_at(cx, &mut self.history_slot, item_id, "".to_string());
                         cx.action(AppAction::SaveAiChat{chat_id});
                         cx.action(AppAction::RedrawAiChat{chat_id});
@@ -450,14 +450,14 @@ impl Widget for AiChatView {
                     .map(|(index, _)| index).unwrap_or(0);
                 }
                 
-                self.check_box(id!(auto_run)).set_active(cx, doc.auto_run);
+                self.check_box(ids!(auto_run)).set_active(cx, doc.auto_run);
                 
                 let history_len = doc.file.history.len(); 
-                self.label(id!(slot)).set_text_with(|v| fmt_over!(v, "{}/{}", self.history_slot+1, history_len));
+                self.label(ids!(slot)).set_text_with(|v| fmt_over!(v, "{}/{}", self.history_slot+1, history_len));
                                 
                 let messages = &doc.file.history[self.history_slot];
                 // model dropdown
-                let dd = self.drop_down(id!(model_dropdown));
+                let dd = self.drop_down(ids!(model_dropdown));
                 // ok how do we set these dropdown labels without causing memory changes
                 let mut i = data.ai_chat_manager.models.iter();
                 dd.set_labels_with(cx, |label|{i.next().map(|m| label.push_str(&m.name));});
@@ -465,7 +465,7 @@ impl Widget for AiChatView {
                     dd.set_selected_item(cx, pos);
                 }
                                                                             
-                let dd = self.drop_down(id!(context_dropdown));
+                let dd = self.drop_down(ids!(context_dropdown));
                 let mut i = data.ai_chat_manager.contexts.iter();
                 dd.set_labels_with(cx, |label|{i.next().map(|m| label.push_str(&m.name));});
                                                                             
@@ -473,7 +473,7 @@ impl Widget for AiChatView {
                     dd.set_selected_item(cx, pos);
                 }
                                                                             
-                let dd = self.drop_down(id!(project_dropdown));
+                let dd = self.drop_down(ids!(project_dropdown));
                 let mut i = data.ai_chat_manager.projects.iter();
                 dd.set_labels_with(cx, |label|{i.next().map(|m| label.push_str(&m.name));});
                                                                                                                 
@@ -495,15 +495,15 @@ impl Widget for AiChatView {
                                     doc.in_flight.is_some();
                                     let item = list.item(cx, item_id, live_id!(Assistant));
                                     // alright we got the assistant. lets set the markdown stuff
-                                    item.widget(id!(md)).set_text(cx, &val);
-                                    item.view(id!(busy)).set_visible(cx, busy);
+                                    item.widget(ids!(md)).set_text(cx, &val);
+                                    item.view(ids!(busy)).set_visible(cx, busy);
                                     item.draw_all_unscoped(cx);
                                 }
                                 Some(AiChatMessage::User(val))=>{
                                     // lets set the value to the text input
                                     let item = list.item(cx, item_id, live_id!(User));
                                     
-                                    item.widget(id!(message_input)).set_text(cx, &val.message);
+                                    item.widget(ids!(message_input)).set_text(cx, &val.message);
                                     item.draw_all_unscoped(cx);
                                 }
                                 _=>()

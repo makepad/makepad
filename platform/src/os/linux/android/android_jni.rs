@@ -92,6 +92,11 @@ pub enum FromJavaMessage {
         name: String,
         midi_device: jni_sys::jobject
     },
+    PermissionResult{
+        permission: String,
+        request_id: i32,
+        status: i32, // 0=NotDetermined, 1=Granted, 2=DeniedCanRetry, 3=DeniedPermanent
+    },
     VideoPlaybackPrepared {
         video_id: u64,
         video_width: u32,
@@ -437,6 +442,12 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
         let rotation_angle = unsafe {ndk_utils::call_float_method!(env, event, "getOrientation", "(I)F", touch_index)} as f64;
         let force = unsafe {ndk_utils::call_float_method!(env, event, "getPressure", "(I)F", touch_index)} as f64;
 
+        // Get actual touch size from Android (returns diameter in pixels)
+        let touch_major = unsafe {ndk_utils::call_float_method!(env, event, "getTouchMajor", "(I)F", touch_index)} as f64;
+        let touch_minor = unsafe {ndk_utils::call_float_method!(env, event, "getTouchMinor", "(I)F", touch_index)} as f64;
+        // Convert diameter to radius
+        let radius = dvec2(touch_major / 2.0, touch_minor / 2.0);
+
         touches.push(TouchPoint {
             state: {
                 if action_index == touch_index {
@@ -454,7 +465,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
             uid: id as u64,
             rotation_angle,
             force,
-            radius: dvec2(1.0, 1.0),
+            radius,
             handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
             abs: dvec2(x as f64, y as f64),
@@ -686,6 +697,31 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onMidiDeviceOpen
         name: jstring_to_string(env, name),
         midi_device
     });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onPermissionResult(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    permission: jni_sys::jstring,
+    request_id: jni_sys::jint,
+    status: jni_sys::jint,
+) {
+    send_from_java_message(FromJavaMessage::PermissionResult {
+        permission: jstring_to_string(env, permission),
+        request_id: request_id as i32,
+        status,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onPermissionDenied(
+    env: *mut jni_sys::JNIEnv,
+    class: jni_sys::jclass,
+    permission: jni_sys::jstring,
+    request_id: jni_sys::jint,
+) {
+    Java_dev_makepad_android_MakepadNative_onPermissionResult(env, class, permission, request_id, 3); // 3 = DeniedPermanent (assume worst case)
 }
 
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
@@ -996,4 +1032,38 @@ pub unsafe fn to_java_cleanup_video_playback_resources(env: *mut jni_sys::JNIEnv
 
 pub unsafe fn to_java_cleanup_video_decoder_ref(env: *mut jni_sys::JNIEnv, video_decoder_ref: jni_sys::jobject) {
     (**env).DeleteGlobalRef.unwrap()(env, video_decoder_ref);
+}
+
+pub unsafe fn to_java_check_permission(permission: &str) -> i32 {
+    let env = attach_jni_env();
+    let permission_str = CString::new(permission).unwrap();
+    let permission_jstr = ((**env).NewStringUTF.unwrap())(env, permission_str.as_ptr());
+    
+    let result = ndk_utils::call_int_method!(
+        env,
+        get_activity(),
+        "checkPermission",
+        "(Ljava/lang/String;)I",
+        permission_jstr
+    );
+    
+    (**env).DeleteLocalRef.unwrap()(env, permission_jstr);
+    result
+}
+
+pub unsafe fn to_java_request_permission(permission: &str, request_id: i32) {
+    let env = attach_jni_env();
+    let permission_str = CString::new(permission).unwrap();
+    let permission_jstr = ((**env).NewStringUTF.unwrap())(env, permission_str.as_ptr());
+    
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "requestPermission",
+        "(Ljava/lang/String;I)V",
+        permission_jstr,
+        request_id as jni_sys::jint
+    );
+    
+    (**env).DeleteLocalRef.unwrap()(env, permission_jstr);
 }

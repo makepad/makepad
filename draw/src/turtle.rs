@@ -1338,6 +1338,8 @@ impl<'a,'b> Cx2d<'a,'b> {
     /// 
     /// The current turtle should be finished with the same guard area that was used to start it.
     pub fn end_turtle_with_guard(&mut self, guard: Area) -> Rect {
+        self.compute_final_size();
+
         let mut turtle = self.turtles.last_mut().unwrap();
         if guard != turtle.guard {
             panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", turtle.guard, guard)
@@ -1345,30 +1347,6 @@ impl<'a,'b> Cx2d<'a,'b> {
         
         let turtle_align_start = turtle.align_start;
         let turtle_walks_start = turtle.finished_walks_start;
-                
-        // If the current turtle's width is not yet known, we can now compute it based on the used width.
-        if turtle.width.is_nan() {
-            turtle.width = turtle.used_width() + turtle.padding().right;
-            if let Size::Fit { min, max } = turtle.walk.width {
-                if let Some(min) = min {
-                    let width = self.first_known_ancestor_width();
-                    turtle = self.turtles.last_mut().unwrap();
-                    if let Some(min) = min.eval(width) {
-                        turtle.width = turtle.width.max(min);
-                    }
-                }
-                if let Some(max) = max {
-                    let width = self.first_known_ancestor_width();
-                    turtle = self.turtles.last_mut().unwrap();
-                    if let Some(max) = max.eval(width) {
-                        turtle.width = turtle.width.min(max);
-                    }
-                }
-            }
-            if let AlignEntry::BeginTurtle(clip_min,clip_max) = &mut self.align_list[turtle.align_start] {
-                clip_max.x = clip_min.x + turtle.width();
-            }
-        };
         
         // If the current turtle's height is not yet known, we can now compute it based on the used height.
         if turtle.height.is_nan() {
@@ -1544,6 +1522,58 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
     }
 
+    pub fn compute_final_size(&mut self) {
+        let mut turtle = self.turtles.last_mut().unwrap();
+        
+        // If the current turtle's width is not yet known, we can now compute it based on the used width.
+        if turtle.width.is_nan() {
+            turtle.width = turtle.used_width() + turtle.padding().right;
+            if let Size::Fit { min, max } = turtle.walk.width {
+                if let Some(min) = min {
+                    let width = self.first_known_ancestor_width();
+                    turtle = self.turtles.last_mut().unwrap();
+                    if let Some(min) = min.eval(width) {
+                        turtle.width = turtle.width.max(min);
+                    }
+                }
+                if let Some(max) = max {
+                    let width = self.first_known_ancestor_width();
+                    turtle = self.turtles.last_mut().unwrap();
+                    if let Some(max) = max.eval(width) {
+                        turtle.width = turtle.width.min(max);
+                    }
+                }
+            }
+            if let AlignEntry::BeginTurtle(clip_min,clip_max) = &mut self.align_list[turtle.align_start] {
+                clip_max.x = clip_min.x + turtle.width();
+            }
+        };
+        
+        // If the current turtle's height is not yet known, we can now compute it based on the used height.
+        if turtle.height.is_nan() {
+            turtle.height = turtle.used_height() + turtle.padding().bottom;
+            if let Size::Fit { min, max } = turtle.walk.height {
+                if let Some(min) = min {
+                    let height = self.first_known_ancestor_height();
+                    turtle = self.turtles.last_mut().unwrap();
+                    if let Some(min) = min.eval(height) { 
+                        turtle.height = turtle.height.max(min);
+                    }
+                }
+                if let Some(max) = max {
+                    let height = self.first_known_ancestor_height();
+                    turtle = self.turtles.last_mut().unwrap();
+                    if let Some(max) = max.eval(height) {
+                        turtle.height = turtle.height.min(max);
+                    }
+                }
+            }
+            if let AlignEntry::BeginTurtle(clip_min, clip_max) = &mut self.align_list[turtle.align_start] {
+                clip_max.y = clip_min.y + turtle.height();
+            }
+        };
+    }
+
     // Returns the end of the align list of the finished walk with the given index.
     fn finished_walk_align_list_end(&self, index: usize) -> usize {
         if index + 1 < self.finished_walks.len() {
@@ -1596,18 +1626,13 @@ impl<'a,'b> Cx2d<'a,'b> {
             
             let outer_origin = match turtle.flow() {
                 Flow::RightWrap if outer_size.x > turtle.unused_inner_width_for_current_row() => {
-                    let outer_origin = dvec2(
-                        turtle.origin.x + turtle.layout.padding.left,
-                        turtle.origin.y + turtle.used_height + turtle.wrap_spacing
-                    );
-                    let shift = outer_origin - turtle.pos() - spacing;
-                    
-                    turtle.move_to(outer_origin);
+                    let wrap_spacing = turtle.wrap_spacing;
+                    self.turtle_new_line_internal(wrap_spacing, self.align_list.len());
+                    let turtle = self.turtles.last_mut().unwrap();
+
+                    let outer_origin = turtle.outer_origin();
                     turtle.allocate_size(outer_size);
                     turtle.move_right(outer_size.x);
-            
-                    self.move_align_list(align_list_start, self.align_list.len(), shift.x, shift.y, false);
-
                     outer_origin
                 },
                 Flow::Right | Flow::RightWrap => {
@@ -1769,10 +1794,6 @@ impl<'a,'b> Cx2d<'a,'b> {
         rect
     }
     
-    pub fn walk_turtle_with_align(&mut self, walk: Walk, align_start: usize) -> Rect {
-        self.walk_turtle_internal(walk, align_start)
-    }
-    
     pub fn peek_walk_turtle(&self, walk: Walk) -> Rect {
         self.walk_turtle_peek(walk)
     }
@@ -1823,21 +1844,24 @@ impl<'a,'b> Cx2d<'a,'b> {
     
     
     pub fn turtle_new_line(&mut self){
-        let turtle = self.turtles.last_mut().unwrap();
-        turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
-        let next_y = turtle.used_height + turtle.origin.y + turtle.wrap_spacing;
-        turtle.pos.y = turtle.pos.y.max(next_y);
-        turtle.used_height = turtle.pos.y - turtle.origin.y;
-        turtle.wrap_spacing = 0.0;
+        self.turtle_new_line_with_spacing(0.0);
     }
 
-    pub fn turtle_new_line_with_spacing(&mut self, spacing: f64){
+    pub fn turtle_new_line_with_spacing(&mut self, spacing: f64) {
+        self.turtle_new_line_internal(spacing, self.align_list.len());
+    }
+
+    fn turtle_new_line_internal(&mut self, spacing: f64, align_list_start: usize) {
         let turtle = self.turtles.last_mut().unwrap();
-        turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
-        let next_y = turtle.used_height + turtle.origin.y + turtle.wrap_spacing + spacing;
-        turtle.pos.y = turtle.pos.y.max(next_y);
-        turtle.used_height = turtle.pos.y - turtle.origin.y;
-        turtle.wrap_spacing = 0.0;
+        let outer_origin = dvec2(
+            turtle.origin.x + turtle.layout.padding.left,
+            turtle.origin.y + turtle.used_height + spacing
+        );
+        let offset = turtle.offset_to_next_walk(self.finished_walks.len());
+        let shift = outer_origin - turtle.pos() - offset;
+        turtle.move_to(outer_origin);
+        turtle.allocate_height(0.0);
+        self.move_align_list(align_list_start, self.align_list.len(), shift.x, shift.y, false);
     }
     
     fn move_align_list(&mut self, start: usize, end: usize, dx: f64, dy: f64, shift_clip: bool) {
@@ -1970,8 +1994,8 @@ impl<'a,'b> Cx2d<'a,'b> {
 }
 
 pub struct TurtleAlignRange{
-    start: usize,
-    end: usize
+    pub start: usize,
+    pub end: usize
 }
 
 impl Turtle {

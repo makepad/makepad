@@ -968,13 +968,25 @@ impl Event {
                             if !options.capture_overload && !t.handled.get().is_empty() {
                                 continue;
                             }
-                            
+
                             if cx.fingers.find_area_capture(area).is_some(){
                                 continue;
                             }
                             
                             let rect = area.clipped_rect(&cx);
-                            if !hit_test(t.abs, &rect, &options.margin) {
+                            // Add touch radius to the margin to account for finger size
+                            let margin_with_radius = if t.radius.x > 0.0 || t.radius.y > 0.0 {
+                                let base_margin = options.margin.unwrap_or_default();
+                                Some(Margin {
+                                    left: base_margin.left + t.radius.x,
+                                    top: base_margin.top + t.radius.y,
+                                    right: base_margin.right + t.radius.x,
+                                    bottom: base_margin.bottom + t.radius.y,
+                                })
+                            } else {
+                                options.margin
+                            };
+                            if !hit_test(t.abs, &rect, &margin_with_radius) {
                                 continue;
                             }
                             
@@ -997,11 +1009,23 @@ impl Event {
                             let rect = area.clipped_rect(&cx);
                             if let Some(capture) = cx.fingers.find_area_capture(area) {
                                 // Check if finger is over the widget.
-                                // Handle two cases:
+                                // Handle three cases:
                                 // 1. Normal: finger is within the widget's current rect
-                                // 2. Layout shift (keyboard dismissal): finger didn't move much from start,
+                                // 2. With touch radius: account for touch radius as margin
+                                // 3. Layout shift (keyboard dismissal): finger didn't move much from start,
                                 //    so treat as "over" even if widget moved underneath
-                                let is_over = rect.contains(t.abs) || (
+                                let is_over = if t.radius.x > 0.0 || t.radius.y > 0.0 {
+                                    let margin = Margin {
+                                        left: t.radius.x,
+                                        top: t.radius.y,
+                                        right: t.radius.x,
+                                        bottom: t.radius.y,
+                                    };
+                                    Margin::rect_contains_with_margin(t.abs, &rect, &Some(margin))
+                                } else {
+                                    rect.contains(t.abs)
+                                } || (
+                                    // Layout shift fallback: treat as "over" if finger didn't move significantly
                                     (e.time - capture.time < TAP_COUNT_TIME) &&
                                     ((t.abs - capture.abs_start).length() < TAP_COUNT_DISTANCE)
                                 );

@@ -34,11 +34,39 @@ impl LiveIdInterner {
             };
             // pre-seed list for debugging purposes
             let fill = [
+                "native",
+                "vec2",
+                "assert",
+                "Range",
+                "start",
+                "end",
+                "sin",
+                "ty",
+                "step",
+                "import",
+                "retain",
+                "extend",
+                "push",
+                "pop",
+                "number",
+                "nan",
+                "bool",
+                "nil",
+                "color",
+                "string",
+                "object",
+                "factory",
+                "opcode",
+                "mod",
+                "global",
+                "scope",
+                "fn",
+                "id",
                 "default",
-                "exp",
-                "void",
                 "true",
                 "false",
+                "exp",
+                "void",
                 "use",
                 "#",
                 "$",
@@ -108,9 +136,10 @@ impl LiveIdInterner {
 #[derive(Clone, Default, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
 pub struct LiveId(pub u64);
 
-pub const LIVE_ID_SEED:u64 = 0xd6e8_feb8_6659_fd93;
-
 impl LiveId {
+    pub const SEED:u64 = 0xd6e8_feb8_6659_fd93;
+    pub const PREFIXED:u64 = 0x0000_2000_0000_0000;
+    
     pub fn empty() -> Self {
         Self (0)
     }
@@ -125,16 +154,16 @@ impl LiveId {
     }
     
     pub fn seeded()->Self{
-        Self(LIVE_ID_SEED)
+        Self(Self::SEED)
     }
-    
+    /*
     pub fn is_unique(&self) -> bool {
         (self.0 & 0x8000_0000_0000_0000) == 0 && self.0 != 0
     }
     
     pub fn is_ident(&self) -> bool {
         (self.0 & 0x8000_0000_0000_0000) != 0
-    }
+    }*/
     
     pub fn is_empty(&self) -> bool {
         self.0 == 0
@@ -146,7 +175,7 @@ impl LiveId {
     
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
-    pub const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize) -> Self {
+    pub const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize, or:u64) -> Self {
         let mut x = seed;
         let mut i = start;
         while i < end {
@@ -158,8 +187,7 @@ impl LiveId {
             x ^= x >> 32;
             i += 1;
         }
-        // mark high bit as meaning that this is a hash id
-        Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
+        Self((x & 0x0000_1fff_ffff_ffff)|or)
     }
     
     pub fn add(&self, what:u64)->Self{
@@ -176,10 +204,19 @@ impl LiveId {
         
     pub const fn from_str(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
-        Self::from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len())
+        if bytes.len() > 0 && bytes[0] == b'$'{
+            Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), Self::PREFIXED)
+        }
+        else{
+            Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), 0)
+        }
     }
     
-    pub const fn from_bytes_lc(seed:u64, id_bytes: &[u8], start: usize, end: usize) -> Self {
+    pub fn is_prefixed(&self)->bool{
+        self.0 & Self::PREFIXED != 0
+    }
+    
+    pub const fn from_bytes_lc(seed:u64, id_bytes: &[u8], start: usize, end: usize, or:u64) -> Self {
         let mut x = seed;
         let mut i = start;
         while i < end {
@@ -199,36 +236,36 @@ impl LiveId {
             i += 1;
         }
         // mark high bit as meaning that this is a hash id
-        Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
+        Self((x & 0x0000_1fff_ffff_ffff)|or)
     }
         
     pub const fn from_str_lc(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
-        Self::from_bytes_lc(LIVE_ID_SEED, bytes, 0, bytes.len())
+        Self::from_bytes_lc(Self::SEED, bytes, 0, bytes.len(), 0)
     }
     
     pub const fn str_append(self, id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
-        Self::from_bytes(self.0, bytes, 0, bytes.len())
+        Self::from_bytes(self.0, bytes, 0, bytes.len(), 0)
     }
 
     pub const fn bytes_append(self, bytes: &[u8]) -> Self {
-        Self::from_bytes(self.0, bytes, 0, bytes.len())
+        Self::from_bytes(self.0, bytes, 0, bytes.len(), 0)
     }
     
     pub const fn id_append(self, id: LiveId) -> Self {
         let bytes = id.0.to_be_bytes();
-        Self::from_bytes(self.0, &bytes, 0, bytes.len())
+        Self::from_bytes(self.0, &bytes, 0, bytes.len(), 0)
     }
     
     pub const fn from_str_num(id_str: &str, num:u64) -> Self {
         let bytes = id_str.as_bytes();
-        let id = Self::from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len());
-        Self::from_bytes(id.0, &num.to_be_bytes(), 0, 8)
+        let id = Self::from_bytes(Self::SEED, bytes, 0, bytes.len(), 0);
+        Self::from_bytes(id.0, &num.to_be_bytes(), 0, 8,0)
     }
     
     pub const fn from_num(seed:u64, num:u64) -> Self {
-        Self::from_bytes(seed, &num.to_be_bytes(), 0, 8)
+        Self::from_bytes(seed, &num.to_be_bytes(), 0, 8,0)
     }
     
     pub fn from_str_with_lut(id_str: &str) -> Result<Self,
@@ -274,6 +311,10 @@ impl LiveId {
             }
         })
     }
+    
+    pub fn not_empty(&self)->bool{
+        self.0 != 0
+    }
 
     pub fn unique() -> Self {
         LiveId(UNIQUE_LIVE_ID.fetch_add(1, Ordering::SeqCst))
@@ -318,9 +359,9 @@ impl fmt::Display for LiveId {
         if *self == LiveId::empty() {
             write!(f, "0")
         }
-        else if self.is_unique(){
-            write!(f, "UniqueId {}", self.0)
-        }
+        //else if self.is_unique(){
+        //    write!(f, "UniqueId {}", self.0)
+        //}
         else{
             self.as_string( | string | {
                 if let Some(id) = string {

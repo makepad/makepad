@@ -1,5 +1,5 @@
-pub use makepad_id;
-pub use makepad_id::makepad_id_derive;
+pub use makepad_live_id;
+pub use makepad_live_id::makepad_live_id_macros;
 pub mod tokenizer; 
 pub mod object;
 pub mod colorhex;
@@ -17,14 +17,19 @@ pub mod value;
 pub mod opcodes;
 pub mod gc;
 pub mod value_map;
-pub mod script;
-pub use makepad_id_derive::*;
-pub use makepad_id::id::*;
+pub mod traits;
+pub mod prims;
+pub mod array;
+pub mod trap;
+
+pub use makepad_live_id::*;
 pub use value::*;
-pub use vm::ScriptVm;
+pub use vm::*;
 pub use makepad_script_derive::*;
-pub use vm::ScriptBlock;
-pub use script::*;
+pub use traits::*;
+pub use thread::*;
+pub use heap::*;
+
 // can we refcount object roots on the heap?
 // yea why not 
 // we can make a super convenient ObjectRef type you can use to hold onto script objects
@@ -42,7 +47,7 @@ pub trait ScriptLife{
         }
         
         if let Some(object) = cx.vm.call(self.rsid(), id!(on_draw), &[item.into()]).as_object(){
-            // we have an Object. can we read a value
+            // we have an ScriptObject. can we read a value
             object.get(id!(myfield))
             object.set(id!(my_field), 2.0.into())
         }
@@ -54,116 +59,66 @@ pub trait ScriptLife{
 pub enum EnumTest{
     Bare,
     Tuple(u32),
-    Fields{field:u32}
+    Named{named:u32}
 }
 
 
 pub fn test(){
-    let mut vm = ScriptVm::new();
+    let mut vmbase = ScriptVmBase::new();
+    
+    let mut vm = vmbase.as_ref();
     
     let net = vm.new_module(id!(test));
-    vm.add_fn(net, id!(fetch), args!(url=NIL, options=NIL), |vm, args|{
+    vm.add_fn(net, id!(fetch), script_args!(url=NIL, options=NIL), |vm, args|{
         // how do we construct our options
-        let _options = value!(vm, args.options); 
-        // let options = StructTest::new_apply(vm, options);
+        let _options = StructTest::script_from_value(vm, script_value!(vm, args.options));
         NIL
     });
     
-    //#[derive(Scriptable)]
-    pub enum _EnumTest{
-        Bare,
-        Tuple(u32),
-        Fields{field:u32}
-    }
-    
+    #[derive(Script)]
     pub struct StructTest{
-        field:f64
+       #[live(1.0)] field:f64,
+       #[live(EnumTest::Bare)] enm:EnumTest,
+       #[live] opt: Option<f64>,
+       #[live] vec: Vec<f64>
     }
     
-    //use crate::scriptable::*;
+    #[derive(Script, ScriptHook)]
+    pub enum EnumTest{
+        #[pick]
+        Bare,
+        #[live(1.0)] 
+        Tuple(f64),
+        #[live{named_field:1.0}] 
+        Named{named_field:f64}
+    }
+    
     use crate::vm::*;
     use crate::value::*;
     
-    impl ScriptNew for StructTest{
-        fn script_new(vm:&mut Vm)->Self{
-            StructTest{
-                field: ScriptNew::script_new(vm)
-            }
-        }
-        
-        fn script_def(vm:&mut Vm)->Value{
-            let obj = vm.heap.new(0);
-            let v = (1.0).to_value(vm);
-            vm.heap.set_value(obj, Id::from_str_with_lut("field").unwrap().into(), v, &vm.thread.trap);
-            // lets give this thing some methods
-            Self::on_script_def(vm, obj);
-            obj.into()
-        }
-    }
-    
     impl ScriptHook for StructTest{
-        fn on_script_def(vm:&mut Vm, obj:Object){
-            vm.add_fn(obj, id!(method), args!(o = 1.0), |vm, args|{
-                let fnptr = value!(vm, args.this.on_click);
-                vm.call(fnptr, &[]);
-                NIL
+        fn on_proto_methods(vm:&mut ScriptVm, obj:ScriptObject){
+            vm.add_fn(obj, id_lut!(return_two), script_args_lut!(o = 1.0), |_vm, _args|{
+                return 2.into()
             });
         }
     }    
-            
-    impl Script for StructTest{
-        fn script_apply(&mut self, vm:&mut Vm, apply:&mut ScriptApply, value:Value){
-            if value.is_nil() || self.on_skip_apply(vm, apply, value){return}
-            self.on_before_apply(vm, apply, value);
-            self.field.script_apply(vm, apply, vm.heap.value_for_apply(value, Value::from_id(id!(field))));
-            self.on_after_apply(vm, apply, value);
-        }
-    }
-    
-    let code = script!{
-        let RustTest = #(StructTest::script_def(vm_ref!(vm)));
-        let x = RustTest{
-            field:2.0
-            on_click: || ~@CLICK
-        }
-        // a
-        x.method();
-    };
 
-    let _code = script!{
-        let x = Button{
-            draw_bg:{
-                pixel: ||{
-                    let x = 1
-                    return t(x)
-                }
-            }
-        }
-        
-        let x = [@view,@bla]
-        for sym in x t[sym]
-        
-        let View = {@view}
-        let Window = {@window}
-        let Button = {@button}
-        let x = MyWindow{
-            $b1 : Checkbox{}
-        }
-        let x = if true 1 else 0
-        let x = x{};
-        for v in [1 2 3 4] ~v
-        ~x;
-    };
-    
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
+        let t = mod.std;
         scope.import(mod.std)
         
         // array operations
         let x = 1+2 assert(x == 3)
         let iv = [1 2 3 4] let ov = []
         for v in iv ov.push(v) assert(iv == ov)
-        ov.pop() assert(iv != ov)
+        assert(ov.pop() == 4) assert(iv != ov)
+        assert(ov[2] == 3);
+        
+        // functions
+        let f = |x| x+1
+        assert( f(1) == 2)
         
         // shallow and deep compare
         let oa = {y:1 z:2}
@@ -172,7 +127,7 @@ pub fn test(){
         ob.z = 2 assert(oa == ob)
         assert(oa !== ob)
         
-        // string comparison        
+        // string comparison
         assert("123" == "123")
         assert("123" != "223")
         assert("123456" == "123456")
@@ -200,6 +155,7 @@ pub fn test(){
         try {x{z:3}} assert(true) ok assert(false)
         // property value known
         let x2 = x{x:3} assert(x2.x == 3)
+        let x2 = x{x:2}
         // property frozen
         try x.x = 2 assert(true) ok assert(false)
                 
@@ -220,7 +176,7 @@ pub fn test(){
         try {x{p:true}} assert(true) ok assert(false)
         // can append to vec  
         try {x{1}} assert(false) ok assert(true)
-                                                        
+        
         // scope shadowing
         let x = 1
         let f = || x
@@ -232,19 +188,42 @@ pub fn test(){
         // try undefined
         try{undef = 1} assert(true) ok assert(false)
         let t = 0 try{t = 1} assert(false) ok assert(true)
-    };
-    
-    let _code = script!{
-        scope.import(mod.std)
-        mod.test.fetch();
-    };
-    
-    let _code = script!{
-        scope.import(mod.std)
-        let a = [1,2,3];
-        a.retain(|v| v!=2);
-        ~a;
-        a.retain(|v|{~v;v>=3}) assert(a==[3 4]);
+        
+        // struct tests
+        let s = #(StructTest::script_api(&mut vm));
+        try{s{field:5}} assert(false) ok assert(true)
+        try{s{field:true}} assert(true) ok assert(false)
+        assert(s.return_two() == 2)
+        
+        // check enum
+        let EnumTest = #(EnumTest::script_api(&mut vm));
+        let x = EnumTest.Bare
+        // test tuple typechecking
+        try{EnumTest.Tuple(1.0)} assert(false) ok assert(true)
+        try{EnumTest.Tuple(false)} assert(true) ok assert(false)
+        try{EnumTest.Tuple()} assert(true) ok assert(false)
+        try{EnumTest.Tuple(1,2)} assert(true) ok assert(false)
+        try{EnumTest.Named{named_field:1.0}} assert(false) ok assert(true)
+        try{EnumTest.Named{named_field:true}} assert(true) ok assert(false)
+        
+        assert(s.enm == EnumTest.Bare)
+        try{s{enm: EnumTest.Bare}} assert(false) ok assert(true)
+        try{s{enm: 1.0}} assert(true) ok assert(false)
+        try{s{enm: EnumTest.Named{named_field:1.0}}} assert(false) ok assert(true)
+        try{s{enm: EnumTest.Tuple(1.0)}} assert(false) ok assert(true)
+        ~EnumTest
+        
+        // check the option
+        try{s{opt:nil}} assert(false) ok assert(true)
+        try{s{opt:1.0}} assert(false) ok assert(true)
+        try{s{opt:false}} assert(true) ok assert(false)
+        
+        // check the vec
+        let x = s{vec:[1,2,3,4]}
+        assert(x.vec == [1,2,3,4])
+        // check typechecking in a vec
+        try{s{vec:[false]}} assert(true) ok assert(false)
+        try{s{vec:[1,2]}} assert(false) ok assert(true)
     };
     
     let _code = script!{
@@ -254,7 +233,7 @@ pub fn test(){
     
     let dt = std::time::Instant::now();
     
-    vm.eval(code, &mut 0);
+    vmbase.eval(code, &mut 0);
     println!("Duration {}", dt.elapsed().as_secs_f64())
     
 }

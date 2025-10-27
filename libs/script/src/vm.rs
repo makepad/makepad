@@ -1,4 +1,4 @@
-use crate::makepad_id::*;
+use crate::makepad_live_id::*;
 use crate::heap::*;
 use crate::value::*;
 use crate::parser::*;
@@ -18,7 +18,7 @@ pub struct ScriptBlock{
     pub line: usize,
     pub column: usize,
     pub code: String,
-    pub values: Vec<Value>,
+    pub values: Vec<ScriptValue>,
 }
 
 pub enum ScriptSource{
@@ -34,8 +34,8 @@ pub struct ScriptBody{
     pub source: ScriptSource,
     pub tokenizer: ScriptTokenizer,
     pub parser: ScriptParser,
-    pub scope: Object,
-    pub me: Object,
+    pub scope: ScriptObject,
+    pub me: ScriptObject,
 }
 
 pub struct ScriptCode{
@@ -96,38 +96,53 @@ impl ScriptCode{
 }
 
 
-pub struct Vm<'a>{
+pub struct ScriptVm<'a>{
     pub host: &'a mut dyn Any,
     pub thread: &'a mut ScriptThread,
     pub code: &'a ScriptCode,
     pub heap: &'a mut ScriptHeap
 }
 
-impl <'a> Vm<'a>{
-    pub fn call(&mut self,fnobj:Value, args:&[Value])->Value{
+impl <'a> ScriptVm<'a>{
+    pub fn call(&mut self,fnobj:ScriptValue, args:&[ScriptValue])->ScriptValue{
         self.thread.call(self.heap, self.code, self.host, fnobj, args)
     }
           
-    pub fn cast_to_f64(&self, v:Value)->f64{
+    pub fn cast_to_f64(&self, v:ScriptValue)->f64{
         self.heap.cast_to_f64(v, self.thread.trap.ip)
     }
-          
-    pub fn add_fn<F>(&mut self, module:Object, method:Id, args:&[(Id, Value)], f: F) 
-    where F: Fn(&mut Vm, Object)->Value + 'static{
+    
+        
+    pub fn new_module(&mut self, id:LiveId)->ScriptObject{
+        self.heap.new_module(id)
+    }
+    
+    pub fn add_fn<F>(&mut self, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         self.code.native.borrow_mut().add_fn(&mut self.heap, module, method, args, f)
     }
 }
 
-pub struct ScriptVm{
+pub struct ScriptVmBase{
+    pub void: usize,
     pub code: ScriptCode,
-    pub global: Object,
+    pub global: ScriptObject,
     pub heap: ScriptHeap,
     pub threads: Vec<ScriptThread>,
 }
 
-impl ScriptVm{
-    pub fn new_ref<'a>(&'a mut self, host:&'a mut dyn Any)->Vm<'a>{
-        Vm{
+impl ScriptVmBase{
+    pub fn as_ref<'a>(&'a mut self)->ScriptVm<'a>{
+        ScriptVm{
+            host: &mut self.void,
+            code: &self.code,
+            heap: &mut self.heap,
+            thread: &mut self.threads[0]
+        }
+    }
+    
+    pub fn as_ref_host<'a>(&'a mut self, host:&'a mut dyn Any)->ScriptVm<'a>{
+        ScriptVm{
             host,
             code: &self.code,
             heap: &mut self.heap,
@@ -146,6 +161,7 @@ impl ScriptVm{
         let builtins = ScriptBuiltins::new(&mut heap);
         
         Self{
+            void: 0,
             code:ScriptCode{
                 builtins,
                 type_methods,
@@ -158,14 +174,6 @@ impl ScriptVm{
         }
     }
         
-    pub fn new_module(&mut self, id:Id)->Object{
-        self.heap.new_module(id)
-    }
-    
-    pub fn add_fn<F>(&mut self, module:Object, method:Id, args:&[(Id, Value)], f: F) 
-    where F: Fn(&mut Vm, Object)->Value + 'static{
-        self.code.native.borrow_mut().add_fn(&mut self.heap, module, method, args, f)
-    }
         
     pub fn add_script_block(&mut self, new_block:ScriptBlock)->u16{
         let scope = self.heap.new_with_proto(id!(scope).into());
@@ -205,7 +213,7 @@ impl ScriptVm{
         
         if let ScriptSource::Block{block} = &body.source{
             body.tokenizer.tokenize(&block.code, &mut self.heap);
-            body.parser.parse(&body.tokenizer.tokens, &mut self.heap, &block.values);
+            body.parser.parse(&body.tokenizer.tokens, &block.values);
             // lets point our thread to it
             self.threads[0].run_root(&mut self.heap, &self.code, host, body_id)
         }

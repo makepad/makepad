@@ -206,7 +206,17 @@ impl IosApp {
     }
     
     pub fn draw_size_will_change() {
-        Self::check_window_geom();
+        // Avoid re-entrant calls by checking if we're already in a with_ios_app call
+        if IOS_APP.try_with(|app| {
+            if let Ok(app_ref) = app.try_borrow_mut() {
+                if app_ref.is_some() {
+                    Self::check_window_geom();
+                }
+                // Otherwise we skip the call, should be safe since draw_size_will_change is called again afterwards
+            }
+        }).is_err() {
+            // IOS_APP is not accessible on this thread, ignore the call (this shouldn't happen)
+        }
     }
     
     pub fn check_window_geom() {
@@ -262,9 +272,15 @@ impl IosApp {
     }
     
     pub fn update_touch(&mut self, uid: u64, abs: DVec2, state: TouchState) {
+        self.update_touch_with_details(uid, abs, state, dvec2(0.0, 0.0), 0.0);
+    }
+
+    pub fn update_touch_with_details(&mut self, uid: u64, abs: DVec2, state: TouchState, radius: DVec2, force: f64) {
         if let Some(touch) = self.touches.iter_mut().find( | v | v.uid == uid) {
             touch.state = state;
             touch.abs = abs;
+            touch.radius = radius;
+            touch.force = force;
         }
         else {
             self.touches.push(TouchPoint {
@@ -273,8 +289,8 @@ impl IosApp {
                 uid,
                 time: self.time_now(),
                 rotation_angle: 0.0,
-                force: 0.0,
-                radius: dvec2(0.0, 0.0),
+                force,
+                radius,
                 handled: Cell::new(Area::Empty),
                 sweep_lock: Cell::new(Area::Empty)
             })

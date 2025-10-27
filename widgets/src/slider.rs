@@ -1818,11 +1818,11 @@ impl WidgetDesign for Slider{
 
 impl Widget for Slider {
     fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
-        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
     }
                 
     fn disabled(&self, cx:&Cx) -> bool {
-        self.animator_in_state(cx, id!(disabled.on))
+        self.animator_in_state(cx, ids!(disabled.on))
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope) {
@@ -1840,10 +1840,10 @@ impl Widget for Slider {
         for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
             match action.as_widget_action().cast() {
                 TextInputAction::KeyFocus => {
-                    self.animator_play(cx, id!(focus.on));
+                    self.animator_play(cx, ids!(focus.on));
                 }
                 TextInputAction::KeyFocusLost => {
-                    self.animator_play(cx, id!(focus.off));
+                    self.animator_play(cx, ids!(focus.off));
                 }
                 TextInputAction::Returned(value, _modifiers) => {
                     if let Ok(v) = value.parse::<f64>() {
@@ -1873,11 +1873,11 @@ impl Widget for Slider {
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                if self.animator.animator_in_state(cx, id!(disabled.on)) { return (); }
-                self.animator_play(cx, id!(hover.on));
+                if self.animator.animator_in_state(cx, ids!(disabled.on)) { return (); }
+                self.animator_play(cx, ids!(hover.on));
             },
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             },
             Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Grab);
@@ -1888,7 +1888,7 @@ impl Widget for Slider {
                 device,
                 ..
             }) if device.is_primary_hit() => {
-                if self.animator.animator_in_state(cx, id!(disabled.on)) { return (); }
+                if self.animator.animator_in_state(cx, ids!(disabled.on)) { return (); }
                 // cx.set_key_focus(self.slider.area());
                 // self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
                 self.update_text_input(cx);
@@ -1898,30 +1898,30 @@ impl Widget for Slider {
                 self.text_input.select_all(cx);
                 self.text_input.redraw(cx);
                                 
-                self.animator_play(cx, id!(drag.on));
+                self.animator_play(cx, ids!(drag.on));
                 self.dragging = Some(self.relative_value);
                 cx.widget_action(uid, &scope.path, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
             },
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
-                if self.animator.animator_in_state(cx, id!(disabled.on)) { return (); }
+                if self.animator.animator_in_state(cx, ids!(disabled.on)) { return (); }
 
                 self.text_input.set_is_read_only(cx, false);
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.force_new_edit_group();
-                self.animator_play(cx, id!(drag.off));
+                self.animator_play(cx, ids!(drag.off));
                 if fe.is_over && fe.device.has_hovers() {
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 }
                 else {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
                 self.dragging = None;
                 cx.widget_action(uid, &scope.path, SliderAction::EndSlide(self.to_external()));
                 cx.set_cursor(MouseCursor::Grab);
             }
             Hit::FingerMove(fe) => {
-                if self.animator.animator_in_state(cx, id!(disabled.on)) { return (); }
+                if self.animator.animator_in_state(cx, ids!(disabled.on)) { return (); }
 
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {

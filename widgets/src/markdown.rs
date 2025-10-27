@@ -299,6 +299,14 @@ live_design!{
     
 } 
 
+/// The state of a list at a given nesting level.
+struct ListState {
+    // Current item number for ordered lists.
+    current_number: u64,         
+    // Start number for ordered lists, None for unordered.
+    start_number: Option<u64>,  
+}
+
 #[derive(Live, LiveHook, Widget)]
 pub struct Markdown{
     #[deref] text_flow: TextFlow,
@@ -341,7 +349,7 @@ impl Markdown {
     fn process_markdown_doc(&mut self, cx: &mut Cx2d) {
         let tf = &mut self.text_flow;
         // Track state for nested formatting
-        let mut list_stack = Vec::new();
+        let mut list_stack: Vec<ListState> = Vec::new();
         let mut is_first_block = true;
 
         let parser = Parser::new_ext(self.body.as_ref(), Options::ENABLE_TABLES);        
@@ -390,7 +398,10 @@ impl Markdown {
                     tf.end_quote(cx);
                 }
                 MdEvent::Start(Tag::List(first_number)) => {
-                    list_stack.push(first_number);
+                    list_stack.push(ListState {
+                        start_number: first_number,
+                        current_number: first_number.unwrap_or(1),
+                    });
                 }
                 MdEvent::End(TagEnd::List(_is_ordered)) => {
                     list_stack.pop();
@@ -400,12 +411,20 @@ impl Markdown {
                          cx.turtle_new_line();
                      }
                      is_first_block = false;
-                    let marker = if let Some(Some(n)) = list_stack.last() {
-                        format!("{}.", n)
+                    let marker = if let Some(state) = list_stack.last_mut() {
+                        if state.start_number.is_some() {
+                            // Ordered list - use and increment the counter
+                            let num = state.current_number;
+                            state.current_number += 1;
+                            format!("{}.", num)
+                        } else {
+                            // Unordered list - use bullet
+                            "•".to_string()
+                        }
                     } else {
                         "•".to_string()
                     };
-                    tf.begin_list_item(cx, &marker, 1.5);
+                    tf.begin_list_item(cx, &marker, 2.5);
                 }
                 MdEvent::End(TagEnd::Item) => {
                     tf.end_list_item(cx);
@@ -476,7 +495,7 @@ impl Markdown {
                         let cbs = &self.code_block_string;
                         
                         tf.item_with(cx, entry_id, live_id!(code_block), |cx, item, _tf|{
-                            item.widget(id!(code_view)).set_text(cx, cbs);
+                            item.widget(ids!(code_view)).set_text(cx, cbs);
                             item.draw_all_unscoped(cx);
                         });
                     }

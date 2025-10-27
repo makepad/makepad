@@ -14,6 +14,7 @@ use {
                     SelectionRect,
                 },
             },
+            event::finger::TouchState,
             *
         },
         widget::*,
@@ -599,6 +600,7 @@ pub struct TextInput {
     #[live] is_password: bool,
     #[live] is_read_only: bool,
     #[live] is_numeric_only: bool,
+    #[live] scroll_y: f64,
     #[live] empty_text: String,
     #[rust] text: String,
     #[live(0.5)] blink_speed: f64,
@@ -682,7 +684,6 @@ impl TextInput {
         }
     }
 
-
     pub fn selection(&self) -> Selection {
         self.selection
     }
@@ -716,7 +717,7 @@ impl TextInput {
     }
 
     pub fn reset_blink_timer(&mut self, cx: &mut Cx) {
-        self.animator_cut(cx, id!(blink.off));
+        self.animator_cut(cx, ids!(blink.off));
         if !self.is_read_only {
             cx.stop_timer(self.blink_timer);
             self.blink_timer = cx.start_timeout(self.blink_speed)
@@ -910,6 +911,44 @@ impl TextInput {
         self.draw_selection.end_many_instances(cx);
     }
 
+    fn scroll_to_cursor(&mut self, cx: &mut Cx2d) {
+        // Compute the final size of the turtle, and obtain its inner height.
+        cx.compute_final_size();
+        let height = cx.turtle().inner_rect().size.y;
+
+        // Compute the min and max y of the row that the cursor is on.
+        let laidout_text = self.laidout_text.as_ref().unwrap();
+        let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
+        let position = self.cursor_to_position(self.cursor()).unwrap();
+        let laidout_row = &laidout_text.rows[position.row_index];
+        let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
+        let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
+
+        // If the min y of the row is less than the scroll position, scroll up so that the top of
+        // the row appears at the top.
+        if y_min < self.scroll_y {
+            self.scroll_y = y_min;
+        }
+
+        // If the max y of the row is greater than the scroll position, scroll down so that the
+        // bottom of the row appears at the bottom.
+        if y_max > self.scroll_y + height {
+            self.scroll_y = y_max - height;
+        }
+
+        // Clamp the scroll position so that we cannot scroll past the start or end of the text.
+        let max_scroll_y = laidout_text_height.max(height) - height;
+        self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+
+        // Shift the align range of the turtle with the scroll position, but do not include the
+        // begin entry, since that would also scroll the background.
+        let align_range: TurtleAlignRange = cx.get_turtle_align_range();
+        cx.shift_align_range(&TurtleAlignRange {
+            start: align_range.start + 1,
+            end: align_range.end,
+        }, dvec2(0.0, -self.scroll_y));
+    }
+
     /// Moves the cursor one column to the left.
     ///
     /// Returns `true` if the cursor/selection actually changed.
@@ -1041,6 +1080,14 @@ impl TextInput {
         self.history.force_new_edit_group();
     }
 
+    fn handle_focus_lost(&mut self, cx: &mut Cx, scope_path: &HeapLiveIdPath, uid: WidgetUid) {
+        self.animator_play(cx, ids!(focus.off));
+        self.animator_play(cx, ids!(blink.on));
+        cx.stop_timer(self.blink_timer);
+        cx.hide_text_ime();
+        cx.widget_action(uid, scope_path, TextInputAction::KeyFocusLost);
+    }
+
     fn ceil_word_boundary(&self, index: usize) -> usize {
         let mut prev_word_boundary_index = 0;
         for (word_boundary_index, _) in self.text.split_word_bound_indices() {
@@ -1126,9 +1173,9 @@ impl TextInput {
 
     fn check_text_is_empty(&mut self, cx: &mut Cx) {
         if self.text.is_empty() {
-            self.animator_play(cx, id!(empty.on));
+            self.animator_play(cx, ids!(empty.on));
         } else {
-            self.animator_play(cx, id!(empty.off));
+            self.animator_play(cx, ids!(empty.off));
         }
     }
     
@@ -1168,11 +1215,12 @@ impl Widget for TextInput {
         let text_rect = self.draw_text(cx);
         let cursor_pos = self.draw_cursor(cx, text_rect);
         self.draw_selection(cx, text_rect);
+        self.scroll_to_cursor(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
             cx.show_text_ime(
                 self.draw_bg.area(), 
-                cursor_pos,
+                cursor_pos - self.scroll_y,
             );
         }
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
@@ -1180,11 +1228,11 @@ impl Widget for TextInput {
     }
 
     fn set_disabled(&mut self, cx:&mut Cx, disabled:bool){
-        self.animator_toggle(cx, disabled, Animate::Yes, id!(disabled.on), id!(disabled.off));
+        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
     }
                 
     fn disabled(&self, cx:&Cx) -> bool {
-        self.animator_in_state(cx, id!(disabled.on))
+        self.animator_in_state(cx, ids!(disabled.on))
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -1193,33 +1241,56 @@ impl Widget for TextInput {
         }
 
         if self.blink_timer.is_event(event).is_some() {
-            if self.animator_in_state(cx, id!(blink.off)) {
-                self.animator_play(cx, id!(blink.on));
+            if self.animator_in_state(cx, ids!(blink.off)) {
+                self.animator_play(cx, ids!(blink.on));
             } else {
-                self.animator_play(cx, id!(blink.off));
+                self.animator_play(cx, ids!(blink.off));
             }
             self.blink_timer = cx.start_timeout(self.blink_speed)
         }
 
         let uid = self.widget_uid();
+
+        // Self-detect focus loss from taps outside our area
+        if cx.has_key_focus(self.draw_bg.area()) {
+            let rect = self.draw_bg.area().rect(cx);
+            let should_lose_focus = match event {
+                // Handle desktop mouse clicks
+                Event::MouseUp(mu) => {
+                    !rect.contains(mu.abs)
+                }
+                // Handle mobile touch events
+                Event::TouchUpdate(tu) => {
+                    // Check if any touch ended outside our area
+                    tu.touches.iter().any(|touch| {
+                        matches!(touch.state, TouchState::Stop) && !rect.contains(touch.abs)
+                    })
+                }
+                _ => false
+            };
+
+            if should_lose_focus {
+                // Update focus state in cx
+                cx.set_key_focus(Area::Empty);
+                // Handle focus loss locally
+                self.handle_focus_lost(cx, &scope.path, uid);
+            }
+        }
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animator_play(cx, id!(hover.on));
+                self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, id!(hover.off));
+                self.animator_play(cx, ids!(hover.off));
             }
             Hit::KeyFocus(_) => {
-                self.animator_play(cx, id!(focus.on));
+                self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
             Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, id!(focus.off));
-                self.animator_play(cx, id!(blink.on));
-                cx.stop_timer(self.blink_timer);
-                cx.hide_text_ime();
-                cx.widget_action(uid, &scope.path, TextInputAction::KeyFocusLost);
+                self.handle_focus_lost(cx, &scope.path, uid);
             }
             Hit::KeyDown(kev @ KeyEvent {
                 key_code: KeyCode::ArrowLeft,
@@ -1318,17 +1389,17 @@ impl Widget for TextInput {
                     _ => {}
                 }
 
-                self.animator_play(cx, id!(hover.down));
+                self.animator_play(cx, ids!(hover.down));
             }
             Hit::FingerUp(fe) => {
                 if fe.is_over && fe.was_tap() {
                     if fe.has_hovers() {
-                        self.animator_play(cx, id!(hover.on));
+                        self.animator_play(cx, ids!(hover.on));
                     } else {
-                        self.animator_play(cx, id!(hover.off));
+                        self.animator_play(cx, ids!(hover.off));
                     }
                 } else {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 }
             }
             Hit::FingerMove(FingerMoveEvent {
@@ -1500,7 +1571,7 @@ impl Widget for TextInput {
                         replace_with: input
                     }
                 );
-                self.animator_play(cx, id!(empty.off));
+                self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
             }

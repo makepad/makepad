@@ -1,57 +1,42 @@
 use std::fmt;
 use crate::value::*;
 use crate::value_map::*;
+use crate::traits::*;
+use std::collections::hash_map::Entry;
+//use std::collections::btree_map::BTreeMap;
 
 #[derive(Default)]
-pub struct ObjectTag(u64); 
+pub struct ScriptObjectTag(u64); 
 
 #[derive(Copy,Clone,Eq,PartialEq, Ord, PartialOrd)]
-pub struct ObjectType(u8);
+pub struct ScriptObjectStorageType(u8);
 
-impl fmt::Debug for ObjectType {
+impl fmt::Debug for ScriptObjectStorageType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-impl fmt::Display for ObjectType {
+impl fmt::Display for ScriptObjectStorageType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self{
             Self::AUTO=>write!(f, "AUTO"),
             Self::VEC2=>write!(f, "VEC2"),
             Self::MAP=>write!(f, "MAP"),
-            Self::VEC1=>write!(f, "VEC1"),
-            Self::U8=>write!(f, "U8"),
-            Self::U16=>write!(f, "U16"),
-            Self::U32=>write!(f, "U32"),
-            Self::I8=>write!(f, "I8"),
-            Self::I16=>write!(f, "I16"),
-            Self::I32=>write!(f, "I32"),
-            Self::F32=>write!(f, "F32"),
-            Self::F64=>write!(f, "F64"),
             _=>write!(f, "?ObjectType"),
         }
     }
 }
 
-impl ObjectType{
+impl ScriptObjectStorageType{
     pub const AUTO: Self = Self(0);
     pub const VEC2: Self = Self(1);
     pub const MAP: Self = Self(2);
-    pub const VEC1:Self = Self(3);
-        
-    pub fn uses_vec2(&self)->bool{
-        *self <= Self::VEC2
-    }
         
     pub fn is_auto(&self)->bool{
         *self == Self::AUTO
     }
         
-    pub fn is_vec1(&self)->bool{
-        *self == Self::VEC1
-    }
-            
     pub fn is_vec2(&self)->bool{
         *self == Self::VEC2
     }
@@ -59,31 +44,7 @@ impl ObjectType{
     pub fn is_map(&self)->bool{
         *self == Self::MAP
     }
-            
-    pub fn has_paired_vec(&self)->bool{
-        return self.0 <= 2
-    }
-                    
-    pub fn is_gc(&self)->bool{
-        return self.0 <= 3
-    }
-        
-    pub fn is_typed(&self)->bool{
-        return self.0 >= 4
-    }
-        
-    pub const U8: Self = Self(4);
-    pub const U16: Self = Self(5);
-    pub const U32: Self = Self(6);
-    pub const I8: Self = Self(7);
-    pub const I16: Self = Self(8);
-    pub const I32: Self = Self(9);
-    pub const F32: Self = Self(10);
-    pub const F64: Self = Self(11);
-    // cant really use these
 }
-
-pub struct RustRef(u64);
 
 #[derive(Debug,Clone,Copy)]
 pub struct NativeId{
@@ -96,49 +57,104 @@ pub enum ScriptFnPtr{
     Native(NativeId)
 }
 
-impl ObjectTag{
+impl ScriptObjectTag{
     // marked in the mark-sweep gc
-    pub const MARK:u64 = 0x40;
+    pub const MARK:u64 = 0x1<<40;
     // object is not 'free'
-    pub const ALLOCED:u64 = 0x80;
+    pub const ALLOCED:u64 = 0x2<<40;
     // object is 'deep' aka writes to protochain
-    pub const DEEP:u64 = 0x100;
-    // used to mark objects dirty for Rust deserialisers
-    pub const DIRTY:u64 = 0x200;
+    pub const DEEP:u64 = 0x4<<40;
+    // make the map tracked
+    pub const TRACKED:u64 = 0x8<<40;
     // used to quick-free objects if not set
-    pub const REFFED: u64 = 0x400;
+    pub const REFFED: u64 = 0x10<<40;
     // object is skipped in gc passes
-    pub const STATIC: u64 = 0x800;
+    pub const STATIC: u64 = 0x20<<40;
+    // object dirty
+    pub const DIRTY: u64 = 0x40<<40;
     
+    // set when the object has been first applied
+    pub const FIRST_APPLIED: u64 = 0x80<<40;
     // marks object readonly
-    pub const FROZEN: u64 = 0x1000;
-    // for readonly allow writes if checked passes
-    pub const VALIDATED: u64 = 0x2000;
+    pub const FROZEN: u64 = 0x100<<40;
+    // checks base types against prototype
+    pub const VALIDATED: u64 = 0x200<<40;
     // for read only allow writes only if map item doesnt exist
-    pub const MAP_ADD: u64 = 0x4000;
+    pub const MAP_ADD: u64 = 0x400<<40;
     // vec is frozen
-    pub const VEC_FROZEN: u64 = 0x8000;
+    pub const VEC_FROZEN: u64 = 0x800<<40;
+    // type checked
+    pub const TYPE_CHECKED: u64 = 0x1000<<40;
+    // cant be a prototype
+    pub const NOTPROTO: u64 = 0x2000<<40;
     
     pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
-
-    pub const FLAG_MASK: u64 = 0xff40;
-                
-    pub const SCRIPT_FN: u64 = 0x10;
-    pub const NATIVE_FN: u64 = 0x20;
-    pub const RUST_REF:  u64 = 0x30;
-    pub const REF_MASK:  u64 = 0x30;
         
-    pub const TYPE_MASK: u64 = 0x0f;
+    pub const NEED_CHECK_MASK: u64 = Self::FREEZE_MASK|Self::TYPE_CHECKED;
+    
+    pub const FLAG_MASK: u64 = 0xFFFF<<40;
+        
+    pub const REF_KIND_SCRIPT_FN: u64 = 0x1<<56;
+    pub const REF_KIND_NATIVE_FN: u64 = 0x2<<56;
+    pub const REF_KIND_TYPE_INDEX: u64 = 0x3<<56;
+    pub const REF_KIND_MASK:  u64 = 0xF<<56;
+    pub const REF_DATA_MASK: u64 = 0xFF_FFFF_FFFF;    
             
-    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::TYPE_MASK|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
+    pub const STORAGE_SHIFT: u64 = 60;
+    pub const STORAGE_MASK: u64 = 0xF<<Self::STORAGE_SHIFT;
+            
+    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::STORAGE_MASK|Self::VALIDATED|
+        Self::MAP_ADD|Self::VEC_FROZEN|Self::TRACKED|Self::REF_KIND_MASK|Self::REF_DATA_MASK|Self::TYPE_CHECKED;
+    
+    pub fn set_first_applied_and_clean(&mut self){
+        self.0 &= !Self::DIRTY;
+        self.0 |= Self::FIRST_APPLIED;
+    }
+    
+    pub fn is_first_applied(&self)->bool{
+        self.0 & Self::FIRST_APPLIED != 0
+    }
+        
+    pub fn set_tracked(&mut self){
+        self.0  |= Self::TRACKED
+    }
+    
+    pub fn is_tracked(&self)->bool{
+        self.0  & Self::TRACKED != 0
+    }
+    
+    pub fn set_dirty(&mut self){
+        self.0  |= Self::DIRTY
+    }
+        
+    pub fn check_and_clear_dirty(&mut self)->bool{
+        if self.0 & Self::DIRTY !=  0{
+            self.0 &= !Self::DIRTY;
+            true
+        }
+        else{
+            false
+        }
+    }
     
     pub fn set_static(&mut self){
         self.0  |= Self::STATIC
     }
     
     pub fn freeze(&mut self){
-        self.0 &= !(Self::FREEZE_MASK);
+        self.0 &= !(Self::NEED_CHECK_MASK);
         self.0  |= Self::FROZEN
+    }
+    
+    pub fn set_type_index(&mut self, ty:ScriptTypeIndex){
+        self.0 &= !(Self::REF_DATA_MASK);
+        self.0 &= !(Self::REF_KIND_MASK);
+        self.0 |= ty.0 as u64|Self::REF_KIND_TYPE_INDEX|Self::TYPE_CHECKED;
+    }
+    
+    pub fn freeze_type(&mut self){
+        self.0 &= !(Self::FREEZE_MASK);
+        self.0 |= Self::FROZEN|Self::VEC_FROZEN
     }
     
     pub fn freeze_api(&mut self){
@@ -148,7 +164,7 @@ impl ObjectTag{
 
     pub fn freeze_module(&mut self){
         self.0 &= !(Self::FREEZE_MASK);
-        self.0  |= Self::MAP_ADD|Self::VEC_FROZEN
+        self.0  |= Self::MAP_ADD|Self::VEC_FROZEN|Self::NOTPROTO
     }
     
     pub fn freeze_component(&mut self){
@@ -156,14 +172,18 @@ impl ObjectTag{
         self.0 |= Self::FROZEN|Self::VALIDATED
     }
     
-    pub fn has_freeze(&self)->bool{
-        self.0 & Self::FREEZE_MASK != 0
+    pub fn needs_checking(&self)->bool{
+        self.0 & (Self::NEED_CHECK_MASK) != 0
+    }
+        
+    pub fn is_notproto(&self)->bool{
+        self.0 & Self::NOTPROTO != 0
     }
     
     pub fn is_frozen(&self)->bool{
         self.0 & Self::FROZEN != 0
     }
-            
+          
     pub fn is_validated(&self)->bool{
         self.0 & Self::VALIDATED != 0
     }
@@ -175,48 +195,39 @@ impl ObjectTag{
     pub fn is_vec_frozen(&self)->bool{
         self.0 & (Self::VEC_FROZEN|Self::FROZEN) != 0
     }
-  
-    pub fn set_flags(&mut self, flags:u64){
-        self.0 |= flags
-    }
     
     pub fn is_static(&mut self)->bool{
         self.0  & Self::STATIC != 0
     }
     
     pub fn set_fn(&mut self, ptr:ScriptFnPtr){
-        self.0 &= !(Self::REF_MASK);
+        self.0 &= !(Self::REF_KIND_MASK);
         match ptr{
             ScriptFnPtr::Script(ip)=>{
-                self.0 |= ((ip.index as u64)<<32) | ((ip.body as u64)<<16) | Self::SCRIPT_FN
+                self.0 |= ip.to_u40()|Self::REF_KIND_SCRIPT_FN
             }
             ScriptFnPtr::Native(ni)=>{
-                self.0 |= Self::NATIVE_FN | ((ni.index as u64)<<32)
+                self.0 |= ((ni.index as u64)) | Self::REF_KIND_NATIVE_FN 
             }
         }
         
     }
     
-    pub fn set_rust_ref(&mut self, value: RustRef){
-        self.0 &= !(Self::REF_MASK);
-        self.0 |= ((value.0 as u64)<<16) | Self::RUST_REF
-    }
-    
-    pub fn as_rust_ref(&mut self)->Option<RustRef>{
-        if self.0 & Self::REF_MASK == Self::SCRIPT_FN{
-            Some(RustRef(self.0>>16))
+    pub fn as_fn(&self)->Option<ScriptFnPtr>{
+        if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN{
+            Some(ScriptFnPtr::Script(ScriptIp::from_u40(self.0)))
+        }
+        else if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_NATIVE_FN{
+            Some(ScriptFnPtr::Native(NativeId{index:self.0 as u32}))
         }
         else{
             None
         }
     }
     
-    pub fn as_fn(&self)->Option<ScriptFnPtr>{
-        if self.0 & Self::REF_MASK == Self::SCRIPT_FN{
-            Some(ScriptFnPtr::Script(ScriptIp{body:((self.0>>16)&0xffff) as u16, index:(self.0 >> 32) as u32}))
-        }
-        else if self.0 & Self::REF_MASK == Self::NATIVE_FN{
-            Some(ScriptFnPtr::Native(NativeId{index:(self.0 >> 32) as u32}))
+    pub fn as_type_index(&self)->Option<ScriptTypeIndex>{
+        if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_TYPE_INDEX{
+            Some(ScriptTypeIndex(self.0 as u32))
         }
         else{
             None
@@ -224,11 +235,11 @@ impl ObjectTag{
     }
         
     pub fn is_script_fn(&self)->bool{
-        self.0 & Self::REF_MASK == Self::SCRIPT_FN
+        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN
     }
         
     pub fn is_native_fn(&self)->bool{
-        self.0 & Self::REF_MASK == Self::NATIVE_FN
+        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_NATIVE_FN
     }
     
     pub fn is_fn(&self)->bool{
@@ -243,13 +254,13 @@ impl ObjectTag{
         self.0 |= fwd
     }
         
-    pub fn set_type_unchecked(&mut self, ty:ObjectType){
-        self.0 &= !Self::TYPE_MASK;
-        self.0 |= (ty.0 as u64) & Self::TYPE_MASK;
+    pub fn set_storage_type_unchecked(&mut self, ty:ScriptObjectStorageType){
+        self.0 &= !Self::STORAGE_MASK;
+        self.0 |= ((ty.0 as u64) << Self::STORAGE_SHIFT) & Self::STORAGE_MASK;
     }
         
-    pub fn get_type(&self)->ObjectType{
-        return ObjectType( (self.0 & Self::TYPE_MASK) as u8 )
+    pub fn get_storage_type(&self)->ScriptObjectStorageType{
+        return ScriptObjectStorageType( ((self.0 & Self::STORAGE_MASK)>>Self::STORAGE_SHIFT) as u8 )
     }
         
     pub fn set_deep(&mut self){
@@ -297,16 +308,16 @@ impl ObjectTag{
     }
 }
 
-impl fmt::Debug for ObjectTag {
+impl fmt::Debug for ScriptObjectTag {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-impl fmt::Display for ObjectTag {
+impl fmt::Display for ScriptObjectTag {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ObjectType(").ok();
-        write!(f, "{}|",self.get_type()).ok();
+        write!(f, "{}|",self.get_storage_type()).ok();
         if self.is_marked(){write!(f,"MARK|").ok();}
         if self.is_alloced(){write!(f,"ALLOCED|").ok();}
         if self.is_deep(){write!(f,"DEEP|").ok();}
@@ -324,58 +335,157 @@ impl fmt::Display for ObjectTag {
     }
 }
 
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
+pub struct ScriptMapTag(u64);
+
+impl ScriptMapTag{
+    const DIRTY:u64 = 1;
+    fn dirty()->Self{
+        Self(1)
+    }
+    fn get_and_clear_dirty(&mut self)->bool{
+        let ret = self.0 & Self::DIRTY != 0;
+        self.0 &= !Self::DIRTY;
+        ret
+    }
+    fn set_dirty(&mut self){
+        self.0 |= Self::DIRTY;
+    }
+}
+
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
+pub struct ScriptMapValue{
+    pub tag: ScriptMapTag,
+    pub value: ScriptValue
+}
+
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
+pub struct ScriptVecValue{
+    pub key: ScriptValue,
+    pub value: ScriptValue
+}
+
 #[derive(Default, Debug)]
 pub struct ObjectData{
-    pub tag: ObjectTag,
-    pub proto: Value,
-    pub map: ValueMap<Value, Value>,
-    pub vec: Vec<Value>,
+    pub tag: ScriptObjectTag,
+    pub proto: ScriptValue,
+    
+    pub map: ValueMap<ScriptValue, ScriptMapValue>,
+    pub vec: Vec<ScriptVecValue>,
 }
 
 impl ObjectData{
+    pub fn map_insert(&mut self, key:ScriptValue, value:ScriptValue){
+        if self.tag.is_tracked(){
+            match self.map.entry(key) {
+                Entry::Occupied(mut occ) => {
+                    let old = occ.get_mut();
+                    if old.value != value{
+                        old.tag.set_dirty();
+                        self.tag.set_dirty();
+                        old.value = value;
+                    }
+                    return 
+                }
+                Entry::Vacant(vac) => {
+                    vac.insert(ScriptMapValue{
+                        value,
+                        tag: ScriptMapTag::dirty()
+                    });
+                    return
+                }   
+            }
+        }
+        else{
+            self.map.insert(key, ScriptMapValue{
+                value,
+                tag: ScriptMapTag::dirty()
+            });
+        }
+    }
+    
+    pub fn map_set_if_exist(&mut self, key:ScriptValue, value:ScriptValue)->bool{
+        if self.tag.is_tracked(){
+            match self.map.entry(key) {
+                Entry::Occupied(mut occ) => {
+                    let old = occ.get_mut();
+                    if old.value != value{
+                        old.tag.set_dirty();
+                        self.tag.set_dirty();
+                        old.value = value;
+                    }
+                    return true
+                }
+                Entry::Vacant(_) => {}
+            }
+        }
+        if let Some(val) = self.map.get_mut(&key){
+            val.value = value;
+            return true
+        }
+        false
+    }
+    
+    pub fn map_get(&self, key:&ScriptValue)->Option<ScriptValue>{
+        if let Some(val) = self.map.get(key){
+            Some(val.value)
+        }
+        else{
+            None
+        }
+    }
+    
+    pub fn map_get_if_dirty(&mut self, key:&ScriptValue)->Option<ScriptValue>{
+        if self.tag.is_tracked(){
+            match self.map.entry(*key) {
+                Entry::Occupied(mut occ) => {
+                    let val = occ.get_mut();
+                    if val.tag.get_and_clear_dirty(){
+                        return Some(val.value)
+                    }
+                    return None
+                }
+                Entry::Vacant(_) => {
+                    return None
+                }
+            };
+        }
+        self.map_get(key)
+    }
+        
+    pub fn map_len(&self)->usize{
+        self.map.len()
+    }
+    
+    pub fn map_iter_ret<T,F:FnMut(ScriptValue,ScriptValue)->Option<T>>(&self, mut f:F)->Option<T>{
+        for (key,val) in self.map.iter(){
+            let r = f(*key,val.value);
+            if r.is_some(){
+                return r
+            }
+        }
+        None
+    }
+    
+    pub fn map_iter<F:FnMut(ScriptValue,ScriptValue)>(&self, mut f:F){
+        for (key,val) in self.map.iter(){
+            f(*key,val.value);
+        }
+    }
+    
     pub fn merge_map_from_other(&mut self, other:&ObjectData){
         self.map.extend(other.map.iter());
     }
      
     pub fn push_vec_from_other(&mut self, other:&ObjectData){
-        // alright lets go and push the vec from other
-        let ty_self = self.tag.get_type();
-        let ty_other = other.tag.get_type();
-        if ty_self.has_paired_vec() && ty_other.has_paired_vec(){
-            self.vec.extend_from_slice(&other.vec);
-            return
-        }
-        if ty_self.is_vec1() && ty_other.has_paired_vec(){
-            for chunk in other.vec.chunks(2){
-                self.vec.push(chunk[1])
-            }
-            return
-        }
-                
-        if ty_self.has_paired_vec() && ty_other.is_vec1(){
-            for value in &other.vec{
-                self.vec.extend_from_slice(&[NIL, *value]);
-            }
-            return
-        }
-        println!("implement push_vec_from_other {} {}", ty_self, ty_other);
+        self.vec.extend_from_slice(&other.vec);
     }
     
-    pub fn set_type(&mut self, ty_new:ObjectType){
-        let ty_now = self.tag.get_type();
-        // block flipping from raw data mode to gc'ed mode
-        if !ty_now.is_gc() && ty_new.is_gc(){
-            self.vec.clear();
-        }
-        if !ty_now.has_paired_vec() && ty_new.has_paired_vec(){
-            if self.vec.len() & 1 != 0{
-                self.vec.push(NIL)
-            }
-        }
-        self.tag.set_type_unchecked(ty_new)
+    pub fn set_storage_type(&mut self, ty_new:ScriptObjectStorageType){
+        self.tag.set_storage_type_unchecked(ty_new)
     }
     //const DONT_RECYCLE_WHEN: usize = 1000;
-    pub fn with_proto(proto:Value)->Self{
+    pub fn with_proto(proto:ScriptValue)->Self{
         Self{
             proto,
             ..Default::default()

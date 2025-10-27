@@ -185,6 +185,21 @@ pub enum ScrollAxis {
     #[pick] Horizontal,
     Vertical
 }
+
+/// A sample of a scroll event
+#[derive(Clone, Copy)]
+struct ScrollSample {
+    abs: f64,
+    time: f64,
+}
+
+/// The scrolling state
+enum ScrollState {
+    Stopped,
+    Drag { samples: Vec<ScrollSample> },
+    Flick { delta: f64, next_frame: NextFrame },
+}
+
 #[derive(Live, LiveHook, LiveRegister)]
 pub struct ScrollBar {
     #[live] draw_bg: DrawScrollBar,
@@ -195,7 +210,18 @@ pub struct ScrollBar {
     
     #[live] use_vertical_finger_scroll: bool,
     #[live] smoothing: Option<f64>,
-    
+
+    /// The minimum amount of scroll to trigger a flick animation
+    #[live(0.2)] flick_scroll_minimum: f64,
+    /// The maximum amount of scroll to trigger a flick animation
+    #[live(80.0)] flick_scroll_maximum: f64,
+    /// The scaling factor for the flick animation
+    #[live(0.005)] flick_scroll_scaling: f64,
+    /// The decay factor for the flick animation
+    #[live(0.97)] flick_scroll_decay: f64,
+    /// Whether to enable drag scrolling
+    #[live(false)] drag_scrolling: bool,
+
     #[animator] animator: Animator,
     
     #[rust] next_frame: NextFrame,
@@ -208,6 +234,7 @@ pub struct ScrollBar {
     #[rust] scroll_target: f64,
     #[rust] scroll_delta: f64,
     #[rust] drag_point: Option<f64>, // the point in pixels where we are dragging
+    #[rust(ScrollState::Stopped)] scroll_state: ScrollState,
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -432,12 +459,101 @@ impl ScrollBar {
                 }
             }
         }
+
+        self.handle_touch_based_drag(cx, event, scroll_area, dispatch_action);
     }
+
     pub fn is_area_captured(&self, cx:&Cx)->bool{
         cx.fingers.is_area_captured(self.draw_bg.area())
     }
+
+    /// Handles touch-based drag scrolling
+    fn handle_touch_based_drag(&mut self, cx: &mut Cx, event: &Event, scroll_area: Area, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
+        if !self.drag_scrolling {
+            return;
+        }
+
+        // Check if scroll bar handle is not captured
+        if self.is_area_captured(cx) {
+            self.scroll_state = ScrollState::Stopped;
+            return;
+        }
+
+        match event.hits(cx, scroll_area) {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                let abs = match self.axis {
+                    ScrollAxis::Horizontal => fe.abs.x,
+                    ScrollAxis::Vertical => fe.abs.y
+                };
+                self.scroll_state = ScrollState::Drag {
+                    samples: vec![ScrollSample { abs, time: fe.time }]
+                };
+            }
+            Hit::FingerMove(e) => {
+                match &mut self.scroll_state {
+                    ScrollState::Drag { samples } => {
+                        let new_abs = match self.axis {
+                            ScrollAxis::Horizontal => e.abs.x,
+                            ScrollAxis::Vertical => e.abs.y
+                        };
+                        let old_sample = *samples.last().unwrap();
+                        samples.push(ScrollSample { abs: new_abs, time: e.time });
+                        if samples.len() > 4 {
+                            samples.remove(0);
+                        }
+
+                        let delta = new_abs - old_sample.abs;
+                        let scroll_pos = self.get_scroll_pos();
+
+                        if self.set_scroll_pos(cx, scroll_pos - delta) {
+                            dispatch_action(cx, self.make_scroll_action());
+                        }
+                    }
+                    _ => ()
+                }
+            }
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
+                match &mut self.scroll_state {
+                    ScrollState::Drag { samples } => {
+                        let mut last = None;
+                        let mut scaled_delta = 0.0;
+                        let mut total_delta = 0.0;
+
+                        for sample in samples.iter().rev() {
+                            if last.is_none() {
+                                last = Some(sample);
+                            } else {
+                                let time_delta = last.unwrap().time - sample.time;
+                                if time_delta > 0.0 {
+                                    let abs_delta = last.unwrap().abs - sample.abs;
+                                    total_delta += abs_delta;
+                                    scaled_delta += abs_delta / time_delta;
+                                }
+                            }
+                        }
+
+                        scaled_delta *= self.flick_scroll_scaling;
+
+                        if total_delta.abs() > 10.0 && scaled_delta.abs() > self.flick_scroll_minimum {
+                            let delta = scaled_delta.min(self.flick_scroll_maximum).max(-self.flick_scroll_maximum);
+                            self.scroll_state = ScrollState::Flick {
+                                delta,
+                                next_frame: cx.new_next_frame()
+                            };
+                        } else {
+                            self.scroll_state = ScrollState::Stopped;
+                        }
+                    }
+                    _ => ()
+                }
+            }
+            _ => ()
+        }
+    }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
+        self.handle_flick(cx, event, dispatch_action);
+
         if self.visible {
             self.animator_handle_event(cx, event);
             if self.next_frame.is_event(event).is_some() {
@@ -449,7 +565,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.draw_bg.area()) {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                    self.animator_play(cx, id!(hover.drag));
+                    self.animator_play(cx, ids!(hover.drag));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
                         ScrollAxis::Horizontal => rel.x,
@@ -469,18 +585,18 @@ impl ScrollBar {
                     }
                 },
                 Hit::FingerHoverIn(_) => {
-                    self.animator_play(cx, id!(hover.on));
+                    self.animator_play(cx, ids!(hover.on));
                 },
                 Hit::FingerHoverOut(_) => {
-                    self.animator_play(cx, id!(hover.off));
+                    self.animator_play(cx, ids!(hover.off));
                 },
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
                     self.drag_point = None;
                     if fe.is_over && fe.device.has_hovers() {
-                        self.animator_play(cx, id!(hover.on));
+                        self.animator_play(cx, ids!(hover.on));
                     }
                     else {
-                        self.animator_play(cx, id!(hover.off));
+                        self.animator_play(cx, ids!(hover.off));
                     }
                     return;
                 },
@@ -508,6 +624,36 @@ impl ScrollBar {
                  },
                 _ => ()
             };
+        }
+    }
+
+    fn handle_flick(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
+        let flick_delta = if let ScrollState::Flick { delta, next_frame } = &self.scroll_state {
+            if next_frame.is_event(event).is_some() {
+                Some(*delta)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(mut delta) = flick_delta {
+            delta = delta * self.flick_scroll_decay;
+
+            if delta.abs() > self.flick_scroll_minimum {
+                let scroll_pos = self.get_scroll_pos();
+                if self.set_scroll_pos(cx, scroll_pos - delta) {
+                    dispatch_action(cx, self.make_scroll_action());
+                }
+
+                self.scroll_state = ScrollState::Flick {
+                    delta,
+                    next_frame: cx.new_next_frame()
+                };
+            } else {
+                self.scroll_state = ScrollState::Stopped;
+            }
         }
     }
     

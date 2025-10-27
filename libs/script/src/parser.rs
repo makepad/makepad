@@ -1,11 +1,10 @@
 #![allow(dead_code)]
 use crate::tokenizer::*;
-use crate::makepad_id::id::*;
+use crate::makepad_live_id::live_id::*;
 
-use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
-use crate::makepad_id_derive::*;
+use crate::makepad_live_id::makepad_live_id_macros::*;
 
 #[derive(Debug, Eq, PartialEq)]
 enum State{
@@ -52,10 +51,10 @@ enum State{
     EmitFnArgTyped{index:u32},
     EmitFnArgDyn{index:u32},
     
-    EmitUnary{what_op:Id, index:u32},
-    EmitOp{what_op:Id, index:u32},
-    EmitFieldAssign{what_op:Id, index:u32},
-    EmitIndexAssign{what_op:Id, index:u32},
+    EmitUnary{what_op:LiveId, index:u32},
+    EmitOp{what_op:LiveId, index:u32},
+    EmitFieldAssign{what_op:LiveId, index:u32},
+    EmitIndexAssign{what_op:LiveId, index:u32},
     
     EndBare,
     EndBareSquare,
@@ -106,7 +105,7 @@ Order list from highest prio to lowest
 */
 
 impl State{
-    fn operator_order(op:Id)->usize{
+    fn operator_order(op:LiveId)->usize{
         match op{
             id!(.) => 3,
             id!(.?) => 3,
@@ -129,7 +128,7 @@ impl State{
         }
     }
     
-    fn is_assign_operator(op:Id)->bool{
+    fn is_assign_operator(op:LiveId)->bool{
         match op{
             id!(=) | id!(:) | id!(+=) | id!(<:) | id!(+=) |
             id!(-=) | id!(*=) | id!(/=) |
@@ -140,7 +139,7 @@ impl State{
         }
     }
     
-    fn operator_supports_inline_number(op:Id)->bool{
+    fn operator_supports_inline_number(op:LiveId)->bool{
         match op{
             id!(*) | id!(/) | id!(%) |
             id!(+)| id!(-) | id!(<<) |id!(>>) | 
@@ -182,7 +181,7 @@ impl State{
         }*/
     }
     
-    fn operator_to_field_assign(op:Id)->Value{
+    fn operator_to_field_assign(op:LiveId)->ScriptValue{
         match op{
             id!(=) => Opcode::ASSIGN_FIELD,
             id!(+=) => Opcode::ASSIGN_FIELD_ADD,
@@ -200,7 +199,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_index_assign(op:Id)->Value{
+    fn operator_to_index_assign(op:LiveId)->ScriptValue{
         match op{
             id!(=) => Opcode::ASSIGN_INDEX,
             id!(+=) => Opcode::ASSIGN_INDEX_ADD,
@@ -218,7 +217,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_unary(op:Id)->Value{
+    fn operator_to_unary(op:LiveId)->ScriptValue{
         match op{
             id!(~)=> Opcode::LOG,
             id!(!)=> Opcode::NOT,
@@ -228,7 +227,7 @@ impl State{
         }.into()
     }
     
-    fn operator_to_opcode(op:Id)->Value{
+    fn operator_to_opcode(op:LiveId)->ScriptValue{
         match op{
             id!(*) => Opcode::MUL,
             id!(/) => Opcode::DIV,
@@ -301,11 +300,11 @@ impl State{
 
 pub struct ScriptParser{
     pub index: u32,
-    pub opcodes: Vec<Value>,
+    pub opcodes: Vec<ScriptValue>,
     pub source_map: Vec<Option<u32>>,
     
     state: Vec<State>,
-    opstack: Vec<Id>
+    opstack: Vec<LiveId>
 }
 
 impl Default for ScriptParser{
@@ -326,7 +325,7 @@ impl ScriptParser{
         self.opcodes.len() as _
     }
     
-    fn code_last(&self)->Option<&Value>{
+    fn code_last(&self)->Option<&ScriptValue>{
         self.opcodes.last()
     }
     
@@ -335,12 +334,12 @@ impl ScriptParser{
         self.source_map.pop();
     }
     
-    fn push_code(&mut self, code: Value, index: u32){
+    fn push_code(&mut self, code: ScriptValue, index: u32){
         self.opcodes.push(code);
         self.source_map.push(Some(index));
     }
     
-    fn push_code_none(&mut self, code: Value){
+    fn push_code_none(&mut self, code: ScriptValue){
         self.opcodes.push(code);
         self.source_map.push(None);
     }
@@ -384,7 +383,7 @@ impl ScriptParser{
         self.state.push(state)
     }
     
-    fn parse_step(&mut self, tok:ScriptToken, heap:&mut ScriptHeap, values: &[Value])->u32{
+    fn parse_step(&mut self, tok:ScriptToken, values: &[ScriptValue])->u32{
         
         let op = tok.operator();
         let sep = tok.separator();
@@ -515,7 +514,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{
-                    self.push_code(Value::from_opcode_args(Opcode::LET_DYN, OpcodeArgs::NIL), index);
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::LET_DYN, OpcodeArgs::NIL), index);
                 }
             }
             State::LetType{index}=>{
@@ -536,7 +535,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{
-                    self.push_code(Value::from_opcode_args(Opcode::LET_TYPED, OpcodeArgs::NIL), index);
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::LET_TYPED, OpcodeArgs::NIL), index);
                 }
             }
             State::EmitLetDyn{index}=>{
@@ -557,10 +556,10 @@ impl ScriptParser{
                 }
             }
             State::EmitFnArgTyped{index}=>{
-                self.push_code(Value::from_opcode_args(Opcode::FN_ARG_TYPED, OpcodeArgs::NIL), index);
+                self.push_code(ScriptValue::from_opcode_args(Opcode::FN_ARG_TYPED, OpcodeArgs::NIL), index);
             }
             State::EmitFnArgDyn{index}=>{
-                self.push_code(Value::from_opcode_args(Opcode::FN_ARG_DYN, OpcodeArgs::NIL), index);
+                self.push_code(ScriptValue::from_opcode_args(Opcode::FN_ARG_DYN, OpcodeArgs::NIL), index);
             }
             State::FnArgType{index}=>{
                 if id.not_empty(){
@@ -634,7 +633,7 @@ impl ScriptParser{
                 }
                                  
                 else{
-                    self.push_code(Value::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL), index);
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL), index);
                 }
                 self.set_opcode_args(fn_slot as _, OpcodeArgs::from_u32(self.code_len() as u32 -fn_slot));
                 
@@ -1009,7 +1008,7 @@ impl ScriptParser{
                     return 1
                 }
                 if let Some(v) = tok.as_number(){
-                    self.push_code(Value::from_f64(v), self.index);
+                    self.push_code(ScriptValue::from_f64(v), self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
@@ -1059,12 +1058,12 @@ impl ScriptParser{
                     return 1;
                 }
                 if id == id!(true){
-                    self.push_code(Value::from_bool(true), self.index);
+                    self.push_code(ScriptValue::from_bool(true), self.index);
                     self.state.push(State::EndExpr);
                     return 1;
                 }
                 if id == id!(false){
-                    self.push_code(Value::from_bool(false), self.index);
+                    self.push_code(ScriptValue::from_bool(false), self.index);
                     self.state.push(State::EndExpr);
                     return 1;
                 }
@@ -1084,7 +1083,7 @@ impl ScriptParser{
                     return 1
                 }
                 if id.not_empty(){
-                    self.push_code(Value::from_id(id), self.index);
+                    self.push_code(ScriptValue::from_id(id), self.index);
                     if starts_with_ds{
                         self.push_code(Opcode::SEARCH_TREE.into(), self.index);
                     }
@@ -1092,19 +1091,12 @@ impl ScriptParser{
                     return 1
                 }
                 if let Some(v) = tok.as_color(){
-                    self.push_code(Value::from_color(v), self.index);
+                    self.push_code(ScriptValue::from_color(v), self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
-                if let Some(ptr) = tok.as_string(){
-                    // maybe make the string inline
-                    let str = heap.string(ptr);
-                    if let Some(value) = Value::from_inline_string(str){
-                        self.push_code(value, self.index);
-                    }
-                    else{
-                        self.push_code(Value::from_string(ptr), self.index);
-                    }
+                if let Some(value) = tok.as_string(){
+                    self.push_code(value, self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
@@ -1224,7 +1216,17 @@ impl ScriptParser{
                             break;
                         }
                     }
-                                        
+                    if let Some(last) = self.state.pop(){
+                        if let State::EmitOp{what_op:id!(.),index} = last{
+                            self.push_code(State::operator_to_opcode(id!(.)), index);
+                        }
+                        else if let State::EmitOp{what_op:id!(.?),index} = last{
+                            self.push_code(State::operator_to_opcode(id!(.?)), index);
+                        }
+                        else{
+                            self.state.push(last);
+                        }
+                    }
                     self.push_code(Opcode::BEGIN_PROTO.into(), self.index);
                     self.state.push(State::EndProto);
                     self.state.push(State::BeginStmt{last_was_sep:false});
@@ -1330,7 +1332,7 @@ impl ScriptParser{
         0
     }
     
-    pub fn parse(&mut self, tokens:&[ScriptTokenPos], heap:&mut ScriptHeap, values: &[Value]){
+    pub fn parse(&mut self, tokens:&[ScriptTokenPos], values: &[ScriptValue]){
         // wait for the tokens to be consumed
         let mut steps_zero = 0;
         while self.index < tokens.len() as u32 && self.state.len()>0{
@@ -1342,7 +1344,7 @@ impl ScriptParser{
                 ScriptToken::StreamEnd
             };
             
-            let step = self.parse_step(tok, heap, values);
+            let step = self.parse_step(tok, values);
             if step == 0{
                 steps_zero += 1;
             }
@@ -1356,6 +1358,6 @@ impl ScriptParser{
             }
             self.index += step;
         }
-        println!("MADE CODE: {:?}", self.opcodes);
+        //println!("MADE CODE: {:?}", self.opcodes);
     }
 }

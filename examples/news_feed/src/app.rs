@@ -949,9 +949,9 @@ impl Widget for NewsFeed{
                         3 => format!("Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. id: {}", item_id),
                         _ => format!("Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. 4 id {}", item_id),
                     };
-                    item.label(id!(content.text)).set_text(cx, &text);
-                    item.button(id!(likes)).set_text(cx, &format!("{}", item_id % 23));
-                    item.button(id!(comments)).set_text(cx, &format!("{}", item_id % 6));
+                    item.label(ids!(content.text)).set_text(cx, &text);
+                    item.button(ids!(likes)).set_text(cx, &format!("{}", item_id % 23));
+                    item.button(ids!(comments)).set_text(cx, &format!("{}", item_id % 6));
                     item.draw_all(cx, &mut Scope::empty());
                 }
             }
@@ -978,7 +978,7 @@ impl MatchEvent for App {
     fn handle_startup(&mut self, _cx:&mut Cx){
     }
     fn handle_actions(&mut self, _cx:&mut Cx, actions:&Actions){
-        if self.ui.button(id!(find)).clicked(actions) {
+        if self.ui.button(ids!(find)).clicked(actions) {
             
         }
     }

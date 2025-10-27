@@ -10,15 +10,22 @@ pub fn script(input: TokenStream) -> TokenStream {
     script_impl(input)
 }
 
-#[proc_macro_derive(Scriptable, attributes(
+#[proc_macro_derive(Script, attributes(
     script,
+    live,
     rust,
     pick,
+    splat,
     walk,
     layout,
     deref,
 ))]
 
-pub fn derive_scriptable(input: TokenStream) -> TokenStream {
-    derive_scriptable_impl(input)
+pub fn derive_script(input: TokenStream) -> TokenStream {
+    derive_script_impl(input)
+}
+
+#[proc_macro_derive(ScriptHook, attributes())]
+pub fn derive_script_hook(input: TokenStream) -> TokenStream {
+    derive_script_hook_impl(input)
 }

@@ -1,12 +1,12 @@
 use crate::vm::*;
 use crate::value::*;
-use crate::makepad_id::id::*;
+use crate::makepad_live_id::live_id::*;
 use crate::heap::*;
-use crate::makepad_id_derive::*;
+use crate::makepad_live_id::*;
 use crate::object::*;
 
 #[macro_export]
-macro_rules! value_f64{
+macro_rules! script_value_f64{
     ($ctx:ident, $args:ident.$id: ident)=>{
         $ctx.heap.cast_to_f64($ctx.heap.value($args, id!($id).into(),&$ctx.thread.trap), $ctx.thread.trap.ip)
     };
@@ -15,16 +15,8 @@ macro_rules! value_f64{
     }
 }
 
-
 #[macro_export]
-macro_rules! vm_ref{
-    ($vm:ident)=>{
-        &mut $vm.new_ref(&mut 0)
-    };
-}
-
-#[macro_export]
-macro_rules! value_bool{
+macro_rules! script_value_bool{
     ($ctx:ident, $args:ident.$id: ident)=>{
         $ctx.heap.cast_to_bool($ctx.heap.value($args, id!($id).into(),NIL), $ctx.thread.ip())
     };
@@ -34,7 +26,7 @@ macro_rules! value_bool{
 }
         
 #[macro_export]
-macro_rules! value{
+macro_rules! script_value{
     ($vm:ident, $obj:ident.$id: ident)=>{
         $vm.heap.value(($obj).into(), id!($id).into(),&$vm.thread.trap)
     };
@@ -43,11 +35,21 @@ macro_rules! value{
     };
     ($vm:ident, $obj:ident[$index: expr])=>{
         $vm.heap.vec_value(($obj).into(), ($index) as usize,&$vm.thread.trap)
+    };
+    ($vm:ident, $obj:ident as array[$index: expr])=>{
+        $vm.heap.array_index(($obj).into(), ($index) as usize,&$vm.thread.trap)
     }
 }
 
 #[macro_export]
-macro_rules! set_value{
+macro_rules! script_array_index{
+    ($vm:ident, $obj:ident[$index: expr])=>{
+        $vm.heap.array_index(($obj).into(), ($index) as usize,&$vm.thread.trap)
+    }
+}
+
+#[macro_export]
+macro_rules! script_set_value{
     ($vm:ident, $obj:ident.$id: ident=$value:expr)=>{
         $vm.heap.set_value($obj, id!($id).into(), ($value).into(), &$vm.thread.trap)
     };
@@ -58,13 +60,20 @@ macro_rules! set_value{
 
 
 #[macro_export]
-macro_rules! args{
+macro_rules! script_args{
     ($($id:ident=$val:expr),*)=>{
         &[$((id!($id), ($val).into()),)*]
     }
 }
 
-pub type NativeFnType = Box<dyn Fn(&mut Vm, Object)->Value + 'static>;
+#[macro_export]
+macro_rules! script_args_lut{
+    ($($id:ident=$val:expr),*)=>{
+        &[$((id_lut!($id), ($val).into()),)*]
+    }
+}
+
+pub type NativeFnType = Box<dyn Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static>;
 
 pub struct NativeFnEntry{
     pub fn_ptr: NativeFnType
@@ -72,7 +81,7 @@ pub struct NativeFnEntry{
 
 impl NativeFnEntry{
     pub fn new<F>(f: F)->Self 
-    where F: Fn(&mut Vm, Object)->Value + 'static{
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         Self{fn_ptr:Box::new(f)}
     }
 }
@@ -83,13 +92,13 @@ pub struct ScriptNative{
 }
 
 impl ScriptNative{
-    pub fn add<F>(&mut self, heap:&mut ScriptHeap, args:&[(Id,Value)], f: F)-> Object
-    where F: Fn(&mut Vm, Object)->Value + 'static{
+    pub fn add<F>(&mut self, heap:&mut ScriptHeap, args:&[(LiveId,ScriptValue)], f: F)-> ScriptObject
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         let fn_index = self.fn_table.len();
         let fn_obj = heap.new_with_proto(id!(native).into());
-        heap.set_object_type(fn_obj, ObjectType::VEC2);
+        heap.set_object_storage_type(fn_obj, ScriptObjectStorageType::VEC2);
         heap.set_fn(fn_obj, ScriptFnPtr::Native(NativeId{index: fn_index as u32}));
-                
+
         for (arg, def) in args{
             heap.set_value_def(fn_obj, (*arg).into(), *def);
         }
@@ -99,8 +108,8 @@ impl ScriptNative{
         fn_obj
     }
     
-    pub fn add_fn<F>(&mut self, heap:&mut ScriptHeap, module:Object, method:Id, args:&[(Id, Value)], f: F) 
-    where F: Fn(&mut Vm, Object)->Value + 'static{
+    pub fn add_fn<F>(&mut self, heap:&mut ScriptHeap, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         // lets get the 
         let fn_obj = self.add(heap, args, f);
         heap.set_value_def(module, method.into(), fn_obj.into());
