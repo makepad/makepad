@@ -1626,18 +1626,13 @@ impl<'a,'b> Cx2d<'a,'b> {
             
             let outer_origin = match turtle.flow() {
                 Flow::RightWrap if outer_size.x > turtle.unused_inner_width_for_current_row() => {
-                    let outer_origin = dvec2(
-                        turtle.origin.x + turtle.layout.padding.left,
-                        turtle.origin.y + turtle.used_height + turtle.wrap_spacing
-                    );
-                    let shift = outer_origin - turtle.pos() - spacing;
-                    
-                    turtle.move_to(outer_origin);
+                    let wrap_spacing = turtle.wrap_spacing;
+                    self.turtle_new_line_internal(wrap_spacing, self.align_list.len());
+                    let turtle = self.turtles.last_mut().unwrap();
+
+                    let outer_origin = turtle.outer_origin();
                     turtle.allocate_size(outer_size);
                     turtle.move_right(outer_size.x);
-            
-                    self.move_align_list(align_list_start, self.align_list.len(), shift.x, shift.y, false);
-
                     outer_origin
                 },
                 Flow::Right | Flow::RightWrap => {
@@ -1849,21 +1844,24 @@ impl<'a,'b> Cx2d<'a,'b> {
     
     
     pub fn turtle_new_line(&mut self){
-        let turtle = self.turtles.last_mut().unwrap();
-        turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
-        let next_y = turtle.used_height + turtle.origin.y + turtle.wrap_spacing;
-        turtle.pos.y = turtle.pos.y.max(next_y);
-        turtle.used_height = turtle.pos.y - turtle.origin.y;
-        turtle.wrap_spacing = 0.0;
+        self.turtle_new_line_with_spacing(0.0);
     }
 
-    pub fn turtle_new_line_with_spacing(&mut self, spacing: f64){
+    pub fn turtle_new_line_with_spacing(&mut self, spacing: f64) {
+        self.turtle_new_line_internal(spacing, self.align_list.len());
+    }
+
+    fn turtle_new_line_internal(&mut self, spacing: f64, align_list_start: usize) {
         let turtle = self.turtles.last_mut().unwrap();
-        turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
-        let next_y = turtle.used_height + turtle.origin.y + turtle.wrap_spacing + spacing;
-        turtle.pos.y = turtle.pos.y.max(next_y);
-        turtle.used_height = turtle.pos.y - turtle.origin.y;
-        turtle.wrap_spacing = 0.0;
+        let outer_origin = dvec2(
+            turtle.origin.x + turtle.layout.padding.left,
+            turtle.origin.y + turtle.used_height + spacing
+        );
+        let offset = turtle.offset_to_next_walk(self.finished_walks.len());
+        let shift = outer_origin - turtle.pos() - offset;
+        turtle.move_to(outer_origin);
+        turtle.allocate_height(0.0);
+        self.move_align_list(align_list_start, self.align_list.len(), shift.x, shift.y, false);
     }
     
     fn move_align_list(&mut self, start: usize, end: usize, dx: f64, dy: f64, shift_clip: bool) {
