@@ -79,6 +79,16 @@ impl ScriptHeap{
                 obj.tag.clear_mark();
             }
         }
+        for i in 0..self.arrays.len(){
+            let array = &mut self.arrays[i];
+            if !array.tag.is_marked() && array.tag.is_alloced(){
+                array.clear();
+                self.arrays_free.push(i);
+            }
+            else{
+                array.tag.clear_mark();
+            }
+        }
         // always leave the empty null string at 0
         for i in 1..self.strings.len(){
             let str = &mut self.strings[i];

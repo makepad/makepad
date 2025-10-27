@@ -3,9 +3,10 @@ use crate::value::*;
 use std::fmt::Write;
 use crate::object::*;
 use crate::string::*;
-use crate::thread::*;
+use crate::trap::*;
 use crate::traits::*;
 use crate::array::*;
+use crate::vm::*;
 use std::collections::HashMap;
 
 #[derive(Copy,Clone)]
@@ -218,6 +219,10 @@ impl ScriptHeap{
     // Arrays
     
     
+    pub fn freeze_array(&mut self, array:ScriptArray){
+        self.arrays[array.index as usize].tag.freeze()
+    }
+    
     pub fn new_array(&mut self)->ScriptArray{
         if let Some(index) = self.arrays_free.pop(){
             let array = &mut self.arrays[index];
@@ -233,13 +238,75 @@ impl ScriptHeap{
         }
     }
     
+    pub fn array_len(&self, array:ScriptArray)->usize{
+        self.arrays[array.index as usize].storage.len()
+    }
     
+    pub fn array_push(&mut self, array:ScriptArray, value:ScriptValue, trap:&ScriptTrap){
+        let array = &mut self.arrays[array.index as usize];
+        if array.tag.is_frozen(){
+            trap.err_frozen();
+            return 
+        }
+        array.tag.set_dirty();
+        array.storage.push(value);
+    }
     
+    pub fn array_remove(&mut self, array:ScriptArray, index: usize,trap:&ScriptTrap)->ScriptValue{
+        let array = &mut self.arrays[array.index as usize];
+        if array.tag.is_frozen(){
+            return trap.err_frozen();
+        }
+        array.tag.set_dirty();
+        if index >= array.storage.len(){
+            return trap.err_array_bound()
+        }
+        array.storage.remove(index)
+    }
     
+    pub fn array_push_vec(&mut self, array:ScriptArray, object:ScriptObject, trap:&ScriptTrap){
+        let array = &mut self.arrays[array.index as usize];
+        if array.tag.is_frozen(){
+            trap.err_frozen();
+            return
+        }
+        array.tag.set_dirty();
+        array.storage.push_vec(&self.objects[object.index as usize].vec);
+    }
     
+    pub fn array_pop(&mut self, array:ScriptArray, trap:&ScriptTrap)->ScriptValue{
+        let array = &mut self.arrays[array.index as usize];
+        if array.tag.is_frozen(){
+            return trap.err_frozen()
+        }
+        if let Some(value) = array.storage.pop(){
+            array.tag.set_dirty();
+            value
+        }
+        else{
+            trap.err_array_bound()
+        }
+    }
     
+    pub fn array_index(&self, array:ScriptArray, index:usize, trap:&ScriptTrap)->ScriptValue{
+        if let Some(value) = self.arrays[array.index as usize].storage.index(index){
+            return value
+        }
+        else{
+            trap.err_array_bound()
+        }
+    }
     
-    
+    pub fn set_array_index(&mut self, array:ScriptArray, index:usize, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
+        let array = &mut self.arrays[array.index as usize];
+        if array.tag.is_frozen(){
+            return trap.err_frozen();
+        }
+        array.tag.set_dirty();
+        array.storage.set_index(index, value);
+        NIL
+    }
+        
     
     // Accessors
     
@@ -898,11 +965,11 @@ impl ScriptHeap{
     
     
         
-    pub fn vec_insert_value_at(&mut self, _ptr:ScriptObject, _key:ScriptValue, _value:ScriptValue, _before:bool, _ip:&mut ScriptTrap)->ScriptValue{
+    pub fn vec_insert_value_at(&mut self, _ptr:ScriptObject, _key:ScriptValue, _value:ScriptValue, _before:bool, _ip:&ScriptTrap)->ScriptValue{
         NIL
     }
         
-    pub fn vec_insert_value_begin(&mut self, _ptr:ScriptObject, _key:ScriptValue, _value:ScriptValue, _ip:&mut ScriptTrap)->ScriptValue{
+    pub fn vec_insert_value_begin(&mut self, _ptr:ScriptObject, _key:ScriptValue, _value:ScriptValue, _ip:&ScriptTrap)->ScriptValue{
         NIL
     }
         
@@ -1164,65 +1231,50 @@ impl ScriptHeap{
         if a == b{
             return true
         }
-        if let Some(cmp) = a.as_inline_string(|a|{
-            if let Some(cmp) = b.as_inline_string(|b|{
-                a == b
-            }){return cmp}
-            else{
-                if let Some(b)  = b.as_string(){
-                    self.string(b) == a
-                }
-                else{
-                    false
-                }
-            }
-        }){return cmp}
-        else if let Some(a) = a.as_string(){
-            let a = self.string(a);
-            if let Some(cmp) = b.as_inline_string(|b|{
-                a == b
-            }){return cmp}
-            else{
-                if let Some(b)  = b.as_string(){
-                    return self.string(b) == a
+        if let Some(arr1) = a.as_array(){
+            if let Some(arr2) = b.as_array(){
+                if self.arrays[arr1.index as usize].storage == self.arrays[arr2.index as usize].storage{
+                    return true
                 }
             }
         }
         false
     }
     
-    pub fn print_key_value(&self, key:ScriptValue, value:ScriptValue,str:&mut String){
+    pub fn print(&self, value:ScriptValue){
         if let Some(obj) = value.as_object(){
-            if !key.is_nil(){
-                str.clear();self.cast_to_string(key, str);
-                print!("{}:", str);
-            }
             let object = &self.objects[obj.index as usize];
             if object.tag.is_script_fn(){
                 print!("Fn");
-                self.print(obj);
+                self.print_object(obj);
             }
             else if object.tag.is_native_fn(){
                 print!("Native");
-                self.print(obj);
+                self.print_object(obj);
             }
             else{
-                self.print(obj);
+                self.print_object(obj);
             }
         }
-        else{
-            if !key.is_nil(){
-                str.clear();self.cast_to_string(key, str);
-                print!("{}:",str);
+        else if let Some(arr) = value.as_array(){
+            let array = &self.arrays[arr.index as usize];
+            let len = array.storage.len();
+            print!("[");
+            for i in 0..len{
+                if i!=0{print!(", ")}
+                self.print(array.storage.index(i).unwrap());
             }
-            str.clear();self.cast_to_string(value, str);
+            print!("]");
+        }
+        else{
+            let mut str = String::new();
+            self.cast_to_string(value, &mut str);
             print!("{}",str);
         }
     }
     
-    pub fn print(&self, set_ptr:ScriptObject){
+    pub fn print_object(&self, set_ptr:ScriptObject){
         let mut ptr = set_ptr;
-        let mut str = String::new();
         // scan up the chain to set the proto value
         print!("{{");
         let mut first = true;
@@ -1230,15 +1282,20 @@ impl ScriptHeap{
             let object = &self.objects[ptr.index as usize];
             object.map_iter(|key,value|{
                 if !first{print!(",")}
-                self.print_key_value(key, value, &mut str);
+                if key != NIL{
+                    print!("{}:", key)
+                }
+                self.print(value);
                 first = false;
             });
             for kv in object.vec.iter(){
                 if !first{print!(",")}
-                self.print_key_value(kv.key, kv.value, &mut str);
+                if kv.key != NIL{
+                    print!("{}:", kv.key)
+                }
+                self.print(kv.value);
                 first = false;
             }
-                
             if let Some(next_ptr) = object.proto.as_object(){
                 if !first{print!(",")}
                 print!("^");
