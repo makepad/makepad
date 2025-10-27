@@ -134,7 +134,7 @@ impl ScriptValueType{
     pub const COLOR: Self = Self(4);
     pub const STRING: Self = Self(5);
     pub const OBJECT: Self = Self(6);
-    pub const TRACKID: Self = Self(7);
+    pub const ARRAY: Self = Self(7);
     pub const OPCODE: Self = Self(8);
     
     pub const REDUX_MARKER: Self = Self(9);
@@ -237,7 +237,7 @@ impl fmt::Display for ScriptValueType {
             Self::COLOR=>write!(f,"color"),
             Self::STRING=>write!(f,"string"),
             Self::OBJECT=>write!(f,"object"),
-            Self::TRACKID=>write!(f,"trackid"),
+            Self::ARRAY=>write!(f,"array"),
             Self::OPCODE=>write!(f,"opcode"),
             Self::INLINE_STRING_0=>write!(f,"string0"),
             Self::INLINE_STRING_1=>write!(f,"string1"),
@@ -304,7 +304,7 @@ impl ScriptValue{
     pub const TYPE_COLOR: u64 = ScriptValueType::COLOR.to_u64();
     pub const TYPE_STRING: u64 = ScriptValueType::STRING.to_u64();
     pub const TYPE_OBJECT: u64 = ScriptValueType::OBJECT.to_u64();
-    pub const TYPE_TRACKID: u64 = ScriptValueType::TRACKID.to_u64();
+    pub const TYPE_ARRAY: u64 = ScriptValueType::ARRAY.to_u64();
     
     pub const TYPE_INLINE_STRING_0: u64 = ScriptValueType::INLINE_STRING_0.to_u64();
     pub const TYPE_INLINE_STRING_1: u64 = ScriptValueType::INLINE_STRING_1.to_u64();
@@ -428,33 +428,12 @@ impl ScriptValue{
         Self(val as u64|Self::TYPE_COLOR)
     }
     
-    pub const fn from_trackid(val: u32)->Self{
-        Self((val as u64)|Self::TYPE_TRACKID)
-    }
-    
-    pub const fn from_trackid_dirty(val: u32)->Self{
-        Self((val as u64)|Self::TYPE_TRACKID|Self::TRACKID_DIRTY_BIT)
-    }
-    
-    pub const fn get_and_clear_trackid_dirty(&mut self)->bool{
-        if self.is_trackid(){
-            let ret = self.0 & Self::TRACKID_DIRTY_BIT != 0;
-            self.0 &= !Self::TRACKID_DIRTY_BIT;
-            ret
-        }
-        else{
-            false
-        }
-    }
-    
-    pub const fn set_trackid_dirty(&mut self){
-        if self.is_trackid(){
-            self.0 |= Self::TRACKID_DIRTY_BIT
-        }
+    pub const fn from_array(val: u32)->Self{
+        Self((val as u64)|Self::TYPE_ARRAY)
     }
         
-    pub const fn as_trackid(&self)->Option<u32>{
-        if self.is_trackid(){
+    pub const fn as_array(&self)->Option<u32>{
+        if self.is_array(){
             Some((self.0 &0xFFFF_FFFF) as u32)
         }
         else{
@@ -705,8 +684,8 @@ impl ScriptValue{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_OBJECT
     }
     
-    pub const fn is_trackid(&self)->bool{
-        (self.0 & Self::TYPE_MASK) == Self::TYPE_TRACKID
+    pub const fn is_array(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_ARRAY
     }
 }
 
@@ -739,8 +718,8 @@ impl fmt::Display for ScriptValue {
         if let Some(ptr) = self.as_object(){
             return write!(f, "[ScriptObject:{}]",ptr.index)
         }
-        if let Some(index) = self.as_trackid(){
-            return write!(f, "[TrackID:{}]",index)
+        if let Some(index) = self.as_array(){
+            return write!(f, "[ScriptArray:{}]",index)
         }
         if let Some(error) = self.as_err(){
             return write!(f, "{}", error.ty)

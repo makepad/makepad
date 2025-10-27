@@ -23,15 +23,6 @@ impl fmt::Display for ObjectStorageType {
             Self::AUTO=>write!(f, "AUTO"),
             Self::VEC2=>write!(f, "VEC2"),
             Self::MAP=>write!(f, "MAP"),
-            Self::VEC1=>write!(f, "VEC1"),
-            Self::U8=>write!(f, "U8"),
-            Self::U16=>write!(f, "U16"),
-            Self::U32=>write!(f, "U32"),
-            Self::I8=>write!(f, "I8"),
-            Self::I16=>write!(f, "I16"),
-            Self::I32=>write!(f, "I32"),
-            Self::F32=>write!(f, "F32"),
-            Self::F64=>write!(f, "F64"),
             _=>write!(f, "?ObjectType"),
         }
     }
@@ -41,20 +32,11 @@ impl ObjectStorageType{
     pub const AUTO: Self = Self(0);
     pub const VEC2: Self = Self(1);
     pub const MAP: Self = Self(2);
-    pub const VEC1:Self = Self(3);
-        
-    pub fn uses_vec2(&self)->bool{
-        *self <= Self::VEC2
-    }
         
     pub fn is_auto(&self)->bool{
         *self == Self::AUTO
     }
         
-    pub fn is_vec1(&self)->bool{
-        *self == Self::VEC1
-    }
-            
     pub fn is_vec2(&self)->bool{
         *self == Self::VEC2
     }
@@ -62,28 +44,6 @@ impl ObjectStorageType{
     pub fn is_map(&self)->bool{
         *self == Self::MAP
     }
-            
-    pub fn has_paired_vec(&self)->bool{
-        return self.0 <= 2
-    }
-                    
-    pub fn is_gc(&self)->bool{
-        return self.0 <= 3
-    }
-        
-    pub fn is_typed(&self)->bool{
-        return self.0 >= 4
-    }
-        
-    pub const U8: Self = Self(4);
-    pub const U16: Self = Self(5);
-    pub const U32: Self = Self(6);
-    pub const I8: Self = Self(7);
-    pub const I16: Self = Self(8);
-    pub const I32: Self = Self(9);
-    pub const F32: Self = Self(10);
-    pub const F64: Self = Self(11);
-    // cant really use these
 }
 
 #[derive(Debug,Clone,Copy)]
@@ -399,13 +359,19 @@ pub struct ScriptMapValue{
     pub value: ScriptValue
 }
 
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
+pub struct ScriptVecValue{
+    pub key: ScriptValue,
+    pub value: ScriptValue
+}
+
 #[derive(Default, Debug)]
 pub struct ObjectData{
     pub tag: ObjectTag,
     pub proto: ScriptValue,
     
     pub map: ValueMap<ScriptValue, ScriptMapValue>,
-    pub vec: Vec<ScriptValue>,
+    pub vec: Vec<ScriptVecValue>,
 }
 
 impl ObjectData{
@@ -512,40 +478,10 @@ impl ObjectData{
     }
      
     pub fn push_vec_from_other(&mut self, other:&ObjectData){
-        // alright lets go and push the vec from other
-        let ty_self = self.tag.get_storage_type();
-        let ty_other = other.tag.get_storage_type();
-        if ty_self.has_paired_vec() && ty_other.has_paired_vec(){
-            self.vec.extend_from_slice(&other.vec);
-            return
-        }
-        if ty_self.is_vec1() && ty_other.has_paired_vec(){
-            for chunk in other.vec.chunks(2){
-                self.vec.push(chunk[1])
-            }
-            return
-        }
-                
-        if ty_self.has_paired_vec() && ty_other.is_vec1(){
-            for value in &other.vec{
-                self.vec.extend_from_slice(&[NIL, *value]);
-            }
-            return
-        }
-        println!("implement push_vec_from_other {} {}", ty_self, ty_other);
+        self.vec.extend_from_slice(&other.vec);
     }
     
     pub fn set_storage_type(&mut self, ty_new:ObjectStorageType){
-        let ty_now = self.tag.get_storage_type();
-        // block flipping from raw data mode to gc'ed mode
-        if !ty_now.is_gc() && ty_new.is_gc(){
-            self.vec.clear();
-        }
-        if !ty_now.has_paired_vec() && ty_new.has_paired_vec(){
-            if self.vec.len() & 1 != 0{
-                self.vec.push(NIL)
-            }
-        }
         self.tag.set_storage_type_unchecked(ty_new)
     }
     //const DONT_RECYCLE_WHEN: usize = 1000;
