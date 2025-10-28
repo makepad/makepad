@@ -235,15 +235,15 @@ impl ScriptHeap{
         None
     }
         
-    pub fn check_intern_string(&self,value:&str)->ScriptValue{
+    pub fn check_intern_string(&self,value:&str)->Option<ScriptValue>{
         if let Some(v) = ScriptValue::from_inline_string(&value){
-            v
+            Some(v)
         }
         else if let Some(idx) = self.string_intern.get(value){
-            (*idx).into()
+            Some((*idx).into())
         }
         else{
-            NIL
+            None
         }
     }
         
@@ -587,7 +587,7 @@ impl ScriptHeap{
         object.tag.freeze_component();
     }
     
-    pub fn set_string_keys(&mut self, obj: ScriptObject){
+    pub fn set_lookup_id_as_string(&mut self, obj: ScriptObject){
         let object = &mut  self.objects[obj.index as usize];
         object.tag.set_string_keys();
     }
@@ -787,7 +787,18 @@ impl ScriptHeap{
                 if object.tag.needs_checking(){
                     return self.set_value_shallow_checked(ptr, key, key_id, value, trap)
                 }
-                
+                if object.tag.is_string_keys(){
+                    if let Some(skey) = key_id.as_string(|s|{
+                        if let Some(s) = s{
+                            self.check_intern_string(s)
+                        }
+                        else{
+                            None
+                        }
+                    }){
+                        return self.set_value_shallow(ptr, skey, value, trap);
+                    }
+                }
                 return self.set_value_shallow(ptr, key, value, trap);
             }
             else{
@@ -938,8 +949,12 @@ impl ScriptHeap{
                 if let Some(id) = key.as_id(){
                     if let Some(value) = id.as_string(|s|{
                         if let Some(s) = s{
-                            let idx = self.check_intern_string(s);
-                            object.map_get(&idx)
+                            if let Some(idx) = self.check_intern_string(s){
+                                object.map_get(&idx)
+                            }
+                            else{
+                                None
+                            }
                         }
                         else{
                             None
@@ -1340,7 +1355,12 @@ impl ScriptHeap{
                                 let id = k.as_id().unwrap();
                                 if let Some(v2) = id.as_string(|s|{
                                     if let Some(s) = s{
-                                        ob.map_get(&self.check_intern_string(s))
+                                        if let Some(idx) = self.check_intern_string(s){
+                                            ob.map_get(&idx)
+                                        }
+                                        else{
+                                            None
+                                        }
                                     }
                                     else{
                                         None
