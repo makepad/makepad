@@ -144,6 +144,40 @@ impl ScriptArrayStorage{
             Self::U8(v)=>v.remove(index).into(),
         }
     }
+    pub fn to_string(&self, heap:&ScriptHeap, s:&mut String){
+        match self{
+            Self::U8(bytes)=>{
+                let v = String::from_utf8_lossy(bytes);
+                s.push_str(v.as_ref());
+            }
+            Self::ScriptValue(vec)=>{
+                for v in vec{
+                    heap.cast_to_string(*v, s);
+                }
+            },
+            Self::F32(v)=>{
+                for v in v {
+                    if let Some(c) = std::char::from_u32(*v as _){
+                        s.push(c)
+                    }
+                }
+            },
+            Self::U32(v)=>{
+                for v in v {
+                    if let Some(c) = std::char::from_u32(*v){
+                        s.push(c)
+                    }
+                }
+            },
+            Self::U16(v)=>{
+                for v in v {
+                    if let Some(c) = std::char::from_u32(*v as _){
+                        s.push(c)
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub struct ScriptArrayData{
@@ -166,39 +200,18 @@ impl ScriptArrayData{
         tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(string), |vm, args|{
             if let Some(arr) = script_value!(vm, args.this).as_array(){
                 return vm.heap.new_string_with(|heap, s|{
-                    match heap.array_ref(arr){
-                        ScriptArrayStorage::U8(bytes)=>{
-                            let v = String::from_utf8_lossy(bytes);
-                            s.push_str(v.as_ref());
-                        }
-                        ScriptArrayStorage::ScriptValue(vec)=>{
-                            for v in vec{
-                                heap.cast_to_string(*v, s);
-                            }
-                        },
-                        ScriptArrayStorage::F32(v)=>{
-                            for v in v {
-                                if let Some(c) = std::char::from_u32(*v as _){
-                                    s.push(c)
-                                }
-                            }
-                        },
-                        ScriptArrayStorage::U32(v)=>{
-                            for v in v {
-                                if let Some(c) = std::char::from_u32(*v){
-                                    s.push(c)
-                                }
-                            }
-                        },
-                        ScriptArrayStorage::U16(v)=>{
-                            for v in v {
-                                if let Some(c) = std::char::from_u32(*v as _){
-                                    s.push(c)
-                                }
-                            }
-                        }
-                    }
+                    heap.array_ref(arr).to_string(heap, s);
                 }).into();
+            }
+            vm.thread.trap.err_unexpected()
+        });
+        
+        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(read_json), |vm, args|{
+            if let Some(arr) = script_value!(vm, args.this).as_array(){
+                let mut s = String::new();
+                let array_ref = vm.heap.array_ref(arr);
+                array_ref.to_string(vm.heap, &mut s);
+                return vm.thread.json_parser.read_json(&s, vm.heap)
             }
             vm.thread.trap.err_unexpected()
         });
@@ -254,6 +267,8 @@ impl ScriptArrayData{
             }
             vm.thread.trap.err_not_impl()
         });
+        
+        
     }
     
     pub fn clear(&mut self){
