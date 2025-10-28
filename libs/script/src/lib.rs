@@ -228,8 +228,8 @@ pub fn test(){
         try{s{opt:false}} assert(true) ok assert(false)
         
         // check the vec
-        let x = s{vec:[1,2,3,4]}
-        assert(x.vec == [1,2,3,4])
+        let x = s{vec:[1 2 3 4]}
+        assert(x.vec == [1 2 3 4])
         // check typechecking in a vec
         try{s{vec:[false]}} assert(true) ok assert(false)
         try{s{vec:[1,2]}} assert(false) ok assert(true)
@@ -244,6 +244,7 @@ pub fn test(){
         let x = {x:1 y:[1 2 3]};
         let y = x.write_json();
         let z = y.read_json();
+        assert(z == x)
         assert(z["x"] == z.x)
         assert(x["y"] == [1 2 3])
         
