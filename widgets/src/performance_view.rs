@@ -29,7 +29,7 @@ live_design! {
         view = <ViewBase> {
             margin: 5,
             visible: true
-            flow: Right
+            flow: Right { wrap: false }
             width: Fill,
             height: Fill,
 

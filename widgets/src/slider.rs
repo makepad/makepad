@@ -1220,7 +1220,7 @@ live_design!{
     pub RotaryFlat = <SliderMinimal> {
         height: 95., width: 65.,
         axis: Vertical,
-        flow: Right
+        flow: Right { wrap: false }
         align:{x:0.,y:0.0}
         label_walk:{
             margin:{top:0}
@@ -1777,7 +1777,7 @@ impl Slider {
         self.draw_bg.slide_pos = self.relative_value as f32;
         self.draw_bg.begin(cx, walk, self.layout);
         
-        if let Flow::Right = self.layout.flow{
+        if let Flow::Right { wrap: false } = self.layout.flow{
             
             if let Some(mut dw) = cx.defer_walk_turtle(self.label_walk) {
                 //, (self.value*100.0) as usize);

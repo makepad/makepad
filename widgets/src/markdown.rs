@@ -132,7 +132,7 @@ live_design!{
     
     pub Markdown = <MarkdownBase> {
         width:Fill, height:Fit,
-        flow: RightWrap,
+        flow: Right { wrap: true },
         padding: <THEME_MSPACE_1> {}
                 
         font_size: (THEME_FONT_SIZE_P),
@@ -181,19 +181,19 @@ live_design!{
         }
         
         code_layout: {
-            flow: RightWrap,
+            flow: Right { wrap: true },
             padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3), bottom:10 }
         }
         code_walk: { width: Fill, height: Fit }
         
         quote_layout: {
-            flow: RightWrap,
+            flow: Right { wrap: true },
             padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
         }
         quote_walk: { width: Fill, height: Fit, }
         
         list_item_layout: {
-            flow: RightWrap,
+            flow: Right { wrap: true },
             padding: <THEME_MSPACE_1> {}
         }
         list_item_walk: {

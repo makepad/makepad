@@ -278,7 +278,7 @@ live_design!{
 
     ImgGridMenuDesktop = <View> {
         width: Fill, height: Fit,
-        flow: Right,
+        flow: Right { wrap: false },
         spacing: 10.,
         padding: { right: 10, bottom: 5., left: 10.},
         align: { y: 0.5 },
@@ -322,7 +322,7 @@ live_design!{
 
     ImgPlaceholderRowDesktop = <View> {
         width: Fill, height: Fit,
-        flow: Right
+        flow: Right { wrap: false }
         spacing: 1.,
 
         <ImgPlaceholder> {}
@@ -335,7 +335,7 @@ live_design!{
 
     ImgPlaceholderRowMobile = <View> {
         width: Fill, height: Fit,
-        flow: Right
+        flow: Right { wrap: false }
         spacing: 1.,
 
         <ImgPlaceholder> {}

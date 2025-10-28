@@ -40,14 +40,14 @@ live_design!{
                 <Vr> {}
                 <View> {
                     align: { x: 0., y: 0. }
-                    flow: Right, width: Fit,
+                    flow: Right { wrap: false }, width: Fit,
                     spacing: 0.
                     <Labelbold> { text: "Font" }
                     <Label> { text: "Noto Sans" }
                 }
                 <View> {
                     align: { x: 0., y: 0. }
-                    flow: Right, width: Fit,
+                    flow: Right { wrap: false }, width: Fit,
                     spacing: 0.
                     <Labelbold> { text: "Weight" }
                     <Label> { text: "bold"
@@ -55,14 +55,14 @@ live_design!{
                 }
                 <View> {
                     align: { x: 0., y: 0. }
-                    flow: Right, width: Fit,
+                    flow: Right { wrap: false }, width: Fit,
                     spacing: 0.
                     <Labelbold> { text: "Size" }
                     <Label> { text: "11 pt" }
                 } 
                 <View> {
                     align: { x: 0., y: 0. }
-                    flow: Right, width: Fit,
+                    flow: Right { wrap: false }, width: Fit,
                     spacing: 0.
                     <Labelbold> { text: "Line height" }
                     <Label> { text: "1.2" }
@@ -70,7 +70,7 @@ live_design!{
                 <Vr> {}
                 <View> {
                     align: { x: 0., y: 0. }
-                    flow: Right, width: Fit,
+                    flow: Right { wrap: false }, width: Fit,
                     spacing: 0.
                     <ButtonFlatter> {
                         width: 25.
@@ -286,7 +286,7 @@ live_design!{
             }
                         
             <View> {
-                flow: Right,
+                flow: Right { wrap: false },
                 width: Fill, height: Fit, 
                 align: { x: 0.0, y: 0.5 }
                 <RoundedView> {
@@ -305,7 +305,7 @@ live_design!{
                 width: Fill, height: Fit, 
                 spacing: (THEME_SPACE_2)
                 align: { x: 0.5, y: 0.5 }
-                flow: Right,
+                flow: Right { wrap: false },
                 <Pbold> { width: Fit, text: "RGBA" }
                 <P> { width: Fit, text: "0 / 255 / 0 / 255" }
                 <P> { width: Fit, text: "#83741AFF" }
@@ -313,7 +313,7 @@ live_design!{
             <View> {
                 align: { x: 0.5, y: 0.5 }
                 width: Fill, height: Fit, 
-                flow: Right,
+                flow: Right { wrap: false },
                 spacing: (THEME_SPACE_1),
                 margin: { bottom: 10. }
                 <RoundedView> {

@@ -33,7 +33,7 @@ live_design!{
             <View> {
                 width: Fill,
                 height: Fit,
-                flow: Right,
+                flow: Right { wrap: false },
                 margin: {left: 10.0, right: 10.0},
     
                 run_button = <Button> {
