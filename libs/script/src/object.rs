@@ -2,6 +2,11 @@ use std::fmt;
 use crate::value::*;
 use crate::value_map::*;
 use crate::traits::*;
+use crate::heap::*;
+use crate::native::*;
+use crate::methods::*;
+use crate::makepad_live_id::*;
+use crate::*;
 use std::collections::hash_map::Entry;
 //use std::collections::btree_map::BTreeMap;
 
@@ -366,7 +371,7 @@ pub struct ScriptVecValue{
 }
 
 #[derive(Default, Debug)]
-pub struct ObjectData{
+pub struct ScriptObjectData{
     pub tag: ScriptObjectTag,
     pub proto: ScriptValue,
     
@@ -374,7 +379,106 @@ pub struct ObjectData{
     pub vec: Vec<ScriptVecValue>,
 }
 
-impl ObjectData{
+impl ScriptObjectData{
+    
+    pub fn add_type_methods(tm:&mut ScriptTypeMethods, h: &mut ScriptHeap, native:&mut ScriptNative, ){
+        tm.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(proto), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                return vm.heap.proto(this)
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        tm.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(push), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                return vm.heap.vec_push_vec(this, args, &mut vm.thread.trap);
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        tm.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(pop), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                return vm.heap.vec_pop(this, &mut vm.thread.trap).value
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        tm.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(len), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                return vm.heap.vec_len(this).into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                    
+        tm.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(extend), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                return vm.heap.vec_push_vec_of_vec(this, args, false, &mut vm.thread.trap);
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                    
+        tm.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(import), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                return vm.heap.vec_push_vec_of_vec(this, args, true, &mut vm.thread.trap);
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        tm.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(freeze), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                vm.heap.freeze(this);
+                return this.into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        tm.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(freeze_api), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                vm.heap.freeze_api(this);
+                return this.into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        tm.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(freeze_module), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                vm.heap.freeze_module(this);
+                return this.into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        tm.add(h, native, &[], ScriptValueType::REDUX_OBJECT, id!(freeze_component), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                vm.heap.freeze_component(this);
+                return this.into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        tm.add(h, native, script_args!(cb=NIL), ScriptValueType::REDUX_OBJECT, id!(retain), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_object(){
+                let fnptr = script_value!(vm, args.cb);
+                let mut i = 0;
+                while i < vm.heap.vec_len(this){
+                    let value = script_value!(vm, this[i]);
+                    let ret = vm.call(fnptr, &[value]);
+                    if ret.is_err(){
+                        return ret;
+                    }
+                    if !vm.heap.cast_to_bool(ret){
+                        vm.heap.vec_remove(this, i, &mut vm.thread.trap);
+                    }
+                    else{
+                        i += 1
+                    }
+                }
+                return NIL
+            }
+            vm.thread.trap.err_not_impl()
+        });
+    }     
+    
     pub fn map_insert(&mut self, key:ScriptValue, value:ScriptValue){
         if self.tag.is_tracked(){
             match self.map.entry(key) {
@@ -473,11 +577,11 @@ impl ObjectData{
         }
     }
     
-    pub fn merge_map_from_other(&mut self, other:&ObjectData){
+    pub fn merge_map_from_other(&mut self, other:&ScriptObjectData){
         self.map.extend(other.map.iter());
     }
      
-    pub fn push_vec_from_other(&mut self, other:&ObjectData){
+    pub fn push_vec_from_other(&mut self, other:&ScriptObjectData){
         self.vec.extend_from_slice(&other.vec);
     }
     
