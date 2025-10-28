@@ -85,9 +85,21 @@ impl From<f64> for ScriptValue{
     }
 }
 
+impl From<ScriptValue> for f64{
+    fn from(v:ScriptValue) -> Self{
+        v.as_f64().unwrap_or(0.0) as _
+    }
+}
+
 impl From<u32> for ScriptValue{
     fn from(v:u32) -> Self{
         ScriptValue::from_f64(v as f64)
+    }
+}
+
+impl From<ScriptValue> for u32{
+    fn from(v:ScriptValue) -> Self{
+        v.as_f64().unwrap_or(0.0) as _
     }
 }
 
@@ -97,9 +109,21 @@ impl From<i32> for ScriptValue{
     }
 }
 
+impl From<ScriptValue> for i32{
+    fn from(v:ScriptValue) -> Self{
+        v.as_f64().unwrap_or(0.0) as _
+    }
+}
+
 impl From<u16> for ScriptValue{
     fn from(v:u16) -> Self{
         ScriptValue::from_f64(v as f64)
+    }
+}
+
+impl From<ScriptValue> for u16{
+    fn from(v:ScriptValue) -> Self{
+        v.as_f64().unwrap_or(0.0) as _
     }
 }
 
@@ -109,15 +133,33 @@ impl From<u8> for ScriptValue{
     }
 }
 
+impl From<ScriptValue> for u8{
+    fn from(v:ScriptValue) -> Self{
+        v.as_f64().unwrap_or(0.0) as _
+    }
+}
+
 impl From<f32> for ScriptValue{
     fn from(v:f32) -> Self{
         ScriptValue::from_f64(v as f64)
     }
 }
 
+impl From<ScriptValue> for f32{
+    fn from(v:ScriptValue) -> Self{
+        v.as_f64().unwrap_or(0.0) as _
+    }
+}
+
 impl From<usize> for ScriptValue{
     fn from(v:usize) -> Self{
         ScriptValue::from_f64(v as f64)
+    }
+}
+
+impl From<ScriptValue> for usize{
+    fn from(v:ScriptValue) -> Self{
+        v.as_f64().unwrap_or(0.0) as _
     }
 }
 
@@ -205,7 +247,8 @@ impl ScriptValueType{
     pub const ERR_NOT_ALLOWED_IN_ARRAY: Self = Self(43);
     pub const ERR_NOT_ALLOWED_IN_ARGUMENTS: Self = Self(44);
     pub const ERR_ARRAY_BOUND: Self = Self(45);
-    pub const ERR_LAST: Self = Self(45);
+    pub const ERR_WRONG_TYPE_IN_APPLY: Self = Self(46);
+    pub const ERR_LAST: Self = Self(46);
     
     pub const ID: Self = Self(0x80);
         
@@ -305,6 +348,7 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_NOT_ALLOWED_IN_ARRAY=>write!(f,"NotAllowedInArray"),
             Self::ERR_NOT_ALLOWED_IN_ARGUMENTS=>write!(f,"NotAllowedInArguments"),
             Self::ERR_ARRAY_BOUND=>write!(f,"ArrayIndexOutOfBounds"),
+            Self::ERR_WRONG_TYPE_IN_APPLY=>write!(f,"WrongTypeInApply"),
             Self::ERR_USER=>write!(f,"UserGenerated"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ScriptValueType?")
@@ -406,7 +450,7 @@ impl ScriptValue{
     err_fn!(err_not_allowed_in_array, ERR_NOT_ALLOWED_IN_ARRAY);
     err_fn!(err_not_allowed_in_arguments, ERR_NOT_ALLOWED_IN_ARGUMENTS);
     err_fn!(err_array_bound, ERR_ARRAY_BOUND);
-    
+    err_fn!(err_wrong_type_in_apply, ERR_WRONG_TYPE_IN_APPLY);
     
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ScriptValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()}
     
@@ -774,7 +818,6 @@ impl ScriptValue{
     pub const fn is_inline_string(&self)->bool{
         self.0 >= Self::TYPE_INLINE_STRING_0  && self.0 < Self::TYPE_INLINE_STRING_END
     }
-
 }
 
 impl fmt::Debug for ScriptValue {
