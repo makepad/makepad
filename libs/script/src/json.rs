@@ -56,7 +56,7 @@ impl JsonParser{
                      }
                      ScriptToken::OpenCurly=>{ // object
                          let new_obj = heap.new_object();
-                         heap.set_string_keys(new_obj);
+                         heap.set_lookup_id_as_string(new_obj);
                          self.root = new_obj.into();
                          self.state.push(State::ObjectKey(new_obj));
                      }
@@ -91,7 +91,7 @@ impl JsonParser{
                     // nonstandard, allow objects and arrays as keys
                     ScriptToken::OpenCurly=>{ // object
                         let new_obj = heap.new_object();
-                        heap.set_string_keys(new_obj);
+                        heap.set_lookup_id_as_string(new_obj);
                         self.state.push(State::ObjectColon(obj, new_obj.into()));
                         self.state.push(State::ObjectKey(new_obj));
                     }
@@ -159,7 +159,7 @@ impl JsonParser{
                      }
                      ScriptToken::OpenCurly=>{ // object
                          let new_obj = heap.new_object();
-                         heap.set_string_keys(new_obj);
+                         heap.set_lookup_id_as_string(new_obj);
                          heap.set_value_def(obj, key, new_obj.into());
                          self.state.push(State::ObjectKey(new_obj));
                      }
@@ -209,7 +209,7 @@ impl JsonParser{
                     }
                     ScriptToken::OpenCurly=>{ // object
                         let new_obj = heap.new_object();
-                        heap.set_string_keys(new_obj);
+                        heap.set_lookup_id_as_string(new_obj);
                         heap.array_push_unchecked(arr, new_obj.into());
                         self.state.push(State::ObjectKey(new_obj));
                     }
@@ -254,6 +254,7 @@ impl JsonParser{
 
 #[derive(Default)]
 pub struct JsonParserThread{
+    pub temp_string: String,
     pub tokenizer:ScriptTokenizer,
     pub parser:JsonParser
 }

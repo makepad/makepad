@@ -247,6 +247,8 @@ pub fn test(){
         assert(z == x)
         assert(z["x"] == z.x)
         assert(x["y"] == [1 2 3])
+        z.x = 2
+        ~z
         
         
     };

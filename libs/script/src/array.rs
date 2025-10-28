@@ -209,9 +209,13 @@ impl ScriptArrayData{
         tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(read_json), |vm, args|{
             if let Some(arr) = script_value!(vm, args.this).as_array(){
                 let mut s = String::new();
+                std::mem::swap(&mut s, &mut vm.thread.json_parser.temp_string);
+                s.clear();
                 let array_ref = vm.heap.array_ref(arr);
                 array_ref.to_string(vm.heap, &mut s);
-                return vm.thread.json_parser.read_json(&s, vm.heap)
+                let r = vm.thread.json_parser.read_json(&s, vm.heap);
+                std::mem::swap(&mut s, &mut vm.thread.json_parser.temp_string);
+                return r
             }
             vm.thread.trap.err_unexpected()
         });
