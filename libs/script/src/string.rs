@@ -53,6 +53,10 @@ impl ScriptStringData{
             let this = script_value!(vm, args.this);
             vm.heap.string_to_chars_array(this).into()
         });
+        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(json), |vm, args|{
+            let this = script_value!(vm, args.this);
+            vm.heap.string_to_bytes_array(this).into()
+        });
     }
     
     pub fn clear(&mut self){

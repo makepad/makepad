@@ -6,7 +6,7 @@ use makepad_script::id;
 
 pub fn define_net_module(vm:&mut ScriptVm){
     let _net = vm.new_module(id!(net));
-    
+    /*
     let req = HttpRequest::script_proto(vm);
     vm.heap.set_value_def(net, id!(HttpRequest), req);
     
@@ -25,5 +25,5 @@ pub fn define_net_module(vm:&mut ScriptVm){
         vm.cx();
         */
         NIL
-    });
+    })*/
 }
