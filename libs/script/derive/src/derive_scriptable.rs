@@ -64,6 +64,10 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             tb.add("}");
         }
         
+        // marker         
+        tb.add("impl").stream(generic.clone());
+        tb.add("ScriptDeriveMarker for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+                
         tb.add("impl").stream(generic.clone());
         tb.add("ScriptHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         tb.add("    fn on_deref_before_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){");
@@ -295,6 +299,17 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         if pick.is_none() {
             return error_result("Enum needs atleast one field marked pick");
         }
+        
+        
+        // marker         
+        
+        
+        
+        
+        tb.add("impl").stream(generic.clone());
+        tb.add("ScriptDeriveMarker for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+        
+        
         
         
         

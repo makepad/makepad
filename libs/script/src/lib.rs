@@ -21,6 +21,7 @@ pub mod traits;
 pub mod prims;
 pub mod array;
 pub mod trap;
+pub mod vec_prims;
 
 pub use makepad_live_id::*;
 pub use value::*;
@@ -80,7 +81,7 @@ pub fn test(){
        #[live(1.0)] field:f64,
        #[live(EnumTest::Bare)] enm:EnumTest,
        #[live] opt: Option<f64>,
-       #[live] vec: Vec<f64>
+       #[live] vec: Vec<u8>
     }
     
     #[derive(Script, ScriptHook)]
@@ -224,6 +225,14 @@ pub fn test(){
         // check typechecking in a vec
         try{s{vec:[false]}} assert(true) ok assert(false)
         try{s{vec:[1,2]}} assert(false) ok assert(true)
+        
+        // string to array
+        assert("hi".bytes().string() == "hi")
+        let a = "12345".bytes();
+        a.pop();
+        assert(a.string() == "1234")
+        assert("hi".chars().string() == "hi")
+                
     };
     
     let _code = script!{
