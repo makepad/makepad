@@ -29,7 +29,7 @@ let main_ui = View{
         }
     }
     view: View{
-        flow: Right
+        flow: Right { wrap: false }
         $new_item: TextInput{}
         Button{
             text: "Add",

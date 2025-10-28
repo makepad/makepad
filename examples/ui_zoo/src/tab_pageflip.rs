@@ -15,7 +15,7 @@ live_design!{
         demos = {
             <View> {
                 height: Fit, width: Fill,
-                flow: Right,
+                flow: Right { wrap: false },
                 spacing: (THEME_SPACE_2)
                 pageflipbutton_a = <Button> { text: "Page A" }
                 pageflipbutton_b = <Button> { text: "Page B" }

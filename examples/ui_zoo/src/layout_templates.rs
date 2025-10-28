@@ -10,7 +10,7 @@ live_design!{
 
     pub UIZooTabLayout_B = <View> {
         height: Fill, width: Fill
-        flow: Right,
+        flow: Right { wrap: false },
         padding: 0
         spacing: 0.
 
@@ -42,7 +42,7 @@ live_design!{
     pub UIZooRowH = <View> {
         height: Fit, width: Fill,
         spacing: (THEME_SPACE_2)
-        flow: Right,
+        flow: Right { wrap: false },
         align: { x: 0., y: 0.5 }
     }
 
