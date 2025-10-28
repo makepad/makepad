@@ -76,6 +76,7 @@ enum State{
     Color
 }
 
+#[derive(Default)]
 pub struct ScriptTokenizer{
     pos: usize,
     pub tokens: Vec<ScriptTokenPos>,
@@ -85,25 +86,21 @@ pub struct ScriptTokenizer{
     state: State,
 }
 
-impl Default for ScriptTokenizer{
-    fn default()->Self{
-        Self{
-            unfinished: Default::default(),
-            tokens: Default::default(),
-            temp: Default::default(),
-            original: Default::default(),
-            state: State::Whitespace,
-            pos: 0,
-        }
-    }
-}
-
 pub struct ScriptLoc{
     pub row: usize,
     pub col: usize
 }
 
 impl ScriptTokenizer{
+    
+    pub fn clear(&mut self){
+        self.pos = 0;
+        self.tokens.clear();
+        self.original.clear();
+        self.unfinished.clear();
+        self.temp.clear();
+        self.state = State::Whitespace
+    }
     
     pub fn  token_index_to_row_col(&self, tok_index:u32)->Option<(u32,u32)>{
         // first find the real pos

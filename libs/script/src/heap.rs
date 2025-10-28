@@ -29,6 +29,7 @@ pub struct ScriptHeap{
     
     pub(crate) type_check: Vec<ScriptTypeCheck>,
     pub(crate) type_index: HashMap<ScriptTypeId, ScriptTypeIndex>,
+    
 }
 
 impl ScriptHeap{
@@ -1305,15 +1306,43 @@ impl ScriptHeap{
             let object = &self.objects[obj.index as usize];
             if object.tag.is_script_fn(){
                 print!("Fn");
-                self.print_object(obj);
             }
             else if object.tag.is_native_fn(){
                 print!("Native");
-                self.print_object(obj);
             }
-            else{
-                self.print_object(obj);
+            let mut ptr = obj;
+            // scan up the chain to set the proto value
+            print!("{{");
+            let mut first = true;
+            loop{
+                let object = &self.objects[ptr.index as usize];
+                object.map_iter(|key,value|{
+                    if !first{print!(", ")}
+                    if key != NIL{
+                        print!("{}:", key)
+                    }
+                    self.print(value);
+                    first = false;
+                });
+                for kv in object.vec.iter(){
+                    if !first{print!(", ")}
+                    if kv.key != NIL{
+                        print!("{}:", kv.key)
+                    }
+                    self.print(kv.value);
+                    first = false;
+                }
+                if let Some(next_ptr) = object.proto.as_object(){
+                    if !first{print!(",")}
+                    print!("^");
+                    ptr = next_ptr
+                }
+                else{
+                    print!("/{}", object.proto);
+                    break;
+                }
             }
+            print!("}}");
         }
         else if let Some(arr) = value.as_array(){
             let array = &self.arrays[arr.index as usize];
@@ -1332,42 +1361,105 @@ impl ScriptHeap{
         }
     }
     
-    pub fn print_object(&self, set_ptr:ScriptObject){
-        let mut ptr = set_ptr;
-        // scan up the chain to set the proto value
-        print!("{{");
-        let mut first = true;
-        loop{
-            let object = &self.objects[ptr.index as usize];
-            object.map_iter(|key,value|{
-                if !first{print!(",")}
-                if key != NIL{
-                    print!("{}:", key)
-                }
-                self.print(value);
-                first = false;
-            });
-            for kv in object.vec.iter(){
-                if !first{print!(",")}
-                if kv.key != NIL{
-                    print!("{}:", kv.key)
-                }
-                self.print(kv.value);
-                first = false;
-            }
-            if let Some(next_ptr) = object.proto.as_object(){
-                if !first{print!(",")}
-                print!("^");
-                ptr = next_ptr
-            }
-            else{
-                print!("/{}", object.proto);
-                break;
-            }
-        }
-        print!("}}");
+    pub fn write_json(&mut self, value:ScriptValue)->ScriptValue{
+        self.new_string_with(|heap, s|{
+            heap.write_json_inner(value, s);
+        })
     }
     
+    pub fn write_json_inner(&self, value:ScriptValue, out:&mut String){
+        fn escape_str(inp:&str, out:&mut String){
+            for c in inp.chars(){
+                match c{
+                    '\x08'=>out.push_str("\\b"),
+                    '\x0c'=>out.push_str("\\f"),
+                    '\n'=>out.push_str("\\n"),
+                    '\r'=>out.push_str("\\r"),
+                    '"'=>out.push_str("\\\""),
+                    '\\'=>out.push_str("\\"),
+                    c=>{
+                        out.push(c);
+                    }
+                }
+            }
+        }
+        if let Some(obj) = value.as_object(){
+            let mut ptr = obj;
+            // scan up the chain to set the proto value
+            out.push('{');
+            let mut first = true;
+            loop{
+                let object = &self.objects[ptr.index as usize];
+                object.map_iter(|key,value|{
+                    if first{print!(",")}
+                    self.write_json_inner(key, out);
+                    out.push(':');
+                    self.write_json_inner(value, out);
+                    first = false;
+                });
+                for kv in object.vec.iter(){
+                    if first{out.push(',')}
+                    first = false;
+                    self.write_json_inner(kv.key, out);
+                    out.push(':');
+                    self.write_json_inner(kv.value, out);
+                }
+                if let Some(next_ptr) = object.proto.as_object(){
+                    ptr = next_ptr
+                }
+                else{
+                    break;
+                }
+            }
+            out.push('}');
+        }
+        else if let Some(arr) = value.as_array(){
+            let array = &self.arrays[arr.index as usize];
+            let len = array.storage.len();
+            let mut first = true;
+            out.push('[');
+            for i in 0..len{
+                if let Some(value) =array.storage.index(i){
+                    if !first{out.push(',')}
+                    first = false;
+                    self.write_json_inner(value, out);
+                }
+            }
+            print!("]");
+        }
+        else if let Some(id) = value.as_id(){
+            out.push('"');
+            id.as_string(|s|{
+                if let Some(s) = s {
+                    escape_str(s, out);
+                }
+            });
+            out.push('"');
+            // alright. this is json eh. so.
+        }
+        else if let Some(s) = value.as_string(){
+            let s = &self.strings[s.index as usize].string;
+            out.push('"');
+            escape_str(s, out);
+            out.push('"');
+        }
+        else if value.as_inline_string(|s|{
+            out.push('"');
+            escape_str(s, out);
+            out.push('"');
+        }).is_some(){}
+        else if let Some(v) = value.as_bool(){
+            if v{out.push_str("true")}
+            else{out.push_str("false")}
+        }
+        else if let Some(v) = value.as_f64(){
+            write!(out, "{}", v).ok();
+        }
+        else {
+            out.push_str("null");
+        }
+    }
+        
     // memory  usage
     pub fn objects_len(&self)->usize{
         self.objects.len()
