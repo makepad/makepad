@@ -1641,7 +1641,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                     self.turtle_new_line_internal(wrap_spacing, self.align_list.len());
                     let turtle = self.turtles.last_mut().unwrap();
 
-                    let outer_origin = turtle.outer_origin();
+                    let outer_origin = turtle.pos();
                     turtle.allocate_size(outer_size);
                     turtle.move_right(outer_size.x);
                     outer_origin
