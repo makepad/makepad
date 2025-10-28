@@ -933,6 +933,7 @@ impl ScriptHeap{
             if let Some(value) = object.map_get(&key){
                 return value
             }
+            // handle auto conversion from string to id and back for json interop
             if object.tag.is_string_keys(){
                 if let Some(id) = key.as_id(){
                     if let Some(value) = id.as_string(|s|{
@@ -946,6 +947,17 @@ impl ScriptHeap{
                     }){
                         return value
                     }
+                }
+            }
+            if key.is_string_like(){
+                let id = if let Some(s) = key.as_string(){
+                    LiveId::from_str(&self.strings[s.index as usize].string)
+                }
+                else {
+                    key.as_inline_string(|s| LiveId::from_str(s)).unwrap()
+                };
+                if let Some(value) = object.map_get(&id.into()){
+                    return value
                 }
             }
             for kv in object.vec.iter().rev(){
@@ -1321,6 +1333,7 @@ impl ScriptHeap{
                                 if !self.deep_eq(v1, v2){
                                     return Some(false)
                                 }
+                                return None
                             }
                             // lets do the string keys shenanigans to make json ok
                             else if k.is_id() && ob.tag.is_string_keys(){
@@ -1336,9 +1349,10 @@ impl ScriptHeap{
                                     if !self.deep_eq(v1, v2){
                                         return Some(false)
                                     }
+                                    return None
                                 }
                             }
-                            else if k.is_string_like() && !ob.tag.is_string_keys(){
+                            else if k.is_string_like(){
                                 let id = if let Some(s) = k.as_string(){
                                     LiveId::from_str(&self.strings[s.index as usize].string)
                                 }
@@ -1349,9 +1363,10 @@ impl ScriptHeap{
                                     if !self.deep_eq(v1, v2){
                                         return Some(false)
                                     }
+                                    return None
                                 }
                             }
-                            None
+                            Some(false)
                         }){
                             return ret
                         }
