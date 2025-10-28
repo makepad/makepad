@@ -246,7 +246,7 @@ impl ScriptHeap{
             NIL
         }
     }
-    
+        
     pub fn string(&self, ptr: ScriptString)->&str{
         &self.strings[ptr.index as usize].string
     }
@@ -586,6 +586,15 @@ impl ScriptHeap{
         object.tag.set_type_index(ty);
         object.tag.freeze_component();
     }
+    
+    pub fn set_string_keys(&mut self, obj: ScriptObject){
+        let object = &mut  self.objects[obj.index as usize];
+        object.tag.set_string_keys();
+    }
+    
+    
+    
+    
     // Writing object values 
         
         
@@ -778,16 +787,18 @@ impl ScriptHeap{
                 if object.tag.needs_checking(){
                     return self.set_value_shallow_checked(ptr, key, key_id, value, trap)
                 }
+                
                 return self.set_value_shallow(ptr, key, value, trap);
             }
             else{
+               
                 return self.set_value_deep(ptr, key, value, trap)
             }
         }
         if key.is_index(){ // use vector
             return self.set_value_index(ptr, key, value, trap);
         }
-        if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
+        if key.is_string_like() || key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             let object = &mut self.objects[ptr.index as usize];
             if !object.tag.is_deep(){
                 if object.tag.needs_checking(){
@@ -922,21 +933,22 @@ impl ScriptHeap{
             if let Some(value) = object.map_get(&key){
                 return value
             }
-            for kv in object.vec.iter().rev(){
-                if kv.key.is_string_like() {
-                   if let Some(id) = key.as_id(){
-                       if id.as_string(|ks|{
-                           if let Some(ks) = ks{
-                               self.check_intern_string(ks)
-                           }
-                           else{
-                               NIL
-                           }
-                       }) == kv.key{
-                           return kv.value
-                       }
-                   } 
+            if object.tag.is_string_keys(){
+                if let Some(id) = key.as_id(){
+                    if let Some(value) = id.as_string(|s|{
+                        if let Some(s) = s{
+                            let idx = self.check_intern_string(s);
+                            object.map_get(&idx)
+                        }
+                        else{
+                            None
+                        }
+                    }){
+                        return value
+                    }
                 }
+            }
+            for kv in object.vec.iter().rev(){
                 if kv.key == key{
                     return kv.value;
                 }
@@ -1310,14 +1322,39 @@ impl ScriptHeap{
                                     return Some(false)
                                 }
                             }
-                            else{
-                                return Some(false)
+                            // lets do the string keys shenanigans to make json ok
+                            else if k.is_id() && ob.tag.is_string_keys(){
+                                let id = k.as_id().unwrap();
+                                if let Some(v2) = id.as_string(|s|{
+                                    if let Some(s) = s{
+                                        ob.map_get(&self.check_intern_string(s))
+                                    }
+                                    else{
+                                        None
+                                    }
+                                }){
+                                    if !self.deep_eq(v1, v2){
+                                        return Some(false)
+                                    }
+                                }
+                            }
+                            else if k.is_string_like() && !ob.tag.is_string_keys(){
+                                let id = if let Some(s) = k.as_string(){
+                                    LiveId::from_str(&self.strings[s.index as usize].string)
+                                }
+                                else {
+                                    k.as_inline_string(|s| LiveId::from_str(s)).unwrap()
+                                };
+                                if let Some(v2) = ob.map_get(&id.into()){
+                                    if !self.deep_eq(v1, v2){
+                                        return Some(false)
+                                    }
+                                }
                             }
                             None
                         }){
                             return ret
                         }
-                        
                         aw = oa.proto;
                         bw = ob.proto;
                         if aw == bw{
@@ -1359,6 +1396,7 @@ impl ScriptHeap{
             let mut first = true;
             loop{
                 let object = &self.objects[ptr.index as usize];
+                
                 object.map_iter(|key,value|{
                     if !first{print!(", ")}
                     if key != NIL{

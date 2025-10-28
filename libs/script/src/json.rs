@@ -4,6 +4,7 @@ use crate::value::*;
 use crate::makepad_live_id::makepad_live_id_macros::*;
 use crate::heap::*;
 
+#[derive(Debug)]
 enum State{
     Root,
     ObjectKey(ScriptObject),
@@ -55,6 +56,7 @@ impl JsonParser{
                      }
                      ScriptToken::OpenCurly=>{ // object
                          let new_obj = heap.new_object();
+                         heap.set_string_keys(new_obj);
                          self.root = new_obj.into();
                          self.state.push(State::ObjectKey(new_obj));
                      }
@@ -89,6 +91,7 @@ impl JsonParser{
                     // nonstandard, allow objects and arrays as keys
                     ScriptToken::OpenCurly=>{ // object
                         let new_obj = heap.new_object();
+                        heap.set_string_keys(new_obj);
                         self.state.push(State::ObjectColon(obj, new_obj.into()));
                         self.state.push(State::ObjectKey(new_obj));
                     }
@@ -139,29 +142,30 @@ impl JsonParser{
                  match tok{
                      ScriptToken::Identifier{id, ..}=>{
                          match id{
-                             id!(true)=>heap.vec_push_unchecked(obj, key, TRUE),
-                             id!(false)=>heap.vec_push_unchecked(obj, key, FALSE),
-                             id!(null)=>heap.vec_push_unchecked(obj, key, NIL),
-                             x=>heap.vec_push_unchecked(obj, x.into(), NIL),
+                             id!(true)=>heap.set_value_def(obj, key, TRUE),
+                             id!(false)=>heap.set_value_def(obj, key, FALSE),
+                             id!(null)=>heap.set_value_def(obj, key, NIL),
+                             x=>heap.set_value_def(obj, key, x.into()),
                          }
                      }
                      ScriptToken::String(v)=>{
-                         heap.vec_push_unchecked(obj, key, v);
+                         heap.set_value_def(obj, key, v);
                      }
                      ScriptToken::Number(v)=>{
-                         heap.vec_push_unchecked(obj, key, v.into());
+                         heap.set_value_def(obj, key, v.into());
                      }
                      ScriptToken::Color(v)=>{
-                         heap.vec_push_unchecked(obj, key, v.into());
+                         heap.set_value_def(obj, key, v.into());
                      }
                      ScriptToken::OpenCurly=>{ // object
                          let new_obj = heap.new_object();
-                         heap.vec_push_unchecked(obj, key, new_obj.into());
+                         heap.set_string_keys(new_obj);
+                         heap.set_value_def(obj, key, new_obj.into());
                          self.state.push(State::ObjectKey(new_obj));
                      }
                      ScriptToken::OpenSquare=>{ // 
                          let new_arr = heap.new_array();
-                         heap.vec_push_unchecked(obj, key, new_arr.into());
+                         heap.set_value_def(obj, key, new_arr.into());
                          self.state.push(State::Array(new_arr));
                      }
                      ScriptToken::CloseCurly=>{
@@ -205,10 +209,13 @@ impl JsonParser{
                     }
                     ScriptToken::OpenCurly=>{ // object
                         let new_obj = heap.new_object();
+                        heap.set_string_keys(new_obj);
+                        heap.array_push_unchecked(arr, new_obj.into());
                         self.state.push(State::ObjectKey(new_obj));
                     }
                     ScriptToken::OpenSquare=>{ // 
                         let new_arr = heap.new_array();
+                        heap.array_push_unchecked(arr, new_arr.into());
                         self.state.push(State::Array(new_arr));
                     }
                     ScriptToken::CloseSquare=>{
@@ -253,7 +260,6 @@ pub struct JsonParserThread{
 
 impl JsonParserThread{
     pub fn read_json(&mut self, json:&str, heap:&mut ScriptHeap)->ScriptValue{
-        //println!("READ {}", json);
         self.tokenizer.clear();
         self.parser.clear();
         self.tokenizer.tokenize(json, heap);
