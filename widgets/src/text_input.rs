@@ -36,7 +36,7 @@ live_design! {
         width: Fill, height: Fit,
         padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
         margin: <THEME_MSPACE_V_1> {}
-        flow: RightWrap,
+        flow: Right { wrap: true },
         is_password: false,
         is_read_only: false,
         is_numeric_only: false
@@ -826,7 +826,7 @@ impl TextInput {
         } else {
             None
         };
-        let wrap = cx.turtle().layout().flow == Flow::RightWrap;
+        let wrap = cx.turtle().layout().flow == Flow::Right { wrap: true };
         self.laidout_text = Some(self.draw_text.layout(
             cx,
             0.0,

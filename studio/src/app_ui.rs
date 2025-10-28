@@ -41,7 +41,7 @@ live_design!{
 
     Vr = <View> {
         width: Fit, height: 27.,
-        flow: Right,
+        flow: Right { wrap: false },
         spacing: 0.,
         margin: <THEME_MSPACE_V_2> {}
         <View> {
@@ -450,7 +450,7 @@ live_design!{
                         content = {
                             height: Fit, width: Fill,
                             spacing: (THEME_SPACE_1)
-                            flow: Right,
+                            flow: Right { wrap: false },
                             margin: {left: (THEME_SPACE_1), right: (THEME_SPACE_1) },
     
                             <ButtonFlatter> { width: Fit, text: "File"}
@@ -581,7 +581,7 @@ live_design!{
                             align: { x: 0., y: 0.5 }
                             <View> {
                                 width: Fit
-                                flow: Right,
+                                flow: Right { wrap: false },
                                 <CheckBoxCustom> {
                                     text:"Error"
                                     align: { y: 0.5 }

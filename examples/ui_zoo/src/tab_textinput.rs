@@ -40,7 +40,7 @@ live_design!{
                 width: Fill, height: Fit,
                 padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
                 margin: <THEME_MSPACE_V_1> {}
-                flow: RightWrap,
+                flow: Right { wrap: true },
                 is_password: false,
                 is_read_only: false,
                 is_numeric_only: false
@@ -134,7 +134,7 @@ live_design!{
                 width: Fill, height: Fit,
                 padding: <THEME_MSPACE_1> { left: (THEME_SPACE_2), right: (THEME_SPACE_2) }
                 margin: <THEME_MSPACE_V_1> {}
-                flow: RightWrap,
+                flow: Right { wrap: true },
                 is_password: false,
                 is_read_only: false,
                 is_numeric_only: false

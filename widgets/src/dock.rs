@@ -112,7 +112,7 @@ live_design!{
         }
 
         content = <View> {
-            flow: Right,
+            flow: Right { wrap: false },
             width: Fill, height: Fill,
             margin: 0.
             padding: 0.

@@ -79,7 +79,7 @@ live_design!{
     
     pub Html = <HtmlBase> {
         width: Fill, height: Fit,
-        flow: RightWrap,
+        flow: Right { wrap: true },
         width:Fill,
         height:Fit,
         padding: <THEME_MSPACE_1> {}
@@ -126,19 +126,19 @@ live_design!{
         }
         
         code_layout: {
-            flow: RightWrap,
+            flow: Right { wrap: true },
             padding: <THEME_MSPACE_2> {left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
         }
         code_walk: { width: Fill, height: Fit }
         
         quote_layout: {
-            flow: RightWrap,
+            flow: Right { wrap: true },
             padding: <THEME_MSPACE_2> { left: (THEME_SPACE_3), right: (THEME_SPACE_3) }
         }
         quote_walk: { width: Fill, height: Fit, }
         
         list_item_layout: {
-            flow: RightWrap,
+            flow: Right { wrap: true },
             padding: <THEME_MSPACE_1> {}
         }
         list_item_walk: {

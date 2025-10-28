@@ -181,7 +181,7 @@
 
                     <View> {
                         width: Fill, height: Fit,
-                        flow: Right,
+                        flow: Right { wrap: false },
                         spacing: (THEME_SPACE_2)
                         align: { x: 0.0, y: 0.0 }
                         padding: <THEME_MSPACE_2> {}

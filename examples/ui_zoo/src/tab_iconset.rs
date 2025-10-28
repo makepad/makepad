@@ -13,7 +13,7 @@ live_design!{
             <Markdown> { body: dep("crate://self/resources/iconset.md") } 
         }
         demos = {
-            flow: RightWrap,
+            flow: Right { wrap: true },
             spacing: 30.
             <IconSet> {
                 text: ""

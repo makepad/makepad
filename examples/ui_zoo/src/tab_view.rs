@@ -24,7 +24,7 @@ live_design!{
             <Hr> {}
             <H4> { text: "Style Templates" }
             <UIZooRowH> {
-                flow: RightWrap
+                flow: Right { wrap: true }
                 <SolidView> {
                     width: Fit, height: Fit, 
                     padding: <THEME_MSPACE_2> {},
@@ -193,7 +193,7 @@ live_design!{
             <Hr> {}
             <H4> { text: "Alternative Shapes" }
             <UIZooRowH> {
-                flow: RightWrap
+                flow: Right { wrap: true }
                 <CircleView> {
                     width: Fit, height: Fit, 
                     padding: 15.,
@@ -231,7 +231,7 @@ live_design!{
             <Hr> {}
             <H4> { text: "Special functions" }
             <UIZooRowH> {
-                flow: RightWrap
+                flow: Right { wrap: true }
                 <CachedView> {
                     width: Fit, height: Fit, 
                     padding: <THEME_MSPACE_2> {},

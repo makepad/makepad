@@ -103,7 +103,7 @@ live_design!{
     
     DividerX = <View> {
         width: Fit, height: Fill, margin: {top: 2.5, right: 1.0, bottom: 2.5, left: 1.0}
-        flow: Right
+        flow: Right { wrap: false }
         <RoundedView> {
             width: 4.0, height: Fill
             draw_bg: {color: (COLOR_UP_2)}
@@ -435,7 +435,7 @@ live_design!{
     }
     
     InstrumentDropdown = <ElementBox> {
-        align: {y: 0.5 padding: 0, flow: Right}
+        align: {y: 0.5 padding: 0, flow: Right { wrap: false }}
         label = <Label> {
             width: Fit
             draw_text: {
@@ -722,7 +722,7 @@ live_design!{
         
         PresetNavigation = <View> {
             width: Fill, height: Fit
-            flow: Right, align: {x: 0.0, y: 0.5}
+            flow: Right { wrap: false }, align: {x: 0.0, y: 0.5}
             
             <IconButton> {
                 draw_icon: {svg_file: (ICO_PREV)}
@@ -733,7 +733,7 @@ live_design!{
             
             <View> {
                 width: Fit, height: Fit
-                flow: Right, align: {x: 0.0, y: 0.5}
+                flow: Right { wrap: false }, align: {x: 0.0, y: 0.5}
                 
                 label = <Label> {
                     draw_text: {
@@ -842,7 +842,7 @@ live_design!{
     
     ChordStrip = <RoundedView> {
         width: Fill, height: Fill
-        flow: Right, spacing: 0.0, padding: {top: 0.0, left: 0.0, bottom: 0.0, right: 5}
+        flow: Right { wrap: false }, spacing: 0.0, padding: {top: 0.0, left: 0.0, bottom: 0.0, right: 5}
         align: {x: 0.5, y: 0.5}
         draw_bg: {
             color: (COLOR_UP_2),
@@ -893,7 +893,7 @@ live_design!{
         <ChordPiano> {}
         
         <View> {
-            flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS)}
+            flow: Right { wrap: false }, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS)}
             spacing: 10
             width: Fill, height: Fit
             
@@ -1003,7 +1003,7 @@ live_design!{
             flow: Down, align: {x: 0.5, y: 0.0 padding: {top: 0, right: 0, bottom: 0, left: 0}}
             width: Fill, height: Fit, margin: 0.0
             <View> {
-                flow: Right, align: {x: 0.5, y: 0.0 padding: 0.0}
+                flow: Right { wrap: false }, align: {x: 0.5, y: 0.0 padding: 0.0}
                  width: Fill, height: Fit, margin: {top: 2.5, right: 0, bottom: 7.5, left: 0}
                 
                 label = <Button> {
@@ -1102,7 +1102,7 @@ live_design!{
     
     Pagination = <View> {
         width: Fill, height: Fit, margin: {bottom: (SPACING_OS)}
-        flow: Right, align: {x: 0.5, y: 0.0 spacing: 10}
+        flow: Right { wrap: false }, align: {x: 0.5, y: 0.0 spacing: 10}
         
         <PaginationButton> {text: "…"}
         <PaginationButton> {text: "3"}
@@ -1131,7 +1131,7 @@ live_design!{
         <GradientYView> {
             draw_bg: {color: (COLOR_DOWN_OFF), color2: (COLOR_DOWN_2)}
             width: Fill, height: 50
-            flow: Right
+            flow: Right { wrap: false }
             
             <View> {
                 width: Fill, margin: {top: 0, right: (SPACING_OS), bottom: 0, left: (SPACING_OS)}
@@ -1185,7 +1185,7 @@ live_design!{
             
             os_header_placeholder = <RoundedView> {
                 width: Fill, height: 50, margin: 0
-                flow: Right, spacing: (SPACING_BASE_PADDING), padding: 0
+                flow: Right { wrap: false }, spacing: (SPACING_BASE_PADDING), padding: 0
                 draw_bg: {color: (COLOR_DOWN_1)}
             }
             
@@ -1202,7 +1202,7 @@ live_design!{
             
             mobile_menu = <RoundedView> {
                 width: Fill, height: 120
-                flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20
+                flow: Right { wrap: false }, spacing: (SPACING_BASE_PADDING), padding: 20
                 draw_bg: {color: (COLOR_DOWN_2)}
                 
                 mobile_modes = <View> {
