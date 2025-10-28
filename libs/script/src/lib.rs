@@ -244,11 +244,12 @@ pub fn test(){
         let x = {x:1 y:[1 2 3]};
         let y = x.write_json();
         let z = y.read_json();
+        
         assert(z == x)
         assert(z["x"] == z.x)
         assert(x["y"] == [1 2 3])
         z.x = 2
-        ~z
+        assert(z["x"] == 2)
         
         
     };
