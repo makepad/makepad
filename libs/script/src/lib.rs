@@ -22,6 +22,7 @@ pub mod prims;
 pub mod array;
 pub mod trap;
 pub mod vec_prims;
+pub mod json;
 
 pub use makepad_live_id::*;
 pub use value::*;
@@ -232,6 +233,8 @@ pub fn test(){
         a.pop();
         assert(a.string() == "1234")
         assert("hi".chars().string() == "hi")
+        
+        for i in "hello world".chars() ~i
                 
     };
     
