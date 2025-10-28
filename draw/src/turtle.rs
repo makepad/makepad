@@ -1638,7 +1638,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             let outer_origin = match turtle.flow() {
                 Flow::Right { wrap: true } if outer_size.x > turtle.unused_inner_width_for_current_row() => {
                     let wrap_spacing = turtle.wrap_spacing;
-                    self.turtle_new_line_internal(wrap_spacing, self.align_list.len());
+                    self.turtle_new_line_internal(wrap_spacing, align_list_start);
                     let turtle = self.turtles.last_mut().unwrap();
 
                     let outer_origin = turtle.pos();
