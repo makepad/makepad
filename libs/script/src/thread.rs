@@ -5,6 +5,7 @@ use crate::opcode::*;
 use crate::vm::*;
 use crate::object::*;
 use crate::trap::*;
+use crate::json::*;
 use std::any::Any;
 
 #[derive(Debug, Default)]
@@ -64,6 +65,7 @@ impl Into<ScriptValue> for ScriptMe{
 
 pub struct ScriptThreadId(pub usize);
 
+#[allow(unused)]
 pub struct ScriptThread{
     pub(crate) stack_limit: usize,
     pub(crate) tries: Vec<TryFrame>,
@@ -74,6 +76,7 @@ pub struct ScriptThread{
     pub(crate) mes: Vec<ScriptMe>,
     pub trap: ScriptTrap,
     pub(crate) last_err: ScriptValue,
+    pub(crate) json_parser: JsonParserThread
 }
 
 impl ScriptThread{
@@ -89,6 +92,7 @@ impl ScriptThread{
             calls: vec![],
             mes: vec![],
             trap: ScriptTrap::default(),
+            json_parser: Default::default(),
         }
     }
     
