@@ -106,7 +106,7 @@ pub fn test(){
         }
     }    
     
-    let code = script!{
+    let _code = script!{
         let x = {x:4 y:[1 2 3]};
         let y = x.write_json();
         let z = y.read_json();
@@ -114,7 +114,7 @@ pub fn test(){
     };
     
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         let t = mod.std;
         scope.import(mod.std)
         
@@ -245,6 +245,8 @@ pub fn test(){
         let y = x.write_json();
         let z = y.read_json();
         assert(z["x"] == z.x)
+        assert(x["y"] == [1 2 3])
+        
         
     };
     
