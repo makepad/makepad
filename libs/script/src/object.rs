@@ -97,7 +97,7 @@ impl ScriptObjectTag{
     
     
     pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
-        
+    
     pub const NEED_CHECK_MASK: u64 = Self::FREEZE_MASK|Self::TYPE_CHECKED;
     
     pub const FLAG_MASK: u64 = 0xFFFF<<40;
@@ -158,7 +158,7 @@ impl ScriptObjectTag{
     }
     
     pub fn freeze(&mut self){
-        self.0 &= !(Self::NEED_CHECK_MASK);
+        self.0 &= !(Self::FREEZE_MASK);
         self.0  |= Self::FROZEN
     }
     
