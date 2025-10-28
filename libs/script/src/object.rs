@@ -92,7 +92,7 @@ impl ScriptObjectTag{
     pub const TYPE_CHECKED: u64 = 0x1000<<40;
     // cant be a prototype
     pub const NOTPROTO: u64 = 0x2000<<40;
-    // use string map keys
+    // automatically convert between id and string keys when looking up
     pub const STRING_KEYS: u64 = 0x4000<<40;
     
     
