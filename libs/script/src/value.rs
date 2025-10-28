@@ -6,6 +6,8 @@ use std::fmt;
 pub struct ScriptValue(u64);
 
 pub const NIL:ScriptValue = ScriptValue::NIL;
+pub const TRUE:ScriptValue = ScriptValue::TRUE;
+pub const FALSE:ScriptValue = ScriptValue::FALSE;
 
 impl Default for ScriptValue{
     fn default()->Self{
