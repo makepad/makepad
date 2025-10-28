@@ -53,9 +53,16 @@ impl ScriptStringData{
             let this = script_value!(vm, args.this);
             vm.heap.string_to_chars_array(this).into()
         });
-        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(json), |vm, args|{
+        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(read_json), |vm, args|{
             let this = script_value!(vm, args.this);
-            vm.heap.string_to_bytes_array(this).into()
+            if let Some(r) = vm.heap.as_string_mut_self(this, |heap,s|{
+                vm.thread.json_parser.read_json(s, heap)
+            }){
+                r
+            }
+            else{
+                vm.thread.trap.err_unexpected()
+            }
         });
     }
     

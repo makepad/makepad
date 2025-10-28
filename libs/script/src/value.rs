@@ -205,11 +205,11 @@ impl ScriptValueType{
     pub const BOOL: Self = Self(2);
     pub const NIL: Self = Self(3);
     pub const COLOR: Self = Self(4);
-    pub const STRING: Self = Self(5);
-    pub const OBJECT: Self = Self(6);
-    pub const ARRAY: Self = Self(7);
-    pub const OPCODE: Self = Self(8);
-    
+    pub const OBJECT: Self = Self(5);
+    pub const ARRAY: Self = Self(6);
+    pub const OPCODE: Self = Self(7);
+    pub const STRING: Self = Self(8);
+        
     pub const REDUX_MARKER: Self = Self(9);
     pub const INLINE_STRING_0: Self = Self(9);
     pub const INLINE_STRING_1: Self = Self(10);
@@ -259,10 +259,10 @@ impl ScriptValueType{
     pub const REDUX_BOOL: usize = 2;
     pub const REDUX_NIL: usize = 3;
     pub const REDUX_COLOR: usize = 4;
-    pub const REDUX_STRING: usize = 5;
-    pub const REDUX_OBJECT: usize = 6;
-    pub const REDUX_ARRAY: usize = 7;
-    pub const REDUX_OPCODE: usize = 8;
+    pub const REDUX_OBJECT: usize = 5;
+    pub const REDUX_ARRAY: usize = 6;
+    pub const REDUX_OPCODE: usize = 7;
+    pub const REDUX_STRING: usize = 8;
     pub const REDUX_ERR: usize = 9;
     pub const REDUX_ID: usize = 10;
     
@@ -762,6 +762,11 @@ impl ScriptValue{
         
     pub const fn is_string(&self)->bool{
         (self.0 & Self::TYPE_MASK) == Self::TYPE_STRING
+    }
+    
+    pub const fn is_string_like(&self)->bool{
+        let ty = self.0 & Self::TYPE_MASK;
+        ty >= Self::TYPE_STRING && ty < Self::TYPE_INLINE_STRING_END
     }
     
     pub const fn from_inline_string(str: &str)->Option<Self>{

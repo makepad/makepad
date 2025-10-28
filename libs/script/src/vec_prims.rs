@@ -57,7 +57,7 @@ impl ScriptNew for Vec<u8> {
                 ScriptArrayStorage::U8(_)=> return true
             }
         }
-        value.is_string() || value.is_inline_string() || value.is_nil()
+        value.is_string_like() || value.is_nil()
     }
     fn script_default(vm:&mut ScriptVm)->ScriptValue{
         vm.heap.new_object().into()
@@ -117,7 +117,7 @@ impl ScriptHook for Vec<ScriptValue> {}
 impl ScriptNew for Vec<ScriptValue> {
     fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}
     fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{
-        value.is_object() || value.is_array() || value.is_string() || value.is_inline_string() || value.is_nil()
+        value.is_object() || value.is_array() || value.is_nil()
     }
     fn script_default(vm:&mut ScriptVm)->ScriptValue{
         vm.heap.new_object().into()

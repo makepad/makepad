@@ -6,6 +6,7 @@ use crate::vm::*;
 use crate::array::*;
 use crate::object::*;
 use crate::string::*;
+use crate::*;
 
 #[derive(Default)]
 pub struct ScriptTypeMethods{
@@ -44,7 +45,8 @@ impl ScriptTypeMethods{
         self.add(h, native, &[], ScriptValueType::REDUX_OPCODE, id!(ty), |_, _|{id!(opcode).escape()});
         self.add(h, native, &[], ScriptValueType::REDUX_ERR, id!(ty), |_, _|{id!(err).escape()});
         self.add(h, native, &[], ScriptValueType::REDUX_ID, id!(ty), |_, _|{id!(id).escape()});
-        for (ty,id) in [
+        
+        let types = [
             (ScriptValueType::REDUX_NUMBER, id!(is_number)),
             (ScriptValueType::REDUX_NAN, id!(is_nan)),
             (ScriptValueType::REDUX_BOOL, id!(is_bool)),
@@ -56,7 +58,15 @@ impl ScriptTypeMethods{
             (ScriptValueType::REDUX_OPCODE, id!(is_opcode)),
             (ScriptValueType::REDUX_ERR, id!(is_err)),
             (ScriptValueType::REDUX_ID, id!(is_id))
-        ]{
+        ];
+        
+        for (ty,_) in types {
+            self.add(h, native, &[], ty, id!(write_json), |vm, args|{
+                let this = script_value!(vm, args.this);vm.heap.write_json(this)
+            });
+        };
+        
+        for (ty,id) in types{
             self.add(h, native, &[], ScriptValueType::REDUX_NUMBER, id, move |_, _|{ (ty == ScriptValueType::REDUX_NUMBER).into()});
             self.add(h, native, &[], ScriptValueType::REDUX_NAN, id, move |_, _|{ (ty == ScriptValueType::REDUX_NAN).into()});
             self.add(h, native, &[], ScriptValueType::REDUX_BOOL, id, move |_, _|{ (ty == ScriptValueType::REDUX_BOOL).into()});
