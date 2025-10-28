@@ -89,7 +89,7 @@ impl LiveRegister for App {
                 is_streaming: true,
                 headers:{
                     "Content-Type":"application/json",
-                    "Authorization":"Bearer"++fs.read_string("OPENAI_KEY")
+                    "Authorization":"Bearer"++fs.read_file_string("OPENAI_KEY")
                 }
                 body: {
                     model:"gpt-4o",

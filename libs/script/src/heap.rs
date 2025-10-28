@@ -219,6 +219,106 @@ impl ScriptHeap{
         }.into()
     }
     
+    pub fn as_string_mut_self<R,F:FnOnce(&mut Self, &str)->R>(&mut self, value:ScriptValue, cb:F)->Option<R>{
+        if let Some(s) = value.as_string(){
+            let mut str = String::new();
+            std::mem::swap(&mut self.strings[s.index as usize].string, &mut str);
+            let r = cb(self, &str);
+            std::mem::swap(&mut self.strings[s.index as usize].string, &mut str);
+            return Some(r)
+        }
+        if let Some(r) = value.as_inline_string(|s|{
+            cb(self, s)
+        }){
+            return Some(r)
+        }
+        None
+    }
+        
+    pub fn check_intern_string(&self,value:&str)->ScriptValue{
+        if let Some(v) = ScriptValue::from_inline_string(&value){
+            v
+        }
+        else if let Some(idx) = self.string_intern.get(value){
+            (*idx).into()
+        }
+        else{
+            NIL
+        }
+    }
+    
+    pub fn string(&self, ptr: ScriptString)->&str{
+        &self.strings[ptr.index as usize].string
+    }
+        
+    pub fn string_to_bytes_array(&mut self, v:ScriptValue)->ScriptArray{
+        let arr = self.new_array();
+        if v.as_inline_string(|str|{
+            let array = &mut self.arrays[arr.index as usize];
+            if let ScriptArrayStorage::U8(v) = &mut array.storage{v.clear();v.extend(str.as_bytes())}
+            else{array.storage = ScriptArrayStorage::U8(str.as_bytes().into());}
+        }).is_some(){}
+        else if let Some(str) = v.as_string(){
+            let array = &mut self.arrays[arr.index as usize];
+            let str = &self.strings[str.index as usize].string;
+            if let ScriptArrayStorage::U8(v) = &mut array.storage{v.clear();v.extend(str.as_bytes())}
+            else{array.storage = ScriptArrayStorage::U8(str.as_bytes().into());}
+        }
+        return arr
+    }
+        
+    pub fn string_to_chars_array(&mut self, v:ScriptValue)->ScriptArray{
+        let arr = self.new_array();
+        if v.as_inline_string(|str|{
+            let array = &mut self.arrays[arr.index as usize];
+            if let ScriptArrayStorage::U32(v) = &mut array.storage{v.clear();for c in str.chars(){v.push(c as u32)}}
+            else{array.storage = ScriptArrayStorage::U32(str.chars().map(|c| c as u32).collect());}
+        }).is_some(){}
+        else if let Some(str) = v.as_string(){
+            let array = &mut self.arrays[arr.index as usize];
+            let str = &self.strings[str.index as usize].string;
+            if let ScriptArrayStorage::U32(v) = &mut array.storage{v.clear();for c in str.chars(){v.push(c as u32)}}
+            else{array.storage = ScriptArrayStorage::U32(str.chars().map(|c| c as u32).collect());}
+        }
+        return arr
+    }
+        
+    pub fn cast_to_string(&self, v:ScriptValue, out:&mut String){
+                
+        if v.as_inline_string(|s|{write!(out, "{s}")}).is_some(){
+        }
+        else if let Some(v) = v.as_string(){
+            let str = self.string(v);
+            out.push_str(str);
+        }
+        else if let Some(v) = v.as_f64(){
+            write!(out, "{v}").ok();
+        }
+        else if let Some(v) = v.as_bool(){
+            write!(out, "{v}").ok();
+        }
+        else if let Some(v) = v.as_id(){
+            write!(out, "{v}").ok();
+        }
+        else if let Some(_v) = v.as_object(){
+            write!(out, "[ScriptObject]").ok();
+        }
+        else if let Some(v) = v.as_color(){
+            write!(out, "#{:08x}", v).ok();
+        }
+        else if v.is_nil(){
+        }
+        else if v.is_opcode(){
+            write!(out, "[Opcode]").ok();
+        }
+        else if v.is_err(){
+            write!(out, "[Error:{}]", v).ok();
+        }
+        else{
+            write!(out, "[Unknown]").ok();
+        }
+    }
+    
     
     // Arrays
     
@@ -374,77 +474,6 @@ impl ScriptHeap{
     //    &self.objects[ptr.index as usize]
     //}
     
-    pub fn string(&self, ptr: ScriptString)->&str{
-        &self.strings[ptr.index as usize].string
-    }
-    
-    pub fn string_to_bytes_array(&mut self, v:ScriptValue)->ScriptArray{
-        let arr = self.new_array();
-        if v.as_inline_string(|str|{
-            let array = &mut self.arrays[arr.index as usize];
-            if let ScriptArrayStorage::U8(v) = &mut array.storage{v.clear();v.extend(str.as_bytes())}
-            else{array.storage = ScriptArrayStorage::U8(str.as_bytes().into());}
-        }).is_some(){}
-        else if let Some(str) = v.as_string(){
-            let array = &mut self.arrays[arr.index as usize];
-            let str = &self.strings[str.index as usize].string;
-            if let ScriptArrayStorage::U8(v) = &mut array.storage{v.clear();v.extend(str.as_bytes())}
-            else{array.storage = ScriptArrayStorage::U8(str.as_bytes().into());}
-        }
-        return arr
-    }
-    
-    pub fn string_to_chars_array(&mut self, v:ScriptValue)->ScriptArray{
-        let arr = self.new_array();
-        if v.as_inline_string(|str|{
-            let array = &mut self.arrays[arr.index as usize];
-            if let ScriptArrayStorage::U32(v) = &mut array.storage{v.clear();for c in str.chars(){v.push(c as u32)}}
-            else{array.storage = ScriptArrayStorage::U32(str.chars().map(|c| c as u32).collect());}
-        }).is_some(){}
-        else if let Some(str) = v.as_string(){
-            let array = &mut self.arrays[arr.index as usize];
-            let str = &self.strings[str.index as usize].string;
-            if let ScriptArrayStorage::U32(v) = &mut array.storage{v.clear();for c in str.chars(){v.push(c as u32)}}
-            else{array.storage = ScriptArrayStorage::U32(str.chars().map(|c| c as u32).collect());}
-        }
-        return arr
-    }
-    
-    pub fn cast_to_string(&self, v:ScriptValue, out:&mut String){
-        
-        if v.as_inline_string(|s|{write!(out, "{s}")}).is_some(){
-        }
-        else if let Some(v) = v.as_string(){
-            let str = self.string(v);
-            out.push_str(str);
-        }
-        else if let Some(v) = v.as_f64(){
-            write!(out, "{v}").ok();
-        }
-        else if let Some(v) = v.as_bool(){
-            write!(out, "{v}").ok();
-        }
-        else if let Some(v) = v.as_id(){
-            write!(out, "{v}").ok();
-        }
-        else if let Some(_v) = v.as_object(){
-            write!(out, "[ScriptObject]").ok();
-        }
-        else if let Some(v) = v.as_color(){
-            write!(out, "#{:08x}", v).ok();
-        }
-        else if v.is_nil(){
-        }
-        else if v.is_opcode(){
-            write!(out, "[Opcode]").ok();
-        }
-        else if v.is_err(){
-            write!(out, "[Error:{}]", v).ok();
-        }
-        else{
-            write!(out, "[Unknown]").ok();
-        }
-    }
         
     pub fn cast_to_f64(&self, v:ScriptValue, ip:ScriptIp)->f64{
         if let Some(v) = v.as_f64(){
@@ -503,14 +532,14 @@ impl ScriptHeap{
         }
         false
     }
-    
+    /*
     pub fn swap_string(&mut self, ptr: ScriptString, swap:&mut String){
         std::mem::swap(swap, &mut self.strings[ptr.index as usize].string);
     }
     
     pub fn mut_string(&mut self, ptr: ScriptString)->&mut String{
         &mut self.strings[ptr.index as usize].string
-    }
+    }*/
     
     
     
@@ -894,6 +923,20 @@ impl ScriptHeap{
                 return value
             }
             for kv in object.vec.iter().rev(){
+                if kv.key.is_string_like() {
+                   if let Some(id) = key.as_id(){
+                       if id.as_string(|ks|{
+                           if let Some(ks) = ks{
+                               self.check_intern_string(ks)
+                           }
+                           else{
+                               NIL
+                           }
+                       }) == kv.key{
+                           return kv.value
+                       }
+                   } 
+                }
                 if kv.key == key{
                     return kv.value;
                 }
@@ -935,7 +978,7 @@ impl ScriptHeap{
         if key.is_prefixed_id(){
             return self.value_prefixed(ptr, key, trap)
         }
-        if key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
+        if key.is_inline_string() || key.is_string() || key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             return self.value_deep(ptr, key, trap)
         }
         // TODO implement string lookup
@@ -1354,10 +1397,19 @@ impl ScriptHeap{
             }
             print!("]");
         }
-        else{
-            let mut str = String::new();
-            self.cast_to_string(value, &mut str);
-            print!("{}",str);
+        else if let Some(s) = value.as_string(){
+            let s = &self.strings[s.index as usize].string;
+            print!("\"");
+            print!("{}", s);
+            print!("\"");
+        }
+        else if value.as_inline_string(|s|{
+            print!("\"");
+            print!("{}", s);
+            print!("\"");
+        }).is_some(){}
+        else {
+            print!("{}", value)
         }
     }
     
@@ -1391,14 +1443,14 @@ impl ScriptHeap{
             loop{
                 let object = &self.objects[ptr.index as usize];
                 object.map_iter(|key,value|{
-                    if first{print!(",")}
+                    if !first{out.push(',')}
                     self.write_json_inner(key, out);
                     out.push(':');
                     self.write_json_inner(value, out);
                     first = false;
                 });
                 for kv in object.vec.iter(){
-                    if first{out.push(',')}
+                    if !first{out.push(',')}
                     first = false;
                     self.write_json_inner(kv.key, out);
                     out.push(':');
@@ -1425,7 +1477,7 @@ impl ScriptHeap{
                     self.write_json_inner(value, out);
                 }
             }
-            print!("]");
+            out.push(']');
         }
         else if let Some(id) = value.as_id(){
             out.push('"');
