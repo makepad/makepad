@@ -1,4 +1,9 @@
-
+use crate::value::*;
+use crate::heap::*;
+use crate::native::*;
+use crate::makepad_live_id::*;
+use crate::methods::*;
+use crate::*;
 
 #[derive(Default)]
 pub struct StringTag(u64);
@@ -39,6 +44,17 @@ pub struct ScriptStringData{
 }
 
 impl ScriptStringData{
+    pub fn add_type_methods(tm: &mut ScriptTypeMethods, h: &mut ScriptHeap, native:&mut ScriptNative){
+        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(bytes), |vm, args|{
+            let this = script_value!(vm, args.this);
+            vm.heap.string_to_bytes_array(this).into()
+        });
+        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(chars), |vm, args|{
+            let this = script_value!(vm, args.this);
+            vm.heap.string_to_chars_array(this).into()
+        });
+    }
+    
     pub fn clear(&mut self){
         self.tag.clear();
         self.string.clear()

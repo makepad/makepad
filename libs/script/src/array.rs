@@ -1,6 +1,10 @@
-
 use crate::value::*;
+use crate::heap::*;
+use crate::native::*;
+use crate::makepad_live_id::*;
+use crate::methods::*;
 use crate::object::*;
+use crate::*;
 
 #[derive(Default)]
 pub struct ScriptArrayTag(u64); 
@@ -157,6 +161,101 @@ impl Default for ScriptArrayData{
 }
 
 impl ScriptArrayData{
+        
+    pub fn add_type_methods(tm: &mut ScriptTypeMethods, h: &mut ScriptHeap, native:&mut ScriptNative){
+        tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(string), |vm, args|{
+            if let Some(arr) = script_value!(vm, args.this).as_array(){
+                return vm.heap.new_string_with(|heap, s|{
+                    match heap.array_ref(arr){
+                        ScriptArrayStorage::U8(bytes)=>{
+                            let v = String::from_utf8_lossy(bytes);
+                            s.push_str(v.as_ref());
+                        }
+                        ScriptArrayStorage::ScriptValue(vec)=>{
+                            for v in vec{
+                                heap.cast_to_string(*v, s);
+                            }
+                        },
+                        ScriptArrayStorage::F32(v)=>{
+                            for v in v {
+                                if let Some(c) = std::char::from_u32(*v as _){
+                                    s.push(c)
+                                }
+                            }
+                        },
+                        ScriptArrayStorage::U32(v)=>{
+                            for v in v {
+                                if let Some(c) = std::char::from_u32(*v){
+                                    s.push(c)
+                                }
+                            }
+                        },
+                        ScriptArrayStorage::U16(v)=>{
+                            for v in v {
+                                if let Some(c) = std::char::from_u32(*v as _){
+                                    s.push(c)
+                                }
+                            }
+                        }
+                    }
+                }).into();
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(push), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                vm.heap.array_push_vec(this, args, &vm.thread.trap);
+                return NIL
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                        
+        tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(pop), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                return vm.heap.array_pop(this, &mut vm.thread.trap)
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                        
+        tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(len), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                return vm.heap.array_len(this).into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                
+        tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(freeze), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                vm.heap.freeze_array(this);
+                return this.into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+                        
+        tm.add(h, native, script_args!(cb=NIL), ScriptValueType::REDUX_ARRAY, id!(retain), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                let fnptr = script_value!(vm, args.cb);
+                let mut i = 0;
+                while i < vm.heap.array_len(this){
+                    let value = script_array_index!(vm, this[i]);
+                    let ret = vm.call(fnptr, &[value]);
+                    if ret.is_err(){
+                        return ret;
+                    }
+                    if !vm.heap.cast_to_bool(ret){
+                        vm.heap.array_remove(this, i, &mut vm.thread.trap);
+                    }
+                    else{
+                        i += 1
+                    }
+                }
+                return NIL
+            }
+            vm.thread.trap.err_not_impl()
+        });
+    }
+    
     pub fn clear(&mut self){
         self.storage.clear();
         self.tag.clear()

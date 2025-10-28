@@ -4,6 +4,8 @@ use crate::value::*;
 use crate::heap::*;
 use makepad_live_id::*;
 
+pub trait ScriptDeriveMarker{}
+
 pub type ScriptTypeId = std::any::TypeId;
 
 // this we implement

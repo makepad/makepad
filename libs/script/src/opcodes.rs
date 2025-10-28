@@ -290,13 +290,13 @@ impl ScriptThread{
             Opcode::SHALLOW_EQ =>{
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
-                self.push_stack_value(heap.shallow_eq(a, b).into());
+                self.push_stack_value((a ==  b).into());
                 self.trap.goto_next();
             }
             Opcode::SHALLOW_NEQ=>{
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
-                self.push_stack_unchecked((!heap.shallow_eq(a, b)).into());
+                self.push_stack_unchecked((a != b).into());
                 self.trap.goto_next();
             }
             

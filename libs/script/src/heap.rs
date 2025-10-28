@@ -16,7 +16,7 @@ pub struct ScriptHeap{
     pub(crate) mark_vec: Vec<ScriptGcMark>,
     pub(crate) roots: Vec<ScriptObject>,
     
-    pub(crate) objects: Vec<ObjectData>,
+    pub(crate) objects: Vec<ScriptObjectData>,
     pub(crate) objects_free: Vec<ScriptObject>,
     
     pub(crate) string_intern: HashMap<String, ScriptString>,
@@ -68,7 +68,7 @@ impl ScriptHeap{
         }
         else{
             let index = self.objects.len();
-            let mut object = ObjectData::default();
+            let mut object = ScriptObjectData::default();
             object.tag.set_alloced();
             object.proto = id!(object).into();
             self.objects.push(object);
@@ -118,7 +118,7 @@ impl ScriptHeap{
         }
         else{
             let index = self.objects.len();
-            let mut object = ObjectData::with_proto(proto);
+            let mut object = ScriptObjectData::with_proto(proto);
             object.tag.set_proto_fwd(proto_fwd);
             let proto_object = &self.objects[proto_index as usize];
             if proto_object.tag.get_storage_type().is_auto(){
@@ -255,6 +255,22 @@ impl ScriptHeap{
         array.storage.push(value);
     }
     
+    pub fn array_ref(&self, array:ScriptArray)->&ScriptArrayStorage{
+        let array = &self.arrays[array.index as usize];
+        &array.storage
+    }
+    
+    pub fn array_mut(&mut self, array:ScriptArray,trap:&ScriptTrap)->Option<&mut ScriptArrayStorage>{
+        let array = &mut self.arrays[array.index as usize];
+        if array.tag.is_frozen(){
+            trap.err_frozen();
+            return None
+        }
+        array.tag.set_dirty();
+        Some(&mut array.storage)
+    }
+        
+        
     pub fn array_remove(&mut self, array:ScriptArray, index: usize,trap:&ScriptTrap)->ScriptValue{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
@@ -354,7 +370,39 @@ impl ScriptHeap{
     pub fn string(&self, ptr: ScriptString)->&str{
         &self.strings[ptr.index as usize].string
     }
-        
+    
+    pub fn string_to_bytes_array(&mut self, v:ScriptValue)->ScriptArray{
+        let arr = self.new_array();
+        if v.as_inline_string(|str|{
+            let array = &mut self.arrays[arr.index as usize];
+            if let ScriptArrayStorage::U8(v) = &mut array.storage{v.clear();v.extend(str.as_bytes())}
+            else{array.storage = ScriptArrayStorage::U8(str.as_bytes().into());}
+        }).is_some(){}
+        else if let Some(str) = v.as_string(){
+            let array = &mut self.arrays[arr.index as usize];
+            let str = &self.strings[str.index as usize].string;
+            if let ScriptArrayStorage::U8(v) = &mut array.storage{v.clear();v.extend(str.as_bytes())}
+            else{array.storage = ScriptArrayStorage::U8(str.as_bytes().into());}
+        }
+        return arr
+    }
+    
+    pub fn string_to_chars_array(&mut self, v:ScriptValue)->ScriptArray{
+        let arr = self.new_array();
+        if v.as_inline_string(|str|{
+            let array = &mut self.arrays[arr.index as usize];
+            if let ScriptArrayStorage::U32(v) = &mut array.storage{v.clear();for c in str.chars(){v.push(c as u32)}}
+            else{array.storage = ScriptArrayStorage::U32(str.chars().map(|c| c as u32).collect());}
+        }).is_some(){}
+        else if let Some(str) = v.as_string(){
+            let array = &mut self.arrays[arr.index as usize];
+            let str = &self.strings[str.index as usize].string;
+            if let ScriptArrayStorage::U32(v) = &mut array.storage{v.clear();for c in str.chars(){v.push(c as u32)}}
+            else{array.storage = ScriptArrayStorage::U32(str.chars().map(|c| c as u32).collect());}
+        }
+        return arr
+    }
+    
     pub fn cast_to_string(&self, v:ScriptValue, out:&mut String){
         
         if v.as_inline_string(|s|{write!(out, "{s}")}).is_some(){
@@ -961,7 +1009,10 @@ impl ScriptHeap{
         object.vec.len()
     }
     
-    
+    pub fn vec_ref(&self, ptr:ScriptObject)->&[ScriptVecValue]{
+        let object = &self.objects[ptr.index as usize];
+        &object.vec
+    }
     
     // Vec Writing
     
@@ -1223,25 +1274,17 @@ impl ScriptHeap{
                 }
             }
         }
-        else {
-            self.shallow_eq(a, b)
-        }
-    }
-        
-    pub fn shallow_eq(&self, a:ScriptValue, b:ScriptValue)->bool{
-        if a == b{
-            return true
-        }
-        if let Some(arr1) = a.as_array(){
+        else if let Some(arr1) = a.as_array(){
             if let Some(arr2) = b.as_array(){
                 if self.arrays[arr1.index as usize].storage == self.arrays[arr2.index as usize].storage{
                     return true
                 }
             }
+            return false
         }
         false
     }
-    
+        
     pub fn print(&self, value:ScriptValue){
         if let Some(obj) = value.as_object(){
             let object = &self.objects[obj.index as usize];
