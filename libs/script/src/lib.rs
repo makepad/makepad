@@ -105,7 +105,15 @@ pub fn test(){
             });
         }
     }    
-
+    
+    let code = script!{
+        let x = {x:4 y:[1 2 3]};
+        let y = x.write_json();
+        let z = y.read_json();
+        ~x
+        ~z["x"]
+    };
+    
     // Our unit tests :)
     let code = script!{
         let t = mod.std;
@@ -234,11 +242,14 @@ pub fn test(){
         assert(a.string() == "1234")
         assert("hi".chars().string() == "hi")
         
-        for i in "hello world".chars() ~i
-                
+        let x = {x:1 y:[1 2 3]};
+        let y = x.write_json();
+        let z = y.read_json();
+        assert(z["x"] == z.x)
+        
     };
     
-    let _code = script!{
+    let code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     };

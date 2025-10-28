@@ -183,7 +183,8 @@ impl JsonParser{
                  }
              }
              State::Array(arr)=>{
-                // alright we can parse a value or ]
+                 self.state.push(State::Array(arr));
+                 // alright we can parse a value or ]
                 match tok{
                     ScriptToken::Identifier{id, ..}=>{
                         match id{
@@ -204,28 +205,25 @@ impl JsonParser{
                     }
                     ScriptToken::OpenCurly=>{ // object
                         let new_obj = heap.new_object();
-                        self.state.push(State::Array(arr));
                         self.state.push(State::ObjectKey(new_obj));
                     }
                     ScriptToken::OpenSquare=>{ // 
                         let new_arr = heap.new_array();
-                        self.state.push(State::Array(arr));
                         self.state.push(State::Array(new_arr));
                     }
                     ScriptToken::CloseSquare=>{
                         // end of array
+                        self.state.pop();
                     }
                     ScriptToken::CloseRound | ScriptToken::CloseCurly=>{
                         self.errors.push((self.index,format!("JsonParser: Unexpected }} or ) in array")));
                     }
                     ScriptToken::Operator(op)=>{
-                        self.state.push(State::Array(arr));
                         if op != id!(,){
                             self.errors.push((self.index,format!("JsonParser: Unexpected operator expecting ',' {}", op)));
                         }
                     }
                     x=>{
-                        self.state.push(State::Array(arr));
                         self.errors.push((self.index,format!("JsonParser: Unexpected token {:?}", x)));
                     }
                 }
@@ -255,6 +253,7 @@ pub struct JsonParserThread{
 
 impl JsonParserThread{
     pub fn read_json(&mut self, json:&str, heap:&mut ScriptHeap)->ScriptValue{
+        //println!("READ {}", json);
         self.tokenizer.clear();
         self.parser.clear();
         self.tokenizer.tokenize(json, heap);
