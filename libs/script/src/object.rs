@@ -92,6 +92,9 @@ impl ScriptObjectTag{
     pub const TYPE_CHECKED: u64 = 0x1000<<40;
     // cant be a prototype
     pub const NOTPROTO: u64 = 0x2000<<40;
+    // use string map keys
+    pub const STRING_KEYS: u64 = 0x4000<<40;
+    
     
     pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
         
@@ -140,6 +143,14 @@ impl ScriptObjectTag{
         else{
             false
         }
+    }
+    
+    pub fn set_string_keys(&mut self){
+        self.0 |= Self::STRING_KEYS
+    }
+    
+    pub fn is_string_keys(&self)->bool{
+        self.0 & Self::STRING_KEYS != 0
     }
     
     pub fn set_static(&mut self){
