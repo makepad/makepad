@@ -20,6 +20,7 @@ pub struct Cx2d<'a, 'b> {
     
     //pub (crate) overlay_sweep_lock: Option<Rc<RefCell<Area>>>,
     pub (crate) turtles: Vec<Turtle>,
+    pub (crate) finished_rows: Vec<usize>,
     pub (crate) finished_walks: Vec<FinishedWalk>,
     pub (crate) turtle_clips: Vec<(DVec2, DVec2)>,
     pub (crate) align_list: Vec<AlignEntry>,
@@ -34,6 +35,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             overlay_id: None,
             cx: cx,
             turtle_clips: Vec::with_capacity(1024),
+            finished_rows: Vec::with_capacity(1024),
             finished_walks: Vec::with_capacity(1024),
             turtles: Vec::with_capacity(64),
             align_list: Vec::with_capacity(4096),

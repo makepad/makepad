@@ -551,6 +551,7 @@ pub struct Turtle {
     used_height: f64,
     wrap_spacing: f64,
     align_start: usize,
+    finished_rows_start: usize,
     finished_walks_start: usize,
     deferred_fills: Vec<DeferredFill>,
     resolved_fills: Vec<f64>,
@@ -1216,6 +1217,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             walk: Walk::fixed(size.x, size.y),
             layout,
             align_start: self.align_list.len() - 1,
+            finished_rows_start: self.finished_rows.len(),
             finished_walks_start: self.finished_walks.len(),
             deferred_fills: Vec::new(),
             resolved_fills: Vec::new(),
@@ -1321,6 +1323,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             walk,
             layout,
             align_start: self.align_list.len()-1,
+            finished_rows_start: self.finished_rows.len(),
             finished_walks_start: self.finished_walks.len(),
             deferred_fills: Vec::new(),
             resolved_fills: Vec::new(),
@@ -1511,7 +1514,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
 
         self.align_list.push(AlignEntry::EndTurtle);
-
+        self.finished_rows.truncate(turtle.finished_rows_start);
         self.finished_walks.truncate(turtle.finished_walks_start);
         let turtle = self.turtles.pop().unwrap();
 
@@ -1873,6 +1876,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         turtle.move_to(outer_origin);
         turtle.allocate_height(0.0);
         self.move_align_list(align_list_start, self.align_list.len(), shift.x, shift.y, false);
+        self.finished_rows.push(self.finished_walks.len());
     }
     
     fn move_align_list(&mut self, start: usize, end: usize, dx: f64, dy: f64, shift_clip: bool) {

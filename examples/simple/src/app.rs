@@ -32,6 +32,14 @@ live_design!{
                             width: 100,
                             height: 10,
                         }
+                        <Button> {
+                            width: 200,
+                            height: 10,
+                        }
+                        <Button> {
+                            width: 100,
+                            height: 10,
+                        }
                     }
                 }
             }
