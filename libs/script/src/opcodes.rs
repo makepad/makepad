@@ -310,6 +310,9 @@ impl ScriptThread{
                             heap.named_fn_arg(*obj, field, value, &self.trap);
                         }
                         ScriptMe::Object(obj)=>{
+                            if field.is_string_like(){
+                                heap.set_string_keys(*obj);
+                            }
                             heap.set_value(*obj, field, value, &self.trap);
                         }
                         ScriptMe::Array(_arr)=>{
@@ -794,6 +797,8 @@ impl ScriptThread{
             }
             Opcode::ME_FIELD=>{
                 let field = self.pop_stack_value();
+                
+               
                 let value = match self.mes.last().unwrap(){
                     ScriptMe::Array(_)=>{
                         self.trap.err_not_allowed_in_array()
