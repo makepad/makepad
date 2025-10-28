@@ -23,7 +23,7 @@ live_design!{
         caption_bar = <SolidView> {
             visible: false,
             
-            flow: Right
+            flow: Right { wrap: false }
             
             draw_bg: {color: (THEME_COLOR_APP_CAPTION_BAR)}
             height: 27,

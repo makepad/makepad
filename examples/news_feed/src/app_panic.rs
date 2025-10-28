@@ -113,7 +113,7 @@ live_design!{
     Header = <RoundedYView> {
         width: Fill,
         height: 70
-        flow: Right,
+        flow: Right { wrap: false },
         padding: 10.0,
         spacing: 10.0
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, -0.5, -1.0, 0.0), radius: vec2(0.5, 4.5)}
@@ -130,7 +130,7 @@ live_design!{
     Menu = <RoundedYView> {
         width: Fill,
         height: 80
-        flow: Right,
+        flow: Right { wrap: false },
         padding: 10.0,
         spacing: 10.0
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: vec2(4.5, 0.5)}
@@ -139,7 +139,7 @@ live_design!{
             width: Fill,
             height: Fit,
             margin: 0.0
-            flow: Right,
+            flow: Right { wrap: false },
             padding: 0.0,
             spacing: 25.0,
             align: {x: 0.5, y: 0.5}
@@ -173,7 +173,7 @@ live_design!{
             width: Fill,
             height: Fit,
             margin: 0.0
-            flow: Right,
+            flow: Right { wrap: false },
             padding: 0.0,
             spacing: 10.0
             
@@ -196,7 +196,7 @@ live_design!{
         body = <View> {
             width: Fill,
             height: Fit
-            flow: Right,
+            flow: Right { wrap: false },
             padding: 10.0,
             spacing: 10.0
             

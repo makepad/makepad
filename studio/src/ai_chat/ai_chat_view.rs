@@ -26,7 +26,7 @@ live_design!{
 
         <View> {
             height: Fit, width: Fill,
-            flow: Right,
+            flow: Right { wrap: false },
             align: { x: 0., y: 0. },
             spacing: (THEME_SPACE_3),
             padding: { left: (THEME_SPACE_1), right: (THEME_SPACE_1), top: (THEME_SPACE_1-1) }
@@ -173,7 +173,7 @@ live_design!{
         tb = <DockToolbar> {
             content = {
                 height: Fill, width: Fill,
-                flow: Right,
+                flow: Right { wrap: false },
                 padding:{top:1}
                 align: { x: 0.0, y: 0.5},
                 margin: <THEME_MSPACE_H_2> {}
@@ -194,7 +194,7 @@ live_design!{
                 }
                                 
                 <View> {
-                    flow: Right,
+                    flow: Right { wrap: false },
                     width: Fit,
                     height: Fit,
                     spacing: (THEME_SPACE_1)
@@ -204,7 +204,7 @@ live_design!{
                 }
                 
                 <View> {
-                    flow: Right,
+                    flow: Right { wrap: false },
                     width: Fit,
                     height: Fit,
                     spacing: (THEME_SPACE_1)
@@ -214,7 +214,7 @@ live_design!{
                 }
                 
                 <View> {
-                    flow: Right,
+                    flow: Right { wrap: false },
                     width: Fit,
                     height: Fit,
                     spacing: (THEME_SPACE_1)

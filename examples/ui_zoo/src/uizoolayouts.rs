@@ -9,7 +9,7 @@ live_design!{
 
     UIZooTabLayout_A = <View> {
         height: Fill, width: Fill
-        flow: Right,
+        flow: Right { wrap: false },
         padding: 0
         spacing: 0.
 

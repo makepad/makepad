@@ -68,7 +68,7 @@ live_design!{
             <H4> { text: "Output demo"}
             <UIZooRowH> {
                 height: Fit
-                flow: Right
+                flow: Right { wrap: false }
                 align: { x: 0.0, y: 0.5}
                 simplecheckbox = <CheckBox> {text:"<CheckBox>"}
                 simplecheckbox_output = <Label> { text:"" }

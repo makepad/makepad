@@ -144,7 +144,7 @@ live_design!{
             }
 
             Binary = <BuildItem> {
-                flow: Right
+                flow: Right { wrap: false }
 
                 fold = <FoldButton> {
                     height: 25, width: 15,
