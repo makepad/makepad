@@ -12,6 +12,7 @@ enum State{
     Array(ScriptArray),
 }
 
+#[derive(Default)]
 pub struct JsonParser{
     index: u32,
     pub root: ScriptValue,
@@ -19,14 +20,13 @@ pub struct JsonParser{
     pub errors: Vec<(u32, String)>
 }
 
-impl Default for JsonParser{
-    fn default()->Self{
-        Self{
-            index: 0,
-            state: vec![State::Root],
-            root:NIL,
-            errors: vec![]
-        }
+impl JsonParser{
+    pub fn clear(&mut self){
+        self.index = 0;
+        self.root = NIL;
+        self.state.clear();
+        self.state.push(State::Root);
+        self.errors.clear();
     }
 }
 
@@ -83,7 +83,19 @@ impl JsonParser{
                     ScriptToken::Number(v)=>{
                         self.state.push(State::ObjectColon(obj, v.into()));
                     }
-                    ScriptToken::CloseCurly=>{ // end of object
+                    ScriptToken::Color(v)=>{
+                        self.state.push(State::ObjectColon(obj, v.into()));
+                    }
+                    // nonstandard, allow objects and arrays as keys
+                    ScriptToken::OpenCurly=>{ // object
+                        let new_obj = heap.new_object();
+                        self.state.push(State::ObjectColon(obj, new_obj.into()));
+                        self.state.push(State::ObjectKey(new_obj));
+                    }
+                    ScriptToken::OpenSquare=>{ // 
+                        let new_arr = heap.new_array();
+                        self.state.push(State::ObjectColon(obj, new_arr.into()));
+                        self.state.push(State::Array(new_arr));
                     }
                     ScriptToken::CloseRound | ScriptToken::CloseSquare=>{
                         self.errors.push((self.index,format!("JsonParser: Unexpected ] or ) in object")));
@@ -232,5 +244,21 @@ impl JsonParser{
             self.parse_step(tok, heap);
             self.index += 1;
         }
+    }
+}
+
+#[derive(Default)]
+pub struct JsonParserThread{
+    pub tokenizer:ScriptTokenizer,
+    pub parser:JsonParser
+}
+
+impl JsonParserThread{
+    pub fn read_json(&mut self, json:&str, heap:&mut ScriptHeap)->ScriptValue{
+        self.tokenizer.clear();
+        self.parser.clear();
+        self.tokenizer.tokenize(json, heap);
+        self.parser.parse(&self.tokenizer.tokens, heap);
+        return self.parser.root
     }
 }
