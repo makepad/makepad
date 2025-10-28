@@ -949,7 +949,7 @@ impl ScriptHeap{
                     }
                 }
             }
-            if key.is_string_like(){
+            else if key.is_string_like(){
                 let id = if let Some(s) = key.as_string(){
                     LiveId::from_str(&self.strings[s.index as usize].string)
                 }
@@ -1352,7 +1352,7 @@ impl ScriptHeap{
                                     return None
                                 }
                             }
-                            else if k.is_string_like(){
+                            else if k.is_string_like() && !ob.tag.is_string_keys(){
                                 let id = if let Some(s) = k.as_string(){
                                     LiveId::from_str(&self.strings[s.index as usize].string)
                                 }
