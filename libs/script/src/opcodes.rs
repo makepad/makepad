@@ -507,7 +507,7 @@ impl ScriptThread{
             
             Opcode::BEGIN_PROTO=>{
                 let proto = self.pop_stack_resolved(heap);
-                let me = heap.new_with_proto_check(proto, &self.trap);
+                let me = heap.new_with_proto_checked(proto, &self.trap);
                 self.mes.push(ScriptMe::Object(me));
                 self.trap.goto_next();
             }

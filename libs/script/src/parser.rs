@@ -1,7 +1,5 @@
-#![allow(dead_code)]
 use crate::tokenizer::*;
 use crate::makepad_live_id::live_id::*;
-
 use crate::value::*;
 use crate::opcode::*;
 use crate::makepad_live_id::makepad_live_id_macros::*;
@@ -304,7 +302,6 @@ pub struct ScriptParser{
     pub source_map: Vec<Option<u32>>,
     
     state: Vec<State>,
-    opstack: Vec<LiveId>
 }
 
 impl Default for ScriptParser{
@@ -313,7 +310,6 @@ impl Default for ScriptParser{
             index: 0,
             opcodes: Default::default(),
             source_map: Default::default(),
-            opstack: Default::default(),
             state: vec![State::BeginStmt{last_was_sep:false}],
         }
     }
@@ -377,10 +373,6 @@ impl ScriptParser{
     
     fn set_opcode_args(&mut self, index:u32, args: OpcodeArgs){
         self.opcodes[index as usize].set_opcode_args(args);
-    }
-    
-    fn push_state(&mut self, state:State){
-        self.state.push(state)
     }
     
     fn parse_step(&mut self, tok:ScriptToken, values: &[ScriptValue])->u32{
