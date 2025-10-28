@@ -110,12 +110,11 @@ pub fn test(){
         let x = {x:4 y:[1 2 3]};
         let y = x.write_json();
         let z = y.read_json();
-        ~x
-        ~z["x"]
+        ~z.y
     };
     
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         let t = mod.std;
         scope.import(mod.std)
         
@@ -249,7 +248,7 @@ pub fn test(){
         
     };
     
-    let code = script!{
+    let _code = script!{
         let fib = |n| if n <= 1 n else fib(n - 1) + fib(n - 2)
         ~fib(38);
     };
