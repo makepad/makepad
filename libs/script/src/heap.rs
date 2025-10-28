@@ -587,7 +587,7 @@ impl ScriptHeap{
         object.tag.freeze_component();
     }
     
-    pub fn set_lookup_id_as_string(&mut self, obj: ScriptObject){
+    pub fn set_string_keys(&mut self, obj: ScriptObject){
         let object = &mut  self.objects[obj.index as usize];
         object.tag.set_string_keys();
     }
