@@ -77,7 +77,7 @@ impl ScriptHeap{
     }
     
     
-    pub fn new_with_proto_check(&mut self, proto:ScriptValue, trap:&ScriptTrap)->ScriptObject{
+    pub fn new_with_proto_checked(&mut self, proto:ScriptValue, trap:&ScriptTrap)->ScriptObject{
         if let Some(ptr) = proto.as_object(){
             let object = &mut self.objects[ptr.index as usize];
             if object.tag.is_notproto(){
@@ -251,6 +251,12 @@ impl ScriptHeap{
             trap.err_frozen();
             return 
         }
+        array.tag.set_dirty();
+        array.storage.push(value);
+    }
+    
+    pub fn array_push_unchecked(&mut self, array:ScriptArray, value:ScriptValue){
+        let array = &mut self.arrays[array.index as usize];
         array.tag.set_dirty();
         array.storage.push(value);
     }
@@ -725,8 +731,8 @@ impl ScriptHeap{
     }
             
     
-    pub fn set_value_def(&mut self, ptr:ScriptObject, key:LiveId, value:ScriptValue){
-        self.set_value(ptr, key.into(), value, &mut ScriptTrap::default());
+    pub fn set_value_def(&mut self, ptr:ScriptObject, key:ScriptValue, value:ScriptValue){
+        self.set_value(ptr, key, value, &mut ScriptTrap::default());
     }
     
     pub fn set_value(&mut self, ptr:ScriptObject, key:ScriptValue, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
@@ -1081,6 +1087,15 @@ impl ScriptHeap{
             object.tag.set_reffed();
         }
         NIL
+    }
+    
+    pub fn vec_push_unchecked(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue){
+        let object = &mut self.objects[ptr.index as usize];
+        object.vec.push(ScriptVecValue{key,value});
+        if let Some(obj) = value.as_object(){
+            let object = &mut self.objects[obj.index as usize];
+            object.tag.set_reffed();
+        }
     }
             
     pub fn vec_remove(&mut self, ptr:ScriptObject, index:usize, trap:&ScriptTrap)->ScriptVecValue{
