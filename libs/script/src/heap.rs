@@ -219,7 +219,7 @@ impl ScriptHeap{
         }.into()
     }
     
-    pub fn as_string_mut_self<R,F:FnOnce(&mut Self, &str)->R>(&mut self, value:ScriptValue, cb:F)->Option<R>{
+    pub fn string_mut_self_with<R,F:FnOnce(&mut Self, &str)->R>(&mut self, value:ScriptValue, cb:F)->Option<R>{
         if let Some(s) = value.as_string(){
             let mut str = String::new();
             std::mem::swap(&mut self.strings[s.index as usize].string, &mut str);
@@ -234,6 +234,20 @@ impl ScriptHeap{
         }
         None
     }
+    
+    pub fn string_with<R,F:FnOnce(&Self, &str)->R>(&self, value:ScriptValue, cb:F)->Option<R>{
+        if let Some(s) = value.as_string(){
+            let r = cb(self, &self.strings[s.index as usize].string);
+            return Some(r)
+        }
+        if let Some(r) = value.as_inline_string(|s|{
+            cb(self, s)
+        }){
+            return Some(r)
+        }
+        None
+    }
+    
         
     pub fn check_intern_string(&self,value:&str)->Option<ScriptValue>{
         if let Some(v) = ScriptValue::from_inline_string(&value){
@@ -1507,13 +1521,13 @@ impl ScriptHeap{
         }
     }
     
-    pub fn write_json(&mut self, value:ScriptValue)->ScriptValue{
+    pub fn to_json(&mut self, value:ScriptValue)->ScriptValue{
         self.new_string_with(|heap, s|{
-            heap.write_json_inner(value, s);
+            heap.to_json_inner(value, s);
         })
     }
     
-    pub fn write_json_inner(&self, value:ScriptValue, out:&mut String){
+    pub fn to_json_inner(&self, value:ScriptValue, out:&mut String){
         fn escape_str(inp:&str, out:&mut String){
             for c in inp.chars(){
                 match c{
@@ -1538,17 +1552,17 @@ impl ScriptHeap{
                 let object = &self.objects[ptr.index as usize];
                 object.map_iter(|key,value|{
                     if !first{out.push(',')}
-                    self.write_json_inner(key, out);
+                    self.to_json_inner(key, out);
                     out.push(':');
-                    self.write_json_inner(value, out);
+                    self.to_json_inner(value, out);
                     first = false;
                 });
                 for kv in object.vec.iter(){
                     if !first{out.push(',')}
                     first = false;
-                    self.write_json_inner(kv.key, out);
+                    self.to_json_inner(kv.key, out);
                     out.push(':');
-                    self.write_json_inner(kv.value, out);
+                    self.to_json_inner(kv.value, out);
                 }
                 if let Some(next_ptr) = object.proto.as_object(){
                     ptr = next_ptr
@@ -1568,7 +1582,7 @@ impl ScriptHeap{
                 if let Some(value) =array.storage.index(i){
                     if !first{out.push(',')}
                     first = false;
-                    self.write_json_inner(value, out);
+                    self.to_json_inner(value, out);
                 }
             }
             out.push(']');

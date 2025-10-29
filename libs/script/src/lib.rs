@@ -116,8 +116,8 @@ pub fn test(){
     // Our unit tests :)
     let code = script!{
         let t = mod.std;
-        scope.import(mod.std)
-        
+        use mod.std.assert
+
         // array operations
         let x = 1+2 assert(x == 3)
         let iv = [1 2 3 4] let ov = []
@@ -235,15 +235,15 @@ pub fn test(){
         try{s{vec:[1,2]}} assert(false) ok assert(true)
         
         // string to array
-        assert("hi".bytes().string() == "hi")
-        let a = "12345".bytes();
+        assert("hi".to_bytes().to_string() == "hi")
+        let a = "12345".to_bytes();
         a.pop();
-        assert(a.string() == "1234")
-        assert("hi".chars().string() == "hi")
+        assert(a.to_string() == "1234")
+        assert("hi".to_chars().to_string() == "hi")
         
         let x = {x:1 y:[1 2 3]};
-        let y = x.write_json();
-        let z = y.read_json();
+        let y = x.to_json();
+        let z = y.parse_json();
         
         assert(z == x)
         assert(z["x"] == z.x)
@@ -261,7 +261,7 @@ pub fn test(){
     
     let dt = std::time::Instant::now();
     
-    vmbase.eval(code, &mut 0);
+    vm.eval(code);
     println!("Duration {}", dt.elapsed().as_secs_f64())
     
 }

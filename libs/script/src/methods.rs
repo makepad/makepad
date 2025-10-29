@@ -61,8 +61,8 @@ impl ScriptTypeMethods{
         ];
         
         for (ty,_) in types {
-            self.add(h, native, &[], ty, id!(write_json), |vm, args|{
-                let this = script_value!(vm, args.this);vm.heap.write_json(this)
+            self.add(h, native, &[], ty, id!(to_json), |vm, args|{
+                let this = script_value!(vm, args.this);vm.heap.to_json(this)
             });
         };
         

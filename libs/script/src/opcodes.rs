@@ -769,7 +769,20 @@ impl ScriptThread{
                 // also pop our ifelse stack
                 self.trap.goto_rel(args.to_u32());
             }   
-            
+            Opcode::USE=>{
+                let field = self.pop_stack_value();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    let value = heap.value(obj, field, &self.trap);
+                    if !value.is_nil(){
+                        if let Some(field) = field.as_id(){
+                            self.def_scope_value(heap, field, value);
+                        }
+                    }
+                }
+                self.trap.goto_next();
+                return
+            }
             Opcode::FIELD=>{
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
