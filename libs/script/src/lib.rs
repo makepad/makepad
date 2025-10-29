@@ -250,8 +250,8 @@ pub fn test(){
         assert(x["y"] == [1 2 3])
         z.x = 2
         assert(z["x"] == 2)
-        let x = {"key":"1.0", x:2.0}
-        assert(x.key == "1.0")
+        let x = {"key":3, x:2.0}
+        assert(x.key == 3)
     };
     
     let _code = script!{

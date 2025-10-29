@@ -69,6 +69,7 @@ script_primitive!(
         }
     }
 );
+impl ScriptDeriveMarker for String{}
 
 script_primitive!(
     LiveId, 

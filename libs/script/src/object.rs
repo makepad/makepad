@@ -16,6 +16,8 @@ pub struct ScriptObjectTag(u64);
 #[derive(Copy,Clone,Eq,PartialEq, Ord, PartialOrd)]
 pub struct ScriptObjectStorageType(u8);
 
+pub type ScriptObjectMap = ValueMap<ScriptValue, ScriptMapValue>;
+
 impl fmt::Debug for ScriptObjectStorageType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
@@ -386,7 +388,7 @@ pub struct ScriptObjectData{
     pub tag: ScriptObjectTag,
     pub proto: ScriptValue,
     
-    pub map: ValueMap<ScriptValue, ScriptMapValue>,
+    pub map: ScriptObjectMap,
     pub vec: Vec<ScriptVecValue>,
 }
 
