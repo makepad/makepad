@@ -74,5 +74,6 @@ impl ScriptTrap{
     err_fwd!(err_not_allowed_in_arguments);
     err_fwd!(err_array_bound);
     err_fwd!(err_wrong_type_in_apply);
+    err_fwd!(err_filesystem);
 }
 

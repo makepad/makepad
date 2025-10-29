@@ -197,7 +197,7 @@ impl Default for ScriptArrayData{
 impl ScriptArrayData{
         
     pub fn add_type_methods(tm: &mut ScriptTypeMethods, h: &mut ScriptHeap, native:&mut ScriptNative){
-        tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(string), |vm, args|{
+        tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(to_string), |vm, args|{
             if let Some(arr) = script_value!(vm, args.this).as_array(){
                 return vm.heap.new_string_with(|heap, s|{
                     heap.array_ref(arr).to_string(heap, s);
@@ -206,7 +206,7 @@ impl ScriptArrayData{
             vm.thread.trap.err_unexpected()
         });
         
-        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(read_json), |vm, args|{
+        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(parse_json), |vm, args|{
             if let Some(arr) = script_value!(vm, args.this).as_array(){
                 let mut s = String::new();
                 std::mem::swap(&mut s, &mut vm.thread.json_parser.temp_string);

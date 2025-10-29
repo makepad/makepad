@@ -43,23 +43,23 @@ pub struct ScriptCode{
     pub type_methods: ScriptTypeMethods,
     pub builtins: ScriptBuiltins,
     pub native: RefCell<ScriptNative>,
-    pub bodies: Vec<ScriptBody>,
+    pub bodies: RefCell<Vec<ScriptBody>>,
 }
 
-pub struct ScriptLoc<'a>{
-    pub file: &'a str,
+pub struct ScriptLoc{
+    pub file: String,
     pub col: u32,
     pub line: u32,
 }
 
-impl<'a> std::fmt::Debug for ScriptLoc<'a> {
+impl std::fmt::Debug for ScriptLoc{
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
 }
 
 
-impl<'a> std::fmt::Display for ScriptLoc<'a> {
+impl std::fmt::Display for ScriptLoc{
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}:{}:{}", self.file, self.line, self.col)
     }
@@ -67,20 +67,20 @@ impl<'a> std::fmt::Display for ScriptLoc<'a> {
 
 impl ScriptCode{
     pub fn ip_to_loc(&self, ip:ScriptIp)->Option<ScriptLoc>{
-        if let Some(body) = self.bodies.get(ip.body as usize){
+        if let Some(body) = self.bodies.borrow().get(ip.body as usize){
             if let Some(Some(index)) = body.parser.source_map.get(ip.index as usize){
                 if let Some(rc) = body.tokenizer.token_index_to_row_col(*index){
                     if let ScriptSource::Block{block} = &body.source{
                         return Some(
                             ScriptLoc{
-                                file: block.file.as_str(),
+                                file: block.file.clone(),
                                 line: rc.0 + block.line as u32 + 1,
                                 col: rc.1
                             }
                         )
                     }else{
                         return Some(ScriptLoc{
-                            file: "generated",
+                            file: "generated".into(),
                             line: rc.0,
                             col: rc.1
                         })
@@ -89,7 +89,7 @@ impl ScriptCode{
             }
         }
         return Some(ScriptLoc{
-            file: "unknown",
+            file: "unknown".into(),
             line: ip.body as _,
             col: ip.index as _
         })
@@ -120,7 +120,6 @@ impl <'a> ScriptVm<'a>{
         self.heap.new_module(id)
     }
     
-    // should belong on heap but i need vm to stay together    
     pub fn map_mut_with<R,F:FnOnce(&mut Self, &mut ScriptObjectMap)->R>(&mut self, object:ScriptObject, f:F)->R{
         let mut map = ScriptObjectMap::default();
         std::mem::swap(&mut map, &mut self.heap.objects[object.index as usize].map);
@@ -133,12 +132,58 @@ impl <'a> ScriptVm<'a>{
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         self.code.native.borrow_mut().add_fn(&mut self.heap, module, method, args, f)
     }
+    
+    
+    pub fn add_script_block(&mut self, new_block:ScriptBlock)->u16{
+        let scope = self.heap.new_with_proto(id!(scope).into());
+        self.heap.set_object_deep(scope);
+        self.heap.set_value_def(scope, id!(mod).into(), self.heap.modules.into());
+        let me = self.heap.new_with_proto(id!(root_me).into());
+                
+        let new_body = ScriptBody{
+            source: ScriptSource::Block{block:new_block},
+            tokenizer: ScriptTokenizer::default(),
+            parser: ScriptParser::default(),
+            scope,
+            me,
+        };
+        let mut bodies = self.code.bodies.borrow_mut();
+        for (i, body) in bodies.iter_mut().enumerate(){
+            if let ScriptSource::Block{block} = &body.source{
+                if let ScriptSource::Block{block:new_block} = &new_body.source{
+                    if  block.file == new_block.file &&
+                    block.line == new_block.line &&
+                    block.column == new_block.column{
+                        *body = new_body;
+                        return i as u16
+                    }
+                }
+            }
+        }
+        let i = bodies.len();
+        bodies.push(new_body);
+        i as u16
+    }
+        
+    pub fn eval(&mut self, block: ScriptBlock){
+        let body_id = self.add_script_block(block);
+        let mut bodies = self.code.bodies.borrow_mut();
+        let body = &mut bodies[body_id as usize];
+                
+        if let ScriptSource::Block{block} = &body.source{
+            body.tokenizer.tokenize(&block.code, &mut self.heap);
+            body.parser.parse(&body.tokenizer.tokens, &block.values);
+            drop(bodies);
+            // lets point our thread to it
+            self.thread.run_root(&mut self.heap, &self.code, self.host, body_id)
+        }
+    }
+    
 }
 
 pub struct ScriptVmBase{
     pub void: usize,
     pub code: ScriptCode,
-    pub global: ScriptObject,
     pub heap: ScriptHeap,
     pub threads: Vec<ScriptThread>,
 }
@@ -147,7 +192,7 @@ impl ScriptVmBase{
     pub fn as_ref<'a>(&'a mut self)->ScriptVm<'a>{
         ScriptVm{
             host: &mut self.void,
-            code: &self.code,
+            code: &mut self.code,
             heap: &mut self.heap,
             thread: &mut self.threads[0]
         }
@@ -169,7 +214,6 @@ impl ScriptVmBase{
         define_math_module(&mut heap, &mut native);
         define_std_module(&mut heap, &mut native);
     
-        let global = heap.new_with_proto(id!(global).into());
         let builtins = ScriptBuiltins::new(&mut heap);
         
         Self{
@@ -181,53 +225,8 @@ impl ScriptVmBase{
                 bodies: Default::default(),
             },
             threads: vec![ScriptThread::new()],
-            global,
             heap: heap,
         }
     }
         
-        
-    pub fn add_script_block(&mut self, new_block:ScriptBlock)->u16{
-        let scope = self.heap.new_with_proto(id!(scope).into());
-        self.heap.set_object_deep(scope);
-        self.heap.set_value_def(scope, id!(mod).into(), self.heap.modules.into());
-        self.heap.set_value_def(scope, id!(global).into(), self.global.into());
-        let me = self.heap.new_with_proto(id!(root_me).into());
-        
-        let new_body = ScriptBody{
-            source: ScriptSource::Block{block:new_block},
-            tokenizer: ScriptTokenizer::default(),
-            parser: ScriptParser::default(),
-            scope,
-            me,
-        };
-        for i in 0..self.code.bodies.len(){
-            let body = &mut self.code.bodies[i];
-            if let ScriptSource::Block{block} = &body.source{
-                if let ScriptSource::Block{block:new_block} = &new_body.source{
-                    if  block.file == new_block.file &&
-                        block.line == new_block.line &&
-                        block.column == new_block.column{
-                        *body = new_body;
-                        return i as u16
-                    }
-                }
-            }
-        }
-        let i = self.code.bodies.len();
-        self.code.bodies.push(new_body);
-        i as u16
-    }
-    
-    pub fn eval(&mut self, block: ScriptBlock, host:&mut dyn Any){
-        let body_id = self.add_script_block(block);
-        let body = &mut self.code.bodies[body_id as usize];
-        
-        if let ScriptSource::Block{block} = &body.source{
-            body.tokenizer.tokenize(&block.code, &mut self.heap);
-            body.parser.parse(&body.tokenizer.tokens, &block.values);
-            // lets point our thread to it
-            self.threads[0].run_root(&mut self.heap, &self.code, host, body_id)
-        }
-    }
 }

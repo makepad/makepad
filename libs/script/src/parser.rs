@@ -68,7 +68,8 @@ enum State{
     EmitReturn{index:u32},
     EmitBreak{index:u32},
     EmitContinue{index:u32},
-        
+    
+    Use{index:u32},
     Let{index:u32},
     LetDynOrTyped{index:u32},
     LetType{index:u32},
@@ -482,6 +483,17 @@ impl ScriptParser{
                 else {
                     println!("Expected }} not found in for");
                     return 0
+                }
+            }
+            State::Use{index}=>{
+                if let Some(code) = self.opcodes.last(){
+                    if let Some((Opcode::FIELD,_)) = code.as_opcode(){
+                        self.pop_code();
+                        self.push_code(Opcode::USE.into(), index)
+                    }
+                    else{
+                        println!("Error use expected field operation")
+                    }
                 }
             }
             State::Let{index}=>{
@@ -1023,6 +1035,11 @@ impl ScriptParser{
                 }
                 if id == id!(while){
                     self.state.push(State::While{index:self.index});
+                    return 1
+                }
+                if id == id!(use){
+                    self.state.push(State::Use{index:self.index});
+                    self.state.push(State::BeginExpr{required:true});
                     return 1
                 }
                 if id == id!(let){
