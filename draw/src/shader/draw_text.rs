@@ -222,7 +222,7 @@ impl DrawText {
         let turtle_rect = cx.turtle().inner_rect();
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
-        let row_height = cx.turtle().row_height();
+        let row_height = cx.turtle().next_row_offset();
         
         // lets draw a debug rect
         /*

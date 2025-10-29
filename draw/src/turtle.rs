@@ -914,8 +914,8 @@ impl Turtle {
     /// Returns the offset to this turtle's next walk.
     /// 
     /// This is either zero if this turtle's next walk would be its first, or this turtle's
-    /// spacing in the direction of it's flow.
-    pub fn offset_to_next_walk(&self, finished_walks_end: usize) -> DVec2 {
+    /// spacing in the direction of it's flow otherwise.
+    pub fn next_walk_offset(&self, finished_walks_end: usize) -> DVec2 {
         if self.next_walk_is_first(finished_walks_end) {
             dvec2(0.0, 0.0)
         } else {
@@ -929,10 +929,10 @@ impl Turtle {
 
     /// Returns the size of the rectangle of this turtle's next walk, based on the given desired
     /// `width`, `height`, and `margin`.
-    pub fn size_of_next_walk(&self, width: Size, height: Size, margin: Margin) -> DVec2 {
+    pub fn next_walk_size(&self, width: Size, height: Size, margin: Margin) -> DVec2 {
         dvec2(
-            self.width_of_next_walk(width, margin),
-            self.height_of_next_walk(height, margin),
+            self.next_walk_width(width, margin),
+            self.next_walk_height(height, margin),
         )
     }
 
@@ -961,7 +961,7 @@ impl Turtle {
     /// - If the desired width is `Size::Fit`, then the actual width cannot be computed until this
     ///   turtle's final unused inner width is known, so we return NaN to indicate that the actual
     ///   width is not yet known.
-    pub fn width_of_next_walk(&self, width: Size, margin: Margin) -> f64 {
+    pub fn next_walk_width(&self, width: Size, margin: Margin) -> f64 {
         match width {
             Size::Fill { min, max, .. } => {
                 let mut outer_width = match self.layout.flow {
@@ -1005,7 +1005,7 @@ impl Turtle {
     /// - If the desired height is `Size::Fit`, then the actual height cannot be computed until this
     ///   turtle's final unused inner height is known, so we return NaN to indicate that the actual
     ///   height is not yet known.
-    pub fn height_of_next_walk(&self, height: Size, margin: Margin) -> f64 {
+    pub fn next_walk_height(&self, height: Size, margin: Margin) -> f64 {
         match height {
             Size::Fill { min, max, .. } => {
                 let mut outer_height = match self.layout.flow {
@@ -1283,11 +1283,11 @@ impl<'a,'b> Cx2d<'a,'b> {
         let outer_origin = if let Some(outer_origin) = walk.abs_pos {
             outer_origin
         } else {
-            parent.pos() + parent.offset_to_next_walk(self.finished_walks.len())
+            parent.pos() + parent.next_walk_offset(self.finished_walks.len())
         };
         let origin = outer_origin + walk.margin.left_top();
 
-        let size = parent.size_of_next_walk(walk.width, walk.height, walk.margin);
+        let size = parent.next_walk_size(walk.width, walk.height, walk.margin);
 
         let clip_min = dvec2(
             if layout.clip_x {
@@ -1607,7 +1607,7 @@ impl<'a,'b> Cx2d<'a,'b> {
     fn walk_turtle_internal(&mut self, walk: Walk, align_list_start: usize) -> Rect {
         let turtle = self.turtles.last_mut().unwrap();
 
-        let size = turtle.size_of_next_walk(walk.width, walk.height, walk.margin);
+        let size = turtle.next_walk_size(walk.width, walk.height, walk.margin);
         let outer_size = size + walk.margin.size();
         
         if let Some(outer_origin) = walk.abs_pos {
@@ -1636,7 +1636,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             }
         }
         else {
-            let spacing = turtle.offset_to_next_walk(self.finished_walks.len());
+            let spacing = turtle.next_walk_offset(self.finished_walks.len());
             
             let outer_origin = match turtle.flow() {
                 Flow::Right { wrap: true } if outer_size.x > turtle.unused_inner_width_for_current_row() => {
@@ -1702,8 +1702,8 @@ impl<'a,'b> Cx2d<'a,'b> {
 
                 let old_pos = turtle.pos();
 
-                let spacing = turtle.offset_to_next_walk(self.finished_walks.len());
-                let size = dvec2(0.0, turtle.height_of_next_walk(walk.height, walk.margin));
+                let spacing = turtle.next_walk_offset(self.finished_walks.len());
+                let size = dvec2(0.0, turtle.next_walk_height(walk.height, walk.margin));
                 let outer_size = size + walk.margin.size();
                 
                 turtle.move_right(spacing.x);
@@ -1727,8 +1727,8 @@ impl<'a,'b> Cx2d<'a,'b> {
 
                 let old_pos = turtle.pos();
 
-                let spacing = turtle.offset_to_next_walk(self.finished_walks.len());
-                let size = dvec2(turtle.width_of_next_walk(walk.width, walk.margin), 0.0);
+                let spacing = turtle.next_walk_offset(self.finished_walks.len());
+                let size = dvec2(turtle.next_walk_width(walk.width, walk.margin), 0.0);
                 let outer_size = size + walk.margin.size();
 
                 turtle.move_down(spacing.y);
@@ -1842,15 +1842,15 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
         let turtle = self.turtles.last().unwrap();
         let size = dvec2(
-            turtle.width_of_next_walk(walk.width, walk.margin),
-            turtle.height_of_next_walk(walk.height, walk.margin),
+            turtle.next_walk_width(walk.width, walk.margin),
+            turtle.next_walk_height(walk.height, walk.margin),
         );
         
         if let Some(pos) = walk.abs_pos {
             Rect {pos: pos + walk.margin.left_top(), size}
         }
         else {
-            let spacing = turtle.offset_to_next_walk(self.finished_walks.len());
+            let spacing = turtle.next_walk_offset(self.finished_walks.len());
             let pos = turtle.pos;
             Rect {pos: pos + walk.margin.left_top() + spacing, size}
         }
@@ -1871,7 +1871,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             turtle.origin.x + turtle.layout.padding.left,
             turtle.origin.y + turtle.used_height + spacing
         );
-        let offset = turtle.offset_to_next_walk(self.finished_walks.len());
+        let offset = turtle.next_walk_offset(self.finished_walks.len());
         let shift = outer_origin - turtle.pos() - offset;
         turtle.move_to(outer_origin);
         turtle.allocate_height(0.0);
@@ -2014,8 +2014,24 @@ pub struct TurtleAlignRange{
 }
 
 impl Turtle {
-    pub fn row_height(&self)->f64{
-        self.used_height - (self.pos.y - self.origin.y) + self.wrap_spacing
+    /// Returns the y-position of the current row.
+    pub fn row_y(&self) -> f64 {
+        self.pos().y - self.origin().y
+    }
+
+    /// Returns the height of the current row so far.
+    ///
+    /// This is the used height of the turtle's rectangle so far, minus the y-position of the
+    /// current row.
+    pub fn row_height(&self) -> f64 {
+        self.used_height - self.row_y()
+    }
+
+    /// Returns the offset to the next row.
+    ///
+    /// This is the height of the current row so far, plus the wrap spacing.
+    pub fn next_row_offset(&self) -> f64 {
+        self.row_height() + self.wrap_spacing
     }
     
     pub fn used(&self) -> DVec2 {
@@ -2062,14 +2078,14 @@ impl Turtle {
         if walk.width.is_fit() {
             return None;
         }
-        Some(self.width_of_next_walk(walk.width, walk.margin) as f64)
+        Some(self.next_walk_width(walk.width, walk.margin) as f64)
     }
 
     pub fn max_height(&self, walk: Walk) -> Option<f64> {
         if walk.height.is_fit() {
             return None
         }
-        Some(self.width_of_next_walk(walk.height, walk.margin) as f64)
+        Some(self.next_walk_width(walk.height, walk.margin) as f64)
     }
 }
 
