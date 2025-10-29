@@ -377,7 +377,6 @@ impl ScriptHeap{
         Some(&mut array.storage)
     }
         
-        
     pub fn array_remove(&mut self, array:ScriptArray, index: usize,trap:&ScriptTrap)->ScriptValue{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
@@ -420,6 +419,15 @@ impl ScriptHeap{
         }
         else{
             trap.err_array_bound()
+        }
+    }
+    
+    pub fn array_index_unchecked(&self, array:ScriptArray, index:usize)->ScriptValue{
+        if let Some(value) = self.arrays[array.index as usize].storage.index(index){
+            return value
+        }
+        else{
+            NIL
         }
     }
     
@@ -1059,6 +1067,19 @@ impl ScriptHeap{
             }
         }
         None    
+    }
+    
+    pub fn map_ref(&self, object:ScriptObject)->&ScriptObjectMap{
+        let object = &self.objects[object.index as usize];
+        &object.map
+    }
+        
+    pub fn map_mut_with<S,R,F:FnOnce(S, &mut ScriptObjectMap)->R>(&mut self, s:S, object:ScriptObject, f:F)->R{
+        let mut map = ScriptObjectMap::default();
+        std::mem::swap(&mut map, &mut self.objects[object.index as usize].map);
+        let r = f(s, &mut map);
+        std::mem::swap(&mut map, &mut self.objects[object.index as usize].map);
+        r
     }
         
     

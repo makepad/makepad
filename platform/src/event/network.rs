@@ -65,6 +65,7 @@ impl Default for NetworkResponseChannel {
     }
 }
 
+/*
 #[derive(PartialEq, Debug)]
 pub struct HttpRequest {
     pub metadata_id: LiveId,
@@ -75,7 +76,8 @@ pub struct HttpRequest {
     pub is_streaming: bool,
     pub body: Option<Vec<u8>>, 
 }
-/*
+*/
+
 #[derive(PartialEq, Debug, Script, ScriptHook)]
 pub struct HttpRequest {
     #[live] pub metadata_id: LiveId,
@@ -85,7 +87,7 @@ pub struct HttpRequest {
     #[live] pub ignore_ssl_cert: bool,
     #[live] pub is_streaming: bool,
     #[live] pub body: Option<Vec<u8>>, 
-}*/
+}
 
 #[derive(Debug)]
 pub struct SplitUrl<'a>{

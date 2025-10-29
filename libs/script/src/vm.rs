@@ -7,6 +7,7 @@ use crate::methods::*;
 use crate::thread::*;
 use crate::native::*;
 use crate::modules::*;
+use crate::object::*;
 use std::cell::RefCell;
 use std::any::Any;
 
@@ -104,6 +105,8 @@ pub struct ScriptVm<'a>{
 }
 
 impl <'a> ScriptVm<'a>{
+        
+    
     pub fn call(&mut self,fnobj:ScriptValue, args:&[ScriptValue])->ScriptValue{
         self.thread.call(self.heap, self.code, self.host, fnobj, args)
     }
@@ -115,6 +118,15 @@ impl <'a> ScriptVm<'a>{
         
     pub fn new_module(&mut self, id:LiveId)->ScriptObject{
         self.heap.new_module(id)
+    }
+    
+    // should belong on heap but i need vm to stay together    
+    pub fn map_mut_with<R,F:FnOnce(&mut Self, &mut ScriptObjectMap)->R>(&mut self, object:ScriptObject, f:F)->R{
+        let mut map = ScriptObjectMap::default();
+        std::mem::swap(&mut map, &mut self.heap.objects[object.index as usize].map);
+        let r = f(self, &mut map);
+        std::mem::swap(&mut map, &mut self.heap.objects[object.index as usize].map);
+        r
     }
     
     pub fn add_fn<F>(&mut self, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
