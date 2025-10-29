@@ -56,7 +56,7 @@ use {
  
 pub struct Cx {
     
-    pub vm: Option<Box<ScriptVmBase>>,
+    pub script_vm: Option<Box<ScriptVmBase>>,
     
     pub (crate) os_type: OsType,
     pub in_makepad_studio: bool,
@@ -283,8 +283,12 @@ impl Cx {
             *sender = Some(action_sender);
         }
         
+        let mut script_vm = Box::new(ScriptVmBase::new());
+        
+        crate::script::define_script_modules(&mut (*script_vm).as_ref());
+        
         Self {
-            vm: Some(Box::new(ScriptVmBase::new())),
+            script_vm: Some(script_vm),
             demo_time_repaint: false,
             null_texture,
             cpu_cores: 8,

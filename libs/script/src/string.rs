@@ -45,17 +45,17 @@ pub struct ScriptStringData{
 
 impl ScriptStringData{
     pub fn add_type_methods(tm: &mut ScriptTypeMethods, h: &mut ScriptHeap, native:&mut ScriptNative){
-        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(bytes), |vm, args|{
+        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(to_bytes), |vm, args|{
             let this = script_value!(vm, args.this);
             vm.heap.string_to_bytes_array(this).into()
         });
-        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(chars), |vm, args|{
+        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(to_chars), |vm, args|{
             let this = script_value!(vm, args.this);
             vm.heap.string_to_chars_array(this).into()
         });
-        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(read_json), |vm, args|{
+        tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(parse_json), |vm, args|{
             let this = script_value!(vm, args.this);
-            if let Some(r) = vm.heap.as_string_mut_self(this, |heap,s|{
+            if let Some(r) = vm.heap.string_mut_self_with(this, |heap,s|{
                 vm.thread.json_parser.read_json(s, heap)
             }){
                 r

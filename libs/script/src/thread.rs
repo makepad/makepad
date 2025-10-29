@@ -280,7 +280,8 @@ impl ScriptThread{
     
     pub fn run_core(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any)->ScriptValue{
         self.trap.in_rust = false;
-        let mut body = &code.bodies[self.trap.ip.body as usize];
+        let bodies = code.bodies.borrow();
+        let mut body = &bodies[self.trap.ip.body as usize];
         while (self.trap.ip.index as usize) < body.parser.opcodes.len(){
             let opcode = body.parser.opcodes[self.trap.ip.index as usize];
             if let Some((opcode, args)) = opcode.as_opcode(){
@@ -319,7 +320,7 @@ impl ScriptThread{
                 self.push_stack_value(opcode);
                 self.trap.goto_next();
             }
-            body = &code.bodies[self.trap.ip.body as usize];
+            body = &bodies[self.trap.ip.body as usize];
         }
         NIL
     }
@@ -337,9 +338,11 @@ impl ScriptThread{
             args: Default::default(),
             return_ip: None,
         });
-                
-        self.scopes.push(code.bodies[body_id as usize].scope);
-        self.mes.push(ScriptMe::Object(code.bodies[body_id as usize].me));
+        
+        let bodies = code.bodies.borrow();
+        
+        self.scopes.push(bodies[body_id as usize].scope);
+        self.mes.push(ScriptMe::Object(bodies[body_id as usize].me));
         
         self.trap.ip.body = body_id;
         self.trap.ip.index = 0;
