@@ -250,7 +250,8 @@ impl ScriptValueType{
     pub const ERR_NOT_ALLOWED_IN_ARGUMENTS: Self = Self(44);
     pub const ERR_ARRAY_BOUND: Self = Self(45);
     pub const ERR_WRONG_TYPE_IN_APPLY: Self = Self(46);
-    pub const ERR_LAST: Self = Self(46);
+    pub const ERR_FILESYSTEM: Self = Self(47);
+    pub const ERR_LAST: Self = Self(47);
     
     pub const ID: Self = Self(0x80);
         
@@ -352,6 +353,7 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_ARRAY_BOUND=>write!(f,"ArrayIndexOutOfBounds"),
             Self::ERR_WRONG_TYPE_IN_APPLY=>write!(f,"WrongTypeInApply"),
             Self::ERR_USER=>write!(f,"UserGenerated"),
+            Self::ERR_FILESYSTEM=>write!(f,"FileSystemError"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             _=>write!(f,"ScriptValueType?")
         }
@@ -453,7 +455,8 @@ impl ScriptValue{
     err_fn!(err_not_allowed_in_arguments, ERR_NOT_ALLOWED_IN_ARGUMENTS);
     err_fn!(err_array_bound, ERR_ARRAY_BOUND);
     err_fn!(err_wrong_type_in_apply, ERR_WRONG_TYPE_IN_APPLY);
-    
+    err_fn!(err_filesystem, ERR_FILESYSTEM);
+        
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ScriptValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()}
     
     pub const fn as_err(&self)->Option<ValueError>{
