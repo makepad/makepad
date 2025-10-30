@@ -30,7 +30,7 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
         tb.add("    values:{");
         tb.add("        let mut v = Vec::new();");
         for value in &values {
-            tb.add("v.push({{").stream(Some(value.clone())).add("}}.into());");
+            tb.add("v.push(cx.with_vm(|vm|{ {").stream(Some(value.clone())).add("}.script_to_value(vm) } ) );");
         }
         tb.add("    v}");
         tb.add("}");

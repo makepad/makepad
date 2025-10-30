@@ -74,6 +74,24 @@ script_primitive!(
 impl ScriptDeriveMarker for String{}
 
 script_primitive!(
+    &'static str, 
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{
+        value.is_string_like()
+    },
+    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){
+    },
+    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
+        if let Some(val) = ScriptValue::from_inline_string(&self){
+            return val
+        }
+        else{
+            vm.heap.new_string_from_str(self).into()
+        }
+    }
+);
+impl ScriptDeriveMarker for &'static str{}
+
+script_primitive!(
     LiveId, 
     fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_id()},
     fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
@@ -96,6 +114,14 @@ script_primitive!(
 );
 
 
+script_primitive!(
+    ScriptValue, 
+    fn script_type_check(_heap:&ScriptHeap, _value:ScriptValue)->bool{true},
+    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        *self = value
+    },
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{*self}
+);
 // Option
 
 
