@@ -1471,7 +1471,8 @@ impl ScriptHeap{
                 object.map_iter(|key,value|{
                     if !first{print!(", ")}
                     if key != NIL{
-                        print!("{}:", key)
+                        self.print(key);
+                        print!(":");
                     }
                     self.print(value);
                     first = false;

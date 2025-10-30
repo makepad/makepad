@@ -64,6 +64,21 @@ impl ScriptTypeMethods{
             self.add(h, native, &[], ty, id!(to_json), |vm, args|{
                 let this = script_value!(vm, args.this);vm.heap.to_json(this)
             });
+            self.add(h, native, &[], ty, id!(to_number), |vm, args|{
+                let this = script_value!(vm, args.this);
+                vm.heap.cast_to_f64(this, vm.thread.trap.ip).into()
+            });
+            if ty != ScriptValueType::REDUX_ARRAY{
+                self.add(h, native, &[], ty, id!(to_string), |vm, args|{
+                    let this = script_value!(vm, args.this);
+                    if this.is_string_like(){
+                        return this
+                    }
+                    vm.heap.new_string_with(|heap, out|{
+                        heap.cast_to_string(this, out);
+                    })
+                });
+            }
         };
         
         for (ty,id) in types{
