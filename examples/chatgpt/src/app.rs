@@ -78,38 +78,37 @@ pub struct App {
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-       // makepad_script::test();
-let code = script!{
-    use mod.net
-    use mod.fs
-    let req = net.HttpRequest{
-        url: "http://127.0.0.1:8080/v1/chat/completions"
-        method: net.HttpMethod.POST
-        headers:{
-            "Content-Type": "application/json"
-            "Authorization": "Bearer "+fs.read_to_string("OPENAI_KEY")
-        }
-        body:{
-            model:"gpt-4o"
-            max_tokens:1000
-            stream:true
-            messages:[{content:"Write a poem",role:"user"}]
-        }.to_json()
-    }
-    net.http_request_stream(req) do net.HttpEvents{
-        on_stream: |s|{
-            let s = s.body.parse_json();
-            let s = ok{s.data.choices[0].delta.content}
-            if s ~s
-            
-        }
-        on_error: |e| ~e
-    }
-};
-
-
-
-cx.eval(code);
+        
+        let code = script!{
+            use mod.net
+            use mod.fs
+            let req = net.HttpRequest{
+                url: "http://127.0.0.1:8080/v1/chat/completions"
+                method: net.HttpMethod.POST
+                headers:{
+                    "Content-Type": "application/json"
+                    "Authorization": "Bearer "+fs.read_to_string("OPENAI_KEY")
+                }
+                body:{
+                    model: "gpt-4o"
+                    max_tokens: 1000
+                    stream: true
+                    messages: [{content:"lplease give me turd emojies",role:"user"}]
+                }.to_json()
+            }
+            net.http_request_stream(req) do net.HttpEvents{
+                on_stream: |res|{
+                    for data in res.body.to_string().split("\n\n"){
+                        let o = data.parse_json();
+                        let s = ok{o.data.choices[0].delta.content}
+                        if s ~s
+                    }
+                }
+                on_error: |e| ~e
+            }
+        };
+        
+        cx.eval(code);
     }
 }
 

@@ -20,11 +20,10 @@ pub struct ScriptHeap{
     pub(crate) objects: Vec<ScriptObjectData>,
     pub(crate) objects_free: Vec<ScriptObject>,
     
-    pub(crate) string_intern: HashMap<String, ScriptString>,
-    pub(crate) string_intern_free: Vec<String>,
-    pub(crate) strings: Vec<ScriptStringData>,
+    pub(crate) string_intern: HashMap<ScriptRcString, ScriptString>,
+    pub(crate) strings_reuse: Vec<String>,
+    pub(crate) strings: Vec<Option<ScriptStringData>>,
     pub(crate) strings_free: Vec<ScriptString>,
-    
     pub(crate) arrays: Vec<ScriptArrayData>,
     pub(crate) arrays_free: Vec<ScriptArray>,
     
@@ -177,55 +176,16 @@ impl ScriptHeap{
     // Strings
     
     
-    pub fn new_string_from_str(&mut self,value:&str)->ScriptValue{
-        self.new_string_with(|_,out|{
-            out.push_str(value);
-        })
-    }
-            
-    pub fn new_string_with<F:FnOnce(&mut Self, &mut String)>(&mut self,cb:F)->ScriptValue{
-        let mut out = if let Some(s) = self.string_intern_free.pop(){s} else {String::new()};
-        
-        cb(self, &mut out);
-        
-        if let Some(v) = ScriptValue::from_inline_string(&out){
-            out.clear();
-            self.string_intern_free.push(out);
-            return v
-        }
-        // check intern table
-        if let Some(index) = self.string_intern.get(&out){
-            out.clear();
-            self.string_intern_free.push(out);
-            return (*index).into();
-        }
-        // fetch a free string
-        if let Some(str) = self.strings_free.pop(){
-            let string = &mut self.strings[str.index as usize];
-            string.string.push_str(&out);
-            string.tag.set_alloced();
-            self.string_intern.insert(out, str);
-            str
-        }
-        else{
-            let index = self.strings.len();
-            let mut string = ScriptStringData::default();
-            string.tag.set_alloced();
-            string.string.push_str(&out);
-            self.strings.push(string);
-            let ret = ScriptString{index: index as _};
-            self.string_intern.insert(out, ret);
-            ret
-        }.into()
-    }
-    
     pub fn string_mut_self_with<R,F:FnOnce(&mut Self, &str)->R>(&mut self, value:ScriptValue, cb:F)->Option<R>{
         if let Some(s) = value.as_string(){
-            let mut str = String::new();
-            std::mem::swap(&mut self.strings[s.index as usize].string, &mut str);
-            let r = cb(self, &str);
-            std::mem::swap(&mut self.strings[s.index as usize].string, &mut str);
-            return Some(r)
+            if let Some(s) =  &self.strings[s.index as usize]{
+                let s = s.string.clone();
+                let r = cb(self, &s.0);
+                return Some(r)
+            }
+            else{
+                return None
+            }
         }
         if let Some(r) = value.as_inline_string(|s|{
             cb(self, s)
@@ -237,8 +197,13 @@ impl ScriptHeap{
     
     pub fn string_with<R,F:FnOnce(&Self, &str)->R>(&self, value:ScriptValue, cb:F)->Option<R>{
         if let Some(s) = value.as_string(){
-            let r = cb(self, &self.strings[s.index as usize].string);
-            return Some(r)
+            if let Some(s) =  &self.strings[s.index as usize]{
+                let r = cb(self, &s.string.0);
+                return Some(r)
+            }
+            else{
+                return None
+            }
         }
         if let Some(r) = value.as_inline_string(|s|{
             cb(self, s)
@@ -248,6 +213,52 @@ impl ScriptHeap{
         None
     }
     
+    pub fn new_string_from_str(&mut self,value:&str)->ScriptValue{
+        self.new_string_with(|_,out|{
+            out.push_str(value);
+        })
+    }
+            
+    pub fn new_string_with<F:FnOnce(&mut Self, &mut String)>(&mut self,cb:F)->ScriptValue{
+        let mut out = if let Some(s) = self.strings_reuse.pop(){s} else {String::new()};
+        
+        cb(self, &mut out);
+        
+        if let Some(v) = ScriptValue::from_inline_string(&out){
+            out.clear();
+            self.strings_reuse.push(out);
+            return v
+        }
+        
+        // check intern table
+        if let Some(index) = self.string_intern.get(&out){
+            out.clear();
+            self.strings_reuse.push(out);
+            return (*index).into();
+        }
+        
+        // fetch a free string
+        if let Some(str) = self.strings_free.pop(){
+            let out = ScriptRcString::new(out);
+            self.strings[str.index as usize] = Some(ScriptStringData{
+                tag: Default::default(),
+                string: out.clone()
+            });
+            self.string_intern.insert(out, str);
+            str
+        }
+        else{
+            let out = ScriptRcString::new(out);
+            let index = self.strings.len();
+            self.strings.push( Some(ScriptStringData{
+                tag: Default::default(),
+                string: out.clone()
+            }));
+            let ret = ScriptString{index: index as _};
+            self.string_intern.insert(out, ret);
+            ret
+        }.into()
+    }
         
     pub fn check_intern_string(&self,value:&str)->Option<ScriptValue>{
         if let Some(v) = ScriptValue::from_inline_string(&value){
@@ -262,7 +273,7 @@ impl ScriptHeap{
     }
         
     pub fn string(&self, ptr: ScriptString)->&str{
-        &self.strings[ptr.index as usize].string
+        if let Some(s) = &self.strings[ptr.index as usize]{&s.string.0}else{""}
     }
         
     pub fn string_to_bytes_array(&mut self, v:ScriptValue)->ScriptArray{
@@ -274,7 +285,7 @@ impl ScriptHeap{
         }).is_some(){}
         else if let Some(str) = v.as_string(){
             let array = &mut self.arrays[arr.index as usize];
-            let str = &self.strings[str.index as usize].string;
+            let str = if let Some(s) = &self.strings[str.index as usize]{&s.string.0}else{""};
             if let ScriptArrayStorage::U8(v) = &mut array.storage{v.clear();v.extend(str.as_bytes())}
             else{array.storage = ScriptArrayStorage::U8(str.as_bytes().into());}
         }
@@ -290,7 +301,7 @@ impl ScriptHeap{
         }).is_some(){}
         else if let Some(str) = v.as_string(){
             let array = &mut self.arrays[arr.index as usize];
-            let str = &self.strings[str.index as usize].string;
+            let str = if let Some(s) = &self.strings[str.index as usize]{&s.string.0}else{""};
             if let ScriptArrayStorage::U32(v) = &mut array.storage{v.clear();for c in str.chars(){v.push(c as u32)}}
             else{array.storage = ScriptArrayStorage::U32(str.chars().map(|c| c as u32).collect());}
         }
@@ -395,6 +406,14 @@ impl ScriptHeap{
         let mut storage = ScriptArrayStorage::ScriptValue(vec![]);
         std::mem::swap(&mut self.arrays[array.index as usize].storage, &mut storage);
         let r = cb(self, &storage);
+        std::mem::swap(&mut self.arrays[array.index as usize].storage, &mut storage);
+        r
+    }
+    
+    pub fn array_mut_mut_self_with<R,F:FnOnce(&mut Self, &mut ScriptArrayStorage)->R>(&mut self, array:ScriptArray, cb:F)->R{
+        let mut storage = ScriptArrayStorage::ScriptValue(vec![]);
+        std::mem::swap(&mut self.arrays[array.index as usize].storage, &mut storage);
+        let r = cb(self, &mut storage);
         std::mem::swap(&mut self.arrays[array.index as usize].storage, &mut storage);
         r
     }
@@ -996,7 +1015,7 @@ impl ScriptHeap{
             }
             else if key.is_string_like(){
                 let id = if let Some(s) = key.as_string(){
-                    LiveId::from_str(&self.strings[s.index as usize].string)
+                    if let Some(s) = &self.strings[s.index as usize]{LiveId::from_str(&s.string.0)}else{LiveId(0)}
                 }
                 else {
                     key.as_inline_string(|s| LiveId::from_str(s)).unwrap()
@@ -1417,7 +1436,7 @@ impl ScriptHeap{
                             }
                             else if k.is_string_like() && !ob.tag.is_string_keys(){
                                 let id = if let Some(s) = k.as_string(){
-                                    LiveId::from_str(&self.strings[s.index as usize].string)
+                                    if let Some(s) = &self.strings[s.index as usize]{LiveId::from_str(&s.string.0)}else{LiveId(0)}
                                 }
                                 else {
                                     k.as_inline_string(|s| LiveId::from_str(s)).unwrap()
@@ -1515,7 +1534,7 @@ impl ScriptHeap{
             print!("]");
         }
         else if let Some(s) = value.as_string(){
-            let s = &self.strings[s.index as usize].string;
+            let s = if let Some(s) = &self.strings[s.index as usize]{&s.string.0}else{""};
             print!("\"");
             print!("{}", s);
             print!("\"");
@@ -1607,7 +1626,7 @@ impl ScriptHeap{
             // alright. this is json eh. so.
         }
         else if let Some(s) = value.as_string(){
-            let s = &self.strings[s.index as usize].string;
+            let s = if let Some(s) = &self.strings[s.index as usize]{&s.string.0}else{""};
             out.push('"');
             escape_str(s, out);
             out.push('"');
