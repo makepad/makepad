@@ -325,7 +325,7 @@ impl ScriptThread{
         NIL
     }
     
-    pub fn run_root(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any, body_id: u16){
+    pub fn run_root(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any, body_id: u16)->ScriptValue{
         
         self.calls.push(CallFrame{
             bases: StackBases{
@@ -349,7 +349,7 @@ impl ScriptThread{
         //let mut profile: std::collections::BTreeMap<Opcode, f64> = Default::default();
         
         // the main interpreter loop
-        self.run_core(heap, code, host);
+        let value = self.run_core(heap, code, host);
         //println!("{:?}", profile);
         // lets have a look at our scope
         let _call = self.calls.last();
@@ -362,5 +362,6 @@ impl ScriptThread{
         //heap.print(global, true);
         //println!("");                                
         //self.heap.free_object(scope);
+        value
     }
 }

@@ -79,30 +79,27 @@ impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
        // makepad_script::test();
-        
-        let code = script!{
-            use mod.net
-            use mod.fs
-            let req = net.HttpRequest{
-                url: "www.google.com"
-                method: net.HttpMethod.POST
-                is_streaming: true
-                headers:{
-                    "Content-Type":"application/json"
-                    "Authorization":"Bearer"+fs.read_to_string("LICENSE")
-                }
-                body:{
-                    model:"gpt-4o"
-                    max_tokens:1000
-                    stream:true
-                    messages:[{content:"msg",role:"user"}]
-                }.to_json()
-            }
-            let x = net.http_request(req)
-        };
-        cx.with_vm(|vm|{
-            vm.eval(code)
-        });
+       let code = script!{
+           use mod.net
+           use mod.fs
+           let req = net.HttpRequest{
+               url: #(OPENAI_BASE_URL),
+               method: net.HttpMethod.POST
+               is_streaming: true
+               headers:{
+                   "Content-Type":"application/json"
+                   "Authorization":"Bearer "+fs.read_to_string("OPENAI_KEY")
+               }
+               body:{
+                   model:"gpt-4o"
+                   max_tokens:1000
+                   stream:true
+                   messages:[{content:"msg",role:"user"}]
+               }.to_json()
+           }
+           let x = net.http_request(req)
+       };
+       cx.eval(code);
     }
 }
 
