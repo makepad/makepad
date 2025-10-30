@@ -366,7 +366,7 @@ impl Cx {
         }
 
         if network_responses.len() != 0 {
-            self.handle_script_async_network_responses(&out);
+            self.handle_script_async_network_responses(&network_responses);
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
         
