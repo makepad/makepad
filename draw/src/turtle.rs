@@ -2191,6 +2191,10 @@ impl Layout {
 impl LiveHook for Flow {
     fn skip_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         match &nodes[index].value {
+            LiveValue::BareEnum(live_id!(Right))=>{
+                *self = Self::right();
+                Some(index + 1)
+            }
             LiveValue::BareEnum(live_id!(RightWrap))=>{
                 *self = Self::right_wrap();
                 Some(index + 1)
