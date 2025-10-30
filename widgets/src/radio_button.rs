@@ -684,7 +684,7 @@ live_design!{
     }
 
     pub ButtonGroup = <CachedRoundedView> {
-        flow: Right { wrap: false }
+        flow: Right
         height: Fit, width: Fit,
         spacing: (THEME_SPACE_2)
         align: { x: 0.0, y: 0.5 }
