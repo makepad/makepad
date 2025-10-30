@@ -87,8 +87,8 @@ impl LiveRegister for App {
                method: net.HttpMethod.POST
                is_streaming: true
                headers:{
-                   "Content-Type":"application/json"
-                   "Authorization":"Bearer "+fs.read_to_string("OPENAI_KEY")
+                   "Content-Type": "application/json"
+                   "Authorization": "Bearer "+fs.read_to_string("OPENAI_KEY")
                }
                body:{
                    model:"gpt-4o"
