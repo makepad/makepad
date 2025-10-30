@@ -34,6 +34,7 @@ impl LiveIdInterner {
             };
             // pre-seed list for debugging purposes
             let fill = [
+                "this",
                 "native",
                 "vec2",
                 "assert",

@@ -55,7 +55,9 @@ script_primitive!(
 
 script_primitive!(
     String, 
-    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_string()},
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{
+        value.is_string_like()
+    },
     fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
         self.clear();
         vm.heap.cast_to_string(value,self);
