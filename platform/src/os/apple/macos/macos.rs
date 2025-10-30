@@ -617,12 +617,7 @@ impl Cx {
 
     fn handle_permission_check(&mut self, permission: Permission, request_id: i32) {
         let status = match permission {
-            Permission::AudioInput => self.check_audio_permission_status(),
-            #[allow(unreachable_patterns)] // Future permissions will be added
-            _ => {
-                crate::log!("macOS permission check not implemented for: {:?}", permission);
-                crate::permission::PermissionStatus::DeniedPermanent
-            }
+            Permission::AudioInput => self.check_audio_permission_status()
         };
         
         self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
@@ -666,16 +661,6 @@ impl Cx {
                         }));
                     }
                 }
-            },
-            #[allow(unreachable_patterns)] // Future permissions will be added
-            _ => {
-                // For other permissions, auto-deny with warning
-                crate::log!("macOS permission not implemented for: {:?}", permission);
-                self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
-                    permission,
-                    request_id,
-                    status: crate::permission::PermissionStatus::DeniedPermanent,
-                }));
             }
         }
     }
