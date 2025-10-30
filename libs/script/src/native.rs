@@ -52,6 +52,15 @@ macro_rules! script_has_proto{
 }
 
 #[macro_export]
+macro_rules! script_is_fn{
+    ($vm:ident, $what:ident, $obj:expr)=>{
+        {
+            $vm.heap.is_fn(($obj).into())
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! script_array_index{
     ($vm:ident, $obj:ident[$index: expr])=>{
         $vm.heap.array_index(($obj).into(), ($index) as usize,&$vm.thread.trap)

@@ -643,11 +643,10 @@ impl ScriptThread{
                     NIL
                 };
                 let args = if fnobj.is_err() || fnobj == NIL{
-                    // lets take the type
                     let type_index = this.value_type().to_redux();
                     let method = method.as_id().unwrap_or(id!());
                     let type_entry = &code.type_methods.type_table[type_index];
-                    
+
                     if let Some(method_ptr) = type_entry.get(&method){
                         let args = heap.new_with_proto((*method_ptr).into());
                         args
@@ -1071,10 +1070,22 @@ impl ScriptThread{
                 self.push_stack_unchecked(cmp.into());
                 self.trap.goto_next();
             }
+            Opcode::OK_TEST=>{
+                // make a try stack item
+                self.last_err = NIL;
+                self.tries.push(TryFrame{
+                    push_nil: true,
+                    start_ip: self.trap.ip(),
+                    jump: opargs.to_u32(),
+                    bases: self.new_bases()
+                });
+                self.trap.goto_next();
+            }
             Opcode::TRY_TEST=>{
                 // make a try stack item
                 self.last_err = NIL;
                 self.tries.push(TryFrame{
+                    push_nil: false,
                     start_ip: self.trap.ip(),
                     jump: opargs.to_u32() + 1,
                     bases: self.new_bases()

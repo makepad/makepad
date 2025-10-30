@@ -29,6 +29,10 @@ enum State{
     IfElseExpr{else_start:u32},
     IfElseBlock{else_start:u32, last_was_sep:bool},
     
+    OkTest{index: u32},
+    OkTestBlock{ok_start:u32, last_was_sep:bool},
+    OkTestExpr{ok_start:u32},
+      
     TryTest{index: u32},
     TryTestBlock{try_start:u32, last_was_sep:bool},
     TryTestExpr{try_start:u32},
@@ -60,7 +64,7 @@ enum State{
     EndRound,
     
     CallMaybeDo{is_method:bool, index:u32},
-    EmitCall{is_method:bool, index:u32},
+    EmitCallFromDo{is_method:bool, index:u32},
     EndCall{is_method:bool, index:u32},
     ArrayIndex,
     
@@ -594,6 +598,10 @@ impl ScriptParser{
                     self.state.push(State::FnBody);
                     return 1
                 }
+                if sep == id!(,){
+                    self.state.push(State::FnArgList);
+                    return 1
+                }
                 // unexpected token, but just stay in the arg list mode
                 println!("Unexpected token in function argument list {:?}", tok);
                 self.state.push(State::FnArgList);
@@ -728,7 +736,8 @@ impl ScriptParser{
                     return 0
                 }
             }
-            State::EmitCall{is_method, index}=>{
+            State::EmitCallFromDo{is_method, index}=>{
+                self.set_pop_to_me();
                 if is_method{
                     self.push_code(Opcode::METHOD_CALL_EXEC.into(), index);
                 }
@@ -739,7 +748,7 @@ impl ScriptParser{
             }
             State::CallMaybeDo{is_method, index}=>{
                 if id == id!(do){
-                    self.state.push(State::EmitCall{is_method, index});
+                    self.state.push(State::EmitCallFromDo{is_method, index});
                     self.state.push(State::BeginExpr{required:true});
                     return 1
                 }
@@ -789,6 +798,37 @@ impl ScriptParser{
                 self.state.push(State::BeginExpr{required:true});
                 return 0
             }
+            State::OkTest{index}=>{
+                let ok_start = self.code_len() as _ ;
+                self.push_code(Opcode::OK_TEST.into(), index);
+                if tok.is_open_curly(){
+                    self.state.push(State::OkTestBlock{ok_start, last_was_sep:false});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                self.state.push(State::OkTestExpr{ok_start});
+                self.state.push(State::BeginExpr{required:true});
+                return 0
+            }
+            State::OkTestExpr{ok_start}=>{
+                self.set_opcode_args(ok_start, OpcodeArgs::from_u32(self.code_len() as u32 -ok_start) );
+                return 0
+            }
+            State::OkTestBlock{ok_start, last_was_sep}=>{
+                self.set_opcode_args(ok_start, OpcodeArgs::from_u32(self.code_len() as u32 -ok_start) );
+                if tok.is_close_curly() {
+                    if !last_was_sep && self.has_pop_to_me(){
+                        self.clear_pop_to_me();
+                    }
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
+                else {
+                    self.state.push(State::TryErrBlockOrExpr);
+                    return 0
+                }
+            }
+            
             State::TryTestExpr{try_start}=>{
                 self.set_opcode_args(try_start, OpcodeArgs::from_u32(self.code_len() as u32 -try_start) );
                 self.state.push(State::TryErrBlockOrExpr);
@@ -1023,6 +1063,10 @@ impl ScriptParser{
                 }
                 if id == id!(try){ // do if as an expression
                     self.state.push(State::TryTest{index:self.index});
+                    return 1
+                }
+                if id == id!(ok){ // do if as an expression
+                    self.state.push(State::OkTest{index:self.index});
                     return 1
                 }
                 if id == id!(for){
@@ -1367,6 +1411,6 @@ impl ScriptParser{
             }
             self.index += step;
         }
-        //println!("MADE CODE: {:?}", self.opcodes);
+        println!("MADE CODE: {:?}", self.opcodes);
     }
 }

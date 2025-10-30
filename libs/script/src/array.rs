@@ -206,6 +206,23 @@ impl ScriptArrayData{
             vm.thread.trap.err_unexpected()
         });
         
+        tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(parse_json), |vm, args|{
+            if let Some(array) = script_value!(vm, args.this).as_array(){
+                return vm.heap.array_mut_self_with(array, |heap, storage|{
+                    match storage{
+                        ScriptArrayStorage::U8(bytes)=>{
+                             let v = String::from_utf8_lossy(bytes);
+                            vm.thread.json_parser.read_json(v.as_ref(), heap)
+                        }
+                        _=>{
+                            vm.thread.trap.err_invalid_arg_type()
+                        }
+                    }
+                }).into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+        
         tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(parse_json), |vm, args|{
             if let Some(arr) = script_value!(vm, args.this).as_array(){
                 let mut s = String::new();

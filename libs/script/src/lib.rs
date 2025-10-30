@@ -24,6 +24,7 @@ pub mod trap;
 pub mod vec_prims;
 pub mod json;
 
+pub use gc::*;
 pub use makepad_live_id::*;
 pub use value::*;
 pub use vm::*;
@@ -98,16 +99,16 @@ pub fn test(){
         }
     }    
     
-    let _code = script!{
-        let x = {x:4 y:[1 2 3]};
-        let y = x.write_json();
-        let z = y.read_json();
-        ~z.y
+    let code = script!{
+        use mod.std.assert
+        // using ok to ignore errors
+        let x = {@object}
+        ~ok{x.x.x.x.x}
+        ~@HI
     };
     
     // Our unit tests :)
-    let code = script!{
-        let t = mod.std;
+    let _code = script!{
         use mod.std.assert
 
         // array operations
@@ -232,10 +233,12 @@ pub fn test(){
         assert(a.to_string() == "1234")
         assert("hi".to_chars().to_string() == "hi")
         
+        // test json
         let x = {x:1 y:[1 2 3]};
         let y = x.to_json();
         let z = y.parse_json();
         
+        // test string-like property acceseses 
         assert(z == x)
         assert(z["x"] == z.x)
         assert(x["y"] == [1 2 3])
@@ -243,6 +246,15 @@ pub fn test(){
         assert(z["x"] == 2)
         let x = {"key":3, x:2.0}
         assert(x.key == 3)
+        
+        // test callbacks and do chaining
+        let f = |x, cb| cb(x)
+        assert(2 == f(1) do |x| x+1)
+        
+        // using ok to ignore errors
+        let x = {}
+        ok{x.y.z}
+        
         
         ~"Test done"
     };
