@@ -351,7 +351,7 @@ impl Cx {
                 self.call_event_handler(&e);
             }
             FromJavaMessage::HttpRequestError {request_id, metadata_id, error, ..} => {
-                let out = (vec![
+                let out = vec![
                     NetworkResponseItem {
                         request_id: LiveId(request_id),
                         response: NetworkResponse::HttpRequestError(HttpError{
@@ -1050,8 +1050,7 @@ impl CxOsApi for Cx {
 
 fn to_android_permission(permission: crate::permission::Permission) -> &'static str {
     match permission {
-        crate::permission::Permission::AudioInput => "android.permission.RECORD_AUDIO",
-        _ => "",
+        crate::permission::Permission::AudioInput => "android.permission.RECORD_AUDIO"
     }
 }
 
@@ -1073,12 +1072,7 @@ impl Cx {
 
     fn handle_permission_check(&mut self, permission: crate::permission::Permission, request_id: i32) {
         let status = match permission {
-            crate::permission::Permission::AudioInput => self.check_audio_permission_status(),
-            #[allow(unreachable_patterns)]
-            _ => {
-                crate::log!("Android permission check not implemented for: {:?}", permission);
-                crate::permission::PermissionStatus::DeniedPermanent
-            }
+            crate::permission::Permission::AudioInput => self.check_audio_permission_status()
         };
         
         self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
@@ -1122,16 +1116,6 @@ impl Cx {
                         }));
                     }
                 }
-            },
-            #[allow(unreachable_patterns)]
-            _ => {
-                // For other permissions, auto-deny with warning
-                crate::log!("Android permission not implemented for: {:?}", permission);
-                self.call_event_handler(&Event::PermissionResult(crate::permission::PermissionResult {
-                    permission,
-                    request_id,
-                    status: crate::permission::PermissionStatus::DeniedPermanent,
-                }));
             }
         }
     }
