@@ -13,32 +13,35 @@ live_design!{
                 body = <View> {
                     padding: 100,
                     <View> {
-                        width: 200,
-                        height: 200,
-                        flow: RightWrap,
+                        width: 400,
+                        height: 400,
+                        flow: Right {
+                            row_align: Bottom,
+                            wrap: true,
+                        },
                         show_bg: true,
                         draw_bg: {
                             color: #888
                         }
                         <Button> {
-                            width: 100,
-                            height: 10,
-                        }
-                        <Button> {
-                            width: 100,
-                            height: 10,
-                        }
-                        <Button> {
-                            width: 100,
-                            height: 10,
+                            width: 200,
+                            height: 20,
                         }
                         <Button> {
                             width: 200,
                             height: 10,
                         }
                         <Button> {
-                            width: 100,
+                            width: 400,
+                            height: 20,
+                        }
+                        <Button> {
+                            width: 200,
                             height: 10,
+                        }
+                        <Button> {
+                            width: 200,
+                            height: 20,
                         }
                     }
                 }

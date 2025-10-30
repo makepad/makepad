@@ -826,7 +826,7 @@ impl TextInput {
         } else {
             None
         };
-        let wrap = cx.turtle().layout().flow == Flow::Right { wrap: true };
+        let wrap = cx.turtle().layout().flow == Flow::right_wrap();
         self.laidout_text = Some(self.draw_text.layout(
             cx,
             0.0,
