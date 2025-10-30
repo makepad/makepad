@@ -28,6 +28,7 @@ pub struct LoopValues{
 
 #[derive(Debug)]
 pub struct TryFrame{
+    pub push_nil: bool,
     pub start_ip: u32,
     pub jump: u32,
     pub bases: StackBases,
@@ -294,6 +295,9 @@ impl ScriptThread{
                             if self.call_has_try(){
                                 let try_frame = self.tries.pop().unwrap();
                                 self.truncate_bases(try_frame.bases, heap);
+                                if try_frame.push_nil{
+                                    self.push_stack_unchecked(NIL)
+                                }
                                 self.trap.goto(try_frame.start_ip + try_frame.jump);
                                 self.last_err = value;
                             }

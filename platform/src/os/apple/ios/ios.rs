@@ -117,6 +117,7 @@ impl Cx {
             out.push(item);
         }
         if out.len()>0{
+            self.handle_script_async_network_responses(&out);
             self.call_event_handler(& Event::NetworkResponses(out))
         }
     }
