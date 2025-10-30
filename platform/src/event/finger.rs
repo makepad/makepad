@@ -1008,8 +1008,8 @@ impl Event {
                             let tap_count = cx.fingers.tap_count();
                             let rect = area.clipped_rect(&cx);
                             if let Some(capture) = cx.fingers.find_area_capture(area) {
-                                // Check if touch is over, accounting for touch radius
-                                let is_over = if t.radius.x > 0.0 || t.radius.y > 0.0 {
+                                // Check if finger is over the widget using touch radius if available
+                                let rect_check = if t.radius.x > 0.0 || t.radius.y > 0.0 {
                                     let margin = Margin {
                                         left: t.radius.x,
                                         top: t.radius.y,
@@ -1020,6 +1020,14 @@ impl Event {
                                 } else {
                                     rect.contains(t.abs)
                                 };
+
+                                // Layout shift fallback: also treat as "over" if finger didn't move
+                                // significantly from start (handles keyboard dismissal moving widgets)
+                                let layout_shift_fallback = (e.time - capture.time < TAP_COUNT_TIME) &&
+                                    ((t.abs - capture.abs_start).length() < TAP_COUNT_DISTANCE);
+
+                                let is_over = rect_check || layout_shift_fallback;
+
                                 return Hit::FingerUp(FingerUpEvent {
                                     abs_start: capture.abs_start,
                                     rect,
