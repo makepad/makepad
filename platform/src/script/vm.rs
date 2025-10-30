@@ -1,18 +1,26 @@
 
 use crate::*;
 use crate::cx::*;
+use makepad_script::*;
 
 impl Cx{
-    pub fn with_vm<F:FnOnce(&mut ScriptVm)>(&mut self, f:F){
+    pub fn with_vm<R,F:FnOnce(&mut ScriptVm)->R>(&mut self, f:F)->R{
         let mut script_vm = None;
         std::mem::swap(&mut self.script_vm, &mut script_vm);
-        if let Some(script_vm) = &mut script_vm{
-            f(&mut script_vm.as_ref_host(self));
+        let r = if let Some(script_vm) = &mut script_vm{
+            f(&mut script_vm.as_ref_host(self))
         }
         else{
             panic!()
-        }
+        };
         std::mem::swap(&mut self.script_vm, &mut script_vm);
+        r
+    }
+    
+    pub fn eval(&mut self, block: ScriptBlock)->ScriptValue{
+        self.with_vm(|vm|{
+            vm.eval(block)
+        })
     }
 }
 

@@ -67,15 +67,7 @@ pub enum EnumTest{
 
 pub fn test(){
     let mut vmbase = ScriptVmBase::new();
-    
-    let mut vm = vmbase.as_ref();
-    
-    let net = vm.new_module(id!(test));
-    vm.add_fn(net, id!(fetch), script_args!(url=NIL, options=NIL), |vm, args|{
-        // how do we construct our options
-        let _options = StructTest::script_from_value(vm, script_value!(vm, args.options));
-        NIL
-    });
+    let cx = &mut vmbase.as_ref();
     
     #[derive(Script)]
     pub struct StructTest{
@@ -199,13 +191,13 @@ pub fn test(){
         let t = 0 try{t = 1} assert(false) ok assert(true)
         
         // struct tests
-        let s = #(StructTest::script_api(&mut vm));
+        let s = #(StructTest::script_api(vm));
         try{s{field:5}} assert(false) ok assert(true)
         try{s{field:true}} assert(true) ok assert(false)
         assert(s.return_two() == 2)
         
         // check enum
-        let EnumTest = #(EnumTest::script_api(&mut vm));
+        let EnumTest = #(EnumTest::script_api(vm));
         let x = EnumTest.Bare
         // test tuple typechecking
         try{EnumTest.Tuple(1.0)} assert(false) ok assert(true)
@@ -220,7 +212,6 @@ pub fn test(){
         try{s{enm: 1.0}} assert(true) ok assert(false)
         try{s{enm: EnumTest.Named{named_field:1.0}}} assert(false) ok assert(true)
         try{s{enm: EnumTest.Tuple(1.0)}} assert(false) ok assert(true)
-        ~EnumTest
         
         // check the option
         try{s{opt:nil}} assert(false) ok assert(true)
@@ -252,6 +243,8 @@ pub fn test(){
         assert(z["x"] == 2)
         let x = {"key":3, x:2.0}
         assert(x.key == 3)
+        
+        ~"Test done"
     };
     
     let _code = script!{
@@ -261,7 +254,7 @@ pub fn test(){
     
     let dt = std::time::Instant::now();
     
-    vm.eval(code);
+    cx.eval(code);
     println!("Duration {}", dt.elapsed().as_secs_f64())
     
 }

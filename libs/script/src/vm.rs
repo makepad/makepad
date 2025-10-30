@@ -105,7 +105,9 @@ pub struct ScriptVm<'a>{
 }
 
 impl <'a> ScriptVm<'a>{
-        
+    pub fn with_vm<R,F:FnOnce(&mut ScriptVm)->R>(&mut self, f:F)->R{
+        f(self)
+    }
     
     pub fn call(&mut self,fnobj:ScriptValue, args:&[ScriptValue])->ScriptValue{
         self.thread.call(self.heap, self.code, self.host, fnobj, args)
@@ -165,7 +167,7 @@ impl <'a> ScriptVm<'a>{
         i as u16
     }
         
-    pub fn eval(&mut self, block: ScriptBlock){
+    pub fn eval(&mut self, block: ScriptBlock)->ScriptValue{
         let body_id = self.add_script_block(block);
         let mut bodies = self.code.bodies.borrow_mut();
         let body = &mut bodies[body_id as usize];
@@ -176,6 +178,9 @@ impl <'a> ScriptVm<'a>{
             drop(bodies);
             // lets point our thread to it
             self.thread.run_root(&mut self.heap, &self.code, self.host, body_id)
+        }
+        else{
+            NIL
         }
     }
     
