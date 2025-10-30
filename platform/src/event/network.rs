@@ -179,12 +179,12 @@ impl HttpRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Script, ScriptHook)]
 pub struct HttpResponse {
-    pub metadata_id: LiveId,
-    pub status_code: u16,
-    pub headers: BTreeMap<String, Vec<String>>,
-    pub body: Option<Vec<u8>>,
+    #[live] pub metadata_id: LiveId,
+    #[live] pub status_code: u16,
+    #[live] pub headers: BTreeMap<String, Vec<String>>,
+    #[live] pub body: Option<Vec<u8>>,
 }
 
 impl HttpResponse {

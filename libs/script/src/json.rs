@@ -7,6 +7,7 @@ use crate::heap::*;
 #[derive(Debug)]
 enum State{
     Root,
+    RootMaybeObject,
     ObjectKey(ScriptObject),
     ObjectColon(ScriptObject, ScriptValue),
     ObjectValue(ScriptObject, ScriptValue),
@@ -35,6 +36,27 @@ impl JsonParser{
 impl JsonParser{
     fn parse_step(&mut self, tok:ScriptToken, heap:&mut ScriptHeap){
          match self.state.pop().unwrap(){
+             State::RootMaybeObject=>{
+                 let key = self.root;
+                 let new_obj = heap.new_object();
+                 heap.set_string_keys(new_obj);
+                 self.root = new_obj.into();
+                 match tok{
+                    ScriptToken::Operator(id)=>{
+                        match id{
+                            id!(:)=>{
+                                self.state.push(State::ObjectValue(new_obj, key));
+                            }
+                            x=>{
+                                self.errors.push((self.index,format!("JsonParser: Unexpected token in json root {:?}", x)));
+                            }
+                        }
+                    }
+                    x=>{
+                        self.errors.push((self.index,format!("JsonParser: Unexpected token in json root {:?}", x)));
+                    }
+                }
+             }
              State::Root=>{
                  match tok{
                      ScriptToken::Identifier{id, ..}=>{
@@ -42,17 +64,23 @@ impl JsonParser{
                              id!(true)=>self.root = TRUE.into(),
                              id!(false)=>self.root = FALSE.into(),
                              id!(null)=>self.root = NIL.into(),
-                             x=>self.root=x.into()
+                             x=>{
+                                 self.root = ScriptValue::from_escaped_id(x);
+                                 self.state.push(State::RootMaybeObject)
+                             }
                          }
                      }
                      ScriptToken::String(v)=>{
                          self.root = v;
+                         self.state.push(State::RootMaybeObject);
                      }
                      ScriptToken::Number(v)=>{
                          self.root = v.into();
+                         self.state.push(State::RootMaybeObject);
                      }
                      ScriptToken::Color(v)=>{
-                         self.root = v.into()
+                         self.root = v.into();
+                         self.state.push(State::RootMaybeObject);
                      }
                      ScriptToken::OpenCurly=>{ // object
                          let new_obj = heap.new_object();

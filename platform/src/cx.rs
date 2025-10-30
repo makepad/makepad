@@ -37,6 +37,7 @@ use {
         action::ActionsBuf,
         cx_api::CxOsOp,
         area::Area,
+        script::script::CxScriptData,
         gpu_info::GpuInfo,
         window::CxWindowPool,
         draw_list::CxDrawListPool,
@@ -57,6 +58,7 @@ use {
 pub struct Cx {
     
     pub script_vm: Option<Box<ScriptVmBase>>,
+    pub script_data: CxScriptData,
     
     pub (crate) os_type: OsType,
     pub in_makepad_studio: bool,
@@ -288,7 +290,6 @@ impl Cx {
         crate::script::define_script_modules(&mut (*script_vm).as_ref());
         
         Self {
-            script_vm: Some(script_vm),
             demo_time_repaint: false,
             null_texture,
             cpu_cores: 8,
@@ -358,6 +359,9 @@ impl Cx {
             display_context: Default::default(),
 
             widget_query_invalidation_event: None,
+            
+            script_vm: Some(script_vm),
+            script_data: Default::default(),
         }
     }
 }

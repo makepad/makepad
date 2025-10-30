@@ -1,11 +1,63 @@
 use crate::value::*;
 use crate::heap::*;
 use crate::array::*;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 #[derive(Copy,Clone)]
 pub enum ScriptGcMark{
     Object(ScriptObject),
     Array(ScriptArray)
+}
+
+pub struct ScriptObjectRef{
+    roots: Rc<RefCell<HashMap<ScriptObject, usize>>>,
+    obj: ScriptObject
+}
+
+pub struct ScriptFnRef(ScriptObjectRef);
+
+impl ScriptObjectRef{
+    pub fn as_obj(&self)->ScriptObject{self.obj}
+}
+
+impl ScriptFnRef{
+    pub fn as_obj(&self)->ScriptObject{self.0.as_obj()}
+}
+
+pub trait ScriptRefOptionExt{
+    fn as_obj(&self)->Option<ScriptObject>;
+}
+impl ScriptRefOptionExt for Option<ScriptObjectRef>{
+    fn as_obj(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_obj())}else{None}}
+}
+impl ScriptRefOptionExt for Option<ScriptFnRef>{
+    fn as_obj(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_obj())}else{None}}
+}
+
+impl Drop for ScriptObjectRef{
+    fn drop(&mut self){
+        let mut roots = self.roots.borrow_mut();
+        match roots.entry(self.obj) {
+            Entry::Occupied(mut occ) => {
+                let value = occ.get_mut();
+                if *value >= 1{
+                    *value -= 1;
+                }
+                else{
+                    eprintln!("ScriptObjectRef is 0!");
+                }
+                if *value == 0{
+                    occ.remove();
+                }
+            }
+            Entry::Vacant(_vac) => {
+                eprintln!("ScriptObjectRef root is vacant!");
+            }
+        }
+    }
 }
 
 macro_rules! mark{
@@ -23,6 +75,30 @@ macro_rules! mark{
 }
 
 impl ScriptHeap{
+            
+    pub fn new_object_ref(&mut self, obj:ScriptObject)->ScriptObjectRef{
+        let mut roots = self.roots.borrow_mut();
+        match roots.entry(obj) {
+            Entry::Occupied(mut occ) => {
+                *occ.get_mut() += 1;
+                ScriptObjectRef{
+                    roots: self.roots.clone(),
+                    obj: obj
+                }
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(1);
+                ScriptObjectRef{
+                    roots: self.roots.clone(),
+                    obj: obj
+                }
+            }
+        }
+    }
+    
+    pub fn new_fn_ref(&mut self, obj:ScriptObject)->ScriptFnRef{
+        ScriptFnRef(self.new_object_ref(obj))
+    }
         
     pub fn mark_inner(&mut self, value:ScriptGcMark){
         match value{
@@ -69,9 +145,11 @@ impl ScriptHeap{
                 }
             }                
         }
-        for i in 0..self.roots.len(){
-            self.mark_inner(self.mark_vec[i]);
+        let roots = self.roots.borrow();
+        for item in roots.keys(){
+            self.mark_vec.push(ScriptGcMark::Object(*item));
         }
+        drop(roots);
         for i in 0..stack.len(){
             let value = stack[i];
             mark!(self, value)
