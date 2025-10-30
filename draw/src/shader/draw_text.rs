@@ -161,7 +161,7 @@ impl DrawText {
         } else {
             None
         };
-        let wrap = cx.turtle().layout().flow == Flow::Right { wrap: true };
+        let wrap = cx.turtle().layout().flow == Flow::Right { row_align: RowAlign::Top, wrap: true };
 
         let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
         self.draw_walk_laidout(cx, walk, &text)
@@ -247,7 +247,7 @@ impl DrawText {
         } else {
             None
         };
-        let wrap = cx.turtle().layout().flow == Flow::Right { wrap: true };
+        let wrap = cx.turtle().layout().flow == Flow::Right { row_align: RowAlign::Top, wrap: true };
 
         let text = self.layout(
             cx,
