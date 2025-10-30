@@ -66,7 +66,7 @@ macro_rules! mark{
             $self.mark_vec.push(ScriptGcMark::Object(ptr));
         }
         else if let Some(ptr) = $val.as_string(){
-            $self.strings[ptr.index as usize].tag.set_mark();
+            $self.strings[ptr.index as usize].as_mut().unwrap().tag.set_mark();
         }
         else if let Some(ptr) = $val.as_array(){
             $self.mark_vec.push(ScriptGcMark::Array(ptr));
@@ -182,17 +182,19 @@ impl ScriptHeap{
         }
         // always leave the empty null string at 0
         for i in 1..self.strings.len(){
-            let str = &mut self.strings[i];
-            if !str.tag.is_marked() && str.tag.is_alloced(){
-                if let Some((mut k,_)) = self.string_intern.remove_entry(&str.string){
-                    k.clear();
-                    self.string_intern_free.push(k);
+            if let Some(str) = &mut self.strings[i]{
+                if !str.tag.is_marked(){
+                    if let Some((k,_)) = self.string_intern.remove_entry(&str.string){
+                        self.strings[i] = None;
+                        if let Some(s) = Rc::into_inner(k.0){
+                            self.strings_reuse.push(s);
+                        }
+                        self.strings_free.push(ScriptString{index:i as _})
+                    }
                 }
-                str.clear();
-                self.strings_free.push(ScriptString{index:i as _})
-            }
-            else {
-                str.tag.clear_mark();
+                else {
+                    str.tag.clear_mark();
+                }
             }
         }
     }
