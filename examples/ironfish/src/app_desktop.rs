@@ -490,7 +490,7 @@ live_design! {
     InstrumentDropdown = <ElementBox> {
         align: {y: 0.5}
         padding: <SPACING_0> {},
-        flow: Right { wrap: false }
+        flow: Right
         width: Fill,
         dropdown = <FishDropDown> {
             margin: {left: (SSPACING_1), right: (SSPACING_1)}
@@ -557,7 +557,7 @@ live_design! {
     }
 
     FishHeader = <RoundedView> {
-        flow: Right { wrap: false }
+        flow: Right
         height: Fit,
         width: Fill,
         align: { x: 0.0, y: 0.5 }
@@ -569,7 +569,7 @@ live_design! {
             padding: <SPACING_0> {}
         }
         menu = <View> {
-            flow: Right { wrap: false }
+            flow: Right
             height: Fit,
             width: Fit
         }
@@ -879,7 +879,7 @@ live_design! {
         <View> {
             width: Fill,
             height: Fit
-            flow: Right { wrap: false },
+            flow: Right,
             spacing: (SSPACING_1)
             attack = <InstrumentSlider> {
                 slider = {
@@ -948,7 +948,7 @@ live_design! {
             width: Fill,
             height: Fit
                 <View> {
-                flow: Right { wrap: false },
+                flow: Right,
                 align: {x: 0.5, y: 0.0}
                 width: Fill,
                 height: Fit
@@ -995,7 +995,7 @@ live_design! {
         <View> {
             height: Fit,
             width: Fill
-            flow: Right { wrap: false },
+            flow: Right,
             spacing: (SSPACING_1),
             padding: {bottom: (SSPACING_0), top: (SSPACING_0)}
             align: {x: 0.0, y: 0.5}
@@ -1051,7 +1051,7 @@ live_design! {
         draw_bg: {color_1: (COLOR_UP_0), color_2: (COLOR_UP_0)}
 
         <View> {
-            flow: Right { wrap: false },
+            flow: Right,
             align: {x: 0.0, y: 0.0} padding: <SPACING_0> {}
             width: Fill,
             height: Fit,
@@ -1203,7 +1203,7 @@ live_design! {
                 <View> {
                     height: Fit,
                     width: Fill
-                    flow: Right { wrap: false },
+                    flow: Right,
                     align: {x: 0.0, y: 0.5}
                     spacing: (SSPACING_4),
                     padding: {top: (SSPACING_1), right: (SSPACING_3), bottom: (SSPACING_0), left: (SSPACING_0)}
@@ -1270,7 +1270,7 @@ live_design! {
         flow: Down
 
             <View> {
-            flow: Right { wrap: false },
+            flow: Right,
             align: {x: 0.0, y: 0.0}
             width: Fill,
             height: Fit
@@ -1326,7 +1326,7 @@ live_design! {
         flow: Down
 
             <View> {
-            flow: Right { wrap: false },
+            flow: Right,
             align: {x: 0.0, y: 0.0}
             width: Fill,
             height: Fit
@@ -1392,7 +1392,7 @@ live_design! {
         flow: Down
 
             <View> {
-            flow: Right { wrap: false },
+            flow: Right,
             align: {x: 0.0, y: 0.0}
             width: Fill,
             height: Fit
@@ -1455,7 +1455,7 @@ live_design! {
             height: Fit
 
                 <View> {
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
                 height: Fit
@@ -1482,7 +1482,7 @@ live_design! {
             }
 
             <View> {
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
                 height: Fit
@@ -1506,7 +1506,7 @@ live_design! {
                 }
             }
             <View> {
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
                 height: Fit
@@ -1541,7 +1541,7 @@ live_design! {
             height: Fit
 
                 <View> {
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
                 height: Fit
@@ -1564,7 +1564,7 @@ live_design! {
                 }
             }
             <View> {
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
                 height: Fit
@@ -1586,7 +1586,7 @@ live_design! {
                 }
             }
             <View> {
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
                 height: Fit
@@ -1627,7 +1627,7 @@ live_design! {
             height: Fit
 
                 <View> {
-                flow: Right { wrap: false }
+                flow: Right
                 width: Fill,
                 height: Fit
 
@@ -1738,7 +1738,7 @@ live_design! {
             }
 
             <View> {
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
                 height: Fit
@@ -1761,7 +1761,7 @@ live_design! {
                 }
             }
             <View> {
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_1)
                 width: Fill,
                 height: Fit
@@ -1792,7 +1792,7 @@ live_design! {
         height: Fit
         flow: Down
         <View> {
-            flow: Right { wrap: false }
+            flow: Right
             width: Fill,
             height: Fit
 
@@ -1921,7 +1921,7 @@ live_design! {
         height: Fit
         flow: Down
             <View> {
-            flow: Right { wrap: false },
+            flow: Right,
             spacing: (SSPACING_1)
             width: Fill,
             height: Fit
@@ -1943,7 +1943,7 @@ live_design! {
             }
         }
         <View> {
-            flow: Right { wrap: false }
+            flow: Right
             width: Fill,
             height: Fit
             balance = <InstrumentBipolarSlider> {
@@ -1991,7 +1991,7 @@ live_design! {
             <View> {
                 width: Fill,
                 height: Fit
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_2)
 
                 osc1 = <OscPanel> {}
@@ -2007,7 +2007,7 @@ live_design! {
         width: Fill,
         height: Fit,
         margin: {top: -150}
-        flow: Right { wrap: false },
+        flow: Right,
         spacing: (SSPACING_0),
         align: {x: 0.0, y: 0.0}
 
@@ -2022,12 +2022,12 @@ live_design! {
 
             <View> {
                 width: Fill
-                flow: Right { wrap: false },
+                flow: Right,
                 padding: <SPACING_3> {}
                 align: {x: 0.0, y: 0.0}
 
                 <View> {
-                    flow: Right { wrap: false },
+                    flow: Right,
                     align: {x: 0.0, y: 1.0}
                     // margin: { top: 20. }
                     <Label> {
@@ -2100,7 +2100,7 @@ live_design! {
     }
 
     Play = <FishPanel> {
-        flow: Right { wrap: false },
+        flow: Right,
         padding: {top: (SSPACING_3)}
         spacing: (SSPACING_0)
         height: Fit,
@@ -2229,7 +2229,7 @@ live_design! {
             height: Fit
 
                 <View> {
-                flow: Right { wrap: false },
+                flow: Right,
                 align: {x: 0.0, y: 0.5 padding: 0.0}
                 width: Fill,
                 height: Fit,
@@ -2346,7 +2346,7 @@ live_design! {
             <View> {
                 width: Fill,
                 height: Fit
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_2),
                 align: {x: 0.0, y: 0.0}
 
@@ -2410,7 +2410,7 @@ live_design! {
     }*/
     
     pub AppDesktop = <View>{
-        flow: Right { wrap: false }
+        flow: Right
         width: Fill,
         height: Fill
         // padding: <SPACING_0> { align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
@@ -2448,7 +2448,7 @@ live_design! {
             <View> {
                 width: Fill,
                 height: Fill
-                flow: Right { wrap: false },
+                flow: Right,
                 spacing: (SSPACING_1),
                 padding: <SPACING_3> {}
                 oscillators = <FishPanelSoundSources> {}

@@ -44,7 +44,7 @@ live_design!{
                             
                             <View> {
                                 width: Fit
-                                flow: Right { wrap: false },
+                                flow: Right,
                                 spacing: (THEME_SPACE_1)
                                 <CheckBoxCustom> {
                                     width: 25,
