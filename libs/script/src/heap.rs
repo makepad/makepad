@@ -1321,6 +1321,7 @@ impl ScriptHeap{
     }
     
     pub fn push_all_fn_args(&mut self, top_ptr:ScriptObject, args:&[ScriptValue], trap:&ScriptTrap)->ScriptValue{
+        println!("pushing all fn args");
         let object = &self.objects[top_ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             for (index, value) in args.iter().enumerate(){

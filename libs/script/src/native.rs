@@ -63,7 +63,7 @@ macro_rules! script_proto{
     ($vm:ident, $obj:ident, $id: ident)=>{
         {
             let v = $id::script_proto($vm);
-            $vm.heap.set_value(($obj).into(), id!($id).into(), v, &$vm.thread.trap);
+            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v, &$vm.thread.trap);
         }
     };
 }
@@ -77,7 +77,7 @@ macro_rules! script_args{
 }
 
 #[macro_export]
-macro_rules! script_args_lut{
+macro_rules! script_args_def{
     ($($id:ident=$val:expr),*)=>{
         &[$((id_lut!($id), ($val).into()),)*]
     }

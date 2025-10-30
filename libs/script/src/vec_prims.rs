@@ -42,7 +42,7 @@ impl<T> ScriptNew for  Vec<T> where T: ScriptApply + ScriptNew + 'static + Scrip
                 ScriptArrayStorage::U8(_)=> return true
             }
         }
-        value.is_nil()
+        value.is_nil() || T::script_type_check(heap, value)
     }
     fn script_default(_vm:&mut ScriptVm)->ScriptValue{NIL}
     fn script_new(_vm:&mut ScriptVm)->Self{Default::default()}
@@ -72,7 +72,8 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + Scri
             self.clear()
         }
         else{
-            vm.thread.trap.err_wrong_type_in_apply();
+            self.clear();
+            self.push(ScriptNew::script_from_value(vm, value));
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
@@ -188,8 +189,8 @@ impl ScriptApply for Vec<u8> {
 impl ScriptHook for Vec<ScriptValue> {}
 impl ScriptNew for Vec<ScriptValue> {
     fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{
-        value.is_object() || value.is_array() || value.is_nil()
+    fn script_type_check(_heap:&ScriptHeap, _value:ScriptValue)->bool{
+         true
     }
     fn script_default(vm:&mut ScriptVm)->ScriptValue{
         vm.heap.new_object().into()
@@ -222,7 +223,8 @@ impl ScriptApply for Vec<ScriptValue> {
             self.clear();
         }
         else{
-            vm.thread.trap.err_wrong_type_in_apply();
+            self.clear();
+            self.push(value);
         }
     }
     fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{

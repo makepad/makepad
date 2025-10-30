@@ -49,7 +49,7 @@ pub struct CallFrame{
 
 pub enum ScriptMe{
     Object(ScriptObject),
-    Call(ScriptObject),
+    Call{this:Option<ScriptValue>, args:ScriptObject},
     Array(ScriptArray),
 }
 
@@ -57,7 +57,7 @@ impl Into<ScriptValue> for ScriptMe{
     fn into(self)->ScriptValue{
         match self{
             Self::Object(v)=>v.into(),
-            Self::Call(v)=>v.into(),
+            Self::Call{args,..}=>args.into(),
             Self::Array(v)=>v.into(),
         }
     }
@@ -131,8 +131,8 @@ impl ScriptThread{
             }else{(NIL,value)};
                         
             match self.mes.last().unwrap(){
-                ScriptMe::Call(obj)=>{
-                    heap.unnamed_fn_arg(*obj, value, &self.trap);
+                ScriptMe::Call{args,..}=>{
+                    heap.unnamed_fn_arg(*args, value, &self.trap);
                 }
                 ScriptMe::Object(obj)=>{
                     if !value.is_nil() && !value.is_err(){

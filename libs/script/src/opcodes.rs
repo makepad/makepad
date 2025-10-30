@@ -28,7 +28,7 @@ macro_rules! f64_scope_assign_op_impl{
             let value = $obj.trap.err_not_assignable();
             $obj.push_stack_unchecked(value);
         }
-        $obj.trap.ip.index += 1;
+        $obj.trap.goto_next();
     }}
 }
 
@@ -52,7 +52,7 @@ macro_rules! fu64_scope_assign_op_impl{
             let value = $obj.trap.err_not_assignable();
             $obj.push_stack_unchecked(value);
         }
-        $obj.trap.ip.index += 1;
+        $obj.trap.goto_next();
     }}
 }
 
@@ -72,7 +72,7 @@ macro_rules! f64_field_assign_op_impl{
             let value = $obj.trap.err_not_assignable();
             $obj.push_stack_unchecked(value);
         }
-        $obj.trap.ip.index += 1;
+        $obj.trap.goto_next();
     }}
 }
 
@@ -93,7 +93,7 @@ macro_rules! fu64_field_assign_op_impl{
             let value = $obj.trap.err_not_assignable();
             $obj.push_stack_unchecked(value);
         }
-        $obj.trap.ip.index += 1;
+        $obj.trap.goto_next();
     }}
 }
 
@@ -121,7 +121,7 @@ macro_rules! f64_index_assign_op_impl{
             let value = $obj.trap.err_not_assignable();
             $obj.push_stack_unchecked(value);
         }
-        $obj.trap.ip.index += 1;
+        $obj.trap.goto_next();
     }}
 }
 
@@ -149,7 +149,7 @@ macro_rules! fu64_index_assign_op_impl{
             let value = $obj.trap.err_not_assignable();
             $obj.push_stack_unchecked(value);
         }
-        $obj.trap.ip.index += 1;
+        $obj.trap.goto_next();
     }}
 }
 
@@ -165,7 +165,7 @@ macro_rules! f64_op_impl{
         let a = $obj.pop_stack_resolved($heap);
         let fa = $heap.cast_to_f64(a, $obj.trap.ip);
         $obj.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa $op fb, $obj.trap.ip));
-        $obj.trap.ip.index += 1;
+        $obj.trap.goto_next();
     }}
 }
 
@@ -181,7 +181,7 @@ macro_rules! fu64_op_impl{
         let a = $obj.pop_stack_resolved($heap);
         let ua = $heap.cast_to_f64(a, $obj.trap.ip) as u64;
         $obj.push_stack_unchecked(ScriptValue::from_f64_traced_nan((ua $op ub) as f64, $obj.trap.ip));
-        $obj.trap.ip.index += 1;
+        $obj.trap.goto_next();
     }}
 } 
 
@@ -198,7 +198,7 @@ macro_rules! f64_cmp_impl{
         let fa = $heap.cast_to_f64(a, $obj.trap.ip);
         //let fb = $heap.cast_to_f64(b, $obj.ip);
         $obj.push_stack_unchecked(ScriptValue::from_bool(fa $op fb));
-        $obj.trap.ip.index += 1;
+        $obj.trap.goto_next();
     }}
 }
 
@@ -209,13 +209,13 @@ macro_rules! bool_op_impl{
         let ba = $heap.cast_to_bool(a);
         let bb = $heap.cast_to_bool(b);
         $obj.push_stack_unchecked(ScriptValue::from_bool((ba $op bb)));
-        $obj.trap.ip.index += 1;
+        $obj.trap.goto_next();
     }}
 } 
 
 impl ScriptThread{
     
-    pub fn opcode(&mut self,opcode: Opcode, args:OpcodeArgs, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any){
+    pub fn opcode(&mut self,opcode: Opcode, opargs:OpcodeArgs, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any){
         
         match opcode{
             Opcode::NOT=>{
@@ -235,16 +235,37 @@ impl ScriptThread{
                 self.trap.goto_next();
             },
             
-            Opcode::MUL=>f64_op_impl!(self, heap, args, *),
-            Opcode::DIV=>f64_op_impl!(self, heap, args, /),
-            Opcode::MOD=>f64_op_impl!(self, heap, args, %),
-            Opcode::ADD=>f64_op_impl!(self, heap, args, +),
-            Opcode::SUB=>f64_op_impl!(self, heap, args, -),
-            Opcode::SHL=>fu64_op_impl!(self, heap, args,>>),
-            Opcode::SHR=>fu64_op_impl!(self, heap, args,<<),
-            Opcode::AND=>fu64_op_impl!(self, heap,args,&),
-            Opcode::OR=>fu64_op_impl!(self, heap, args,|),
-            Opcode::XOR=>fu64_op_impl!(self, heap, args,^),
+            Opcode::MUL=>f64_op_impl!(self, heap, opargs, *),
+            Opcode::DIV=>f64_op_impl!(self, heap, opargs, /),
+            Opcode::MOD=>f64_op_impl!(self, heap, opargs, %),
+            Opcode::ADD=>{
+                let b = if opargs.is_u32(){
+                    (opargs.to_u32()).into()
+                }
+                else{
+                    self.pop_stack_resolved(heap)
+                };
+                let a = self.pop_stack_resolved(heap);
+                if a.is_string_like() || b.is_string_like(){
+                    let ptr = heap.new_string_with(|heap, out|{
+                        heap.cast_to_string(a, out);
+                        heap.cast_to_string(b, out);
+                    });
+                    self.push_stack_unchecked(ptr.into());
+                }
+                else{
+                    let fa = heap.cast_to_f64(a, self.trap.ip);
+                    let fb = heap.cast_to_f64(b, self.trap.ip);
+                    self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa + fb, self.trap.ip));
+                }
+                self.trap.goto_next();
+            }
+            Opcode::SUB=>f64_op_impl!(self, heap, opargs, -),
+            Opcode::SHL=>fu64_op_impl!(self, heap, opargs,>>),
+            Opcode::SHR=>fu64_op_impl!(self, heap, opargs,<<),
+            Opcode::AND=>fu64_op_impl!(self, heap,opargs,&),
+            Opcode::OR=>fu64_op_impl!(self, heap, opargs,|),
+            Opcode::XOR=>fu64_op_impl!(self, heap, opargs,^),
                                 
             Opcode::CONCAT=>{
                 let op1 = self.pop_stack_resolved(heap);
@@ -269,10 +290,10 @@ impl ScriptThread{
                 self.trap.goto_next();
             }
             
-            Opcode::LT=>f64_cmp_impl!(self, heap, args, <),
-            Opcode::GT=>f64_cmp_impl!(self, heap, args, >),
-            Opcode::LEQ=>f64_cmp_impl!(self, heap, args, <=),
-            Opcode::GEQ=>f64_cmp_impl!(self, heap, args, >=),
+            Opcode::LT=>f64_cmp_impl!(self, heap, opargs, <),
+            Opcode::GT=>f64_cmp_impl!(self, heap, opargs, >),
+            Opcode::LEQ=>f64_cmp_impl!(self, heap, opargs, <=),
+            Opcode::GEQ=>f64_cmp_impl!(self, heap, opargs, >=),
             
             Opcode::LOGIC_AND => bool_op_impl!(self, heap, &&),
             Opcode::LOGIC_OR => bool_op_impl!(self, heap, ||),
@@ -306,8 +327,8 @@ impl ScriptThread{
                 if self.call_has_me(){
                     let me = self.mes.last().unwrap();
                     match me{
-                        ScriptMe::Call(obj)=>{
-                            heap.named_fn_arg(*obj, field, value, &self.trap);
+                        ScriptMe::Call{args,..}=>{
+                            heap.named_fn_arg(*args, field, value, &self.trap);
                         }
                         ScriptMe::Object(obj)=>{
                             if field.is_string_like(){
@@ -327,7 +348,7 @@ impl ScriptThread{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
                 let value = match self.mes.last().unwrap(){
-                    ScriptMe::Call(_obj)=>{
+                    ScriptMe::Call{..}=>{
                         self.trap.err_not_allowed_in_arguments()
                     }
                     ScriptMe::Object(obj)=>{
@@ -345,7 +366,7 @@ impl ScriptThread{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
                 let value = match self.mes.last().unwrap(){
-                    ScriptMe::Call(_obj)=>{
+                    ScriptMe::Call{..}=>{
                         self.trap.err_not_allowed_in_arguments()
                     }
                     ScriptMe::Object(obj)=>{
@@ -558,19 +579,22 @@ impl ScriptThread{
                 let scope = heap.new_with_proto(fnobj);
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(scope);
-                self.mes.push(ScriptMe::Call(scope));
+                self.mes.push(ScriptMe::Call{args:scope, this:None});
                 self.trap.goto_next();
             }
             Opcode::CALL_EXEC | Opcode::METHOD_CALL_EXEC=>{
                 //self.call_exec(heap, code, scope);
                 // ok so now we have all our args on 'mes'
                 let me = self.mes.pop().unwrap();
-                let scope = if let ScriptMe::Call(scope) = me{scope}else{panic!()};
+                let (args, this) = if let ScriptMe::Call{args, this} = me{(args,this)}else{panic!()};
+                if let Some(this) = this{
+                    heap.force_value_in_map(args, id!(this).into(), this);
+                }
                 // set the scope back to 'deep' so values can be written again
-                heap.set_object_deep(scope);
-                heap.set_object_storage_type(scope, ScriptObjectStorageType::AUTO);
+                heap.set_object_deep(args);
+                heap.set_object_storage_type(args, ScriptObjectStorageType::AUTO);
                                 
-                if let Some(fnptr) = heap.parent_as_fn(scope){
+                if let Some(fnptr) = heap.parent_as_fn(args){
                     match fnptr{
                         ScriptFnPtr::Native(ni)=>{
                             let ip = self.trap.ip;
@@ -580,23 +604,23 @@ impl ScriptThread{
                                 heap,
                                 thread:self,
                                 code
-                            }, scope);
+                            }, args);
                             self.trap.in_rust = false;
                             self.trap.ip = ip;
                             self.push_stack_value(ret);
-                            heap.free_object_if_unreffed(scope);
+                            heap.free_object_if_unreffed(args);
                             self.trap.goto_next();
                         }
                         ScriptFnPtr::Script(sip)=>{
                             let call = CallFrame{
                                 bases: self.new_bases(),
-                                args: args,
+                                args: opargs,
                                 return_ip: Some(ScriptIp{index: self.trap.ip.index + 1, body:self.trap.ip.body})
                             };
-                            self.scopes.push(scope);
+                            self.scopes.push(args);
                             self.calls.push(call);
                             self.trap.ip = sip;
-                            if args.is_pop_to_me(){ // skip this
+                            if opargs.is_pop_to_me(){ // skip this
                                 return
                             }
                         }
@@ -618,15 +642,15 @@ impl ScriptThread{
                 else{ // we're calling a method on some other thing
                     NIL
                 };
-                let scope = if fnobj.is_err() || fnobj == NIL{
+                let args = if fnobj.is_err() || fnobj == NIL{
                     // lets take the type
                     let type_index = this.value_type().to_redux();
                     let method = method.as_id().unwrap_or(id!());
                     let type_entry = &code.type_methods.type_table[type_index];
                     
                     if let Some(method_ptr) = type_entry.get(&method){
-                        let scope = heap.new_with_proto((*method_ptr).into());
-                        scope
+                        let args = heap.new_with_proto((*method_ptr).into());
+                        args
                     }
                     else{ 
                         self.trap.err_not_found();
@@ -638,9 +662,9 @@ impl ScriptThread{
                 };
                 //heap.set_object_map(scope);
                 // set the args object to not write into the prototype
-                heap.clear_object_deep(scope);
-                heap.force_value_in_map(scope, id!(this).into(), this.into());
-                self.mes.push(ScriptMe::Call(scope));
+                heap.clear_object_deep(args); 
+                
+                self.mes.push(ScriptMe::Call{args, this:Some(this)});
                 self.trap.goto_next();
             }
             
@@ -651,13 +675,13 @@ impl ScriptThread{
                 // set it to a vec type to ensure ordered inserts
                 heap.set_object_storage_type(me, ScriptObjectStorageType::VEC2);
                 heap.clear_object_deep(me);
-                                                
+                
                 self.mes.push(ScriptMe::Object(me));
                 self.trap.goto_next();
             }
                                     
             Opcode::FN_ARG_DYN=>{
-                let value = if args.is_nil(){
+                let value = if opargs.is_nil(){
                     NIL
                 }
                 else{
@@ -666,7 +690,7 @@ impl ScriptThread{
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 
                 match self.mes.last().unwrap(){
-                    ScriptMe::Call(_) | ScriptMe::Array(_)=>{
+                    ScriptMe::Call{..} | ScriptMe::Array(_)=>{
                         self.trap.err_unexpected();
                     }
                     ScriptMe::Object(obj)=>{
@@ -676,7 +700,7 @@ impl ScriptThread{
                 self.trap.goto_next();                
             }
             Opcode::FN_ARG_TYPED=>{
-                let value = if args.is_nil(){
+                let value = if opargs.is_nil(){
                     NIL
                 }
                 else{
@@ -685,7 +709,7 @@ impl ScriptThread{
                 let _ty = self.pop_stack_value().as_id().unwrap_or(id!());
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 match self.mes.last().unwrap(){
-                    ScriptMe::Call(_) | ScriptMe::Array(_)=>{
+                    ScriptMe::Call{..} | ScriptMe::Array(_)=>{
                         self.trap.err_unexpected();
                     }
                     ScriptMe::Object(obj)=>{
@@ -695,10 +719,10 @@ impl ScriptThread{
                 self.trap.goto_next();
             }
             Opcode::FN_BODY=>{ // alright we have all the args now we get an expression
-                let jump_over_fn = args.to_u32();
+                let jump_over_fn = opargs.to_u32();
                 let me = self.mes.pop().unwrap();
                 match me{
-                    ScriptMe::Call(_) | ScriptMe::Array(_)=>{
+                    ScriptMe::Call{..} | ScriptMe::Array(_)=>{
                         self.trap.err_unexpected();
                         self.push_stack_unchecked(NIL);
                     }
@@ -712,7 +736,7 @@ impl ScriptThread{
                 self.trap.goto_rel(jump_over_fn);
             }
             Opcode::RETURN=>{
-                let value = if args.is_nil(){
+                let value = if opargs.is_nil(){
                     NIL
                 }
                 else{
@@ -760,14 +784,14 @@ impl ScriptThread{
                     self.trap.goto_next()
                 }
                 else{ // jump to else
-                    self.trap.goto_rel(args.to_u32());
+                    self.trap.goto_rel(opargs.to_u32());
                 }
             }
             
             Opcode::IF_ELSE =>{ // we are running into an else jump over it
                 // we have to chuck our scope stack if we made any
                 // also pop our ifelse stack
-                self.trap.goto_rel(args.to_u32());
+                self.trap.goto_rel(opargs.to_u32());
             }   
             Opcode::USE=>{
                 let field = self.pop_stack_value();
@@ -816,7 +840,10 @@ impl ScriptThread{
                     ScriptMe::Array(_)=>{
                         self.trap.err_not_allowed_in_array()
                     }
-                    ScriptMe::Call(obj) | ScriptMe::Object(obj)=>{
+                    ScriptMe::Call{args,..}=>{
+                        heap.value(*args, field, &self.trap)
+                    }
+                    ScriptMe::Object(obj)=>{
                         heap.value(*obj, field, &self.trap)
                     }
                 };
@@ -862,7 +889,7 @@ impl ScriptThread{
             }
                    
             Opcode::LET_DYN=>{
-                let value = if args.is_nil(){
+                let value = if opargs.is_nil(){
                     NIL
                 }
                 else{
@@ -880,7 +907,7 @@ impl ScriptThread{
                 self.trap.goto_next();
             }
             Opcode::LET_TYPED=>{
-                let value = if args.is_nil(){
+                let value = if opargs.is_nil(){
                     NIL
                 }
                 else{
@@ -937,7 +964,10 @@ impl ScriptThread{
                         ScriptMe::Array(arr)=>{
                             self.push_stack_value((*arr).into());
                         }
-                        ScriptMe::Call(obj) | ScriptMe::Object(obj)=>{
+                        ScriptMe::Call{args,..}=>{
+                            self.push_stack_value((*args).into());
+                        }
+                        ScriptMe::Object(obj)=>{
                             self.push_stack_value((*obj).into());
                         }
                     }
@@ -957,23 +987,23 @@ impl ScriptThread{
             Opcode::FOR_1 =>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, code, args.to_u32() as _, source, value_id, None, None);
+                self.begin_for_loop(heap, code, opargs.to_u32() as _, source, value_id, None, None);
             }
             Opcode::FOR_2 =>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
                 let index_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, code, args.to_u32() as _, source, value_id,Some(index_id), None);
+                self.begin_for_loop(heap, code, opargs.to_u32() as _, source, value_id,Some(index_id), None);
             }
             Opcode::FOR_3=>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
                 let index_id = self.pop_stack_value().as_id().unwrap();
                 let key_id = self.pop_stack_value().as_id().unwrap();
-                self.begin_for_loop(heap, code, args.to_u32() as _, source, value_id, Some(index_id), Some(key_id));
+                self.begin_for_loop(heap, code, opargs.to_u32() as _, source, value_id, Some(index_id), Some(key_id));
             }
             Opcode::LOOP=>{
-                self.begin_loop(heap, args.to_u32() as _);
+                self.begin_loop(heap, opargs.to_u32() as _);
             }
             Opcode::FOR_END=>{
                 self.end_for_loop(heap, code);
@@ -1046,17 +1076,17 @@ impl ScriptThread{
                 self.last_err = NIL;
                 self.tries.push(TryFrame{
                     start_ip: self.trap.ip(),
-                    jump: args.to_u32() + 1,
+                    jump: opargs.to_u32() + 1,
                     bases: self.new_bases()
                 });
                 self.trap.goto_next();
             }
             Opcode::TRY_ERR=>{ // we hit err, meaning we dont have errors, pop try frame
                 self.tries.pop().unwrap();
-                self.trap.goto_rel(args.to_u32() + 1);
+                self.trap.goto_rel(opargs.to_u32() + 1);
             }
             Opcode::TRY_OK=>{ // we hit ok, jump over it
-                self.trap.goto_rel(args.to_u32());
+                self.trap.goto_rel(opargs.to_u32());
             }
             opcode=>{
                 println!("UNDEFINED OPCODE {}", opcode);
@@ -1064,7 +1094,7 @@ impl ScriptThread{
                 // unknown instruction
             }
         }
-        if args.is_pop_to_me(){
+        if opargs.is_pop_to_me(){
             self.pop_to_me(heap);
         }
     }
