@@ -1220,7 +1220,7 @@ live_design!{
     pub RotaryFlat = <SliderMinimal> {
         height: 95., width: 65.,
         axis: Vertical,
-        flow: Right { wrap: false }
+        flow: Right
         align:{x:0.,y:0.0}
         label_walk:{
             margin:{top:0}

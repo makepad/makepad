@@ -33,7 +33,7 @@ live_design!{
         demos = {
             <H4> { text: "Width & Height"}
             <UIZooRowH> {
-                flow: Right { wrap: false },
+                flow: Right,
                 height: 100.
                 <Box> {
                     width: 100., height: 60.
@@ -53,7 +53,7 @@ live_design!{
             <H4> { text: "Margin"}
             <UIZooRowH> {
                 align: { x: 0., y: 0. }
-                flow: Right { wrap: false }
+                flow: Right
                 spacing: 0.
                 <Box> {
                     width: Fit, height: Fit,
@@ -121,7 +121,7 @@ live_design!{
 
             <Hr> {}
             <H4> { text: "Flow Direction"}
-            <Pbold> { text: "flow: Right { wrap: false }" }
+            <Pbold> { text: "flow: Right" }
             <UIZooRowH> {
                 spacing: 10.
                 <Box> { height: 50, width: 50.}
@@ -199,7 +199,7 @@ live_design!{
                             <H2> { width: Fit, height: Fit, text: "Desktop"}
                         }
                         <View> {
-                            flow: Right { wrap: false },
+                            flow: Right,
                             spacing: (THEME_SPACE_2)
                             <View> {
                                 show_bg: true,

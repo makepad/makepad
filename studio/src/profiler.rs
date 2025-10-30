@@ -71,13 +71,13 @@ live_design!{
                 }
                 <ButtonGroup> {
                     height: Fit
-                    flow: Right { wrap: false }
+                    flow: Right
                     align: { x: 0.0, y: 0.5 }
                 }
                 <Vr> {}
                 <View> {
                     width: Fit,
-                    flow: Right { wrap: false },
+                    flow: Right,
                     spacing: 0.,
                     <Pbold> {
                         width: Fit,
