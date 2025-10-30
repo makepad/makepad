@@ -1641,8 +1641,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             
             let outer_origin = match turtle.flow() {
                 Flow::Right { wrap: true } if outer_size.x > turtle.unused_inner_width_for_current_row() => {
-                    let wrap_spacing = turtle.wrap_spacing;
-                    self.turtle_new_line_internal(wrap_spacing, align_list_start);
+                    self.wrap_turtle(align_list_start);
                     let turtle = self.turtles.last_mut().unwrap();
 
                     let outer_origin = turtle.pos();
@@ -1859,26 +1858,25 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
     }
 
+    fn wrap_turtle(&mut self, align_list_start: usize) {
+        let old_pos = self.turtle().pos() - self.turtle_next_walk_offset();
+        self.turtle_new_line_with_spacing(self.turtle().wrap_spacing);
+        let new_pos = self.turtle().pos();
+        let shift = new_pos - old_pos;
+        self.move_align_list(align_list_start, self.align_list.len(), shift.x, shift.y, false);
+    }
+
     pub fn turtle_new_line(&mut self){
         self.turtle_new_line_with_spacing(0.0);
     }
 
     pub fn turtle_new_line_with_spacing(&mut self, spacing: f64) {
-        self.turtle_new_line_internal(spacing, self.align_list.len());
-    }
-
-    fn turtle_new_line_internal(&mut self, spacing: f64, align_list_start: usize) {
-        let turtle = self.turtles.last_mut().unwrap();
-        let outer_origin = dvec2(
-            turtle.origin.x + turtle.layout.padding.left,
-            turtle.origin.y + turtle.used_height + spacing
+        let new_pos = dvec2(
+            self.turtle().origin.x + self.turtle().padding().left,
+            self.turtle().origin.y + self.turtle().used_height() + spacing
         );
-        let offset = self.turtle_next_walk_offset();
-        let turtle = self.turtles.last_mut().unwrap();
-        let shift = outer_origin - turtle.pos() - offset;
-        turtle.move_to(outer_origin);
-        turtle.allocate_height(0.0);
-        self.move_align_list(align_list_start, self.align_list.len(), shift.x, shift.y, false);
+        self.turtle_mut().move_to(new_pos);
+        self.turtle_mut().allocate_height(0.0);
         self.finished_rows.push(self.finished_walks.len());
     }
     
