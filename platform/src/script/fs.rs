@@ -8,11 +8,9 @@ use std::io::Read;
 pub fn define_fs_module(vm:&mut ScriptVm){
     let fs = vm.new_module(id!(fs));
         
-    vm.add_fn(fs, id!(read_to_string), script_args!(path=NIL), |vm, args|{
+    vm.add_fn(fs, id!(read_to_string), script_args_def!(path=NIL), |vm, args|{
         let path =  script_value!(vm, args.path);
-        println!("READTOSTRING {}", path);
         if let Some(Some(mut file)) = vm.heap.string_with(path, |_heap,s|{
-            println!("GOT PATH {}",s);
             fs::File::open(s).ok()
         }){
             let thread = &vm.thread;
