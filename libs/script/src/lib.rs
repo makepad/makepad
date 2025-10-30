@@ -100,7 +100,7 @@ pub fn test(){
     
     impl ScriptHook for StructTest{
         fn on_proto_methods(vm:&mut ScriptVm, obj:ScriptObject){
-            vm.add_fn(obj, id_lut!(return_two), script_args_lut!(o = 1.0), |_vm, _args|{
+            vm.add_fn(obj, id_lut!(return_two), script_args_def!(o = 1.0), |_vm, _args|{
                 return 2.into()
             });
         }

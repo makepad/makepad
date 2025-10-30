@@ -78,7 +78,7 @@ pub struct App {
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        makepad_script::test();
+       // makepad_script::test();
         
         let code = script!{
             use mod.net
@@ -89,7 +89,7 @@ impl LiveRegister for App {
                 is_streaming: true
                 headers:{
                     "Content-Type":"application/json"
-                    "Authorization":"Bearer"++fs.read_to_string("LICENSE")
+                    "Authorization":"Bearer"+fs.read_to_string("LICENSE")
                 }
                 body:{
                     model:"gpt-4o"
