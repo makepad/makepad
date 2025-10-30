@@ -394,15 +394,6 @@ impl Cx {
                     }
                 }
             },
-            _ => {
-                // For other permissions, auto-deny with warning
-                crate::log!("iOS permission not implemented for: {:?}", permission);
-                self.call_event_handler(&crate::event::Event::PermissionResult(crate::permission::PermissionResult {
-                    permission,
-                    request_id,
-                    status: crate::permission::PermissionStatus::DeniedPermanent,
-                }));
-            }
         }
     }
     
