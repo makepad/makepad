@@ -406,9 +406,11 @@ pub struct Align {
 pub enum Flow {
     // Walks are laid out from left to right.
     #[pick {
+        row_align: RowAlign::Top,
         wrap: false,
     }]
     Right {
+        row_align: RowAlign,
         wrap: bool,
     },
     
@@ -421,18 +423,26 @@ pub enum Flow {
 
 impl Flow {
     pub fn right() -> Self {
-        Flow::Right { wrap: false }
+        Flow::Right { row_align: RowAlign::Top, wrap: false }
     }
 
     pub fn right_wrap() -> Self {
-        Flow::Right { wrap: true }
+        Flow::Right { row_align: RowAlign::Top, wrap: true }
     }
 }
 
 impl Default for Flow {
     fn default() -> Self {
-        Flow::Right { wrap: false }
+        Flow::Right { row_align: RowAlign::Top, wrap: false }
     }
+}
+
+#[derive(Copy, Clone, PartialEq, Debug, Live, LiveHook)]
+#[live_ignore]
+pub enum RowAlign {
+    #[pick]
+    Top,
+    Bottom,
 }
 
 /// Specifies the padding around a walk's inner rectangle.
@@ -944,8 +954,8 @@ impl Turtle {
         match width {
             Size::Fill { min, max, .. } => {
                 let mut outer_width = match self.layout.flow {
-                    Flow::Right { wrap: false } => self.unused_inner_width(),
-                    Flow::Right { wrap: true }  => self.unused_inner_width_for_current_row(),
+                    Flow::Right { wrap: false, .. } => self.unused_inner_width(),
+                    Flow::Right { wrap: true, .. }  => self.unused_inner_width_for_current_row(),
                     Flow::Down | Flow::Overlay => self.effective_inner_width(),
                 };
                 if let Some(min) = min {
@@ -1062,7 +1072,7 @@ impl Turtle {
 
     fn inner_unused_length(&self) -> f64 {
         match self.layout.flow {
-            Flow::Right { wrap: false } => self.unused_inner_width(),
+            Flow::Right { wrap: false, .. } => self.unused_inner_width(),
             Flow::Down => self.unused_inner_height(),
             _ => panic!(),
         }
@@ -1128,7 +1138,7 @@ impl DeferredWalk {
                 let turtle = cx.turtles.last_mut().unwrap();
 
                 let walk = match turtle.flow() {
-                    Flow::Right { wrap: false} => Walk {
+                    Flow::Right { wrap: false, .. } => Walk {
                         abs_pos: Some(pos + dvec2(turtle.total_resolved_length_to(index), 0.0)),
                         margin,
                         width: Size::Fixed(turtle.resolve_fill(index)),
@@ -1352,6 +1362,7 @@ impl<'a,'b> Cx2d<'a,'b> {
     /// 
     /// The current turtle should be finished with the same guard area that was used to start it.
     pub fn end_turtle_with_guard(&mut self, guard: Area) -> Rect {
+        self.finish_row(self.align_list.len());
         self.compute_final_size();
 
         let mut turtle = self.turtles.last_mut().unwrap();
@@ -1388,7 +1399,7 @@ impl<'a,'b> Cx2d<'a,'b> {
 
         // Now that the current turtle's rectangle is known, we can align its finished walks.
         match turtle.flow() {
-            Flow::Right { wrap: false } => {
+            Flow::Right { wrap: false, .. } => {
                 if turtle.deferred_fills.len() == 0 {
                     // If walks are laid out from left to right, and there are no deferred walks,
                     // then the horizontal alignment is applied to all walks as a whole, while
@@ -1434,7 +1445,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                     }
                 }
             },
-            Flow::Right { wrap: true } => {
+            Flow::Right { wrap: true, .. } => {
                 if turtle.deferred_fills.is_empty() {
                     // TODO   
                 } else {
@@ -1640,7 +1651,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             let turtle = self.turtles.last_mut().unwrap();
             
             let outer_origin = match turtle.flow() {
-                Flow::Right { wrap: true } if outer_size.x > turtle.unused_inner_width_for_current_row() => {
+                Flow::Right { wrap: true, .. } if outer_size.x > turtle.unused_inner_width_for_current_row() => {
                     self.wrap_turtle(align_list_start);
                     let turtle = self.turtles.last_mut().unwrap();
 
@@ -1695,7 +1706,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         let turtle = self.turtles.last_mut().unwrap();
         
         match turtle.flow() {
-            Flow::Right { wrap: false } => {
+            Flow::Right { wrap: false, .. } => {
                 let Size::Fill { weight, min, max } = walk.width else {
                     return None
                 };
@@ -1747,7 +1758,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                     pos: old_pos + spacing
                 })
             },
-            Flow::Right { wrap: true } if walk.width.is_fill() => {
+            Flow::Right { wrap: true, .. } if walk.width.is_fill() => {
                 error!("flow: Right {{ wrap: true }} does not support width: Fill");
                 None
             },
@@ -1860,7 +1871,7 @@ impl<'a,'b> Cx2d<'a,'b> {
 
     fn wrap_turtle(&mut self, align_list_start: usize) {
         let old_pos = self.turtle().pos() - self.turtle_next_walk_offset();
-        self.turtle_new_line_with_spacing(self.turtle().wrap_spacing);
+        self.turtle_new_line_internal(self.turtle().wrap_spacing, align_list_start);
         let new_pos = self.turtle().pos();
         let shift = new_pos - old_pos;
         self.move_align_list(align_list_start, self.align_list.len(), shift.x, shift.y, false);
@@ -1871,12 +1882,43 @@ impl<'a,'b> Cx2d<'a,'b> {
     }
 
     pub fn turtle_new_line_with_spacing(&mut self, spacing: f64) {
+        self.turtle_new_line_internal(spacing, self.align_list.len());
+    }
+
+    pub fn turtle_new_line_internal(&mut self, spacing: f64, align_list_start: usize) {
+        self.finish_row(align_list_start);
         let new_pos = dvec2(
             self.turtle().origin.x + self.turtle().padding().left,
             self.turtle().origin.y + self.turtle().used_height() + spacing
         );
         self.turtle_mut().move_to(new_pos);
         self.turtle_mut().allocate_height(0.0);
+    }
+
+    fn finish_row(&mut self, align_list_start: usize) {
+        let Flow::Right { row_align, .. } = self.turtle().flow() else {
+            return;
+        };
+        let finished_walks_start = if self.turtle().finished_rows_start == self.finished_rows.len() {
+            self.turtle().finished_walks_start
+        } else {
+            self.finished_rows[self.turtle().finished_rows_start]
+        };
+        let row_height = self.turtle().row_height();
+        for finished_walk_index in finished_walks_start..self.finished_walks.len() {
+            let finished_walk_height = self.finished_walks[finished_walk_index].outer_size.y;
+            let shift = match row_align {
+                RowAlign::Top => 0.0,
+                RowAlign::Bottom => row_height - finished_walk_height,
+            };
+            let start = self.finished_walks[finished_walk_index].align_list_start;
+            let end = if finished_walk_index + 1 < self.finished_walks.len() {
+                self.finished_walks[finished_walk_index + 1].align_list_start
+            } else {
+                align_list_start
+            };
+            self.move_align_list(start, end, 0.0, shift, false);
+        }
         self.finished_rows.push(self.finished_walks.len());
     }
     
@@ -2150,7 +2192,7 @@ impl LiveHook for Flow {
     fn skip_apply(&mut self, _cx: &mut Cx, _apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         match &nodes[index].value {
             LiveValue::BareEnum(live_id!(RightWrap))=>{
-                *self = Self::Right { wrap: true };
+                *self = Self::right_wrap();
                 Some(index + 1)
             }
             _ => None

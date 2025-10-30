@@ -225,7 +225,7 @@ pub struct Label {
     
     #[walk] walk: Walk,
     #[live] align: Align,
-    #[live(Flow::Right { wrap: true })] flow: Flow,
+    #[live(Flow::right_wrap())] flow: Flow,
     #[live] padding: Padding,
     
     #[rust] area: Area,
