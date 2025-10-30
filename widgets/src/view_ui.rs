@@ -51,7 +51,7 @@ live_design! {
     
     pub Vr = <View> {
         width: (THEME_SPACE_2 * 2.), height: Fill,
-        flow: Right { wrap: false },
+        flow: Right,
 
         show_bg: true, 
         draw_bg: {

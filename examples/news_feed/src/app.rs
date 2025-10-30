@@ -220,7 +220,7 @@ live_design!{
 
         <View> {
             width: Fill, height: 60,
-            flow: Right { wrap: false },
+            flow: Right,
             padding: 10.0,
             spacing: 5.0
             align: { x: 0., y: 0.5}
@@ -413,14 +413,14 @@ live_design!{
 
     Menu = <View> {
         width: Fill, height: 80
-        flow: Right { wrap: false },
+        flow: Right,
         padding: 10.0,
         show_bg: true,
         draw_bg: {color: (COLOR_BG)}
 
         <View> {
             width: Fill, height: Fit,
-            flow: Right { wrap: false },
+            flow: Right,
             align: {x: 0.5, y: 1.0}
 
             margin: 0.0,
@@ -552,7 +552,7 @@ live_design!{
 
     PostMenu = <View> {
         width: Fit, height: Fit,
-        flow: Right { wrap: false },
+        flow: Right,
         align: { x: 0., y: 0.5 }
 
         likes = <IconButton> {
@@ -576,7 +576,7 @@ live_design!{
 
         body = <RoundedView> {
             width: Fill, height: Fit
-            flow: Right { wrap: false },
+            flow: Right,
             padding: 10.0,
             spacing: 10.0
             show_bg: true,
@@ -609,7 +609,7 @@ live_design!{
                 spacing: 15.,
 
                 <View> {
-                    flow: Right { wrap: false },
+                    flow: Right,
                     height: Fit, width: Fill,
                     spacing: 5.,
                     margin: { bottom: 10.0, top: 5.}
