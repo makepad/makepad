@@ -79,27 +79,37 @@ impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
        // makepad_script::test();
-       let code = script!{
-           use mod.net
-           use mod.fs
-           let req = net.HttpRequest{
-               url: #(OPENAI_BASE_URL),
-               method: net.HttpMethod.POST
-               is_streaming: true
-               headers:{
-                   "Content-Type": "application/json"
-                   "Authorization": "Bearer "+fs.read_to_string("OPENAI_KEY")
-               }
-               body:{
-                   model:"gpt-4o"
-                   max_tokens:1000
-                   stream:true
-                   messages:[{content:"msg",role:"user"}]
-               }.to_json()
-           }
-           let x = net.http_request(req)
-       };
-       cx.eval(code);
+let code = script!{
+    use mod.net
+    use mod.fs
+    let req = net.HttpRequest{
+        url: "http://127.0.0.1:8080/v1/chat/completions"
+        method: net.HttpMethod.POST
+        headers:{
+            "Content-Type": "application/json"
+            "Authorization": "Bearer "+fs.read_to_string("OPENAI_KEY")
+        }
+        body:{
+            model:"gpt-4o"
+            max_tokens:1000
+            stream:true
+            messages:[{content:"Write a poem",role:"user"}]
+        }.to_json()
+    }
+    net.http_request_stream(req) do net.HttpEvents{
+        on_stream: |s|{
+            let s = s.body.parse_json();
+            let s = ok{s.data.choices[0].delta.content}
+            if s ~s
+            
+        }
+        on_error: |e| ~e
+    }
+};
+
+
+
+cx.eval(code);
     }
 }
 
@@ -137,8 +147,10 @@ impl MatchEvent for App {
         }
     }
         
-    fn handle_network_responses(&mut self, cx: &mut Cx, responses:&NetworkResponsesEvent ){
-        let label = self.ui.label(ids!(message_label));
+    fn handle_network_responses(&mut self, _cx: &mut Cx, _responses:&NetworkResponsesEvent ){
+        
+        let _label = self.ui.label(ids!(message_label));
+        /*
         for event in responses{
             match &event.response {
                 NetworkResponse::HttpStreamResponse(response)=>{
@@ -184,7 +196,7 @@ impl MatchEvent for App {
                 }
                 _ => ()
             }
-        } 
+        } */
     }
 }
 

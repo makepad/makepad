@@ -187,7 +187,8 @@ impl Opcode{
     pub const TRY_TEST:Self = Self(110);
     pub const TRY_ERR:Self = Self(111);
     pub const TRY_OK:Self = Self(112);
-    pub const USE:Self = Self(113);
+    pub const OK_TEST:Self = Self(113);
+    pub const USE:Self = Self(114);
 }
 
 
@@ -342,6 +343,8 @@ impl fmt::Display for Opcode {
             Self::TRY_TEST => return write!(f, "try_test"),
             Self::TRY_ERR => return write!(f, "try_err"),
             Self::TRY_OK => return write!(f, "try_ok"),
+            Self::USE=>return write!(f, "use"),
+            Self::OK_TEST=>return write!(f, "ok_test"),
             _=>return write!(f, "OP{}",self.0)
         }
     }

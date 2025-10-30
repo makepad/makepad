@@ -335,7 +335,7 @@ impl Cx {
                 }
             }
             FromJavaMessage::HttpResponse {request_id, metadata_id, status_code, headers, body} => {
-                let e = Event::NetworkResponses(vec![
+                let out = vec![
                     NetworkResponseItem {
                         request_id: LiveId(request_id),
                         response: NetworkResponse::HttpResponse(HttpResponse::new(
@@ -345,11 +345,13 @@ impl Cx {
                             Some(body)
                         ))
                     }
-                ]);
+                ];
+                self.handle_script_async_network_responses(&out);
+                let e = Event::NetworkResponses(out);
                 self.call_event_handler(&e);
             }
             FromJavaMessage::HttpRequestError {request_id, metadata_id, error, ..} => {
-                let e = Event::NetworkResponses(vec![
+                let out = (vec![
                     NetworkResponseItem {
                         request_id: LiveId(request_id),
                         response: NetworkResponse::HttpRequestError(HttpError{
@@ -357,7 +359,9 @@ impl Cx {
                             metadata_id: LiveId(metadata_id)
                         })
                     }
-                ]);
+                ];
+                self.handle_script_async_network_responses(&out);
+                let e = Event::NetworkResponses(out);
                 self.call_event_handler(&e);
             }
             FromJavaMessage::WebSocketMessage {message, sender} => {

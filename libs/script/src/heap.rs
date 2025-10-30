@@ -6,7 +6,8 @@ use crate::trap::*;
 use crate::traits::*;
 use crate::array::*;
 use crate::gc::*;
-
+use std::rc::Rc;
+use std::cell::RefCell;
 use std::fmt::Write;
 use std::collections::HashMap;
 
@@ -14,7 +15,7 @@ use std::collections::HashMap;
 pub struct ScriptHeap{
     pub modules: ScriptObject,
     pub(crate) mark_vec: Vec<ScriptGcMark>,
-    pub(crate) roots: Vec<ScriptObject>,
+    pub(crate) roots: Rc<RefCell<HashMap<ScriptObject, usize>>>,
     
     pub(crate) objects: Vec<ScriptObjectData>,
     pub(crate) objects_free: Vec<ScriptObject>,
@@ -36,7 +37,7 @@ impl ScriptHeap{
     
     pub fn empty()->Self{
         let mut v = Self{
-            roots: vec![],
+            roots: Default::default(),
             modules: ScriptObject::ZERO,
             objects: vec![Default::default()],
             arrays: vec![Default::default()],
@@ -50,14 +51,13 @@ impl ScriptHeap{
         v.arrays[0].tag.freeze();
         
         v.modules = v.new_with_proto(id!(mod).into()); 
-        v.roots.push(v.modules);
+        v.roots.borrow_mut().insert(v.modules, 1);
         
         v
     }
     
     
     // New objects
-    
     
     
     pub fn new_object(&mut self)->ScriptObject{
@@ -389,6 +389,14 @@ impl ScriptHeap{
         }
         array.tag.set_dirty();
         Some(&mut array.storage)
+    }
+    
+    pub fn array_mut_self_with<R,F:FnOnce(&mut Self, &ScriptArrayStorage)->R>(&mut self, array:ScriptArray, cb:F)->R{
+        let mut storage = ScriptArrayStorage::ScriptValue(vec![]);
+        std::mem::swap(&mut self.arrays[array.index as usize].storage, &mut storage);
+        let r = cb(self, &storage);
+        std::mem::swap(&mut self.arrays[array.index as usize].storage, &mut storage);
+        r
     }
         
     pub fn array_remove(&mut self, array:ScriptArray, index: usize,trap:&ScriptTrap)->ScriptValue{
@@ -1321,7 +1329,6 @@ impl ScriptHeap{
     }
     
     pub fn push_all_fn_args(&mut self, top_ptr:ScriptObject, args:&[ScriptValue], trap:&ScriptTrap)->ScriptValue{
-        println!("pushing all fn args");
         let object = &self.objects[top_ptr.index as usize];
         if let Some(ptr) = object.proto.as_object(){
             for (index, value) in args.iter().enumerate(){
