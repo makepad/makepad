@@ -156,3 +156,14 @@ impl RotatedImage {
         DrawStep::done()
     }
 }
+
+impl RotatedImageRef {
+    pub fn set_texture(&self, cx:&mut Cx, texture: Option<Texture>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.texture = texture;
+            if cx.in_draw_event(){
+                inner.redraw(cx);
+            }
+        }
+    }
+}
