@@ -188,7 +188,8 @@ impl Opcode{
     pub const TRY_ERR:Self = Self(111);
     pub const TRY_OK:Self = Self(112);
     pub const OK_TEST:Self = Self(113);
-    pub const USE:Self = Self(114);
+    pub const OK_END:Self = Self(114);
+    pub const USE:Self = Self(115);
 }
 
 
