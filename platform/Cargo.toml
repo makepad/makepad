@@ -48,13 +48,11 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "1.0.0" }
 wayland-client = "0.31.11"
 wayland-protocols = { version = "0.32.9", features = ["client", "unstable", "staging"] }
 wayland-egl = "0.32.8"
-tempfile = "3.22"
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 wayland-client = "0.31.11"
 wayland-protocols = { version = "0.32.9", features = ["client", "unstable", "staging"] }
 wayland-egl = "0.32.8"
-tempfile = "3.22"
 
 [target.'cfg(target_os = "android")'.dependencies]
 ## Note: we must not use local 'path' dependencies on `makepad-jni-sys` or `makepad-android-state`
