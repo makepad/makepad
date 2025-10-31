@@ -234,6 +234,7 @@ impl X11Cx {
                 if e.timer_id == 0{
                     if SignalToUI::check_and_clear_ui_signal(){
                         cx.handle_media_signals();
+                        self.handle_script_signals();
                         cx.call_event_handler(&Event::Signal);
                     }
                     cx.handle_action_receiver();

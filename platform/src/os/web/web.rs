@@ -185,6 +185,7 @@ impl Cx {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
                     if tw.flags & 1 != 0{
                         self.handle_media_signals();
+                        self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                     if tw.flags & 2 != 0{
