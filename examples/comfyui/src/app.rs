@@ -67,9 +67,7 @@ let code = script!{
     }    
         
     fn finish_image(prompt_id){
-        ~"FINISH:"+prompt_id
         comfy_history(prompt_id) do |data|{
-            fs.write("./dump.json", data.to_json())
             for image in data[prompt_id].outputs["9"].images{
                 download_image(image)
             }
@@ -79,9 +77,9 @@ let code = script!{
     fn download_image(image){
         let req = net.HttpRequest{
             url: "http://10.0.0.123:8000/view?"+
-            "filename="+image.filename+
-            "&subfolder="+image.subfolder+
-            "&type="+image.type
+                 "filename="+image.filename+
+                 "&subfolder="+image.subfolder+
+                 "&type="+image.type
             method: net.HttpMethod.GET
         }
         net.http_request(req) do net.HttpEvents{
@@ -91,7 +89,6 @@ let code = script!{
             on_error: |e| ~e
         }
     }
-    
     
     fn comfy_history(prompt_id, cb){
         let req = net.HttpRequest{
@@ -104,7 +101,6 @@ let code = script!{
         }
     }
     
-    // alright lets do the websocket
     net.web_socket("ws://10.0.0.123:8000/ws?clientId=1234") do net.WebSocketEvents{
         on_string:fn(str){
             let str = str.parse_json()
@@ -112,9 +108,6 @@ let code = script!{
             if ok{str.data.nodes["9"].state == "finished"}{
                 finish_image(str.data.nodes["9"].prompt_id)
             }
-        }
-        on_binary:fn(bin){
-            ~"GOT BIN"
         }
     };
     
@@ -133,10 +126,6 @@ let code = script!{
             on_error: |e| ~e
         }
     }
-    
-    
-    
-    
 };
         cx.eval(code);
     }
