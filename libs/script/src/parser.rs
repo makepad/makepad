@@ -812,6 +812,7 @@ impl ScriptParser{
             }
             State::OkTestExpr{ok_start}=>{
                 self.set_opcode_args(ok_start, OpcodeArgs::from_u32(self.code_len() as u32 -ok_start) );
+                self.push_code(Opcode::OK_END.into(), self.index);
                 return 0
             }
             State::OkTestBlock{ok_start, last_was_sep}=>{
@@ -820,15 +821,15 @@ impl ScriptParser{
                     if !last_was_sep && self.has_pop_to_me(){
                         self.clear_pop_to_me();
                     }
+                    self.push_code(Opcode::OK_END.into(), self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }
                 else {
-                    self.state.push(State::TryErrBlockOrExpr);
+                    self.push_code(Opcode::OK_END.into(), self.index);
                     return 0
                 }
             }
-            
             State::TryTestExpr{try_start}=>{
                 self.set_opcode_args(try_start, OpcodeArgs::from_u32(self.code_len() as u32 -try_start) );
                 self.state.push(State::TryErrBlockOrExpr);
