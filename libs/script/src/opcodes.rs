@@ -836,20 +836,26 @@ impl ScriptThread{
             }
             Opcode::FN_BODY=>{ // alright we have all the args now we get an expression
                 let jump_over_fn = opargs.to_u32();
-                let me = self.mes.pop().unwrap();
-                match me{
-                    ScriptMe::Call{..} | ScriptMe::Array(_)=>{
-                        self.trap.err_unexpected();
-                        self.push_stack_unchecked(NIL);
-                    }
-                    ScriptMe::Object(obj)=>{
-                        heap.set_fn(obj, ScriptFnPtr::Script(
-                            ScriptIp{body: self.trap.ip.body, index:(self.trap.ip() + 1)}
-                        ));
-                        self.push_stack_unchecked(obj.into());
-                    }
-                };
-                self.trap.goto_rel(jump_over_fn);
+                if let Some(me) = self.mes.pop(){
+                    match me{
+                        ScriptMe::Call{..} | ScriptMe::Array(_)=>{
+                            self.trap.err_unexpected();
+                            self.push_stack_unchecked(NIL);
+                        }
+                        ScriptMe::Object(obj)=>{
+                            heap.set_fn(obj, ScriptFnPtr::Script(
+                                ScriptIp{body: self.trap.ip.body, index:(self.trap.ip() + 1)}
+                            ));
+                            self.push_stack_unchecked(obj.into());
+                        }
+                    };
+                    self.trap.goto_rel(jump_over_fn);
+                }
+                else{
+                    self.trap.err_unexpected();
+                    self.push_stack_unchecked(NIL);
+                    self.trap.goto_next();
+                }
             }
             Opcode::RETURN=>{
                 let value = if opargs.is_nil(){
