@@ -793,7 +793,7 @@ impl ScriptThread{
                 heap.set_object_storage_type(me, ScriptObjectStorageType::VEC2);
                 heap.clear_object_deep(me);
                 self.mes.push(ScriptMe::Object(me));
-                self.set_scope_value(heap, id, me.into());
+                self.def_scope_value(heap, id, me.into());
                 self.trap.goto_next();
             }   
             Opcode::FN_ARG_DYN=>{
