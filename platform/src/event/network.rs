@@ -12,17 +12,17 @@ pub struct NetworkResponseItem{
 
 pub type NetworkResponsesEvent = Vec<NetworkResponseItem>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Script, ScriptHook)]
 pub struct HttpError{
-    pub message: String,
-    pub metadata_id: LiveId
+    #[live] pub message: String,
+    #[live] pub metadata_id: LiveId
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Script, ScriptHook)]
 pub struct HttpProgress{
-    pub loaded:u64, 
-    pub total:u64,
+    #[live] pub loaded:u64, 
+    #[live] pub total:u64,
 }
 
 #[derive(Clone, Debug)]
@@ -78,7 +78,7 @@ pub struct HttpRequest {
 }
 */
 
-#[derive(PartialEq, Debug, Script, ScriptHook)]
+#[derive(PartialEq, Debug, Script, ScriptHook, Default)]
 pub struct HttpRequest {
     #[live] pub metadata_id: LiveId,
     #[live] pub url: String,
@@ -244,8 +244,9 @@ impl HttpResponse {
     }
 }
 
-#[derive(PartialEq, Debug, Script, ScriptHook)]
+#[derive(PartialEq, Debug, Script, ScriptHook, Default)]
 pub enum HttpMethod{
+    #[default]
     #[pick]
     GET,
     HEAD,
