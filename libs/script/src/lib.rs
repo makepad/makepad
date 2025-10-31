@@ -33,38 +33,6 @@ pub use traits::*;
 pub use thread::*;
 pub use heap::*;
 
-// can we refcount object roots on the heap?
-// yea why not 
-// we can make a super convenient ObjectRef type you can use to hold onto script objects
-/*
-pub trait ScriptLife{
-    fn on_create(){
-    }
-    pub fn handle(&mut self, ){
-        // now i wanna fire the onclick event somehow. how do we do that
-        // we could simply have an rust_ref u64 -> object id map 
-        cx.vm.call(self.get_refid(), id!(on_click))
-        
-        if let Some(object) = vm_call!(cx.vm, self, on_draw(item)){
-            vm_get!(cx.vm, object, myfield)
-        }
-        
-        if let Some(object) = cx.vm.call(self.rsid(), id!(on_draw), &[item.into()]).as_object(){
-            // we have an ScriptObject. can we read a value
-            object.get(id!(myfield))
-            object.set(id!(my_field), 2.0.into())
-        }
-    }
-}*/
-
-
-//#[derive(Script)]
-pub enum EnumTest{
-    Bare,
-    Tuple(u32),
-    Named{named:u32}
-}
-
 
 pub fn test(){
     let mut vmbase = ScriptVmBase::new();
@@ -99,16 +67,27 @@ pub fn test(){
         }
     }    
     
-    let code = script!{
+    let _code = script!{
         use mod.std.assert
         // using ok to ignore errors
-        let x = {@object}
-        ~ok{x.x.x.x.x}
-        ~@HI
+        let x = {t:3}
+        assert( ok{x.y.z} == nil)
+        assert( ok{x.t} == 3)
+                
+        // string concats
+        let x = {t:"a"}
+        x.t  += "b" + "c" + 2
+        assert(x.t == "abc2")
+        let x = ["c"]
+        x[0] += "b" + "a" + 3
+        assert(x == ["cba3"])
+        let x = "aaaaaaa"
+        x = x + "b"
+        assert(x == "aaaaaaab")
     };
     
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         use mod.std.assert
 
         // array operations
@@ -252,9 +231,20 @@ pub fn test(){
         assert(2 == f(1) do |x| x+1)
         
         // using ok to ignore errors
-        let x = {}
-        ok{x.y.z}
+        let x = {t:3}
+        assert( ok{x.y.z} == nil)
+        assert( ok{x.t} == 3)
         
+        // string concats
+        let x = {t:"a"}
+        x.t  += "b" + "c" + 2
+        assert(x.t == "abc2")
+        let x = ["c"]
+        x[0] += "b" + "a" + 3
+        assert(x == ["cba3"])
+        let x = "aaaaaaa"
+        x = x + "b"
+        assert(x == "aaaaaaab")
         
         ~"Test done"
     };
