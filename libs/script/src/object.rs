@@ -219,6 +219,7 @@ impl ScriptObjectTag{
     }
     
     pub fn set_fn(&mut self, ptr:ScriptFnPtr){
+        self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
         match ptr{
             ScriptFnPtr::Script(ip)=>{
@@ -269,7 +270,7 @@ impl ScriptObjectTag{
     }
         
     pub fn set_proto_fwd(&mut self, fwd:u64){
-        self.0 |= fwd
+        self.0 = fwd
     }
         
     pub fn set_storage_type_unchecked(&mut self, ty:ScriptObjectStorageType){
