@@ -55,18 +55,11 @@ let code = script!{
                     }
                 }
             }
-            on_error: fn(e) ~
+            on_error: |e| ~e
         }
     }
             
-    openai_chat("Say hi") do fn(s) ~s;
-    
-    let comfy_ui_queue = |flow|{
-        
-    }
-    
-    
-    
+    openai_chat("Say hi") do |s| ~s;
 };
         cx.eval(code);
     }

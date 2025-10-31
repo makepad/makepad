@@ -304,6 +304,7 @@ impl fmt::Display for Opcode {
             Self::END_ARRAY => return write!(f, "]"),
                                         
             Self::FN_ARGS=> return write!(f, "<fn>|"),
+            Self::FN_LET_ARGS=> return write!(f, "<fn_let>|"),
             Self::FN_ARG_DYN=> return write!(f, "fnarg"),
             Self::FN_ARG_TYPED=> return write!(f, "fnarg_ty"),
             Self::FN_BODY=> return write!(f, "|<body>"),
