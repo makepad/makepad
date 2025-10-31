@@ -146,50 +146,51 @@ impl Opcode{
     pub const METHOD_CALL_EXEC:Self = Self(75);
     
     pub const FN_ARGS:Self = Self(76);
-    pub const FN_ARG_DYN:Self = Self(77);
-    pub const FN_ARG_TYPED:Self = Self(78);
-    pub const FN_BODY:Self = Self(79);
-    pub const RETURN:Self = Self(80);
+    pub const FN_LET_ARGS: Self = Self(77);
+    pub const FN_ARG_DYN:Self = Self(78);
+    pub const FN_ARG_TYPED:Self = Self(79);
+    pub const FN_BODY:Self = Self(80);
+    pub const RETURN:Self = Self(81);
             
-    pub const IF_TEST:Self = Self(81);
-    pub const IF_ELSE:Self = Self(82);
+    pub const IF_TEST:Self = Self(82);
+    pub const IF_ELSE:Self = Self(83);
         
-    pub const FIELD:Self = Self(83);
-    pub const FIELD_NIL: Self = Self(84);
-    pub const ME_FIELD:Self = Self(85);
-    pub const ARRAY_INDEX:Self = Self(86);
+    pub const FIELD:Self = Self(84);
+    pub const FIELD_NIL: Self = Self(85);
+    pub const ME_FIELD:Self = Self(86);
+    pub const ARRAY_INDEX:Self = Self(87);
     // prototypically inherit the chain for deep prototype fields
-    pub const PROTO_FIELD:Self = Self(87);
-    pub const POP_TO_ME:Self = Self(88);
+    pub const PROTO_FIELD:Self = Self(88);
+    pub const POP_TO_ME:Self = Self(89);
             
-    pub const LET_TYPED:Self = Self(89);
-    pub const LET_DYN:Self = Self(90);
+    pub const LET_TYPED:Self = Self(90);
+    pub const LET_DYN:Self = Self(91);
                 
-    pub const SEARCH_TREE:Self = Self(91);
-    pub const STRING_STREAM:Self = Self(92);
-    pub const LOG: Self = Self(93);
+    pub const SEARCH_TREE:Self = Self(92);
+    pub const STRING_STREAM:Self = Self(93);
+    pub const LOG: Self = Self(94);
     
-    pub const ME: Self = Self(94);
-    pub const DELETE: Self = Self(95);
-    pub const SCOPE: Self = Self(96);
+    pub const ME: Self = Self(95);
+    pub const DELETE: Self = Self(96);
+    pub const SCOPE: Self = Self(97);
         
-    pub const FOR_1: Self = Self(97);
-    pub const FOR_2: Self = Self(98);
-    pub const FOR_3: Self = Self(99);
+    pub const FOR_1: Self = Self(98);
+    pub const FOR_2: Self = Self(99);
+    pub const FOR_3: Self = Self(100);
     pub const LOOP: Self = Self(101);
-    pub const BREAKIFNOT: Self = Self(103);
-    pub const FOR_END: Self = Self(104);
-    pub const BREAK: Self = Self(105);
-    pub const CONTINUE: Self = Self(106);
-    pub const RANGE: Self = Self(107);
-    pub const IS: Self = Self(108);
-    pub const RETURN_IF_ERR:Self = Self(109);
-    pub const TRY_TEST:Self = Self(110);
-    pub const TRY_ERR:Self = Self(111);
-    pub const TRY_OK:Self = Self(112);
-    pub const OK_TEST:Self = Self(113);
-    pub const OK_END:Self = Self(114);
-    pub const USE:Self = Self(115);
+    pub const BREAKIFNOT: Self = Self(102);
+    pub const FOR_END: Self = Self(103);
+    pub const BREAK: Self = Self(104);
+    pub const CONTINUE: Self = Self(105);
+    pub const RANGE: Self = Self(106);
+    pub const IS: Self = Self(107);
+    pub const RETURN_IF_ERR:Self = Self(108);
+    pub const TRY_TEST:Self = Self(109);
+    pub const TRY_ERR:Self = Self(110);
+    pub const TRY_OK:Self = Self(111);
+    pub const OK_TEST:Self = Self(112);
+    pub const OK_END:Self = Self(113);
+    pub const USE:Self = Self(114);
 }
 
 
@@ -346,6 +347,7 @@ impl fmt::Display for Opcode {
             Self::TRY_OK => return write!(f, "try_ok"),
             Self::USE=>return write!(f, "use"),
             Self::OK_TEST=>return write!(f, "ok_test"),
+            Self::OK_END=>return write!(f, "ok_end"),
             _=>return write!(f, "OP{}",self.0)
         }
     }
