@@ -128,6 +128,8 @@ impl JsonParser{
                         self.state.push(State::ObjectColon(obj, new_arr.into()));
                         self.state.push(State::Array(new_arr));
                     }
+                    ScriptToken::CloseCurly=>{
+                    }
                     ScriptToken::CloseRound | ScriptToken::CloseSquare=>{
                         self.errors.push((self.index,format!("JsonParser: Unexpected ] or ) in object")));
                     }

@@ -392,6 +392,14 @@ impl ScriptHeap{
         &array.storage
     }
     
+    pub fn new_array_from_vec_u8(&mut self, data:Vec<u8>)->ScriptArray{
+        let ptr = self.new_array();
+        let array = &mut self.arrays[ptr.index as usize];
+        array.tag.set_dirty();
+        array.storage = ScriptArrayStorage::U8(data);
+        ptr
+    }
+    
     pub fn array_mut(&mut self, array:ScriptArray,trap:&ScriptTrap)->Option<&mut ScriptArrayStorage>{
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
