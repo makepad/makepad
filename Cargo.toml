@@ -16,7 +16,8 @@ workspace.members = [
     "examples/snake",
     "examples/slides",
     "examples/xr_net",
-    "examples/script",
+    "examples/comfyui",
+    "libs/script/test",
     "studio",
     "tools/cargo_makepad",
 ]
