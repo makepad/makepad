@@ -275,6 +275,7 @@ impl ScriptThread{
                             heap.cast_to_string(value, out);
                         });
                         self.set_scope_value(heap, id, str.into());
+                        self.push_stack_unchecked(NIL);
                     }
                     else{
                         let fa = heap.cast_to_f64(old_value, self.trap.ip);
@@ -783,7 +784,18 @@ impl ScriptThread{
                 self.mes.push(ScriptMe::Object(me));
                 self.trap.goto_next();
             }
-                                    
+            Opcode::FN_LET_ARGS=>{
+                let id = self.pop_stack_value().as_id().unwrap_or(id!());
+                let scope = *self.scopes.last_mut().unwrap();
+                let me = heap.new_with_proto(scope.into());
+                                                
+                // set it to a vec type to ensure ordered inserts
+                heap.set_object_storage_type(me, ScriptObjectStorageType::VEC2);
+                heap.clear_object_deep(me);
+                self.mes.push(ScriptMe::Object(me));
+                self.set_scope_value(heap, id, me.into());
+                self.trap.goto_next();
+            }   
             Opcode::FN_ARG_DYN=>{
                 let value = if opargs.is_nil(){
                     NIL

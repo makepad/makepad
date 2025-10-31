@@ -69,21 +69,15 @@ pub fn test(){
     
     let _code = script!{
         use mod.std.assert
-        // using ok to ignore errors
-        let x = {t:3}
-        assert( ok{x.y.z} == nil)
-        assert( ok{x.t} == 3)
-                
-        // string concats
-        let x = {t:"a"}
-        x.t  += "b" + "c" + 2
-        assert(x.t == "abc2")
-        let x = ["c"]
-        x[0] += "b" + "a" + 3
-        assert(x == ["cba3"])
-        let x = "aaaaaaa"
-        x = x + "b"
-        assert(x == "aaaaaaab")
+        let x = |a| a + 1
+        assert(x(1) == 2)
+        let x = fn{2}
+        assert(x() == 2)
+        fn x{3}
+        assert(x() == 3)
+        fn x(a = 2){a + 2}
+        assert(x(3) == 5)
+        assert(x() == 4)
     };
     
     // Our unit tests :)
@@ -245,6 +239,16 @@ pub fn test(){
         let x = "aaaaaaa"
         x = x + "b"
         assert(x == "aaaaaaab")
+        
+        let x = |a| a + 1
+        assert(x(1) == 2)
+        let x = fn{2}
+        assert(x() == 2)
+        fn x{3}
+        assert(x() == 3)
+        fn x(a = 2){a + 2}
+        assert(x(3) == 5)
+        assert(x() == 4)
         
         ~"Test done"
     };

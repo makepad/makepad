@@ -340,14 +340,7 @@ impl Cx {
         
         live_registry.expand_all_documents(&mut errs);
        //crate::profile_end!(dt);
-        
-        // lets evaluate all expressions in the main module
-       /* for file in &live_registry.live_files {
-            if file.module_id == live_registry.main_module.as_ref().unwrap().module_id{
-                println!("GOT HERE");
-            }
-        }*/
-                
+
         for err in errs {
             if std::env::args().find(|v| v == "--message-format=json").is_some(){
                 let err = live_registry.live_error_to_live_file_error(err);
