@@ -43,11 +43,15 @@ enum State{
     TryOkBlockOrExpr,
     TryOkBlock{ok_start:u32, last_was_sep:bool},
     TryOkExpr{ok_start:u32},
-        
-    FnArgList,
-    FnArgMaybeType{index:u32},
-    FnArgType{index:u32},
-    FnBody,
+    
+    FnMaybeLet{index:u32},
+    FnLetMaybeArgs,
+    FnArgList{lambda:bool},
+    FnArgMaybeType{lambda:bool,index:u32},
+    FnArgType{lambda:bool,index:u32},
+    FnArgTypeAssign{lambda:bool,index:u32},
+          
+    FnBody{lambda:bool},
     EndFnBlock{fn_slot:u32, last_was_sep:bool, index:u32},
     EndFnExpr{fn_slot:u32, index:u32},
     EmitFnArgTyped{index:u32},
@@ -363,15 +367,24 @@ impl ScriptParser{
     
     fn has_pop_to_me(&self)->bool{
         if let Some(code) = self.opcodes.last(){
-            code.has_opcode_args_pop_to_me()
+            if let Some((opcode,args)) = code.as_opcode(){
+                if opcode == Opcode::POP_TO_ME{
+                    return true
+                }
+                return args.0 & OpcodeArgs::POP_TO_ME_FLAG != 0
+            }
         }
-        else{
-            false
-        }
+        false
     }
     
     fn clear_pop_to_me(&mut self){
         if let Some(code) = self.opcodes.last_mut(){
+            if let Some((opcode,_)) = code.as_opcode(){
+                if opcode == Opcode::POP_TO_ME{
+                    self.opcodes.pop();
+                    return;
+                }
+            }
             code.clear_opcode_args_pop_to_me();
         }
     }
@@ -564,15 +577,59 @@ impl ScriptParser{
                 }
             }
             State::EmitFnArgTyped{index}=>{
-                self.push_code(ScriptValue::from_opcode_args(Opcode::FN_ARG_TYPED, OpcodeArgs::NIL), index);
+                self.push_code(Opcode::FN_ARG_TYPED.into(), index);
             }
             State::EmitFnArgDyn{index}=>{
-                self.push_code(ScriptValue::from_opcode_args(Opcode::FN_ARG_DYN, OpcodeArgs::NIL), index);
+                self.push_code(Opcode::FN_ARG_DYN.into(), index);
             }
-            State::FnArgType{index}=>{
+            State::FnMaybeLet{index}=>{
+                if id.not_empty(){
+                    // ok we did fn id
+                    self.push_code(id.into(), self.index);
+                    self.push_code(Opcode::FN_LET_ARGS.into(), self.index);
+                    self.state.push(State::FnLetMaybeArgs);
+                    return 1
+                }
+                else if tok.is_open_curly(){ // zero args function
+                    self.push_code(Opcode::FN_ARGS.into(), self.index);
+                    let fn_slot = self.code_len();
+                    self.push_code(Opcode::FN_BODY.into(), self.index);
+                    self.state.push(State::EndFnBlock{fn_slot, last_was_sep:false, index:self.index});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                // immediate args
+                else if tok.is_open_round(){
+                    self.push_code(Opcode::FN_ARGS.into(), self.index);
+                    self.state.push(State::FnArgList{lambda: false});
+                    return 1
+                }
+                else{
+                    self.state.push(State::EmitFnArgDyn{index});
+                    println!("Argument type expected in function");
+                }
+            }
+            State::FnLetMaybeArgs=>{
+                // no args
+                if tok.is_open_curly(){
+                    let fn_slot = self.code_len();
+                    self.push_code(Opcode::FN_BODY.into(), self.index);
+                    self.state.push(State::EndFnBlock{fn_slot, last_was_sep:false, index:self.index});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                else if tok.is_open_round(){
+                    self.state.push(State::FnArgList{lambda: false});
+                    return 1
+                }
+                else{
+                    println!("Expected either {{ or ( in function definition");
+                }
+            }
+            State::FnArgType{lambda, index}=>{
                 if id.not_empty(){
                     self.push_code(id.into(), self.index);
-                    self.state.push(State::EmitFnArgTyped{index:self.index});
+                    self.state.push(State::FnArgTypeAssign{lambda,index});
                     return 1
                 }
                 else{
@@ -580,34 +637,53 @@ impl ScriptParser{
                     println!("Argument type expected in function")
                 }
             }
-            State::FnArgMaybeType{index}=>{
-                if op == id!(:){
-                    self.state.push(State::FnArgType{index});
+            State::FnArgTypeAssign{lambda, index}=>{
+                if !lambda && op == id!(=){ // assignment following
+                    self.state.push(State::EmitFnArgTyped{index});
+                    self.state.push(State::BeginExpr{required:true});
                     return 1
                 }
-                self.state.push(State::EmitFnArgDyn{index});
+                else{
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::FN_ARG_TYPED, OpcodeArgs::NIL), index);
+                }
             }
-            State::FnArgList=>{
+            State::FnArgMaybeType{lambda, index}=>{
+                if !lambda && op == id!(=){ // assignment following
+                    self.state.push(State::EmitFnArgDyn{index});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
+                if op == id!(:){
+                    self.state.push(State::FnArgType{lambda, index});
+                    return 1
+                }
+                self.push_code(ScriptValue::from_opcode_args(Opcode::FN_ARG_DYN, OpcodeArgs::NIL), index);
+            }
+            State::FnArgList{lambda}=>{
                 if id.not_empty(){ // ident
                     self.push_code(id.into(), self.index);
-                    self.state.push(State::FnArgList);
-                    self.state.push(State::FnArgMaybeType{index:self.index});
+                    self.state.push(State::FnArgList{lambda});
+                    self.state.push(State::FnArgMaybeType{lambda, index:self.index});
                     return 1
                 }
-                if op == id!(|){
-                    self.state.push(State::FnBody);
+                if lambda && op == id!(|){
+                    self.state.push(State::FnBody{lambda});
+                    return 1
+                }
+                else if !lambda && tok.is_close_round(){
+                    self.state.push(State::FnBody{lambda});
                     return 1
                 }
                 if sep == id!(,){
-                    self.state.push(State::FnArgList);
+                    self.state.push(State::FnArgList{lambda});
                     return 1
                 }
                 // unexpected token, but just stay in the arg list mode
                 println!("Unexpected token in function argument list {:?}", tok);
-                self.state.push(State::FnArgList);
+                self.state.push(State::FnArgList{lambda});
                 return 1
             }
-            State::FnBody=>{
+            State::FnBody{lambda}=>{
                 let fn_slot = self.code_len() as _ ;
                 self.push_code(Opcode::FN_BODY.into(), self.index);
                 if tok.is_open_curly(){ // function body
@@ -615,9 +691,12 @@ impl ScriptParser{
                     self.state.push(State::BeginStmt{last_was_sep:false});
                     return 1
                 }
-                else{ // function body is expression
+                else if lambda{ // function body can be expression expression
                     self.state.push(State::EndFnExpr{fn_slot, index:self.index});
                     self.state.push(State::BeginExpr{required:true});
+                }
+                else{
+                    println!("Unexpected token in function definition, expected {{ {:?}", tok);
                 }
             }
             State::EscapedId=>{
@@ -1087,6 +1166,10 @@ impl ScriptParser{
                     self.state.push(State::BeginExpr{required:true});
                     return 1
                 }
+                if id == id!(fn){
+                    self.state.push(State::FnMaybeLet{index:self.index});
+                    return 1
+                }
                 if id == id!(let){
                     // we have to have an identifier after let
                     self.state.push(State::Let{index:self.index});
@@ -1166,12 +1249,12 @@ impl ScriptParser{
                 }
                 if op == id!(||){
                     self.push_code(Opcode::FN_ARGS.into(), self.index);
-                    self.state.push(State::FnBody);
+                    self.state.push(State::FnBody{lambda:true});
                     return 1
                 }
                 if op == id!(|){
                     self.push_code(Opcode::FN_ARGS.into(), self.index);
-                    self.state.push(State::FnArgList);
+                    self.state.push(State::FnArgList{lambda:true});
                     return 1
                 }
                 if op == id!(.){
@@ -1329,6 +1412,7 @@ impl ScriptParser{
                     return 1
                 }
                 if tok.is_close_round() || tok.is_close_curly() || tok.is_close_square(){
+                   
                     if last_was_sep{
                         if let Some(State::TryTestBlock{last_was_sep,..}) = self.state.last_mut(){*last_was_sep = true}
                         if let Some(State::TryErrBlock{last_was_sep,..}) = self.state.last_mut(){*last_was_sep = true}
