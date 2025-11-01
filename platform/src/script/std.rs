@@ -3,6 +3,7 @@ use crate::*;
 use makepad_script::*;
 use makepad_script::id;
 use crate::script::vm::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub struct CxScriptTimer{
@@ -40,6 +41,47 @@ impl Cx{
 
 pub fn extend_std_module(vm:&mut ScriptVm){
     let std = vm.module(id!(std));
+    
+    pub fn next_hash(bytes: &[u8;8]) -> u64 {
+        let mut x:u64 = 0xd6e8_feb8_6659_fd93;
+        let mut i = 0;
+        while i < 8 {
+            x = x.overflowing_add(bytes[i] as u64).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            i += 1;
+        }
+        x
+    }
+    
+    vm.add_fn(std, id!(random_seed), script_args_def!(), |vm, _args|{
+        let start = SystemTime::now();
+        let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap();
+        let nanos = since_the_epoch.as_nanos();
+        let cx = vm.cx_mut();
+        cx.script_data.random_seed = (nanos >>64)as u64 ^ (nanos as u64);
+        NIL
+    });
+    
+    vm.add_fn(std, id!(random), script_args_def!(), |vm, _args|{
+        let cx = vm.cx_mut();
+        let seed = cx.script_data.random_seed;
+        let seed = next_hash(&seed.to_ne_bytes());
+        cx.script_data.random_seed = seed;
+        ((seed as f64) / u64::MAX as f64).into()
+    });
+    
+    vm.add_fn(std, id!(random_u32), script_args_def!(), |vm, _args|{
+        let cx = vm.cx_mut();
+        let seed = cx.script_data.random_seed;
+        let seed = next_hash(&seed.to_ne_bytes());
+        cx.script_data.random_seed = seed;
+        (seed as u32 as f64).into()
+    });
+    
     vm.add_fn(std, id!(start_timeout), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
         let delay = script_value!(vm, args.delay);
         let callback = script_value!(vm, args.callback);
