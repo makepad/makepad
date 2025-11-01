@@ -33,7 +33,8 @@ impl LiveHook for App {
             use mod.net
             use mod.fs
             use mod.std
-                        
+            use mod.run
+            
             fn openai_chat(message, cb){
                 let req = net.HttpRequest{
                     url: "http://127.0.0.1:8080/v1/chat/completions"
@@ -140,8 +141,12 @@ impl LiveHook for App {
                     on_error: |e| ~e
                 }
             }
-                
-            std.start_interval(0.5) do |s| ~s
+            
+            run.child(run.ChildCmd{cmd:"ls"}) do run.ChildEvents{
+                on_stdout: |s| ~s
+            }
+            std.random_seed();
+            std.start_interval(0.5) do |s| ~std.random_u32()
                 
             // comfy_post("Soundwave waveform rendering art of a black hole bright white ultra bright") do |e| ~"Prompt ID"+e
         };
