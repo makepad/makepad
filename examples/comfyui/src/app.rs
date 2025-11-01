@@ -85,24 +85,6 @@ impl LiveHook for App {
                 }
             }
             
-            fn upload_image(image){
-                run.child(run.ChildCmd{
-                    cmd:"node",
-                    args: [
-                        "/usr/local/lib/node_modules/@weejewel/samsung-emdx/bin/index.mjs"
-                        "show-image"
-                        "-mac"
-                        "28-07-08-2c-d9-42"
-                        "--host 10.0.0.122"
-                        "--pin 123456"
-                        "--image"
-                        "~/makepad/makepad/dump.png"
-                    ]
-                }) do run.ChildEvents{
-                    on_stdout: |s| ~s
-                }
-            }
-            
             fn download_image(image){
                 let req = net.HttpRequest{
                     url: "http://10.0.0.123:8000/view?"+
@@ -114,7 +96,8 @@ impl LiveHook for App {
                 net.http_request(req) do net.HttpEvents{
                     on_response: |res|{
                         fs.write("./dump.png", res.body)
-                    }
+                        upload_image();
+                    } 
                     on_error: |e| ~e
                 }
             }
@@ -130,7 +113,7 @@ impl LiveHook for App {
                 }
             }
                 
-            net2.web_socket("ws://10.0.0.123:8000/ws?clientId=1234") do net.WebSocketEvents{
+            net.web_socket("ws://10.0.0.123:8000/ws?clientId=1234") do net.WebSocketEvents{
                 on_string:fn(str){
                     let str = str.parse_json()
                     ok{
@@ -141,12 +124,14 @@ impl LiveHook for App {
                     }
                 }
             };
-                
-            fn comfy_post(prompt, cb){
-                ~"COMFY POST"
+            
+            
+            fn comfy_post_schnell(prompt, cb){
                 let flow = fs.read("./examples/comfyui/flux_schnell.json").parse_json()
                 flow["6"].inputs.text = prompt
                 flow["31"].inputs.seed = std.random_u32()
+                flow["27"].inputs.width = eink.width
+                flow["27"].inputs.height = eink.height
                 let req = net.HttpRequest{
                     url: "http://10.0.0.123:8000/prompt"
                     method: net.HttpMethod.POST
@@ -160,12 +145,71 @@ impl LiveHook for App {
                 }
             }
             
+            fn comfy_post_dev(prompt, cb){
+                let flow = fs.read("./examples/comfyui/flux_dev.json").parse_json()
+                flow["6"].inputs.text = prompt
+                flow["31"].inputs.seed = std.random_u32()
+                flow["27"].inputs.width = eink.width
+                flow["27"].inputs.height = eink.height
+                let req = net.HttpRequest{
+                    url: "http://10.0.0.123:8000/prompt"
+                    method: net.HttpMethod.POST
+                    body:{prompt:flow, client_id:1234}.to_json()
+                }
+                net.http_request(req) do net.HttpEvents{
+                    on_response: |res|{
+                        cb(ok{res.body.parse_json().prompt_id})
+                    }
+                    on_error: |e| ~e
+                }
+            }
             
             std.random_seed();
-            //std.start_interval(0.5) do |s| ~std.random_u32()
-                
-            // comfy_post("Soundwave waveform rendering art of a black hole bright white ultra bright") do |e| ~"Prompt ID"+e
+            
+            fn upload_image(){
+                ~"UPLOADING"+eink.ip
+                run.child(run.ChildCmd{
+                    cmd:"node",
+                    args: [
+                        "/usr/local/lib/node_modules/@weejewel/samsung-emdx/bin/index.mjs"
+                        "show-image"
+                        "--mac" eink.mac
+                        "--host" eink.ip
+                        "--pin" "123456"
+                        "--image" "/Users/admin/makepad/makepad/dump.png"
+                    ]
+                }) do run.ChildEvents{
+                    on_stdout: |s| ~s
+                    on_stderr: |s| ~s
+                }
+            }
+                        
+            
+            //post()
+            let EInk = {mac:"", ip:"", width:0, height:0}.freeze_api()
+            let einks = [
+                EInk{mac:"28-07-08-2c-d9-42" ip:"10.0.0.122", width:1920, height:1080},
+                EInk{mac:"B0-f2-f6-60-f6-e1" ip:"10.0.0.132", width:1920, height:1080},
+                EInk{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.133", width:1080, height:1920}
+            ] 
+            let eink = einks[0];
+            let eink_iter = 0;
+            fn post{ 
+                eink = einks[eink_iter % einks.len()]
+                ~eink
+                eink_iter += 1
+                let prompt = fs.read("./local/prompt.txt")
+                comfy_post_dev(prompt) do |e| ~"Prompt ID"+e
+            }
+            
+            std.start_interval(60) do fn{
+                post()
+            }
+            post()
+            
+            //comfy_post("Monster police car") do |e| ~"Prompt ID"+e
         };
+        //println!("{}", code.code);
         cx.eval(code);
     }
 }

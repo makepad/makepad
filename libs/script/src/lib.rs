@@ -69,9 +69,12 @@ pub fn test(){
     
     let _code = script!{
         use mod.std.assert
-        let x = false
-        if x {1}
-        
+        let Test = {prop:1}.freeze_api()
+        let test = [
+            Test{prop:2},
+            Test{prop:3},
+        ] 
+        ~test
     };
     
     // Our unit tests :)
