@@ -860,6 +860,7 @@ impl ScriptParser{
                     return 1
                 }
                 else {
+                    println!("AT TOK {:?}", tok);
                     println!("Expected ] not found");
                     return 0
                 }
