@@ -115,9 +115,9 @@ impl MatchEvent for App {
         }
     }
         
-    fn handle_network_responses(&mut self, _cx: &mut Cx, _responses:&NetworkResponsesEvent ){
+    fn handle_network_responses(&mut self, cx: &mut Cx, responses:&NetworkResponsesEvent ){
         
-        let _label = self.ui.label(ids!(message_label));
+        let label = self.ui.label(ids!(message_label));
         
         for event in responses{
             match &event.response {

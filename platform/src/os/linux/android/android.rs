@@ -346,7 +346,7 @@ impl Cx {
                         ))
                     }
                 ];
-                self.handle_script_async_network_responses(&out);
+                self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
                 self.call_event_handler(&e);
             }
@@ -360,7 +360,7 @@ impl Cx {
                         })
                     }
                 ];
-                self.handle_script_async_network_responses(&out);
+                self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
                 self.call_event_handler(&e);
             }
@@ -528,10 +528,12 @@ impl Cx {
     /// This includes timers, signals, video updates, live edits, and platform operations.
     pub(crate) fn handle_other_events(&mut self) {
         // Timers
-        for event in self.os.timers.get_dispatch() {
-            self.call_event_handler(&event);
-        }
-    
+        let events = self.os.timers.get_dispatch();
+        for event in events{
+            self.handle_script_timer(&event);
+            self.call_event_handler(&Event::Timer(event));
+        }        
+        
         // Signals
         if SignalToUI::check_and_clear_ui_signal() {
             self.handle_media_signals();

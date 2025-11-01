@@ -69,8 +69,9 @@ pub fn test(){
     
     let _code = script!{
         use mod.std.assert
-        fn openai_chat(message, cb){
-        }
+        let x = false
+        if x {1}
+        
     };
     
     // Our unit tests :)
@@ -242,7 +243,8 @@ pub fn test(){
         fn x(a = 2){a + 2}
         assert(x(3) == 5)
         assert(x() == 4)
-        
+        fn test(a,b){a+b}
+        assert(test(2 3) == 5)
         ~"Test done"
     };
     

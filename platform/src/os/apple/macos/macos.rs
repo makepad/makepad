@@ -197,7 +197,7 @@ impl Cx {
             out.push(item);
         }
         if out.len()>0 {
-            self.handle_script_async_network_responses(&out);
+            self.handle_script_network_events(&out);
             self.call_event_handler(&Event::NetworkResponses(out))
         }
     }
@@ -433,6 +433,7 @@ impl Cx {
                 self.call_event_handler(&Event::TextCut(e))
             }
             MacosEvent::Timer(e) => {
+                self.handle_script_timer(&e);
                 self.call_event_handler(&Event::Timer(e));
                 return EventFlow::Wait;
             }
@@ -466,6 +467,7 @@ impl Cx {
     
     fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx)->EventFlow {
         while let Some(op) = self.platform_ops.pop() {
+            println!("{:?}", op);
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
@@ -541,6 +543,7 @@ impl Cx {
                     with_macos_app(|app| app.set_mouse_cursor(cursor));
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                    println!("START TIMER {} {}", timer_id, repeats);
                     with_macos_app(|app| app.start_timer(timer_id, interval, repeats));
                 },
                 CxOsOp::StopTimer(timer_id) => {

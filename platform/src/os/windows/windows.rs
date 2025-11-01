@@ -229,6 +229,7 @@ impl Cx {
                 self.call_event_handler(&Event::TextCut(e))
             }
             Win32Event::Timer(e) => {
+                self.handle_script_timer(&e);
                 self.call_event_handler(&Event::Timer(e))
             }
             Win32Event::Signal => {
@@ -296,7 +297,7 @@ impl Cx {
             out.push(event);
         }
         if out.len()>0{
-            self.handle_script_async_network_responses(&out);
+            self.handle_script_network_events(&out);
             self.call_event_handler(& Event::NetworkResponses(out))
         }
     }

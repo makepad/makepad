@@ -11,7 +11,6 @@ use {
         area::Area,
         event::{
             KeyModifiers,
-            Event,
             TextInputEvent,
             TimerEvent,
             KeyEvent,
@@ -572,7 +571,7 @@ impl PollTimers{
         (time_now.duration_since(self.time_start)).as_secs_f64()
     }
 
-    pub fn get_dispatch(&mut self)->Vec<Event>{
+    pub fn get_dispatch(&mut self)->Vec<TimerEvent>{
         let mut to_be_dispatched = Vec::with_capacity(self.timers.len());
         let mut to_be_removed = Vec::with_capacity(self.timers.len());
         let now = Instant::now();
@@ -583,7 +582,7 @@ impl PollTimers{
             
             if elapsed_time > next_due_time {
                 
-                to_be_dispatched.push(Event::Timer(TimerEvent {timer_id: *id, time:Some(time)}));
+                to_be_dispatched.push(TimerEvent {timer_id: *id, time:Some(time)});
                 if timer.repeats {
                     timer.step += 1;
                 } else {
