@@ -37,6 +37,11 @@ pub struct WebSocketEvents{
 
 impl Cx{
     pub(crate) fn handle_script_signals(&mut self){
+        self.handle_script_web_sockets();
+        self.handle_script_child_processes();
+    }
+    
+    pub(crate) fn handle_script_web_sockets(&mut self){
         let mut i = 0;
         while i<self.script_data.web_sockets.len(){
             match self.script_data.web_sockets[i].socket.try_recv(){

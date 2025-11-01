@@ -19,12 +19,12 @@ pub fn define_fs_module(vm:&mut ScriptVm){
                 let thread = &vm.thread;
                 vm.heap.new_string_with(|_heap, s|{
                     if file.read_to_string(s).is_err(){
-                        thread.trap.err_filesystem();
+                        thread.trap.err_file_system();
                     }
                 }).into()
             }
             else{
-                vm.thread.trap.err_filesystem()
+                vm.thread.trap.err_file_system()
             }
         })
     }
@@ -39,7 +39,7 @@ pub fn define_fs_module(vm:&mut ScriptVm){
                 if data.is_string_like(){
                     vm.heap.string_with(data, |_heap,s|{
                         if file.write_all(&s.as_bytes()).is_err(){
-                            thread.trap.err_filesystem();
+                            thread.trap.err_file_system();
                         }
                     });
                 }
@@ -47,7 +47,7 @@ pub fn define_fs_module(vm:&mut ScriptVm){
                     match vm.heap.array_ref(data){
                         ScriptArrayStorage::U8(data)=>{
                             if file.write_all(&data).is_err(){
-                                thread.trap.err_filesystem();
+                                thread.trap.err_file_system();
                             }
                         }
                         _=>{
@@ -59,7 +59,7 @@ pub fn define_fs_module(vm:&mut ScriptVm){
                 return NIL
             }
             else{
-                vm.thread.trap.err_filesystem()
+                vm.thread.trap.err_file_system()
             }
         })
     }
