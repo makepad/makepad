@@ -84,7 +84,25 @@ impl LiveHook for App {
                     }
                 }
             }
-                
+            
+            fn upload_image(image){
+                run.child(run.ChildCmd{
+                    cmd:"node",
+                    args: [
+                        "/usr/local/lib/node_modules/@weejewel/samsung-emdx/bin/index.mjs"
+                        "show-image"
+                        "-mac"
+                        "28-07-08-2c-d9-42"
+                        "--host 10.0.0.122"
+                        "--pin 123456"
+                        "--image"
+                        "~/makepad/makepad/dump.png"
+                    ]
+                }) do run.ChildEvents{
+                    on_stdout: |s| ~s
+                }
+            }
+            
             fn download_image(image){
                 let req = net.HttpRequest{
                     url: "http://10.0.0.123:8000/view?"+
@@ -128,7 +146,7 @@ impl LiveHook for App {
                 ~"COMFY POST"
                 let flow = fs.read("./examples/comfyui/flux_schnell.json").parse_json()
                 flow["6"].inputs.text = prompt
-                flow["31"].inputs.seed = 123421127583743362
+                flow["31"].inputs.seed = std.random_u32()
                 let req = net.HttpRequest{
                     url: "http://10.0.0.123:8000/prompt"
                     method: net.HttpMethod.POST
@@ -142,11 +160,9 @@ impl LiveHook for App {
                 }
             }
             
-            run.child(run.ChildCmd{cmd:"ls"}) do run.ChildEvents{
-                on_stdout: |s| ~s
-            }
+            
             std.random_seed();
-            std.start_interval(0.5) do |s| ~std.random_u32()
+            //std.start_interval(0.5) do |s| ~std.random_u32()
                 
             // comfy_post("Soundwave waveform rendering art of a black hole bright white ultra bright") do |e| ~"Prompt ID"+e
         };
