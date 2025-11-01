@@ -282,9 +282,10 @@ impl Cx {
                         self.handle_action_receiver();
                     }
                     let events = self.os.stdin_timers.get_dispatch();
-                    for event in  events{
-                        self.call_event_handler(&event);
-                    }                    
+                    for event in events{
+                        self.handle_script_timer(&event);
+                        self.call_event_handler(&Event::Timer(event));
+                    }
                     if self.handle_live_edit() {
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();

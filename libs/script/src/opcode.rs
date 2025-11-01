@@ -296,9 +296,9 @@ impl fmt::Display for Opcode {
             Self::END_BARE => return write!(f, "}}"),
             
             Self::METHOD_CALL_ARGS => return write!(f, "<methodcall>("),
-            Self::METHOD_CALL_EXEC => return write!(f, ")"),
+            Self::METHOD_CALL_EXEC => return write!(f, ")<method_exec>"),
             Self::CALL_ARGS => return write!(f, "<call>("),
-            Self::CALL_EXEC => return write!(f, ")"),
+            Self::CALL_EXEC => return write!(f, ")<call_exec>"),
             
             Self::BEGIN_ARRAY => return write!(f, "["),
             Self::END_ARRAY => return write!(f, "]"),

@@ -195,10 +195,12 @@ impl Cx {
                 
                 live_id!(ToWasmTimerFired) => {
                     let tw = ToWasmTimerFired::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&Event::Timer(TimerEvent {
+                    let e = TimerEvent {
                         timer_id: tw.timer_id as u64,
                         time: None
-                    }));
+                    };
+                    self.handle_script_timer(&e);
+                    self.call_event_handler(&Event::Timer(e));
                 }
                 
                 live_id!(ToWasmAppGotFocus) => {
@@ -367,7 +369,7 @@ impl Cx {
         }
 
         if network_responses.len() != 0 {
-            self.handle_script_async_network_responses(&network_responses);
+            self.handle_script_network_events(&network_responses);
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
         

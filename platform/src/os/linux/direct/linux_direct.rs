@@ -188,6 +188,7 @@ impl Cx {
 
                 }
                 else {
+                    self.handle_script_timer(&e);
                     self.call_event_handler(&Event::Timer(e))
                 }
 
