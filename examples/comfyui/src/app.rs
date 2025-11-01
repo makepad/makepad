@@ -74,7 +74,7 @@ impl LiveHook for App {
                 
                 
             fn progress(progress){
-                ~"PROGRESS:"+progress
+                ~"AI Step:"+progress
             }    
                     
             fn finish_image(prompt_id){
@@ -95,7 +95,7 @@ impl LiveHook for App {
                 }
                 net.http_request(req) do net.HttpEvents{
                     on_response: |res|{
-                        fs.write("./dump.png", res.body)
+                        fs.write("/Users/admin/makepad/makepad/local/eink.png", res.body)
                         upload_image();
                     } 
                     on_error: |e| ~e
@@ -167,7 +167,7 @@ impl LiveHook for App {
             std.random_seed();
             
             fn upload_image(){
-                ~"UPLOADING"+eink.ip
+                ~"Uploading to "+eink.ip
                 run.child(run.ChildCmd{
                     cmd:"node",
                     args: [
@@ -176,10 +176,10 @@ impl LiveHook for App {
                         "--mac" eink.mac
                         "--host" eink.ip
                         "--pin" "123456"
-                        "--image" "/Users/admin/makepad/makepad/dump.png"
+                        "--image" "/Users/admin/makepad/makepad/local/eink.png"
                     ]
                 }) do run.ChildEvents{
-                    on_stdout: |s| ~s
+                    on_stdout: |s| {}
                     on_stderr: |s| ~s
                 }
             }
