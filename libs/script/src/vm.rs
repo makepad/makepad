@@ -11,7 +11,7 @@ use crate::object::*;
 use std::cell::RefCell;
 use std::any::Any;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ScriptBlock{
     pub cargo_manifest_path: String,
     pub module_path: String,

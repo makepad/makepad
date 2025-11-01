@@ -235,7 +235,7 @@ pub fn define_run_module(vm:&mut ScriptVm){
         
         match ChildProcess::spawn(cmd_build){
             Ok(child)=>{
-                
+                 println!("SPAWNED");
                 let id = LiveId::unique();
                 cx.script_data.child_processes.push(CxScriptChildProcess{
                     child,
@@ -245,7 +245,7 @@ pub fn define_run_module(vm:&mut ScriptVm){
                 id.escape()
             }
             Err(_e)=>{
-                println!("ERROR SPAWNING");
+               
                 vm.thread.trap.err_child_process()
             }
         }

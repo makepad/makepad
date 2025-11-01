@@ -733,8 +733,8 @@ impl ScriptHeap{
         lhs.value_type().to_redux() == rhs.value_type().to_redux()
     }
     
-    fn set_value_shallow_checked(&mut self, ptr:ScriptObject, key:ScriptValue, key_id:LiveId, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
-        let object = &self.objects[ptr.index as usize];
+    fn set_value_shallow_checked(&mut self, top_ptr:ScriptObject, key:ScriptValue, key_id:LiveId, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
+        let object = &self.objects[top_ptr.index as usize];
         if object.tag.is_frozen(){
             return trap.err_frozen()
         }
@@ -758,13 +758,13 @@ impl ScriptHeap{
             else{
                 return trap.err_invalid_prop_name()
             }
-            let object = &mut self.objects[ptr.index as usize];
+            let object = &mut self.objects[top_ptr.index as usize];
             object.map_insert(key, value);
             return NIL    
         }
         // check against prototype or type
         if object.tag.is_validated(){
-            let mut ptr = ptr;
+            let mut ptr = top_ptr;
             loop{
                 let object = &self.objects[ptr.index as usize];
                 if object.tag.get_storage_type().is_vec2(){
@@ -773,7 +773,7 @@ impl ScriptHeap{
                             if !self.validate_type(kv.value, value){
                                 return trap.err_invalid_prop_type()
                             }
-                            return self.set_value_shallow(ptr, key, value, trap);
+                            return self.set_value_shallow(top_ptr, key, value, trap);
                         }
                     }
                 }
@@ -781,7 +781,7 @@ impl ScriptHeap{
                     if !self.validate_type(set_value, value){
                         return trap.err_invalid_prop_type()
                     }
-                    return self.set_value_shallow(ptr, key, value, trap);
+                    return self.set_value_shallow(top_ptr, key, value, trap);
                 }
                 if let Some(next_ptr) = object.proto.as_object(){
                     ptr = next_ptr
@@ -791,7 +791,7 @@ impl ScriptHeap{
                 } 
             }
         }
-        let object = &mut self.objects[ptr.index as usize];
+        let object = &mut self.objects[top_ptr.index as usize];
         if object.tag.is_map_add(){
             if object.tag.get_storage_type().is_vec2(){
                 for kv in object.vec.iter_mut().rev(){
