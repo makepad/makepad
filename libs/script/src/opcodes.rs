@@ -995,6 +995,7 @@ impl ScriptThread{
             Opcode::ARRAY_INDEX=>{
                 let index = self.pop_stack_resolved(heap);
                 let object = self.pop_stack_resolved(heap);
+                
                 if let Some(obj) = object.as_object(){
                     let value = heap.value(obj, index, &self.trap);
                     self.push_stack_unchecked(value)
