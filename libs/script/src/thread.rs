@@ -48,6 +48,7 @@ pub struct CallFrame{
     pub return_ip: Option<ScriptIp>,
 }
 
+#[derive(Debug)]
 pub enum ScriptMe{
     Object(ScriptObject),
     Call{this:Option<ScriptValue>, args:ScriptObject},
@@ -125,19 +126,19 @@ impl ScriptThread{
                 
         let value = self.pop_stack_value();
         if self.call_has_me(){
-                        
+                                    
             let (key, value) = if let Some(id) = value.as_id(){
                 if value.is_escaped_id(){ (NIL, value) }
                 else{(value, self.scope_value(heap, id))}
             }else{(NIL,value)};
-                        
+            
             match self.mes.last().unwrap(){
                 ScriptMe::Call{args,..}=>{
                     heap.unnamed_fn_arg(*args, value, &self.trap);
                 }
                 ScriptMe::Object(obj)=>{
                     if !value.is_nil() && !value.is_err(){
-                        heap.vec_push(*obj, key, value, &self.trap);       
+                        heap.vec_push(*obj, key, value, &self.trap);
                     }
                 }
                 ScriptMe::Array(arr)=>{

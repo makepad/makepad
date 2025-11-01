@@ -5,12 +5,14 @@ use makepad_script::id;
 use crate::event::network::*;
 use crate::web_socket::*;
 
-pub struct CxScriptDataWebSocket{
+pub struct CxScriptWebSocket{
+    #[allow(unused)]
+    id: LiveId,
     socket: WebSocket,
     events: WebSocketEvents,
 }
 
-pub struct CxScriptDataHttp{
+pub struct CxScriptHttp{
     pub id: LiveId,
     pub events: HttpEvents,
 }
@@ -35,7 +37,8 @@ pub struct WebSocketEvents{
 
 impl Cx{
     pub(crate) fn handle_script_signals(&mut self){
-        for i in 0..self.script_data.web_sockets.len(){
+        let mut i = 0;
+        while i<self.script_data.web_sockets.len(){
             match self.script_data.web_sockets[i].socket.try_recv(){
                 Ok(WebSocketMessage::String(s))=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_string.as_obj(){
@@ -44,6 +47,7 @@ impl Cx{
                             vm.call(handler.into(), &[str.into()]);
                         })
                     }
+                    i += 1;
                 }
                 Ok(WebSocketMessage::Binary(s))=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_string.as_obj(){
@@ -52,6 +56,7 @@ impl Cx{
                             vm.call(handler.into(), &[array.into()]);
                         })
                     }
+                    i += 1;
                 }
                 Ok(WebSocketMessage::Opened)=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_opened.as_obj(){
@@ -59,6 +64,7 @@ impl Cx{
                             vm.call(handler.into(), &[]);
                         })
                     }
+                    i += 1;
                 }
                 Ok(WebSocketMessage::Closed)=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_closed.as_obj(){
@@ -66,6 +72,7 @@ impl Cx{
                             vm.call(handler.into(), &[]);
                         })
                     }
+                    self.script_data.web_sockets.remove(i);
                 }
                 Ok(WebSocketMessage::Error(s))=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_string.as_obj(){
@@ -74,14 +81,16 @@ impl Cx{
                             vm.call(handler.into(), &[str.into()]);
                         })
                     }
+                    i += 1;
                 }
-                Err(_)=>{}
+                Err(_)=>{i += 1;}
             }
             
         }
     }    
     
-    pub(crate) fn handle_script_async_network_responses(&mut self, items: &[NetworkResponseItem]){
+    pub(crate) fn handle_script_network_events(&mut self, items: &[NetworkResponseItem]){
+
         for item in items{
             match &item.response {
                 NetworkResponse::HttpStreamResponse(res)=>{
@@ -95,33 +104,36 @@ impl Cx{
                     }
                 }
                 NetworkResponse::HttpStreamComplete(res)=>{
-                    if let Some(s) = self.script_data.http_requests.iter().find(|v| v.id == item.request_id){
-                        if let Some(handler) = s.events.on_complete.as_obj(){
+                    if let Some(i) = self.script_data.http_requests.iter().position(|v| v.id == item.request_id){
+                        if let Some(handler) = self.script_data.http_requests[i].events.on_complete.as_obj(){
                             self.with_vm(|vm|{
                                 let res = res.script_to_value(vm);
                                 vm.call(handler.into(), &[res]);
                             })
                         }
+                        self.script_data.http_requests.remove(i);
                     }
                 }
                 NetworkResponse::HttpResponse(res) => {
-                    if let Some(s) = self.script_data.http_requests.iter().find(|v| v.id == item.request_id){
-                        if let Some(handler) = s.events.on_response.as_obj(){
+                    if let Some(i) = self.script_data.http_requests.iter().position(|v| v.id == item.request_id){
+                        if let Some(handler) = self.script_data.http_requests[i].events.on_response.as_obj(){
                             self.with_vm(|vm|{
                                 let res = res.script_to_value(vm);
                                 vm.call(handler.into(), &[res]);
                             })
                         }
+                        self.script_data.http_requests.remove(i);
                     }
                 }
                 NetworkResponse::HttpRequestError(err) => {
-                    if let Some(s) = self.script_data.http_requests.iter().find(|v| v.id == item.request_id){
-                        if let Some(handler) = s.events.on_error.as_obj(){
+                    if let Some(i) = self.script_data.http_requests.iter().position(|v| v.id == item.request_id){
+                        if let Some(handler) = self.script_data.http_requests[i].events.on_error.as_obj(){
                             self.with_vm(|vm|{
                                 let res = err.script_to_value(vm);
                                 vm.call(handler.into(), &[res]);
                             })
                         }
+                        self.script_data.http_requests.remove(i);
                     }
                 }
                 NetworkResponse::HttpProgress(_p)=>{
@@ -151,12 +163,12 @@ pub fn define_net_module(vm:&mut ScriptVm){
         // alright now what
         let cx = vm.cx_mut();
         let id = LiveId::unique();
-        cx.script_data.http_requests.push(CxScriptDataHttp{
+        cx.script_data.http_requests.push(CxScriptHttp{
             id,
             events
         });
         cx.http_request(id, request);
-        NIL
+        id.escape()
     });
     
     script_proto!(vm, net, WebSocketEvents);
@@ -188,10 +200,12 @@ pub fn define_net_module(vm:&mut ScriptVm){
         
         // alright now what
         let cx = vm.cx_mut();
-        cx.script_data.web_sockets.push(CxScriptDataWebSocket{
+        let id = LiveId::unique();
+        cx.script_data.web_sockets.push(CxScriptWebSocket{
             socket: WebSocket::open(request),
+            id,
             events
         });
-        NIL
+        id.escape()
     });
 }

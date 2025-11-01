@@ -121,6 +121,10 @@ impl <'a> ScriptVm<'a>{
     pub fn new_module(&mut self, id:LiveId)->ScriptObject{
         self.heap.new_module(id)
     }
+          
+    pub fn module(&mut self, id:LiveId)->ScriptObject{
+        self.heap.module(id)
+    }
     
     pub fn map_mut_with<R,F:FnOnce(&mut Self, &mut ScriptObjectMap)->R>(&mut self, object:ScriptObject, f:F)->R{
         let mut map = ScriptObjectMap::default();

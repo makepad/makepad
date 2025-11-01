@@ -172,6 +172,9 @@ impl ScriptHeap{
         md
     }
     
+    pub fn module(&mut self, id:LiveId)->ScriptObject{
+        self.value(self.modules, id.into(), &ScriptTrap::default()).into()
+    }
     
     // Strings
     
@@ -1074,7 +1077,7 @@ impl ScriptHeap{
         if key.is_prefixed_id(){
             return self.value_prefixed(ptr, key, trap)
         }
-        if key.is_inline_string() || key.is_string() || key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
+        if key.is_string_like() || key.is_object() || key.is_color() || key.is_bool(){ // scan protochain for object
             return self.value_deep(ptr, key, trap)
         }
         // TODO implement string lookup
