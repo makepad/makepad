@@ -85,9 +85,11 @@ impl Cx {
 
     fn handle_other_events(&mut self) {
         // Timers
-        for event in self.os.timers.get_dispatch() {
-            self.call_event_handler(&event);
-        }
+        let events = self.os.timers.get_dispatch();
+        for event in events{
+            self.handle_script_timer(&event);
+            self.call_event_handler(&Event::Timer(event));
+        }        
 
         // Signals
         if SignalToUI::check_and_clear_ui_signal() {

@@ -17,6 +17,26 @@ pub struct ScriptObjectRef{
     obj: ScriptObject
 }
 
+impl Clone for ScriptObjectRef{
+    fn clone(&self)->Self{
+        let mut roots = self.roots.borrow_mut();
+        match roots.entry(self.obj) {
+            Entry::Occupied(mut occ) => {
+                let value = occ.get_mut();
+                * value += 1;
+            }
+            Entry::Vacant(_vac) => {
+                eprintln!("ScriptObjectRef root is vacant!");
+            }
+        }
+        Self{
+            roots: self.roots.clone(),
+            obj: self.obj.clone()
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct ScriptFnRef(ScriptObjectRef);
 
 impl ScriptObjectRef{

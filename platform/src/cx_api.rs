@@ -362,11 +362,11 @@ impl Cx {
         self.fingers.sweep_unlock(value);
     }
 
-    pub fn start_timeout(&mut self, interval: f64) -> Timer {
+    pub fn start_timeout(&mut self, delay: f64) -> Timer {
         self.timer_id += 1;
         self.platform_ops.push(CxOsOp::StartTimer {
             timer_id: self.timer_id,
-            interval,
+            interval: delay,
             repeats: false,
         });
         Timer(self.timer_id)

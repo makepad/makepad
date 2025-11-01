@@ -906,6 +906,7 @@ impl ScriptThread{
                     self.trap.goto_next()
                 }
                 else{ // jump to else
+                    self.push_stack_unchecked(NIL);
                     self.trap.goto_rel(opargs.to_u32());
                 }
             }

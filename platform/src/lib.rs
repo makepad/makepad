@@ -83,6 +83,7 @@ pub use {
     makepad_shader_compiler::makepad_micro_serde,
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
+    makepad_http,
     smallvec,
     smallvec::SmallVec,
     //makepad_image_formats::image,
