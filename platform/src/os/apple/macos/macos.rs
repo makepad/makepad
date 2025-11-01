@@ -467,7 +467,6 @@ impl Cx {
     
     fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx)->EventFlow {
         while let Some(op) = self.platform_ops.pop() {
-            println!("{:?}", op);
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
