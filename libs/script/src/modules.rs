@@ -42,6 +42,32 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         }
         NIL
     });
+    
+    native.add_fn(heap, std, id!(print), script_args_def!(what=NIL), |vm, args|{
+        let what = script_value!(vm, args.what);
+        if vm.heap.string_with(what, |_heap, str|{
+            print!("{}", str);
+        }).is_none(){
+            vm.heap.temp_string_with(|heap, temp|{
+                heap.cast_to_string(what, temp);
+                print!("{}", what)
+            });
+        }
+        NIL
+    });
+    
+    native.add_fn(heap, std, id!(println), script_args_def!(what=NIL), |vm, args|{
+        let what = script_value!(vm, args.what);
+        if vm.heap.string_with(what, |_heap, str|{
+            println!("{}", str);
+        }).is_none(){
+            vm.heap.temp_string_with(|heap, temp|{
+                heap.cast_to_string(what, temp);
+                println!("{}", what)
+            });
+        }
+        NIL
+    });
 }
 
 

@@ -80,6 +80,7 @@ pub fn test(){
     // Our unit tests :)
     let code = script!{
         use mod.std.assert
+        use mod.std.println
 
         // array operations
         let x = 1+2 assert(x == 3)
@@ -248,7 +249,7 @@ pub fn test(){
         assert(x() == 4)
         fn test(a,b){a+b}
         assert(test(2 3) == 5)
-        ~"Test done"
+        println("Test done")
     };
     
     let _code = script!{
