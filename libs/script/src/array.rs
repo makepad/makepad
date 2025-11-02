@@ -225,14 +225,11 @@ impl ScriptArrayData{
         
         tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(parse_json), |vm, args|{
             if let Some(arr) = script_value!(vm, args.this).as_array(){
-                let mut s = String::new();
-                std::mem::swap(&mut s, &mut vm.thread.json_parser.temp_string);
-                s.clear();
-                let array_ref = vm.heap.array_ref(arr);
-                array_ref.to_string(vm.heap, &mut s);
-                let r = vm.thread.json_parser.read_json(&s, vm.heap);
-                std::mem::swap(&mut s, &mut vm.thread.json_parser.temp_string);
-                return r
+                return vm.heap.temp_string_with(|heap, temp|{
+                    let array_ref = heap.array_ref(arr);
+                    array_ref.to_string(heap, temp);
+                    vm.thread.json_parser.read_json(temp, heap)
+                })
             }
             vm.thread.trap.err_unexpected()
         });
@@ -247,7 +244,15 @@ impl ScriptArrayData{
                         
         tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(pop), |vm, args|{
             if let Some(this) = script_value!(vm, args.this).as_array(){
-                return vm.heap.array_pop(this, &mut vm.thread.trap)
+                return vm.heap.array_pop(this, &vm.thread.trap)
+            }
+            vm.thread.trap.err_unexpected()
+        });
+        
+        tm.add(h, native, &[], ScriptValueType::REDUX_ARRAY, id!(clear), |vm, args|{
+            if let Some(this) = script_value!(vm, args.this).as_array(){
+                vm.heap.array_clear(this, &vm.thread.trap);
+                return NIL
             }
             vm.thread.trap.err_unexpected()
         });
