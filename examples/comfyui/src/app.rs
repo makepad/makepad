@@ -168,7 +168,7 @@ let code = script!{
         current_display = displays[display_iter % displays.len()]
         display_iter += 1
         let prompt = fs.read("./local/prompt.txt").parse_json();
-        if messages.len() > 50 messages.clear()
+        if messages.len() > 150 messages.clear()
         if prompt.clear || messages.len() == 0{
             messages.clear();
             messages.push({content:prompt.system.trim(),role:"user"});
@@ -180,7 +180,7 @@ let code = script!{
         openai_chat(messages) do |res|{
             std.println("Sending prompt "+res);
             messages.push({content:res,role:"assistant"});
-            comfy_post(res) do |e| ~"Prompt ID"+e
+            comfy_post(res) do |e| std.print("Prompt ID"+e)
         }
     }
     
@@ -190,21 +190,7 @@ let code = script!{
         post()
     }
     post()
-    
-    /*
-    openai_chat("Imagine a single ONLY ONE very short image prompt, about a superhero cartoon") do |res|{
-        ~"prompting: "+res
-        comfy_post(res) do |id|{
-                                                    
-        }
-    };*/
-                            
-            
-    
-            
-    //comfy_post("Monster police car") do |e| ~"Prompt ID"+e
 };
-//println!("{}", code.code);
 cx.eval(code);
     }
 }
