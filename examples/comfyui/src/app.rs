@@ -167,7 +167,7 @@ let code = script!{
     fn post(){ 
         current_display = displays[display_iter % displays.len()]
         display_iter += 1
-        let prompt = fs.read("./local/prompt.txt").parse_json();
+        let prompt = fs.read("/Users/admin/makepad/makepad/local/prompt.txt").parse_json();
         if messages.len() > 150 messages.clear()
         if prompt.clear || messages.len() == 0{
             messages.clear();
