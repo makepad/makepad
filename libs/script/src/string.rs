@@ -61,10 +61,12 @@ impl ScriptStringData{
             let this = script_value!(vm, args.this);
             vm.heap.string_to_bytes_array(this).into()
         });
+        
         tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(to_chars), |vm, args|{
             let this = script_value!(vm, args.this);
             vm.heap.string_to_chars_array(this).into()
         });
+        
         tm.add(h, native, &[], ScriptValueType::REDUX_STRING, id!(parse_json), |vm, args|{
             let this = script_value!(vm, args.this);
             
@@ -77,6 +79,17 @@ impl ScriptStringData{
                 vm.thread.trap.err_unexpected()
             }
         });
+        
+        tm.add(h, native, script_args_def!(), ScriptValueType::REDUX_STRING, id!(trim), |vm, args|{
+            let this = script_value!(vm, args.this);
+            if let Some(s) = vm.heap.string_mut_self_with(this,|heap,this|{
+                heap.new_string_from_str(this.trim())
+            }){
+                return s.into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+        
         tm.add(h, native, script_args_def!(pat = NIL), ScriptValueType::REDUX_STRING, id!(split), |vm, args|{
             let this = script_value!(vm, args.this);
             let pat = script_value!(vm, args.pat);

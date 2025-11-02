@@ -284,7 +284,6 @@ impl JsonParser{
 
 #[derive(Default)]
 pub struct JsonParserThread{
-    pub temp_string: String,
     pub tokenizer:ScriptTokenizer,
     pub parser:JsonParser
 }

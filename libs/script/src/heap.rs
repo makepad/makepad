@@ -221,7 +221,16 @@ impl ScriptHeap{
             out.push_str(value);
         })
     }
-            
+    
+    pub fn temp_string_with<R,F:FnOnce(&mut Self, &mut String)->R>(&mut self,cb:F)->R{
+        let mut out = if let Some(s) = self.strings_reuse.pop(){s} else {String::new()};
+        let r = cb(self, &mut out);
+        out.clear();
+        self.strings_reuse.push(out);
+        r
+    }
+                
+                
     pub fn new_string_with<F:FnOnce(&mut Self, &mut String)>(&mut self,cb:F)->ScriptValue{
         let mut out = if let Some(s) = self.strings_reuse.pop(){s} else {String::new()};
         
@@ -462,6 +471,18 @@ impl ScriptHeap{
         }
         else{
             trap.err_array_bound()
+        }
+    }
+    
+    pub fn array_clear(&mut self, array:ScriptArray, trap:&ScriptTrap){
+        let array = &mut self.arrays[array.index as usize];
+        if array.tag.is_frozen(){
+            trap.err_frozen();
+            return
+        }
+        if array.storage.len() != 0{
+            array.storage.clear();
+            array.tag.set_dirty();
         }
     }
     
