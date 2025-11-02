@@ -52,7 +52,6 @@ impl Cx{
                             vm.call(handler.into(), &[str.into()]);
                         })
                     }
-                    i += 1;
                 }
                 Ok(WebSocketMessage::Binary(s))=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_string.as_obj(){
@@ -61,7 +60,6 @@ impl Cx{
                             vm.call(handler.into(), &[array.into()]);
                         })
                     }
-                    i += 1;
                 }
                 Ok(WebSocketMessage::Opened)=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_opened.as_obj(){
@@ -69,7 +67,6 @@ impl Cx{
                             vm.call(handler.into(), &[]);
                         })
                     }
-                    i += 1;
                 }
                 Ok(WebSocketMessage::Closed)=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_closed.as_obj(){
@@ -86,11 +83,10 @@ impl Cx{
                             vm.call(handler.into(), &[str.into()]);
                         })
                     }
-                    i += 1;
+                    self.script_data.web_sockets.remove(i);
                 }
                 Err(_)=>{i += 1;}
             }
-            
         }
     }    
     
