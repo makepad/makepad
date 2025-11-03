@@ -4,6 +4,9 @@ use crate::makepad_live_id::live_id::*;
 use crate::heap::*;
 use crate::makepad_live_id::*;
 use crate::object::*;
+use crate::array::*;
+use crate::string::*;
+use crate::*;
 
 #[macro_export]
 macro_rules! script_value_f64{
@@ -102,28 +105,31 @@ macro_rules! script_args_def{
     }
 }
 
-pub type NativeFnType = Box<dyn Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static>;
-
-pub struct NativeFnEntry{
-    pub fn_ptr: NativeFnType
-}
-
-impl NativeFnEntry{
-    pub fn new<F>(f: F)->Self 
-    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
-        Self{fn_ptr:Box::new(f)}
-    }
-}
+pub type NativeGetterFn = Box<dyn Fn(&mut ScriptVm, ScriptValue, LiveId)->ScriptValue + 'static>;
+pub type NativeSetterFn = Box<dyn Fn(&mut ScriptVm, ScriptValue, LiveId, ScriptValue)->ScriptValue + 'static>;
+pub type NativeFn = Box<dyn Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static>;
 
 #[derive(Default)]
 pub struct ScriptNative{
-    pub(crate)  fn_table: Vec<NativeFnEntry>,
+    pub(crate) functions: Vec<NativeFn>,
+    pub(crate) type_table: Vec<LiveIdMap<LiveId, ScriptObject>>,
+    pub(crate) getters: Vec<NativeGetterFn>,
+    pub(crate) setters: Vec<NativeSetterFn>,
 }
 
 impl ScriptNative{
-    pub fn add<F>(&mut self, heap:&mut ScriptHeap, args:&[(LiveId,ScriptValue)], f: F)-> ScriptObject
+    pub fn new(h:&mut ScriptHeap)->Self{
+        let mut native = Self::default();
+        native.add_shared(h);
+        ScriptObjectData::add_type_methods(&mut native, h);
+        ScriptArrayData::add_type_methods(&mut native, h);
+        ScriptStringData::add_type_methods(&mut native, h);
+        native
+    }
+    
+    pub fn add_fn<F>(&mut self, heap:&mut ScriptHeap, args:&[(LiveId,ScriptValue)], f: F)-> ScriptObject
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
-        let fn_index = self.fn_table.len();
+        let fn_index = self.functions.len();
         let fn_obj = heap.new_with_proto(id!(native).into());
         heap.set_object_storage_type(fn_obj, ScriptObjectStorageType::VEC2);
         heap.set_fn(fn_obj, ScriptFnPtr::Native(NativeId{index: fn_index as u32}));
@@ -132,7 +138,7 @@ impl ScriptNative{
             heap.set_value_def(fn_obj, (*arg).into(), *def);
         }
         
-        self.fn_table.push(NativeFnEntry::new(f));
+        self.functions.push(Box::new(f));
         
         fn_obj
     }
@@ -140,8 +146,107 @@ impl ScriptNative{
     pub fn add_method<F>(&mut self, heap:&mut ScriptHeap, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         // lets get the 
-        let fn_obj = self.add(heap, args, f);
+        let fn_obj = self.add_fn(heap, args, f);
         heap.set_value_def(module, method.into(), fn_obj.into());
+    }
+    
+    pub fn add_handle_method<F>(&mut self, heap:&mut ScriptHeap, ty:ScriptHandleType, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
+        self.add_type_method(heap, args, ty.to_redux(), method, f);
+    }
+                
+    pub fn new_handle_type(&mut self, heap:&mut ScriptHeap, id:LiveId)->ScriptHandleType{
+        let ht = self.type_table.len() - ScriptValueType::REDUX_HANDLE_FIRST.to_index();
+        if ht >= ScriptValueType::REDUX_HANDLE_MAX as usize{
+            panic!("Too many handle types (max {})", ScriptValueType::REDUX_HANDLE_MAX);
+        }
+        let ty = ScriptHandleType(ht as u8);
+        self.add_type_method(heap, &[], ty.to_redux(), id!(ty), move |_, _|{id.escape()});
+        ty
+    }
+            
+    pub fn set_type_getter<F>(&mut self, ty_redux:ScriptTypeRedux,f: F) 
+    where F: Fn(&mut ScriptVm, ScriptValue, LiveId)->ScriptValue + 'static{
+        self.getters[ty_redux.to_index()] = Box::new(f)
+    }
+            
+    pub fn set_type_setter<F>(&mut self, ty_redux:ScriptTypeRedux,f: F) 
+    where F: Fn(&mut ScriptVm, ScriptValue, LiveId, ScriptValue)->ScriptValue + 'static{
+        self.setters[ty_redux.to_index()] = Box::new(f)
+    }
+            
+    pub fn add_type_method<F>(&mut self, heap:&mut ScriptHeap, args:&[(LiveId,ScriptValue)], ty_redux:ScriptTypeRedux, method:LiveId, f: F) 
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
+        let fn_obj = self.add_fn(heap, args, f);
+        if ty_redux.to_index() as usize >= self.type_table.len(){
+            self.type_table.resize_with( ty_redux.to_index() + 1, || Default::default());
+            self.getters.resize_with( ty_redux.to_index() + 1, || Box::new(|vm, _, _|{vm.thread.trap.err_invalid_prop_name()}));
+            self.setters.resize_with( ty_redux.to_index() + 1, || Box::new(|vm, _, _, _|{vm.thread.trap.err_invalid_prop_name()}));
+        }
+        self.type_table[ ty_redux.to_index()].insert(method,fn_obj);
+    }
+            
+    pub fn add_shared(&mut self, heap:&mut ScriptHeap){
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_NUMBER, id!(ty), |_, _|{id!(number).escape()});
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_NAN, id!(ty), |_, _|{id!(nan).escape()});
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_BOOL, id!(ty), |_, _|{id!(bool).escape()});
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_NIL, id!(ty), |_, _|{id!(nil).escape()});
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_COLOR, id!(ty), |_, _|{id!(color).escape()});
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_STRING, id!(ty), |_, _|{id!(string).escape()});
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_OBJECT, id!(ty), |_, _|{id!(object).escape()});
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_ARRAY, id!(ty), |_, _|{id!(rsid).escape()});
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_OPCODE, id!(ty), |_, _|{id!(opcode).escape()});
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_ERR, id!(ty), |_, _|{id!(err).escape()});
+        self.add_type_method(heap, &[], ScriptValueType::REDUX_ID, id!(ty), |_, _|{id!(id).escape()});
+                                
+        let types = [
+            (ScriptValueType::REDUX_NUMBER, id!(is_number)),
+            (ScriptValueType::REDUX_NAN, id!(is_nan)),
+            (ScriptValueType::REDUX_BOOL, id!(is_bool)),
+            (ScriptValueType::REDUX_NIL, id!(is_nil)),
+            (ScriptValueType::REDUX_COLOR, id!(is_color)),
+            (ScriptValueType::REDUX_STRING, id!(is_string)),
+            (ScriptValueType::REDUX_OBJECT, id!(is_object)),
+            (ScriptValueType::REDUX_ARRAY, id!(is_array)),
+            (ScriptValueType::REDUX_OPCODE, id!(is_opcode)),
+            (ScriptValueType::REDUX_ERR, id!(is_err)),
+            (ScriptValueType::REDUX_ID, id!(is_id))
+        ];
+                        
+        for (ty,_) in types {
+            self.add_type_method(heap, &[], ty, id!(to_json), |vm, args|{
+                let this = script_value!(vm, args.this);vm.heap.to_json(this)
+            });
+            self.add_type_method(heap, &[], ty, id!(to_number), |vm, args|{
+                let this = script_value!(vm, args.this);
+                vm.heap.cast_to_f64(this, vm.thread.trap.ip).into()
+            });
+            if ty != ScriptValueType::REDUX_ARRAY{
+                self.add_type_method(heap, &[], ty, id!(to_string), |vm, args|{
+                    let this = script_value!(vm, args.this);
+                    if this.is_string_like(){
+                        return this
+                    }
+                    vm.heap.new_string_with(|heap, out|{
+                        heap.cast_to_string(this, out);
+                    })
+                });
+            }
+        };
+                        
+        for (ty,id) in types{
+            self.add_type_method(heap, &[], ScriptValueType::REDUX_NUMBER, id, move |_, _|{ (ty == ScriptValueType::REDUX_NUMBER).into()});
+            self.add_type_method(heap, &[], ScriptValueType::REDUX_NAN, id, move |_, _|{ (ty == ScriptValueType::REDUX_NAN).into()});
+            self.add_type_method(heap,  &[], ScriptValueType::REDUX_BOOL, id, move |_, _|{ (ty == ScriptValueType::REDUX_BOOL).into()});
+            self.add_type_method(heap, &[], ScriptValueType::REDUX_NIL, id, move |_, _|{ (ty == ScriptValueType::REDUX_NIL).into()});
+            self.add_type_method(heap,  &[], ScriptValueType::REDUX_COLOR, id, move |_, _|{ (ty == ScriptValueType::REDUX_COLOR).into()});
+            self.add_type_method(heap, &[], ScriptValueType::REDUX_STRING, id, move |_, _|{ (ty == ScriptValueType::REDUX_STRING).into()});
+            self.add_type_method(heap, &[], ScriptValueType::REDUX_OBJECT, id, move |_, _|{ (ty == ScriptValueType::REDUX_OBJECT).into()});
+            self.add_type_method(heap, &[], ScriptValueType::REDUX_ARRAY, id, move |_, _|{ (ty == ScriptValueType::REDUX_ARRAY).into()});
+            self.add_type_method(heap, &[], ScriptValueType::REDUX_OPCODE, id, move |_, _|{ (ty == ScriptValueType::REDUX_OPCODE).into()});
+            self.add_type_method(heap, &[], ScriptValueType::REDUX_ERR, id, move |_, _|{ (ty == ScriptValueType::REDUX_ERR).into()});
+            self.add_type_method(heap, &[], ScriptValueType::REDUX_ID, id, move |_, _|{ (ty == ScriptValueType::REDUX_ID).into()});
+        }
     }
     
 }
