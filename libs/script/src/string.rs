@@ -56,17 +56,17 @@ pub struct ScriptStringData{
 
 impl ScriptStringData{
     pub fn add_type_methods(native: &mut ScriptNative, heap: &mut ScriptHeap){
-        native.add_type_method(heap, &[], ScriptValueType::REDUX_STRING, id!(to_bytes), |vm, args|{
+        native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(to_bytes), &[], |vm, args|{
             let this = script_value!(vm, args.this);
             vm.heap.string_to_bytes_array(this).into()
         });
         
-        native.add_type_method(heap, &[], ScriptValueType::REDUX_STRING, id!(to_chars), |vm, args|{
+        native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(to_chars), &[], |vm, args|{
             let this = script_value!(vm, args.this);
             vm.heap.string_to_chars_array(this).into()
         });
         
-        native.add_type_method(heap, &[], ScriptValueType::REDUX_STRING, id!(parse_json), |vm, args|{
+        native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(parse_json), &[], |vm, args|{
             let this = script_value!(vm, args.this);
             
             if let Some(r) = vm.heap.string_mut_self_with(this, |heap,s|{
@@ -79,7 +79,7 @@ impl ScriptStringData{
             }
         });
         
-        native.add_type_method(heap, script_args_def!(), ScriptValueType::REDUX_STRING, id!(trim), |vm, args|{
+        native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(trim), script_args_def!(), |vm, args|{
             let this = script_value!(vm, args.this);
             if let Some(s) = vm.heap.string_mut_self_with(this,|heap,this|{
                 heap.new_string_from_str(this.trim())
@@ -89,7 +89,7 @@ impl ScriptStringData{
             vm.thread.trap.err_unexpected()
         });
         
-        native.add_type_method(heap, script_args_def!(pat = NIL), ScriptValueType::REDUX_STRING, id!(split), |vm, args|{
+        native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(split), script_args_def!(pat = NIL), |vm, args|{
             let this = script_value!(vm, args.this);
             let pat = script_value!(vm, args.pat);
             if let Some(Some(s)) = vm.heap.string_mut_self_with(this,|heap,this|{

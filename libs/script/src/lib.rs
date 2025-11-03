@@ -192,7 +192,6 @@ pub fn test(){
         
         // check handle features
         let h = s.return_handle();
-        ~h
         assert(h.return_three() == 3)
         
         // check enum
