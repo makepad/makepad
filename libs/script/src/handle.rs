@@ -1,7 +1,3 @@
-use crate::heap::*;
-use crate::native::*;
-use crate::methods::*;
-
 use std::any::TypeId;
 use std::fmt::Debug;
 use std::fmt;
@@ -31,9 +27,6 @@ pub struct ScriptHandleData{
 }
 
 impl ScriptHandleData{
-    pub fn add_type_methods(_tm: &mut ScriptTypeMethods, _h: &mut ScriptHeap, _native:&mut ScriptNative){
-    }
-    
     pub fn gc(mut self){
         self.handle.gc()
     }
