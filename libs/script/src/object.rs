@@ -8,6 +8,9 @@ use crate::methods::*;
 use crate::makepad_live_id::*;
 use crate::*;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::cell::RefCell;
 //use std::collections::btree_map::BTreeMap;
 
 #[derive(Default)]
@@ -31,6 +34,75 @@ impl fmt::Display for ScriptObjectStorageType {
             Self::VEC2=>write!(f, "VEC2"),
             Self::MAP=>write!(f, "MAP"),
             _=>write!(f, "?ObjectType"),
+        }
+    }
+}
+
+
+pub struct ScriptObjectRef{
+    pub(crate) roots: Rc<RefCell<HashMap<ScriptObject, usize>>>,
+    pub(crate) obj: ScriptObject
+}
+
+impl Clone for ScriptObjectRef{
+    fn clone(&self)->Self{
+        let mut roots = self.roots.borrow_mut();
+        match roots.entry(self.obj) {
+            Entry::Occupied(mut occ) => {
+                let value = occ.get_mut();
+                * value += 1;
+            }
+            Entry::Vacant(_vac) => {
+                eprintln!("ScriptObjectRef root is vacant!");
+            }
+        }
+        Self{
+            roots: self.roots.clone(),
+            obj: self.obj.clone()
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ScriptFnRef(pub(crate) ScriptObjectRef);
+
+impl ScriptObjectRef{
+    pub fn as_obj(&self)->ScriptObject{self.obj}
+}
+
+impl ScriptFnRef{
+    pub fn as_obj(&self)->ScriptObject{self.0.as_obj()}
+}
+
+pub trait ScriptRefOptionExt{
+    fn as_obj(&self)->Option<ScriptObject>;
+}
+impl ScriptRefOptionExt for Option<ScriptObjectRef>{
+    fn as_obj(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_obj())}else{None}}
+}
+impl ScriptRefOptionExt for Option<ScriptFnRef>{
+    fn as_obj(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_obj())}else{None}}
+}
+
+impl Drop for ScriptObjectRef{
+    fn drop(&mut self){
+        let mut roots = self.roots.borrow_mut();
+        match roots.entry(self.obj) {
+            Entry::Occupied(mut occ) => {
+                let value = occ.get_mut();
+                if *value >= 1{
+                    *value -= 1;
+                }
+                else{
+                    eprintln!("ScriptObjectRef is 0!");
+                }
+                if *value == 0{
+                    occ.remove();
+                }
+            }
+            Entry::Vacant(_vac) => {
+                eprintln!("ScriptObjectRef root is vacant!");
+            }
         }
     }
 }

@@ -3,7 +3,6 @@ use crate::*;
 use std::fs;
 use makepad_script::*;
 use makepad_script::id;
-use makepad_script::array::*;
 use std::io::Read;
 use std::io::Write;
 
@@ -11,7 +10,7 @@ pub fn define_fs_module(vm:&mut ScriptVm){
     let fs = vm.new_module(id!(fs));
     
     for sym in [id!(read), id!(read_to_string)]{    
-        vm.add_fn(fs, sym, script_args_def!(path=NIL), |vm, args|{
+        vm.add_method(fs, sym, script_args_def!(path=NIL), |vm, args|{
             let path =  script_value!(vm, args.path);
             if let Some(Some(mut file)) = vm.heap.string_with(path, |_heap,s|{
                 fs::File::open(s).ok()
@@ -29,7 +28,7 @@ pub fn define_fs_module(vm:&mut ScriptVm){
         })
     }
     for sym in [id!(write), id!(write_string)]{    
-        vm.add_fn(fs, sym, script_args_def!(path=NIL, data=NIL), |vm, args|{
+        vm.add_method(fs, sym, script_args_def!(path=NIL, data=NIL), |vm, args|{
             let path =  script_value!(vm, args.path);
             let data =  script_value!(vm, args.data);
             if let Some(Some(mut file)) = vm.heap.string_with(path, |_heap,s|{

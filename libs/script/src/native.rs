@@ -117,7 +117,7 @@ impl NativeFnEntry{
 
 #[derive(Default)]
 pub struct ScriptNative{
-    pub fn_table: Vec<NativeFnEntry>,
+    pub(crate)  fn_table: Vec<NativeFnEntry>,
 }
 
 impl ScriptNative{
@@ -137,11 +137,12 @@ impl ScriptNative{
         fn_obj
     }
     
-    pub fn add_fn<F>(&mut self, heap:&mut ScriptHeap, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
+    pub fn add_method<F>(&mut self, heap:&mut ScriptHeap, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         // lets get the 
         let fn_obj = self.add(heap, args, f);
         heap.set_value_def(module, method.into(), fn_obj.into());
     }
+    
 }
-
+ 
