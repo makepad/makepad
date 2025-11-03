@@ -837,18 +837,46 @@ live_design! {
     }
     
     pub CachedScrollXY = <CachedView> {
-        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
+        scroll_bars: <ScrollBars> {
+            show_scroll_x: true, show_scroll_y: true
+            scroll_bar_x: {drag_scrolling: true}
+            scroll_bar_y: {drag_scrolling: true}
+        }
     }
         
     pub CachedScrollX = <CachedView> {
-        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
+        scroll_bars: <ScrollBars> {
+            show_scroll_x: true, show_scroll_y: false
+            scroll_bar_x: {drag_scrolling: true}
+        }
     }
         
     pub CachedScrollY = <CachedView> {
-        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+        scroll_bars: <ScrollBars> {
+            show_scroll_x: false, show_scroll_y: true
+            scroll_bar_y: {drag_scrolling: true}
+        }
     }
         
-    pub ScrollXYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
-    pub ScrollXView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
-    pub ScrollYView = <ViewBase> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
+    pub ScrollXYView = <ViewBase> {
+        scroll_bars: <ScrollBars> {
+            show_scroll_x: true, show_scroll_y: true
+            scroll_bar_x: {drag_scrolling: true}
+            scroll_bar_y: {drag_scrolling: true}
+        }
+    }
+
+    pub ScrollXView = <ViewBase> {
+        scroll_bars: <ScrollBars> {
+            show_scroll_x: true, show_scroll_y: false
+            scroll_bar_x: {drag_scrolling: true}
+        }   
+    }
+
+    pub ScrollYView = <ViewBase> {
+        scroll_bars: <ScrollBars> {
+            show_scroll_x: false, show_scroll_y: true,
+            scroll_bar_y: {drag_scrolling: true}
+        }
+    }
 }
