@@ -124,9 +124,9 @@ impl <'a> ScriptVm<'a>{
     
     pub fn add_handle_method<F>(&mut self, ht:ScriptHandleType, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
-        self.code.native.borrow_mut().add_handle_method(
+        self.code.native.borrow_mut().add_type_method(
             self.heap,
-            ht,
+            ht.to_redux(),
             method,
             args,
             f
