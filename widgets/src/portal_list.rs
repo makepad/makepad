@@ -374,7 +374,8 @@ impl PortalList {
                                 abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + self.first_scroll)),
                                 margin: Default::default(),
                                 width: Size::fill(),
-                                height: Size::fit()
+                                height: Size::fit(),
+                                descender: 0.0,
                             }, layout);
                         }
                         Vec2Index::X => {
@@ -382,7 +383,8 @@ impl PortalList {
                                 abs_pos: Some(dvec2(viewport.pos.x + self.first_scroll, viewport.pos.y)),
                                 margin: Default::default(),
                                 width: Size::fit(),
-                                height: Size::fill()
+                                height: Size::fill(),
+                                descender: 0.0,
                             }, layout);
                         }
                     }
@@ -415,7 +417,8 @@ impl PortalList {
                                         abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                                         margin: Default::default(),
                                         width: Size::fill(),
-                                        height: Size::fit()
+                                        height: Size::fit(),
+                                        descender: 0.0,
                                     }, layout);
                                 }
                                 Vec2Index::X => {
@@ -423,7 +426,8 @@ impl PortalList {
                                         abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                                         margin: Default::default(),
                                         width: Size::fit(),
-                                        height: Size::fill()
+                                        height: Size::fill(),
+                                        descender: 0.0,
                                     }, layout);
                                 }
                             }
@@ -454,7 +458,8 @@ impl PortalList {
                                 abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + pos + rect.size.index(vi))),
                                 margin: Default::default(),
                                 width: Size::fill(),
-                                height: Size::fit()
+                                height: Size::fit(),
+                                descender: 0.0,
                             }, layout);
                         }
                         Vec2Index::X => {
@@ -462,7 +467,8 @@ impl PortalList {
                                 abs_pos: Some(dvec2(viewport.pos.x + pos + rect.size.index(vi), viewport.pos.y)),
                                 margin: Default::default(),
                                 width: Size::fit(),
-                                height: Size::fill()
+                                height: Size::fill(),
+                                descender: 0.0,
                             }, layout);
                         }
                     }
@@ -496,7 +502,8 @@ impl PortalList {
                                     abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + total_height)),
                                     margin: Default::default(),
                                     width: Size::fill(),
-                                    height: Size::fit()
+                                    height: Size::fit(),
+                                    descender: 0.0,
                                 }, Layout::flow_down());
                                 return Some(last_index + 1);
                             }
@@ -521,7 +528,8 @@ impl PortalList {
                         abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                         margin: Default::default(),
                         width: Size::fill(),
-                        height: Size::fit()
+                        height: Size::fit(),
+                        descender: 0.0,
                     }, Layout::flow_down());
                     
                     return Some(index - 1);

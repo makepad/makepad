@@ -396,6 +396,7 @@ impl FileTreeNode {
             abs_pos: None,
             width: Size::Fixed(depth as f64 * self.indent_width + self.indent_shift),
             height: Size::Fixed(0.0),
+            descender: 0.0,
             margin: Margin {
                 left: depth as f64 * 1.0,
                 top: 0.0,
