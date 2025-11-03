@@ -253,7 +253,7 @@ impl ScriptThread{
             match fnptr{
                 ScriptFnPtr::Native(ni)=>{
                     self.trap.in_rust = true;
-                    return (*code.native.borrow().fn_table[ni.index as usize].fn_ptr)(&mut ScriptVm{
+                    return (*code.native.borrow().functions[ni.index as usize])(&mut ScriptVm{
                         host,
                         heap,
                         thread:self,

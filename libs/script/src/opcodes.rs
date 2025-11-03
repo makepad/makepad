@@ -705,7 +705,7 @@ impl ScriptThread{
                         ScriptFnPtr::Native(ni)=>{
                             let ip = self.trap.ip;
                             self.trap.in_rust = true;
-                            let ret = (*code.native.borrow().fn_table[ni.index as usize].fn_ptr)(&mut ScriptVm{
+                            let ret = (*code.native.borrow().functions[ni.index as usize])(&mut ScriptVm{
                                 host,
                                 heap,
                                 thread:self,
@@ -751,7 +751,7 @@ impl ScriptThread{
                 let args = if fnobj.is_err() || fnobj == NIL{
                     let method = method.as_id().unwrap_or(id!());
                     let type_index = this.value_type().to_redux();
-                    let type_entry = &code.type_methods.borrow().type_table[type_index.to_index()];
+                    let type_entry = &code.native.borrow().type_table[type_index.to_index()];
                     if let Some(method_ptr) = type_entry.get(&method){
                         let args = heap.new_with_proto((*method_ptr).into());
                         args
@@ -766,7 +766,7 @@ impl ScriptThread{
                 };
                 //heap.set_object_map(scope);
                 // set the args object to not write into the prototype
-                heap.clear_object_deep(args); 
+                heap.clear_object_deep(args);
                 
                 self.mes.push(ScriptMe::Call{args, this:Some(this)});
                 self.trap.goto_next();
@@ -937,8 +937,16 @@ impl ScriptThread{
                     self.push_stack_unchecked(value);
                 }
                 else{
-                    let value = self.trap.err_not_object();
-                    self.push_stack_unchecked(value);
+                    let field = field.as_id().unwrap_or(id!());
+                    let type_index = object.value_type().to_redux();
+                    let getter = &code.native.borrow().getters[type_index.to_index()];
+                    let ret = (*getter)(&mut ScriptVm{
+                        host,
+                        heap,
+                        thread:self,
+                        code
+                    }, object, field);
+                    self.push_stack_unchecked(ret);
                 }
                 self.trap.goto_next();
             }

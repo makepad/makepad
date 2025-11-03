@@ -6,7 +6,6 @@ pub mod colorhex;
 pub mod parser;
 pub mod heap;
 pub mod string;
-pub mod methods;
 pub mod modules;
 #[macro_use]
 pub mod native;
