@@ -3,7 +3,7 @@ use crate::vm::*;
 use crate::value::*;
 use crate::heap::*;
 use crate::traits::*;
-use crate::gc::*;
+use crate::object::*;
 use makepad_live_id::*;
 
 #[macro_export]

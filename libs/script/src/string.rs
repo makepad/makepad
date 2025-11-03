@@ -4,17 +4,17 @@ use crate::array::*;
 use crate::native::*;
 use crate::makepad_live_id::*;
 use crate::methods::*;
-use std::rc::Rc;
+use std::sync::Arc;
 use crate::*;
 use std::borrow::Borrow;
 
 
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
-pub struct ScriptRcString(pub Rc<String>);
+pub struct ScriptRcString(pub Arc<String>);
 
 impl ScriptRcString{
     pub fn new(str:String)->Self{
-        Self(Rc::new(str))
+        Self(Arc::new(str))
     }
 }
 

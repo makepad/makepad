@@ -5,6 +5,61 @@ use crate::makepad_live_id::*;
 use crate::methods::*;
 use crate::object::*;
 use crate::*;
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
+pub struct ScriptArrayRef{
+    pub(crate) roots: Rc<RefCell<HashMap<ScriptArray, usize>>>,
+    pub(crate) array: ScriptArray
+}
+
+impl Clone for ScriptArrayRef{
+    fn clone(&self)->Self{
+        let mut roots = self.roots.borrow_mut();
+        match roots.entry(self.array) {
+            Entry::Occupied(mut occ) => {
+                let value = occ.get_mut();
+                * value += 1;
+            }
+            Entry::Vacant(_vac) => {
+                eprintln!("ScriptObjectRef root is vacant!");
+            }
+        }
+        Self{
+            roots: self.roots.clone(),
+            array: self.array.clone()
+        }
+    }
+}
+
+impl ScriptArrayRef{
+    pub fn as_array(&self)->ScriptArray{self.array}
+}
+
+impl Drop for ScriptArrayRef{
+    fn drop(&mut self){
+        let mut roots = self.roots.borrow_mut();
+        match roots.entry(self.array) {
+            Entry::Occupied(mut occ) => {
+                let value = occ.get_mut();
+                if *value >= 1{
+                    *value -= 1;
+                }
+                else{
+                    eprintln!("ScriptObjectRef is 0!");
+                }
+                if *value == 0{
+                    occ.remove();
+                }
+            }
+            Entry::Vacant(_vac) => {
+                eprintln!("ScriptObjectRef root is vacant!");
+            }
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct ScriptArrayTag(u64); 

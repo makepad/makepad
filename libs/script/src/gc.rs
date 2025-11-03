@@ -1,10 +1,10 @@
 use crate::value::*;
 use crate::heap::*;
 use crate::array::*;
-use std::collections::HashMap;
+use crate::object::*;
+
 use std::collections::hash_map::Entry;
-use std::rc::Rc;
-use std::cell::RefCell;
+use std::sync::Arc;
 
 #[derive(Copy,Clone)]
 pub enum ScriptGcMark{
@@ -12,73 +12,7 @@ pub enum ScriptGcMark{
     Array(ScriptArray)
 }
 
-pub struct ScriptObjectRef{
-    roots: Rc<RefCell<HashMap<ScriptObject, usize>>>,
-    obj: ScriptObject
-}
 
-impl Clone for ScriptObjectRef{
-    fn clone(&self)->Self{
-        let mut roots = self.roots.borrow_mut();
-        match roots.entry(self.obj) {
-            Entry::Occupied(mut occ) => {
-                let value = occ.get_mut();
-                * value += 1;
-            }
-            Entry::Vacant(_vac) => {
-                eprintln!("ScriptObjectRef root is vacant!");
-            }
-        }
-        Self{
-            roots: self.roots.clone(),
-            obj: self.obj.clone()
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ScriptFnRef(ScriptObjectRef);
-
-impl ScriptObjectRef{
-    pub fn as_obj(&self)->ScriptObject{self.obj}
-}
-
-impl ScriptFnRef{
-    pub fn as_obj(&self)->ScriptObject{self.0.as_obj()}
-}
-
-pub trait ScriptRefOptionExt{
-    fn as_obj(&self)->Option<ScriptObject>;
-}
-impl ScriptRefOptionExt for Option<ScriptObjectRef>{
-    fn as_obj(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_obj())}else{None}}
-}
-impl ScriptRefOptionExt for Option<ScriptFnRef>{
-    fn as_obj(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_obj())}else{None}}
-}
-
-impl Drop for ScriptObjectRef{
-    fn drop(&mut self){
-        let mut roots = self.roots.borrow_mut();
-        match roots.entry(self.obj) {
-            Entry::Occupied(mut occ) => {
-                let value = occ.get_mut();
-                if *value >= 1{
-                    *value -= 1;
-                }
-                else{
-                    eprintln!("ScriptObjectRef is 0!");
-                }
-                if *value == 0{
-                    occ.remove();
-                }
-            }
-            Entry::Vacant(_vac) => {
-                eprintln!("ScriptObjectRef root is vacant!");
-            }
-        }
-    }
-}
 
 macro_rules! mark{
     ($self:ident, $val:expr)=>{
@@ -91,26 +25,49 @@ macro_rules! mark{
         else if let Some(ptr) = $val.as_array(){
             $self.mark_vec.push(ScriptGcMark::Array(ptr));
         }
+        else if let Some(ptr) = $val.as_handle(){
+            $self.handles[ptr.index as usize].as_mut().unwrap().tag.set_mark();
+        }
     };
 }
 
 impl ScriptHeap{
             
     pub fn new_object_ref(&mut self, obj:ScriptObject)->ScriptObjectRef{
-        let mut roots = self.roots.borrow_mut();
+        let mut roots = self.root_objects.borrow_mut();
         match roots.entry(obj) {
             Entry::Occupied(mut occ) => {
                 *occ.get_mut() += 1;
                 ScriptObjectRef{
-                    roots: self.roots.clone(),
+                    roots: self.root_objects.clone(),
                     obj: obj
                 }
             }
             Entry::Vacant(vac) => {
                 vac.insert(1);
                 ScriptObjectRef{
-                    roots: self.roots.clone(),
+                    roots: self.root_objects.clone(),
                     obj: obj
+                }
+            }
+        }
+    }
+    
+    pub fn new_array_ref(&mut self, array:ScriptArray)->ScriptArrayRef{
+        let mut roots = self.root_arrays.borrow_mut();
+        match roots.entry(array) {
+            Entry::Occupied(mut occ) => {
+                *occ.get_mut() += 1;
+                ScriptArrayRef{
+                    roots: self.root_arrays.clone(),
+                    array: array
+                }
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(1);
+                ScriptArrayRef{
+                    roots: self.root_arrays.clone(),
+                    array: array
                 }
             }
         }
@@ -165,9 +122,14 @@ impl ScriptHeap{
                 }
             }                
         }
-        let roots = self.roots.borrow();
+        let roots = self.root_objects.borrow();
         for item in roots.keys(){
             self.mark_vec.push(ScriptGcMark::Object(*item));
+        }
+        drop(roots);
+        let roots = self.root_arrays.borrow();
+        for item in roots.keys(){
+            self.mark_vec.push(ScriptGcMark::Array(*item));
         }
         drop(roots);
         for i in 0..stack.len(){
@@ -206,7 +168,7 @@ impl ScriptHeap{
                 if !str.tag.is_marked(){
                     if let Some((k,_)) = self.string_intern.remove_entry(&str.string){
                         self.strings[i] = None;
-                        if let Some(s) = Rc::into_inner(k.0){
+                        if let Some(s) = Arc::into_inner(k.0){
                             self.strings_reuse.push(s);
                         }
                         self.strings_free.push(ScriptString{index:i as _})
@@ -214,6 +176,17 @@ impl ScriptHeap{
                 }
                 else {
                     str.tag.clear_mark();
+                }
+            }
+        }
+        for i in 1..self.handles.len(){
+            if let Some(handle) = &mut self.handles[i]{
+                if !handle.tag.is_marked(){
+                    let handle = self.handles[i].take().unwrap();
+                    handle.gc()
+                }
+                else{
+                    handle.tag.clear_mark();
                 }
             }
         }

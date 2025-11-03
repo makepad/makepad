@@ -6,16 +6,20 @@ use crate::trap::*;
 use crate::traits::*;
 use crate::array::*;
 use crate::gc::*;
+use crate::handle::*;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::fmt::Write;
 use std::collections::HashMap;
 
+
 #[derive(Default)]
 pub struct ScriptHeap{
     pub modules: ScriptObject,
     pub(crate) mark_vec: Vec<ScriptGcMark>,
-    pub(crate) roots: Rc<RefCell<HashMap<ScriptObject, usize>>>,
+    
+    pub(crate) root_objects: Rc<RefCell<HashMap<ScriptObject, usize>>>,
+    pub(crate) root_arrays: Rc<RefCell<HashMap<ScriptArray, usize>>>,
     
     pub(crate) objects: Vec<ScriptObjectData>,
     pub(crate) objects_free: Vec<ScriptObject>,
@@ -24,22 +28,26 @@ pub struct ScriptHeap{
     pub(crate) strings_reuse: Vec<String>,
     pub(crate) strings: Vec<Option<ScriptStringData>>,
     pub(crate) strings_free: Vec<ScriptString>,
+    
     pub(crate) arrays: Vec<ScriptArrayData>,
     pub(crate) arrays_free: Vec<ScriptArray>,
     
     pub(crate) type_check: Vec<ScriptTypeCheck>,
     pub(crate) type_index: HashMap<ScriptTypeId, ScriptTypeIndex>,
     
+    pub(crate) handles: Vec<Option<ScriptHandleData>>,
+    pub(crate) handles_free: Vec<ScriptHandle>
 }
 
 impl ScriptHeap{
     
     pub fn empty()->Self{
         let mut v = Self{
-            roots: Default::default(),
+            root_objects: Default::default(),
             modules: ScriptObject::ZERO,
             objects: vec![Default::default()],
             arrays: vec![Default::default()],
+            handles: vec![None],
             ..Default::default()
         };
         // object zero
@@ -48,9 +56,9 @@ impl ScriptHeap{
         v.objects[0].tag.freeze();
         v.arrays[0].tag.set_alloced();
         v.arrays[0].tag.freeze();
-        
+                
         v.modules = v.new_with_proto(id!(mod).into()); 
-        v.roots.borrow_mut().insert(v.modules, 1);
+        v.root_objects.borrow_mut().insert(v.modules, 1);
         
         v
     }
@@ -175,6 +183,7 @@ impl ScriptHeap{
     pub fn module(&mut self, id:LiveId)->ScriptObject{
         self.value(self.modules, id.into(), &ScriptTrap::default()).into()
     }
+    
     
     // Strings
     
@@ -513,7 +522,31 @@ impl ScriptHeap{
         array.storage.set_index(index, value);
         NIL
     }
+    
         
+        
+    // Handles
+        
+        
+    pub fn new_handle(&mut self, ty:ScriptHandleType, hgc:Box<dyn ScriptHandleGc>)->ScriptHandle{
+        if let Some(mut handle) = self.handles_free.pop(){
+            self.handles[handle.index as usize] = Some(ScriptHandleData{
+                tag: Default::default(),
+                handle:hgc
+            });
+            handle.ty = ty;
+            handle
+        }
+        else{
+            let index = self.handles.len();
+            self.handles.push(Some(ScriptHandleData{
+                tag: Default::default(),
+                handle:hgc
+            }));
+            ScriptHandle{ty, index: index as _}
+        }
+    }
+    
     
     // Accessors
     
@@ -1674,6 +1707,9 @@ impl ScriptHeap{
         }
         else if let Some(v) = value.as_f64(){
             write!(out, "{}", v).ok();
+        }
+        else if let Some(v) = value.as_handle(){
+            write!(out, "Handle{:?}", v).ok();
         }
         else {
             out.push_str("null");

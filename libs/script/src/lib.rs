@@ -23,6 +23,7 @@ pub mod array;
 pub mod trap;
 pub mod vec_prims;
 pub mod json;
+pub mod handle;
 
 pub use gc::*;
 pub use makepad_live_id::*;
@@ -32,6 +33,8 @@ pub use makepad_script_derive::*;
 pub use traits::*;
 pub use thread::*;
 pub use heap::*;
+pub use object::*;
+pub use array::*;
 
 
 pub fn test(){
@@ -61,21 +64,41 @@ pub fn test(){
     
     impl ScriptHook for StructTest{
         fn on_proto_methods(vm:&mut ScriptVm, obj:ScriptObject){
-            vm.add_fn(obj, id_lut!(return_two), script_args_def!(o = 1.0), |_vm, _args|{
+            let ht = vm.new_handle_type(id!(myhandle));
+            
+            vm.add_handle_method(ht, id_lut!(return_three), script_args_def!(o = 1.0), |_vm, _args|{
+                return 3.into()
+            });
+            
+            vm.add_method(obj, id_lut!(return_two), script_args_def!(o = 1.0), |_vm, _args|{
                 return 2.into()
+            });
+            
+            vm.add_method(obj, id_lut!(return_handle), script_args_def!(o = 1.0), move |_vm, _args|{
+                return ScriptHandle{ty:ht,index:0}.into()
             });
         }
     }    
     
     let _code = script!{
         use mod.std.assert
-        let Test = {prop:1}.freeze_api()
-        let test = [
-            Test{prop:2},
-            Test{prop:3},
-        ] 
-        ~test
+        use mod.std.channel
+        // alright so.
+        // we want channels. what does that look like
+        fn comfy_history(prompt_id){
+            let c = channel();
+            net.http_request(net.HttpRequest{url: "bla"}) do net.HttpEvents{
+                on_response: |res| c.send(ok{res.body.parse_json()})
+                on_error: |e| c.error(e)
+            }
+            c
+        }
+        for i in comfy_history(){
+        }
     };
+    
+    // lets define a handle type with some methods on it
+    
     
     // Our unit tests :)
     let code = script!{
@@ -167,6 +190,11 @@ pub fn test(){
         try{s{field:5}} assert(false) ok assert(true)
         try{s{field:true}} assert(true) ok assert(false)
         assert(s.return_two() == 2)
+        
+        // check handle features
+        let h = s.return_handle();
+        ~h
+        assert(h.return_three() == 3)
         
         // check enum
         let EnumTest = #(EnumTest::script_api(vm));

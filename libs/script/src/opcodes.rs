@@ -749,10 +749,9 @@ impl ScriptThread{
                     NIL
                 };
                 let args = if fnobj.is_err() || fnobj == NIL{
-                    let type_index = this.value_type().to_redux();
                     let method = method.as_id().unwrap_or(id!());
-                    let type_entry = &code.type_methods.type_table[type_index];
-
+                    let type_index = this.value_type().to_redux();
+                    let type_entry = &code.type_methods.borrow().type_table[type_index.to_index()];
                     if let Some(method_ptr) = type_entry.get(&method){
                         let args = heap.new_with_proto((*method_ptr).into());
                         args
