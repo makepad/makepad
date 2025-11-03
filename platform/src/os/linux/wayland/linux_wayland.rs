@@ -33,9 +33,25 @@ impl WaylandCx {
         let wayland_cx = Rc::new(RefCell::new(WaylandCx{
             cx: cx.clone(), qhandle: None,
         }));
-        let conn = Connection::connect_to_env().unwrap();
+
+        println!("Attempting to connect to Wayland display...");
+        let conn = match Connection::connect_to_env() {
+            Ok(conn) => {
+                println!("Successfully connected to Wayland display");
+                conn
+            }
+            Err(e) => {
+                eprintln!("ERROR: Failed to connect to Wayland display: {:?}", e);
+                eprintln!("This might indicate:");
+                eprintln!("  1. Wayland libraries (libwayland-client.so) not found at runtime");
+                eprintln!("  2. WAYLAND_DISPLAY is set but Wayland compositor is not running");
+                eprintln!("  3. Permission issues accessing the Wayland socket");
+                panic!("Cannot initialize Wayland backend");
+            }
+        };
         let display = conn.display();
 
+        println!("Initializing OpenGL context with EGL_PLATFORM_WAYLAND_KHR...");
         let display_ptr = conn.backend().display_ptr();
         cx.borrow_mut().os.opengl_cx = Some(unsafe {
             OpenglCx::from_egl_platform_display(
@@ -43,6 +59,7 @@ impl WaylandCx {
                 display_ptr as NativeDisplayType
             )
         });
+        println!("OpenGL context initialized successfully");
 
         let mut event_queue = conn.new_event_queue();
         let qhandle = event_queue.handle();
@@ -55,19 +72,45 @@ impl WaylandCx {
                 wayland_state.event_loop_running = false;
             }
         }));
+
+        println!("Waiting for Wayland protocols...");
+        let mut roundtrip_count = 0;
         while !state.available() {
+            println!("  Roundtrip #{}: compositor={}, wm_base={}, seat={}, decoration_manager={}",
+                roundtrip_count,
+                state.compositor.is_some(),
+                state.wm_base.is_some(),
+                state.seat.is_some(),
+                state.decoration_manager.is_some()
+            );
             event_queue.roundtrip(&mut state).unwrap();
+            roundtrip_count += 1;
+            if roundtrip_count > 100 {
+                panic!("Timeout: Wayland compositor did not provide required protocols after 100 roundtrips");
+            }
         }
+        println!("All required protocols available");
+        println!("  Optional protocols: decoration_manager={}, viewporter={}, scale_manager={}",
+            state.decoration_manager.is_some(),
+            state.viewporter.is_some(),
+            state.scale_manager.is_some()
+        );
+
+        println!("Creating WaylandApp...");
         let mut app = WaylandApp::new(conn, event_queue, state,
             Box::new(
                 move |wayland_app, event| {
                     wayland_cx.borrow_mut().app_event_callback(wayland_app, event)
                 }));
+        println!("WaylandApp created successfully");
 
+        println!("Firing Event::Startup...");
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
+        println!("Event::Startup complete, starting event loop...");
 
         app.start_timer(0, 0.008, true);
+        println!("Entering Wayland event loop");
         app.event_loop();
     }
 
@@ -268,12 +311,25 @@ impl WaylandCx {
             }
             match op {
                 CxOsOp::CreateWindow(window_id) => {
+                    println!("CreateWindow called for window_id={:?}", window_id);
                     let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
                     let compositor = state.compositor.as_ref().unwrap();
                     let wm_base = state.wm_base.as_ref().unwrap();
-                    let decoration_manager = state.decoration_manager.as_ref().unwrap();
-                    let scale_manager = state.scale_manager.as_ref().unwrap();
-                    let viewporter = state.viewporter.as_ref().unwrap();
+
+                    // These protocols are optional - not all compositors support them
+                    if state.decoration_manager.is_none() {
+                        eprintln!("WARNING: Compositor does not support zxdg_decoration_manager_v1 - server-side decorations disabled (using client-side)");
+                    }
+                    if state.scale_manager.is_none() {
+                        eprintln!("WARNING: Compositor does not support wp_fractional_scale_manager_v1 - fractional scaling disabled");
+                    }
+                    if state.viewporter.is_none() {
+                        eprintln!("WARNING: Compositor does not support wp_viewporter - viewport scaling disabled");
+                    }
+
+                    let decoration_manager = state.decoration_manager.as_ref();
+                    let scale_manager = state.scale_manager.as_ref();
+                    let viewporter = state.viewporter.as_ref();
                     let window = &cx.windows[window_id];
                     let window = WaylandWindow::new(
                         window_id,
@@ -290,6 +346,7 @@ impl WaylandCx {
                         window.is_fullscreen
                     );
                     state.windows.push(window);
+                    println!("Window {:?} created successfully", window_id);
                 },
                 CxOsOp::CloseWindow(window_id) => {
                     cx.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
@@ -381,8 +438,12 @@ impl WaylandCx {
 
                         cx.draw_pass_to_window(*pass_id, window.egl_surface, pix_width, pix_height);
                         window.wl_egl_surface.resize(pix_width as i32, pix_height as i32, 0, 0);
-                        window.viewport.set_source(-1., -1., -1., -1.);
-                        window.viewport.set_destination(window.window_geom.inner_size.x as i32, window.window_geom.inner_size.y as i32);
+
+                        // Set viewport scaling if supported
+                        if let Some(ref viewport) = window.viewport {
+                            viewport.set_source(-1., -1., -1., -1.);
+                            viewport.set_destination(window.window_geom.inner_size.x as i32, window.window_geom.inner_size.y as i32);
+                        }
                     }
                 }
                 CxPassParent::Pass(_) => {

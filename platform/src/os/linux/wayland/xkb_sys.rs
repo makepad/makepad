@@ -15,6 +15,8 @@
 #![allow(dead_code)]
 
 use std::os::raw::{c_char, c_int, c_void};
+use std::sync::OnceLock;
+use super::super::module_loader::ModuleLoader;
 
 // XKB Context
 pub type xkb_context = c_void;
@@ -296,189 +298,252 @@ pub const XKB_KEY_Hyper_R: xkb_keysym_t = 0xffee;
 // ISO 9995 function and modifier keys
 pub const XKB_KEY_ISO_Left_Tab: xkb_keysym_t = 0xfe20;
 
-#[link(name = "xkbcommon")]
-extern "C" {
-    // Context management
-    pub fn xkb_context_new(flags: u32) -> *mut xkb_context;
-    pub fn xkb_context_unref(context: *mut xkb_context);
-    pub fn xkb_context_ref(context: *mut xkb_context) -> *mut xkb_context;
+// Function pointer types for dlopen
+type PFN_xkb_context_new = unsafe extern "C" fn(flags: u32) -> *mut xkb_context;
+type PFN_xkb_context_unref = unsafe extern "C" fn(context: *mut xkb_context);
+type PFN_xkb_context_ref = unsafe extern "C" fn(context: *mut xkb_context) -> *mut xkb_context;
+type PFN_xkb_keymap_new_from_string = unsafe extern "C" fn(
+    context: *mut xkb_context,
+    string: *const c_char,
+    format: xkb_keymap_format,
+    flags: u32,
+) -> *mut xkb_keymap;
+type PFN_xkb_keymap_unref = unsafe extern "C" fn(keymap: *mut xkb_keymap);
+type PFN_xkb_keymap_ref = unsafe extern "C" fn(keymap: *mut xkb_keymap) -> *mut xkb_keymap;
+type PFN_xkb_state_new = unsafe extern "C" fn(keymap: *mut xkb_keymap) -> *mut xkb_state;
+type PFN_xkb_state_unref = unsafe extern "C" fn(state: *mut xkb_state);
+type PFN_xkb_state_ref = unsafe extern "C" fn(state: *mut xkb_state) -> *mut xkb_state;
+type PFN_xkb_state_update_mask = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    depressed_mods: xkb_mod_mask_t,
+    latched_mods: xkb_mod_mask_t,
+    locked_mods: xkb_mod_mask_t,
+    depressed_layout: xkb_layout_index_t,
+    latched_layout: xkb_layout_index_t,
+    locked_layout: xkb_layout_index_t,
+) -> u32;
+type PFN_xkb_state_update_key = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    key: xkb_keycode_t,
+    direction: xkb_key_direction,
+) -> u32;
+type PFN_xkb_state_key_get_syms = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    key: xkb_keycode_t,
+    syms_out: *mut *const xkb_keysym_t,
+) -> c_int;
+type PFN_xkb_state_key_get_one_sym = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    key: xkb_keycode_t,
+) -> xkb_keysym_t;
+type PFN_xkb_state_key_get_utf8 = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    key: xkb_keycode_t,
+    buffer: *mut c_char,
+    size: usize,
+) -> c_int;
+type PFN_xkb_state_mod_name_is_active = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    name: *const c_char,
+    type_: u32,
+) -> c_int;
+type PFN_xkb_state_mod_names_are_active = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    type_: u32,
+    match_: u32,
+    names: *const *const c_char,
+) -> c_int;
+type PFN_xkb_state_layout_name_is_active = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    name: *const c_char,
+    type_: u32,
+) -> c_int;
+type PFN_xkb_state_layout_index_is_active = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    idx: xkb_layout_index_t,
+    type_: u32,
+) -> c_int;
+type PFN_xkb_state_led_name_is_active = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    name: *const c_char,
+) -> c_int;
+type PFN_xkb_state_led_index_is_active = unsafe extern "C" fn(
+    state: *mut xkb_state,
+    idx: xkb_led_index_t,
+) -> c_int;
+type PFN_xkb_keymap_mod_get_index = unsafe extern "C" fn(
+    keymap: *mut xkb_keymap,
+    name: *const c_char,
+) -> xkb_mod_index_t;
+type PFN_xkb_keymap_layout_get_index = unsafe extern "C" fn(
+    keymap: *mut xkb_keymap,
+    name: *const c_char,
+) -> xkb_layout_index_t;
+type PFN_xkb_keymap_led_get_index = unsafe extern "C" fn(
+    keymap: *mut xkb_keymap,
+    name: *const c_char,
+) -> xkb_led_index_t;
+type PFN_xkb_keymap_key_repeats = unsafe extern "C" fn(
+    keymap: *mut xkb_keymap,
+    key: xkb_keycode_t,
+) -> c_int;
+type PFN_xkb_keysym_get_name = unsafe extern "C" fn(
+    keysym: xkb_keysym_t,
+    buffer: *mut c_char,
+    size: usize,
+) -> c_int;
+type PFN_xkb_keysym_from_name = unsafe extern "C" fn(
+    name: *const c_char,
+    flags: u32,
+) -> xkb_keysym_t;
+type PFN_xkb_keysym_to_utf8 = unsafe extern "C" fn(
+    keysym: xkb_keysym_t,
+    buffer: *mut c_char,
+    size: usize,
+) -> c_int;
+type PFN_xkb_keysym_to_utf32 = unsafe extern "C" fn(keysym: xkb_keysym_t) -> u32;
+type PFN_xkb_compose_table_new_from_locale = unsafe extern "C" fn(
+    context: *mut xkb_context,
+    locale: *const c_char,
+    flags: u32,
+) -> *mut c_void;
+type PFN_xkb_compose_state_new = unsafe extern "C" fn(
+    table: *mut c_void,
+    flags: u32,
+) -> *mut c_void;
+type PFN_xkb_compose_state_feed = unsafe extern "C" fn(
+    state: *mut c_void,
+    keysym: xkb_keysym_t,
+) -> u32;
+type PFN_xkb_compose_state_get_utf8 = unsafe extern "C" fn(
+    state: *mut c_void,
+    buffer: *mut c_char,
+    size: usize,
+) -> c_int;
+type PFN_xkb_compose_state_get_one_sym = unsafe extern "C" fn(
+    state: *mut c_void,
+) -> xkb_keysym_t;
+type PFN_xkb_compose_state_get_status = unsafe extern "C" fn(
+    state: *mut c_void,
+) -> u32;
+type PFN_xkb_compose_state_reset = unsafe extern "C" fn(state: *mut c_void);
+type PFN_xkb_compose_state_unref = unsafe extern "C" fn(state: *mut c_void);
+type PFN_xkb_compose_table_unref = unsafe extern "C" fn(table: *mut c_void);
 
-    // Keymap management
-    pub fn xkb_keymap_new_from_string(
-        context: *mut xkb_context,
-        string: *const c_char,
-        format: xkb_keymap_format,
-        flags: u32,
-    ) -> *mut xkb_keymap;
-
-    pub fn xkb_keymap_unref(keymap: *mut xkb_keymap);
-    pub fn xkb_keymap_ref(keymap: *mut xkb_keymap) -> *mut xkb_keymap;
-
-    // State management
-    pub fn xkb_state_new(keymap: *mut xkb_keymap) -> *mut xkb_state;
-    pub fn xkb_state_unref(state: *mut xkb_state);
-    pub fn xkb_state_ref(state: *mut xkb_state) -> *mut xkb_state;
-
-    // State updates
-    pub fn xkb_state_update_mask(
-        state: *mut xkb_state,
-        depressed_mods: xkb_mod_mask_t,
-        latched_mods: xkb_mod_mask_t,
-        locked_mods: xkb_mod_mask_t,
-        depressed_layout: xkb_layout_index_t,
-        latched_layout: xkb_layout_index_t,
-        locked_layout: xkb_layout_index_t,
-    ) -> u32;
-
-    pub fn xkb_state_update_key(
-        state: *mut xkb_state,
-        key: xkb_keycode_t,
-        direction: xkb_key_direction,
-    ) -> u32;
-
-    // Key symbol queries
-    pub fn xkb_state_key_get_syms(
-        state: *mut xkb_state,
-        key: xkb_keycode_t,
-        syms_out: *mut *const xkb_keysym_t,
-    ) -> c_int;
-
-    pub fn xkb_state_key_get_one_sym(
-        state: *mut xkb_state,
-        key: xkb_keycode_t,
-    ) -> xkb_keysym_t;
-
-    // UTF-8 string queries
-    pub fn xkb_state_key_get_utf8(
-        state: *mut xkb_state,
-        key: xkb_keycode_t,
-        buffer: *mut c_char,
-        size: usize,
-    ) -> c_int;
-
-    // Modifier state queries
-    pub fn xkb_state_mod_name_is_active(
-        state: *mut xkb_state,
-        name: *const c_char,
-        type_: u32,
-    ) -> c_int;
-
-    pub fn xkb_state_mod_names_are_active(
-        state: *mut xkb_state,
-        type_: u32,
-        match_: u32,
-        names: *const *const c_char,
-    ) -> c_int;
-
-    // Layout queries
-    pub fn xkb_state_layout_name_is_active(
-        state: *mut xkb_state,
-        name: *const c_char,
-        type_: u32,
-    ) -> c_int;
-
-    pub fn xkb_state_layout_index_is_active(
-        state: *mut xkb_state,
-        idx: xkb_layout_index_t,
-        type_: u32,
-    ) -> c_int;
-
-    // LED state queries
-    pub fn xkb_state_led_name_is_active(
-        state: *mut xkb_state,
-        name: *const c_char,
-    ) -> c_int;
-
-    pub fn xkb_state_led_index_is_active(
-        state: *mut xkb_state,
-        idx: xkb_led_index_t,
-    ) -> c_int;
-
-    // Keymap queries
-    pub fn xkb_keymap_mod_get_index(
-        keymap: *mut xkb_keymap,
-        name: *const c_char,
-    ) -> xkb_mod_index_t;
-
-    pub fn xkb_keymap_layout_get_index(
-        keymap: *mut xkb_keymap,
-        name: *const c_char,
-    ) -> xkb_layout_index_t;
-
-    pub fn xkb_keymap_led_get_index(
-        keymap: *mut xkb_keymap,
-        name: *const c_char,
-    ) -> xkb_led_index_t;
-
-    // Key repeat
-    pub fn xkb_keymap_key_repeats(
-        keymap: *mut xkb_keymap,
-        key: xkb_keycode_t,
-    ) -> c_int;
-
-    // Keysym utilities
-    pub fn xkb_keysym_get_name(
-        keysym: xkb_keysym_t,
-        buffer: *mut c_char,
-        size: usize,
-    ) -> c_int;
-
-    pub fn xkb_keysym_from_name(
-        name: *const c_char,
-        flags: u32,
-    ) -> xkb_keysym_t;
-
-    pub fn xkb_keysym_to_utf8(
-        keysym: xkb_keysym_t,
-        buffer: *mut c_char,
-        size: usize,
-    ) -> c_int;
-
-    pub fn xkb_keysym_to_utf32(keysym: xkb_keysym_t) -> u32;
-
-    // Compose support (for dead keys)
-    pub fn xkb_compose_table_new_from_locale(
-        context: *mut xkb_context,
-        locale: *const c_char,
-        flags: u32,
-    ) -> *mut c_void; // xkb_compose_table
-
-    pub fn xkb_compose_state_new(
-        table: *mut c_void, // xkb_compose_table
-        flags: u32,
-    ) -> *mut c_void; // xkb_compose_state
-
-    pub fn xkb_compose_state_feed(
-        state: *mut c_void, // xkb_compose_state
-        keysym: xkb_keysym_t,
-    ) -> u32; // xkb_compose_feed_result
-
-    pub fn xkb_compose_state_get_utf8(
-        state: *mut c_void, // xkb_compose_state
-        buffer: *mut c_char,
-        size: usize,
-    ) -> c_int;
-
-    pub fn xkb_compose_state_get_one_sym(
-        state: *mut c_void, // xkb_compose_state
-    ) -> xkb_keysym_t;
-
-    pub fn xkb_compose_state_get_status(
-        state: *mut c_void, // xkb_compose_state
-    ) -> u32; // xkb_compose_status
-
-    pub fn xkb_compose_state_reset(
-        state: *mut c_void, // xkb_compose_state
-    );
-
-    pub fn xkb_compose_state_unref(
-        state: *mut c_void, // xkb_compose_state
-    );
-
-    pub fn xkb_compose_table_unref(
-        table: *mut c_void, // xkb_compose_table
-    );
+// Library structure holding all function pointers
+pub struct LibXkbCommon {
+    pub xkb_context_new: PFN_xkb_context_new,
+    pub xkb_context_unref: PFN_xkb_context_unref,
+    pub xkb_context_ref: PFN_xkb_context_ref,
+    pub xkb_keymap_new_from_string: PFN_xkb_keymap_new_from_string,
+    pub xkb_keymap_unref: PFN_xkb_keymap_unref,
+    pub xkb_keymap_ref: PFN_xkb_keymap_ref,
+    pub xkb_state_new: PFN_xkb_state_new,
+    pub xkb_state_unref: PFN_xkb_state_unref,
+    pub xkb_state_ref: PFN_xkb_state_ref,
+    pub xkb_state_update_mask: PFN_xkb_state_update_mask,
+    pub xkb_state_update_key: PFN_xkb_state_update_key,
+    pub xkb_state_key_get_syms: PFN_xkb_state_key_get_syms,
+    pub xkb_state_key_get_one_sym: PFN_xkb_state_key_get_one_sym,
+    pub xkb_state_key_get_utf8: PFN_xkb_state_key_get_utf8,
+    pub xkb_state_mod_name_is_active: PFN_xkb_state_mod_name_is_active,
+    pub xkb_state_mod_names_are_active: PFN_xkb_state_mod_names_are_active,
+    pub xkb_state_layout_name_is_active: PFN_xkb_state_layout_name_is_active,
+    pub xkb_state_layout_index_is_active: PFN_xkb_state_layout_index_is_active,
+    pub xkb_state_led_name_is_active: PFN_xkb_state_led_name_is_active,
+    pub xkb_state_led_index_is_active: PFN_xkb_state_led_index_is_active,
+    pub xkb_keymap_mod_get_index: PFN_xkb_keymap_mod_get_index,
+    pub xkb_keymap_layout_get_index: PFN_xkb_keymap_layout_get_index,
+    pub xkb_keymap_led_get_index: PFN_xkb_keymap_led_get_index,
+    pub xkb_keymap_key_repeats: PFN_xkb_keymap_key_repeats,
+    pub xkb_keysym_get_name: PFN_xkb_keysym_get_name,
+    pub xkb_keysym_from_name: PFN_xkb_keysym_from_name,
+    pub xkb_keysym_to_utf8: PFN_xkb_keysym_to_utf8,
+    pub xkb_keysym_to_utf32: PFN_xkb_keysym_to_utf32,
+    pub xkb_compose_table_new_from_locale: PFN_xkb_compose_table_new_from_locale,
+    pub xkb_compose_state_new: PFN_xkb_compose_state_new,
+    pub xkb_compose_state_feed: PFN_xkb_compose_state_feed,
+    pub xkb_compose_state_get_utf8: PFN_xkb_compose_state_get_utf8,
+    pub xkb_compose_state_get_one_sym: PFN_xkb_compose_state_get_one_sym,
+    pub xkb_compose_state_get_status: PFN_xkb_compose_state_get_status,
+    pub xkb_compose_state_reset: PFN_xkb_compose_state_reset,
+    pub xkb_compose_state_unref: PFN_xkb_compose_state_unref,
+    pub xkb_compose_table_unref: PFN_xkb_compose_table_unref,
+    _keep_module_alive: ModuleLoader,
 }
+
+impl LibXkbCommon {
+    pub fn try_load() -> Option<LibXkbCommon> {
+        let module = ModuleLoader::load("libxkbcommon.so")
+            .or_else(|_| ModuleLoader::load("libxkbcommon.so.0"))
+            .ok()?;
+
+        Some(LibXkbCommon {
+            xkb_context_new: module.get_symbol("xkb_context_new").ok()?,
+            xkb_context_unref: module.get_symbol("xkb_context_unref").ok()?,
+            xkb_context_ref: module.get_symbol("xkb_context_ref").ok()?,
+            xkb_keymap_new_from_string: module.get_symbol("xkb_keymap_new_from_string").ok()?,
+            xkb_keymap_unref: module.get_symbol("xkb_keymap_unref").ok()?,
+            xkb_keymap_ref: module.get_symbol("xkb_keymap_ref").ok()?,
+            xkb_state_new: module.get_symbol("xkb_state_new").ok()?,
+            xkb_state_unref: module.get_symbol("xkb_state_unref").ok()?,
+            xkb_state_ref: module.get_symbol("xkb_state_ref").ok()?,
+            xkb_state_update_mask: module.get_symbol("xkb_state_update_mask").ok()?,
+            xkb_state_update_key: module.get_symbol("xkb_state_update_key").ok()?,
+            xkb_state_key_get_syms: module.get_symbol("xkb_state_key_get_syms").ok()?,
+            xkb_state_key_get_one_sym: module.get_symbol("xkb_state_key_get_one_sym").ok()?,
+            xkb_state_key_get_utf8: module.get_symbol("xkb_state_key_get_utf8").ok()?,
+            xkb_state_mod_name_is_active: module.get_symbol("xkb_state_mod_name_is_active").ok()?,
+            xkb_state_mod_names_are_active: module.get_symbol("xkb_state_mod_names_are_active").ok()?,
+            xkb_state_layout_name_is_active: module.get_symbol("xkb_state_layout_name_is_active").ok()?,
+            xkb_state_layout_index_is_active: module.get_symbol("xkb_state_layout_index_is_active").ok()?,
+            xkb_state_led_name_is_active: module.get_symbol("xkb_state_led_name_is_active").ok()?,
+            xkb_state_led_index_is_active: module.get_symbol("xkb_state_led_index_is_active").ok()?,
+            xkb_keymap_mod_get_index: module.get_symbol("xkb_keymap_mod_get_index").ok()?,
+            xkb_keymap_layout_get_index: module.get_symbol("xkb_keymap_layout_get_index").ok()?,
+            xkb_keymap_led_get_index: module.get_symbol("xkb_keymap_led_get_index").ok()?,
+            xkb_keymap_key_repeats: module.get_symbol("xkb_keymap_key_repeats").ok()?,
+            xkb_keysym_get_name: module.get_symbol("xkb_keysym_get_name").ok()?,
+            xkb_keysym_from_name: module.get_symbol("xkb_keysym_from_name").ok()?,
+            xkb_keysym_to_utf8: module.get_symbol("xkb_keysym_to_utf8").ok()?,
+            xkb_keysym_to_utf32: module.get_symbol("xkb_keysym_to_utf32").ok()?,
+            xkb_compose_table_new_from_locale: module.get_symbol("xkb_compose_table_new_from_locale").ok()?,
+            xkb_compose_state_new: module.get_symbol("xkb_compose_state_new").ok()?,
+            xkb_compose_state_feed: module.get_symbol("xkb_compose_state_feed").ok()?,
+            xkb_compose_state_get_utf8: module.get_symbol("xkb_compose_state_get_utf8").ok()?,
+            xkb_compose_state_get_one_sym: module.get_symbol("xkb_compose_state_get_one_sym").ok()?,
+            xkb_compose_state_get_status: module.get_symbol("xkb_compose_state_get_status").ok()?,
+            xkb_compose_state_reset: module.get_symbol("xkb_compose_state_reset").ok()?,
+            xkb_compose_state_unref: module.get_symbol("xkb_compose_state_unref").ok()?,
+            xkb_compose_table_unref: module.get_symbol("xkb_compose_table_unref").ok()?,
+            _keep_module_alive: module,
+        })
+    }
+}
+
+// Global instance
+static LIBXKB: OnceLock<LibXkbCommon> = OnceLock::new();
+
+fn get_xkb() -> &'static LibXkbCommon {
+    LIBXKB.get_or_init(|| {
+        println!("Loading libxkbcommon.so at runtime...");
+        match LibXkbCommon::try_load() {
+            Some(lib) => {
+                println!("Successfully loaded libxkbcommon.so");
+                lib
+            }
+            None => {
+                eprintln!("ERROR: Failed to load libxkbcommon.so at runtime.");
+                eprintln!("This library is required for keyboard input on Wayland.");
+                eprintln!("On most systems, it's provided by the 'libxkbcommon' package.");
+                eprintln!("Note: With dlopen enabled, you don't need libxkbcommon-dev at build time,");
+                eprintln!("but the runtime library must still be present when running on Wayland.");
+                panic!("Cannot load libxkbcommon");
+            }
+        }
+    })
+}
+
 
 // Helper constants for common modifier names
 pub const MOD_NAME_SHIFT: &'static [u8] = b"Shift\0";
@@ -621,7 +686,8 @@ pub struct XkbContext {
 impl XkbContext {
     /// Create a new XKB context
     pub fn new() -> Option<Self> {
-        let ptr = unsafe { xkb_context_new(XKB_CONTEXT_NO_FLAGS) };
+        let lib = get_xkb();
+        let ptr = unsafe { (lib.xkb_context_new)(XKB_CONTEXT_NO_FLAGS) };
         if ptr.is_null() {
             None
         } else {
@@ -637,8 +703,9 @@ impl XkbContext {
 
 impl Drop for XkbContext {
     fn drop(&mut self) {
+        let lib = get_xkb();
         unsafe {
-            xkb_context_unref(self.ptr);
+            (lib.xkb_context_unref)(self.ptr);
         }
     }
 }
@@ -654,8 +721,9 @@ pub struct XkbKeymap {
 impl XkbKeymap {
     /// Create a keymap from a string
     pub fn from_cstr(context: &XkbContext, keymap_string: *mut c_void) -> Option<Self> {
+        let lib = get_xkb();
         let ptr = unsafe {
-            xkb_keymap_new_from_string(
+            (lib.xkb_keymap_new_from_string)(
                 context.as_ptr(),
                 keymap_string as *const c_char,
                 xkb_keymap_format::XKB_KEYMAP_FORMAT_TEXT_V1,
@@ -673,13 +741,15 @@ impl XkbKeymap {
 
     /// Check if a key repeats
     pub fn key_repeats(&self, keycode: u32) -> bool {
-        unsafe { xkb_keymap_key_repeats(self.ptr, keycode) != 0 }
+        let lib = get_xkb();
+        unsafe { (lib.xkb_keymap_key_repeats)(self.ptr, keycode) != 0 }
     }
 
     /// Get modifier index by name
     pub fn mod_get_index(&self, name: &str) -> Option<u32> {
+        let lib = get_xkb();
         let c_name = CString::new(name).ok()?;
-        let index = unsafe { xkb_keymap_mod_get_index(self.ptr, c_name.as_ptr()) };
+        let index = unsafe { (lib.xkb_keymap_mod_get_index)(self.ptr, c_name.as_ptr()) };
         if index == u32::MAX {
             None
         } else {
@@ -689,8 +759,9 @@ impl XkbKeymap {
 
     /// Get layout index by name
     pub fn layout_get_index(&self, name: &str) -> Option<u32> {
+        let lib = get_xkb();
         let c_name = CString::new(name).ok()?;
-        let index = unsafe { xkb_keymap_layout_get_index(self.ptr, c_name.as_ptr()) };
+        let index = unsafe { (lib.xkb_keymap_layout_get_index)(self.ptr, c_name.as_ptr()) };
         if index == u32::MAX {
             None
         } else {
@@ -706,8 +777,9 @@ impl XkbKeymap {
 
 impl Drop for XkbKeymap {
     fn drop(&mut self) {
+        let lib = get_xkb();
         unsafe {
-            xkb_keymap_unref(self.ptr);
+            (lib.xkb_keymap_unref)(self.ptr);
         }
     }
 }
@@ -723,7 +795,8 @@ pub struct XkbState {
 impl XkbState {
     /// Create a new XKB state from a keymap
     pub fn new(keymap: &XkbKeymap) -> Option<Self> {
-        let ptr = unsafe { xkb_state_new(keymap.as_ptr()) };
+        let lib = get_xkb();
+        let ptr = unsafe { (lib.xkb_state_new)(keymap.as_ptr()) };
         if ptr.is_null() {
             None
         } else {
@@ -741,8 +814,9 @@ impl XkbState {
         latched_layout: u32,
         locked_layout: u32,
     ) -> u32 {
+        let lib = get_xkb();
         unsafe {
-            xkb_state_update_mask(
+            (lib.xkb_state_update_mask)(
                 self.ptr,
                 depressed_mods,
                 latched_mods,
@@ -756,22 +830,25 @@ impl XkbState {
 
     /// Update the state with a key press/release
     pub fn update_key(&mut self, keycode: u32, direction: XkbKeyDirection) -> u32 {
+        let lib = get_xkb();
         let dir = match direction {
             XkbKeyDirection::Down => xkb_key_direction::XKB_KEY_DOWN,
             XkbKeyDirection::Up => xkb_key_direction::XKB_KEY_UP,
         };
-        unsafe { xkb_state_update_key(self.ptr, keycode, dir) }
+        unsafe { (lib.xkb_state_update_key)(self.ptr, keycode, dir) }
     }
 
     /// Get the primary keysym for a key
     pub fn key_get_one_sym(&self, keycode: u32) -> u32 {
-        unsafe { xkb_state_key_get_one_sym(self.ptr, keycode) }
+        let lib = get_xkb();
+        unsafe { (lib.xkb_state_key_get_one_sym)(self.ptr, keycode) }
     }
 
     /// Get all keysyms for a key
     pub fn key_get_syms(&self, keycode: u32) -> Vec<u32> {
+        let lib = get_xkb();
         let mut syms_ptr: *const u32 = ptr::null();
-        let count = unsafe { xkb_state_key_get_syms(self.ptr, keycode, &mut syms_ptr) };
+        let count = unsafe { (lib.xkb_state_key_get_syms)(self.ptr, keycode, &mut syms_ptr) };
 
         if count <= 0 || syms_ptr.is_null() {
             return Vec::new();
@@ -783,8 +860,9 @@ impl XkbState {
 
     /// Get UTF-8 string for a key
     pub fn key_get_utf8(&self, keycode: u32) -> String {
+        let lib = get_xkb();
         // First, get the required buffer size
-        let size = unsafe { xkb_state_key_get_utf8(self.ptr, keycode, ptr::null_mut(), 0) };
+        let size = unsafe { (lib.xkb_state_key_get_utf8)(self.ptr, keycode, ptr::null_mut(), 0) };
 
         if size <= 0 {
             return String::new();
@@ -793,7 +871,7 @@ impl XkbState {
         // Allocate buffer and get the actual string, including the null terminator
         let mut buffer = vec![0u8; (size + 1) as usize];
         let actual_size = unsafe {
-            xkb_state_key_get_utf8(
+            (lib.xkb_state_key_get_utf8)(
                 self.ptr,
                 keycode,
                 buffer.as_mut_ptr() as *mut c_char,
@@ -814,29 +892,32 @@ impl XkbState {
 
     /// Check if a modifier is active by name
     pub fn mod_name_is_active(&self, name: &str, state_type: XkbStateComponent) -> bool {
+        let lib = get_xkb();
         let c_name = match CString::new(name) {
             Ok(s) => s,
             Err(_) => return false,
         };
 
         let type_flags = state_type.to_flags();
-        unsafe { xkb_state_mod_name_is_active(self.ptr, c_name.as_ptr(), type_flags) != 0 }
+        unsafe { (lib.xkb_state_mod_name_is_active)(self.ptr, c_name.as_ptr(), type_flags) != 0 }
     }
 
     /// Check if a layout is active by index
     pub fn layout_index_is_active(&self, index: u32, state_type: XkbStateComponent) -> bool {
+        let lib = get_xkb();
         let type_flags = state_type.to_flags();
-        unsafe { xkb_state_layout_index_is_active(self.ptr, index, type_flags) != 0 }
+        unsafe { (lib.xkb_state_layout_index_is_active)(self.ptr, index, type_flags) != 0 }
     }
 
     /// Check if an LED is active by name
     pub fn led_name_is_active(&self, name: &str) -> bool {
+        let lib = get_xkb();
         let c_name = match CString::new(name) {
             Ok(s) => s,
             Err(_) => return false,
         };
 
-        unsafe { xkb_state_led_name_is_active(self.ptr, c_name.as_ptr()) != 0 }
+        unsafe { (lib.xkb_state_led_name_is_active)(self.ptr, c_name.as_ptr()) != 0 }
     }
 
     /// Convert a keycode to Makepad KeyCode using the current state
@@ -853,8 +934,9 @@ impl XkbState {
 
 impl Drop for XkbState {
     fn drop(&mut self) {
+        let lib = get_xkb();
         unsafe {
-            xkb_state_unref(self.ptr);
+            (lib.xkb_state_unref)(self.ptr);
         }
     }
 }
@@ -908,18 +990,19 @@ pub struct XkbCompose {
 impl XkbCompose {
     /// Create a new compose table and state for the given locale
     pub fn new(context: &XkbContext, locale: &str) -> Option<Self> {
+        let lib = get_xkb();
         let c_locale = CString::new(locale).ok()?;
         let table = unsafe {
-            xkb_compose_table_new_from_locale(context.as_ptr(), c_locale.as_ptr(), 0)
+            (lib.xkb_compose_table_new_from_locale)(context.as_ptr(), c_locale.as_ptr(), 0)
         };
 
         if table.is_null() {
             return None;
         }
 
-        let state = unsafe { xkb_compose_state_new(table, 0) };
+        let state = unsafe { (lib.xkb_compose_state_new)(table, 0) };
         if state.is_null() {
-            unsafe { xkb_compose_table_unref(table) };
+            unsafe { (lib.xkb_compose_table_unref)(table) };
             return None;
         }
 
@@ -928,7 +1011,8 @@ impl XkbCompose {
 
     /// Feed a keysym to the compose state
     pub fn feed(&mut self, keysym: u32) -> XkbComposeFeedResult {
-        let result = unsafe { xkb_compose_state_feed(self.state, keysym) };
+        let lib = get_xkb();
+        let result = unsafe { (lib.xkb_compose_state_feed)(self.state, keysym) };
         match result {
             0 => XkbComposeFeedResult::Ignored,
             1 => XkbComposeFeedResult::Accepted,
@@ -939,7 +1023,8 @@ impl XkbCompose {
 
     /// Get the current compose status
     pub fn get_status(&self) -> XkbComposeStatus {
-        let status = unsafe { xkb_compose_state_get_status(self.state) };
+        let lib = get_xkb();
+        let status = unsafe { (lib.xkb_compose_state_get_status)(self.state) };
         match status {
             0 => XkbComposeStatus::Nothing,
             1 => XkbComposeStatus::Composing,
@@ -951,7 +1036,8 @@ impl XkbCompose {
 
     /// Get the composed UTF-8 string
     pub fn get_utf8(&self) -> String {
-        let size = unsafe { xkb_compose_state_get_utf8(self.state, ptr::null_mut(), 0) };
+        let lib = get_xkb();
+        let size = unsafe { (lib.xkb_compose_state_get_utf8)(self.state, ptr::null_mut(), 0) };
 
         if size <= 0 {
             return String::new();
@@ -959,7 +1045,7 @@ impl XkbCompose {
 
         let mut buffer = vec![0u8; size as usize];
         let actual_size = unsafe {
-            xkb_compose_state_get_utf8(
+            (lib.xkb_compose_state_get_utf8)(
                 self.state,
                 buffer.as_mut_ptr() as *mut c_char,
                 buffer.len(),
@@ -978,20 +1064,23 @@ impl XkbCompose {
 
     /// Get the composed keysym
     pub fn get_one_sym(&self) -> u32 {
-        unsafe { xkb_compose_state_get_one_sym(self.state) }
+        let lib = get_xkb();
+        unsafe { (lib.xkb_compose_state_get_one_sym)(self.state) }
     }
 
     /// Reset the compose state
     pub fn reset(&mut self) {
-        unsafe { xkb_compose_state_reset(self.state) };
+        let lib = get_xkb();
+        unsafe { (lib.xkb_compose_state_reset)(self.state) };
     }
 }
 
 impl Drop for XkbCompose {
     fn drop(&mut self) {
+        let lib = get_xkb();
         unsafe {
-            xkb_compose_state_unref(self.state);
-            xkb_compose_table_unref(self.table);
+            (lib.xkb_compose_state_unref)(self.state);
+            (lib.xkb_compose_table_unref)(self.table);
         }
     }
 }
@@ -1066,8 +1155,9 @@ impl XkbState {
 
 /// Helper function to convert keysym name to keysym value
 pub fn keysym_from_name(name: &str) -> Option<u32> {
+    let lib = get_xkb();
     let c_name = CString::new(name).ok()?;
-    let keysym = unsafe { xkb_keysym_from_name(c_name.as_ptr(), 0) };
+    let keysym = unsafe { (lib.xkb_keysym_from_name)(c_name.as_ptr(), 0) };
     if keysym == XKB_KEY_NoSymbol {
         None
     } else {
@@ -1077,9 +1167,10 @@ pub fn keysym_from_name(name: &str) -> Option<u32> {
 
 /// Helper function to convert keysym value to name
 pub fn keysym_get_name(keysym: u32) -> String {
+    let lib = get_xkb();
     let mut buffer = [0u8; 64];
     let size = unsafe {
-        xkb_keysym_get_name(
+        (lib.xkb_keysym_get_name)(
             keysym,
             buffer.as_mut_ptr() as *mut c_char,
             buffer.len(),
@@ -1096,9 +1187,10 @@ pub fn keysym_get_name(keysym: u32) -> String {
 
 /// Helper function to convert keysym to UTF-8 string
 pub fn keysym_to_utf8(keysym: u32) -> String {
+    let lib = get_xkb();
     let mut buffer = [0u8; 8]; // UTF-8 character can be at most 4 bytes, plus null terminator
     let size = unsafe {
-        xkb_keysym_to_utf8(
+        (lib.xkb_keysym_to_utf8)(
             keysym,
             buffer.as_mut_ptr() as *mut c_char,
             buffer.len(),
@@ -1117,7 +1209,8 @@ pub fn keysym_to_utf8(keysym: u32) -> String {
 
 /// Helper function to convert keysym to UTF-32 codepoint
 pub fn keysym_to_utf32(keysym: u32) -> Option<char> {
-    let codepoint = unsafe { xkb_keysym_to_utf32(keysym) };
+    let lib = get_xkb();
+    let codepoint = unsafe { (lib.xkb_keysym_to_utf32)(keysym) };
     if codepoint == 0 {
         None
     } else {

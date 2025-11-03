@@ -22,9 +22,9 @@ pub(crate) struct WaylandWindow {
     pub window_id: WindowId,
     pub base_surface: wl_surface::WlSurface,
     pub toplevel: xdg_toplevel::XdgToplevel,
-    pub decoration: zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+    pub decoration: Option<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1>,
     pub xdg_surface: xdg_surface::XdgSurface,
-    pub viewport: wp_viewport::WpViewport,
+    pub viewport: Option<wp_viewport::WpViewport>,
     pub window_geom: WindowGeom,
     pub cal_size: DVec2,
     pub wl_egl_surface: WlEglSurface,
@@ -36,9 +36,9 @@ impl WaylandWindow {
         window_id: WindowId,
         compositer: &wl_compositor::WlCompositor,
         wm_base: &xdg_wm_base::XdgWmBase,
-        decoration_manager: &zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
-        scale_manager: &wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
-        viewporter: &wp_viewporter::WpViewporter,
+        decoration_manager: Option<&zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
+        scale_manager: Option<&wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
+        viewporter: Option<&wp_viewporter::WpViewporter>,
         qhandle: &QueueHandle<WaylandState>,
         opengl_cx: &OpenglCx,
         inner_size: DVec2,
@@ -50,16 +50,26 @@ impl WaylandWindow {
         assert_eq!(opengl_cx.egl_platform, egl_sys::EGL_PLATFORM_WAYLAND_KHR);
 
         let base_surface = compositer.create_surface(qhandle, ());
-        scale_manager.get_fractional_scale(&base_surface, qhandle, window_id);
-        let viewport = viewporter.get_viewport(&base_surface, qhandle, ());
+
+        // Fractional scaling - only if supported by compositor
+        if let Some(scale_mgr) = scale_manager {
+            scale_mgr.get_fractional_scale(&base_surface, qhandle, window_id);
+        }
+
+        // Viewport - only if supported by compositor
+        let viewport = viewporter.map(|vp| vp.get_viewport(&base_surface, qhandle, ()));
 
         let shell_surface = wm_base.get_xdg_surface(&base_surface, qhandle, window_id);
         let toplevel = shell_surface.get_toplevel(qhandle, window_id);
         toplevel.set_title(String::from(title));
         toplevel.set_app_id("Makepad".to_owned());
 
-        let decoration = decoration_manager.get_toplevel_decoration(&toplevel, qhandle, ());
-        decoration.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+        // Server-side decorations - only if supported by compositor (GNOME uses client-side)
+        let decoration = decoration_manager.map(|dec_mgr| {
+            let decoration = dec_mgr.get_toplevel_decoration(&toplevel, qhandle, ());
+            decoration.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+            decoration
+        });
 
         if is_fullscreen {
             toplevel.set_fullscreen(None);
@@ -119,7 +129,9 @@ impl WaylandWindow {
     }
     pub fn close_window(&mut self) {
         self.base_surface.destroy();
-        self.decoration.destroy();
+        if let Some(ref decoration) = self.decoration {
+            decoration.destroy();
+        }
         self.toplevel.destroy();
         self.xdg_surface.destroy();
     }
