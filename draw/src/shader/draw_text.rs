@@ -190,6 +190,7 @@ impl DrawText {
             margin: walk.margin,
             width: turtle::Size::Fixed(max_size_in_lpxs.width as f64),
             height: turtle::Size::Fixed(max_size_in_lpxs.height as f64),
+            descender: 0.0,
         });
 
         if self.debug {

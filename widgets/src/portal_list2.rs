@@ -222,7 +222,8 @@ impl PortalList2 {
                     abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                     margin: Default::default(),
                     width: Size::fill(),
-                    height: Size::fit()
+                    height: Size::fit(),
+                    descender: 0.0,
                 }, layout);
             }
             Vec2Index::X => {
@@ -230,7 +231,8 @@ impl PortalList2 {
                     abs_pos: Some(dvec2(viewport.pos.x , viewport.pos.y)),
                     margin: Default::default(),
                     width: Size::fit(),
-                    height: Size::fill()
+                    height: Size::fill(),
+                    descender: 0.0,
                 }, layout);
             }
         }
