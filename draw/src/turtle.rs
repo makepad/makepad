@@ -1233,6 +1233,9 @@ pub struct FinishedWalk {
 
     /// The size of the outer rectangle of this finished walk.
     outer_size: DVec2,
+
+    /// The distance from the descender to the bottom of the outer rectangle of this finished walk.
+    descender: f64,
 }
 
 impl<'a,'b> Cx2d<'a,'b> {
@@ -1671,6 +1674,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                 align_list_start,
                 deferred_before_count: 0,
                 outer_size: size + walk.margin.size(),
+                descender: walk.descender,
             });
             
             let origin = outer_origin + walk.margin.left_top();
@@ -1720,6 +1724,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                 align_list_start,
                 deferred_before_count: defer_index,
                 outer_size,
+                descender: walk.descender,
             });
 
             let origin = outer_origin + walk.margin.left_top();
@@ -1879,6 +1884,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             align_list_start: self.align_list.len(),
             deferred_before_count: turtle.deferred_fills.len(),
             outer_size: rect.size,
+            descender: 0.0,
         });
     }
     
