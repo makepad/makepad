@@ -41,6 +41,10 @@ pub struct Walk {
     /// The desired height of this walk's rectangle.
     #[live]
     pub height: Size,
+
+    /// The distance from the baseline to the bottom of this walk's rectangle.
+    #[live]
+    pub descender: f64,
 }
 
 impl Walk {
@@ -51,6 +55,7 @@ impl Walk {
             margin: Margin::default(),
             width,
             height,
+            descender: 0.0,
         }
     }
 
@@ -66,6 +71,7 @@ impl Walk {
             margin: Margin::default(),
             width: Size::fill(),
             height: Size::fill(),
+            descender: 0.0,
         }
     }
 
@@ -76,6 +82,7 @@ impl Walk {
             margin: Margin::default(),
             width: Size::Fixed(width),
             height: Size::Fixed(height),
+            descender: 0.0,
         }
     }
 
@@ -86,6 +93,7 @@ impl Walk {
             margin: Margin::default(),
             width: Size::fit(),
             height: Size::fit(),
+            descender: 0.0,
         }
     }
 
@@ -97,6 +105,7 @@ impl Walk {
             margin: Margin::default(),
             width: Size::fill(),
             height: Size::fit(),
+            descender: 0.0,
         }
     }
 
@@ -1189,13 +1198,15 @@ impl DeferredWalk {
                         abs_pos: Some(pos + dvec2(turtle.total_resolved_length_to(index), 0.0)),
                         margin,
                         width: Size::Fixed(turtle.resolve_fill(index)),
-                        height: other_axis
+                        height: other_axis,
+                        descender: 0.0,
                     },
                     Flow::Down => Walk {
                         abs_pos: Some(pos + dvec2(0.0, turtle.total_resolved_length_to(index))),
                         margin: margin,
                         height: Size::Fixed(turtle.resolve_fill(index)),
-                        width: other_axis
+                        width: other_axis,
+                        descender: 0.0,
                     },
                     _ => panic!()
                 };
@@ -1562,6 +1573,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                     margin: turtle.margin(),
                     width: Size::Fixed(turtle.width()),
                     height: Size::Fixed(turtle.height()),
+                    descender: 0.0,
                 },
                 turtle_align_start
             )
@@ -2160,6 +2172,7 @@ impl Walk {
             margin: Margin::default(),
             width: Size::Fixed(rect.size.x),
             height: Size::Fixed(rect.size.y),
+            descender: 0.0,
         }
     }
     

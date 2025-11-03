@@ -226,7 +226,8 @@ impl Widget for SlidesView {
                 abs_pos: None,
                 margin: Default::default(),
                 width: Size::fill(),
-                height: Size::fill()
+                height: Size::fill(),
+                descender: 0.0,
             }, Layout::flow_down().with_scroll(
                 dvec2(rect.size.x * self.current_slide.fract(), 0.0)
             ));
@@ -248,7 +249,8 @@ impl Widget for SlidesView {
                 abs_pos: None,
                 margin: Default::default(),
                 width: Size::fill(),
-                height: Size::fill()
+                height: Size::fill(),
+                descender: 0.0,
             }, Layout::flow_down().with_scroll(
                 dvec2(-rect.size.x * (1.0-self.current_slide.fract()), 0.0)
             ));

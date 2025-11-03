@@ -257,6 +257,7 @@ impl Widget for DesignerContainer {
             abs_pos: Some(data.rect.pos),
             width: Size::Fixed(data.rect.size.x),
             height: Size::Fixed(data.rect.size.y),
+            descender: 0.0,
             margin: Default::default()
         };
         while let Some(_next) = self.view.draw(cx, &mut Scope::empty()).step() {
