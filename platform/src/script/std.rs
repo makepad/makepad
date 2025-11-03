@@ -20,8 +20,12 @@ pub struct CxScriptTimers{
 
 // this is a UI-thread pipe
 pub struct CxScriptChannel{
-    pub id: LiveId,
     pub array: ScriptArrayRef,
+}
+
+// this is a UI-thread pipe
+pub struct CxScriptChannelGc{
+    // point back to our script channel set
 }
 
 impl Cx{
@@ -47,6 +51,19 @@ impl Cx{
 
 pub fn extend_std_module(vm:&mut ScriptVm){
     let std = vm.module(id!(std));
+    
+    let channel = vm.new_handle_type(id!(channel));
+    vm.add_handle_method(channel, id!(send), script_args_def!(), |_vm, _args|{
+        NIL
+    });
+    vm.add_handle_method(channel, id!(recv), script_args_def!(), |_vm, _args|{
+        NIL
+    });
+    vm.add_method(std, id!(channel), script_args_def!(), |_vm, _args|{
+        NIL
+    });
+        
+    vm.new_handle_type(id!(timer));
     
     pub fn next_hash(bytes: &[u8;8]) -> u64 {
         let mut x:u64 = 0xd6e8_feb8_6659_fd93;
