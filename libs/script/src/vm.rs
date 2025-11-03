@@ -40,7 +40,7 @@ pub struct ScriptBody{
 }
 
 pub struct ScriptCode{
-    pub type_methods: ScriptTypeMethods,
+    pub type_methods: RefCell<ScriptTypeMethods>,
     pub builtins: ScriptBuiltins,
     pub native: RefCell<ScriptNative>,
     pub bodies: RefCell<Vec<ScriptBody>>,
@@ -117,7 +117,26 @@ impl <'a> ScriptVm<'a>{
         self.heap.cast_to_f64(v, self.thread.trap.ip)
     }
     
-        
+    pub fn new_handle_type(&mut self, id:LiveId)->ScriptHandleType{
+        self.code.type_methods.borrow_mut().new_handle_type(
+            self.heap,
+            &mut *self.code.native.borrow_mut(),
+            id
+        )
+    }
+    
+    pub fn add_handle_method<F>(&mut self, ht:ScriptHandleType, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
+        self.code.type_methods.borrow_mut().add_handle_method(
+            self.heap,
+            &mut *self.code.native.borrow_mut(),
+            ht,
+            method,
+            args,
+            f
+        )
+    }
+    
     pub fn new_module(&mut self, id:LiveId)->ScriptObject{
         self.heap.new_module(id)
     }
@@ -134,9 +153,9 @@ impl <'a> ScriptVm<'a>{
         r
     }
     
-    pub fn add_fn<F>(&mut self, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
+    pub fn add_method<F>(&mut self, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
-        self.code.native.borrow_mut().add_fn(&mut self.heap, module, method, args, f)
+        self.code.native.borrow_mut().add_method(&mut self.heap, module, method, args, f)
     }
     
     
@@ -229,7 +248,7 @@ impl ScriptVmBase{
             void: 0,
             code:ScriptCode{
                 builtins,
-                type_methods,
+                type_methods: RefCell::new(type_methods),
                 native: RefCell::new(native),
                 bodies: Default::default(),
             },

@@ -42,8 +42,35 @@ pub struct ScriptObject{
 pub struct ScriptArray{
     pub(crate) index: u32    
 }
+
 impl ScriptObject{
     pub const ZERO:ScriptObject = ScriptObject{index:0};
+}
+
+impl ScriptHandle{
+    pub const ZERO:ScriptHandle = ScriptHandle{ty:ScriptHandleType(0),index:0};
+}
+
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ScriptHandleType(pub(crate) u8);
+
+impl ScriptHandleType{
+    pub fn to_redux(&self)->ScriptTypeRedux{
+        ScriptTypeRedux(ScriptValueType::REDUX_HANDLE_FIRST.0 + self.0)
+    }
+}
+
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ScriptTypeRedux(u8);
+
+impl ScriptTypeRedux{
+    pub(crate) fn to_index(&self)->usize{self.0 as usize}
+}
+
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ScriptHandle{
+    pub(crate) ty: ScriptHandleType,
+    pub(crate) index: u32    
 }
 
 impl From<ScriptObject> for ScriptValue{
@@ -65,6 +92,23 @@ impl From<ScriptValue> for ScriptObject{
         }
         else{
             ScriptObject{index:0}
+        }
+    }
+}
+
+impl From<ScriptHandle> for ScriptValue{
+    fn from(v:ScriptHandle) -> Self{
+        ScriptValue::from_handle(v)
+    }
+}
+
+impl From<ScriptValue> for ScriptHandle{
+    fn from(v:ScriptValue) -> Self{
+        if let Some(obj) = v.as_handle(){
+            obj
+        }
+        else{
+            ScriptHandle{ty:ScriptHandleType(0), index:0}
         }
     }
 }
@@ -209,18 +253,19 @@ impl ScriptValueType{
     pub const OPCODE: Self = Self(7);
     pub const STRING: Self = Self(8);
         
-    pub const REDUX_MARKER: Self = Self(9);
-    pub const INLINE_STRING_0: Self = Self(9);
-    pub const INLINE_STRING_1: Self = Self(10);
-    pub const INLINE_STRING_2: Self = Self(11);
-    pub const INLINE_STRING_3: Self = Self(12);
-    pub const INLINE_STRING_4: Self = Self(13);
-    pub const INLINE_STRING_5: Self = Self(14);
-    pub const INLINE_STRING_END: Self = Self(15);
+    pub const REDUX_MARKER: Self = Self(10);
     
-    pub const ERR_FIRST: Self = Self(16);
-    pub const ERR_NOT_FOUND: Self = Self(16);
-    pub const ERR_NOT_FN: Self = Self(17);
+    pub const INLINE_STRING_0: Self = Self(10);
+    pub const INLINE_STRING_1: Self = Self(11);
+    pub const INLINE_STRING_2: Self = Self(12);
+    pub const INLINE_STRING_3: Self = Self(13);
+    pub const INLINE_STRING_4: Self = Self(14);
+    pub const INLINE_STRING_5: Self = Self(15);
+    pub const INLINE_STRING_END: Self = Self(16);
+    
+    pub const ERR_FIRST: Self = Self(17);
+    pub const ERR_NOT_FOUND: Self = Self(17);
+    pub const ERR_NOT_FN: Self = Self(18);
     pub const ERR_NOT_INDEX: Self = Self(19);
     pub const ERR_NOT_OBJECT: Self = Self(20);
     pub const ERR_STACK_UNDERFLOW: Self = Self(21);
@@ -253,20 +298,24 @@ impl ScriptValueType{
     pub const ERR_CHILD_PROCESS: Self = Self(48);
     pub const ERR_LAST: Self = Self(48);
     
+    pub const HANDLE_FIRST: Self = Self(0x40);
+    pub const HANDLE_LAST: Self = Self(0x7F);
+    pub const REDUX_HANDLE_MAX: u8  = Self::HANDLE_LAST.0 - Self::HANDLE_FIRST.0;
     pub const ID: Self = Self(0x80);
         
-    pub const REDUX_NUMBER: usize = 0;
-    pub const REDUX_NAN: usize = 1;
-    pub const REDUX_BOOL: usize = 2;
-    pub const REDUX_NIL: usize = 3;
-    pub const REDUX_COLOR: usize = 4;
-    pub const REDUX_OBJECT: usize = 5;
-    pub const REDUX_ARRAY: usize = 6;
-    pub const REDUX_OPCODE: usize = 7;
-    pub const REDUX_STRING: usize = 8;
-    pub const REDUX_ERR: usize = 9;
-    pub const REDUX_ID: usize = 10;
-    
+    pub const REDUX_NUMBER: ScriptTypeRedux = ScriptTypeRedux(0);
+    pub const REDUX_NAN: ScriptTypeRedux = ScriptTypeRedux(1);
+    pub const REDUX_BOOL: ScriptTypeRedux = ScriptTypeRedux(2);
+    pub const REDUX_NIL: ScriptTypeRedux = ScriptTypeRedux(3);
+    pub const REDUX_COLOR: ScriptTypeRedux = ScriptTypeRedux(4);
+    pub const REDUX_OBJECT: ScriptTypeRedux = ScriptTypeRedux(5);
+    pub const REDUX_ARRAY: ScriptTypeRedux = ScriptTypeRedux(6);
+    pub const REDUX_OPCODE: ScriptTypeRedux = ScriptTypeRedux(7);
+    pub const REDUX_STRING: ScriptTypeRedux = ScriptTypeRedux(8);
+    pub const REDUX_ERR: ScriptTypeRedux = ScriptTypeRedux(9);
+    pub const REDUX_ID: ScriptTypeRedux = ScriptTypeRedux(10);
+    pub const REDUX_HANDLE_FIRST: ScriptTypeRedux = ScriptTypeRedux(11);
+        
     pub const fn to_u64(&self)->u64{ ((self.0 as u64) << 40) | 0xFFFF_0000_0000_0000 }
     pub const fn from_u64(val:u64)->Self{
         let val = ((val>>40)&0xff) as u8;
@@ -276,23 +325,26 @@ impl ScriptValueType{
         Self(val)
     }
     
-    pub const fn to_redux(&self)->usize{
+    pub const fn to_redux(&self)->ScriptTypeRedux{
         if self.0 >= Self::REDUX_MARKER.0{
             if self.0 >= Self::ID.0{
                 return Self::REDUX_ID
             }
+            else if self.0 >= Self::HANDLE_FIRST.0{
+                ScriptTypeRedux(Self::REDUX_HANDLE_FIRST.0 + (self.0 - Self::HANDLE_FIRST.0))
+            }
             else if self.0 >= Self::ERR_FIRST.0{
-                Self::REDUX_ERR as usize
+                Self::REDUX_ERR
             }
             else{
-                Self::REDUX_STRING as usize 
+                Self::REDUX_STRING
             }
         }
         else if self.0 > 0{
-            (self.0) as usize 
+            ScriptTypeRedux(self.0) 
         }
         else{
-            0
+            ScriptTypeRedux(0)
         }
     }
 }
@@ -356,6 +408,7 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_FILE_SYSTEM=>write!(f,"FileSystemError"),
             Self::ERR_CHILD_PROCESS=>write!(f,"ChildProcessError"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
+            x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
             _=>write!(f,"ScriptValueType?")
         }
     }
@@ -395,7 +448,7 @@ impl ScriptValue{
     pub const TYPE_STRING: u64 = ScriptValueType::STRING.to_u64();
     pub const TYPE_OBJECT: u64 = ScriptValueType::OBJECT.to_u64();
     pub const TYPE_ARRAY: u64 = ScriptValueType::ARRAY.to_u64();
-    
+        
     pub const TYPE_INLINE_STRING_0: u64 = ScriptValueType::INLINE_STRING_0.to_u64();
     pub const TYPE_INLINE_STRING_1: u64 = ScriptValueType::INLINE_STRING_1.to_u64();
     pub const TYPE_INLINE_STRING_2: u64 = ScriptValueType::INLINE_STRING_2.to_u64();
@@ -403,7 +456,10 @@ impl ScriptValue{
     pub const TYPE_INLINE_STRING_4: u64 = ScriptValueType::INLINE_STRING_4.to_u64();
     pub const TYPE_INLINE_STRING_5: u64 = ScriptValueType::INLINE_STRING_5.to_u64();
     pub const TYPE_INLINE_STRING_END: u64 = ScriptValueType::INLINE_STRING_END.to_u64();
-
+    
+    pub const TYPE_HANDLE_FIRST: u64 = ScriptValueType::HANDLE_FIRST.to_u64();
+    pub const TYPE_HANDLE_LAST: u64 = ScriptValueType::HANDLE_LAST.to_u64();
+       
     pub const TYPE_ID: u64 = ScriptValueType::ID.to_u64();
     
     pub const ESCAPED_ID: u64 = 0x0000_4000_0000_0000;
@@ -458,7 +514,9 @@ impl ScriptValue{
     err_fn!(err_wrong_type_in_apply, ERR_WRONG_TYPE_IN_APPLY);
     err_fn!(err_file_system, ERR_FILE_SYSTEM);
     err_fn!(err_child_process, ERR_CHILD_PROCESS);
-            
+    
+    pub const fn raw(&self)->u64{self.0}
+    
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ScriptValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()}
     
     pub const fn as_err(&self)->Option<ValueError>{
@@ -643,7 +701,35 @@ impl ScriptValue{
         }
         None
     }
-    
+        
+        
+        
+    // Handle
+        
+        
+        
+        
+    pub const fn from_handle(ptr: ScriptHandle)->Self{
+        Self(ptr.index as u64 | (Self::TYPE_HANDLE_FIRST + ((ptr.ty.0 as u64)<< 40)))
+    }
+        
+    pub const fn is_handle(&self)->bool{
+        let ty = self.0 & Self::TYPE_MASK;
+        ty >= Self::TYPE_HANDLE_FIRST && ty <= Self::TYPE_HANDLE_LAST
+    }
+        
+    pub const fn as_handle(&self)->Option<ScriptHandle>{
+        if self.is_handle(){
+            return Some(ScriptHandle{
+                ty: ScriptHandleType((((self.0 & Self::TYPE_MASK) - Self::TYPE_HANDLE_FIRST) >> 40) as u8),
+                index: (self.0 & 0xffff_ffff) as u32
+            })
+        }
+        None
+    }
+        
+        
+        
     
     
     // bool
@@ -863,6 +949,9 @@ impl fmt::Display for ScriptValue {
         }
         if let Some(ptr) = self.as_array(){
             return write!(f, "[ScriptArray:{}]",ptr.index)
+        }
+        if let Some(ptr) = self.as_handle(){
+            return write!(f, "[ScriptHandle:{}]",ptr.index)
         }
         if let Some(error) = self.as_err(){
             return write!(f, "{}", error.ty)

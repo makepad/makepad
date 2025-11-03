@@ -199,7 +199,7 @@ pub fn define_run_module(vm:&mut ScriptVm){
     script_proto!(vm, run, ChildEvents);
     script_proto!(vm, run, ChildCmd);
     
-    vm.add_fn(run, id!(child), script_args_def!(cmd=NIL, events=NIL), move |vm, args|{
+    vm.add_method(run, id!(child), script_args_def!(cmd=NIL, events=NIL), move |vm, args|{
         
         let cmd = script_value!(vm, args.cmd);
         let events = script_value!(vm, args.events);

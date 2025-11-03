@@ -151,7 +151,7 @@ pub fn define_net_module(vm:&mut ScriptVm){
     script_proto!(vm, net, HttpMethod);
     script_proto!(vm, net, HttpEvents);
 
-    vm.add_fn(net, id!(http_request), script_args_def!(request=NIL, events=NIL), move |vm, args|{
+    vm.add_method(net, id!(http_request), script_args_def!(request=NIL, events=NIL), move |vm, args|{
         let request = script_value!(vm, args.request);
         let events = script_value!(vm, args.events);
         // we should check if options is actually of type HttpRequest
@@ -174,7 +174,7 @@ pub fn define_net_module(vm:&mut ScriptVm){
     
     script_proto!(vm, net, WebSocketEvents);
         
-    vm.add_fn(net, id!(web_socket), script_args_def!(request=NIL, events=NIL), move |vm, args|{
+    vm.add_method(net, id!(web_socket), script_args_def!(request=NIL, events=NIL), move |vm, args|{
         let request = script_value!(vm, args.request);
         let events = script_value!(vm, args.events);
         // we should check if options is actually of type HttpRequest

@@ -16,6 +16,20 @@ impl Cx{
         std::mem::swap(&mut self.script_vm, &mut script_vm);
         r
     }
+    /*
+    pub fn with_vm_gc<R,F:FnOnce(&mut ScriptVm)->R>(&mut self, f:F)->R{
+        let mut script_vm = None;
+        std::mem::swap(&mut self.script_vm, &mut script_vm);
+        let r = if let Some(script_vm) = &mut script_vm{
+            f(&mut script_vm.as_ref_host(self))
+        }
+        else{
+            panic!()
+        };
+        script_vm.
+        std::mem::swap(&mut self.script_vm, &mut script_vm);
+        r
+    }*/
     
     pub fn eval(&mut self, block: ScriptBlock)->ScriptValue{
         self.with_vm(|vm|{

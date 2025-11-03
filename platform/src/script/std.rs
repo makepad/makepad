@@ -18,6 +18,12 @@ pub struct CxScriptTimers{
     pub timers: Vec<CxScriptTimer>,
 }
 
+// this is a UI-thread pipe
+pub struct CxScriptChannel{
+    pub id: LiveId,
+    pub array: ScriptArrayRef,
+}
+
 impl Cx{
     pub(crate) fn handle_script_timer(&mut self, event:&TimerEvent){
         if let Some(i) = self.script_data.timers.timers.iter().position(|v| v.timer.is_timer(event).is_some()){
@@ -57,7 +63,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         x
     }
     
-    vm.add_fn(std, id!(random_seed), script_args_def!(), |vm, _args|{
+    vm.add_method(std, id!(random_seed), script_args_def!(), |vm, _args|{
         let start = SystemTime::now();
         let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap();
         let nanos = since_the_epoch.as_nanos();
@@ -66,7 +72,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         NIL
     });
     
-    vm.add_fn(std, id!(random), script_args_def!(), |vm, _args|{
+    vm.add_method(std, id!(random), script_args_def!(), |vm, _args|{
         let cx = vm.cx_mut();
         let seed = cx.script_data.random_seed;
         let seed = next_hash(&seed.to_ne_bytes());
@@ -74,7 +80,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         ((seed as f64) / u64::MAX as f64).into()
     });
     
-    vm.add_fn(std, id!(random_u32), script_args_def!(), |vm, _args|{
+    vm.add_method(std, id!(random_u32), script_args_def!(), |vm, _args|{
         let cx = vm.cx_mut();
         let seed = cx.script_data.random_seed;
         let seed = next_hash(&seed.to_ne_bytes());
@@ -82,7 +88,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         (seed as u32 as f64).into()
     });
     
-    vm.add_fn(std, id!(start_timeout), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
+    vm.add_method(std, id!(start_timeout), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
         let delay = script_value!(vm, args.delay);
         let callback = script_value!(vm, args.callback);
         
@@ -104,7 +110,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         id.escape()
     });
     
-    vm.add_fn(std, id!(start_interval), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
+    vm.add_method(std, id!(start_interval), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
         let delay = script_value!(vm, args.delay);
         let callback = script_value!(vm, args.callback);
                 
@@ -127,7 +133,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         id.escape()
     });
     
-    vm.add_fn(std, id!(stop_timer), script_args_def!(timer=NIL), |vm, args|{
+    vm.add_method(std, id!(stop_timer), script_args_def!(timer=NIL), |vm, args|{
         let timer = script_value!(vm, args.timer);
         if !timer.is_id(){ 
             return vm.thread.trap.err_invalid_arg_type()
