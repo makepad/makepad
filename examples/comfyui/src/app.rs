@@ -34,7 +34,7 @@ let code = script!{
     use mod.fs
     use mod.std
     use mod.run
-    
+                
     let comfy_ip = "10.0.0.123:8000"
     let openai_base = "http://127.0.0.1:8080";
     let Display = {mac:"", ip:"", width:0, height:0}.freeze_api()
@@ -43,9 +43,9 @@ let code = script!{
         Display{mac:"B0-f2-f6-60-f6-e1" ip:"10.0.0.132", width:1920, height:1080},
         Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.133", width:1080, height:1920}
     ] 
-    let current_display = displays[0];    
-              
-    fn openai_chat(messages, cb){
+                
+    fn openai_completion(messages){
+        let chan = std.channel()
         let req = net.HttpRequest{
             url: openai_base + "/v1/chat/completions"
             method: net.HttpMethod.POST
@@ -67,124 +67,152 @@ let code = script!{
                     }
                 }
             }
-            on_complete: || cb(total.trim())
+            on_complete: || chan.close(total.trim())
             on_error: |e| ~e
         }
+        chan
     }
-
-    fn download_image(image){
+            
+    fn comfy_image_download(image){
+        let chan = std.channel()
         let req = net.HttpRequest{
             url: "http://" + comfy_ip + "/view?"+
-            "filename=" + image.filename+
-            "&subfolder=" + image.subfolder+
-            "&type=" + image.type
+                 "filename=" + image.filename+
+                 "&subfolder=" + image.subfolder+
+                 "&type=" + image.type
             method: net.HttpMethod.GET
         }
         net.http_request(req) do net.HttpEvents{
-            on_response: |res|{
-                fs.write("/Users/admin/makepad/makepad/local/eink.png", res.body)
-                upload_image(current_display);
-            } 
+            on_response: |res| chan.send(res.body)
             on_error: |e| ~e
         }
+        chan
     }
-                
-    fn comfy_history(prompt_id, cb){
+                            
+    fn comfy_last_image(prompt_id){
+        let chan = std.channel()
         let req = net.HttpRequest{
             url: "http://"+comfy_ip+"/history/"+prompt_id
             method: net.HttpMethod.GET
         }
         net.http_request(req) do net.HttpEvents{
-            on_response: |res| cb(ok{res.body.parse_json()})
+            on_response: |res| {
+                let data = res.body.parse_json()
+                let image = ok{data[prompt_id].outputs["9"].images[0]}
+                chan.close(image)
+            }
             on_error: |e| ~e
         }
+        chan
     }
-    
+                
     fn connect_comfy_websocket(){
+        let chan = std.channel()
         net.web_socket("ws://"+comfy_ip+"/ws?clientId=1234") do net.WebSocketEvents{
             on_string:fn(str){
                 let str = str.parse_json()
-                ok{
-                    if str.data.nodes["31"].state == "running" std.println(str.data.nodes["31"].value+" ")
-                }
+                if ok{str.data.nodes["31"].state == "running"}
+                    chan.send(@progress str.data.nodes["31"].value)
                 if ok{str.data.nodes["9"].state == "finished"}{
-                    std.println("Done");
                     let prompt_id = str.data.nodes["9"].prompt_id;
-                    comfy_history(prompt_id) do |data|{
-                        for image in data[prompt_id].outputs["9"].images{
-                            download_image(image)
-                        }
-                    }
+                    chan.send(@done, prompt_id)
                 }
             }
         };
+        chan
     }
-            
-    fn comfy_post(prompt, cb){
+                        
+    fn comfy_render(prompt, display){
+        let chan = std.channel()
         std.print("Rendering AI: ");
         let flow = fs.read("./examples/comfyui/flux_dev.json").parse_json()
         flow["6"].inputs.text = prompt
         flow["31"].inputs.seed = std.random_u32()
-        flow["27"].inputs.width = current_display.width
-        flow["27"].inputs.height = current_display.height
+        flow["27"].inputs.width = display.width
+        flow["27"].inputs.height = display.height
         let req = net.HttpRequest{
-            url: "http://"+comfy_ip+"/prompt"
+            url: "http://" + comfy_ip + "/prompt"
             method: net.HttpMethod.POST
-            body:{prompt:flow, client_id:1234}.to_json()
+            body:{prompt:flow client_id:1234}.to_json()
         }
         net.http_request(req) do net.HttpEvents{
-            on_response: |res|{
-                cb(ok{res.body.parse_json().prompt_id})
-            }
-            on_error: |e| ~e
+            on_response: |res| chan.close(ok{res.body.parse_json().prompt_id})
         }
+        chan
     }
-            
-    fn upload_image(display){
-        std.println("Uploading to " + display.ip)
+                        
+    fn eink_upload_image(display, path){
+        let chan = std.channel()
         run.child(run.ChildCmd{
-            cmd:"node"
+            cmd: "node"
             args: [
                 "/usr/local/lib/node_modules/@weejewel/samsung-emdx/bin/index.mjs" "show-image"
                 "--mac" display.mac
                 "--host" display.ip
                 "--pin" "123456"
-                "--image" "/Users/admin/makepad/makepad/local/eink.png"
+                "--image" path
             ]
         }) do run.ChildEvents{
             on_stdout: |s| {}
             on_stderr: |s| ~s
+            on_term: || chan.close()
         }
+        chan
     }
-                        
-    
+                
     // main application flow
-                    
-    std.random_seed();
-    
-    let display_iter = 0;
-    let messages = [];
+                
+    std.random_seed()
+                
+    let web_socket = connect_comfy_websocket()
+                
+    let display_iter = 0
+    let messages = []
+                
     fn post(){ 
-        current_display = displays[display_iter % displays.len()]
-        display_iter += 1
+        // handle AI prompt messages
+                        
         let prompt = fs.read("/Users/admin/makepad/makepad/local/prompt.txt").parse_json();
         if messages.len() > 150 messages.clear()
         if prompt.clear || messages.len() == 0{
-            messages.clear();
-            messages.push({content:prompt.system.trim(),role:"user"});
-            messages.push({content:prompt.prompt.trim(),role:"user"});
+            messages.clear()
+            messages.push({content:prompt.system.trim() role:"user"})
+            messages.push({content:prompt.prompt.trim() role:"user"})
         }
         else{
-            messages.push({content:prompt.next.trim(),role:"user"});
+            messages.push({content:prompt.next.trim() role:"user"})
         }
-        openai_chat(messages) do |res|{
-            std.println("Sending prompt "+res);
-            messages.push({content:res,role:"assistant"});
-            comfy_post(res) do |e| std.print("Prompt ID"+e)
+                        
+        // rotate displays
+        let display = displays[display_iter % displays.len()]
+        display_iter += 1
+                        
+        let image_prompt = openai_completion(messages).recv()
+        
+        // put the answer back in the messages array
+        messages.push({content:image_prompt role:"assistant"})
+                                
+        std.println("Rendering prompt:"+image_prompt)
+        let prompt_id = comfy_render(image_prompt display).recv()
+        // this loop needs some more features like match or a for loop with array destructuring'
+        loop{
+            let d = web_socket.recv();
+            if d[0] == @progress std.println("Progress: "+d[1])
+            if d[0] == @done {
+                prompt_id = d[1];break
+            }
         }
+        std.println("Fetching last image from comfy");
+        let image = comfy_last_image(prompt_id).recv()
+        // fetch the image from comfy
+        let data = comfy_image_download(image).recv()
+        let path = "/Users/admin/makepad/makepad/local/eink.png"
+        fs.write(path data)
+        
+        std.println("Uploading to "+display.ip)
+        eink_upload_image(display path).wait()
+        std.println("DONE!")
     }
-    
-    connect_comfy_websocket();    
                 
     std.start_interval(60) do fn{
         post()
