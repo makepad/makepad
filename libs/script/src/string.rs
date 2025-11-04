@@ -97,11 +97,11 @@ impl ScriptStringData{
                     let array = heap.new_array();
                     heap.array_mut_mut_self_with(array, |heap, storage|{
                         if let ScriptArrayStorage::ScriptValue(_) = storage{}
-                        else{*storage = ScriptArrayStorage::ScriptValue(vec![]);}
+                        else{*storage = ScriptArrayStorage::ScriptValue(Default::default());}
                         if let ScriptArrayStorage::ScriptValue(vec) = storage{
                             vec.clear();
                             for s in this.split(pat){
-                                vec.push(heap.new_string_from_str(s));
+                                vec.push_back(heap.new_string_from_str(s));
                             }
                         }
                     });

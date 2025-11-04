@@ -1,3 +1,4 @@
+use crate::value::*;
 use std::any::TypeId;
 use std::fmt::Debug;
 use std::fmt;
@@ -32,16 +33,16 @@ impl ScriptHandleData{
     }
 }
 
-
 pub trait ScriptHandleGc{
-    fn gc(&mut self){}
+    fn gc(&mut self);
+    fn set_handle(&mut self, _handle:ScriptHandle);
     fn ref_cast_type_id(&self) -> TypeId where Self: 'static {TypeId::of::<Self>()}
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
-impl<T: 'static + Debug + ?Sized > ScriptHandleGc for T {
-    fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
-        self.fmt(f)
+impl Debug for dyn ScriptHandleGc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
+        self.debug_fmt(f)
     }
 }
 

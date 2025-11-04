@@ -393,6 +393,9 @@ impl ScriptHeap{
     }
     
     pub fn array_push(&mut self, array:ScriptArray, value:ScriptValue, trap:&ScriptTrap){
+        if let Some(obj) = value.as_object(){
+            self.set_reffed(obj);
+        }
         let array = &mut self.arrays[array.index as usize];
         if array.tag.is_frozen(){
             trap.err_frozen();
@@ -402,13 +405,38 @@ impl ScriptHeap{
         array.storage.push(value);
     }
     
+    pub fn array_pop_front_option(&mut self, array:ScriptArray)->Option<ScriptValue>{
+        let array = &mut self.arrays[array.index as usize];
+        if array.tag.is_frozen(){
+            return None
+        }
+        array.tag.set_dirty();
+        array.storage.pop_front()
+    }
+    
+    pub fn array_push_vec(&mut self, array:ScriptArray, object:ScriptObject, trap:&ScriptTrap){
+        let array = &mut self.arrays[array.index as usize];
+        if array.tag.is_frozen(){
+            trap.err_frozen();
+            return 
+        }
+        array.tag.set_dirty();
+        let object = &self.objects[object.index as usize];
+        for kv in &object.vec{
+            array.storage.push(kv.value);
+        }
+    }
+    
     pub fn array_push_unchecked(&mut self, array:ScriptArray, value:ScriptValue){
+        if let Some(obj) = value.as_object(){
+            self.set_reffed(obj);
+        }
         let array = &mut self.arrays[array.index as usize];
         array.tag.set_dirty();
         array.storage.push(value);
     }
     
-    pub fn array_ref(&self, array:ScriptArray)->&ScriptArrayStorage{
+    pub fn array_storage(&self, array:ScriptArray)->&ScriptArrayStorage{
         let array = &self.arrays[array.index as usize];
         &array.storage
     }
@@ -432,7 +460,7 @@ impl ScriptHeap{
     }
     
     pub fn array_mut_self_with<R,F:FnOnce(&mut Self, &ScriptArrayStorage)->R>(&mut self, array:ScriptArray, cb:F)->R{
-        let mut storage = ScriptArrayStorage::ScriptValue(vec![]);
+        let mut storage = ScriptArrayStorage::ScriptValue(Default::default());
         std::mem::swap(&mut self.arrays[array.index as usize].storage, &mut storage);
         let r = cb(self, &storage);
         std::mem::swap(&mut self.arrays[array.index as usize].storage, &mut storage);
@@ -440,7 +468,7 @@ impl ScriptHeap{
     }
     
     pub fn array_mut_mut_self_with<R,F:FnOnce(&mut Self, &mut ScriptArrayStorage)->R>(&mut self, array:ScriptArray, cb:F)->R{
-        let mut storage = ScriptArrayStorage::ScriptValue(vec![]);
+        let mut storage = ScriptArrayStorage::ScriptValue(Default::default());
         std::mem::swap(&mut self.arrays[array.index as usize].storage, &mut storage);
         let r = cb(self, &mut storage);
         std::mem::swap(&mut self.arrays[array.index as usize].storage, &mut storage);
@@ -457,16 +485,6 @@ impl ScriptHeap{
             return trap.err_array_bound()
         }
         array.storage.remove(index)
-    }
-    
-    pub fn array_push_vec(&mut self, array:ScriptArray, object:ScriptObject, trap:&ScriptTrap){
-        let array = &mut self.arrays[array.index as usize];
-        if array.tag.is_frozen(){
-            trap.err_frozen();
-            return
-        }
-        array.tag.set_dirty();
-        array.storage.push_vec(&self.objects[object.index as usize].vec);
     }
     
     pub fn array_pop(&mut self, array:ScriptArray, trap:&ScriptTrap)->ScriptValue{
@@ -528,8 +546,9 @@ impl ScriptHeap{
     // Handles
         
         
-    pub fn new_handle(&mut self, ty:ScriptHandleType, hgc:Box<dyn ScriptHandleGc>)->ScriptHandle{
+    pub fn new_handle(&mut self, ty:ScriptHandleType, mut hgc:Box<dyn ScriptHandleGc>)->ScriptHandle{
         if let Some(mut handle) = self.handles_free.pop(){
+            hgc.set_handle(handle);
             self.handles[handle.index as usize] = Some(ScriptHandleData{
                 tag: Default::default(),
                 handle:hgc
@@ -539,11 +558,13 @@ impl ScriptHeap{
         }
         else{
             let index = self.handles.len();
+            let handle = ScriptHandle{ty, index: index as _};
+            hgc.set_handle(handle);
             self.handles.push(Some(ScriptHandleData{
                 tag: Default::default(),
                 handle:hgc
             }));
-            ScriptHandle{ty, index: index as _}
+            handle
         }
     }
     
@@ -584,10 +605,6 @@ impl ScriptHeap{
         }
     }
                 
-    //pub fn object(&self, ptr:ScriptObject)->&ScriptObject{
-    //    &self.objects[ptr.index as usize]
-    //}
-    
         
     pub fn cast_to_f64(&self, v:ScriptValue, ip:ScriptIp)->f64{
         if let Some(v) = v.as_f64(){

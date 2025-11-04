@@ -5,6 +5,7 @@ use crate::script::run::*;
 #[derive(Default)]
 pub struct CxScriptData{
     pub random_seed: u64,
+    pub channels: CxScriptChannels,
     pub timers: CxScriptTimers,
     pub child_processes: Vec<CxScriptChildProcess>,
     pub web_sockets: Vec<CxScriptWebSocket>,

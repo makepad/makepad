@@ -711,6 +711,13 @@ impl ScriptThread{
                                 thread:self,
                                 code
                             }, args);
+                            
+                            // if we trapped on 'pause' we need to reexecute this function
+                            if self.is_paused{
+                                self.mes.push(me);
+                                return
+                            }
+                            
                             self.trap.in_rust = false;
                             self.trap.ip = ip;
                             self.push_stack_value(ret);

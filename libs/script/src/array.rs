@@ -8,7 +8,9 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::VecDeque;
 
+#[derive(Debug)]
 pub struct ScriptArrayRef{
     pub(crate) roots: Rc<RefCell<HashMap<ScriptArray, usize>>>,
     pub(crate) array: ScriptArray
@@ -118,7 +120,7 @@ impl ScriptArrayTag{
 
 #[derive(PartialEq)]
 pub enum ScriptArrayStorage{
-    ScriptValue(Vec<ScriptValue>),
+    ScriptValue(VecDeque<ScriptValue>),
     F32(Vec<f32>),
     U32(Vec<u32>),
     U16(Vec<u16>),
@@ -164,7 +166,7 @@ impl ScriptArrayStorage{
     }
     pub fn push(&mut self, value:ScriptValue){
         match self{
-            Self::ScriptValue(v)=>v.push(value),
+            Self::ScriptValue(v)=>v.push_back(value),
             Self::F32(v)=>v.push(value.as_f64().unwrap_or(0.0) as f32),
             Self::U32(v)=>v.push(value.as_f64().unwrap_or(0.0) as u32),
             Self::U16(v)=>v.push(value.as_f64().unwrap_or(0.0) as u16),
@@ -173,7 +175,7 @@ impl ScriptArrayStorage{
     }
     pub fn push_vec(&mut self, vec:&[ScriptVecValue]){
         match self{
-            Self::ScriptValue(v)=>for a in vec{v.push(a.value)},
+            Self::ScriptValue(v)=>for a in vec{v.push_back(a.value)},
             Self::F32(v)=>for a in vec{v.push(a.value.as_f64().unwrap_or(0.0) as f32)},
             Self::U32(v)=>for a in vec{v.push(a.value.as_f64().unwrap_or(0.0) as u32)},
             Self::U16(v)=>for a in vec{v.push(a.value.as_f64().unwrap_or(0.0) as u16)},
@@ -182,16 +184,26 @@ impl ScriptArrayStorage{
     }
     pub fn pop(&mut self)->Option<ScriptValue>{
         match self{
-            Self::ScriptValue(v)=>if let Some(v) = v.pop(){Some(v.into())}else{None},
+            Self::ScriptValue(v)=>if let Some(v) = v.pop_back(){Some(v.into())}else{None},
             Self::F32(v)=>if let Some(v) = v.pop(){Some(v.into())}else{None},
             Self::U32(v)=>if let Some(v) = v.pop(){Some(v.into())}else{None},
             Self::U16(v)=>if let Some(v) = v.pop(){Some(v.into())}else{None},
             Self::U8(v)=>if let Some(v) = v.pop(){Some(v.into())}else{None},
         }
     }
+        
+    pub fn pop_front(&mut self)->Option<ScriptValue>{
+        match self{
+            Self::ScriptValue(v)=>if let Some(v) = v.pop_front(){Some(v.into())}else{None},
+            Self::F32(v)=>if v.len()>0{Some(v.remove(0).into())}else{None},
+            Self::U32(v)=>if v.len()>0{Some(v.remove(0).into())}else{None},
+            Self::U16(v)=>if v.len()>0{Some(v.remove(0).into())}else{None},
+            Self::U8(v)=>if v.len()>0{Some(v.remove(0).into())}else{None},
+        }
+    }
     pub fn remove(&mut self, index:usize)->ScriptValue{
         match self{
-            Self::ScriptValue(v)=>v.remove(index),
+            Self::ScriptValue(v)=>if let Some(value) = v.remove(index){value}else{NIL}
             Self::F32(v)=>v.remove(index).into(),
             Self::U32(v)=>v.remove(index).into(),
             Self::U16(v)=>v.remove(index).into(),
@@ -243,7 +255,7 @@ impl Default for ScriptArrayData{
     fn default()->Self{
         Self{
             tag: ScriptArrayTag::default(),
-            storage: ScriptArrayStorage::ScriptValue(vec![])
+            storage: ScriptArrayStorage::ScriptValue(Default::default())
         }
     }
 }
@@ -254,7 +266,7 @@ impl ScriptArrayData{
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(to_string), &[], |vm, args|{
             if let Some(arr) = script_value!(vm, args.this).as_array(){
                 return vm.heap.new_string_with(|heap, s|{
-                    heap.array_ref(arr).to_string(heap, s);
+                    heap.array_storage(arr).to_string(heap, s);
                 }).into();
             }
             vm.thread.trap.err_unexpected()
@@ -280,8 +292,8 @@ impl ScriptArrayData{
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(parse_json), &[], |vm, args|{
             if let Some(arr) = script_value!(vm, args.this).as_array(){
                 return vm.heap.temp_string_with(|heap, temp|{
-                    let array_ref = heap.array_ref(arr);
-                    array_ref.to_string(heap, temp);
+                    let storage = heap.array_storage(arr);
+                    storage.to_string(heap, temp);
                     vm.thread.json_parser.read_json(temp, heap)
                 })
             }

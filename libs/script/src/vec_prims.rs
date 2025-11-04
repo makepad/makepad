@@ -27,7 +27,7 @@ impl<T> ScriptNew for  Vec<T> where T: ScriptApply + ScriptNew + 'static + Scrip
             return true
         }
         else if let Some(arr) = value.as_array(){
-            match heap.array_ref(arr){
+            match heap.array_storage(arr){
                 ScriptArrayStorage::ScriptValue(vec)=>{
                     for v in vec{
                         if !T::script_type_check(heap, *v){
@@ -80,23 +80,25 @@ impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + Scri
         let arr = vm.heap.new_array();
         let astore = vm.heap.array_mut(arr, &vm.thread.trap).unwrap();
         // we swap the vec off of the heap to be able to script_to_value the rest
-        let mut vec_store = ScriptArrayStorage::ScriptValue(vec![]);
+        let mut vec_store = ScriptArrayStorage::ScriptValue(Default::default());
         std::mem::swap(&mut vec_store, astore);
         if let ScriptArrayStorage::ScriptValue(vec) = &mut vec_store{
             vec.clear();
             for v in self{
-                vec.push(v.script_to_value(vm));
+                vec.push_back(v.script_to_value(vm));
             }
             let astore = vm.heap.array_mut(arr, &vm.thread.trap).unwrap();
             std::mem::swap(&mut vec_store, astore);
         }
         else{
-            let mut vec = Vec::new();
-            for v in self{
-                vec.push(v.script_to_value(vm));
+            let mut vec_store = ScriptArrayStorage::ScriptValue(Default::default());
+            if let ScriptArrayStorage::ScriptValue(vec) = &mut vec_store{
+                for v in self{
+                    vec.push_back(v.script_to_value(vm));
+                }
+                let astore = vm.heap.array_mut(arr, &vm.thread.trap).unwrap();
+                std::mem::swap(&mut vec_store, astore);
             }
-            let astore = vm.heap.array_mut(arr, &vm.thread.trap).unwrap();
-            *astore = ScriptArrayStorage::ScriptValue(vec);
         }
         arr.into()
     } 
@@ -117,7 +119,7 @@ impl ScriptNew for Vec<u8> {
             return true
         }
         else if let Some(arr) = value.as_array(){
-            match heap.array_ref(arr){
+            match heap.array_storage(arr){
                 ScriptArrayStorage::ScriptValue(vec)=>{
                     for v in vec{ 
                         if !v.is_number(){return false}
@@ -152,7 +154,7 @@ impl ScriptApply for Vec<u8> {
         }
         else if let Some(arr) = value.as_array(){
             self.clear();
-            match vm.heap.array_ref(arr){
+            match vm.heap.array_storage(arr){
                 ScriptArrayStorage::ScriptValue(vec)=> for v in vec{ self.push((*v).into()) }
                 ScriptArrayStorage::F32(vec)=> for v in vec{ self.push(*v as _) }
                 ScriptArrayStorage::U32(vec)=> for v in vec{ self.push(*v as _) }
@@ -211,7 +213,7 @@ impl ScriptApply for Vec<ScriptValue> {
         }
         else if let Some(arr) = value.as_array(){
             self.clear();
-            match vm.heap.array_ref(arr){
+            match vm.heap.array_storage(arr){
                 ScriptArrayStorage::ScriptValue(vec)=> for v in vec{ self.push((*v).into()) }
                 ScriptArrayStorage::F32(vec)=> for v in vec{ self.push((*v).into()) }
                 ScriptArrayStorage::U32(vec)=> for v in vec{ self.push((*v).into()) }
@@ -231,7 +233,7 @@ impl ScriptApply for Vec<ScriptValue> {
         let arr = vm.heap.new_array();
         let astore = vm.heap.array_mut(arr, &vm.thread.trap).unwrap();
         if let ScriptArrayStorage::ScriptValue(v) = astore{v.clear();v.extend(self)}
-        else{*astore = ScriptArrayStorage::ScriptValue(self.clone());}
+        else{*astore = ScriptArrayStorage::ScriptValue(self.iter().cloned().collect());}
         arr.into()
     } 
 }

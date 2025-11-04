@@ -9,7 +9,7 @@ use std::io::Write;
 pub fn define_fs_module(vm:&mut ScriptVm){
     let fs = vm.new_module(id!(fs));
     
-    for sym in [id!(read), id!(read_to_string)]{    
+    for sym in [id_lut!(read), id_lut!(read_to_string)]{    
         vm.add_method(fs, sym, script_args_def!(path=NIL), |vm, args|{
             let path =  script_value!(vm, args.path);
             if let Some(Some(mut file)) = vm.heap.string_with(path, |_heap,s|{
@@ -27,7 +27,7 @@ pub fn define_fs_module(vm:&mut ScriptVm){
             }
         })
     }
-    for sym in [id!(write), id!(write_string)]{    
+    for sym in [id_lut!(write), id_lut!(write_string)]{    
         vm.add_method(fs, sym, script_args_def!(path=NIL, data=NIL), |vm, args|{
             let path =  script_value!(vm, args.path);
             let data =  script_value!(vm, args.data);
@@ -43,7 +43,7 @@ pub fn define_fs_module(vm:&mut ScriptVm){
                     });
                 }
                 else if let Some(data) = data.as_array(){
-                    match vm.heap.array_ref(data){
+                    match vm.heap.array_storage(data){
                         ScriptArrayStorage::U8(data)=>{
                             if file.write_all(&data).is_err(){
                                 thread.trap.err_file_system();
