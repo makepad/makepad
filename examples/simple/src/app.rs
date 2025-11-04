@@ -13,10 +13,10 @@ live_design!{
                 body = <View> {
                     padding: 100,
                     <View> {
-                        width: 400,
-                        height: 400,
+                        width: 300,
+                        height: 500,
                         flow: Right {
-                            row_align: Bottom,
+                            row_align: Baseline,
                             wrap: true,
                         },
                         show_bg: true,
@@ -24,24 +24,26 @@ live_design!{
                             color: #888
                         }
                         <Button> {
-                            width: 200,
-                            height: 20,
+                            margin: 0.0,
+                            width: 100,
+                            height: 100,
+                            descender: 50,
                         }
                         <Button> {
+                            margin: 0.0,
                             width: 200,
-                            height: 10,
+                            height: 200,
                         }
                         <Button> {
-                            width: 400,
-                            height: 20,
+                            margin: 0.0,
+                            width: 200,
+                            height: 200,
                         }
                         <Button> {
-                            width: 200,
-                            height: 10,
-                        }
-                        <Button> {
-                            width: 200,
-                            height: 20,
+                            margin: 0.0,
+                            width: 100,
+                            height: 100,
+                            descender: 50,
                         }
                     }
                 }
