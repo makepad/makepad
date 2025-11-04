@@ -78,6 +78,6 @@ impl ScriptTrap{
     err_fwd!(err_wrong_type_in_apply);
     err_fwd!(err_file_system);
     err_fwd!(err_child_process);
-    err_fwd!(err_call_already_blocked_elsewhere);
+    err_fwd!(err_too_many_paused_calls);
 }
 
