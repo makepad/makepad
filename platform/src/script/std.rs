@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::fmt::Debug;
+use std::collections::VecDeque;
 
 #[derive(Clone)]
 pub struct CxScriptTimer{
@@ -25,8 +26,8 @@ pub struct CxScriptChannel{
     pub handle: ScriptHandle,
     pub array_ref: ScriptArrayRef,
     pub max_depth: usize,
-    pub send_pause: Option<ScriptThreadId>,
-    pub recv_pause: Option<ScriptThreadId>,
+    pub send_pause: VecDeque<ScriptThreadId>,
+    pub recv_pause: VecDeque<ScriptThreadId>,
 }
 
 #[derive(Default)]
@@ -64,12 +65,12 @@ impl Cx{
                 let array = channel.array_ref.as_array();
                 
                 let array_len = self.script_vm.as_ref().unwrap().heap.array_len(array);
-                if channel.recv_pause.is_some() && array_len > 0{
-                    next_thread = channel.recv_pause.take();
+                if channel.recv_pause.len()>0 && array_len > 0{
+                    next_thread = channel.recv_pause.pop_back();
                     break;
                 }
-                if channel.send_pause.is_some() && array_len<channel.max_depth{
-                    next_thread = channel.send_pause.take();
+                if channel.send_pause.len()>0 && array_len<channel.max_depth{
+                    next_thread = channel.send_pause.pop_back();
                     break;
                 }                
             }
@@ -128,10 +129,10 @@ pub fn extend_std_module(vm:&mut ScriptVm){
                     return ((array_len + 1) as f64).into()
                 }
                 else {
-                    if chan.send_pause.is_some(){
-                        return vm.thread.trap.err_call_already_blocked_elsewhere()
+                    if chan.send_pause.len() > 100{
+                        return vm.thread.trap.err_too_many_paused_calls()
                     }
-                    chan.send_pause = Some(vm.thread.pause());
+                    chan.send_pause.push_front(vm.thread.pause());
                     return NIL
                 }
             }
@@ -147,10 +148,10 @@ pub fn extend_std_module(vm:&mut ScriptVm){
                     return value
                 }
                 else{
-                    if chan.recv_pause.is_some(){
-                        return vm.thread.trap.err_call_already_blocked_elsewhere()
+                    if chan.recv_pause.len() > 100{
+                        return vm.thread.trap.err_too_many_paused_calls()
                     }
-                    chan.recv_pause = Some(vm.thread.pause());
+                    chan.recv_pause.push_front(vm.thread.pause());
                     return NIL
                 }
             }
@@ -185,8 +186,8 @@ pub fn extend_std_module(vm:&mut ScriptVm){
             CxScriptChannel{
                 max_depth: max_depth as usize,
                 handle,
-                recv_pause: None,
-                send_pause: None,
+                recv_pause: Default::default(),
+                send_pause: Default::default(),
                 array_ref,
             }
         );
