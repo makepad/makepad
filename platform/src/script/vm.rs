@@ -15,7 +15,20 @@ impl Cx{
             panic!()
         };
         std::mem::swap(&mut self.script_vm, &mut script_vm);
-        self.handle_script_channels();
+        self.handle_script_tasks();
+        r
+    }
+    
+    pub fn with_vm<R,F:FnOnce(&mut ScriptVm)->R>(&mut self, f:F)->R{
+        let mut script_vm = None;
+        std::mem::swap(&mut self.script_vm, &mut script_vm);
+        let r = if let Some(script_vm) = &mut script_vm{
+            f(&mut script_vm.as_ref_host(self))
+        }
+        else{
+            panic!()
+        };
+        std::mem::swap(&mut self.script_vm, &mut script_vm);
         r
     }
     

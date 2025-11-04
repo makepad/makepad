@@ -45,7 +45,7 @@ let code = script!{
     ] 
                 
     fn openai_completion(messages){
-        let chan = std.channel()
+        let task = std.task()
         let req = net.HttpRequest{
             url: openai_base + "/v1/chat/completions"
             method: net.HttpMethod.POST
@@ -67,14 +67,14 @@ let code = script!{
                     }
                 }
             }
-            on_complete: || chan.close(total.trim())
+            on_complete: || task.end(total.trim())
             on_error: |e| ~e
         }
-        chan
+        task
     }
             
     fn comfy_image_download(image){
-        let chan = std.channel()
+        let task = std.task()
         let req = net.HttpRequest{
             url: "http://" + comfy_ip + "/view?"+
                  "filename=" + image.filename+
@@ -83,14 +83,14 @@ let code = script!{
             method: net.HttpMethod.GET
         }
         net.http_request(req) do net.HttpEvents{
-            on_response: |res| chan.send(res.body)
+            on_response: |res| task.end(res.body)
             on_error: |e| ~e
         }
-        chan
+        task
     }
                             
     fn comfy_last_image(prompt_id){
-        let chan = std.channel()
+        let task = std.task()
         let req = net.HttpRequest{
             url: "http://"+comfy_ip+"/history/"+prompt_id
             method: net.HttpMethod.GET
@@ -99,31 +99,31 @@ let code = script!{
             on_response: |res| {
                 let data = res.body.parse_json()
                 let image = ok{data[prompt_id].outputs["9"].images[0]}
-                chan.close(image)
+                task.end(image)
             }
             on_error: |e| ~e
         }
-        chan
+        task
     }
                 
     fn connect_comfy_websocket(){
-        let chan = std.channel()
+        let task = std.task()
         net.web_socket("ws://"+comfy_ip+"/ws?clientId=1234") do net.WebSocketEvents{
             on_string:fn(str){
                 let str = str.parse_json()
                 if ok{str.data.nodes["31"].state == "running"}
-                    chan.send(@progress str.data.nodes["31"].value)
+                    task.emit(@progress str.data.nodes["31"].value)
                 if ok{str.data.nodes["9"].state == "finished"}{
                     let prompt_id = str.data.nodes["9"].prompt_id;
-                    chan.send(@done, prompt_id)
+                    task.emit(@done, prompt_id)
                 }
             }
         };
-        chan
+        task
     }
                         
     fn comfy_render(prompt, display){
-        let chan = std.channel()
+        let task = std.task()
         std.print("Rendering AI: ");
         let flow = fs.read("./examples/comfyui/flux_dev.json").parse_json()
         flow["6"].inputs.text = prompt
@@ -136,13 +136,13 @@ let code = script!{
             body:{prompt:flow client_id:1234}.to_json()
         }
         net.http_request(req) do net.HttpEvents{
-            on_response: |res| chan.close(ok{res.body.parse_json().prompt_id})
+            on_response: |res| task.end(ok{res.body.parse_json().prompt_id})
         }
-        chan
+        task
     }
                         
     fn eink_upload_image(display, path){
-        let chan = std.channel()
+        let task = std.task()
         run.child(run.ChildCmd{
             cmd: "node"
             args: [
@@ -155,9 +155,9 @@ let code = script!{
         }) do run.ChildEvents{
             on_stdout: |s| {}
             on_stderr: |s| ~s
-            on_term: || chan.close()
+            on_term: || task.end()
         }
-        chan
+        task
     }
                 
     // main application flow
@@ -180,40 +180,40 @@ let code = script!{
             messages.push({content:prompt.prompt.trim() role:"user"})
         }
         else{
-            messages.push({content:prompt.next.trim() role:"user"})
+            messages.push({content:prompt.prompt.trim() role:"user"})
         }
                         
         // rotate displays
         let display = displays[display_iter % displays.len()]
         display_iter += 1
                         
-        let image_prompt = openai_completion(messages).recv()
+        let image_prompt = openai_completion(messages).last()
         
         // put the answer back in the messages array
         messages.push({content:image_prompt role:"assistant"})
                 
         // flush the websocket queue
         web_socket.queue.clear()
-                
+        
         std.println("Rendering prompt:"+image_prompt)
-        let prompt_id = comfy_render(image_prompt display).recv()
+        let prompt_id = comfy_render(image_prompt display).last()
         // this loop needs some more features like match or a for loop with array destructuring'
         loop{
-            let d = web_socket.recv();
+            let d = web_socket.next();
             if d[0] == @progress std.println("Progress: "+d[1])
             if d[0] == @done {
                 prompt_id = d[1];break
             }
         }
         std.println("Fetching last image from comfy");
-        let image = comfy_last_image(prompt_id).recv()
+        let image = comfy_last_image(prompt_id).last()
         // fetch the image from comfy
-        let data = comfy_image_download(image).recv()
+        let data = comfy_image_download(image).last()
         let path = "/Users/admin/makepad/makepad/local/eink.png"
         fs.write(path data)
         
         std.println("Uploading to "+display.ip)
-        eink_upload_image(display path).wait()
+        eink_upload_image(display path).last()
         std.println("DONE!")
     }
                 

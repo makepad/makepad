@@ -16,6 +16,12 @@ pub struct ScriptArrayRef{
     pub(crate) array: ScriptArray
 }
 
+impl From<ScriptArrayRef> for ScriptValue{
+    fn from(v:ScriptArrayRef) -> Self{
+        ScriptValue::from_array(v.as_array())
+    }
+}
+
 impl Clone for ScriptArrayRef{
     fn clone(&self)->Self{
         let mut roots = self.roots.borrow_mut();
