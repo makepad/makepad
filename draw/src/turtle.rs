@@ -485,6 +485,7 @@ pub enum RowAlign {
     #[pick]
     Top,
     Bottom,
+    Baseline,
 }
 
 /// Specifies the padding around a walk's inner rectangle.
@@ -1576,7 +1577,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                     margin: turtle.margin(),
                     width: Size::Fixed(turtle.width()),
                     height: Size::Fixed(turtle.height()),
-                    descender: 0.0,
+                    descender: turtle.walk().descender,
                 },
                 turtle_align_start
             )
@@ -1943,12 +1944,18 @@ impl<'a,'b> Cx2d<'a,'b> {
         } else {
             self.finished_rows[self.turtle().finished_rows_start]
         };
-        let row_height = self.turtle().row_height();
-        for finished_walk_index in finished_walks_start..self.finished_walks.len() {
-            let finished_walk_height = self.finished_walks[finished_walk_index].outer_size.y;
+        let finished_walks_end = self.finished_walks.len();
+        let max_height = self.turtle().row_height();
+        for finished_walk_index in finished_walks_start..finished_walks_end {
+            let height = self.finished_walks[finished_walk_index].outer_size.y;
+            let descender = self.finished_walks[finished_walk_index].descender;
             let shift = match row_align {
                 RowAlign::Top => 0.0,
-                RowAlign::Bottom => row_height - finished_walk_height,
+                RowAlign::Bottom => max_height - height,
+                RowAlign::Baseline => {
+                    self.turtle_mut().allocate_height(max_height + descender);
+                    max_height - height + descender
+                },
             };
             let start = self.finished_walks[finished_walk_index].align_list_start;
             let end = if finished_walk_index + 1 < self.finished_walks.len() {
