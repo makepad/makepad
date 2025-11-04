@@ -189,11 +189,11 @@ impl ChildProcess {
                         }
                     }
                     else{
-                        let _ = out_send.send(ChildOut::Term);
-                        let _ = in_send.send(ChildIn::Term);
                         break;
                     }
                 }
+                let _ = out_send.send(ChildOut::Term);
+                let _ = in_send.send(ChildIn::Term);
             })
         };
                         

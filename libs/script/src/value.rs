@@ -252,6 +252,7 @@ impl ScriptValueType{
     pub const ARRAY: Self = Self(6);
     pub const OPCODE: Self = Self(7);
     pub const STRING: Self = Self(8);
+    pub const ERROR: Self = Self(9);
         
     pub const REDUX_MARKER: Self = Self(10);
     
@@ -450,7 +451,7 @@ impl ScriptValue{
     pub const TYPE_STRING: u64 = ScriptValueType::STRING.to_u64();
     pub const TYPE_OBJECT: u64 = ScriptValueType::OBJECT.to_u64();
     pub const TYPE_ARRAY: u64 = ScriptValueType::ARRAY.to_u64();
-        
+    
     pub const TYPE_INLINE_STRING_0: u64 = ScriptValueType::INLINE_STRING_0.to_u64();
     pub const TYPE_INLINE_STRING_1: u64 = ScriptValueType::INLINE_STRING_1.to_u64();
     pub const TYPE_INLINE_STRING_2: u64 = ScriptValueType::INLINE_STRING_2.to_u64();
