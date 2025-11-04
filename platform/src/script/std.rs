@@ -26,6 +26,7 @@ pub struct CxScriptChannel{
     pub handle: ScriptHandle,
     pub array_ref: ScriptArrayRef,
     pub max_depth: usize,
+    pub closed: bool,
     pub send_pause: VecDeque<ScriptThreadId>,
     pub recv_pause: VecDeque<ScriptThreadId>,
 }
@@ -112,33 +113,38 @@ pub fn extend_std_module(vm:&mut ScriptVm){
     
     let channel_type = vm.new_handle_type(id_lut!(channel));
     
-    vm.add_handle_method(channel_type, id_lut!(send), script_args_def!(), |vm, args|{
-        if let Some(handle) = script_value!(vm, args.this).as_handle(){
-            let cx = vm.host.cx_mut();
-            if let Some(chan) = cx.script_data.channels.channels.borrow_mut().iter_mut().find(|v| v.handle == handle){
-                let array_len = vm.heap.array_len(chan.array_ref.as_array());
-                
-                if chan.max_depth == 0 || array_len < chan.max_depth{
-                    if vm.heap.vec_len(args.into()) == 1{
-                        let value = vm.heap.vec_value(args, 0, &vm.thread.trap);
-                        vm.heap.array_push(chan.array_ref.as_array(), value, &vm.thread.trap);
+    for fn_id in [id_lut!(send), id_lut!(close)]{
+        vm.add_handle_method(channel_type, fn_id, script_args_def!(), move |vm, args|{
+            if let Some(handle) = script_value!(vm, args.this).as_handle(){
+                let cx = vm.host.cx_mut();
+                if let Some(chan) = cx.script_data.channels.channels.borrow_mut().iter_mut().find(|v| v.handle == handle){
+                    let array_len = vm.heap.array_len(chan.array_ref.as_array());
+                    
+                    if chan.max_depth == 0 || array_len < chan.max_depth{
+                        if vm.heap.vec_len(args.into()) == 1{
+                            let value = vm.heap.vec_value(args, 0, &vm.thread.trap);
+                            vm.heap.array_push(chan.array_ref.as_array(), value, &vm.thread.trap);
+                        }
+                        else{
+                            vm.heap.array_push(chan.array_ref.as_array(), args.into(), &vm.thread.trap);
+                        }
+                        if fn_id == id!(close){
+                            chan.closed = true;
+                        }
+                        return ((array_len + 1) as f64).into()
                     }
-                    else{
-                        vm.heap.array_push(chan.array_ref.as_array(), args.into(), &vm.thread.trap);
+                    else {
+                        if chan.send_pause.len() > 100{
+                            return vm.thread.trap.err_too_many_paused_calls()
+                        }
+                        chan.send_pause.push_front(vm.thread.pause());
+                        return NIL
                     }
-                    return ((array_len + 1) as f64).into()
-                }
-                else {
-                    if chan.send_pause.len() > 100{
-                        return vm.thread.trap.err_too_many_paused_calls()
-                    }
-                    chan.send_pause.push_front(vm.thread.pause());
-                    return NIL
                 }
             }
-        }
-        NIL
-    });
+            NIL
+        });
+    }
     vm.add_handle_method(channel_type, id_lut!(recv), script_args_def!(), |vm, args|{
         // lets find the channel
         if let Some(handle) = script_value!(vm, args.this).as_handle(){
@@ -146,6 +152,9 @@ pub fn extend_std_module(vm:&mut ScriptVm){
             if let Some(chan) = cx.script_data.channels.channels.borrow_mut().iter_mut().find(|v| v.handle == handle){
                 if let Some(value) = vm.heap.array_pop_front_option(chan.array_ref.as_array()){
                     return value
+                }
+                else if chan.closed{
+                    return NIL
                 }
                 else{
                     if chan.recv_pause.len() > 100{
@@ -158,6 +167,27 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         }
         vm.thread.trap.err_unexpected()
     });
+    vm.add_handle_method(channel_type, id_lut!(wait), script_args_def!(), |vm, args|{
+        // lets find the channel
+        if let Some(handle) = script_value!(vm, args.this).as_handle(){
+            let cx = vm.host.cx_mut();
+            if let Some(chan) = cx.script_data.channels.channels.borrow_mut().iter_mut().find(|v| v.handle == handle){
+                vm.heap.array_clear(chan.array_ref.as_array(), &vm.thread.trap);
+                if chan.closed{
+                    return NIL
+                }
+                else{
+                    if chan.recv_pause.len() > 100{
+                        return vm.thread.trap.err_too_many_paused_calls()
+                    }
+                    chan.recv_pause.push_front(vm.thread.pause());
+                    return NIL
+                }
+            }
+        }
+        vm.thread.trap.err_unexpected()
+    });
+    
     vm.set_handle_getter(channel_type, |vm, this, prop|{
         // lets find the channel
         if prop == id!(array){
@@ -186,6 +216,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
             CxScriptChannel{
                 max_depth: max_depth as usize,
                 handle,
+                closed: false,
                 recv_pause: Default::default(),
                 send_pause: Default::default(),
                 array_ref,
