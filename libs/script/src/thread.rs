@@ -65,10 +65,16 @@ impl Into<ScriptValue> for ScriptMe{
     }
 }
 
-pub struct ScriptThreadId(pub usize);
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ScriptThreadId(pub(crate) u32);
+
+impl ScriptThreadId{
+    pub fn to_index(&self)->usize{self.0 as usize}
+}
 
 #[allow(unused)]
 pub struct ScriptThread{
+    pub(crate) is_paused: bool,
     pub(crate) stack_limit: usize,
     pub(crate) tries: Vec<TryFrame>,
     pub(crate) loops: Vec<LoopFrame>,
@@ -78,13 +84,16 @@ pub struct ScriptThread{
     pub(crate) mes: Vec<ScriptMe>,
     pub trap: ScriptTrap,
     pub(crate) last_err: ScriptValue,
-    pub(crate) json_parser: JsonParserThread
+    pub(crate) json_parser: JsonParserThread,
+    pub(crate) thread_id: ScriptThreadId,
 }
 
 impl ScriptThread{
     
-    pub fn new()->Self{
+    pub fn new(thread_id:ScriptThreadId)->Self{
         Self{
+            thread_id,
+            is_paused: false,
             last_err: NIL,
             scopes: vec![],
             tries: vec![],
@@ -106,6 +115,12 @@ impl ScriptThread{
             scope: self.scopes.len(),
             mes: self.mes.len()
         }
+    }
+    
+    pub fn pause(&mut self)->ScriptThreadId{
+        self.trap.on.set(Some(ScriptTrapOn::Pause));
+        self.is_paused = true;
+        self.thread_id
     }
     
     pub fn truncate_bases(&mut self, bases:StackBases, heap:&mut ScriptHeap){
@@ -314,6 +329,9 @@ impl ScriptThread{
                                     }
                                 }
                             }
+                        }
+                        ScriptTrapOn::Pause=>{
+                            return NIL
                         }
                         ScriptTrapOn::Return(value)=>{
                             return value

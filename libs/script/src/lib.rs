@@ -34,7 +34,7 @@ pub use thread::*;
 pub use heap::*;
 pub use object::*;
 pub use array::*;
-
+pub use handle::*;
 
 pub fn test(){
     let mut vmbase = ScriptVmBase::new();
@@ -107,6 +107,9 @@ pub fn test(){
         // array operations
         let x = 1+2 assert(x == 3)
         let iv = [1 2 3 4] let ov = []
+        
+        ~iv
+        
         for v in iv ov.push(v) assert(iv == ov)
         assert(ov.pop() == 4) assert(iv != ov)
         assert(ov[2] == 3);

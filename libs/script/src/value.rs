@@ -296,7 +296,8 @@ impl ScriptValueType{
     pub const ERR_WRONG_TYPE_IN_APPLY: Self = Self(46);
     pub const ERR_FILE_SYSTEM: Self = Self(47);
     pub const ERR_CHILD_PROCESS: Self = Self(48);
-    pub const ERR_LAST: Self = Self(48);
+    pub const ERR_CALL_ALREADY_BLOCKED_ELSEWHERE: Self = Self(49);
+    pub const ERR_LAST: Self = Self(49);
     
     pub const HANDLE_FIRST: Self = Self(0x40);
     pub const HANDLE_LAST: Self = Self(0x7F);
@@ -407,6 +408,7 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_USER=>write!(f,"UserGenerated"),
             Self::ERR_FILE_SYSTEM=>write!(f,"FileSystemError"),
             Self::ERR_CHILD_PROCESS=>write!(f,"ChildProcessError"),
+            Self::ERR_CALL_ALREADY_BLOCKED_ELSEWHERE=>write!(f,"CallAlreadyBlockedElsewhere"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
             _=>write!(f,"ScriptValueType?")
@@ -514,6 +516,7 @@ impl ScriptValue{
     err_fn!(err_wrong_type_in_apply, ERR_WRONG_TYPE_IN_APPLY);
     err_fn!(err_file_system, ERR_FILE_SYSTEM);
     err_fn!(err_child_process, ERR_CHILD_PROCESS);
+    err_fn!(err_call_already_blocked_elsewhere, ERR_CALL_ALREADY_BLOCKED_ELSEWHERE);
     
     pub const fn raw(&self)->u64{self.0}
     

@@ -30,101 +30,6 @@ enum ChildIn {
     Term,
 }
 
-impl ChildProcess {
-        
-    pub fn spawn(mut command:Command) -> Result<ChildProcess, std::io::Error> {
-        
-        let mut child = command.spawn()?;
-        
-        let mut stdin = child.stdin.take().expect("stdin cannot be taken!");
-        let stdout = child.stdout.take().expect("stdout cannot be taken!");
-        let stderr = child.stderr.take().expect("stderr cannot be taken!");
-        
-        let out_recv:ToUIReceiver<ChildOut> = Default::default();
-        let out_send = out_recv.sender();
-        
-        let mut in_send:FromUISender<ChildIn> = Default::default();
-        let in_recv = in_send.receiver();
-        
-        let _stdout_thread = {
-            let out_send = out_send.clone();
-            let in_send = in_send.sender();
-            thread::spawn(move || {
-                let mut reader = BufReader::new(stdout);
-                loop{
-                    let mut line = String::new();
-                    if let Ok(len) = reader.read_line(&mut line){
-                        if len == 0{
-                            break
-                        }
-                        if out_send.send(ChildOut::StdOut(line)).is_err(){
-                            break;
-                        }
-                    }
-                    else{
-                        let _ = out_send.send(ChildOut::Term);
-                        let _ = in_send.send(ChildIn::Term);
-                        break;
-                    }
-                }
-            })
-        };
-                
-        let _stderr_thread = {
-            let out_send = out_send.clone();
-            thread::spawn(move || {
-                let mut reader = BufReader::new(stderr);
-                loop{
-                    let mut line = String::new();
-                    if let Ok(len) = reader.read_line(&mut line){
-                        if len == 0{
-                            break
-                        }
-                        if out_send.send(ChildOut::StdErr(line)).is_err(){
-                            break;
-                        }
-                    }
-                    else{
-                        break;
-                    }
-                }
-            });
-        };
-        
-        let _stdin_thread = {
-            thread::spawn(move || {
-                while let Ok(line) = in_recv.recv() {
-                    match line {
-                        ChildIn::Send(line) => {
-                            if let Err(_) = stdin.write_all(line.as_bytes()){
-                                //println!("Stdin send error {}",e);
-                                                                
-                            }
-                            let _ = stdin.flush();
-                        }
-                        ChildIn::Term=>{
-                            break;
-                        }
-                    }
-                }
-            });
-        };
-        
-        
-        Ok(ChildProcess {
-            in_send,
-            out_recv,
-            child,
-        })
-    }
-    
-    #[allow(unused)]
-    pub fn kill(mut self) {
-        let _ = self.in_send.send(ChildIn::Term);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 pub struct CxScriptChildProcess{
     #[allow(unused)]
@@ -158,7 +63,7 @@ impl Cx{
                 match value{
                     ChildOut::StdOut(s)=>{
                         if let Some(handler) = self.script_data.child_processes[i].events.on_stdout.as_obj(){
-                            self.with_vm(|vm|{
+                            self.with_vm_and_async(|vm|{
                                 let str = vm.heap.new_string_from_str(&s);
                                 vm.call(handler.into(), &[str.into()]);
                             })
@@ -166,7 +71,7 @@ impl Cx{
                     }
                     ChildOut::StdErr(s)=>{
                         if let Some(handler) = self.script_data.child_processes[i].events.on_stderr.as_obj(){
-                            self.with_vm(|vm|{
+                            self.with_vm_and_async(|vm|{
                                 let str = vm.heap.new_string_from_str(&s);
                                 vm.call(handler.into(), &[str.into()]);
                             })
@@ -174,7 +79,7 @@ impl Cx{
                     }
                     ChildOut::Term=>{
                         if let Some(handler) = self.script_data.child_processes[i].events.on_term.as_obj(){
-                            self.with_vm(|vm|{
+                            self.with_vm_and_async(|vm|{
                                 vm.call(handler.into(), &[]);
                             })
                         }
@@ -199,7 +104,7 @@ pub fn define_run_module(vm:&mut ScriptVm){
     script_proto!(vm, run, ChildEvents);
     script_proto!(vm, run, ChildCmd);
     
-    vm.add_method(run, id!(child), script_args_def!(cmd=NIL, events=NIL), move |vm, args|{
+    vm.add_method(run, id_lut!(child), script_args_def!(cmd=NIL, events=NIL), move |vm, args|{
         
         let cmd = script_value!(vm, args.cmd);
         let events = script_value!(vm, args.events);
@@ -251,3 +156,99 @@ pub fn define_run_module(vm:&mut ScriptVm){
     });
     
 }   
+
+impl ChildProcess {
+            
+    pub fn spawn(mut command:Command) -> Result<ChildProcess, std::io::Error> {
+                
+        let mut child = command.spawn()?;
+                
+        let mut stdin = child.stdin.take().expect("stdin cannot be taken!");
+        let stdout = child.stdout.take().expect("stdout cannot be taken!");
+        let stderr = child.stderr.take().expect("stderr cannot be taken!");
+                
+        let out_recv:ToUIReceiver<ChildOut> = Default::default();
+        let out_send = out_recv.sender();
+                
+        let mut in_send:FromUISender<ChildIn> = Default::default();
+        let in_recv = in_send.receiver();
+                
+        let _stdout_thread = {
+            let out_send = out_send.clone();
+            let in_send = in_send.sender();
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                loop{
+                    let mut line = String::new();
+                    if let Ok(len) = reader.read_line(&mut line){
+                        if len == 0{
+                            break
+                        }
+                        if out_send.send(ChildOut::StdOut(line)).is_err(){
+                            break;
+                        }
+                    }
+                    else{
+                        let _ = out_send.send(ChildOut::Term);
+                        let _ = in_send.send(ChildIn::Term);
+                        break;
+                    }
+                }
+            })
+        };
+                        
+        let _stderr_thread = {
+            let out_send = out_send.clone();
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                loop{
+                    let mut line = String::new();
+                    if let Ok(len) = reader.read_line(&mut line){
+                        if len == 0{
+                            break
+                        }
+                        if out_send.send(ChildOut::StdErr(line)).is_err(){
+                            break;
+                        }
+                    }
+                    else{
+                        break;
+                    }
+                }
+            });
+        };
+                
+        let _stdin_thread = {
+            thread::spawn(move || {
+                while let Ok(line) = in_recv.recv() {
+                    match line {
+                        ChildIn::Send(line) => {
+                            if let Err(_) = stdin.write_all(line.as_bytes()){
+                                //println!("Stdin send error {}",e);
+                                                                                                
+                            }
+                            let _ = stdin.flush();
+                        }
+                        ChildIn::Term=>{
+                            break;
+                        }
+                    }
+                }
+            });
+        };
+                
+                
+        Ok(ChildProcess {
+            in_send,
+            out_recv,
+            child,
+        })
+    }
+        
+    #[allow(unused)]
+    pub fn kill(mut self) {
+        let _ = self.in_send.send(ChildIn::Term);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}

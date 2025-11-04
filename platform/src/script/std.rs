@@ -1,9 +1,11 @@
-
 use crate::*;
 use makepad_script::*;
 use makepad_script::id;
 use crate::script::vm::*;
+use std::rc::Rc;
+use std::cell::RefCell;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::fmt::Debug;
 
 #[derive(Clone)]
 pub struct CxScriptTimer{
@@ -18,17 +20,72 @@ pub struct CxScriptTimers{
     pub timers: Vec<CxScriptTimer>,
 }
 
-// this is a UI-thread pipe
+#[derive(Clone, Debug)]
 pub struct CxScriptChannel{
-    pub array: ScriptArrayRef,
+    pub handle: ScriptHandle,
+    pub array_ref: ScriptArrayRef,
+    pub max_depth: usize,
+    pub send_pause: Option<ScriptThreadId>,
+    pub recv_pause: Option<ScriptThreadId>,
+}
+
+#[derive(Default)]
+pub struct CxScriptChannels{
+    pub channels: Rc<RefCell<Vec<CxScriptChannel>>>,
 }
 
 // this is a UI-thread pipe
+#[derive(Debug)]
 pub struct CxScriptChannelGc{
-    // point back to our script channel set
+    pub channels: Rc<RefCell<Vec<CxScriptChannel>>>,
+    pub handle: ScriptHandle,
+}
+
+impl ScriptHandleGc for CxScriptChannelGc{
+    fn gc(&mut self){
+        self.channels.borrow_mut().retain(|v| v.handle != self.handle)
+    }
+    fn set_handle(&mut self, handle:ScriptHandle){
+        self.handle = handle
+    }
+    fn debug_fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result{
+        self.fmt(f)
+    }
 }
 
 impl Cx{
+    pub(crate) fn handle_script_channels(&mut self){
+        loop{
+            let mut next_thread = None;
+            let mut channels = self.script_data.channels.channels.borrow_mut();
+            for channel in channels.iter_mut(){
+                // alright lets check each channels array len and if they are waiting
+                // ifso we call that thread
+                let array = channel.array_ref.as_array();
+                
+                let array_len = self.script_vm.as_ref().unwrap().heap.array_len(array);
+                if channel.recv_pause.is_some() && array_len > 0{
+                    next_thread = channel.recv_pause.take();
+                    break;
+                }
+                if channel.send_pause.is_some() && array_len<channel.max_depth{
+                    next_thread = channel.send_pause.take();
+                    break;
+                }                
+            }
+            drop(channels);
+            // alright execute this thread
+            if let Some(next_thread) = next_thread.take(){
+                self.with_vm_thread(next_thread, |vm|{
+                    vm.resume();
+                });
+            }
+            else{
+                break
+            }
+        }
+    }
+    
     pub(crate) fn handle_script_timer(&mut self, event:&TimerEvent){
         if let Some(i) = self.script_data.timers.timers.iter().position(|v| v.timer.is_timer(event).is_some()){
             let timer = &self.script_data.timers.timers[i];
@@ -42,7 +99,7 @@ impl Cx{
             else{
                 NIL
             };
-            self.with_vm(|vm|{
+            self.with_vm_and_async(|vm|{
                 vm.call(callback.into(), &[time]);
             })
         }
@@ -52,18 +109,92 @@ impl Cx{
 pub fn extend_std_module(vm:&mut ScriptVm){
     let std = vm.module(id!(std));
     
-    let channel = vm.new_handle_type(id!(channel));
-    vm.add_handle_method(channel, id!(send), script_args_def!(), |_vm, _args|{
+    let channel_type = vm.new_handle_type(id_lut!(channel));
+    
+    vm.add_handle_method(channel_type, id_lut!(send), script_args_def!(), |vm, args|{
+        if let Some(handle) = script_value!(vm, args.this).as_handle(){
+            let cx = vm.host.cx_mut();
+            if let Some(chan) = cx.script_data.channels.channels.borrow_mut().iter_mut().find(|v| v.handle == handle){
+                let array_len = vm.heap.array_len(chan.array_ref.as_array());
+                
+                if chan.max_depth == 0 || array_len < chan.max_depth{
+                    if vm.heap.vec_len(args.into()) == 1{
+                        let value = vm.heap.vec_value(args, 0, &vm.thread.trap);
+                        vm.heap.array_push(chan.array_ref.as_array(), value, &vm.thread.trap);
+                    }
+                    else{
+                        vm.heap.array_push(chan.array_ref.as_array(), args.into(), &vm.thread.trap);
+                    }
+                    return ((array_len + 1) as f64).into()
+                }
+                else {
+                    if chan.send_pause.is_some(){
+                        return vm.thread.trap.err_call_already_blocked_elsewhere()
+                    }
+                    chan.send_pause = Some(vm.thread.pause());
+                    return NIL
+                }
+            }
+        }
         NIL
     });
-    vm.add_handle_method(channel, id!(recv), script_args_def!(), |_vm, _args|{
-        NIL
+    vm.add_handle_method(channel_type, id_lut!(recv), script_args_def!(), |vm, args|{
+        // lets find the channel
+        if let Some(handle) = script_value!(vm, args.this).as_handle(){
+            let cx = vm.host.cx_mut();
+            if let Some(chan) = cx.script_data.channels.channels.borrow_mut().iter_mut().find(|v| v.handle == handle){
+                if let Some(value) = vm.heap.array_pop_front_option(chan.array_ref.as_array()){
+                    return value
+                }
+                else{
+                    if chan.recv_pause.is_some(){
+                        return vm.thread.trap.err_call_already_blocked_elsewhere()
+                    }
+                    chan.recv_pause = Some(vm.thread.pause());
+                    return NIL
+                }
+            }
+        }
+        vm.thread.trap.err_unexpected()
     });
-    vm.add_method(std, id!(channel), script_args_def!(), |_vm, _args|{
-        NIL
+    vm.set_handle_getter(channel_type, |vm, this, prop|{
+        // lets find the channel
+        if prop == id!(array){
+            if let Some(handle) = this.as_handle(){
+                let cx = vm.host.cx_mut();
+                if let Some(chan) = cx.script_data.channels.channels.borrow_mut().iter_mut().find(|v| v.handle == handle){
+                    return chan.array_ref.as_array().into()
+                }
+            }
+        }
+        vm.thread.trap.err_invalid_prop_name()
+    });
+    
+    vm.add_method(std, id_lut!(channel), script_args_def!(max_depth = NIL), move |vm, args|{
+        // lets make a new channel
+        let max_depth = script_value_f64!(vm, args.max_depth);
+        let cx = vm.host.cx_mut();
+        let handle_gc = CxScriptChannelGc{
+            channels: cx.script_data.channels.channels.clone(),
+            handle: ScriptHandle::ZERO
+        };
+        let handle = vm.heap.new_handle(channel_type, Box::new(handle_gc));
+        let array = vm.heap.new_array();
+        let array_ref = vm.heap.new_array_ref(array);
+        cx.script_data.channels.channels.borrow_mut().push(
+            CxScriptChannel{
+                max_depth: max_depth as usize,
+                handle,
+                recv_pause: None,
+                send_pause: None,
+                array_ref,
+            }
+        );
+        
+        handle.into()
     });
         
-    vm.new_handle_type(id!(timer));
+    vm.new_handle_type(id_lut!(timer));
     
     pub fn next_hash(bytes: &[u8;8]) -> u64 {
         let mut x:u64 = 0xd6e8_feb8_6659_fd93;
@@ -80,7 +211,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         x
     }
     
-    vm.add_method(std, id!(random_seed), script_args_def!(), |vm, _args|{
+    vm.add_method(std, id_lut!(random_seed), script_args_def!(), |vm, _args|{
         let start = SystemTime::now();
         let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap();
         let nanos = since_the_epoch.as_nanos();
@@ -89,7 +220,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         NIL
     });
     
-    vm.add_method(std, id!(random), script_args_def!(), |vm, _args|{
+    vm.add_method(std, id_lut!(random), script_args_def!(), |vm, _args|{
         let cx = vm.cx_mut();
         let seed = cx.script_data.random_seed;
         let seed = next_hash(&seed.to_ne_bytes());
@@ -97,7 +228,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         ((seed as f64) / u64::MAX as f64).into()
     });
     
-    vm.add_method(std, id!(random_u32), script_args_def!(), |vm, _args|{
+    vm.add_method(std, id_lut!(random_u32), script_args_def!(), |vm, _args|{
         let cx = vm.cx_mut();
         let seed = cx.script_data.random_seed;
         let seed = next_hash(&seed.to_ne_bytes());
@@ -105,7 +236,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         (seed as u32 as f64).into()
     });
     
-    vm.add_method(std, id!(start_timeout), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
+    vm.add_method(std, id_lut!(start_timeout), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
         let delay = script_value!(vm, args.delay);
         let callback = script_value!(vm, args.callback);
         
@@ -127,7 +258,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         id.escape()
     });
     
-    vm.add_method(std, id!(start_interval), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
+    vm.add_method(std, id_lut!(start_interval), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
         let delay = script_value!(vm, args.delay);
         let callback = script_value!(vm, args.callback);
                 
@@ -150,7 +281,7 @@ pub fn extend_std_module(vm:&mut ScriptVm){
         id.escape()
     });
     
-    vm.add_method(std, id!(stop_timer), script_args_def!(timer=NIL), |vm, args|{
+    vm.add_method(std, id_lut!(stop_timer), script_args_def!(timer=NIL), |vm, args|{
         let timer = script_value!(vm, args.timer);
         if !timer.is_id(){ 
             return vm.thread.trap.err_invalid_arg_type()

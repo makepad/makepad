@@ -110,6 +110,11 @@ impl <'a> ScriptVm<'a>{
     pub fn call(&mut self,fnobj:ScriptValue, args:&[ScriptValue])->ScriptValue{
         self.thread.call(self.heap, self.code, self.host, fnobj, args)
     }
+    
+    pub fn resume(&mut self)->ScriptValue{
+        self.thread.is_paused = false;
+        self.thread.run_core(self.heap, self.code, self.host)
+    }
           
     pub fn cast_to_f64(&self, v:ScriptValue)->f64{
         self.heap.cast_to_f64(v, self.thread.trap.ip)
@@ -129,6 +134,22 @@ impl <'a> ScriptVm<'a>{
             ht.to_redux(),
             method,
             args,
+            f
+        )
+    }
+    
+    pub fn set_handle_setter<F>(&mut self, ht:ScriptHandleType, f: F) 
+    where F: Fn(&mut ScriptVm, ScriptValue, LiveId, ScriptValue)->ScriptValue + 'static{
+        self.code.native.borrow_mut().set_type_setter(
+            ht.to_redux(),
+            f
+        )
+    }
+    
+    pub fn set_handle_getter<F>(&mut self, ht:ScriptHandleType, f: F) 
+    where F: Fn(&mut ScriptVm, ScriptValue, LiveId)->ScriptValue + 'static{
+        self.code.native.borrow_mut().set_type_getter(
+            ht.to_redux(),
             f
         )
     }
@@ -222,13 +243,35 @@ impl ScriptVmBase{
         }
     }
     
-    pub fn as_ref_host<'a>(&'a mut self, host:&'a mut dyn Any)->ScriptVm<'a>{
+    pub fn as_ref_host_thread<'a>(&'a mut self, thread:ScriptThreadId, host:&'a mut dyn Any)->ScriptVm<'a>{
         ScriptVm{
             host,
             code: &self.code,
             heap: &mut self.heap,
-            thread: &mut self.threads[0]
+            thread: &mut self.threads[thread.to_index()]
         }
+    }
+    
+    pub fn as_ref_host<'a>(&'a mut self, host:&'a mut dyn Any)->ScriptVm<'a>{
+        let id = self.get_unpaused_thread();
+        // lets get an unpaused thread
+        ScriptVm{
+            host,
+            code: &self.code,
+            heap: &mut self.heap,
+            thread: &mut self.threads[id.to_index()]
+        }
+    }
+    
+    pub fn get_unpaused_thread(&mut self)->ScriptThreadId{
+        for (id,thread) in self.threads.iter().enumerate(){
+            if !thread.is_paused{
+                return ScriptThreadId(id as u32)
+            }
+        }
+        let id = ScriptThreadId(self.threads.len() as u32);
+        self.threads.push(ScriptThread::new(id));
+        id
     }
     
     pub fn new()->Self{
@@ -246,7 +289,7 @@ impl ScriptVmBase{
                 native: RefCell::new(native),
                 bodies: Default::default(),
             },
-            threads: vec![ScriptThread::new()],
+            threads: vec![ScriptThread::new(ScriptThreadId(0))],
             heap: heap,
         }
     }
