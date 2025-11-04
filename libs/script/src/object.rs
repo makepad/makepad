@@ -62,25 +62,37 @@ impl Clone for ScriptObjectRef{
     }
 }
 
+impl From<ScriptObjectRef> for ScriptValue{
+    fn from(v:ScriptObjectRef) -> Self{
+        ScriptValue::from_object(v.as_object())
+    }
+}
+
 #[derive(Clone)]
 pub struct ScriptFnRef(pub(crate) ScriptObjectRef);
 
+impl From<ScriptFnRef> for ScriptValue{
+    fn from(v:ScriptFnRef) -> Self{
+        ScriptValue::from_object(v.as_object())
+    }
+}
+
 impl ScriptObjectRef{
-    pub fn as_obj(&self)->ScriptObject{self.obj}
+    pub fn as_object(&self)->ScriptObject{self.obj}
 }
 
 impl ScriptFnRef{
-    pub fn as_obj(&self)->ScriptObject{self.0.as_obj()}
+    pub fn as_object(&self)->ScriptObject{self.0.as_object()}
 }
 
 pub trait ScriptRefOptionExt{
-    fn as_obj(&self)->Option<ScriptObject>;
+    fn as_object(&self)->Option<ScriptObject>;
 }
 impl ScriptRefOptionExt for Option<ScriptObjectRef>{
-    fn as_obj(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_obj())}else{None}}
+    fn as_object(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_object())}else{None}}
 }
 impl ScriptRefOptionExt for Option<ScriptFnRef>{
-    fn as_obj(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_obj())}else{None}}
+    fn as_object(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_object())}else{None}}
 }
 
 impl Drop for ScriptObjectRef{

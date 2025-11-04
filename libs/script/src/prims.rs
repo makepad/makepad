@@ -57,7 +57,7 @@ script_primitive!(
         }
     },
     fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{
-        self.as_obj().into()
+        self.as_object().into()
     }
 );
 
@@ -81,7 +81,7 @@ script_primitive!(
         }
     },
     fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{
-        self.as_obj().into()
+        self.as_object().into()
     }
 );
 
