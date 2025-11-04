@@ -47,7 +47,7 @@ impl Cx{
             match self.script_data.web_sockets[i].socket.try_recv(){
                 Ok(WebSocketMessage::String(s))=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_string.as_obj(){
-                        self.with_vm(|vm|{
+                        self.with_vm_and_async(|vm|{
                             let str = vm.heap.new_string_from_str(&s);
                             vm.call(handler.into(), &[str.into()]);
                         })
@@ -55,7 +55,7 @@ impl Cx{
                 }
                 Ok(WebSocketMessage::Binary(s))=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_string.as_obj(){
-                        self.with_vm(|vm|{
+                        self.with_vm_and_async(|vm|{
                             let array = vm.heap.new_array_from_vec_u8(s);
                             vm.call(handler.into(), &[array.into()]);
                         })
@@ -63,14 +63,14 @@ impl Cx{
                 }
                 Ok(WebSocketMessage::Opened)=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_opened.as_obj(){
-                        self.with_vm(|vm|{
+                        self.with_vm_and_async(|vm|{
                             vm.call(handler.into(), &[]);
                         })
                     }
                 }
                 Ok(WebSocketMessage::Closed)=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_closed.as_obj(){
-                        self.with_vm(|vm|{
+                        self.with_vm_and_async(|vm|{
                             vm.call(handler.into(), &[]);
                         })
                     }
@@ -78,7 +78,7 @@ impl Cx{
                 }
                 Ok(WebSocketMessage::Error(s))=>{
                     if let Some(handler) = self.script_data.web_sockets[i].events.on_string.as_obj(){
-                        self.with_vm(|vm|{
+                        self.with_vm_and_async(|vm|{
                             let str = vm.heap.new_string_from_str(&s);
                             vm.call(handler.into(), &[str.into()]);
                         })
@@ -97,7 +97,7 @@ impl Cx{
                 NetworkResponse::HttpStreamResponse(res)=>{
                     if let Some(s) = self.script_data.http_requests.iter().find(|v| v.id == item.request_id){
                         if let Some(handler) = s.events.on_stream.as_obj(){
-                            self.with_vm(|vm|{
+                            self.with_vm_and_async(|vm|{
                                 let res = res.script_to_value(vm);
                                 vm.call(handler.into(), &[res]);
                             })
@@ -107,7 +107,7 @@ impl Cx{
                 NetworkResponse::HttpStreamComplete(res)=>{
                     if let Some(i) = self.script_data.http_requests.iter().position(|v| v.id == item.request_id){
                         if let Some(handler) = self.script_data.http_requests[i].events.on_complete.as_obj(){
-                            self.with_vm(|vm|{
+                            self.with_vm_and_async(|vm|{
                                 let res = res.script_to_value(vm);
                                 vm.call(handler.into(), &[res]);
                             })
@@ -118,7 +118,7 @@ impl Cx{
                 NetworkResponse::HttpResponse(res) => {
                     if let Some(i) = self.script_data.http_requests.iter().position(|v| v.id == item.request_id){
                         if let Some(handler) = self.script_data.http_requests[i].events.on_response.as_obj(){
-                            self.with_vm(|vm|{
+                            self.with_vm_and_async(|vm|{
                                 let res = res.script_to_value(vm);
                                 vm.call(handler.into(), &[res]);
                             })
@@ -129,7 +129,7 @@ impl Cx{
                 NetworkResponse::HttpRequestError(err) => {
                     if let Some(i) = self.script_data.http_requests.iter().position(|v| v.id == item.request_id){
                         if let Some(handler) = self.script_data.http_requests[i].events.on_error.as_obj(){
-                            self.with_vm(|vm|{
+                            self.with_vm_and_async(|vm|{
                                 let res = err.script_to_value(vm);
                                 vm.call(handler.into(), &[res]);
                             })
@@ -151,7 +151,7 @@ pub fn define_net_module(vm:&mut ScriptVm){
     script_proto!(vm, net, HttpMethod);
     script_proto!(vm, net, HttpEvents);
 
-    vm.add_method(net, id!(http_request), script_args_def!(request=NIL, events=NIL), move |vm, args|{
+    vm.add_method(net, id_lut!(http_request), script_args_def!(request=NIL, events=NIL), move |vm, args|{
         let request = script_value!(vm, args.request);
         let events = script_value!(vm, args.events);
         // we should check if options is actually of type HttpRequest
@@ -174,7 +174,7 @@ pub fn define_net_module(vm:&mut ScriptVm){
     
     script_proto!(vm, net, WebSocketEvents);
         
-    vm.add_method(net, id!(web_socket), script_args_def!(request=NIL, events=NIL), move |vm, args|{
+    vm.add_method(net, id_lut!(web_socket), script_args_def!(request=NIL, events=NIL), move |vm, args|{
         let request = script_value!(vm, args.request);
         let events = script_value!(vm, args.events);
         // we should check if options is actually of type HttpRequest

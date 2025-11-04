@@ -6,6 +6,7 @@ pub enum ScriptTrapOn{
         in_rust: bool,
         value: ScriptValue
     },
+    Pause,
     Return(ScriptValue),
 }
 use std::cell::Cell;
@@ -15,6 +16,7 @@ pub struct ScriptTrap{
     pub(crate) on: Cell<Option<ScriptTrapOn>>,
     pub ip: ScriptIp,
 }
+
 
 impl ScriptTrap{
     pub fn ip(&self)->u32{
@@ -76,5 +78,6 @@ impl ScriptTrap{
     err_fwd!(err_wrong_type_in_apply);
     err_fwd!(err_file_system);
     err_fwd!(err_child_process);
+    err_fwd!(err_call_already_blocked_elsewhere);
 }
 
