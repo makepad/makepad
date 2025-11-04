@@ -191,10 +191,10 @@ let code = script!{
         
         // put the answer back in the messages array
         messages.push({content:image_prompt role:"assistant"})
-        
+                
         // flush the websocket queue
-        websocket.queue.clear()
-        
+        web_socket.queue.clear()
+                
         std.println("Rendering prompt:"+image_prompt)
         let prompt_id = comfy_render(image_prompt display).recv()
         // this loop needs some more features like match or a for loop with array destructuring'
