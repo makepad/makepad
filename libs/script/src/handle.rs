@@ -37,7 +37,9 @@ pub trait ScriptHandleGc{
     fn gc(&mut self);
     fn set_handle(&mut self, _handle:ScriptHandle);
     fn ref_cast_type_id(&self) -> TypeId where Self: 'static {TypeId::of::<Self>()}
-    fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
+        write!(f, "ScriptHandleGc: No debug format")
+    }
 }
 
 impl Debug for dyn ScriptHandleGc {

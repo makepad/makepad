@@ -62,7 +62,7 @@ impl Cx{
             while let Ok(value) = self.script_data.child_processes[i].child.out_recv.try_recv(){
                 match value{
                     ChildOut::StdOut(s)=>{
-                        if let Some(handler) = self.script_data.child_processes[i].events.on_stdout.as_obj(){
+                        if let Some(handler) = self.script_data.child_processes[i].events.on_stdout.as_object(){
                             self.with_vm_and_async(|vm|{
                                 let str = vm.heap.new_string_from_str(&s);
                                 vm.call(handler.into(), &[str.into()]);
@@ -70,7 +70,7 @@ impl Cx{
                         }
                     }
                     ChildOut::StdErr(s)=>{
-                        if let Some(handler) = self.script_data.child_processes[i].events.on_stderr.as_obj(){
+                        if let Some(handler) = self.script_data.child_processes[i].events.on_stderr.as_object(){
                             self.with_vm_and_async(|vm|{
                                 let str = vm.heap.new_string_from_str(&s);
                                 vm.call(handler.into(), &[str.into()]);
@@ -78,7 +78,7 @@ impl Cx{
                         }
                     }
                     ChildOut::Term=>{
-                        if let Some(handler) = self.script_data.child_processes[i].events.on_term.as_obj(){
+                        if let Some(handler) = self.script_data.child_processes[i].events.on_term.as_object(){
                             self.with_vm_and_async(|vm|{
                                 vm.call(handler.into(), &[]);
                             })
