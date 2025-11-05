@@ -60,7 +60,7 @@ impl Cx{
                 if task.send_pause.len()>0 && queue_len<task.max_depth{
                     next_thread = task.send_pause.pop_back();
                     break;
-                }                
+                }
             }
             drop(tasks);
             // alright execute this thread
@@ -93,7 +93,11 @@ pub fn extend_std_module_with_task(vm:&mut ScriptVm){
                     let array_len = vm.heap.array_len(chan.queue.as_array());
                     
                     if chan.max_depth == 0 || array_len < chan.max_depth{
-                        if vm.heap.vec_len(args.into()) == 1{
+                        let vec_len = vm.heap.vec_len(args.into());
+                        if vec_len == 0{
+                            vm.heap.array_push(chan.queue.as_array(), NIL, &vm.thread.trap);
+                        }
+                        else if vec_len== 1{
                             let value = vm.heap.vec_value(args, 0, &vm.thread.trap);
                             vm.heap.array_push(chan.queue.as_array(), value, &vm.thread.trap);
                         }

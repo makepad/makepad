@@ -136,7 +136,7 @@ let code = script!{
             body:{prompt:flow client_id:1234}.to_json()
         }
         net.http_request(req) do net.HttpEvents{
-            on_response: |res| task.end(ok{res.body.parse_json().prompt_id})
+            on_response: |res| task.end(ok{res.body.parse_json().prompt_id}:string)
         }
         task
     }
@@ -171,7 +171,7 @@ let code = script!{
                 
     fn post(){ 
         // handle AI prompt messages
-                        
+             
         let prompt = fs.read("/Users/admin/makepad/makepad/local/prompt.txt").parse_json();
         if messages.len() > 150 messages.clear()
         if prompt.clear || messages.len() == 0{
@@ -182,11 +182,10 @@ let code = script!{
         else{
             messages.push({content:prompt.prompt.trim() role:"user"})
         }
-                        
+        display_iter += 1
         // rotate displays
         let display = displays[display_iter % displays.len()]
-        display_iter += 1
-                        
+                                
         let image_prompt = openai_completion(messages).last()
         
         // put the answer back in the messages array
@@ -198,6 +197,7 @@ let code = script!{
         std.println("Rendering prompt:"+image_prompt)
         let prompt_id = comfy_render(image_prompt display).last()
         // this loop needs some more features like match or a for loop with array destructuring'
+        
         loop{
             let d = web_socket.next();
             if d[0] == @progress std.println("Progress: "+d[1])
