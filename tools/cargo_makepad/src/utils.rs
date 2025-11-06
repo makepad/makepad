@@ -69,18 +69,48 @@ pub fn get_crate_dep_dirs(build_crate: &str, build_dir:&Path, target:&str) -> Ha
     dependencies
 }
 
-pub fn get_build_crate_from_args(args: &[String]) -> Result<&str, String> {
+pub fn get_build_crate_from_args(args: &[String]) -> Result<String, String> {
     if args.is_empty() {
-        return Err("Not enough arguments to build".into());
+        // Auto-detect package from current directory
+        let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+        if let Ok(output) = shell_env_cap(&[], &cwd, "cargo", &["pkgid"]) {
+            // Extract package name from cargo pkgid output
+            // Format is typically: path+file:///path/to/crate#package_name@version
+            if let Some(package_part) = output.split('#').nth(1) {
+                // Split by @ to separate package name from version
+                if let Some(package_name) = package_part.split('@').next() {
+                    return Ok(package_name.trim().to_string());
+                }
+            }
+        }
+        return Err("Not enough arguments to build and could not auto-detect package from current directory. Please specify with --example <name> or -p <package>".into());
     }
     if args[0] == "-p" {
         if args.len()<2 { 
             return Err("Not enough arguments to build".into());
         }
-        Ok(&args[1])
+        Ok(args[1].clone())
     }
     else {
-        Ok(&args[0])
+        // First arg might be a cargo flag like --example, --bin, etc.
+        // Skip those and look for the actual package name
+        // For now, if it doesn't start with --, treat it as a package name
+        if args[0].starts_with("--") {
+            // It's a cargo flag, we need to find the package differently
+            // Try to auto-detect from current directory
+            let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+            if let Ok(output) = shell_env_cap(&[], &cwd, "cargo", &["pkgid"]) {
+                if let Some(package_part) = output.split('#').nth(1) {
+                    // Split by @ to separate package name from version
+                    if let Some(package_name) = package_part.split('@').next() {
+                        return Ok(package_name.trim().to_string());
+                    }
+                }
+            }
+            return Err(format!("Could not determine package name from cargo arguments. Please use -p <package> to specify the package explicitly."));
+        }
+        // It's a package name
+        Ok(args[0].clone())
     }
 }
 

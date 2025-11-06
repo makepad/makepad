@@ -342,7 +342,7 @@ fn add_dependencies(args : &[String], targets :&[OpenHarmonyTarget]) -> Result<(
 
     let prj_path = cwd.join("target").join("makepad-open-harmony").join(&underscore_build_crate);
     let raw_file = prj_path.join("entry").join("src").join("main").join("resources").join("rawfile");
-    let build_crate_dir = get_crate_dir(build_crate)?;
+    let build_crate_dir = get_crate_dir(&build_crate)?;
     let local_resources_path = build_crate_dir.join("resources");
 
     if local_resources_path.is_dir() {
@@ -352,7 +352,7 @@ fn add_dependencies(args : &[String], targets :&[OpenHarmonyTarget]) -> Result<(
         cp_all(&local_resources_path, &dst_dir, false)?;
     }
     let build_dir =cwd.join("target").join(targets[0].target_triple_str()).join(profile.clone());
-    let deps = get_crate_dep_dirs(build_crate, &build_dir, &targets[0].target_triple_str());
+    let deps = get_crate_dep_dirs(&build_crate, &build_dir, &targets[0].target_triple_str());
     for (name, dep_dir) in deps.iter() {
         let resources_path = dep_dir.join("resources");
         if resources_path.is_dir() {

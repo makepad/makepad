@@ -122,6 +122,18 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
     ];
     let cwd = std::env::current_dir().unwrap();
     
+    // Find workspace root - cargo builds to workspace root's target directory
+    let workspace_root = if let Ok(output) = shell_env_cap(&[], &cwd, "cargo", &["locate-project", "--workspace"]) {
+        // Parse JSON: {"root":"/path/to/Cargo.toml"}
+        if let Some(root_path) = output.split('"').nth(3) {
+            PathBuf::from(root_path).parent().unwrap().to_path_buf()
+        } else {
+            cwd.clone()
+        }
+    } else {
+        cwd.clone()
+    };
+    
     let mut args_out = Vec::new();
     args_out.extend_from_slice(base_args);
     
@@ -137,9 +149,9 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
     ], &cwd, "rustup", &args_out) ?;
     
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
-    let build_dir = cwd.join(format!("target/wasm32-unknown-unknown/{profile}"));
+    let build_dir = workspace_root.join(format!("target/wasm32-unknown-unknown/{profile}"));
     
-    let build_crate_dir = get_crate_dir(build_crate) ?;
+    let build_crate_dir = get_crate_dir(&build_crate) ?;
     let local_resources_path = build_crate_dir.join("resources");
             
     if local_resources_path.is_dir() {
@@ -159,7 +171,7 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
         }) ?;
         
     }
-    let resources = get_crate_dep_dirs(build_crate, &build_dir, "wasm32-unknown-unknown");
+    let resources = get_crate_dep_dirs(&build_crate, &build_dir, "wasm32-unknown-unknown");
     for (name, dep_dir) in resources.iter() {
         // alright we need special handling for makepad-wasm-bridge
         // and makepad-platform
@@ -263,7 +275,7 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
     }
     // generate html file
     let index_path = app_dir.join("index.html");
-    let html = generate_html(build_crate, &config);
+    let html = generate_html(&build_crate, &config);
     fs::write(&index_path, &html.as_bytes()).map_err( | e | format!("Can't write {:?} {:?} ", index_path, e)) ?;
     if config.brotli{
         brotli_compress(&index_path);

@@ -753,7 +753,7 @@ pub fn run_on_device(apple_args: AppleArgs, args: &[String], apple_target: Apple
     
     cp(&provision.path, &dst_provision, false) ?;
     
-    copy_resources(Path::new(&app_dir), build_crate, &result.build_dir, apple_target) ?;
+    copy_resources(Path::new(&app_dir), &build_crate, &result.build_dir, apple_target) ?;
     
     let cert = parsed.cert(apple_args.signing_identity.as_ref().unwrap()).expect("cannot find signing certificate");
     
