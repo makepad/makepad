@@ -31,6 +31,7 @@ live_design!{
             height: Fill
                         
             draw_bg: {
+                debug: true
                 fn pixel(self) -> vec4 {
                     return mix(#3, #1, self.pos.y);
                 }
