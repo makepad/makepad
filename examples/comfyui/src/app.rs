@@ -136,7 +136,7 @@ let code = script!{
             body:{prompt:flow client_id:1234}.to_json()
         }
         net.http_request(req) do net.HttpEvents{
-            on_response: |res| task.end(ok{res.body.parse_json().prompt_id}:string)
+            on_response: |res| task.end(ok{res.body.parse_json().prompt_id})
         }
         task
     }
