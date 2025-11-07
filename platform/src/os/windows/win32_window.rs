@@ -395,10 +395,10 @@ impl Win32Window {
         match msg {
             WM_ACTIVATE => {
                 if wparam.0 & 0xffff == WA_ACTIVE as usize {
-                    window.do_callback(Win32Event::AppGotFocus(window.window_id));
+                    window.do_callback(Win32Event::WindowGotFocus(window.window_id));
                 }
                 else {
-                    window.do_callback(Win32Event::AppLostFocus(window.window_id));
+                    window.do_callback(Win32Event::WindowLostFocus(window.window_id));
                 }
             },
             WM_NCCALCSIZE => {
@@ -1012,11 +1012,11 @@ impl Win32Window {
     }
     
     pub fn send_focus_event(&mut self) {
-        self.do_callback(Win32Event::AppGotFocus(self.window_id));
+        self.do_callback(Win32Event::WindowGotFocus(self.window_id));
     }
     
     pub fn send_focus_lost_event(&mut self) {
-        self.do_callback(Win32Event::AppLostFocus(self.window_id));
+        self.do_callback(Win32Event::WindowLostFocus(self.window_id));
     }
     
     pub fn send_mouse_down(&mut self, button: MouseButton, modifiers: KeyModifiers) {

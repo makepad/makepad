@@ -184,12 +184,12 @@ impl Cx {
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
             }
-            IosEvent::AppGotFocus(window_id) => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+            IosEvent::WindowGotFocus(window_id) => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 paint_dirty = true;
-                self.call_event_handler(&Event::AppGotFocus(window_id));
+                self.call_event_handler(&Event::WindowGotFocus(window_id));
             }
-            IosEvent::AppLostFocus(window_id) => {
-                self.call_event_handler(&Event::AppLostFocus(window_id));
+            IosEvent::WindowLostFocus(window_id) => {
+                self.call_event_handler(&Event::WindowLostFocus(window_id));
             }
             IosEvent::WindowGeomChange(re) => { // do this here because mac
                 let window_id = CxWindowPool::id_zero();

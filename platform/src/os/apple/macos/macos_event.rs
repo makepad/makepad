@@ -6,8 +6,8 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub enum MacosEvent {
-    AppGotFocus(WindowId),
-    AppLostFocus(WindowId),
+    WindowGotFocus(WindowId),
+    WindowLostFocus(WindowId),
     WindowResizeLoopStart(WindowId),
     WindowResizeLoopStop(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),

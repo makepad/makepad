@@ -323,11 +323,11 @@ impl MacosWindow {
     }
     
     pub fn send_got_focus_event(&mut self) {
-        self.do_callback(MacosEvent::AppGotFocus(self.window_id));
+        self.do_callback(MacosEvent::WindowGotFocus(self.window_id));
     }
     
     pub fn send_lost_focus_event(&mut self) {
-        self.do_callback(MacosEvent::AppLostFocus(self.window_id));
+        self.do_callback(MacosEvent::WindowLostFocus(self.window_id));
     }
     
     pub fn mouse_down_can_drag_window(&mut self) -> bool {

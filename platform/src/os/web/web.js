@@ -870,12 +870,12 @@ export class WasmWebBrowser extends WasmBridge {
         
         // TODO! BIND THESE SOMEWHERE USEFUL
         this.handlers.on_app_got_focus = () => {
-            this.to_wasm.ToWasmAppGotFocus();
+            this.to_wasm.ToWasmWindowGotFocus();
             this.do_wasm_pump();
         }
         
         this.handlers.on_app_lost_focus = () => {
-            this.to_wasm.ToWasmAppGotFocus();
+            this.to_wasm.ToWasmWindowLostFocus();
             this.do_wasm_pump();
         }
         
