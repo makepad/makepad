@@ -9,6 +9,7 @@ use {
         makepad_live_id::LiveId,
         cx::Cx,
         area::Area,
+        window::WindowId,
         //midi::{Midi1InputData, MidiInputInfo},
         event::{
             finger::*,
@@ -128,9 +129,9 @@ pub enum Event {
     Draw(DrawEvent),
     LiveEdit,
     /// The application has gained focus and is now the active window receiving user input.
-    AppGotFocus,
+    AppGotFocus(WindowId),
     /// The application has lost focus and is no longer the active window receiving user input.
-    AppLostFocus,
+    AppLostFocus(WindowId),
     NextFrame(NextFrameEvent),
     XrUpdate(XrUpdateEvent),
     XrLocal(XrLocalEvent),
@@ -321,8 +322,8 @@ impl Event{
 
             Self::Draw(_)=>7,
             Self::LiveEdit=>8,
-            Self::AppGotFocus=>9,
-            Self::AppLostFocus=>10,
+            Self::AppGotFocus(_)=>9,
+            Self::AppLostFocus(_)=>10,
             Self::NextFrame(_)=>11,
             Self::XrUpdate(_)=>12,
 
