@@ -11,8 +11,8 @@ use {
 #[derive(Debug, Clone)]
 pub enum TvosEvent {
     Init,
-    AppGotFocus(WindowId),
-    AppLostFocus(WindowId),
+    WindowGotFocus(WindowId),
+    WindowLostFocus(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     Paint,
     Timer(TimerEvent),

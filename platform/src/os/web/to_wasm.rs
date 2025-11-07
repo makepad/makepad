@@ -507,10 +507,10 @@ pub struct ToWasmTextCopy {
 
 
 #[derive(ToWasm)]
-pub struct ToWasmAppGotFocus {}
+pub struct ToWasmWindowGotFocus {}
 
 #[derive(ToWasm)]
-pub struct ToWasmAppLostFocus {}
+pub struct ToWasmWindowLostFocus {}
 
 #[derive(ToWasm)]
 pub struct ToWasmHTTPResponse {

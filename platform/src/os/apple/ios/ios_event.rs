@@ -22,8 +22,8 @@ use {
 #[derive(Debug, Clone)]
 pub enum IosEvent {
     Init,
-    AppGotFocus(WindowId),
-    AppLostFocus(WindowId),
+    WindowGotFocus(WindowId),
+    WindowLostFocus(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     Paint,
     VirtualKeyboard(VirtualKeyboardEvent),
