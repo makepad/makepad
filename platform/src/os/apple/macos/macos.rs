@@ -283,16 +283,16 @@ impl Cx {
         }
         //self.process_desktop_pre_event(&mut event);
         match event {
-            MacosEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+            MacosEvent::AppGotFocus(window_id) => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 for window in metal_windows.iter_mut() {
                     if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
                         self.repaint_pass(main_pass_id);
                     }
                 }
-                self.call_event_handler(&Event::AppGotFocus);
+                self.call_event_handler(&Event::AppGotFocus(window_id));
             }
-            MacosEvent::AppLostFocus => {
-                self.call_event_handler(&Event::AppLostFocus);
+            MacosEvent::AppLostFocus(window_id) => {
+                self.call_event_handler(&Event::AppLostFocus(window_id));
             }
             MacosEvent::WindowResizeLoopStart(window_id) => {
                 if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
@@ -542,7 +542,6 @@ impl Cx {
                     with_macos_app(|app| app.set_mouse_cursor(cursor));
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                    println!("START TIMER {} {}", timer_id, repeats);
                     with_macos_app(|app| app.start_timer(timer_id, interval, repeats));
                 },
                 CxOsOp::StopTimer(timer_id) => {
