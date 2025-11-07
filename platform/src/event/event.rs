@@ -128,10 +128,10 @@ pub enum Event {
     
     Draw(DrawEvent),
     LiveEdit,
-    /// The application has gained focus and is now the active window receiving user input.
-    AppGotFocus(WindowId),
-    /// The application has lost focus and is no longer the active window receiving user input.
-    AppLostFocus(WindowId),
+    /// A window has gained focus and is now the active window receiving user input.
+    WindowGotFocus(WindowId),
+    /// A window has lost focus and is no longer the active window receiving user input.
+    WindowLostFocus(WindowId),
     NextFrame(NextFrameEvent),
     XrUpdate(XrUpdateEvent),
     XrLocal(XrLocalEvent),
@@ -248,8 +248,8 @@ impl Event{
 
             7=>"Draw",
             8=>"LiveEdit",
-            9=>"AppGotFocus",
-            10=>"AppLostFocus",
+            9=>"WindowGotFocus",
+            10=>"WindowLostFocus",
             11=>"NextFrame",
             12=>"XRUpdate",
 
@@ -322,8 +322,8 @@ impl Event{
 
             Self::Draw(_)=>7,
             Self::LiveEdit=>8,
-            Self::AppGotFocus(_)=>9,
-            Self::AppLostFocus(_)=>10,
+            Self::WindowGotFocus(_)=>9,
+            Self::WindowLostFocus(_)=>10,
             Self::NextFrame(_)=>11,
             Self::XrUpdate(_)=>12,
 

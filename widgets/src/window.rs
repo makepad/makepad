@@ -427,14 +427,14 @@ impl Widget for Window {
             Event::MouseMove(ev) => ev.window_id != self.window.window_id(),
             Event::MouseUp(ev) => ev.window_id != self.window.window_id(),
             Event::Scroll(ev) => ev.window_id != self.window.window_id(),
-            Event::AppGotFocus(window_id) => {
+            Event::WindowGotFocus(window_id) => {
                 if *window_id == self.window.window_id() {
                     cx.set_key_focus(self.last_known_area);
                 }
 
                 *window_id != self.window.window_id()
             }
-            Event::AppLostFocus(window_id) => {
+            Event::WindowLostFocus(window_id) => {
                 if *window_id == self.window.window_id() {
                     self.last_known_area = cx.key_focus();
                     cx.set_key_focus(Area::Empty);

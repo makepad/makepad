@@ -88,17 +88,17 @@ impl Cx {
 
         //self.process_desktop_pre_event(&mut event);
         match event {
-            Win32Event::AppGotFocus(window_id) => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+            Win32Event::WindowGotFocus(window_id) => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 for window in d3d11_windows.iter_mut() {
                     if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
                         self.repaint_pass(main_pass_id);
                     }
                 }
                 //paint_dirty = true;
-                self.call_event_handler(&Event::AppGotFocus(window_id));
+                self.call_event_handler(&Event::WindowGotFocus(window_id));
             }
-            Win32Event::AppLostFocus(window_id) => {
-                self.call_event_handler(&Event::AppLostFocus(window_id));
+            Win32Event::WindowLostFocus(window_id) => {
+                self.call_event_handler(&Event::WindowLostFocus(window_id));
             }
             Win32Event::WindowResizeLoopStart(window_id) => {
                 if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {

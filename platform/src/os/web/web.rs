@@ -203,14 +203,14 @@ impl Cx {
                     self.call_event_handler(&Event::Timer(e));
                 }
                 
-                live_id!(ToWasmAppGotFocus) => {
+                live_id!(ToWasmWindowGotFocus) => {
                     let window_id = CxWindowPool::id_zero();
-                    self.call_event_handler(&Event::AppGotFocus(window_id));
+                    self.call_event_handler(&Event::WindowGotFocus(window_id));
                 }
                 
-                live_id!(ToWasmAppLostFocus) => {
+                live_id!(ToWasmWindowLostFocus) => {
                     let window_id = CxWindowPool::id_zero();
-                    self.call_event_handler(&Event::AppLostFocus(window_id));
+                    self.call_event_handler(&Event::WindowLostFocus(window_id));
                 }
                 
                 live_id!(ToWasmRedrawAll) => {
@@ -582,8 +582,8 @@ impl CxOsApi for Cx {
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
-            ToWasmAppGotFocus::to_js_code(),
-            ToWasmAppLostFocus::to_js_code(),
+            ToWasmWindowGotFocus::to_js_code(),
+            ToWasmWindowLostFocus::to_js_code(),
             ToWasmHTTPResponse::to_js_code(),
             ToWasmHttpRequestError::to_js_code(),
             ToWasmHttpResponseProgress::to_js_code(),
