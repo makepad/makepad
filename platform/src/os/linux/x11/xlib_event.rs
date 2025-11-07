@@ -22,8 +22,8 @@ use {
 
 #[derive(Debug)]
 pub enum XlibEvent {
-    AppGotFocus(WindowId),
-    AppLostFocus(WindowId),
+    WindowGotFocus(WindowId),
+    WindowLostFocus(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     WindowClosed(WindowClosedEvent),
     Paint,

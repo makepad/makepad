@@ -146,12 +146,12 @@ impl Cx {
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
             }
-            TvosEvent::AppGotFocus(window_id) => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+            TvosEvent::WindowGotFocus(window_id) => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 paint_dirty = true;
-                self.call_event_handler(&Event::AppGotFocus(window_id));
+                self.call_event_handler(&Event::WindowGotFocus(window_id));
             }
-            TvosEvent::AppLostFocus(window_id) => {
-                self.call_event_handler(&Event::AppLostFocus(window_id));
+            TvosEvent::WindowLostFocus(window_id) => {
+                self.call_event_handler(&Event::WindowLostFocus(window_id));
             } 
             TvosEvent::WindowGeomChange(re) => { // do this here because mac
                 let window_id = CxWindowPool::id_zero();

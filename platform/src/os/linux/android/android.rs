@@ -496,9 +496,9 @@ impl Cx {
             FromJavaMessage::WindowFocusChanged { has_focus } => {
                 let window_id = CxWindowPool::id_zero();
                 if has_focus {
-                    self.call_event_handler(&Event::AppGotFocus(window_id));
+                    self.call_event_handler(&Event::WindowGotFocus(window_id));
                 } else {
-                    self.call_event_handler(&Event::AppLostFocus(window_id));
+                    self.call_event_handler(&Event::WindowLostFocus(window_id));
                 }
             }
             FromJavaMessage::Init(_) => {
