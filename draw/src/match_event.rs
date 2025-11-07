@@ -8,8 +8,8 @@ pub trait MatchEvent{
     fn handle_background(&mut self, _cx: &mut Cx){}
     fn handle_pause(&mut self, _cx: &mut Cx){}
     fn handle_resume(&mut self, _cx: &mut Cx){}
-    fn handle_app_got_focus(&mut self, _cx: &mut Cx){}
-    fn handle_app_lost_focus(&mut self, _cx: &mut Cx){}
+    fn handle_app_got_focus(&mut self, _cx: &mut Cx, _window_id: &WindowId){}
+    fn handle_app_lost_focus(&mut self, _cx: &mut Cx, _window_id: &WindowId){}
     fn handle_next_frame(&mut self, _cx: &mut Cx, _e:&NextFrameEvent){}
     fn handle_action(&mut self, _cx: &mut Cx, _e:&Action){}
     fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
@@ -73,9 +73,9 @@ pub trait MatchEvent{
             Event::Pause=>self.handle_pause(cx),
             Event::Resume=>self.handle_resume(cx),
             Event::Signal=>self.handle_signal(cx),
-            Event::AppGotFocus=>self.handle_app_got_focus(cx),
+            Event::AppGotFocus(window_id)=>self.handle_app_got_focus(cx, window_id),
             Event::Timer(te)=>self.handle_timer(cx, te),
-            Event::AppLostFocus=>self.handle_app_lost_focus(cx),
+            Event::AppLostFocus(window_id)=>self.handle_app_lost_focus(cx, window_id),
             Event::NextFrame(e)=>self.handle_next_frame(cx, e),
             Event::Actions(e)=>self.handle_actions(cx,e),
             Event::Draw(e)=>self.handle_draw(cx, e),

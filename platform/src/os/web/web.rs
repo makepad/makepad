@@ -204,11 +204,13 @@ impl Cx {
                 }
                 
                 live_id!(ToWasmAppGotFocus) => {
-                    self.call_event_handler(&Event::AppGotFocus);
+                    let window_id = CxWindowPool::id_zero();
+                    self.call_event_handler(&Event::AppGotFocus(window_id));
                 }
                 
                 live_id!(ToWasmAppLostFocus) => {
-                    self.call_event_handler(&Event::AppLostFocus);
+                    let window_id = CxWindowPool::id_zero();
+                    self.call_event_handler(&Event::AppLostFocus(window_id));
                 }
                 
                 live_id!(ToWasmRedrawAll) => {

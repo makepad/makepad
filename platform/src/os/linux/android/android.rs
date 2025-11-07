@@ -494,10 +494,11 @@ impl Cx {
                 self.os.ignore_destroy = false;
             }
             FromJavaMessage::WindowFocusChanged { has_focus } => {
+                let window_id = CxWindowPool::id_zero();
                 if has_focus {
-                    self.call_event_handler(&Event::AppGotFocus);
+                    self.call_event_handler(&Event::AppGotFocus(window_id));
                 } else {
-                    self.call_event_handler(&Event::AppLostFocus);
+                    self.call_event_handler(&Event::AppLostFocus(window_id));
                 }
             }
             FromJavaMessage::Init(_) => {

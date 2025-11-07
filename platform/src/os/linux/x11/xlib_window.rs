@@ -472,11 +472,11 @@ impl XlibWindow {
     }
     
     pub fn send_focus_event(&mut self) {
-        self.do_callback(XlibEvent::AppGotFocus);
+        self.do_callback(XlibEvent::AppGotFocus(self.window_id));
     }
     
     pub fn send_focus_lost_event(&mut self) {
-        self.do_callback(XlibEvent::AppLostFocus);
+        self.do_callback(XlibEvent::AppLostFocus(self.window_id));
     }
     
     pub fn send_mouse_down(&mut self, button: MouseButton, modifiers: KeyModifiers) {

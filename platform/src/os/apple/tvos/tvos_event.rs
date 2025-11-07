@@ -1,5 +1,6 @@
 use {
     crate::{
+        window::WindowId,
         event::{
             WindowGeomChangeEvent,
             TimerEvent,
@@ -10,8 +11,8 @@ use {
 #[derive(Debug, Clone)]
 pub enum TvosEvent {
     Init,
-    AppGotFocus,
-    AppLostFocus,
+    AppGotFocus(WindowId),
+    AppLostFocus(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     Paint,
     Timer(TimerEvent),

@@ -378,11 +378,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         state.current_window = window_id;
                     }
                 });
-                state.do_callback(XlibEvent::AppGotFocus);
+                if let Some(window_id) = window_id {
+                    state.do_callback(XlibEvent::AppGotFocus(window_id));
+                }
             },
             wl_pointer::Event::Leave { serial, surface: _ } => {
                 state.pointer_serial = Some(serial);
-                state.do_callback(XlibEvent::AppLostFocus);
+                if let Some(window_id) = state.current_window {
+                    state.do_callback(XlibEvent::AppLostFocus(window_id));
+                }
             },
             wl_pointer::Event::Motion { time, surface_x, surface_y } => {
                 if let Some(window_id) = state.current_window {

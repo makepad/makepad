@@ -115,6 +115,7 @@ pub struct Window {
     #[live] nav_control: NavControl,
     #[live] window: WindowHandle,
     #[live] stdin_size: DrawColor,
+    #[rust] last_known_area: Area,
     #[rust(Overlay::new(cx))] overlay: Overlay,
     #[rust(DrawList2d::new(cx))] main_draw_list: DrawList2d,
     #[live] pass: Pass,
@@ -426,6 +427,21 @@ impl Widget for Window {
             Event::MouseMove(ev) => ev.window_id != self.window.window_id(),
             Event::MouseUp(ev) => ev.window_id != self.window.window_id(),
             Event::Scroll(ev) => ev.window_id != self.window.window_id(),
+            Event::AppGotFocus(window_id) => {
+                if *window_id == self.window.window_id() {
+                    cx.set_key_focus(self.last_known_area);
+                }
+
+                *window_id != self.window.window_id()
+            }
+            Event::AppLostFocus(window_id) => {
+                if *window_id == self.window.window_id() {
+                    self.last_known_area = cx.key_focus();
+                    cx.set_key_focus(Area::Empty);
+                }
+
+                *window_id != self.window.window_id()
+            }
             _ => false
         };
         
