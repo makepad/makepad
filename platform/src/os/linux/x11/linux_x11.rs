@@ -94,7 +94,7 @@ impl X11Cx {
 
         //self.process_desktop_pre_event(&mut event);
        match event {
-            XlibEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+            XlibEvent::AppGotFocus(window_id) => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 let mut cx = self.cx.borrow_mut();
                 for window in opengl_windows.iter_mut() {
                     if let Some(main_pass_id) = cx.windows[window.window_id].main_pass_id {
@@ -102,11 +102,11 @@ impl X11Cx {
                     }
                 }
                 //paint_dirty = true;
-                cx.call_event_handler(&Event::AppGotFocus);
+                cx.call_event_handler(&Event::AppGotFocus(window_id));
             }
-            XlibEvent::AppLostFocus => {
+            XlibEvent::AppLostFocus(window_id) => {
                 let mut cx = self.cx.borrow_mut();
-                cx.call_event_handler(&Event::AppLostFocus);
+                cx.call_event_handler(&Event::AppLostFocus(window_id));
             }
             XlibEvent::WindowGeomChange(mut re) => { // do this here because mac
                 let mut cx = self.cx.borrow_mut();

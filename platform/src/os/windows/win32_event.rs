@@ -23,8 +23,8 @@ use {
 
 #[derive(Debug)]
 pub enum Win32Event {
-    AppGotFocus,
-    AppLostFocus,
+    AppGotFocus(WindowId),
+    AppLostFocus(WindowId),
     WindowResizeLoopStart(WindowId),
     WindowResizeLoopStop(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),

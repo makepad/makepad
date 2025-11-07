@@ -40,6 +40,10 @@ impl CxKeyboard {
         self.next_key_focus = focus_area;
     }
 
+    pub fn key_focus(&self) -> Area {
+        self.key_focus
+    }
+
     pub fn revert_key_focus(&mut self) {
         self.next_key_focus = self.prev_key_focus;
     }

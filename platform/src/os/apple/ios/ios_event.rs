@@ -1,5 +1,6 @@
 use {
     crate::{
+        window::WindowId,
         event::{
             MouseDownEvent,
             MouseUpEvent,
@@ -21,8 +22,8 @@ use {
 #[derive(Debug, Clone)]
 pub enum IosEvent {
     Init,
-    AppGotFocus,
-    AppLostFocus,
+    AppGotFocus(WindowId),
+    AppLostFocus(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     Paint,
     VirtualKeyboard(VirtualKeyboardEvent),

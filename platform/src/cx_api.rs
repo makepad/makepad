@@ -610,6 +610,10 @@ impl Cx {
         self.keyboard.set_key_focus(focus_area);
     }
 
+    pub fn key_focus(&self) -> Area {
+        self.keyboard.key_focus()
+    }
+
     pub fn revert_key_focus(&mut self) {
         self.keyboard.revert_key_focus();
     }
