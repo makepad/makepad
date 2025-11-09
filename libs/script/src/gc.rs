@@ -25,6 +25,12 @@ macro_rules! mark{
         else if let Some(ptr) = $val.as_array(){
             $self.mark_vec.push(ScriptGcMark::Array(ptr));
         }
+        else if let Some(ptr) = $val.as_pod(){
+            $self.pods[ptr.index as usize].tag.set_mark();
+        }
+        else if let Some(ptr) = $val.as_pod_type(){
+            $self.pod_types[ptr.index as usize].tag.set_mark();
+        }
         else if let Some(ptr) = $val.as_handle(){
             $self.handles[ptr.index as usize].as_mut().unwrap().tag.set_mark();
         }
@@ -190,6 +196,27 @@ impl ScriptHeap{
                 }
             }
         }
+        for i in 1..self.pods.len(){
+            let pod = &mut self.pods[i];
+            if !pod.tag.is_marked() && pod.tag.is_alloced(){
+                pod.clear();
+                self.pods_free.push(ScriptPod{index: i as _});
+            }
+            else{
+                pod.tag.clear_mark();
+            }
+        }
+        for i in 1..self.pod_types.len(){
+            let pod_type = &mut self.pod_types[i];
+            if !pod_type.tag.is_marked(){
+                pod_type.clear();
+                self.pod_types_free.push(ScriptPodType{index: i as _});
+            }
+            else{
+                pod_type.tag.clear_mark();
+            }
+        }
+        
     }
     
         

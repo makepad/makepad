@@ -33,6 +33,32 @@ impl ScriptIp{
     }
 }
 
+
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ScriptPod{
+    pub(crate) index: u32    
+}
+
+impl From<ScriptPod> for ScriptValue{
+    fn from(v:ScriptPod) -> Self{
+        ScriptValue::from_pod(v)
+    }
+}
+
+
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ScriptPodType{
+    pub(crate) index: u32    
+}
+
+impl From<ScriptPodType> for ScriptValue{
+    fn from(v:ScriptPodType) -> Self{
+        ScriptValue::from_pod_type(v)
+    }
+}
+
+
+
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ScriptObject{
     pub(crate) index: u32    
@@ -250,55 +276,57 @@ impl ScriptValueType{
     pub const COLOR: Self = Self(4);
     pub const OBJECT: Self = Self(5);
     pub const ARRAY: Self = Self(6);
-    pub const OPCODE: Self = Self(7);
-    pub const STRING: Self = Self(8);
-    pub const ERROR: Self = Self(9);
+    pub const POD_TYPE: Self = Self(7);
+    pub const POD: Self = Self(8);
+    pub const OPCODE: Self = Self(9);
+    pub const STRING: Self = Self(10);
+    pub const ERROR: Self = Self(11);
         
-    pub const REDUX_MARKER: Self = Self(10);
+    pub const REDUX_MARKER: Self = Self(12);
     
-    pub const INLINE_STRING_0: Self = Self(10);
-    pub const INLINE_STRING_1: Self = Self(11);
-    pub const INLINE_STRING_2: Self = Self(12);
-    pub const INLINE_STRING_3: Self = Self(13);
-    pub const INLINE_STRING_4: Self = Self(14);
-    pub const INLINE_STRING_5: Self = Self(15);
-    pub const INLINE_STRING_END: Self = Self(16);
+    pub const INLINE_STRING_0: Self = Self(12);
+    pub const INLINE_STRING_1: Self = Self(13);
+    pub const INLINE_STRING_2: Self = Self(14);
+    pub const INLINE_STRING_3: Self = Self(15);
+    pub const INLINE_STRING_4: Self = Self(16);
+    pub const INLINE_STRING_5: Self = Self(17);
+    pub const INLINE_STRING_END: Self = Self(18);
     
-    pub const ERR_FIRST: Self = Self(17);
-    pub const ERR_NOT_FOUND: Self = Self(17);
-    pub const ERR_NOT_FN: Self = Self(18);
-    pub const ERR_NOT_INDEX: Self = Self(19);
-    pub const ERR_NOT_OBJECT: Self = Self(20);
-    pub const ERR_STACK_UNDERFLOW: Self = Self(21);
-    pub const ERR_STACK_OVERFLOW: Self = Self(22);
-    pub const ERR_INVALID_ARGS: Self = Self(23);
-    pub const ERR_NOT_ASSIGNABLE: Self = Self(24);
-    pub const ERR_UNEXPECTED: Self = Self(25);
-    pub const ERR_ASSERT_FAIL: Self = Self(26);
-    pub const ERR_NOT_IMPL: Self = Self(27);
-    pub const ERR_FROZEN: Self = Self(28);
-    pub const ERR_VEC_FROZEN: Self = Self(29);
-    pub const ERR_INVALID_PROP_TYPE: Self = Self(30);
-    pub const ERR_INVALID_PROP_NAME: Self = Self(31);
-    pub const ERR_KEY_ALREADY_EXISTS: Self = Self(32);
-    pub const ERR_INVALID_KEY_TYPE: Self = Self(33);
-    pub const ERR_INVALID_VAR_NAME: Self = Self(34);
-    pub const ERR_USER: Self = Self(35);
-    pub const ERR_VEC_BOUND: Self = Self(36);
-    pub const ERR_INVALID_ARG_TYPE: Self = Self(37);
-    pub const ERR_INVALID_ARG_NAME: Self = Self(38);
-    pub const ERR_INVALID_ARG_COUNT: Self = Self(39);
-    pub const ERR_NOT_PROTO: Self = Self(40);
-    pub const ERR_TYPE_NOT_REGISTERED: Self = Self(41);
-    pub const ERR_ENUM_UNKNOWN_VARIANT: Self = Self(42);
-    pub const ERR_NOT_ALLOWED_IN_ARRAY: Self = Self(43);
-    pub const ERR_NOT_ALLOWED_IN_ARGUMENTS: Self = Self(44);
-    pub const ERR_ARRAY_BOUND: Self = Self(45);
-    pub const ERR_WRONG_TYPE_IN_APPLY: Self = Self(46);
-    pub const ERR_FILE_SYSTEM: Self = Self(47);
-    pub const ERR_CHILD_PROCESS: Self = Self(48);
-    pub const ERR_TOO_MANY_PAUSED_CALLS: Self = Self(49);
-    pub const ERR_LAST: Self = Self(49);
+    pub const ERR_FIRST: Self = Self(20);
+    pub const ERR_NOT_FOUND: Self = Self(20);
+    pub const ERR_NOT_FN: Self = Self(21);
+    pub const ERR_NOT_INDEX: Self = Self(22);
+    pub const ERR_NOT_OBJECT: Self = Self(23);
+    pub const ERR_STACK_UNDERFLOW: Self = Self(24);
+    pub const ERR_STACK_OVERFLOW: Self = Self(25);
+    pub const ERR_INVALID_ARGS: Self = Self(26);
+    pub const ERR_NOT_ASSIGNABLE: Self = Self(27);
+    pub const ERR_UNEXPECTED: Self = Self(28);
+    pub const ERR_ASSERT_FAIL: Self = Self(29);
+    pub const ERR_NOT_IMPL: Self = Self(30);
+    pub const ERR_FROZEN: Self = Self(31);
+    pub const ERR_VEC_FROZEN: Self = Self(32);
+    pub const ERR_INVALID_PROP_TYPE: Self = Self(33);
+    pub const ERR_INVALID_PROP_NAME: Self = Self(34);
+    pub const ERR_KEY_ALREADY_EXISTS: Self = Self(35);
+    pub const ERR_INVALID_KEY_TYPE: Self = Self(36);
+    pub const ERR_INVALID_VAR_NAME: Self = Self(37);
+    pub const ERR_USER: Self = Self(38);
+    pub const ERR_VEC_BOUND: Self = Self(39);
+    pub const ERR_INVALID_ARG_TYPE: Self = Self(40);
+    pub const ERR_INVALID_ARG_NAME: Self = Self(41);
+    pub const ERR_INVALID_ARG_COUNT: Self = Self(42);
+    pub const ERR_NOT_PROTO: Self = Self(43);
+    pub const ERR_TYPE_NOT_REGISTERED: Self = Self(44);
+    pub const ERR_ENUM_UNKNOWN_VARIANT: Self = Self(45);
+    pub const ERR_NOT_ALLOWED_IN_ARRAY: Self = Self(46);
+    pub const ERR_NOT_ALLOWED_IN_ARGUMENTS: Self = Self(47);
+    pub const ERR_ARRAY_BOUND: Self = Self(48);
+    pub const ERR_WRONG_TYPE_IN_APPLY: Self = Self(49);
+    pub const ERR_FILE_SYSTEM: Self = Self(50);
+    pub const ERR_CHILD_PROCESS: Self = Self(51);
+    pub const ERR_TOO_MANY_PAUSED_CALLS: Self = Self(52);
+    pub const ERR_LAST: Self = Self(53);
     
     pub const HANDLE_FIRST: Self = Self(0x40);
     pub const HANDLE_LAST: Self = Self(0x7F);
@@ -312,11 +340,13 @@ impl ScriptValueType{
     pub const REDUX_COLOR: ScriptTypeRedux = ScriptTypeRedux(4);
     pub const REDUX_OBJECT: ScriptTypeRedux = ScriptTypeRedux(5);
     pub const REDUX_ARRAY: ScriptTypeRedux = ScriptTypeRedux(6);
-    pub const REDUX_OPCODE: ScriptTypeRedux = ScriptTypeRedux(7);
-    pub const REDUX_STRING: ScriptTypeRedux = ScriptTypeRedux(8);
-    pub const REDUX_ERR: ScriptTypeRedux = ScriptTypeRedux(9);
-    pub const REDUX_ID: ScriptTypeRedux = ScriptTypeRedux(10);
-    pub const REDUX_HANDLE_FIRST: ScriptTypeRedux = ScriptTypeRedux(11);
+    pub const REDUX_POD: ScriptTypeRedux = ScriptTypeRedux(7);
+    pub const REDUX_POD_TYPE: ScriptTypeRedux = ScriptTypeRedux(8);
+    pub const REDUX_OPCODE: ScriptTypeRedux = ScriptTypeRedux(9);
+    pub const REDUX_STRING: ScriptTypeRedux = ScriptTypeRedux(10);
+    pub const REDUX_ERR: ScriptTypeRedux = ScriptTypeRedux(11);
+    pub const REDUX_ID: ScriptTypeRedux = ScriptTypeRedux(12);
+    pub const REDUX_HANDLE_FIRST: ScriptTypeRedux = ScriptTypeRedux(13);
         
     pub const fn to_u64(&self)->u64{ ((self.0 as u64) << 40) | 0xFFFF_0000_0000_0000 }
     pub const fn from_u64(val:u64)->Self{
@@ -451,7 +481,9 @@ impl ScriptValue{
     pub const TYPE_STRING: u64 = ScriptValueType::STRING.to_u64();
     pub const TYPE_OBJECT: u64 = ScriptValueType::OBJECT.to_u64();
     pub const TYPE_ARRAY: u64 = ScriptValueType::ARRAY.to_u64();
-    
+    pub const TYPE_POD: u64 = ScriptValueType::POD.to_u64();
+    pub const TYPE_POD_TYPE: u64 = ScriptValueType::POD_TYPE.to_u64();
+        
     pub const TYPE_INLINE_STRING_0: u64 = ScriptValueType::INLINE_STRING_0.to_u64();
     pub const TYPE_INLINE_STRING_1: u64 = ScriptValueType::INLINE_STRING_1.to_u64();
     pub const TYPE_INLINE_STRING_2: u64 = ScriptValueType::INLINE_STRING_2.to_u64();
@@ -706,6 +738,52 @@ impl ScriptValue{
         None
     }
         
+        
+        
+    // Pod
+        
+        
+        
+    pub const fn from_pod(ptr: ScriptPod)->Self{
+        Self(ptr.index as u64 | Self::TYPE_POD)
+    }
+        
+    pub const fn is_pod(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_POD
+    }
+        
+    pub const fn as_pod(&self)->Option<ScriptPod>{
+        if self.is_pod(){
+            return Some(ScriptPod{
+                index: (self.0 & 0xffff_ffff) as u32
+            })
+        }
+        None
+    }
+    
+         
+            
+            
+    // Pod Type
+            
+            
+            
+    pub const fn from_pod_type(ptr: ScriptPodType)->Self{
+        Self(ptr.index as u64 | Self::TYPE_POD_TYPE)
+    }
+            
+    pub const fn is_pod_type(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_POD_TYPE
+    }
+            
+    pub const fn as_pod_type(&self)->Option<ScriptPodType>{
+        if self.is_pod_type(){
+            return Some(ScriptPodType{
+                index: (self.0 & 0xffff_ffff) as u32
+            })
+        }
+        None
+    }
         
         
     // Handle

@@ -7,6 +7,7 @@ use crate::traits::*;
 use crate::array::*;
 use crate::gc::*;
 use crate::handle::*;
+use crate::pod::*;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::fmt::Write;
@@ -32,6 +33,11 @@ pub struct ScriptHeap{
     pub(crate) arrays: Vec<ScriptArrayData>,
     pub(crate) arrays_free: Vec<ScriptArray>,
     
+    pub(crate) pod_types: Vec<ScriptPodTypeData>,
+    pub(crate) pod_types_free: Vec<ScriptPodType>,
+    pub(crate) pods: Vec<ScriptPodData>,
+    pub(crate) pods_free: Vec<ScriptPod>,
+    
     pub(crate) type_check: Vec<ScriptTypeCheck>,
     pub(crate) type_index: HashMap<ScriptTypeId, ScriptTypeIndex>,
     
@@ -47,6 +53,8 @@ impl ScriptHeap{
             modules: ScriptObject::ZERO,
             objects: vec![Default::default()],
             arrays: vec![Default::default()],
+            pods: vec![Default::default()],
+            pod_types: vec![Default::default()],
             handles: vec![None],
             ..Default::default()
         };

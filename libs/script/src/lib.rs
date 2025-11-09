@@ -23,6 +23,7 @@ pub mod trap;
 pub mod vec_prims;
 pub mod json;
 pub mod handle;
+pub mod pod;
 
 pub use gc::*;
 pub use makepad_live_id::*;
@@ -80,20 +81,14 @@ pub fn test(){
     }    
     
     let _code = script!{
-        use mod.std.assert
-        use mod.std.channel
-        // alright so.
-        // we want channels. what does that look like
-        fn comfy_history(prompt_id){
-            let c = channel();
-            net.http_request(net.HttpRequest{url: "bla"}) do net.HttpEvents{
-                on_response: |res| c.send(ok{res.body.parse_json()})
-                on_error: |e| c.error(e)
-            }
-            c
+        use mod.pod
+        // lets make this work:
+        let vec2 = pod.struct{ // inherits from struct
+            x: pod.f32,
+            y: pod.f32
         }
-        for i in comfy_history(){
-        }
+        let t = vec2(0,0)
+        ~t
     };
     
     // lets define a handle type with some methods on it
@@ -107,8 +102,6 @@ pub fn test(){
         // array operations
         let x = 1+2 assert(x == 3)
         let iv = [1 2 3 4] let ov = []
-        
-        ~iv
         
         for v in iv ov.push(v) assert(iv == ov)
         assert(ov.pop() == 4) assert(iv != ov)
