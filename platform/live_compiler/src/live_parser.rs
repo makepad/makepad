@@ -10,7 +10,7 @@ use {
         makepad_live_id::*,
         makepad_math::{
             Vec2,
-            Vec3,
+            vec3,
             Vec4
         },
         live_token::{LiveToken, TokenWithSpan, LiveTokenId},
@@ -757,7 +757,7 @@ impl<'a> LiveParser<'a> {
                     self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
-                        value: LiveValue::Vec3(Vec3 {x: x as f32, y: y as f32, z: z as f32})
+                        value: LiveValue::Vec3(vec3(x as f32, y as f32, z as f32))
                     });
                 }
                 else {

@@ -71,6 +71,12 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
 }
 
 
+pub fn define_pod_module(_heap:&mut ScriptHeap, _native:&mut ScriptNative){
+    // alright pod module.
+    // lets define the f32 type
+    // and vec2
+}
+
 pub struct ScriptBuiltins{
     pub range: ScriptObject,
 }
