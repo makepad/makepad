@@ -432,7 +432,17 @@ impl ScrollBar {
                     ScrollAxis::Vertical => e.handled_y.get()
                 } {
                     let scroll = match self.axis {
-                        ScrollAxis::Horizontal => if self.use_vertical_finger_scroll {e.scroll.y}else {e.scroll.x},
+                        ScrollAxis::Horizontal => {
+                            // Prioritize horizontal scroll (trackpad horizontal swipe) when available
+                            if e.scroll.x != 0.0 {
+                                e.scroll.x
+                            } else if self.use_vertical_finger_scroll {
+                                // Fall back to vertical scroll for horizontal scrolling if enabled
+                                e.scroll.y
+                            } else {
+                                e.scroll.x
+                            }
+                        },
                         ScrollAxis::Vertical => e.scroll.y
                     };
                     if !self.smoothing.is_none() && e.is_mouse {
