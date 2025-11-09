@@ -547,7 +547,7 @@ live_primitive!(
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Vec2(v) => {
-                *self = Vec3{x:v.x, y:v.y, z:0.0};
+                *self = vec3(v.x, v.y, 0.0);
                 index + 1
             }
             LiveValue::Uint64(v) => {

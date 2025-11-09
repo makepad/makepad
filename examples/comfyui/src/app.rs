@@ -171,7 +171,7 @@ let code = script!{
                 
     fn post(){ 
         // handle AI prompt messages
-             
+        
         let prompt = fs.read("/Users/admin/makepad/makepad/local/prompt.txt").parse_json();
         if messages.len() > 150 messages.clear()
         if prompt.clear || messages.len() == 0{

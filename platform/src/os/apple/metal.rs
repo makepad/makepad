@@ -83,7 +83,7 @@ impl Cx {
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
                     draw_call
-                }else {
+                } else {
                     continue;
                 };
                 
