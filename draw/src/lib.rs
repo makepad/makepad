@@ -20,6 +20,7 @@ pub use crate::{
     turtle::{
         Layout,
         Walk,
+        Metrics,
         Align,
         Padding,
         Flow,
