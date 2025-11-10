@@ -26,10 +26,8 @@ macro_rules! mark{
             $self.mark_vec.push(ScriptGcMark::Array(ptr));
         }
         else if let Some(ptr) = $val.as_pod(){
+            
             $self.pods[ptr.index as usize].tag.set_mark();
-        }
-        else if let Some(ptr) = $val.as_pod_type(){
-            $self.pod_types[ptr.index as usize].tag.set_mark();
         }
         else if let Some(ptr) = $val.as_handle(){
             $self.handles[ptr.index as usize].as_mut().unwrap().tag.set_mark();
@@ -151,6 +149,9 @@ impl ScriptHeap{
         for i in 1..self.objects.len(){
             let obj = &mut self.objects[i];
             if !obj.tag.is_marked() && obj.tag.is_alloced(){
+                if let Some(pod_ty) = obj.tag.as_pod_type(){
+                    self.pod_types_free.push(pod_ty);
+                }
                 obj.clear();
                 self.objects_free.push(ScriptObject{index: i as _});
             }
@@ -206,23 +207,15 @@ impl ScriptHeap{
                 pod.tag.clear_mark();
             }
         }
-        for i in 1..self.pod_types.len(){
-            let pod_type = &mut self.pod_types[i];
-            if !pod_type.tag.is_marked(){
-                pod_type.clear();
-                self.pod_types_free.push(ScriptPodType{index: i as _});
-            }
-            else{
-                pod_type.tag.clear_mark();
-            }
-        }
-        
     }
     
         
     pub fn free_object_if_unreffed(&mut self, ptr:ScriptObject){
         let obj = &mut self.objects[ptr.index as usize];
         if !obj.tag.is_reffed(){
+            if let Some(pod_ty) = obj.tag.as_pod_type(){
+                self.pod_types_free.push(pod_ty);
+            }
             obj.clear();
             self.objects_free.push(ptr);
         }

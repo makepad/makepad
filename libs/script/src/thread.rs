@@ -262,7 +262,7 @@ impl ScriptThread{
         }
         
         heap.set_object_deep(scope);
-        heap.set_object_storage_type(scope, ScriptObjectStorageType::AUTO);
+        heap.set_object_storage_auto(scope);
                 
         if let Some(fnptr) = heap.parent_as_fn(scope){
             match fnptr{

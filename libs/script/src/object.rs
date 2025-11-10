@@ -1,15 +1,16 @@
-use std::fmt;
+use ::std::fmt;
 use crate::value::*;
 use crate::value_map::*;
 use crate::traits::*;
 use crate::heap::*;
 use crate::native::*;
 use crate::makepad_live_id::*;
+
 use crate::*;
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::cell::RefCell;
+use ::std::collections::hash_map::Entry;
+use ::std::collections::HashMap;
+use ::std::rc::Rc;
+use ::std::cell::RefCell;
 //use std::collections::btree_map::BTreeMap;
 
 #[derive(Default)]
@@ -19,24 +20,6 @@ pub struct ScriptObjectTag(u64);
 pub struct ScriptObjectStorageType(u8);
 
 pub type ScriptObjectMap = ValueMap<ScriptValue, ScriptMapValue>;
-
-impl fmt::Debug for ScriptObjectStorageType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
-
-impl fmt::Display for ScriptObjectStorageType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self{
-            Self::AUTO=>write!(f, "AUTO"),
-            Self::VEC2=>write!(f, "VEC2"),
-            Self::MAP=>write!(f, "MAP"),
-            _=>write!(f, "?ObjectType"),
-        }
-    }
-}
-
 
 pub struct ScriptObjectRef{
     pub(crate) roots: Rc<RefCell<HashMap<ScriptObject, usize>>>,
@@ -118,23 +101,6 @@ impl Drop for ScriptObjectRef{
     }
 }
 
-impl ScriptObjectStorageType{
-    pub const AUTO: Self = Self(0);
-    pub const VEC2: Self = Self(1);
-    pub const MAP: Self = Self(2);
-        
-    pub fn is_auto(&self)->bool{
-        *self == Self::AUTO
-    }
-        
-    pub fn is_vec2(&self)->bool{
-        *self == Self::VEC2
-    }
-        
-    pub fn is_map(&self)->bool{
-        *self == Self::MAP
-    }
-}
 
 #[derive(Debug,Clone,Copy)]
 pub struct NativeId{
@@ -179,23 +145,55 @@ impl ScriptObjectTag{
     pub const NOTPROTO: u64 = 0x2000<<40;
     // automatically convert between id and string keys when looking up
     pub const STRING_KEYS: u64 = 0x4000<<40;
-    
-    
     pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
     
     pub const NEED_CHECK_MASK: u64 = Self::FREEZE_MASK|Self::TYPE_CHECKED;
     
-    pub const FLAG_MASK: u64 = 0xFFFF<<40;
+    pub const FLAG_MASK: u64 = 0x3FFFF<<40;
         
-    pub const REF_KIND_SCRIPT_FN: u64 = 0x1<<56;
-    pub const REF_KIND_NATIVE_FN: u64 = 0x2<<56;
-    pub const REF_KIND_TYPE_INDEX: u64 = 0x3<<56;
-    pub const REF_KIND_MASK:  u64 = 0xF<<56;
-    pub const REF_DATA_MASK: u64 = 0xFF_FFFF_FFFF;    
-            
-    pub const STORAGE_SHIFT: u64 = 60;
-    pub const STORAGE_MASK: u64 = 0xF<<Self::STORAGE_SHIFT;
-            
+    pub const REF_KIND_SCRIPT_FN: u64 = 0x1<<58;
+    pub const REF_KIND_NATIVE_FN: u64 = 0x2<<58;
+    pub const REF_KIND_TYPE_INDEX: u64 = 0x3<<58;
+    pub const REF_KIND_POD_TYPE: u64 = 0x4<<58;
+    pub const REF_KIND_MASK:  u64 = 0xF<<58;
+    pub const REF_DATA_MASK: u64 = 0xFF_FFFF_FFFF;
+    
+    pub const STORAGE_SHIFT: u64 = 62;
+    pub const STORAGE_MASK: u64 = 0x3<<Self::STORAGE_SHIFT;
+    
+    pub const STORAGE_AUTO: u64 = 0<<Self::STORAGE_SHIFT;
+    pub const STORAGE_VEC2: u64 = 1<<Self::STORAGE_SHIFT;
+    pub const STORAGE_MAP: u64 = 2<<Self::STORAGE_SHIFT;
+        
+    pub fn is_auto(&self)->bool{
+        self.0 & Self::STORAGE_MASK == Self::STORAGE_AUTO
+    }
+                
+    pub fn is_vec2(&self)->bool{
+        self.0 & Self::STORAGE_MASK == Self::STORAGE_VEC2
+    }
+                
+    pub fn is_map(&self)->bool{
+        self.0 & Self::STORAGE_MASK == Self::STORAGE_MAP
+    }
+    
+    pub fn set_vec2(&mut self){
+        self.0 &= !Self::STORAGE_MASK;
+        self.0 |= Self::STORAGE_VEC2;
+    }
+                    
+    pub fn set_auto(&mut self){
+        self.0 &= !Self::STORAGE_AUTO;
+        self.0 |= Self::STORAGE_MAP;
+        
+    }
+                    
+    pub fn set_map(&mut self){
+        self.0 &= !Self::STORAGE_MASK;
+        self.0 |= Self::STORAGE_MAP;
+    }
+    
+    
     const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::STORAGE_MASK|Self::VALIDATED|
         Self::MAP_ADD|Self::VEC_FROZEN|Self::TRACKED|Self::REF_KIND_MASK|Self::REF_DATA_MASK|Self::TYPE_CHECKED;
     
@@ -312,7 +310,6 @@ impl ScriptObjectTag{
                 self.0 |= ((ni.index as u64)) | Self::REF_KIND_NATIVE_FN 
             }
         }
-        
     }
     
     pub fn as_fn(&self)->Option<ScriptFnPtr>{
@@ -321,6 +318,21 @@ impl ScriptObjectTag{
         }
         else if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_NATIVE_FN{
             Some(ScriptFnPtr::Native(NativeId{index:self.0 as u32}))
+        }
+        else{
+            None
+        }
+    }
+    
+    pub fn set_pod_type(&mut self, ty:ScriptPodType){
+        self.0 &= !(Self::REF_DATA_MASK);
+        self.0 &= !(Self::REF_KIND_MASK);
+        self.0 |= ty.index as u64 | Self::REF_KIND_POD_TYPE 
+    }
+    
+    pub fn as_pod_type(&self)->Option<ScriptPodType>{
+        if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_POD_TYPE{
+            Some(ScriptPodType{index:self.0 as u32})
         }
         else{
             None
@@ -419,7 +431,9 @@ impl fmt::Debug for ScriptObjectTag {
 impl fmt::Display for ScriptObjectTag {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ObjectType(").ok();
-        write!(f, "{}|",self.get_storage_type()).ok();
+        if self.is_vec2(){write!(f,"STORAGE_VEC2|").ok();}
+        if self.is_auto(){write!(f,"STORAGE_AUTO|").ok();}
+        if self.is_map(){write!(f,"STORAGE_MAP|").ok();}
         if self.is_marked(){write!(f,"MARK|").ok();}
         if self.is_alloced(){write!(f,"ALLOCED|").ok();}
         if self.is_deep(){write!(f,"DEEP|").ok();}
@@ -471,7 +485,6 @@ pub struct ScriptVecValue{
 pub struct ScriptObjectData{
     pub tag: ScriptObjectTag,
     pub proto: ScriptValue,
-    
     pub map: ScriptObjectMap,
     pub vec: Vec<ScriptVecValue>,
 }
@@ -682,9 +695,6 @@ impl ScriptObjectData{
         self.vec.extend_from_slice(&other.vec);
     }
     
-    pub fn set_storage_type(&mut self, ty_new:ScriptObjectStorageType){
-        self.tag.set_storage_type_unchecked(ty_new)
-    }
     //const DONT_RECYCLE_WHEN: usize = 1000;
     pub fn with_proto(proto:ScriptValue)->Self{
         Self{

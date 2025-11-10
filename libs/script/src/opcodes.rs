@@ -218,6 +218,8 @@ impl ScriptThread{
     pub fn opcode(&mut self,opcode: Opcode, opargs:OpcodeArgs, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any){
         
         match opcode{
+            
+// ARITHMETIC            
             Opcode::NOT=>{
                 let value = self.pop_stack_resolved(heap);
                 if let Some(v) = value.as_f64(){
@@ -260,6 +262,29 @@ impl ScriptThread{
                 }
                 self.trap.goto_next();
             }
+                        
+            Opcode::SUB=>f64_op_impl!(self, heap, opargs, -),
+            Opcode::SHL=>fu64_op_impl!(self, heap, opargs,>>),
+            Opcode::SHR=>fu64_op_impl!(self, heap, opargs,<<),
+            Opcode::AND=>fu64_op_impl!(self, heap,opargs,&),
+            Opcode::OR=>fu64_op_impl!(self, heap, opargs,|),
+            Opcode::XOR=>fu64_op_impl!(self, heap, opargs,^),
+            
+// ASSIGN
+            Opcode::ASSIGN=>{
+                let value = self.pop_stack_resolved(heap);
+                let id = self.pop_stack_value();
+                if let Some(id) = id.as_id(){
+                    let value = self.set_scope_value(heap, id, value);
+                    self.push_stack_unchecked(value);
+                }
+                else{
+                    let value = self.trap.err_not_assignable();
+                    self.push_stack_unchecked(value);
+                }
+                self.trap.goto_next();
+            }
+            
             Opcode::ASSIGN_ADD=>{
                 
                 let value = self.pop_stack_resolved(heap);
@@ -290,6 +315,51 @@ impl ScriptThread{
                 }
                 self.trap.goto_next();
             }
+            
+                        
+            Opcode::ASSIGN_SUB=>f64_scope_assign_op_impl!(self, heap, -),
+            Opcode::ASSIGN_MUL=>f64_scope_assign_op_impl!(self, heap, *),
+            Opcode::ASSIGN_DIV=>f64_scope_assign_op_impl!(self, heap, /),
+            Opcode::ASSIGN_MOD=>f64_scope_assign_op_impl!(self, heap, %),
+            Opcode::ASSIGN_AND=>fu64_scope_assign_op_impl!(self, heap, &),
+            Opcode::ASSIGN_OR=>fu64_scope_assign_op_impl!(self, heap, |),
+            Opcode::ASSIGN_XOR=>fu64_scope_assign_op_impl!(self, heap, ^),
+            Opcode::ASSIGN_SHL=>fu64_scope_assign_op_impl!(self, heap, <<),
+            Opcode::ASSIGN_SHR=>fu64_scope_assign_op_impl!(self, heap, >>),
+            Opcode::ASSIGN_IFNIL=>{
+                let value = self.pop_stack_resolved(heap);
+                let id = self.pop_stack_value();
+                if let Some(id) = id.as_id(){
+                    let va = self.scope_value(heap, id);
+                    if va.is_err() || va.is_nil(){
+                        let value = self.set_scope_value(heap, id, value);
+                        self.push_stack_unchecked(value);
+                    }
+                    else{
+                        self.push_stack_unchecked(NIL);
+                    }
+                }
+                else{
+                    let value = self.trap.err_not_assignable();
+                    self.push_stack_unchecked(value);
+                }
+                self.trap.goto_next();
+            }
+// ASSIGN FIELD                       
+            Opcode::ASSIGN_FIELD=>{
+                let value = self.pop_stack_resolved(heap);
+                let field = self.pop_stack_value();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    let value = heap.set_value(obj, field, value, &self.trap);
+                    self.push_stack_unchecked(value);
+                }
+                else{
+                    let value = self.trap.err_not_object();
+                    self.push_stack_unchecked(value);
+                }
+                self.trap.goto_next();
+            }
             Opcode::ASSIGN_FIELD_ADD=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
@@ -316,7 +386,56 @@ impl ScriptThread{
                     self.push_stack_unchecked(value);
                 }
                 self.trap.goto_next();
+            }            
+            Opcode::ASSIGN_FIELD_SUB=>f64_field_assign_op_impl!(self, heap, -),
+            Opcode::ASSIGN_FIELD_MUL=>f64_field_assign_op_impl!(self, heap, *),
+            Opcode::ASSIGN_FIELD_DIV=>f64_field_assign_op_impl!(self, heap, /),
+            Opcode::ASSIGN_FIELD_MOD=>f64_field_assign_op_impl!(self, heap, %),
+            Opcode::ASSIGN_FIELD_AND=>fu64_field_assign_op_impl!(self, heap, &),
+            Opcode::ASSIGN_FIELD_OR=>fu64_field_assign_op_impl!(self, heap, |),
+            Opcode::ASSIGN_FIELD_XOR=>fu64_field_assign_op_impl!(self, heap, ^),
+            Opcode::ASSIGN_FIELD_SHL=>fu64_field_assign_op_impl!(self, heap, <<),
+            Opcode::ASSIGN_FIELD_SHR=>fu64_field_assign_op_impl!(self, heap, >>),
+            Opcode::ASSIGN_FIELD_IFNIL=>{
+                let value = self.pop_stack_resolved(heap);
+                let field = self.pop_stack_value();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    let old_value = heap.value(obj, field, &self.trap);
+                    if old_value.is_err() || old_value.is_nil(){
+                        let value = heap.set_value(obj, field, value, &self.trap);
+                        self.push_stack_unchecked(value);
+                    }
+                    else{
+                        self.push_stack_unchecked(NIL);
+                    }
+                }
+                else{
+                    let value = self.trap.err_not_object();
+                    self.push_stack_unchecked(value);
+                }
+                self.trap.goto_next();
             }
+                        
+            Opcode::ASSIGN_INDEX=>{
+                let value = self.pop_stack_resolved(heap);
+                let index = self.pop_stack_value();
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    let value = heap.set_value(obj, index, value, &self.trap);
+                    self.push_stack_unchecked(value);
+                }
+                else if let Some(arr) = object.as_array(){
+                    let value = heap.array_index(arr, index.as_index(), &self.trap);
+                    self.push_stack_unchecked(value);
+                }
+                else{
+                    let value = self.trap.err_not_object();
+                    self.push_stack_unchecked(value);
+                }
+                self.trap.goto_next();
+            }
+// ASSIGN INDEX
             Opcode::ASSIGN_INDEX_ADD=>{
                 let value = self.pop_stack_resolved(heap);
                 let index = self.pop_stack_resolved(heap);
@@ -362,13 +481,108 @@ impl ScriptThread{
                 }
                 self.trap.goto_next();
             },
-            Opcode::SUB=>f64_op_impl!(self, heap, opargs, -),
-            Opcode::SHL=>fu64_op_impl!(self, heap, opargs,>>),
-            Opcode::SHR=>fu64_op_impl!(self, heap, opargs,<<),
-            Opcode::AND=>fu64_op_impl!(self, heap,opargs,&),
-            Opcode::OR=>fu64_op_impl!(self, heap, opargs,|),
-            Opcode::XOR=>fu64_op_impl!(self, heap, opargs,^),
-                                
+            Opcode::ASSIGN_INDEX_SUB=>f64_index_assign_op_impl!(self, heap, -),
+            Opcode::ASSIGN_INDEX_MUL=>f64_index_assign_op_impl!(self, heap, *),
+            Opcode::ASSIGN_INDEX_DIV=>f64_index_assign_op_impl!(self, heap, /),
+            Opcode::ASSIGN_INDEX_MOD=>f64_index_assign_op_impl!(self, heap, %),
+            Opcode::ASSIGN_INDEX_AND=>fu64_index_assign_op_impl!(self, heap, &),
+            Opcode::ASSIGN_INDEX_OR=>fu64_index_assign_op_impl!(self, heap, |),
+            Opcode::ASSIGN_INDEX_XOR=>fu64_index_assign_op_impl!(self, heap, ^),
+            Opcode::ASSIGN_INDEX_SHL=>fu64_index_assign_op_impl!(self, heap, <<),
+            Opcode::ASSIGN_INDEX_SHR=>fu64_index_assign_op_impl!(self, heap, >>),
+            Opcode::ASSIGN_INDEX_IFNIL=>{
+                let value = self.pop_stack_resolved(heap);
+                let index = self.pop_stack_resolved(heap);
+                let object = self.pop_stack_resolved(heap);
+                if let Some(obj) = object.as_object(){
+                    let old_value = heap.value(obj, index, &self.trap);
+                    if old_value.is_err() || old_value.is_nil(){
+                        let value = heap.set_value(obj, index, value, &self.trap);
+                        self.push_stack_unchecked(value);
+                    }
+                    else{
+                        self.push_stack_unchecked(NIL);
+                    }
+                }
+                else if let Some(arr) = object.as_array(){
+                    let index = index.as_index();
+                    let old_value = heap.array_index(arr, index, &self.trap);
+                    if old_value.is_err() || old_value.is_nil(){
+                        let value = heap.set_array_index(arr, index, value, &self.trap);
+                        self.push_stack_unchecked(value);
+                    }
+                    else{
+                        self.push_stack_unchecked(NIL);
+                    }
+                }
+                else{
+                    let value = self.trap.err_not_object();
+                    self.push_stack_unchecked(value);
+                }
+                self.trap.goto_next();
+            }
+// ASSIGN ME            
+            Opcode::ASSIGN_ME=>{
+                let value = self.pop_stack_resolved(heap);
+                let field = self.pop_stack_value();
+                if self.call_has_me(){
+                    let me = self.mes.last().unwrap();
+                    match me{
+                        ScriptMe::Call{args,..}=>{
+                            heap.named_fn_arg(*args, field, value, &self.trap);
+                        }
+                        ScriptMe::Object(obj)=>{
+                            if field.is_string_like(){
+                                heap.set_string_keys(*obj);
+                            }
+                            heap.set_value(*obj, field, value, &self.trap);
+                        }
+                        ScriptMe::Array(_arr)=>{
+                            self.trap.err_not_allowed_in_array();
+                        }
+                    }
+                }
+                self.trap.goto_next();
+            }
+                        
+            Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{
+                let value = self.pop_stack_resolved(heap);
+                let field = self.pop_stack_value();
+                let value = match self.mes.last().unwrap(){
+                    ScriptMe::Call{..}=>{
+                        self.trap.err_not_allowed_in_arguments()
+                    }
+                    ScriptMe::Object(obj)=>{
+                        heap.vec_insert_value_at(*obj, field, value, opcode == Opcode::ASSIGN_ME_BEFORE, &self.trap)
+                    }
+                    ScriptMe::Array(_arr)=>{
+                        self.trap.err_not_allowed_in_array()
+                    }
+                };
+                self.push_stack_unchecked(value);
+                self.trap.goto_next();
+            }
+                        
+            Opcode::ASSIGN_ME_BEGIN=>{
+                let value = self.pop_stack_resolved(heap);
+                let field = self.pop_stack_value();
+                let value = match self.mes.last().unwrap(){
+                    ScriptMe::Call{..}=>{
+                        self.trap.err_not_allowed_in_arguments()
+                    }
+                    ScriptMe::Object(obj)=>{
+                        heap.vec_insert_value_begin(*obj, field, value, &self.trap)
+                    }
+                    ScriptMe::Array(_arr)=>{
+                        self.trap.err_not_allowed_in_array()
+                    }
+                };
+                self.push_stack_unchecked(value);
+                self.trap.goto_next();
+            }
+            
+            
+// CONCAT  
             Opcode::CONCAT=>{
                 let op1 = self.pop_stack_resolved(heap);
                 let op2 = self.pop_stack_resolved(heap);
@@ -379,6 +593,7 @@ impl ScriptThread{
                 self.push_stack_unchecked(ptr.into());
                 self.trap.goto_next();
             }
+// EQUALITY
             Opcode::EQ=> {
                 let b = self.pop_stack_resolved(heap);
                 let a = self.pop_stack_resolved(heap);
@@ -422,215 +637,7 @@ impl ScriptThread{
                 self.push_stack_unchecked((a != b).into());
                 self.trap.goto_next();
             }
-            
-            Opcode::ASSIGN_ME=>{
-                let value = self.pop_stack_resolved(heap);
-                let field = self.pop_stack_value();
-                if self.call_has_me(){
-                    let me = self.mes.last().unwrap();
-                    match me{
-                        ScriptMe::Call{args,..}=>{
-                            heap.named_fn_arg(*args, field, value, &self.trap);
-                        }
-                        ScriptMe::Object(obj)=>{
-                            if field.is_string_like(){
-                                heap.set_string_keys(*obj);
-                            }
-                            heap.set_value(*obj, field, value, &self.trap);
-                        }
-                        ScriptMe::Array(_arr)=>{
-                            self.trap.err_not_allowed_in_array();
-                        }
-                    }
-                }
-                self.trap.goto_next();
-            }
-            
-            Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{
-                let value = self.pop_stack_resolved(heap);
-                let field = self.pop_stack_value();
-                let value = match self.mes.last().unwrap(){
-                    ScriptMe::Call{..}=>{
-                        self.trap.err_not_allowed_in_arguments()
-                    }
-                    ScriptMe::Object(obj)=>{
-                        heap.vec_insert_value_at(*obj, field, value, opcode == Opcode::ASSIGN_ME_BEFORE, &self.trap)
-                    }
-                    ScriptMe::Array(_arr)=>{
-                        self.trap.err_not_allowed_in_array()
-                    }
-                };
-                self.push_stack_unchecked(value);
-                self.trap.goto_next();
-            }
-            
-            Opcode::ASSIGN_ME_BEGIN=>{
-                let value = self.pop_stack_resolved(heap);
-                let field = self.pop_stack_value();
-                let value = match self.mes.last().unwrap(){
-                    ScriptMe::Call{..}=>{
-                        self.trap.err_not_allowed_in_arguments()
-                    }
-                    ScriptMe::Object(obj)=>{
-                        heap.vec_insert_value_begin(*obj, field, value, &self.trap)
-                    }
-                    ScriptMe::Array(_arr)=>{
-                        self.trap.err_not_allowed_in_array()
-                    }
-                };
-                self.push_stack_unchecked(value);
-                self.trap.goto_next();
-            }
-            
-            Opcode::ASSIGN=>{
-                let value = self.pop_stack_resolved(heap);
-                let id = self.pop_stack_value();
-                if let Some(id) = id.as_id(){
-                    let value = self.set_scope_value(heap, id, value);
-                    self.push_stack_unchecked(value);
-                }
-                else{
-                    let value = self.trap.err_not_assignable();
-                    self.push_stack_unchecked(value);
-                }
-                self.trap.goto_next();
-            }
-            
-            Opcode::ASSIGN_SUB=>f64_scope_assign_op_impl!(self, heap, -),
-            Opcode::ASSIGN_MUL=>f64_scope_assign_op_impl!(self, heap, *),
-            Opcode::ASSIGN_DIV=>f64_scope_assign_op_impl!(self, heap, /),
-            Opcode::ASSIGN_MOD=>f64_scope_assign_op_impl!(self, heap, %),
-            Opcode::ASSIGN_AND=>fu64_scope_assign_op_impl!(self, heap, &),
-            Opcode::ASSIGN_OR=>fu64_scope_assign_op_impl!(self, heap, |),
-            Opcode::ASSIGN_XOR=>fu64_scope_assign_op_impl!(self, heap, ^),
-            Opcode::ASSIGN_SHL=>fu64_scope_assign_op_impl!(self, heap, <<),
-            Opcode::ASSIGN_SHR=>fu64_scope_assign_op_impl!(self, heap, >>),
-            Opcode::ASSIGN_IFNIL=>{
-                let value = self.pop_stack_resolved(heap);
-                let id = self.pop_stack_value();
-                if let Some(id) = id.as_id(){
-                    let va = self.scope_value(heap, id);
-                    if va.is_err() || va.is_nil(){
-                        let value = self.set_scope_value(heap, id, value);
-                        self.push_stack_unchecked(value);
-                    }
-                    else{
-                        self.push_stack_unchecked(NIL);
-                    }
-                }
-                else{
-                    let value = self.trap.err_not_assignable();
-                    self.push_stack_unchecked(value);
-                }
-                self.trap.goto_next();
-            }
-            
-            Opcode::ASSIGN_FIELD=>{
-                let value = self.pop_stack_resolved(heap);
-                let field = self.pop_stack_value();
-                let object = self.pop_stack_resolved(heap);
-                if let Some(obj) = object.as_object(){
-                    let value = heap.set_value(obj, field, value, &self.trap);
-                    self.push_stack_unchecked(value);
-                }
-                else{
-                    let value = self.trap.err_not_object();
-                    self.push_stack_unchecked(value);
-                }
-                self.trap.goto_next();
-            }
-            
-            
-            Opcode::ASSIGN_FIELD_SUB=>f64_field_assign_op_impl!(self, heap, -),
-            Opcode::ASSIGN_FIELD_MUL=>f64_field_assign_op_impl!(self, heap, *),
-            Opcode::ASSIGN_FIELD_DIV=>f64_field_assign_op_impl!(self, heap, /),
-            Opcode::ASSIGN_FIELD_MOD=>f64_field_assign_op_impl!(self, heap, %),
-            Opcode::ASSIGN_FIELD_AND=>fu64_field_assign_op_impl!(self, heap, &),
-            Opcode::ASSIGN_FIELD_OR=>fu64_field_assign_op_impl!(self, heap, |),
-            Opcode::ASSIGN_FIELD_XOR=>fu64_field_assign_op_impl!(self, heap, ^),
-            Opcode::ASSIGN_FIELD_SHL=>fu64_field_assign_op_impl!(self, heap, <<),
-            Opcode::ASSIGN_FIELD_SHR=>fu64_field_assign_op_impl!(self, heap, >>),
-            Opcode::ASSIGN_FIELD_IFNIL=>{
-                let value = self.pop_stack_resolved(heap);
-                let field = self.pop_stack_value();
-                let object = self.pop_stack_resolved(heap);
-                if let Some(obj) = object.as_object(){
-                    let old_value = heap.value(obj, field, &self.trap);
-                    if old_value.is_err() || old_value.is_nil(){
-                        let value = heap.set_value(obj, field, value, &self.trap);
-                        self.push_stack_unchecked(value);
-                    }
-                    else{
-                        self.push_stack_unchecked(NIL);
-                    }
-                }
-                else{
-                    let value = self.trap.err_not_object();
-                    self.push_stack_unchecked(value);
-                }
-                self.trap.goto_next();
-            }
-            
-            Opcode::ASSIGN_INDEX=>{
-                let value = self.pop_stack_resolved(heap);
-                let index = self.pop_stack_value();
-                let object = self.pop_stack_resolved(heap);
-                if let Some(obj) = object.as_object(){
-                    let value = heap.set_value(obj, index, value, &self.trap);
-                    self.push_stack_unchecked(value);
-                }
-                else if let Some(arr) = object.as_array(){
-                    let value = heap.array_index(arr, index.as_index(), &self.trap);
-                    self.push_stack_unchecked(value);
-                }
-                else{
-                    let value = self.trap.err_not_object();
-                    self.push_stack_unchecked(value);
-                }
-                self.trap.goto_next();
-            }
-            
-            Opcode::ASSIGN_INDEX_SUB=>f64_index_assign_op_impl!(self, heap, -),
-            Opcode::ASSIGN_INDEX_MUL=>f64_index_assign_op_impl!(self, heap, *),
-            Opcode::ASSIGN_INDEX_DIV=>f64_index_assign_op_impl!(self, heap, /),
-            Opcode::ASSIGN_INDEX_MOD=>f64_index_assign_op_impl!(self, heap, %),
-            Opcode::ASSIGN_INDEX_AND=>fu64_index_assign_op_impl!(self, heap, &),
-            Opcode::ASSIGN_INDEX_OR=>fu64_index_assign_op_impl!(self, heap, |),
-            Opcode::ASSIGN_INDEX_XOR=>fu64_index_assign_op_impl!(self, heap, ^),
-            Opcode::ASSIGN_INDEX_SHL=>fu64_index_assign_op_impl!(self, heap, <<),
-            Opcode::ASSIGN_INDEX_SHR=>fu64_index_assign_op_impl!(self, heap, >>),
-            Opcode::ASSIGN_INDEX_IFNIL=>{
-                let value = self.pop_stack_resolved(heap);
-                let index = self.pop_stack_resolved(heap);
-                let object = self.pop_stack_resolved(heap);
-                if let Some(obj) = object.as_object(){
-                    let old_value = heap.value(obj, index, &self.trap);
-                    if old_value.is_err() || old_value.is_nil(){
-                        let value = heap.set_value(obj, index, value, &self.trap);
-                        self.push_stack_unchecked(value);
-                    }
-                    else{
-                        self.push_stack_unchecked(NIL);
-                    }
-                }
-                else if let Some(arr) = object.as_array(){
-                    let index = index.as_index();
-                    let old_value = heap.array_index(arr, index, &self.trap);
-                    if old_value.is_err() || old_value.is_nil(){
-                        let value = heap.set_array_index(arr, index, value, &self.trap);
-                        self.push_stack_unchecked(value);
-                    }
-                    else{
-                        self.push_stack_unchecked(NIL);
-                    }
-                }
-                else{
-                    let value = self.trap.err_not_object();
-                    self.push_stack_unchecked(value);
-                }
-                self.trap.goto_next();
-            }
-            
+// Object/Array begin
             Opcode::BEGIN_PROTO=>{
                 let proto = self.pop_stack_resolved(heap);
                 let me = heap.new_with_proto_checked(proto, &self.trap);
@@ -651,6 +658,8 @@ impl ScriptThread{
                 self.trap.goto_next();
             }
             Opcode::END_PROTO=>{
+                // see if we need to transform to a pod type
+                
                 let me = self.mes.pop().unwrap();
                 self.push_stack_unchecked(me.into());
                 self.trap.goto_next();
@@ -675,7 +684,7 @@ impl ScriptThread{
                 self.push_stack_unchecked(me.into());
                 self.trap.goto_next();
             }
-            
+// Calling
             Opcode::CALL_ARGS=>{
                 let fnobj = self.pop_stack_resolved(heap);
                 let scope = heap.new_with_proto(fnobj);
@@ -698,7 +707,7 @@ impl ScriptThread{
                 }
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(args);
-                heap.set_object_storage_type(args, ScriptObjectStorageType::AUTO);
+                heap.set_object_storage_auto(args);
                                 
                 if let Some(fnptr) = heap.parent_as_fn(args){
                     match fnptr{
@@ -778,13 +787,13 @@ impl ScriptThread{
                 self.mes.push(ScriptMe::Call{args, this:Some(this)});
                 self.trap.goto_next();
             }
-            
+// Fn def
             Opcode::FN_ARGS=>{
                 let scope = *self.scopes.last_mut().unwrap();
                 let me = heap.new_with_proto(scope.into());
                                 
                 // set it to a vec type to ensure ordered inserts
-                heap.set_object_storage_type(me, ScriptObjectStorageType::VEC2);
+                heap.set_object_storage_vec2(me);
                 heap.clear_object_deep(me);
                 
                 self.mes.push(ScriptMe::Object(me));
@@ -796,7 +805,7 @@ impl ScriptThread{
                 let me = heap.new_with_proto(scope.into());
                                                 
                 // set it to a vec type to ensure ordered inserts
-                heap.set_object_storage_type(me, ScriptObjectStorageType::VEC2);
+                heap.set_object_storage_vec2(me);
                 heap.clear_object_deep(me);
                 self.mes.push(ScriptMe::Object(me));
                 self.def_scope_value(heap, id, me.into());
@@ -904,6 +913,7 @@ impl ScriptThread{
                     self.trap.goto_next()
                 }
             }
+// IF            
             Opcode::IF_TEST=>{
                 let test = self.pop_stack_resolved(heap);
                 let test = heap.cast_to_bool(test);
@@ -921,7 +931,8 @@ impl ScriptThread{
                 // we have to chuck our scope stack if we made any
                 // also pop our ifelse stack
                 self.trap.goto_rel(opargs.to_u32());
-            }   
+            }
+// Use            
             Opcode::USE=>{
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
@@ -936,6 +947,7 @@ impl ScriptThread{
                 self.trap.goto_next();
                 return
             }
+// Field            
             Opcode::FIELD=>{
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
@@ -971,8 +983,6 @@ impl ScriptThread{
             }
             Opcode::ME_FIELD=>{
                 let field = self.pop_stack_value();
-                
-               
                 let value = match self.mes.last().unwrap(){
                     ScriptMe::Array(_)=>{
                         self.trap.err_not_allowed_in_array()
@@ -1005,7 +1015,7 @@ impl ScriptThread{
                 self.pop_to_me(heap);
                 self.trap.goto_next();
             }
-            
+// Array index            
             Opcode::ARRAY_INDEX=>{
                 let index = self.pop_stack_resolved(heap);
                 let object = self.pop_stack_resolved(heap);
@@ -1025,7 +1035,7 @@ impl ScriptThread{
                 }
                 self.trap.goto_next();
             }
-                   
+// Let                   
             Opcode::LET_DYN=>{
                 let value = if opargs.is_nil(){
                     NIL
@@ -1035,13 +1045,6 @@ impl ScriptThread{
                 };
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 self.def_scope_value(heap, id, value);
-                /*
-                let scope = *self.scopes.last_mut().unwrap();
-                let value =heap.set_value_ip(scope, id.into(), value, self.ip);
-                if value.is_err(){
-                    self.trap = Some(ScriptTrap::Error(value));
-                }
-                */
                 self.trap.goto_next();
             }
             Opcode::LET_TYPED=>{
@@ -1054,19 +1057,13 @@ impl ScriptThread{
                 let _ty = self.pop_stack_value();
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 self.def_scope_value(heap, id, value);
-/*                
-                let scope = *self.scopes.last_mut().unwrap();
-                let value = heap.set_value_ip(scope, id.into(), value, self.ip);
-                if value.is_err(){
-                    self.trap = Some(ScriptTrap::Error(value));
-                }*/
                 self.trap.goto_next();
             } 
-            
+// Tree search            
             Opcode::SEARCH_TREE=>{
                 self.trap.goto_next();
             }
-                                  
+// Log            
             Opcode::LOG=>{
                 
                 if let Some(loc) = code.ip_to_loc(self.trap.ip){
@@ -1095,7 +1092,7 @@ impl ScriptThread{
                 }
                 self.trap.goto_next();
             }
-            
+// Me/Scope
             Opcode::ME=>{
                 if self.call_has_me(){
                     match self.mes.last().unwrap(){
@@ -1121,7 +1118,7 @@ impl ScriptThread{
                 self.push_stack_value(scope.into());
                 self.trap.goto_next();
             }
-            
+// For            
             Opcode::FOR_1 =>{
                 let source = self.pop_stack_resolved(heap);
                 let value_id = self.pop_stack_value().as_id().unwrap();
@@ -1161,6 +1158,7 @@ impl ScriptThread{
             Opcode::CONTINUE=>{
                 self.end_for_loop(heap, code);
             }
+// Range            
             Opcode::RANGE=>{
                 let end = self.pop_stack_resolved(heap);
                 let start = self.pop_stack_resolved(heap);
@@ -1170,6 +1168,7 @@ impl ScriptThread{
                 self.push_stack_unchecked(range.into());
                 self.trap.goto_next();
             }
+// Is            
             Opcode::IS=>{
                 let rhs = self.pop_stack_value();
                 let lhs = self.pop_stack_resolved(heap);
@@ -1209,6 +1208,7 @@ impl ScriptThread{
                 self.push_stack_unchecked(cmp.into());
                 self.trap.goto_next();
             }
+// Try / OK            
             Opcode::OK_TEST=>{
                 // make a try stack item
                 self.last_err = NIL;

@@ -5,7 +5,9 @@ use crate::parser::*;
 use crate::tokenizer::*;
 use crate::thread::*;
 use crate::native::*;
-use crate::modules::*;
+use crate::mod_std::*;
+use crate::mod_math::*;
+use crate::mod_pod::*;
 use crate::object::*;
 use std::cell::RefCell;
 use std::any::Any;
@@ -36,6 +38,18 @@ pub struct ScriptBody{
     pub parser: ScriptParser,
     pub scope: ScriptObject,
     pub me: ScriptObject,
+}
+
+pub struct ScriptBuiltins{
+    pub range: ScriptObject,
+}
+
+impl ScriptBuiltins{
+    pub fn new(heap:&mut ScriptHeap)->Self{
+        Self{
+            range: heap.value_path(heap.modules, ids!(std.Range),&mut Default::default()).as_object().unwrap()
+        }
+    }
 }
 
 pub struct ScriptCode{
@@ -279,7 +293,8 @@ impl ScriptVmBase{
         let mut native = ScriptNative::new(&mut heap);
         define_math_module(&mut heap, &mut native);
         define_std_module(&mut heap, &mut native);
-    
+        define_pod_module(&mut heap, &mut native);
+            
         let builtins = ScriptBuiltins::new(&mut heap);
         
         Self{
