@@ -26,8 +26,10 @@ live_design!{
                         <Button> {
                             margin: 0.0,
                             width: 100,
-                            height: 100,
-                            descender: 50,
+                            height: 100,gi
+                            metrics: {
+                                descender: 50,
+                            }
                         }
                         <Button> {
                             margin: 0.0,
@@ -43,7 +45,9 @@ live_design!{
                             margin: 0.0,
                             width: 100,
                             height: 100,
-                            descender: 50,
+                            metrics: {
+                                descender: 50,
+                            }
                         }
                     }
                 }
