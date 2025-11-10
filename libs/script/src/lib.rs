@@ -6,7 +6,9 @@ pub mod colorhex;
 pub mod parser;
 pub mod heap;
 pub mod string;
-pub mod modules;
+pub mod mod_math;
+pub mod mod_std;
+pub mod mod_pod;
 #[macro_use]
 pub mod native;
 pub mod vm;
@@ -87,12 +89,13 @@ pub fn test(){
             x: pod.f32,
             y: pod.f32
         }
+        
         let t = vec2(0,0)
         ~t
     };
     
     // lets define a handle type with some methods on it
-    
+    println!("{}", std::mem::size_of::<ScriptObjectData>());
     
     // Our unit tests :)
     let code = script!{
