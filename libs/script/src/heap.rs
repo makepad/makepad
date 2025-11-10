@@ -54,7 +54,6 @@ impl ScriptHeap{
             objects: vec![Default::default()],
             arrays: vec![Default::default()],
             pods: vec![Default::default()],
-            pod_types: vec![Default::default()],
             handles: vec![None],
             ..Default::default()
         };
@@ -92,7 +91,6 @@ impl ScriptHeap{
         }
     }
     
-    
     pub fn new_with_proto_checked(&mut self, proto:ScriptValue, trap:&ScriptTrap)->ScriptObject{
         if let Some(ptr) = proto.as_object(){
             let object = &mut self.objects[ptr.index as usize];
@@ -127,7 +125,7 @@ impl ScriptHeap{
             object.tag.set_proto_fwd(proto_fwd);
             object.proto = proto;
             // only copy vec if we are 'auto' otherwise we proto inherit normally
-            if proto_object.tag.get_storage_type().is_auto(){
+            if proto_object.tag.is_auto(){
                 object.vec.extend_from_slice(&proto_object.vec);
             }
             obj
@@ -137,7 +135,7 @@ impl ScriptHeap{
             let mut object = ScriptObjectData::with_proto(proto);
             object.tag.set_proto_fwd(proto_fwd);
             let proto_object = &self.objects[proto_index as usize];
-            if proto_object.tag.get_storage_type().is_auto(){
+            if proto_object.tag.is_auto(){
                 object.vec.extend_from_slice(&proto_object.vec);
             }
             self.objects.push(object);
@@ -190,6 +188,23 @@ impl ScriptHeap{
     
     pub fn module(&mut self, id:LiveId)->ScriptObject{
         self.value(self.modules, id.into(), &ScriptTrap::default()).into()
+    }
+    
+    pub fn new_pod_type(&mut self, ty:ScriptPodTy, default:ScriptValue)->ScriptPodType{
+        if let Some(ptr) = self.pod_types_free.pop(){
+            let pod_type = &mut self.pod_types[ptr.index as usize];
+            pod_type.ty = ty;
+            pod_type.default = default;
+            ptr
+        }
+        else{
+            let ptr = ScriptPodType{index: self.pod_types.len() as u32};
+            self.pod_types.push(ScriptPodTypeData{
+                ty,
+                default
+            });
+            ptr
+        }
     }
     
     
@@ -340,37 +355,62 @@ impl ScriptHeap{
     pub fn cast_to_string(&self, v:ScriptValue, out:&mut String){
                 
         if v.as_inline_string(|s|{write!(out, "{s}")}).is_some(){
+            return
         }
-        else if let Some(v) = v.as_string(){
+        if let Some(v) = v.as_string(){
             let str = self.string(v);
             out.push_str(str);
+            return
         }
-        else if let Some(v) = v.as_f64(){
+        if let Some(v) = v.as_f64(){
             write!(out, "{v}").ok();
+            return
         }
-        else if let Some(v) = v.as_bool(){
+        if let Some(v) = v.as_bool(){
             write!(out, "{v}").ok();
+            return
         }
-        else if let Some(v) = v.as_id(){
+        if let Some(v) = v.as_id(){
             write!(out, "{v}").ok();
+            return
         }
-        else if let Some(_v) = v.as_object(){
+        if let Some(v) = v.as_f32(){
+            write!(out, "{v}").ok();
+            return
+        }
+        if let Some(v) = v.as_f16(){
+            write!(out, "{v}").ok();
+            return
+        }
+        if let Some(v) = v.as_u32(){
+            write!(out, "{v}").ok();
+            return
+        }
+        if let Some(v) = v.as_i32(){
+            write!(out, "{v}").ok();
+            return
+        }
+        if let Some(_v) = v.as_object(){
             write!(out, "[ScriptObject]").ok();
+            return
         }
-        else if let Some(v) = v.as_color(){
+        if let Some(v) = v.as_color(){
             write!(out, "#{:08x}", v).ok();
+            return
         }
-        else if v.is_nil(){
+        if v.is_nil(){
+            return
         }
-        else if v.is_opcode(){
+        if v.is_opcode(){
             write!(out, "[Opcode]").ok();
+            return
         }
-        else if v.is_err(){
+        if v.is_err(){
             write!(out, "[Error:{}]", v).ok();
+            return
         }
-        else{
-            write!(out, "[Unknown]").ok();
-        }
+        write!(out, "[Unknown]").ok();
+        return
     }
     
     
@@ -579,7 +619,7 @@ impl ScriptHeap{
     
     // Accessors
     
-            
+    
     pub fn has_proto(&mut self, ptr:ScriptObject, rhs:ScriptValue)->bool{
         let mut ptr = ptr;
         loop{
@@ -616,9 +656,9 @@ impl ScriptHeap{
         
     pub fn cast_to_f64(&self, v:ScriptValue, ip:ScriptIp)->f64{
         if let Some(v) = v.as_f64(){
-            v
+            return v
         }
-        else if let Some(v) = v.as_string(){
+        if let Some(v) = v.as_string(){
             let str = self.string(v);
             if let Ok(v) = str.parse::<f64>(){
                 return v
@@ -627,18 +667,28 @@ impl ScriptHeap{
                 return 0.0
             }
         }
-        else if let Some(v) = v.as_bool(){
+        if let Some(v) = v.as_bool(){
             return if v{1.0}else{0.0}
         }
-        else if let Some(v) = v.as_color(){
+        if let Some(v) = v.as_f32(){
             return v as f64
         }
-        else if v.is_nil(){
-            0.0
+        if let Some(v) = v.as_f16(){
+            return v as f64
         }
-        else {
-            ScriptValue::from_f64_traced_nan(f64::NAN, ip).as_f64().unwrap()
+        if let Some(v) = v.as_u32(){
+            return v as f64
         }
+        if let Some(v) = v.as_i32(){
+            return v as f64
+        }
+        if let Some(v) = v.as_color(){
+            return v as f64
+        }
+        if v.is_nil(){
+            return 0.0
+        }
+        ScriptValue::from_f64_traced_nan(f64::NAN, ip).as_f64().unwrap()
     }
     
     pub fn cast_to_bool(&self, v:ScriptValue)->bool{
@@ -650,6 +700,18 @@ impl ScriptHeap{
         }
         if let Some(v) = v.as_f64(){
             return v != 0.0
+        }
+        if let Some(v) = v.as_f32(){
+            return v != 0.0
+        }
+        if let Some(v) = v.as_f16(){
+            return v != 0.0
+        }
+        if let Some(v) = v.as_u32(){
+            return v != 0
+        }
+        if let Some(v) = v.as_i32(){
+            return v != 0
         }
         if let Some(_v) = v.as_object(){
             return true
@@ -691,8 +753,16 @@ impl ScriptHeap{
          self.objects[ptr.index as usize].tag.set_deep()
     }
     
-    pub fn set_object_storage_type(&mut self, ptr:ScriptObject, ty: ScriptObjectStorageType){
-        self.objects[ptr.index as usize].set_storage_type(ty)
+    pub fn set_object_storage_vec2(&mut self, ptr:ScriptObject){
+        self.objects[ptr.index as usize].tag.set_vec2()
+    }
+    
+    pub fn set_object_storage_auto(&mut self, ptr:ScriptObject){
+        self.objects[ptr.index as usize].tag.set_auto()
+    }
+        
+    pub fn set_object_pod_type(&mut self, ptr:ScriptObject, pt:ScriptPodType){
+        self.objects[ptr.index as usize].tag.set_pod_type(pt)
     }
     
     pub fn set_first_applied_and_clean(&mut self, ptr:ScriptObject){
@@ -799,7 +869,7 @@ impl ScriptHeap{
         }
         // alright nothing found
         let object = &mut self.objects[ptr.index as usize];
-        if object.tag.get_storage_type().is_vec2(){
+        if object.tag.is_vec2(){
             object.vec.push(ScriptVecValue{key, value});
         }
         else{
@@ -846,7 +916,7 @@ impl ScriptHeap{
             let mut ptr = top_ptr;
             loop{
                 let object = &self.objects[ptr.index as usize];
-                if object.tag.get_storage_type().is_vec2(){
+                if object.tag.is_vec2(){
                     for kv in object.vec.iter().rev(){
                         if kv.key == key{
                             if !self.validate_type(kv.value, value){
@@ -872,7 +942,7 @@ impl ScriptHeap{
         }
         let object = &mut self.objects[top_ptr.index as usize];
         if object.tag.is_map_add(){
-            if object.tag.get_storage_type().is_vec2(){
+            if object.tag.is_vec2(){
                 for kv in object.vec.iter_mut().rev(){
                     if kv.key == key{
                         return trap.err_key_already_exists()
@@ -894,7 +964,7 @@ impl ScriptHeap{
     
     fn set_value_shallow(&mut self, ptr:ScriptObject, key:ScriptValue, value:ScriptValue, _trap:&ScriptTrap)->ScriptValue{
         let object = &mut self.objects[ptr.index as usize];
-        if object.tag.get_storage_type().is_vec2(){
+        if object.tag.is_vec2(){
             for kv in object.vec.iter_mut().rev(){
                 if kv.key == key{
                     kv.value = value;
@@ -994,7 +1064,7 @@ impl ScriptHeap{
             if let Some(set) = object.map.get(&key){
                 return set.value
             }
-            if object.tag.get_storage_type().is_vec2(){
+            if object.tag.is_vec2(){
                 for kv in object.vec.iter().rev(){
                     if kv.key == key{
                         return kv.value;

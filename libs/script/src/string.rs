@@ -3,9 +3,9 @@ use crate::heap::*;
 use crate::array::*;
 use crate::native::*;
 use crate::makepad_live_id::*;
-use std::sync::Arc;
+use ::std::sync::Arc;
 use crate::*;
-use std::borrow::Borrow;
+use ::std::borrow::Borrow;
 
 
 #[derive(Clone, Default, PartialEq, Eq, Hash)]

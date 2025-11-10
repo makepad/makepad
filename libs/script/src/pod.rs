@@ -1,17 +1,20 @@
 #![allow(unused)]
 use makepad_live_id::*;
 use crate::value::*;
-
+ 
+#[derive(Debug)]
 pub struct ScriptPodField{
     pub name: LiveId,
     pub ty: ScriptPodType,
 }
 
+#[derive(Debug)]
 pub struct ScriptPodEnum{
     pub name: LiveId,
     pub variant: ScriptPodEnumVariant
 }
 
+#[derive(Debug)]
 pub enum ScriptPodEnumVariant{
     Bare,
     Tuple{
@@ -23,23 +26,16 @@ pub enum ScriptPodEnumVariant{
 }
 
 // we're going to try to follow std140 datamapping for wgsl
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ScriptPodTypeData{
-    pub tag: ScriptPodTypeTag,
     pub default: ScriptValue,
     pub ty: ScriptPodTy
 }
 
-impl ScriptPodTypeData{
-    pub fn clear(&mut self){
-        self.tag.clear();
-    }
-}
-
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub enum ScriptPodTy{
     #[default]
-    VOID,
+    NIL,
     U8,
     U32,
     I32,
@@ -56,38 +52,8 @@ pub enum ScriptPodTy{
     }
 }
 
-#[derive(Default)]
-pub struct ScriptPodTypeTag(u64);
-
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ScriptPodTag(u64);
-
-impl ScriptPodTypeTag{
-    const MARK:u64 = 0x1;
-    const ALLOCED:u64 = 0x2;
-    pub fn is_marked(&self)->bool{
-        self.0 & Self::MARK != 0
-    }
-                    
-    pub fn set_mark(&mut self){
-        self.0 |= Self::MARK
-    }
-                    
-    pub fn clear_mark(&mut self){
-        self.0 &= !Self::MARK
-    }
-    pub fn is_alloced(&self)->bool{
-        return self.0 & Self::ALLOCED != 0
-    }
-            
-    pub fn set_alloced(&mut self){
-        self.0 |= Self::ALLOCED
-    }
-            
-    pub fn clear(&mut self){
-        self.0 = 0;
-    }
-}
 
 impl ScriptPodTag{
     const MARK:u64 = 0x1;
@@ -120,7 +86,7 @@ impl ScriptPodTag{
 #[derive(Default)]
 pub struct ScriptPodData{
     pub tag: ScriptPodTag,
-    pub ty: ScriptPodType,
+    pub ty: ScriptObject,
     pub data: Vec<u64>
 }
 
