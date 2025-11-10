@@ -42,9 +42,8 @@ pub struct Walk {
     #[live]
     pub height: Size,
 
-    /// The distance from the baseline to the bottom of this walk's rectangle.
     #[live]
-    pub descender: f64,
+    pub metrics: Metrics,
 }
 
 impl Walk {
@@ -55,7 +54,7 @@ impl Walk {
             margin: Margin::default(),
             width,
             height,
-            descender: 0.0,
+            metrics: Metrics::default(),
         }
     }
 
@@ -71,7 +70,7 @@ impl Walk {
             margin: Margin::default(),
             width: Size::fill(),
             height: Size::fill(),
-            descender: 0.0,
+            metrics: Metrics::default(),
         }
     }
 
@@ -82,7 +81,7 @@ impl Walk {
             margin: Margin::default(),
             width: Size::Fixed(width),
             height: Size::Fixed(height),
-            descender: 0.0,
+            metrics: Metrics::default(),
         }
     }
 
@@ -93,7 +92,7 @@ impl Walk {
             margin: Margin::default(),
             width: Size::fit(),
             height: Size::fit(),
-            descender: 0.0,
+            metrics: Metrics::default(),
         }
     }
 
@@ -105,7 +104,7 @@ impl Walk {
             margin: Margin::default(),
             width: Size::fill(),
             height: Size::fit(),
-            descender: 0.0,
+            metrics: Metrics::default(),
         }
     }
 
@@ -148,6 +147,13 @@ impl Walk {
             ..self
         }
     }
+}
+
+#[derive(Copy, Clone, Default, Debug, Live, LiveHook, LiveRegister)]
+#[live_ignore]
+pub struct Metrics {
+    #[live]
+    pub descender: f64,
 }
 
 /// Specifies the desired width/height of a walk's rectangle.
@@ -1200,14 +1206,14 @@ impl DeferredWalk {
                         margin,
                         width: Size::Fixed(turtle.resolve_fill(index)),
                         height: other_axis,
-                        descender: 0.0,
+                        metrics: Metrics::default(),
                     },
                     Flow::Down => Walk {
                         abs_pos: Some(pos + dvec2(0.0, turtle.total_resolved_length_to(index))),
                         margin: margin,
                         height: Size::Fixed(turtle.resolve_fill(index)),
                         width: other_axis,
-                        descender: 0.0,
+                        metrics: Metrics::default(),
                     },
                     _ => panic!()
                 };
@@ -1235,8 +1241,7 @@ pub struct FinishedWalk {
     /// The size of the outer rectangle of this finished walk.
     outer_size: DVec2,
 
-    /// The distance from the descender to the bottom of the outer rectangle of this finished walk.
-    descender: f64,
+    metrics: Metrics,
 }
 
 impl<'a,'b> Cx2d<'a,'b> {
@@ -1577,7 +1582,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                     margin: turtle.margin(),
                     width: Size::Fixed(turtle.width()),
                     height: Size::Fixed(turtle.height()),
-                    descender: turtle.walk().descender,
+                    metrics: turtle.walk().metrics,
                 },
                 turtle_align_start
             )
@@ -1675,7 +1680,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                 align_list_start,
                 deferred_before_count: 0,
                 outer_size: size + walk.margin.size(),
-                descender: walk.descender,
+                metrics: walk.metrics,
             });
             
             let origin = outer_origin + walk.margin.left_top();
@@ -1725,7 +1730,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                 align_list_start,
                 deferred_before_count: defer_index,
                 outer_size,
-                descender: walk.descender,
+                metrics: walk.metrics,
             });
 
             let origin = outer_origin + walk.margin.left_top();
@@ -1885,7 +1890,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             align_list_start: self.align_list.len(),
             deferred_before_count: turtle.deferred_fills.len(),
             outer_size: rect.size,
-            descender: 0.0,
+            metrics: Metrics::default(),
         });
     }
     
@@ -1948,7 +1953,9 @@ impl<'a,'b> Cx2d<'a,'b> {
         let max_height = self.turtle().row_height();
         for finished_walk_index in finished_walks_start..finished_walks_end {
             let height = self.finished_walks[finished_walk_index].outer_size.y;
-            let descender = self.finished_walks[finished_walk_index].descender;
+            let Metrics {
+                descender
+            } = self.finished_walks[finished_walk_index].metrics;
             let shift = match row_align {
                 RowAlign::Top => 0.0,
                 RowAlign::Bottom => max_height - height,
@@ -2185,7 +2192,7 @@ impl Walk {
             margin: Margin::default(),
             width: Size::Fixed(rect.size.x),
             height: Size::Fixed(rect.size.y),
-            descender: 0.0,
+            metrics: Metrics::default(),
         }
     }
     

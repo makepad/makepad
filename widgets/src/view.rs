@@ -1056,8 +1056,8 @@ impl View {
             } else {
                 Size::Fixed(view_size.y)
             },
-            descender: 0.0,
             margin: walk.margin,
+            metrics: Metrics::default(),
         }
     }
 

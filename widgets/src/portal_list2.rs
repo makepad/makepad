@@ -223,7 +223,7 @@ impl PortalList2 {
                     margin: Default::default(),
                     width: Size::fill(),
                     height: Size::fit(),
-                    descender: 0.0,
+                    metrics: Metrics::default(),
                 }, layout);
             }
             Vec2Index::X => {
@@ -232,7 +232,7 @@ impl PortalList2 {
                     margin: Default::default(),
                     width: Size::fit(),
                     height: Size::fill(),
-                    descender: 0.0,
+                    metrics: Metrics::default(),
                 }, layout);
             }
         }

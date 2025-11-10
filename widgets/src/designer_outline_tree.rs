@@ -408,8 +408,8 @@ impl DesignerOutlineTreeNode {
             abs_pos: None,
             width: Size::Fixed(depth as f64 * self.indent_width + self.indent_shift),
             height: Size::Fixed(0.0),
-            descender: 0.0,
-            margin: Margin::default()
+            margin: Margin::default(),
+            metrics: Metrics::default(),
         }
     }
     
