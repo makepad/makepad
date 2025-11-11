@@ -149,13 +149,36 @@ impl Walk {
     }
 }
 
-#[derive(Copy, Clone, Default, Debug, Live, LiveHook, LiveRegister)]
+#[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Metrics {
     #[live]
     pub descender: f64,
+    #[live]
+    pub line_gap: f64,
+    #[live(1.0)]
+    pub line_scale: f64,
 }
 
+impl Metrics {
+    fn max(self, other: Self) -> Self {
+        Self {
+            descender: self.descender.max(other.descender),
+            line_gap: self.line_gap.max(other.line_gap),
+            line_scale: self.line_scale.max(other.line_scale),
+        }
+    }
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            descender: 0.0,
+            line_gap: 0.0,
+            line_scale: 1.0,
+        }
+    }
+}
 /// Specifies the desired width/height of a walk's rectangle.
 /// 
 /// See `Turtle::next_walk_width` and `Turtle::next_walk_height` for details on how the actual
@@ -491,7 +514,6 @@ pub enum RowAlign {
     #[pick]
     Top,
     Bottom,
-    Baseline,
 }
 
 /// Specifies the padding around a walk's inner rectangle.
@@ -608,6 +630,8 @@ pub struct Turtle {
     height: f64,
     used_width: f64,
     used_height: f64,
+    prev_row_metrics: Metrics,
+    current_row_metrics: Metrics,
     wrap_spacing: f64,
     align_start: usize,
     finished_rows_start: usize,
@@ -1250,6 +1274,10 @@ impl<'a,'b> Cx2d<'a,'b> {
         self.turtles.last().unwrap()
     }
 
+    pub fn turtle_is_at_first_row(&self) -> bool {
+        self.turtle().finished_rows_start == self.finished_rows.len()
+    }
+
     /// Returns true if the current turtle's next walk would be it's first.
     pub fn turtle_next_walk_is_first(&self) -> bool {
         self.turtle().finished_walks_start == self.finished_walks.len() && self.turtle().deferred_fills.is_empty()
@@ -1306,6 +1334,8 @@ impl<'a,'b> Cx2d<'a,'b> {
             height: size.y,
             used_width: layout.padding.left,
             used_height: layout.padding.top,
+            prev_row_metrics: Metrics::default(),
+            current_row_metrics: Metrics::default(),
             guard: Area::Empty,
         };
 
@@ -1412,6 +1442,8 @@ impl<'a,'b> Cx2d<'a,'b> {
             height: size.y,
             used_width: layout.padding.left,
             used_height: layout.padding.top,
+            prev_row_metrics: Metrics::default(),
+            current_row_metrics: Metrics::default(),
             guard,
         };
         
@@ -1726,6 +1758,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             };
 
             let defer_index = self.turtle().deferred_fills.len();
+            self.turtle_mut().current_row_metrics = self.turtle().current_row_metrics.max(walk.metrics);
             self.finished_walks.push(FinishedWalk {
                 align_list_start,
                 deferred_before_count: defer_index,
@@ -1941,37 +1974,76 @@ impl<'a,'b> Cx2d<'a,'b> {
     }
 
     fn finish_row(&mut self, align_list_start: usize) {
-        let Flow::Right { row_align, .. } = self.turtle().flow() else {
-            return;
-        };
-        let finished_walks_start = if self.turtle().finished_rows_start == self.finished_rows.len() {
-            self.turtle().finished_walks_start
-        } else {
-            self.finished_rows[self.turtle().finished_rows_start]
-        };
-        let finished_walks_end = self.finished_walks.len();
-        let max_height = self.turtle().row_height();
-        for finished_walk_index in finished_walks_start..finished_walks_end {
-            let height = self.finished_walks[finished_walk_index].outer_size.y;
-            let Metrics {
-                descender
-            } = self.finished_walks[finished_walk_index].metrics;
-            let shift = match row_align {
-                RowAlign::Top => 0.0,
-                RowAlign::Bottom => max_height - height,
-                RowAlign::Baseline => {
-                    self.turtle_mut().allocate_height(max_height + descender);
-                    max_height - height + descender
-                },
-            };
-            let start = self.finished_walks[finished_walk_index].align_list_start;
-            let end = if finished_walk_index + 1 < self.finished_walks.len() {
-                self.finished_walks[finished_walk_index + 1].align_list_start
+        if let Flow::Right { row_align: RowAlign::Bottom, .. } = self.turtle().flow() {
+            let current_row_height = self.turtle().row_height();
+            let current_row_metrics = self.turtle().current_row_metrics;
+
+            // We're going to push down each finished walk for the current row so that their
+            // baseline aligns with the bottom of the current row. Therefore, the height of the
+            // ascender of the current row will be the height of the current row, minus the height
+            // of the descender of the current row.
+            let current_row_ascender = current_row_height - current_row_metrics.descender;
+            
+            // If the current row is not the first row, compute the amount by which we have to shift
+            // each finished walk for the current row so that the actual spacing between the
+            // baseline of the previous and the current row is equal to the desired spacing.
+            let line_spacing_shift = if self.turtle_is_at_first_row() {
+                0.0
             } else {
-                align_list_start
+                // After we've pushed down each finished walk for the current row so that their
+                // baseline aligns with the bottom of the current row, the actual spacing
+                // between the baseline of the previous and current row will be the height of
+                // the descender of the previous row, plus the height of the current row.
+                let prev_row_metrics = self.turtle().prev_row_metrics;
+                let actual_line_spacing = prev_row_metrics.descender + current_row_height;
+
+                // The desired spacing between the baseline of the previous and current row is
+                // the sum of the height of the descender and line gap of the previous row, and
+                // the ascender of the current row, scaled up by the line scale of the current
+                // row.
+                let desired_line_spacing = (prev_row_metrics.descender + prev_row_metrics.line_gap + current_row_ascender) * current_row_metrics.line_scale;
+
+                // The amount by which we have to shift each finished walk is the difference between
+                // the desired and the actual spacing.
+                desired_line_spacing - actual_line_spacing
             };
-            self.move_align_list(start, end, 0.0, shift, false);
+
+            // Update the height of the row to account for the shifts we're about to do.
+            self.turtle_mut().used_height += current_row_metrics.descender + line_spacing_shift;
+
+            let finished_walks_start = if self.turtle().finished_rows_start == self.finished_rows.len() {
+                self.turtle().finished_walks_start
+            } else {
+                self.finished_rows[self.turtle().finished_rows_start]
+            };
+            let finished_walks_end = self.finished_walks.len();
+            for finished_walk_index in finished_walks_start..finished_walks_end {
+                let finished_walk_height = self.finished_walks[finished_walk_index].outer_size.y;
+                let finished_walk_metrics = self.finished_walks[finished_walk_index].metrics;
+
+                // The amount by which we have to shift the current finished walk so that its
+                // descender aligns with the bottom of the current row.
+                let descender_shift = current_row_height - finished_walk_height;
+
+                // The amount by which we have to shift the current finished walk so that its
+                // baseline aligns with the bottom of the current row.
+                let baseline_shift = finished_walk_metrics.descender;
+
+                // The total amount by which we have to shift the current finished walk.
+                let shift = descender_shift + baseline_shift + line_spacing_shift;
+
+                let start = self.finished_walks[finished_walk_index].align_list_start;
+                let end = if finished_walk_index + 1 < self.finished_walks.len() {
+                    self.finished_walks[finished_walk_index + 1].align_list_start
+                } else {
+                    align_list_start
+                };
+                self.move_align_list(start, end, 0.0, shift, false);
+            }
         }
+
+        self.turtle_mut().prev_row_metrics = self.turtle().current_row_metrics;
+        self.turtle_mut().current_row_metrics = Metrics::default();
         self.finished_rows.push(self.finished_walks.len());
     }
     

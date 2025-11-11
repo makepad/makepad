@@ -14,9 +14,9 @@ live_design!{
                     padding: 100,
                     <View> {
                         width: 300,
-                        height: 500,
+                        height: 750,
                         flow: Right {
-                            row_align: Baseline,
+                            row_align: Bottom,
                             wrap: true,
                         },
                         show_bg: true,
@@ -26,7 +26,7 @@ live_design!{
                         <Button> {
                             margin: 0.0,
                             width: 100,
-                            height: 100,gi
+                            height: 100,
                             metrics: {
                                 descender: 50,
                             }
@@ -40,14 +40,15 @@ live_design!{
                             margin: 0.0,
                             width: 200,
                             height: 200,
+                            metrics: {
+                                descender: 100.0,
+                                line_scale: 1.1,
+                            }
                         }
                         <Button> {
                             margin: 0.0,
                             width: 100,
                             height: 100,
-                            metrics: {
-                                descender: 50,
-                            }
                         }
                     }
                 }
