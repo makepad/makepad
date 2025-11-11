@@ -30,14 +30,14 @@ live_design!{
             height: Fill
             show_bg: true
             draw_bg: {
+                color: #000000B3
                 fn pixel(self) -> vec4 {
-                    return vec4(0., 0., 0., 0.7)
+                    return self.color
                 }
             }
         }
         
         content: <View> {
-            flow: Overlay
             width: Fit
             height: Fit
         }
@@ -46,31 +46,22 @@ live_design!{
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum ModalAction {
-    None,
     Dismissed,
+    None,
 }
 
 #[derive(Live, Widget)]
 pub struct Modal {
-    #[live]
-    #[find]
-    content: View,
-    #[live] #[area]
-    bg_view: View,
+    #[live] #[find] content: View,
+    #[live] #[area] bg_view: View,
 
-    #[redraw]
-    #[rust(DrawList2d::new(cx))]
-    draw_list: DrawList2d,
+    #[redraw] #[rust(DrawList2d::new(cx))] draw_list: DrawList2d,
 
-    #[live]
-    draw_bg: DrawQuad,
-    #[layout]
-    layout: Layout,
-    #[walk]
-    walk: Walk,
+    #[live] draw_bg: DrawQuad,
+    #[layout] layout: Layout,
+    #[walk] walk: Walk,
 
-    #[rust]
-    opened: bool,
+    #[rust] is_open: bool,
 }
 
 impl LiveHook for Modal {
@@ -81,36 +72,35 @@ impl LiveHook for Modal {
 
 impl Widget for Modal {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if !self.opened {
+        if !self.is_open {
             return;
         }
 
-        let area = self.draw_bg.area();
-
-        // When passing down events to the inner `content` view,
-        // we must temporarily suspend the sweep lock to allow the overlaid `content` View
-        // to correctly respond to events/hits.
-        cx.sweep_unlock(area);
+        // Forward the event to the inner `content` view.
         self.content.handle_event(cx, event, scope);
-        cx.sweep_lock(area);
-
-        // Consume any hit that occurred in the bg area, which prevents the hit
+        
+        // Proactively consume any hit that occurred in the bg area, which prevents the hit
         // from being handled by any views underneath this modal.
-        let consumed_hit = event.hits_with_sweep_area(cx, area, area);
+        let bg_area = self.draw_bg.area();
+        let bg_area_hit = event.hits(cx, bg_area);
+        let content_area_hit = event.hits(cx, self.content.area()); // we already let `content` handle this event above
 
         // Close the modal if any of the following conditions occur:
-        // * If the back navigational action/gesture was triggered (e.g., on Android)
-        // * If the Escape key was pressed
-        // * If there was a click/press in the background area, outside of the inner `content` view
+        // * If the back navigational action/gesture was triggered (e.g., on Android),
+        // * If the Escape key was pressed while either the `bg_view` or `content` has key focus,
+        // * If there was a click/press in the background area, outside of the inner `content` view.
         let should_close = event.back_pressed()
-            || matches!(event, Event::KeyUp(KeyEvent { key_code: KeyCode::Escape, .. }))
-            || match consumed_hit {
+            || match bg_area_hit {
+                Hit::KeyDown(KeyEvent { key_code: KeyCode::Escape, .. }) => true,
                 Hit::FingerUp(fe) => !self.content.area().rect(cx).contains(fe.abs),
+                _ => false,
+            }
+            || match content_area_hit {
+                Hit::KeyDown(KeyEvent { key_code: KeyCode::Escape, .. }) => true,
                 _ => false,
             };
         if should_close {
-            let widget_uid = self.content.widget_uid();
-            cx.widget_action(widget_uid, &scope.path, ModalAction::Dismissed);
+            cx.widget_action(self.content.widget_uid(), &scope.path, ModalAction::Dismissed);
             self.close(cx);
         }
     }
@@ -121,7 +111,7 @@ impl Widget for Modal {
         cx.begin_turtle(walk, self.layout);
         self.draw_bg.begin(cx, self.walk, self.layout);
 
-        if self.opened {
+        if self.is_open {
             let _ = self
                 .bg_view
                 .draw_walk(cx, scope, walk);
@@ -137,9 +127,8 @@ impl Widget for Modal {
 
 impl Modal {
     pub fn open(&mut self, cx: &mut Cx) {
-        self.opened = true;
+        self.is_open = true;
         self.draw_bg.redraw(cx);
-        cx.sweep_lock(self.draw_bg.area());
     }
 
     pub fn close(&mut self, cx: &mut Cx) {
@@ -149,9 +138,8 @@ impl Modal {
             &Event::Actions(vec![Box::new(ModalAction::Dismissed)]),
             &mut Scope::empty(),
         );
-        self.opened = false;
+        self.is_open = false;
         self.draw_bg.redraw(cx);
-        cx.sweep_unlock(self.draw_bg.area());
     }
 
     pub fn dismissed(&self, actions: &Actions) -> bool {
@@ -163,26 +151,32 @@ impl Modal {
 }
 
 impl ModalRef {
+    /// Returns whether the modal is currently open (displayed).
     pub fn is_open(&self) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.opened
+            inner.is_open
         } else {
             false
         }
     }
 
+    /// Opens (displays) the model.
+    #[doc(alias = "show")]
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.open(cx);
         }
     }
 
+    /// Closes (hides) the modal.
+    #[doc(alias = "hide")]
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.close(cx);
         }
     }
 
+    /// Returns `true` if this modal was dismissed by the given `actions`.
     pub fn dismissed(&self, actions: &Actions) -> bool {
         if let Some(inner) = self.borrow() {
             inner.dismissed(actions)
