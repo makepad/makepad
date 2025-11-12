@@ -56,37 +56,46 @@ pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->Scrip
     
     let pod = heap.new_module(id!(pod));
     
-    let pod_struct = script_pod_def!(heap, pod, pod_struct, struct, ScriptPodTy::UndefinedStruct, ScriptValue::NIL);
-    let pod_array = script_pod_def!(heap, pod, pod_array, array, ScriptPodTy::UndefinedArray, ScriptValue::NIL);
-    let pod_bool = script_pod_def!(heap, pod, pod_bool, bool, ScriptPodTy::Bool, ScriptValue::from_bool(false));
-    let pod_f32 = script_pod_def!(heap, pod, pod_f32, f32, ScriptPodTy::F32, ScriptValue::from_f32(0.0));
-    let pod_f16 = script_pod_def!(heap, pod, pod_f16, f16, ScriptPodTy::F16, ScriptValue::from_f16(0.0));
-    let pod_u32 = script_pod_def!(heap, pod, pod_u32, u32, ScriptPodTy::U32, ScriptValue::from_u32(0));
-    let pod_i32 = script_pod_def!(heap, pod, pod_i32, i32, ScriptPodTy::I32, ScriptValue::from_i32(0));
-    let pod_atomic_u32 = script_pod_def!(heap, pod, pod_atomic_u32, atomic_u32, ScriptPodTy::AtomicU32, ScriptValue::from_u32(0));
-    let pod_atomic_i32 = script_pod_def!(heap, pod, pod_atomic_i32, atomic_i32, ScriptPodTy::AtomicI32, ScriptValue::from_i32(0));
-    let pod_vec2f = heap.pod_def_vec(pod, id_lut!(vec2f), 2, pod_f32);
-    let pod_vec3f = heap.pod_def_vec(pod, id_lut!(vec3f), 3, pod_f32);
-    let pod_vec4f = heap.pod_def_vec(pod, id_lut!(vec4f), 4, pod_f32);
-    let pod_vec2u = heap.pod_def_vec(pod, id_lut!(vec2u), 2, pod_u32);
-    let pod_vec3u = heap.pod_def_vec(pod, id_lut!(vec3u), 3, pod_u32);
-    let pod_vec4u = heap.pod_def_vec(pod, id_lut!(vec4u), 4, pod_u32);
-    let pod_vec2i = heap.pod_def_vec(pod, id_lut!(vec2i), 2, pod_i32);
-    let pod_vec3i = heap.pod_def_vec(pod, id_lut!(vec3i), 3, pod_i32);
-    let pod_vec4i = heap.pod_def_vec(pod, id_lut!(vec4i), 4, pod_i32);
-    let pod_vec2h = heap.pod_def_vec(pod, id_lut!(vec2h), 2, pod_f16);
-    let pod_vec3h = heap.pod_def_vec(pod, id_lut!(vec3h), 3, pod_f16);
-    let pod_vec4h = heap.pod_def_vec(pod, id_lut!(vec4h), 4, pod_f16);
+    let pod_struct = heap.pod_def_atom(pod, id_lut!(struct), ScriptPodTy::UndefinedStruct, id_lut!(pod_struct), ScriptValue::NIL);
     
-    let pod_mat2x2f = heap.pod_def_mat(pod, id_lut!(mat2x2f), 2, 2, pod_f32);
-    let pod_mat2x3f = heap.pod_def_mat(pod, id_lut!(mat2x3f), 2, 3, pod_f32);
-    let pod_mat2x4f = heap.pod_def_mat(pod, id_lut!(mat2x4f), 2, 4, pod_f32);
-    let pod_mat3x2f = heap.pod_def_mat(pod, id_lut!(mat3x2f), 3, 2, pod_f32);
-    let pod_mat3x3f = heap.pod_def_mat(pod, id_lut!(mat3x3f), 3, 3, pod_f32);
-    let pod_mat3x4f = heap.pod_def_mat(pod, id_lut!(mat3x4f), 3, 4, pod_f32);
-    let pod_mat4x2f = heap.pod_def_mat(pod, id_lut!(mat4x2f), 4, 2, pod_f32);
-    let pod_mat4x3f = heap.pod_def_mat(pod, id_lut!(mat4x3f), 4, 3, pod_f32);
-    let pod_mat4x4f = heap.pod_def_mat(pod, id_lut!(mat4x4f), 4, 4, pod_f32);
+    let pod_array = heap.pod_def_atom(pod, id_lut!(array), ScriptPodTy::UndefinedArray, id_lut!(pod_array), ScriptValue::NIL);
+    
+    let pod_bool = heap.pod_def_atom(pod, id_lut!(bool), ScriptPodTy::Bool, id_lut!(pod_bool), ScriptValue::from_bool(false));
+    
+    let pod_f32 = heap.pod_def_atom(pod, id_lut!(f32), ScriptPodTy::F32, id_lut!(pod_f32), ScriptValue::from_f32(0.0));
+        
+    let pod_f16 = heap.pod_def_atom(pod, id_lut!(f16), ScriptPodTy::F16, id_lut!(pod_f16), ScriptValue::from_f16(0.0));
+    
+    let pod_u32 = heap.pod_def_atom(pod, id_lut!(u32), ScriptPodTy::U32, id_lut!(pod_u32), ScriptValue::from_u32(0));    
+    
+    let pod_i32 = heap.pod_def_atom(pod, id_lut!(i32), ScriptPodTy::I32, id_lut!(pod_i32), ScriptValue::from_i32(0));    
+    
+    let pod_atomic_u32 = heap.pod_def_atom(pod, id_lut!(atomic_u32), ScriptPodTy::AtomicU32, id_lut!(pod_atomic_u32), ScriptValue::from_u32(0));    
+    
+    let pod_atomic_i32 = heap.pod_def_atom(pod, id_lut!(pod_atomic_i32), ScriptPodTy::AtomicI32, id_lut!(pod_atomic_i32), ScriptValue::from_i32(0));    
+    
+    let pod_vec2f = heap.pod_def_vec(pod, id_lut!(vec2f), ScriptPodVec::Vec2f);
+    let pod_vec3f = heap.pod_def_vec(pod, id_lut!(vec3f), ScriptPodVec::Vec3f);
+    let pod_vec4f = heap.pod_def_vec(pod, id_lut!(vec4f), ScriptPodVec::Vec4f);
+    let pod_vec2u = heap.pod_def_vec(pod, id_lut!(vec2u), ScriptPodVec::Vec2u);
+    let pod_vec3u = heap.pod_def_vec(pod, id_lut!(vec3u), ScriptPodVec::Vec3u);
+    let pod_vec4u = heap.pod_def_vec(pod, id_lut!(vec4u), ScriptPodVec::Vec4u);
+    let pod_vec2i = heap.pod_def_vec(pod, id_lut!(vec2i), ScriptPodVec::Vec2i);
+    let pod_vec3i = heap.pod_def_vec(pod, id_lut!(vec3i), ScriptPodVec::Vec3i);
+    let pod_vec4i = heap.pod_def_vec(pod, id_lut!(vec4i), ScriptPodVec::Vec4i);
+    let pod_vec2h = heap.pod_def_vec(pod, id_lut!(vec2h), ScriptPodVec::Vec2h);
+    let pod_vec3h = heap.pod_def_vec(pod, id_lut!(vec3h), ScriptPodVec::Vec3h);
+    let pod_vec4h = heap.pod_def_vec(pod, id_lut!(vec4h), ScriptPodVec::Vec4h);
+    
+    let pod_mat2x2f = heap.pod_def_mat(pod, id_lut!(mat2x2f), ScriptPodMat::Mat2x2f);
+    let pod_mat2x3f = heap.pod_def_mat(pod, id_lut!(mat2x3f), ScriptPodMat::Mat2x3f);
+    let pod_mat2x4f = heap.pod_def_mat(pod, id_lut!(mat2x4f), ScriptPodMat::Mat2x4f);
+    let pod_mat3x2f = heap.pod_def_mat(pod, id_lut!(mat3x2f), ScriptPodMat::Mat3x2f);
+    let pod_mat3x3f = heap.pod_def_mat(pod, id_lut!(mat3x3f), ScriptPodMat::Mat3x3f);
+    let pod_mat3x4f = heap.pod_def_mat(pod, id_lut!(mat3x4f), ScriptPodMat::Mat3x4f);
+    let pod_mat4x2f = heap.pod_def_mat(pod, id_lut!(mat4x2f), ScriptPodMat::Mat4x2f);
+    let pod_mat4x3f = heap.pod_def_mat(pod, id_lut!(mat4x3f), ScriptPodMat::Mat4x3f);
+    let pod_mat4x4f = heap.pod_def_mat(pod, id_lut!(mat4x4f), ScriptPodMat::Mat4x4f);
                 
     let ps = ScriptPodBuiltins{
         pod_struct,

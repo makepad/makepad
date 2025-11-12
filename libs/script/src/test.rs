@@ -7,7 +7,8 @@ use crate::heap::*;
 pub fn test(){
     let mut vmbase = ScriptVmBase::new();
     let cx = &mut vmbase.as_ref();
-        
+    
+    
     #[derive(Script)]
     pub struct StructTest{
         #[live(1.0)] field:f64,
@@ -49,16 +50,27 @@ pub fn test(){
         
     let code = script!{
         use mod.pod
-        let x = pod.array{pod.f32 4}
+       /* let x = pod.array{pod.f32 4}
         let v2 = pod.struct{ // extendable pods 
-            x: pod.f32
-            y: pod.f32
+            a: pod.f32
+            b: pod.f32
+            c: pod.f32
+        }
+        let v3 = pod.struct{ // extendable pods 
+            a: pod.f32
+            b: pod.f32
+            c: pod.f32
         }
         let test = pod.struct{
-            x: v2,
+            x: v3,
             y: pod.f32
         }
-        let v = test(1,2)
+        let v = test(v3(1,2,3),4)
+        ~v*/
+        let x = pod.vec2h(1,3);
+        ~x
+        let v2 = pod.vec3f(1 2 3)
+        let v = pod.vec4f(v2 4)
         ~v
     };
         

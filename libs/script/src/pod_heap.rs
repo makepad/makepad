@@ -1,18 +1,17 @@
-#![allow(unused)]
 use makepad_live_id::*;
 use crate::value::*;
 use crate::heap::*;
-use crate::value::*;
 use crate::trap::*;
 use crate::mod_pod::*;
 use crate::pod::*;
+
 
 impl ScriptHeap{
         
     pub fn new_pod_type(&mut self, ty:ScriptPodTy, default:ScriptValue)->ScriptPodType{
         if let Some(ptr) = self.pod_types_free.pop(){
             let pod_type = &mut self.pod_types[ptr.index as usize];
-            pod_type.cached_align_of = ty.align_of();
+            //pod_type.cached_align_of = ty.align_of();
             pod_type.ty = ty;
             pod_type.default = default;
             ptr
@@ -20,7 +19,7 @@ impl ScriptHeap{
         else{
             let ptr = ScriptPodType{index: self.pod_types.len() as u32};
             self.pod_types.push(ScriptPodTypeData{
-                cached_align_of: ty.align_of(),
+                //cached_align_of: ty.align_of(),
                 ty,
                 default
             });
@@ -48,84 +47,37 @@ impl ScriptHeap{
         }
     }
     
-    pub fn pod_def_vec(&mut self, pod_module:ScriptObject, name:LiveId, components:usize,  ty:ScriptPodType)->ScriptPodType{
-        let pod_obj = self.new_with_proto(name.into());
-        let pod_type = &self.pod_types[ty.index as usize];
-        // lets make a struct
-        let names = [id!(x), id!(y), id!(z), id!(w)];
-        let mut fields = Vec::new();
-        for i in 0..components{
-            fields.push(ScriptPodField{
-                name: names[i],
-                ty: ScriptPodTypeInline{
-                    self_ref: ty,
-                    data: pod_type.clone()
-                },
-                default:NIL
-            });
+    pub fn pod_def_atom(&mut self, pod_module:ScriptObject, name: LiveId, ty: ScriptPodTy, helper_name:LiveId, default:ScriptValue)->ScriptPodType{
+        let pod_obj = self.new_with_proto(helper_name.into());
+        if ty != ScriptPodTy::UndefinedStruct && 
+           ty != ScriptPodTy::UndefinedArray{
+            self.set_notproto(pod_obj);
         }
-        let mut size_of = components * pod_type.ty.align_of();
-        
-        // do the custom vec3 haxery blegh.
-        let mut align_of = size_of;
-        if size_of == 12{align_of = 16}
-        else if size_of == 6{align_of = 8}
-        
-        let vec_ty = self.new_pod_type(ScriptPodTy::Struct{
-            align_of,
-            size_of,
-            fields,
-        }, NIL);
+        let pt = self.new_pod_type(ty, default);
+        self.set_object_storage_vec2(pod_obj);
+        self.set_object_pod_type(pod_obj, pt); 
+        self.set_value_def(pod_module, name.into(), pod_obj.into());
+        pt
+    }
+    
+    pub fn pod_def_vec(&mut self, pod_module:ScriptObject, name:LiveId, builtin: ScriptPodVec)->ScriptPodType{
+        let pod_obj = self.new_with_proto(name.into());
+        let vec_ty = self.new_pod_type(ScriptPodTy::Vec(builtin), NIL);
         self.set_object_pod_type(pod_obj, vec_ty);
         self.set_notproto(pod_obj);
         self.freeze(pod_obj);
         self.set_value_def(pod_module, name.into(), pod_obj.into());
         return vec_ty
     }
-    
         
-    pub fn pod_def_mat(&mut self, pod_module:ScriptObject, name:LiveId, x:usize, y:usize,  ty:ScriptPodType)->ScriptPodType{
+    pub fn pod_def_mat(&mut self, pod_module:ScriptObject, name:LiveId, builtin:ScriptPodMat)->ScriptPodType{
         let pod_obj = self.new_with_proto(name.into());
-        let pod_type = &self.pod_types[ty.index as usize];
-        // lets make a struct
-        let names = [id!(a), id!(b), id!(c), id!(d), id!(e), id!(f), id!(g), id!(h), id!(i), id!(j),id!(k),id!(l),id!(m),id!(n),id!(o),id!(p)];
-        let mut fields = Vec::new();
-        for i in 0..(x*y){
-            fields.push(ScriptPodField{
-                name: names[i],
-                ty: ScriptPodTypeInline{
-                    self_ref: ty,
-                    data: pod_type.clone()
-                },
-                default:NIL
-            });
-        }
-        let mut size_bytes = (x*y) * pod_type.ty.align_of();
-        
-        // align of / size of table copied from wgsl spec
-        let (align_of, size_of) = match (x,y){
-            (2,2)=>(8,16),
-            (3,2)=>(8,24),
-            (4,2)=>(8,32),
-            (2,3)=>(16,32),
-            (3,3)=>(16,48),
-            (4,3)=>(16,64),
-            (2,4)=>(16,32),
-            (3,4)=>(16,48),
-            (4,4)=>(16,64),
-            _=>panic!()
-        };
-                
-        let vec_ty = self.new_pod_type(ScriptPodTy::Struct{
-            align_of,
-            size_of,
-            fields,
-        }, NIL);
-        self.set_object_pod_type(pod_obj, vec_ty);
+        let mat_ty = self.new_pod_type(ScriptPodTy::Mat(builtin), NIL);
+        self.set_object_pod_type(pod_obj, mat_ty);
         self.set_notproto(pod_obj);
         self.freeze(pod_obj);
         self.set_value_def(pod_module, name.into(), pod_obj.into());
-        return vec_ty
+        return mat_ty
     }
             
     pub fn pod_type(&mut self, ty:ScriptValue)->Option<ScriptPodType>{
@@ -141,19 +93,22 @@ impl ScriptHeap{
     }
         
     pub fn set_pod_field(&self, pod:ScriptPod, field:ScriptValue, _value:ScriptValue, _trap:&ScriptTrap)->ScriptValue{
-        let pod = &self.pods[pod.index as usize];
+        let _pod = &self.pods[pod.index as usize];
         println!("WANT TO SET FIELD {}", field);
         todo!()
     }
         
         
-    pub fn pod_pop_to_me(&mut self,  pod:ScriptPod, offset:&mut ScriptPodOffset, field:ScriptValue, value:ScriptValue, trap:&ScriptTrap){
-        let pod = &mut self.pods[pod.index as usize];
-        let pod_type = &self.pod_types[pod.ty.index as usize];
+    pub fn pod_pop_to_me(&mut self,  pod_ptr:ScriptPod, offset:&mut ScriptPodOffset, _field:ScriptValue, value:ScriptValue, trap:&ScriptTrap){
+        let pod = &mut self.pods[pod_ptr.index as usize];
+        let mut out_data = Vec::new();
+        std::mem::swap(&mut out_data, &mut pod.data);
+        let pod_ty = pod.ty;
+        let pod_type = &self.pod_types[pod_ty.index as usize];
         // alright lets write 'value' into our current offset slot
         // our current offset slot is
         match &pod_type.ty{
-            ScriptPodTy::Struct{align_of,size_of,fields}=>{
+            ScriptPodTy::Struct{align_of,fields,..}=>{
                 // struct. ok so we are at field 
                 if let Some(field) = fields.get(offset.field_index){
                     
@@ -161,7 +116,7 @@ impl ScriptHeap{
                     let align_bytes = field.ty.data.ty.align_of();
                     let rem = offset.offset_of % align_of;
                     if rem != 0{ // align offset
-                        offset.offset_of += (align_bytes - rem)
+                        offset.offset_of += align_bytes - rem
                     }
                     
                     match &field.ty.data.ty{
@@ -171,7 +126,7 @@ impl ScriptHeap{
                         }
                         ScriptPodTy::Bool=>{
                             if let Some(value) = value.as_bool(){
-                                pod.data[offset.offset_of>>2] = if value{1} else {0}
+                                out_data[offset.offset_of>>2] = if value{1} else {0}
                             }
                             else { // error?
                                 trap.err_pod_type_not_matching();
@@ -179,7 +134,7 @@ impl ScriptHeap{
                         }
                         ScriptPodTy::U32 | ScriptPodTy::AtomicU32=>{
                             if let Some(value) = value.as_number(){
-                                pod.data[offset.offset_of>>2] = (value as u32);
+                                out_data[offset.offset_of>>2] = value as u32;
                             }
                             else { // error?
                                 trap.err_pod_type_not_matching();
@@ -187,7 +142,7 @@ impl ScriptHeap{
                         }
                         ScriptPodTy::I32 |ScriptPodTy::AtomicI32=>{
                             if let Some(value) = value.as_number(){
-                                pod.data[offset.offset_of>>2] = (value as i32) as u32;
+                                out_data[offset.offset_of>>2] = (value as i32) as u32;
                             }
                             else { // error?
                                 trap.err_pod_type_not_matching();
@@ -195,31 +150,54 @@ impl ScriptHeap{
                         }
                         ScriptPodTy::F32=>{
                             if let Some(value) = value.as_number(){
-                                pod.data[offset.offset_of>>2] = (value as f32).to_bits();
+                                out_data[offset.offset_of>>2] = (value as f32).to_bits();
                             }
-                            else { // error?
+                            else if let Some(other_pod) = value.as_pod(){
+                                let other_pod = &self.pods[other_pod.index as usize];
+                                let _other_pod_ty = &self.pod_types[other_pod.ty.index as usize];
+                                // we should only allow splatting vecs into vecs
+                                // how do we figure out we are a vec
+                            }
+                            else{
                                 trap.err_pod_type_not_matching();
                             }
+                        }
+                        ScriptPodTy::Vec(_vt)=>{ 
+                            println!("setting a vec via pop");
+                        }
+                        ScriptPodTy::Mat(_mt)=>{
+                            println!("setting a mat via pop");
                         }
                         ScriptPodTy::F16=>{
-                            todo!();
                             if let Some(value) = value.as_number(){
+                                let u = f32_to_f16(value as f32);
                                 if offset.offset_of&3 >= 2{
-                                    pod.data[offset.offset_of>>2] |= (value as f32).to_bits()<<16;
+                                    out_data[offset.offset_of>>2] |= (u as u32) << 16;
                                 }
                                 else{
-                                    pod.data[offset.offset_of>>2] = (value as f32).to_bits();
+                                    out_data[offset.offset_of>>2] = u as u32;
                                 }
                             }
                             else { // error?
                                 trap.err_pod_type_not_matching();
                             }
                         }
-                        ScriptPodTy::Struct{fields,..}=>{
-                            // we should check the type of what we are assigning
-                            println!("ASSIGN TO STRUCT");
-                                                        
-                            // alright we have to assign to a struct.
+                        ScriptPodTy::Struct{..}=>{
+                            if let Some(other_pod) = value.as_pod(){
+                                let other_pod = &self.pods[other_pod.index as usize];
+                                if other_pod.ty == field.ty.self_ref{
+                                    let o = offset.offset_of>>2;
+                                    for i in 0..other_pod.data.len(){
+                                        out_data[o+i] = other_pod.data[i]
+                                    }
+                                }
+                                else{
+                                    trap.err_pod_type_not_matching();
+                                }
+                            }
+                            else{
+                                trap.err_pod_type_not_matching();
+                            }
                         }
                         ScriptPodTy::Enum{..}=>{
                             todo!()
@@ -232,21 +210,194 @@ impl ScriptHeap{
                         }
                     }
                     // alright lets do the align and all that
+                    offset.field_index += 1;
                     offset.offset_of += field.ty.data.ty.size_of();
                 }
                 else{
                     trap.err_pod_too_much_data();
-                    return
                 }
             },
-            ScriptPodTy::FixedArray{align_of,size_of,len,ty}=>{
+            ScriptPodTy::FixedArray{align_of:_,size_of:_,len:_,ty:_}=>{
                 
             },
+            ScriptPodTy::Vec(ot)=>{
+                if let Some(value) = value.as_number(){
+                    if offset.offset_of >= ot.elem_size() * ot.dims(){
+                        trap.err_pod_too_much_data();
+                    }
+                    else{
+                        let o = offset.offset_of;
+                        let o2 = o>>2;
+                        match ot{
+                            ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>{
+                                out_data[o2] = (value as f32).to_bits();
+                            }
+                            ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>{
+                                let u = f32_to_f16(value as f32);
+                                if o & 3 >= 2{
+                                    out_data[o>>2] |= (u as u32) << 16;
+                                }
+                                else{
+                                    out_data[o>>2] = u as u32;
+                                }
+                            }
+                            ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>{
+                                out_data[o2] = value as u32;
+                            }
+                            ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>{
+                                out_data[o2] = value as i32 as u32;
+                            }
+                        }
+                        offset.offset_of += ot.elem_size()
+                    }
+                }
+                else if let Some(in_pod) = value.as_pod(){
+                    let in_pod = &self.pods[in_pod.index as usize];
+                    let in_pod_ty = &self.pod_types[in_pod.ty.index as usize];
+                    if let ScriptPodTy::Vec(it) = &in_pod_ty.ty{
+                        if offset.offset_of + it.dims() * ot.elem_size() > ot.elem_size() * ot.dims(){
+                            trap.err_pod_too_much_data();
+                        }
+                        else{
+                            // output type
+                            let o = offset.offset_of;
+                            let o2 = o >> 2;
+                            match ot{
+                                ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>{
+                                    match it{
+                                        ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>for i in 0..it.dims(){
+                                            out_data[o2+i] = in_pod.data[i];
+                                        }
+                                        ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>for i in 0..it.dims(){
+                                            if i&1 == 1{
+                                                out_data[o2+i] = f16_to_f32((in_pod.data[i>>1]>>16) as u16).to_bits();
+                                            }
+                                            else{
+                                                out_data[o2+i] = f16_to_f32(in_pod.data[i>>1] as u16).to_bits()
+                                            }
+                                        }
+                                        ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>for i in 0..it.dims(){
+                                            out_data[o2+i] = (in_pod.data[i] as f32).to_bits();
+                                        }
+                                        ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>for i in 0..it.dims(){
+                                            out_data[o2+i] = (in_pod.data[i] as i32 as f32).to_bits();
+                                        }
+                                    }
+                                }
+                                ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>{
+                                    match it{
+                                        ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>for i in 0..it.dims(){
+                                            let u = f32_to_f16(f32::from_bits(in_pod.data[i]));
+                                            let op = o + (i<<1);
+                                            if op & 3 >= 2{
+                                                out_data[op>>2] |= (u as u32) << 16;
+                                            }
+                                            else{
+                                                out_data[op>>2] = u as u32;
+                                            }
+                                        }
+                                        ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>for i in (0..it.dims()).step_by(2){
+                                            out_data[o+i>>1] = in_pod.data[i>>1];
+                                        }
+                                        ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>for i in 0..it.dims(){
+                                            let u = f32_to_f16(in_pod.data[i] as f32);
+                                            let op = o + (i<<1);
+                                            if op & 3 >= 2{
+                                                out_data[op>>2] |= (u as u32) << 16;
+                                            }
+                                            else{
+                                                out_data[op>>2] = u as u32;
+                                            }
+                                        }
+                                        ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>for i in 0..it.dims(){
+                                            let u = f32_to_f16(in_pod.data[i] as i32 as f32);
+                                            let op = o + (i<<1);
+                                            if op & 3 >= 2{
+                                                out_data[op>>2] |= (u as u32) << 16;
+                                            }
+                                            else{
+                                                out_data[op>>2] = u as u32;
+                                            }
+                                        }
+                                    }
+                                    todo!()
+                                }
+                                ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>{
+                                    match it{
+                                        ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>for i in 0..it.dims(){
+                                            out_data[o2+i] = f32::from_bits(in_pod.data[i]) as u32;
+                                        }
+                                        ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>for i in 0..it.dims(){
+                                            if i&1 == 1{
+                                                out_data[o2+i] = f16_to_f32((in_pod.data[i>>1]>>16) as u16) as u32;
+                                            }
+                                            else{
+                                                out_data[o2+i] = f16_to_f32(in_pod.data[i>>1] as u16) as u32;
+                                            }
+                                        }
+                                        ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>for i in 0..it.dims(){
+                                            out_data[o2+i] = in_pod.data[i];
+                                        }
+                                        ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>for i in 0..it.dims(){
+                                            out_data[o2+i] = in_pod.data[i] as i32 as u32;
+                                        }
+                                    }
+                                }
+                                ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>{
+                                    match it{
+                                        ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>for i in 0..it.dims(){
+                                            out_data[o2+i] = f32::from_bits(in_pod.data[i]) as i32 as u32;
+                                        }
+                                        ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>for i in 0..it.dims(){
+                                            if i&1 == 1{
+                                                out_data[o2+i] = f16_to_f32((in_pod.data[i>>1]>>16) as u16) as i32 as u32
+                                            }
+                                            else{
+                                                out_data[o2+i] = f16_to_f32(in_pod.data[i>>1] as u16) as i32 as u32
+                                            }
+                                        }
+                                        ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>for i in 0..it.dims(){
+                                            out_data[o2+i] = in_pod.data[i] as i32 as u32;
+                                        }
+                                        ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>for i in 0..it.dims(){
+                                            out_data[o2+i] = in_pod.data[i];
+                                        }
+                                    }
+                                }
+                            }
+                            offset.offset_of += it.dims() * ot.elem_size();
+                        }                            
+                    }
+                    else{
+                        trap.err_pod_type_not_matching();
+                    }
+                }
+                else{
+                    trap.err_pod_type_not_matching();
+                }
+            }
+            ScriptPodTy::Mat(mt)=>{
+                if let Some(value) = value.as_number(){
+                    if offset.offset_of >= mt.elem_size() * mt.dim(){
+                        trap.err_pod_too_much_data();
+                    }
+                    else{
+                        out_data[offset.offset_of>>2] = (value as f32).to_bits();
+                        offset.offset_of += mt.elem_size()
+                    }
+                }
+                else if let Some(_in_pod) = value.as_pod(){
+                    trap.err_pod_type_not_matching();
+                }
+                else{
+                    trap.err_pod_type_not_matching();
+                }
+            }
             _=>{
                 trap.err_unexpected();
-                return
             }
         }
+        std::mem::swap(&mut out_data, &mut self.pods[pod_ptr.index as usize].data);
     }
     
     pub fn pod_debug_print(&self, pod_type:&ScriptPodTypeData, offset_of: usize, data:&[u32]){
@@ -275,11 +426,47 @@ impl ScriptHeap{
             }
             ScriptPodTy::F16=>{
                 if offset_of&3>=2{
-                    print!("f16:{}", data[offset_of>>2]>>16)
+                    print!("f16:{}", f16_to_f32((data[offset_of>>2]>>16) as u16))
                 }
                 else{
-                    print!("f16:{}", data[offset_of>>2])
+                    print!("f16:{}", f16_to_f32(data[offset_of>>2] as u16))
                 }
+            }
+            ScriptPodTy::Vec(vt)=>{
+                print!("{}(", vt.name());
+                let mut offset_of = offset_of;
+                for i in 0..vt.dims(){
+                    if i>0{
+                        print!(" ");
+                    }
+                    if vt.elem_size() == 2{
+                        if offset_of&3>=2{
+                            print!("{}",f16_to_f32((data[offset_of>>2]>>16) as u16));
+                        }
+                        else{
+                            print!("{}",f16_to_f32(data[offset_of>>2] as u16));
+                        }
+                    }
+                    else{
+                        print!("{}",f32::from_bits(data[offset_of>>2]));
+                    }
+                    offset_of += vt.elem_size();
+                }
+                print!(")");
+            }
+            ScriptPodTy::Mat(mt)=>{
+                print!("{}(", mt.name());
+                let (dim_x,dim_y) = mt.dims();
+                let mut offset_of = offset_of;
+                for _y in 0..dim_y{
+                    print!("[");
+                    for _x in 0..dim_x{
+                        print!("{} ",f32::from_bits(data[offset_of>>2]));
+                        offset_of += mt.elem_size();
+                    }
+                    print!("]")
+                }
+                print!(")")
             }
             ScriptPodTy::Struct{fields, ..}=>{
                 print!("struct{{");
@@ -296,7 +483,7 @@ impl ScriptHeap{
                     let size_of = field.ty.data.ty.size_of();
                     let rem = offset_of % align_of;
                     if rem != 0{ // align offset
-                        offset_of += (align_of - rem)
+                        offset_of += align_of - rem
                     }
                     print!("{}:",field.name);
                     self.pod_debug_print(&field.ty.data, offset_of, data);
@@ -321,7 +508,7 @@ impl ScriptHeap{
                     let size_of = ty.data.ty.size_of();
                     let rem = offset_of % align_of;
                     if rem != 0{ // align offset
-                        offset_of += (align_of - rem)
+                        offset_of += align_of - rem
                     }
                     print!("{}:",i);
                     self.pod_debug_print(&ty.data, offset_of, data);
@@ -345,7 +532,7 @@ impl ScriptHeap{
                     let size_of = ty.data.ty.size_of();
                     let rem = offset_of % align_of;
                     if rem != 0{ // align offset
-                        offset_of += (align_of - rem)
+                        offset_of += align_of - rem
                     }
                     print!("{}:",(i - start)/ty.data.ty.align_of());
                     self.pod_debug_print(&ty.data, i, data);
@@ -385,42 +572,42 @@ impl ScriptHeap{
                 }));
             }
         }
-        if let Some(v) = val.as_f64(){
+        if val.is_f64(){
             let pod_type = &self.pod_types[pod_builtins.pod_f32.index as usize];
             return Some((val, ScriptPodTypeInline{
                 self_ref: pod_builtins.pod_f32,
                 data: pod_type.clone()
             }));
         }
-        if let Some(v) = val.as_f32(){
+        if val.is_f32(){
             let pod_type = &self.pod_types[pod_builtins.pod_f32.index as usize];
             return Some((val, ScriptPodTypeInline{
                 self_ref: pod_builtins.pod_f32,
                 data: pod_type.clone()
             }));
         }
-        if let Some(v) = val.as_u32(){
+        if val.is_u32(){
             let pod_type = &self.pod_types[pod_builtins.pod_u32.index as usize];
             return Some((val, ScriptPodTypeInline{
                 self_ref: pod_builtins.pod_u32,
                 data: pod_type.clone()
             }));
         }
-        if let Some(v) = val.as_i32(){
+        if val.is_i32(){
             let pod_type = &self.pod_types[pod_builtins.pod_i32.index as usize];
             return Some((val, ScriptPodTypeInline{
                 self_ref: pod_builtins.pod_i32,
                 data: pod_type.clone()
             }));
         }
-        if let Some(v) = val.as_f16(){
+        if val.is_f16(){
             let pod_type = &self.pod_types[pod_builtins.pod_f16.index as usize];
             return Some((val, ScriptPodTypeInline{
                 self_ref: pod_builtins.pod_f16,
                 data: pod_type.clone()
             }));
         }
-        if let Some(v) = val.as_bool(){
+        if val.is_bool(){
             let pod_type = &self.pod_types[pod_builtins.pod_bool.index as usize];
             return Some((val, ScriptPodTypeInline{
                 self_ref: pod_builtins.pod_bool,
@@ -473,7 +660,7 @@ impl ScriptHeap{
                                 let align_of = ty.data.ty.align_of();
                                 let size_of = align_of * len;
                                 let rem = size_of % align_of;
-                                let size_bytes = if rem != 0{size_of + (align_of - rem)}else{size_of};
+                                let size_of = if rem != 0{size_of + (align_of - rem)}else{size_of};
                                 
                                 let pt = self.new_pod_type(ScriptPodTy::FixedArray{
                                     ty: Box::new(ty),
@@ -516,7 +703,7 @@ impl ScriptHeap{
                         let size_bytes =  field.ty.data.ty.size_of();
                         let rem = offset_of % align_bytes;
                         if rem != 0{ // align offset
-                            offset_of += (align_bytes - rem)
+                            offset_of += align_bytes - rem
                         }
                         
                         offset_of += size_bytes;
@@ -524,7 +711,7 @@ impl ScriptHeap{
                     // align final offset
                     let rem = offset_of % align_of;
                     if rem != 0{
-                        offset_of += (align_of - rem)
+                        offset_of += align_of - rem
                     }
                     
                     let pt = self.new_pod_type(ScriptPodTy::Struct{
@@ -536,7 +723,7 @@ impl ScriptHeap{
                     self.set_notproto(ptr);
                     self.freeze(ptr);
                 }
-                x=>{
+                _x=>{
                     trap.err_pod_type_not_extendable();
                     return
                 }
@@ -544,3 +731,84 @@ impl ScriptHeap{
         }
     }
 }
+
+
+// AI generated f16/f32 conversions. They look correct at first glance/test
+
+pub fn f16_to_f32(h: u16) -> f32 {
+    // Extract sign, exponent, and mantissa
+    let sign = (h as u32) >> 15;
+    let exponent = (h >> 10) & 0x1F;
+    let mantissa = (h & 0x03FF) as u32;
+        
+    let bits = if exponent == 0x1F {
+        // Infinity or NaN
+        let new_mantissa = if mantissa != 0 { 0x400000 } else { 0 }; // Preserve NaN
+        (sign << 31) | 0x7F800000 | new_mantissa
+    } else if exponent == 0 {
+        // Zero or Subnormal
+        if mantissa == 0 {
+            // Zero
+            sign << 31
+        } else {
+            // Subnormal number
+            // Count leading zeros in the 10-bit mantissa
+            // We use `(mantissa as u16).leading_zeros() - 6` because we're interested
+            // in the position within the 10 bits, not the full 16 bits of the u16.
+            let shift = (mantissa as u16).leading_zeros() as u32 - 6;
+                        
+            // Re-bias exponent and shift mantissa
+            let new_exponent = 127 - 15 - shift;
+            let new_mantissa = (mantissa << (shift + 1)) & 0x7FFFFF;
+                        
+            (sign << 31) | (new_exponent << 23) | (new_mantissa << 13)
+        }
+    } else {
+        // Normal number
+        // Re-bias exponent from 15 to 127
+        let new_exponent = (exponent as u32 - 15) + 127;
+        // Scale the mantissa
+        let new_mantissa = mantissa << 13;
+        (sign << 31) | (new_exponent << 23) | new_mantissa
+    };
+        
+    f32::from_bits(bits)
+}
+
+pub fn f32_to_f16(f: f32) -> u16 {
+    let bits: u32 = f.to_bits();
+    // Extract the sign, exponent, and mantissa from the f32
+    let sign = (bits >> 31) & 0x1;
+    let exponent = (bits >> 23) & 0xff;
+    let mantissa = bits & 0x7fffff;
+        
+    // Handle special cases: NaN and Infinity
+    if exponent == 0xff {
+        // NaN or Infinity
+        let new_mantissa = if mantissa != 0 { 0x200 } else { 0 }; // Preserve NaN-ness
+        return ((sign as u16) << 15) | 0x7c00 | new_mantissa;
+    }
+        
+    // Re-bias the exponent from f32's bias (127) to f16's bias (15)
+    let new_exponent = exponent as i32 - 127 + 15;
+        
+    if new_exponent >= 31 {
+        // Overflow to infinity
+        return ((sign as u16) << 15) | 0x7c00;
+    }
+        
+    if new_exponent <= 0 {
+        if new_exponent < -10 {
+            // Underflow to zero
+            return (sign as u16) << 15;
+        }
+        // Handle subnormal numbers
+        let new_mantissa = (mantissa | 0x800000) >> (1 - new_exponent);
+        return ((sign as u16) << 15) | (new_mantissa >> 13) as u16;
+    }
+        
+    // Normal number
+    let new_mantissa = mantissa >> 13;
+    ((sign as u16) << 15) | ((new_exponent as u16) << 10) | (new_mantissa as u16)
+}
+
