@@ -34,7 +34,7 @@ pub enum ScriptPodEnumVariant{
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScriptPodTypeData{
     pub default: ScriptValue,
-    pub cached_align_bytes: usize,
+    pub cached_align_of: usize,
     pub ty: ScriptPodTy
 }
 
@@ -59,35 +59,35 @@ pub enum ScriptPodTy{
     F32,
     F16,
     Struct{
-        align_bytes: usize,
-        size_bytes: usize,
+        align_of: usize,
+        size_of: usize,
         fields:Vec<ScriptPodField>
     },
     Enum{
-        align_bytes: usize,
-        size_bytes: usize,
+        align_of: usize,
+        size_of: usize,
         variants:Vec<ScriptPodEnum>
     },
     FixedArray{
-        align_bytes: usize,
-        size_bytes: usize,
+        align_of: usize,
+        size_of: usize,
         len: usize,
         ty: Box<ScriptPodTypeInline>,
     },
     VariableArray{
-        align_bytes: usize,
+        align_of: usize,
         ty: Box<ScriptPodTypeInline>,
     }
 }
 
 #[derive(Debug, Default)]
 pub struct ScriptPodOffset{
-    pub offset_byte: usize,
+    pub offset_of: usize,
     pub field_index: usize
 }
 
 impl ScriptPodTy{
-    pub fn align_bytes(&self)->usize{
+    pub fn align_of(&self)->usize{
         match self{
             Self::NIL | Self::UndefinedArray | Self::UndefinedStruct => 0,
             Self::Bool => 4,
@@ -97,14 +97,14 @@ impl ScriptPodTy{
             Self::I32 => 4,
             Self::F32 => 4,
             Self::F16 => 2,
-            Self::Struct{align_bytes,..}=>*align_bytes,
-            Self::Enum{align_bytes,..}=>*align_bytes,
-            Self::FixedArray{align_bytes,..}=>*align_bytes,
-            Self::VariableArray{align_bytes,..}=>*align_bytes,
+            Self::Struct{align_of,..}=>*align_of,
+            Self::Enum{align_of,..}=>*align_of,
+            Self::FixedArray{align_of,..}=>*align_of,
+            Self::VariableArray{align_of,..}=>*align_of,
         }
     }
     
-    pub fn size_bytes(&self)->usize{
+    pub fn size_of(&self)->usize{
         match self{
             Self::NIL | Self::UndefinedArray | Self::UndefinedStruct => 0,
             Self::Bool => 4,
@@ -114,9 +114,9 @@ impl ScriptPodTy{
             Self::I32 => 4,
             Self::F32 => 4,
             Self::F16 => 2,
-            Self::Struct{size_bytes,..}=>*size_bytes,
-            Self::Enum{size_bytes,..}=>*size_bytes,
-            Self::FixedArray{size_bytes, ..}=>*size_bytes,
+            Self::Struct{size_of,..}=>*size_of,
+            Self::Enum{size_of,..}=>*size_of,
+            Self::FixedArray{size_of, ..}=>*size_of,
             Self::VariableArray{..}=>0,
         }
     }
