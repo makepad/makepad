@@ -6,6 +6,7 @@ use crate::vm::*;
 use crate::function::*;
 use crate::trap::*;
 use crate::json::*;
+use crate::pod::*;
 use std::any::Any;
 
 #[derive(Debug, Default)]
@@ -52,7 +53,7 @@ pub struct CallFrame{
 pub enum ScriptMe{
     Object(ScriptObject),
     Call{this:Option<ScriptValue>, args:ScriptObject},
-    Pod{pod:ScriptPod, offset:usize},
+    Pod{pod:ScriptPod, offset:ScriptPodOffset},
     Array(ScriptArray),
 }
 
