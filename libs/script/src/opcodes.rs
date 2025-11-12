@@ -6,6 +6,7 @@ use crate::function::*;
 use crate::vm::*;
 use crate::thread::*;
 use crate::trap::*;
+use crate::pod::*;
 use std::any::Any;
 
 macro_rules! f64_scope_assign_op_impl{
@@ -697,7 +698,7 @@ impl ScriptThread{
                 if let Some(ty) = heap.pod_type(fnobj){
                     // lets construct a new pod
                     let pod = heap.new_pod(ty);
-                    self.mes.push(ScriptMe::Pod{pod, offset:0});
+                    self.mes.push(ScriptMe::Pod{pod, offset:ScriptPodOffset::default()});
                 }
                 else{
                     let scope = heap.new_with_proto(fnobj);
