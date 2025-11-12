@@ -1,24 +1,29 @@
 #![allow(unused)]
 use makepad_live_id::*;
 use crate::value::*;
- 
-#[derive(Debug)]
+use crate::heap::*;
+use crate::value::*;
+use crate::trap::*;
+use crate::mod_pod::*;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptPodField{
     pub name: LiveId,
-    pub ty: ScriptPodType,
+    pub default: ScriptValue,
+    pub ty: ScriptPodTypeInline,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptPodEnum{
     pub name: LiveId,
     pub variant: ScriptPodEnumVariant
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptPodEnumVariant{
     Bare,
     Tuple{
-        items: Vec<ScriptPodType>,
+        items: Vec<ScriptPodTypeInline>,
     },
     Named{
         fields: Vec<ScriptPodField>
@@ -26,29 +31,44 @@ pub enum ScriptPodEnumVariant{
 }
 
 // we're going to try to follow std140 datamapping for wgsl
-#[derive(Default, Debug)]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScriptPodTypeData{
     pub default: ScriptValue,
     pub ty: ScriptPodTy
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct ScriptPodTypeInline{
+    pub self_ref: ScriptPodType,
+    pub data: ScriptPodTypeData
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub enum ScriptPodTy{
     #[default]
     NIL,
-    U8,
+    // limited to the types WGSL supports
+    Bool,
+    AtomicU32,
+    AtomicI32,
     U32,
     I32,
     F32,
+    F16,
     Struct{
         fields:Vec<ScriptPodField>
     },
     Enum{
         variants:Vec<ScriptPodEnum>
     },
-    Array{
+    UndefinedArray,
+    UndefinedStruct,
+    FixedArray{
         len: usize,
-        ty: Box<ScriptPodTy>,
+        ty: Box<ScriptPodTypeInline>,
+    },
+    VariableArray{
+        ty: Box<ScriptPodTypeInline>,
     }
 }
 
@@ -86,7 +106,7 @@ impl ScriptPodTag{
 #[derive(Default)]
 pub struct ScriptPodData{
     pub tag: ScriptPodTag,
-    pub ty: ScriptObject,
+    pub ty: ScriptPodType,
     pub data: Vec<u64>
 }
 

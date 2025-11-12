@@ -322,7 +322,11 @@ impl ScriptValueType{
     pub const ERR_FILE_SYSTEM: Self = Self(Self::ERR_FIRST.0 + 30);
     pub const ERR_CHILD_PROCESS: Self= Self(Self::ERR_FIRST.0 + 31);
     pub const ERR_TOO_MANY_PAUSED_CALLS: Self = Self(Self::ERR_FIRST.0 + 32);
-    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 33);
+    pub const ERR_POD_TYPE_NOT_EXTENDABLE: Self = Self(Self::ERR_FIRST.0 + 33);
+    pub const ERR_POD_TYPE_NOT_MATCHING: Self = Self(Self::ERR_FIRST.0 + 34);
+    pub const ERR_POD_FIELD_NOT_POD: Self = Self(Self::ERR_FIRST.0 + 35);
+    pub const ERR_POD_ARRAY_DEF_INCORRECT: Self = Self(Self::ERR_FIRST.0 + 36);
+    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 37);
     
     pub const HANDLE_FIRST: Self = Self(0x40);
     pub const HANDLE_LAST: Self = Self(0x7F);
@@ -437,6 +441,10 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_FILE_SYSTEM=>write!(f,"FileSystemError"),
             Self::ERR_CHILD_PROCESS=>write!(f,"ChildProcessError"),
             Self::ERR_TOO_MANY_PAUSED_CALLS=>write!(f,"TooManyPausedCalls"),
+            Self::ERR_POD_TYPE_NOT_EXTENDABLE=>write!(f,"PodTypeNotExtendable"),
+            Self::ERR_POD_TYPE_NOT_MATCHING=>write!(f,"PodTypeNotMatching"),
+            Self::ERR_POD_FIELD_NOT_POD=>write!(f,"PodFieldNotPod"),
+            Self::ERR_POD_ARRAY_DEF_INCORRECT=>write!(f,"PodArrayDefIncorrect"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
             _=>write!(f,"ScriptValueType?")
@@ -555,6 +563,11 @@ impl ScriptValue{
     err_fn!(err_child_process, ERR_CHILD_PROCESS);
     err_fn!(err_too_many_paused_calls, ERR_TOO_MANY_PAUSED_CALLS);
     
+    err_fn!(err_pod_type_not_extendable, ERR_POD_TYPE_NOT_EXTENDABLE);
+    err_fn!(err_pod_type_not_matching, ERR_POD_TYPE_NOT_MATCHING);
+    err_fn!(err_pod_field_not_pod, ERR_POD_FIELD_NOT_POD);
+    err_fn!(err_pod_array_def_incorrect, ERR_POD_ARRAY_DEF_INCORRECT);
+    
     pub const fn raw(&self)->u64{self.0}
     
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ScriptValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()}
@@ -653,6 +666,26 @@ impl ScriptValue{
         self.0 <= Self::TYPE_NUMBER_MAX
     }
     
+    pub const fn as_number(&self)->Option<f64>{
+        if let Some(v) = self.as_f64(){
+            return Some(v)
+        }
+        if let Some(v) = self.as_f32(){
+            return Some(v as _)
+        }
+        if let Some(v) = self.as_u32(){
+            return Some(v as _)
+        }
+        if let Some(v) = self.as_i32(){
+            return Some(v as _)
+        }
+        if let Some(v) = self.as_f16(){
+            return Some(v as _)
+        }
+        None
+    }
+    
+    
     // f32
     
     pub const fn from_f32(v: f32)->Self{
@@ -690,8 +723,8 @@ impl ScriptValue{
             
     // f16
         
-    pub const fn from_u32(v: f32)->Self{
-        Self(v.to_bits() as u64 | Self::TYPE_U32)
+    pub const fn from_u32(v: u32)->Self{
+        Self(v as u64 | Self::TYPE_U32)
     }
                 
     pub const fn is_u32(&self)->bool{

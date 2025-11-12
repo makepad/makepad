@@ -2,7 +2,7 @@ use crate::makepad_live_id::*;
 use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
-use crate::object::*;
+use crate::function::*;
 use crate::vm::*;
 use crate::thread::*;
 use crate::trap::*;
@@ -537,6 +537,9 @@ impl ScriptThread{
                             }
                             heap.set_value(*obj, field, value, &self.trap);
                         }
+                        ScriptMe::Pod{pod,..}=>{
+                            heap.set_pod_field(*pod, field, value, &self.trap);
+                        }
                         ScriptMe::Array(_arr)=>{
                             self.trap.err_not_allowed_in_array();
                         }
@@ -549,7 +552,7 @@ impl ScriptThread{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
                 let value = match self.mes.last().unwrap(){
-                    ScriptMe::Call{..}=>{
+                    ScriptMe::Call{..} | ScriptMe::Pod{..}=>{
                         self.trap.err_not_allowed_in_arguments()
                     }
                     ScriptMe::Object(obj)=>{
@@ -567,7 +570,7 @@ impl ScriptThread{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
                 let value = match self.mes.last().unwrap(){
-                    ScriptMe::Call{..}=>{
+                    ScriptMe::Call{..} | ScriptMe::Pod{..}=>{
                         self.trap.err_not_allowed_in_arguments()
                     }
                     ScriptMe::Object(obj)=>{
@@ -659,8 +662,10 @@ impl ScriptThread{
             }
             Opcode::END_PROTO=>{
                 // see if we need to transform to a pod type
-                
                 let me = self.mes.pop().unwrap();
+                if let ScriptMe::Object(me) = me{
+                    heap.finalize_maybe_pod_type(me, &code.builtins.pod, &self.trap);
+                }
                 self.push_stack_unchecked(me.into());
                 self.trap.goto_next();
             }
@@ -686,11 +691,19 @@ impl ScriptThread{
             }
 // Calling
             Opcode::CALL_ARGS=>{
+                // alright we're calling a 'type'
                 let fnobj = self.pop_stack_resolved(heap);
-                let scope = heap.new_with_proto(fnobj);
-                // set the args object to not write into the prototype
-                heap.clear_object_deep(scope);
-                self.mes.push(ScriptMe::Call{args:scope, this:None});
+                // check if we are a POD 
+                if let Some(ty) = heap.pod_type(fnobj){
+                    // lets construct a new pod
+                    let pod = heap.new_pod(ty);
+                    self.mes.push(ScriptMe::Pod{pod, offset:0});
+                }
+                else{
+                    let scope = heap.new_with_proto(fnobj);
+                    heap.clear_object_deep(scope);
+                    self.mes.push(ScriptMe::Call{args:scope, this:None});
+                }
                 self.trap.goto_next();
             }
             Opcode::CALL_EXEC | Opcode::METHOD_CALL_EXEC=>{
@@ -698,8 +711,18 @@ impl ScriptThread{
                 // ok so now we have all our args on 'mes'
                 let me = self.mes.pop().unwrap();
                 
-                let (args, this) = if let ScriptMe::Call{args, this} = me{(args,this)}else{
-                    panic!()
+                let (args, this) = match me{
+                    ScriptMe::Call{args, this}=>(args,this),
+                    ScriptMe::Pod{pod,offset}=>{
+                        // alright finalize the pod
+                        heap.pod_check_arg_total(pod, offset, &self.trap);
+                        self.push_stack_unchecked(pod.into());
+                        if opargs.is_pop_to_me(){
+                            self.pop_to_me(heap);
+                        }
+                        return
+                    }
+                    _=>panic!()
                 };
                 
                 if let Some(this) = this{
@@ -821,7 +844,7 @@ impl ScriptThread{
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 
                 match self.mes.last().unwrap(){
-                    ScriptMe::Call{..} | ScriptMe::Array(_)=>{
+                    ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..}=>{
                         self.trap.err_unexpected();
                     }
                     ScriptMe::Object(obj)=>{
@@ -840,7 +863,7 @@ impl ScriptThread{
                 let _ty = self.pop_stack_value().as_id().unwrap_or(id!());
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 match self.mes.last().unwrap(){
-                    ScriptMe::Call{..} | ScriptMe::Array(_)=>{
+                    ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..}=>{
                         self.trap.err_unexpected();
                     }
                     ScriptMe::Object(obj)=>{
@@ -853,7 +876,7 @@ impl ScriptThread{
                 let jump_over_fn = opargs.to_u32();
                 if let Some(me) = self.mes.pop(){
                     match me{
-                        ScriptMe::Call{..} | ScriptMe::Array(_)=>{
+                        ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..}=>{
                             self.trap.err_unexpected();
                             self.push_stack_unchecked(NIL);
                         }
@@ -990,6 +1013,9 @@ impl ScriptThread{
                     ScriptMe::Call{args,..}=>{
                         heap.value(*args, field, &self.trap)
                     }
+                    ScriptMe::Pod{pod,..}=>{
+                        heap.pod_field(*pod, field, &self.trap)
+                    }
                     ScriptMe::Object(obj)=>{
                         heap.value(*obj, field, &self.trap)
                     }
@@ -1101,6 +1127,9 @@ impl ScriptThread{
                         }
                         ScriptMe::Call{args,..}=>{
                             self.push_stack_value((*args).into());
+                        }
+                        ScriptMe::Pod{pod,..}=>{
+                            self.push_stack_value((*pod).into());
                         }
                         ScriptMe::Object(obj)=>{
                             self.push_stack_value((*obj).into());

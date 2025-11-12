@@ -6,6 +6,8 @@ use crate::makepad_live_id::*;
 use crate::object::*;
 use crate::array::*;
 use crate::string::*;
+use crate::function::*;
+
 use crate::*;
 
 #[macro_export]
