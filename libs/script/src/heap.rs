@@ -399,7 +399,7 @@ impl ScriptHeap{
         else if let Some(pod) = value.as_pod(){
             let pod = &self.pods[pod.index as usize];
             let pod_type = &self.pod_types[pod.ty.index as usize];
-            self.pod_debug_print(pod_type, &pod.data);
+            self.pod_debug_print(pod_type, 0, &pod.data);
         }else{
             print!("{}", value)
         }

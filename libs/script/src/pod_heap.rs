@@ -12,7 +12,7 @@ impl ScriptHeap{
     pub fn new_pod_type(&mut self, ty:ScriptPodTy, default:ScriptValue)->ScriptPodType{
         if let Some(ptr) = self.pod_types_free.pop(){
             let pod_type = &mut self.pod_types[ptr.index as usize];
-            pod_type.cached_align_bytes = ty.align_bytes();
+            pod_type.cached_align_of = ty.align_of();
             pod_type.ty = ty;
             pod_type.default = default;
             ptr
@@ -20,7 +20,7 @@ impl ScriptHeap{
         else{
             let ptr = ScriptPodType{index: self.pod_types.len() as u32};
             self.pod_types.push(ScriptPodTypeData{
-                cached_align_bytes: ty.align_bytes(),
+                cached_align_of: ty.align_of(),
                 ty,
                 default
             });
@@ -34,7 +34,7 @@ impl ScriptHeap{
             let pod = &mut self.pods[ptr.index as usize];
             pod.ty = ty;
             pod.tag.set_alloced();
-            pod.data.resize(pod_ty.ty.size_bytes()>>2, 0);
+            pod.data.resize(pod_ty.ty.size_of().next_multiple_of(4)>>2, 0);
             ptr
         }
         else{
@@ -43,7 +43,7 @@ impl ScriptHeap{
                 ty,
                 ..Default::default()
             });
-            self.pods[ptr.index as usize].data.resize(pod_ty.ty.size_bytes()>>2, 0);
+            self.pods[ptr.index as usize].data.resize(pod_ty.ty.size_of().next_multiple_of(4)>>2, 0);
             ptr
         }
     }
@@ -64,16 +64,16 @@ impl ScriptHeap{
                 default:NIL
             });
         }
-        let mut size_bytes = components * pod_type.ty.align_bytes();
+        let mut size_of = components * pod_type.ty.align_of();
         
         // do the custom vec3 haxery blegh.
-        let mut align_bytes = size_bytes;
-        if size_bytes == 12{align_bytes = 16}
-        else if size_bytes == 6{align_bytes = 8}
+        let mut align_of = size_of;
+        if size_of == 12{align_of = 16}
+        else if size_of == 6{align_of = 8}
         
         let vec_ty = self.new_pod_type(ScriptPodTy::Struct{
-            align_bytes,
-            size_bytes,
+            align_of,
+            size_of,
             fields,
         }, NIL);
         self.set_object_pod_type(pod_obj, vec_ty);
@@ -100,10 +100,10 @@ impl ScriptHeap{
                 default:NIL
             });
         }
-        let mut size_bytes = (x*y) * pod_type.ty.align_bytes();
+        let mut size_bytes = (x*y) * pod_type.ty.align_of();
         
         // align of / size of table copied from wgsl spec
-        let (align_bytes, size_bytes) = match (x,y){
+        let (align_of, size_of) = match (x,y){
             (2,2)=>(8,16),
             (3,2)=>(8,24),
             (4,2)=>(8,32),
@@ -117,8 +117,8 @@ impl ScriptHeap{
         };
                 
         let vec_ty = self.new_pod_type(ScriptPodTy::Struct{
-            align_bytes,
-            size_bytes,
+            align_of,
+            size_of,
             fields,
         }, NIL);
         self.set_object_pod_type(pod_obj, vec_ty);
@@ -153,25 +153,25 @@ impl ScriptHeap{
         // alright lets write 'value' into our current offset slot
         // our current offset slot is
         match &pod_type.ty{
-            ScriptPodTy::Struct{align_bytes,size_bytes,fields}=>{
+            ScriptPodTy::Struct{align_of,size_of,fields}=>{
                 // struct. ok so we are at field 
                 if let Some(field) = fields.get(offset.field_index){
                     
                     // align the field offset
-                    let align_bytes = field.ty.data.ty.align_bytes();
-                    let rem = offset.offset_byte % align_bytes;
+                    let align_bytes = field.ty.data.ty.align_of();
+                    let rem = offset.offset_of % align_of;
                     if rem != 0{ // align offset
-                        offset.offset_byte += (align_bytes - rem)
+                        offset.offset_of += (align_bytes - rem)
                     }
                     
-                    match field.ty.data.ty{
+                    match &field.ty.data.ty{
                         ScriptPodTy::NIL | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct =>{
                             trap.err_unexpected();
                             return 
                         }
                         ScriptPodTy::Bool=>{
                             if let Some(value) = value.as_bool(){
-                                pod.data[offset.offset_byte>>4] = if value{1} else {0}
+                                pod.data[offset.offset_of>>2] = if value{1} else {0}
                             }
                             else { // error?
                                 trap.err_pod_type_not_matching();
@@ -179,7 +179,7 @@ impl ScriptHeap{
                         }
                         ScriptPodTy::U32 | ScriptPodTy::AtomicU32=>{
                             if let Some(value) = value.as_number(){
-                                pod.data[offset.offset_byte>>4] = (value as u32);
+                                pod.data[offset.offset_of>>2] = (value as u32);
                             }
                             else { // error?
                                 trap.err_pod_type_not_matching();
@@ -187,7 +187,7 @@ impl ScriptHeap{
                         }
                         ScriptPodTy::I32 |ScriptPodTy::AtomicI32=>{
                             if let Some(value) = value.as_number(){
-                                pod.data[offset.offset_byte>>4] = (value as i32) as u32;
+                                pod.data[offset.offset_of>>2] = (value as i32) as u32;
                             }
                             else { // error?
                                 trap.err_pod_type_not_matching();
@@ -195,7 +195,7 @@ impl ScriptHeap{
                         }
                         ScriptPodTy::F32=>{
                             if let Some(value) = value.as_number(){
-                                pod.data[offset.offset_byte>>4] = (value as f32).to_bits();
+                                pod.data[offset.offset_of>>2] = (value as f32).to_bits();
                             }
                             else { // error?
                                 trap.err_pod_type_not_matching();
@@ -204,19 +204,22 @@ impl ScriptHeap{
                         ScriptPodTy::F16=>{
                             todo!();
                             if let Some(value) = value.as_number(){
-                                if offset.offset_byte&3 >= 2{
-                                    pod.data[offset.offset_byte>>4] |= (value as f32).to_bits()<<16;
+                                if offset.offset_of&3 >= 2{
+                                    pod.data[offset.offset_of>>2] |= (value as f32).to_bits()<<16;
                                 }
                                 else{
-                                    pod.data[offset.offset_byte>>4] = (value as f32).to_bits();
+                                    pod.data[offset.offset_of>>2] = (value as f32).to_bits();
                                 }
                             }
                             else { // error?
                                 trap.err_pod_type_not_matching();
                             }
                         }
-                        ScriptPodTy::Struct{..}=>{
-                            todo!()
+                        ScriptPodTy::Struct{fields,..}=>{
+                            // we should check the type of what we are assigning
+                            println!("ASSIGN TO STRUCT");
+                                                        
+                            // alright we have to assign to a struct.
                         }
                         ScriptPodTy::Enum{..}=>{
                             todo!()
@@ -229,14 +232,14 @@ impl ScriptHeap{
                         }
                     }
                     // alright lets do the align and all that
-                    offset.offset_byte += field.ty.data.ty.size_bytes();
+                    offset.offset_of += field.ty.data.ty.size_of();
                 }
                 else{
                     trap.err_pod_too_much_data();
                     return
                 }
             },
-            ScriptPodTy::FixedArray{align_bytes,size_bytes,len,ty}=>{
+            ScriptPodTy::FixedArray{align_of,size_of,len,ty}=>{
                 
             },
             _=>{
@@ -246,33 +249,109 @@ impl ScriptHeap{
         }
     }
     
-    pub fn pod_debug_print(&self, pod_type:&ScriptPodTypeData, range:&[u32]){
+    pub fn pod_debug_print(&self, pod_type:&ScriptPodTypeData, offset_of: usize, data:&[u32]){
         // alright we have a range of data, and a podtype we should be able to print it
-        match pod_type.ty{
+        match &pod_type.ty{
             ScriptPodTy::NIL=>{
                 print!("ScriptPodTy::NIL");
             }
             ScriptPodTy::UndefinedArray=>{
+                print!("ScriptPodTy::UndefinedArray");
             }
             ScriptPodTy::UndefinedStruct =>{
+                print!("ScriptPodTy::UndefinedStruct");
             }
             ScriptPodTy::Bool=>{
+                print!("bool:{}", if data[offset_of>>2]!=0{true}else{false})
             }
             ScriptPodTy::U32 | ScriptPodTy::AtomicU32=>{
+                print!("u32:{}", data[offset_of>>2])
             }
             ScriptPodTy::I32 |ScriptPodTy::AtomicI32=>{
+                print!("i32:{}", data[offset_of>>2] as i32)
             }
             ScriptPodTy::F32=>{
+                print!("f32:{}", f32::from_bits(data[offset_of>>2]))
             }
             ScriptPodTy::F16=>{
+                if offset_of&3>=2{
+                    print!("f16:{}", data[offset_of>>2]>>16)
+                }
+                else{
+                    print!("f16:{}", data[offset_of>>2])
+                }
             }
-            ScriptPodTy::Struct{..}=>{
+            ScriptPodTy::Struct{fields, ..}=>{
+                print!("struct{{");
+                // keep a counter
+                let mut offset_of = offset_of;
+                let mut first = true;
+                for field in fields{
+                    if !first{
+                        print!(", ")
+                    }
+                    first = false;
+                    // align the field offset
+                    let align_of = field.ty.data.ty.align_of();
+                    let size_of = field.ty.data.ty.size_of();
+                    let rem = offset_of % align_of;
+                    if rem != 0{ // align offset
+                        offset_of += (align_of - rem)
+                    }
+                    print!("{}:",field.name);
+                    self.pod_debug_print(&field.ty.data, offset_of, data);
+                    offset_of += size_of;
+                }
+                print!("}}");
             }
             ScriptPodTy::Enum{..}=>{
             }
-            ScriptPodTy::FixedArray{..}=>{
+            ScriptPodTy::FixedArray{len, ty, ..}=>{
+                print!("array(");
+                
+                let mut offset_of = offset_of;
+                let mut first = true;
+                for i in 0..*len{
+                    if !first{
+                        print!(", ")
+                    }
+                    first = false;
+                    // align the field offset
+                    let align_of = ty.data.ty.align_of();
+                    let size_of = ty.data.ty.size_of();
+                    let rem = offset_of % align_of;
+                    if rem != 0{ // align offset
+                        offset_of += (align_of - rem)
+                    }
+                    print!("{}:",i);
+                    self.pod_debug_print(&ty.data, offset_of, data);
+                    offset_of += size_of;
+                }
+                print!(")");
             }
-            ScriptPodTy::VariableArray{..}=>{
+            ScriptPodTy::VariableArray{ty,..}=>{
+                print!("var_array(");
+                                
+                let mut offset_of = offset_of;
+                let mut first = true;
+                let start = offset_of;
+                for i in start..data.len()<<2{
+                    if !first{
+                        print!(", ")
+                    }
+                    first = false;
+                    // align the field offset
+                    let align_of = ty.data.ty.align_of();
+                    let size_of = ty.data.ty.size_of();
+                    let rem = offset_of % align_of;
+                    if rem != 0{ // align offset
+                        offset_of += (align_of - rem)
+                    }
+                    print!("{}:",(i - start)/ty.data.ty.align_of());
+                    self.pod_debug_print(&ty.data, i, data);
+                    offset_of += size_of;
+                }
+                print!(")");
             }
         }
     }
@@ -280,8 +359,8 @@ impl ScriptHeap{
     pub fn pod_check_arg_total(&mut self,  pod:ScriptPod, offset:ScriptPodOffset, trap:&ScriptTrap){
         let pod = &mut self.pods[pod.index as usize];
         let pod_type = &self.pod_types[pod.ty.index as usize];
-        let size_bytes = pod_type.ty.size_bytes();
-        if size_bytes != offset.offset_byte{
+        let size_of = pod_type.ty.size_of();
+        if size_of != offset.offset_of{
             trap.err_pod_not_enough_data();
         }
     }
@@ -378,7 +457,7 @@ impl ScriptHeap{
                     if kvs.len() == 1{
                         if let Some((_,ty)) = self.pod_type_inline(kvs[0].value, pod_builtins){
                             let pt = self.new_pod_type(ScriptPodTy::VariableArray{
-                                align_bytes: ty.data.ty.align_bytes(),
+                                align_of: ty.data.ty.align_of(),
                                 ty: Box::new(ty),
                             }, NIL);
                             self.set_object_pod_type(ptr, pt);
@@ -391,15 +470,15 @@ impl ScriptHeap{
                         if let Some((_,ty)) = self.pod_type_inline(kvs[1].value, pod_builtins){
                             if let Some(len) = kvs[0].value.as_number(){
                                 let len = len as usize;
-                                let align_bytes = ty.data.ty.align_bytes();
-                                let size_bytes = align_bytes * len;
-                                let rem = size_bytes % align_bytes;
-                                let size_bytes = if rem != 0{size_bytes + (align_bytes - rem)}else{size_bytes};
+                                let align_of = ty.data.ty.align_of();
+                                let size_of = align_of * len;
+                                let rem = size_of % align_of;
+                                let size_bytes = if rem != 0{size_of + (align_of - rem)}else{size_of};
                                 
                                 let pt = self.new_pod_type(ScriptPodTy::FixedArray{
                                     ty: Box::new(ty),
-                                    align_bytes,
-                                    size_bytes,
+                                    align_of,
+                                    size_of,
                                     len
                                 }, NIL);
                                 self.set_object_pod_type(ptr, pt);
@@ -415,11 +494,11 @@ impl ScriptHeap{
                 id!(pod_struct)=>{
                     // alright lets build a struct
                     let mut fields = Vec::new();
-                    let mut align_bytes = 0;
+                    let mut align_of = 0;
                     for kv in kvs.iter().rev(){
                         if let Some((default,ty)) = self.pod_type_inline(kv.value, pod_builtins){
                             if let Some(name) = kv.key.as_id(){
-                                align_bytes = align_bytes.max(ty.data.ty.align_bytes());
+                                align_of = align_of.max(ty.data.ty.align_of());
                                 fields.push(ScriptPodField{
                                     name,
                                     ty,
@@ -431,26 +510,26 @@ impl ScriptHeap{
                         trap.err_pod_field_not_pod();
                     }
                     
-                    let mut offset = 0;
+                    let mut offset_of = 0;
                     for field in &fields{
-                        let align_bytes = field.ty.data.ty.align_bytes();
-                        let size_bytes =  field.ty.data.ty.size_bytes();
-                        let rem = offset % align_bytes;
+                        let align_bytes = field.ty.data.ty.align_of();
+                        let size_bytes =  field.ty.data.ty.size_of();
+                        let rem = offset_of % align_bytes;
                         if rem != 0{ // align offset
-                            offset += (align_bytes - rem)
+                            offset_of += (align_bytes - rem)
                         }
                         
-                        offset += size_bytes;
+                        offset_of += size_bytes;
                     }
                     // align final offset
-                    let rem = offset % align_bytes;
+                    let rem = offset_of % align_of;
                     if rem != 0{
-                        offset += (align_bytes - rem)
+                        offset_of += (align_of - rem)
                     }
                     
                     let pt = self.new_pod_type(ScriptPodTy::Struct{
-                        align_bytes,
-                        size_bytes: offset,
+                        align_of,
+                        size_of: offset_of,
                         fields,
                     }, NIL);
                     self.set_object_pod_type(ptr, pt);
