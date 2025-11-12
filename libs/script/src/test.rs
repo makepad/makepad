@@ -50,11 +50,11 @@ pub fn test(){
     let code = script!{
         use mod.pod
         let x = pod.array{pod.f32 4}
-        let test = pod.struct{ // extendable pods 
+        let test1 = pod.struct{ // extendable pods 
             x: pod.f32
             y: pod.f32
         }
-        let v = test(x:1,y:2)
+        let v = test(1,2)
         ~test
     };
         
