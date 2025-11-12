@@ -34,7 +34,7 @@ pub enum ScriptPodEnumVariant{
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScriptPodTypeData{
     pub default: ScriptValue,
-    pub cached_align_of: usize,
+    //pub cached_align_of2: usize,
     pub ty: ScriptPodTy
 }
 
@@ -43,6 +43,165 @@ pub struct ScriptPodTypeInline{
     pub self_ref: ScriptPodType,
     pub data: ScriptPodTypeData
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptPodVec{
+    Vec2f,
+    Vec3f,
+    Vec4f,
+    Vec2h,
+    Vec3h,
+    Vec4h,
+    Vec2u,
+    Vec3u,
+    Vec4u,
+    Vec2i,
+    Vec3i,
+    Vec4i,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptPodMat{
+    Mat2x2f,
+    Mat3x2f,
+    Mat4x2f,
+    Mat2x3f,
+    Mat3x3f,
+    Mat4x3f,
+    Mat2x4f,
+    Mat3x4f,
+    Mat4x4f,
+}
+
+impl ScriptPodVec{
+    pub fn elem_size(&self)->usize{
+        match self{
+            Self::Vec2h|Self::Vec3h|Self::Vec4h=>2,
+            _=>4,
+        }
+                
+    }
+    pub fn name(&self)->LiveId{
+        match self{
+            Self::Vec2f=>id!(vec2f),
+            Self::Vec2h=>id!(vec2h),
+            Self::Vec2u=>id!(vec2u),
+            Self::Vec2i=>id!(vec2i),
+            Self::Vec3f=>id!(vec3f),
+            Self::Vec3h=>id!(vec3h),
+            Self::Vec3u=>id!(vec3u),
+            Self::Vec3i=>id!(vec3i),
+            Self::Vec4f=>id!(vec4f),
+            Self::Vec4h=>id!(vec4h),
+            Self::Vec4u=>id!(vec4u),
+            Self::Vec4i=>id!(vec4i),
+        }
+    }
+    
+    pub fn dims(&self)->usize{
+        match self{
+            Self::Vec2f|Self::Vec2h|Self::Vec2u|Self::Vec2i=>2,
+            Self::Vec3f|Self::Vec3h|Self::Vec3u|Self::Vec3i=>3,
+            Self::Vec4f|Self::Vec4h|Self::Vec4u|Self::Vec4i=>4,
+        }
+    }
+    pub fn align_of(&self)->usize{
+        match self{
+            Self::Vec2f=>8,
+            Self::Vec2h=>4,
+            Self::Vec2u=>8,
+            Self::Vec2i=>8,
+            Self::Vec3f=>16,
+            Self::Vec3h=>8,
+            Self::Vec3u=>16,
+            Self::Vec3i=>16,
+            Self::Vec4f=>8,
+            Self::Vec4h=>16,
+            Self::Vec4u=>16,
+            Self::Vec4i=>16,
+        }
+    }
+    pub fn size_of(&self)->usize{
+        match self{
+            Self::Vec2f=>8,
+            Self::Vec2h=>4,
+            Self::Vec2u=>8,
+            Self::Vec2i=>8,
+            Self::Vec3f=>12,
+            Self::Vec3h=>6,
+            Self::Vec3u=>12,
+            Self::Vec3i=>12,
+            Self::Vec4f=>16,
+            Self::Vec4h=>8,
+            Self::Vec4u=>16,
+            Self::Vec4i=>16,
+        }
+    }
+}
+impl ScriptPodMat{
+    pub fn elem_size(&self)->usize{
+        match self{
+            _=>4,
+        }
+    }
+    pub fn name(&self)->LiveId{
+        match self{
+            Self::Mat2x2f=>id!(mat2x2f),
+            Self::Mat3x2f=>id!(mat3x2f),
+            Self::Mat4x2f=>id!(mat4x2f),
+            Self::Mat2x3f=>id!(mat2x3f),
+            Self::Mat3x3f=>id!(mat3x3f),
+            Self::Mat4x3f=>id!(mat4x3f),
+            Self::Mat2x4f=>id!(mat2x4f),
+            Self::Mat3x4f=>id!(mat3x4f),
+            Self::Mat4x4f=>id!(mat4x4f),
+        }
+    }
+    
+    pub fn dim(&self)->usize{let (x,y) = self.dims(); x*y }
+            
+    pub fn dims(&self)->(usize,usize){
+        match self{
+            Self::Mat2x2f=>(2,2),
+            Self::Mat3x2f=>(3,2),
+            Self::Mat4x2f=>(4,2),
+            Self::Mat2x3f=>(2,3),
+            Self::Mat3x3f=>(3,3),
+            Self::Mat4x3f=>(4,3),
+            Self::Mat2x4f=>(2,4),
+            Self::Mat3x4f=>(3,4),
+            Self::Mat4x4f=>(4,4),
+        }
+    }
+    
+    
+    pub fn align_of(&self)->usize{
+        match self{
+            Self::Mat2x2f=>8,
+            Self::Mat3x2f=>8,
+            Self::Mat4x2f=>8,
+            Self::Mat2x3f=>16,
+            Self::Mat3x3f=>16,
+            Self::Mat4x3f=>16,
+            Self::Mat2x4f=>16,
+            Self::Mat3x4f=>16,
+            Self::Mat4x4f=>16,
+        }
+    }
+    pub fn size_of(&self)->usize{
+        match self{
+            Self::Mat2x2f=>16,
+            Self::Mat3x2f=>24,
+            Self::Mat4x2f=>32,
+            Self::Mat2x3f=>32,
+            Self::Mat3x3f=>48,
+            Self::Mat4x3f=>64,
+            Self::Mat2x4f=>32,
+            Self::Mat3x4f=>48,
+            Self::Mat4x4f=>64,
+        }
+    }
+}
+    
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub enum ScriptPodTy{
@@ -58,6 +217,8 @@ pub enum ScriptPodTy{
     I32,
     F32,
     F16,
+    Vec(ScriptPodVec),
+    Mat(ScriptPodMat),
     Struct{
         align_of: usize,
         size_of: usize,
@@ -97,6 +258,8 @@ impl ScriptPodTy{
             Self::I32 => 4,
             Self::F32 => 4,
             Self::F16 => 2,
+            Self::Vec(bt)=>bt.align_of(),
+            Self::Mat(bt)=>bt.align_of(),
             Self::Struct{align_of,..}=>*align_of,
             Self::Enum{align_of,..}=>*align_of,
             Self::FixedArray{align_of,..}=>*align_of,
@@ -114,6 +277,8 @@ impl ScriptPodTy{
             Self::I32 => 4,
             Self::F32 => 4,
             Self::F16 => 2,
+            Self::Vec(bt)=>bt.size_of(),
+            Self::Mat(bt)=>bt.size_of(),
             Self::Struct{size_of,..}=>*size_of,
             Self::Enum{size_of,..}=>*size_of,
             Self::FixedArray{size_of, ..}=>*size_of,

@@ -781,6 +781,7 @@ impl ScriptThread{
                 
             }
             Opcode::METHOD_CALL_ARGS=>{
+                
                 let method =  self.pop_stack_value();
                 let this = self.pop_stack_resolved(heap);
                 let fnobj = if let Some(obj) = this.as_object(){
@@ -789,6 +790,7 @@ impl ScriptThread{
                 else{ // we're calling a method on some other thing
                     NIL
                 };
+                                
                 let args = if fnobj.is_err() || fnobj == NIL{
                     let method = method.as_id().unwrap_or(id!());
                     let type_index = this.value_type().to_redux();
@@ -803,6 +805,12 @@ impl ScriptThread{
                     }
                 }
                 else{
+                    if let Some(ty) = heap.pod_type(fnobj){
+                        let pod = heap.new_pod(ty);
+                        self.mes.push(ScriptMe::Pod{pod, offset:ScriptPodOffset::default()});
+                        self.trap.goto_next();
+                        return
+                    }
                     heap.new_with_proto(fnobj)
                 };
                 //heap.set_object_map(scope);
