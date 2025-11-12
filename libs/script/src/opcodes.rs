@@ -718,6 +718,7 @@ impl ScriptThread{
                         // alright finalize the pod
                         heap.pod_check_arg_total(pod, offset, &self.trap);
                         self.push_stack_unchecked(pod.into());
+                        self.trap.goto_next();
                         if opargs.is_pop_to_me(){
                             self.pop_to_me(heap);
                         }

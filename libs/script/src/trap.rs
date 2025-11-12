@@ -83,6 +83,7 @@ impl ScriptTrap{
     err_fwd!(err_pod_type_not_matching);
     err_fwd!(err_pod_field_not_pod);
     err_fwd!(err_pod_array_def_incorrect);
-    
+    err_fwd!(err_pod_too_much_data);
+    err_fwd!(err_pod_not_enough_data);
 }
 

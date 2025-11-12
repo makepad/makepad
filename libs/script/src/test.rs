@@ -50,12 +50,12 @@ pub fn test(){
     let code = script!{
         use mod.pod
         let x = pod.array{pod.f32 4}
-        let test1 = pod.struct{ // extendable pods 
+        let test = pod.struct{ // extendable pods 
             x: pod.f32
             y: pod.f32
         }
         let v = test(1,2)
-        ~test
+        ~v
     };
         
     // lets define a handle type with some methods on it
