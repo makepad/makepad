@@ -42,12 +42,14 @@ pub struct ScriptBody{
 
 pub struct ScriptBuiltins{
     pub range: ScriptObject,
+    pub pod: ScriptPodBuiltins,
 }
 
 impl ScriptBuiltins{
-    pub fn new(heap:&mut ScriptHeap)->Self{
+    pub fn new(heap:&mut ScriptHeap, pod: ScriptPodBuiltins)->Self{
         Self{
-            range: heap.value_path(heap.modules, ids!(std.Range),&mut Default::default()).as_object().unwrap()
+            range: heap.value_path(heap.modules, ids!(std.Range),&mut Default::default()).as_object().unwrap(),
+            pod,
         }
     }
 }
@@ -293,9 +295,9 @@ impl ScriptVmBase{
         let mut native = ScriptNative::new(&mut heap);
         define_math_module(&mut heap, &mut native);
         define_std_module(&mut heap, &mut native);
-        define_pod_module(&mut heap, &mut native);
+        let pod_builtins = define_pod_module(&mut heap, &mut native);
             
-        let builtins = ScriptBuiltins::new(&mut heap);
+        let builtins = ScriptBuiltins::new(&mut heap, pod_builtins);
         
         Self{
             void: 0,

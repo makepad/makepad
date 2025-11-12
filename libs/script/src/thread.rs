@@ -3,7 +3,7 @@ use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
 use crate::vm::*;
-use crate::object::*;
+use crate::function::*;
 use crate::trap::*;
 use crate::json::*;
 use std::any::Any;
@@ -52,6 +52,7 @@ pub struct CallFrame{
 pub enum ScriptMe{
     Object(ScriptObject),
     Call{this:Option<ScriptValue>, args:ScriptObject},
+    Pod{pod:ScriptPod, offset:usize},
     Array(ScriptArray),
 }
 
@@ -60,6 +61,7 @@ impl Into<ScriptValue> for ScriptMe{
         match self{
             Self::Object(v)=>v.into(),
             Self::Call{args,..}=>args.into(),
+            Self::Pod{pod,..}=>pod.into(),
             Self::Array(v)=>v.into(),
         }
     }
@@ -147,7 +149,7 @@ impl ScriptThread{
                 else{(value, self.scope_value(heap, id))}
             }else{(NIL,value)};
             
-            match self.mes.last().unwrap(){
+            match self.mes.last_mut().unwrap(){
                 ScriptMe::Call{args,..}=>{
                     heap.unnamed_fn_arg(*args, value, &self.trap);
                 }
@@ -155,6 +157,9 @@ impl ScriptThread{
                     if !value.is_nil() && !value.is_err(){
                         heap.vec_push(*obj, key, value, &self.trap);
                     }
+                }
+                ScriptMe::Pod{pod, offset}=>{
+                    heap.pod_pop_to_me(*pod, offset, key, value, &self.trap);
                 }
                 ScriptMe::Array(arr)=>{
                     heap.array_push(*arr, value, &self.trap)

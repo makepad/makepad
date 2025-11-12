@@ -2,6 +2,7 @@ use crate::value::*;
 use crate::heap::*;
 use crate::array::*;
 use crate::object::*;
+use crate::function::*;
 
 use std::collections::hash_map::Entry;
 use std::sync::Arc;

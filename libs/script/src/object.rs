@@ -5,6 +5,7 @@ use crate::traits::*;
 use crate::heap::*;
 use crate::native::*;
 use crate::makepad_live_id::*;
+use crate::function::*;
 
 use crate::*;
 use ::std::collections::hash_map::Entry;
@@ -15,9 +16,6 @@ use ::std::cell::RefCell;
 
 #[derive(Default)]
 pub struct ScriptObjectTag(u64); 
-
-#[derive(Copy,Clone,Eq,PartialEq, Ord, PartialOrd)]
-pub struct ScriptObjectStorageType(u8);
 
 pub type ScriptObjectMap = ValueMap<ScriptValue, ScriptMapValue>;
 
@@ -51,22 +49,10 @@ impl From<ScriptObjectRef> for ScriptValue{
     }
 }
 
-#[derive(Clone)]
-pub struct ScriptFnRef(pub(crate) ScriptObjectRef);
-
-impl From<ScriptFnRef> for ScriptValue{
-    fn from(v:ScriptFnRef) -> Self{
-        ScriptValue::from_object(v.as_object())
-    }
-}
-
 impl ScriptObjectRef{
     pub fn as_object(&self)->ScriptObject{self.obj}
 }
 
-impl ScriptFnRef{
-    pub fn as_object(&self)->ScriptObject{self.0.as_object()}
-}
 
 pub trait ScriptRefOptionExt{
     fn as_object(&self)->Option<ScriptObject>;
@@ -74,9 +60,7 @@ pub trait ScriptRefOptionExt{
 impl ScriptRefOptionExt for Option<ScriptObjectRef>{
     fn as_object(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_object())}else{None}}
 }
-impl ScriptRefOptionExt for Option<ScriptFnRef>{
-    fn as_object(&self)->Option<ScriptObject>{if let Some(x)=self{Some(x.as_object())}else{None}}
-}
+
 
 impl Drop for ScriptObjectRef{
     fn drop(&mut self){
@@ -100,18 +84,7 @@ impl Drop for ScriptObjectRef{
         }
     }
 }
-
-
-#[derive(Debug,Clone,Copy)]
-pub struct NativeId{
-    pub index: u32
-}
-
-#[derive(Debug,Clone,Copy)]
-pub enum ScriptFnPtr{
-    Script(ScriptIp),
-    Native(NativeId)
-}
+ 
 
 impl ScriptObjectTag{
     // marked in the mark-sweep gc
@@ -147,6 +120,11 @@ impl ScriptObjectTag{
     pub const STRING_KEYS: u64 = 0x4000<<40;
     pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
     
+    const PROTO_FWD:u64 =
+        Self::ALLOCED|Self::DEEP|Self::STORAGE_MASK|Self::VALIDATED|
+        Self::MAP_ADD|Self::VEC_FROZEN|Self::TRACKED| 
+        Self::REF_KIND_MASK|Self::REF_DATA_MASK|Self::TYPE_CHECKED;
+    
     pub const NEED_CHECK_MASK: u64 = Self::FREEZE_MASK|Self::TYPE_CHECKED;
     
     pub const FLAG_MASK: u64 = 0x3FFFF<<40;
@@ -164,7 +142,18 @@ impl ScriptObjectTag{
     pub const STORAGE_AUTO: u64 = 0<<Self::STORAGE_SHIFT;
     pub const STORAGE_VEC2: u64 = 1<<Self::STORAGE_SHIFT;
     pub const STORAGE_MAP: u64 = 2<<Self::STORAGE_SHIFT;
+    
         
+    pub fn proto_fwd(&self)->u64{
+        self.0 & Self::PROTO_FWD
+    }
+            
+    pub fn set_proto_fwd(&mut self, fwd:u64){
+        self.0 = fwd
+    }
+    
+    // STORAGE
+    
     pub fn is_auto(&self)->bool{
         self.0 & Self::STORAGE_MASK == Self::STORAGE_AUTO
     }
@@ -194,8 +183,7 @@ impl ScriptObjectTag{
     }
     
     
-    const PROTO_FWD:u64 = Self::ALLOCED|Self::DEEP|Self::STORAGE_MASK|Self::VALIDATED|
-        Self::MAP_ADD|Self::VEC_FROZEN|Self::TRACKED|Self::REF_KIND_MASK|Self::REF_DATA_MASK|Self::TYPE_CHECKED;
+    // FLAGS
     
     pub fn set_first_applied_and_clean(&mut self){
         self.0 &= !Self::DIRTY;
@@ -219,7 +207,7 @@ impl ScriptObjectTag{
     }
         
     pub fn check_and_clear_dirty(&mut self)->bool{
-        if self.0 & Self::DIRTY !=  0{
+        if self.0 & Self::DIRTY != 0{
             self.0 &= !Self::DIRTY;
             true
         }
@@ -239,16 +227,81 @@ impl ScriptObjectTag{
     pub fn set_static(&mut self){
         self.0  |= Self::STATIC
     }
+        
+    pub fn is_static(&mut self)->bool{
+        self.0  & Self::STATIC != 0
+    }
+        
+    pub fn is_notproto(&self)->bool{
+        self.0 & Self::NOTPROTO != 0
+    }
+    
+    pub fn set_notproto(&mut self){
+        self.0 |= Self::NOTPROTO
+    }
+    
+    pub fn is_frozen(&self)->bool{
+        self.0 & Self::FROZEN != 0
+    }
+              
+    pub fn is_validated(&self)->bool{
+        self.0 & Self::VALIDATED != 0
+    }
+        
+    pub fn is_map_add(&self)->bool{
+        self.0 & Self::MAP_ADD != 0
+    }
+        
+        
+    pub fn set_reffed(&mut self){
+        self.0 |= Self::REFFED
+    }
+                
+    pub fn is_reffed(&self)->bool{
+        self.0 & Self::REFFED != 0
+    }
+                   
+    pub fn set_deep(&mut self){
+        self.0 |= Self::DEEP
+    }
+                
+    pub fn clear_deep(&mut self){
+        self.0 &= !Self::DEEP
+    }
+                
+    pub fn is_deep(&self)->bool{
+        self.0 & Self::DEEP != 0
+    }
+    
+    pub fn is_alloced(&self)->bool{
+        return self.0 & Self::ALLOCED != 0
+    }
+                
+    pub fn set_alloced(&mut self){
+        self.0 |= Self::ALLOCED
+    }
+                
+    pub fn clear(&mut self){
+        self.0 = 0;
+    }
+                
+    pub fn is_marked(&self)->bool{
+        self.0 & Self::MARK != 0
+    }
+                
+    pub fn set_mark(&mut self){
+        self.0 |= Self::MARK
+    }
+                
+    pub fn clear_mark(&mut self){
+        self.0 &= !Self::MARK
+    }
+    
+    // FREEZE
     
     pub fn freeze(&mut self){
         self.0 &= !(Self::FREEZE_MASK);
         self.0  |= Self::FROZEN
-    }
-    
-    pub fn set_type_index(&mut self, ty:ScriptTypeIndex){
-        self.0 &= !(Self::REF_DATA_MASK);
-        self.0 &= !(Self::REF_KIND_MASK);
-        self.0 |= ty.0 as u64|Self::REF_KIND_TYPE_INDEX|Self::TYPE_CHECKED;
     }
     
     pub fn freeze_type(&mut self){
@@ -275,29 +328,34 @@ impl ScriptObjectTag{
         self.0 & (Self::NEED_CHECK_MASK) != 0
     }
         
-    pub fn is_notproto(&self)->bool{
-        self.0 & Self::NOTPROTO != 0
-    }
-    
-    pub fn is_frozen(&self)->bool{
-        self.0 & Self::FROZEN != 0
-    }
-          
-    pub fn is_validated(&self)->bool{
-        self.0 & Self::VALIDATED != 0
-    }
-    
-    pub fn is_map_add(&self)->bool{
-        self.0 & Self::MAP_ADD != 0
-    }
-    
     pub fn is_vec_frozen(&self)->bool{
         self.0 & (Self::VEC_FROZEN|Self::FROZEN) != 0
     }
     
-    pub fn is_static(&mut self)->bool{
-        self.0  & Self::STATIC != 0
+    
+    
+    // REF 
+    
+    
+        
+    pub fn set_type_index(&mut self, ty:ScriptTypeIndex){
+        self.0 &= !(Self::REF_DATA_MASK);
+        self.0 &= !(Self::REF_KIND_MASK);
+        self.0 |= ty.0 as u64|Self::REF_KIND_TYPE_INDEX|Self::TYPE_CHECKED;
     }
+    
+    pub fn as_type_index(&self)->Option<ScriptTypeIndex>{
+        if self.is_type_index(){
+            Some(ScriptTypeIndex(self.0 as u32))
+        }
+        else{
+            None
+        }
+    }
+            
+    pub fn is_type_index(&self)->bool{
+        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_TYPE_INDEX
+    }    
     
     pub fn set_fn(&mut self, ptr:ScriptFnPtr){
         self.0 &= !(Self::REF_DATA_MASK);
@@ -323,6 +381,18 @@ impl ScriptObjectTag{
             None
         }
     }
+        
+    pub fn is_script_fn(&self)->bool{
+        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN
+    }
+            
+    pub fn is_native_fn(&self)->bool{
+        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_NATIVE_FN
+    }
+        
+    pub fn is_fn(&self)->bool{
+        self.is_script_fn() || self.is_native_fn()
+    }
     
     pub fn set_pod_type(&mut self, ty:ScriptPodType){
         self.0 &= !(Self::REF_DATA_MASK);
@@ -331,7 +401,7 @@ impl ScriptObjectTag{
     }
     
     pub fn as_pod_type(&self)->Option<ScriptPodType>{
-        if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_POD_TYPE{
+        if self.is_pod_type(){
             Some(ScriptPodType{index:self.0 as u32})
         }
         else{
@@ -339,87 +409,12 @@ impl ScriptObjectTag{
         }
     }
     
-    pub fn as_type_index(&self)->Option<ScriptTypeIndex>{
-        if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_TYPE_INDEX{
-            Some(ScriptTypeIndex(self.0 as u32))
-        }
-        else{
-            None
-        }
-    }
-        
-    pub fn is_script_fn(&self)->bool{
-        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN
-    }
-        
-    pub fn is_native_fn(&self)->bool{
-        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_NATIVE_FN
+    pub fn is_pod_type(&self)->bool{
+        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_POD_TYPE
     }
     
-    pub fn is_fn(&self)->bool{
-        self.is_script_fn() || self.is_native_fn()
-    }
     
-    pub fn proto_fwd(&self)->u64{
-        self.0 & Self::PROTO_FWD
-    }
-        
-    pub fn set_proto_fwd(&mut self, fwd:u64){
-        self.0 = fwd
-    }
-        
-    pub fn set_storage_type_unchecked(&mut self, ty:ScriptObjectStorageType){
-        self.0 &= !Self::STORAGE_MASK;
-        self.0 |= ((ty.0 as u64) << Self::STORAGE_SHIFT) & Self::STORAGE_MASK;
-    }
-        
-    pub fn get_storage_type(&self)->ScriptObjectStorageType{
-        return ScriptObjectStorageType( ((self.0 & Self::STORAGE_MASK)>>Self::STORAGE_SHIFT) as u8 )
-    }
-        
-    pub fn set_deep(&mut self){
-        self.0 |= Self::DEEP
-    }
     
-    pub fn set_reffed(&mut self){
-        self.0 |= Self::REFFED
-    }
-        
-    pub fn is_reffed(&self)->bool{
-        self.0 & Self::REFFED != 0
-    }
-        
-    pub fn clear_deep(&mut self){
-        self.0 &= !Self::DEEP
-    }
-        
-    pub fn is_deep(&self)->bool{
-        self.0 & Self::DEEP != 0
-    }
-            
-    pub fn is_alloced(&self)->bool{
-        return self.0 & Self::ALLOCED != 0
-    }
-        
-    pub fn set_alloced(&mut self){
-        self.0 |= Self::ALLOCED
-    }
-        
-    pub fn clear(&mut self){
-        self.0 = 0;
-    }
-        
-    pub fn is_marked(&self)->bool{
-        self.0 & Self::MARK != 0
-    }
-        
-    pub fn set_mark(&mut self){
-        self.0 |= Self::MARK
-    }
-        
-    pub fn clear_mark(&mut self){
-        self.0 &= !Self::MARK
-    }
 }
 
 impl fmt::Debug for ScriptObjectTag {

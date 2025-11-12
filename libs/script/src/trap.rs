@@ -79,5 +79,10 @@ impl ScriptTrap{
     err_fwd!(err_file_system);
     err_fwd!(err_child_process);
     err_fwd!(err_too_many_paused_calls);
+    err_fwd!(err_pod_type_not_extendable);
+    err_fwd!(err_pod_type_not_matching);
+    err_fwd!(err_pod_field_not_pod);
+    err_fwd!(err_pod_array_def_incorrect);
+    
 }
 
