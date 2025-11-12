@@ -449,8 +449,8 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_POD_TYPE_NOT_MATCHING=>write!(f,"PodTypeNotMatching"),
             Self::ERR_POD_FIELD_NOT_POD=>write!(f,"PodFieldNotPod"),
             Self::ERR_POD_ARRAY_DEF_INCORRECT=>write!(f,"PodArrayDefIncorrect"),
-            Self::ERR_POD_TOO_MUCH_DATA=>write!(f,"PodTooManyFields"),
-            Self::ERR_POD_NOT_ENOUGH_DATA=>write!(f,"PodTooManyFields"),
+            Self::ERR_POD_TOO_MUCH_DATA=>write!(f,"PodTooMuchData"),
+            Self::ERR_POD_NOT_ENOUGH_DATA=>write!(f,"PodNotEnoughData"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
             _=>write!(f,"ScriptValueType?")
