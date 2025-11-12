@@ -1,7 +1,32 @@
 use crate::value::*;
+use crate::heap::*;
 use std::any::TypeId;
 use std::fmt::Debug;
 use std::fmt;
+
+impl ScriptHeap{
+    pub fn new_handle(&mut self, ty:ScriptHandleType, mut hgc:Box<dyn ScriptHandleGc>)->ScriptHandle{
+        if let Some(mut handle) = self.handles_free.pop(){
+            hgc.set_handle(handle);
+            self.handles[handle.index as usize] = Some(ScriptHandleData{
+                tag: Default::default(),
+                handle:hgc
+            });
+            handle.ty = ty;
+            handle
+        }
+        else{
+            let index = self.handles.len();
+            let handle = ScriptHandle{ty, index: index as _};
+            hgc.set_handle(handle);
+            self.handles.push(Some(ScriptHandleData{
+                tag: Default::default(),
+                handle:hgc
+            }));
+            handle
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct HandleTag(u64);

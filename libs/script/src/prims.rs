@@ -5,6 +5,7 @@ use crate::heap::*;
 use crate::traits::*;
 use crate::object::*;
 use makepad_live_id::*;
+use crate::function::*;
 
 #[macro_export]
 macro_rules!script_primitive {
