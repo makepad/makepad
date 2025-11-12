@@ -326,9 +326,11 @@ impl ScriptValueType{
     pub const ERR_POD_TYPE_NOT_MATCHING: Self = Self(Self::ERR_FIRST.0 + 34);
     pub const ERR_POD_FIELD_NOT_POD: Self = Self(Self::ERR_FIRST.0 + 35);
     pub const ERR_POD_ARRAY_DEF_INCORRECT: Self = Self(Self::ERR_FIRST.0 + 36);
-    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 37);
+    pub const ERR_POD_TOO_MUCH_DATA: Self = Self(Self::ERR_FIRST.0 + 37);
+    pub const ERR_POD_NOT_ENOUGH_DATA: Self = Self(Self::ERR_FIRST.0 + 38);
+    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 39);
     
-    pub const HANDLE_FIRST: Self = Self(0x40);
+    pub const HANDLE_FIRST: Self = Self(0x50);
     pub const HANDLE_LAST: Self = Self(0x7F);
     pub const REDUX_HANDLE_MAX: u8  = Self::HANDLE_LAST.0 - Self::HANDLE_FIRST.0;
     pub const ID: Self = Self(0x80);
@@ -401,6 +403,8 @@ impl fmt::Display for ScriptValueType {
             Self::STRING=>write!(f,"string"),
             Self::OBJECT=>write!(f,"object"),
             Self::ARRAY=>write!(f,"array"),
+            Self::POD_TYPE=>write!(f,"pod_type"),
+            Self::POD=>write!(f,"pod"),
             Self::OPCODE=>write!(f,"opcode"),
             Self::INLINE_STRING_0=>write!(f,"string0"),
             Self::INLINE_STRING_1=>write!(f,"string1"),
@@ -445,6 +449,8 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_POD_TYPE_NOT_MATCHING=>write!(f,"PodTypeNotMatching"),
             Self::ERR_POD_FIELD_NOT_POD=>write!(f,"PodFieldNotPod"),
             Self::ERR_POD_ARRAY_DEF_INCORRECT=>write!(f,"PodArrayDefIncorrect"),
+            Self::ERR_POD_TOO_MUCH_DATA=>write!(f,"PodTooManyFields"),
+            Self::ERR_POD_NOT_ENOUGH_DATA=>write!(f,"PodTooManyFields"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
             _=>write!(f,"ScriptValueType?")
@@ -567,6 +573,8 @@ impl ScriptValue{
     err_fn!(err_pod_type_not_matching, ERR_POD_TYPE_NOT_MATCHING);
     err_fn!(err_pod_field_not_pod, ERR_POD_FIELD_NOT_POD);
     err_fn!(err_pod_array_def_incorrect, ERR_POD_ARRAY_DEF_INCORRECT);
+    err_fn!(err_pod_too_much_data, ERR_POD_TOO_MUCH_DATA);
+    err_fn!(err_pod_not_enough_data, ERR_POD_NOT_ENOUGH_DATA);
     
     pub const fn raw(&self)->u64{self.0}
     
