@@ -69,18 +69,21 @@ pub enum ScriptPodTy{
         variants:Vec<ScriptPodEnum>
     },
     FixedArray{
+        align_bytes: usize,
+        size_bytes: usize,
         len: usize,
         ty: Box<ScriptPodTypeInline>,
     },
     VariableArray{
+        align_bytes: usize,
         ty: Box<ScriptPodTypeInline>,
     }
 }
 
 #[derive(Debug, Default)]
 pub struct ScriptPodOffset{
-    offset_byte: usize,
-    field_index: usize
+    pub offset_byte: usize,
+    pub field_index: usize
 }
 
 impl ScriptPodTy{
@@ -96,8 +99,8 @@ impl ScriptPodTy{
             Self::F16 => 2,
             Self::Struct{align_bytes,..}=>*align_bytes,
             Self::Enum{align_bytes,..}=>*align_bytes,
-            Self::FixedArray{ty,..}=>ty.data.ty.align_bytes(),
-            Self::VariableArray{..}=>0,
+            Self::FixedArray{align_bytes,..}=>*align_bytes,
+            Self::VariableArray{align_bytes,..}=>*align_bytes,
         }
     }
     
@@ -113,15 +116,7 @@ impl ScriptPodTy{
             Self::F16 => 2,
             Self::Struct{size_bytes,..}=>*size_bytes,
             Self::Enum{size_bytes,..}=>*size_bytes,
-            Self::FixedArray{len,ty}=>{
-                let align_bytes = ty.data.ty.align_bytes();
-                let len = align_bytes * len;
-                let rem = len % align_bytes;
-                if rem != 0{
-                    return len + (align_bytes - rem);
-                }
-                len
-            },
+            Self::FixedArray{size_bytes, ..}=>*size_bytes,
             Self::VariableArray{..}=>0,
         }
     }
