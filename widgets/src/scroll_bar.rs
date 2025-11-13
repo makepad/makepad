@@ -426,7 +426,7 @@ impl ScrollBar {
     
     pub fn handle_scroll_event(&mut self, cx: &mut Cx, event: &Event, scroll_area: Area, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
         if let Event::Scroll(e) = event {
-            if scroll_area.rect(cx).contains(e.abs) {
+            if cx.is_scrolling_allowed_within(&scroll_area) && scroll_area.rect(cx).contains(e.abs) {
                 if !match self.axis {
                     ScrollAxis::Horizontal => e.handled_x.get(),
                     ScrollAxis::Vertical => e.handled_y.get()
