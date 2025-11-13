@@ -365,6 +365,9 @@ pub struct CxFingers {
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
     sweep_lock: Option<Area>,
+    /// * If `Some`, scrolling is currently blocked *except* within the contained area.
+    /// * If `None`, scrolling is not blocked anywhere.
+    block_scrolling_except_within: Option<Area>,
 }
 
 impl CxFingers {
@@ -585,6 +588,17 @@ impl CxFingers {
         if self.sweep_lock == Some(area) {
             self.sweep_lock = None;
         }
+    }
+
+    /// Returns the excepted area in which scrolling is currently allowed.
+    /// * If `Some`, scrolling is currently blocked *except* within the contained area.
+    /// * If `None`, scrolling is not blocked anywhere.
+    pub fn blocked_scrolling_exception_area(&self) -> Option<Area> {
+        self.block_scrolling_except_within
+    }
+
+    pub fn block_scrolling_within_area(&mut self, area: Option<Area>) {
+        self.block_scrolling_except_within = area;
     }
     
 }
@@ -917,8 +931,10 @@ impl Event {
             },
             Event::Scroll(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
-                    // log!("Skipping Scroll sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
+                }
+                if !cx.is_scrolling_allowed_within(&area) {
+                    return Hit::Nothing;
                 }
                 let digit_id = live_id!(mouse).into();
                 
@@ -941,7 +957,6 @@ impl Event {
             },
             Event::TouchUpdate(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
-                    // log!("Skipping TouchUpdate, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
                 for t in &e.touches {
@@ -1122,7 +1137,6 @@ impl Event {
             }
             Event::MouseMove(e) => { // ok so we dont get hovers
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
-                    // log!("Skipping MouseMove, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
                 
@@ -1275,7 +1289,6 @@ impl Event {
                 }
                 
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
-                    // log!("Skipping MouseDown, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
                 
@@ -1314,7 +1327,6 @@ impl Event {
             },
             Event::MouseUp(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
-                    // log!("Skipping MouseUp, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
                 
@@ -1355,7 +1367,6 @@ impl Event {
             },
             Event::MouseLeave(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
-                    // log!("Skipping MouseLeave, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing;
                 }
                 let device = DigitDevice::Mouse { button: MouseButton::empty() };
@@ -1379,7 +1390,6 @@ impl Event {
             },
             Event::LongPress(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
-                    log!("Skipping LongPress Hit, sweep_area: {:?}", options.sweep_area);
                     return Hit::Nothing
                 }
 
