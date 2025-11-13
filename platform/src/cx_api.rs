@@ -362,6 +362,29 @@ impl Cx {
         self.fingers.sweep_unlock(value);
     }
 
+    /// Returns whether scrolling is currently allowed within the given `area`.
+    pub fn is_scrolling_allowed_within(&mut self, area: &Area) -> bool {
+        let Some(scrollable_area) = self.fingers.blocked_scrolling_exception_area() else { return true };
+        area.rect(self).is_inside_of(scrollable_area.rect(self))
+    }
+
+    /// Blocks scrolling events/hits in the app *EXCEPT* for within the given `scrollable_area`.
+    ///
+    /// ***NOTE***: this must be re-invoked every time the area changes, which is upon every draw pass.
+    ///
+    /// If you want to block scrolling everywhere, pass in `Area::Empty`.
+    pub fn block_scrolling_except_within(&mut self, scrollable_area: Area) {
+        self.fingers.block_scrolling_within_area(Some(scrollable_area));
+    }
+
+    /// Fully unblocks scrolling, allowing scrolling to occur anywhere across the entire app.
+    ///
+    /// This effectively restores the default behavior, e.g., after a previous call to
+    /// [`Cx::block_scrolling_except_within()`].
+    pub fn unblock_scrolling(&mut self) {
+        self.fingers.block_scrolling_within_area(None);
+    }
+
     pub fn start_timeout(&mut self, delay: f64) -> Timer {
         self.timer_id += 1;
         self.platform_ops.push(CxOsOp::StartTimer {
