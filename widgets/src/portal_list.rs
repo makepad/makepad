@@ -918,7 +918,6 @@ impl Widget for PortalList {
         if !self.scroll_bar.is_area_captured(cx) || is_scroll{ 
             match event.hits_with_capture_overload(cx, self.area, self.capture_overload) {
                 Hit::FingerScroll(e) => {
-                    log!("PORTALLIST GOT FINGERSCROLL EVENT");
                     self.tail_range = false;
                     self.detect_tail_in_draw = true;
                     self.was_scrolling = false;
