@@ -282,17 +282,7 @@ impl LayoutContext {
             .text
             .substr(self.current_row_start..self.current_row_end);
         let width_in_lpxs = self.current_point_in_lpxs.x;
-        
-        let line_spacing_scale = self.options.line_spacing_scale;
-        let line_spacing_above_in_lpxs = ascender_in_lpxs * line_spacing_scale;
-        let line_spacing_below_in_lpxs =
-            (-descender_in_lpxs + line_gap_in_lpxs) * line_spacing_scale;
-        let line_spacing_below_in_lpxs =
-            line_spacing_below_in_lpxs.max(if self.current_row_is_first() {
-                self.options.first_row_min_line_spacing_below_in_lpxs - line_spacing_above_in_lpxs
-            } else {
-                0.0
-            });
+
         let glyphs = mem::take(&mut self.glyphs);
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
@@ -302,8 +292,7 @@ impl LayoutContext {
             ascender_in_lpxs,
             descender_in_lpxs,
             line_gap_in_lpxs,
-            line_spacing_above_in_lpxs,
-            line_spacing_below_in_lpxs,
+            line_spacing_scale: self.options.line_spacing_scale,
             glyphs,
         };
 
@@ -585,6 +574,8 @@ impl PartialEq for Style {
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutOptions {
     pub first_row_indent_in_lpxs: f32,
+    // Note: currently does nothing. Only used by `TextFlow`. Should be removed once `TextFlow` is
+    // replaced with `TextFlow2`.
     pub first_row_min_line_spacing_below_in_lpxs: f32,
     pub max_width_in_lpxs: Option<f32>,
     pub wrap: bool,
@@ -791,14 +782,13 @@ pub struct LaidoutRow {
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
     pub line_gap_in_lpxs: f32,
-    pub line_spacing_above_in_lpxs: f32,
-    pub line_spacing_below_in_lpxs: f32,
+    pub line_spacing_scale: f32,
     pub glyphs: Vec<LaidoutGlyph>,
 }
 
 impl LaidoutRow {
     pub fn line_spacing_in_lpxs(&self, next_row: &LaidoutRow) -> f32 {
-        self.line_spacing_below_in_lpxs + next_row.line_spacing_above_in_lpxs
+        (self.line_gap_in_lpxs - self.descender_in_lpxs + next_row.ascender_in_lpxs) * next_row.line_spacing_scale
     }
 
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
