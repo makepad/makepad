@@ -2,8 +2,10 @@ use proc_macro::{TokenStream};
 
 mod script;
 mod derive_scriptable;
+mod swizzle;
 use script::*;
 use derive_scriptable::*;
+use swizzle::*;
 
 #[proc_macro]
 pub fn script(input: TokenStream) -> TokenStream {
@@ -28,4 +30,9 @@ pub fn derive_script(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(ScriptHook, attributes())]
 pub fn derive_script_hook(input: TokenStream) -> TokenStream {
     derive_script_hook_impl(input)
+}
+
+#[proc_macro]
+pub fn pod_swizzle_vec_match(input: TokenStream) -> TokenStream {
+    pod_swizzle_vec_match_impl(input)
 }

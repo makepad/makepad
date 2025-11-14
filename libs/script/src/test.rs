@@ -48,37 +48,18 @@ pub fn test(){
         }
     }    
         
-    let code = script!{
+    let _code = script!{
         use mod.pod
-       /* let x = pod.array{pod.f32 4}
-        let v2 = pod.struct{ // extendable pods 
-            a: pod.f32
-            b: pod.f32
-            c: pod.f32
-        }
-        let v3 = pod.struct{ // extendable pods 
-            a: pod.f32
-            b: pod.f32
-            c: pod.f32
-        }
-        let test = pod.struct{
-            x: v3,
-            y: pod.f32
-        }
-        let v = test(v3(1,2,3),4)
-        ~v*/
-        let x = pod.vec2h(1,3);
-        ~x
-        let v2 = pod.vec3f(1 2 3)
-        let v = pod.vec4f(v2 4)
-        ~v
+        let x = pod.vec3f(1,2,3);
+        ~x.xy
     };
         
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         use mod.std.assert
         use mod.std.println
+        use mod.pod
         
         // array operations
         let x = 1+2 assert(x == 3)
@@ -253,6 +234,21 @@ pub fn test(){
         fn test(a,b){a+b}
         assert(test(2 3) == 5)
         println("Test done")
+        
+        // POD testing
+        let struct_3 = pod.struct{ // extendable pods 
+            a: pod.f32
+            b: pod.f32
+            c: pod.f32
+        }
+        let x = struct_3(1,2,3);
+        assert(x.c == 3f);
+        
+        let x = pod.vec3f(1,2,3);
+        assert(x.z == 3f);
+        let x = pod.vec4f(pod.vec2f(1,2), pod.vec2f(3,4));
+        assert(x.w == 4f);
+                
     };
         
     let _code = script!{
