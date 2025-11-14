@@ -1132,8 +1132,28 @@ impl ScriptParser{
                     self.state.push(State::BeginExpr{required:true});
                     return 1
                 }
-                if let Some(v) = tok.as_number(){
+                if let Some(v) = tok.as_f64(){
                     self.push_code(ScriptValue::from_f64(v), self.index);
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
+                if let Some(v) = tok.as_f32(){
+                    self.push_code(ScriptValue::from_f32(v), self.index);
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
+                if let Some(v) = tok.as_u32(){
+                    self.push_code(ScriptValue::from_u32(v), self.index);
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
+                if let Some(v) = tok.as_i32(){
+                    self.push_code(ScriptValue::from_i32(v), self.index);
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
+                if let Some(v) = tok.as_f16(){
+                    self.push_code(ScriptValue::from_f16(v), self.index);
                     self.state.push(State::EndExpr);
                     return 1
                 }

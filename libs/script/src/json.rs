@@ -74,7 +74,7 @@ impl JsonParser{
                          self.root = v;
                          self.state.push(State::RootMaybeObject);
                      }
-                     ScriptToken::Number(v)=>{
+                     ScriptToken::F64(v)=>{
                          self.root = v.into();
                          self.state.push(State::RootMaybeObject);
                      }
@@ -110,7 +110,7 @@ impl JsonParser{
                     ScriptToken::String(v)=>{
                         self.state.push(State::ObjectColon(obj, v.into()));
                     }
-                    ScriptToken::Number(v)=>{
+                    ScriptToken::F64(v)=>{
                         self.state.push(State::ObjectColon(obj, v.into()));
                     }
                     ScriptToken::Color(v)=>{
@@ -181,7 +181,7 @@ impl JsonParser{
                      ScriptToken::String(v)=>{
                          heap.set_value_def(obj, key, v);
                      }
-                     ScriptToken::Number(v)=>{
+                     ScriptToken::F64(v)=>{
                          heap.set_value_def(obj, key, v.into());
                      }
                      ScriptToken::Color(v)=>{
@@ -231,7 +231,7 @@ impl JsonParser{
                     ScriptToken::String(v)=>{
                         heap.array_push_unchecked(arr, v);
                     }
-                    ScriptToken::Number(v)=>{
+                    ScriptToken::F64(v)=>{
                         heap.array_push_unchecked(arr, v.into());
                     }
                     ScriptToken::Color(v)=>{
