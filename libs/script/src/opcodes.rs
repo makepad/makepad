@@ -989,7 +989,7 @@ impl ScriptThread{
                     self.push_stack_unchecked(value);
                 }
                 else if let Some(pod) = object.as_pod(){
-                    let value = heap.pod_field(pod, field, &self.trap);
+                    let value = heap.pod_read_field(pod, field, &code.builtins.pod, &self.trap);
                     self.push_stack_unchecked(value);
                 }
                 else {
@@ -1028,7 +1028,7 @@ impl ScriptThread{
                         heap.value(*args, field, &self.trap)
                     }
                     ScriptMe::Pod{pod,..}=>{
-                        heap.pod_field(*pod, field, &self.trap)
+                        heap.pod_read_field(*pod, field,  &code.builtins.pod, &self.trap)
                     }
                     ScriptMe::Object(obj)=>{
                         heap.value(*obj, field, &self.trap)

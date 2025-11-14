@@ -17,18 +17,18 @@ pub fn pod_swizzle_vec_match_impl(_input: TokenStream) -> TokenStream {
     fn do_fields(tb:&mut TokenBuilder, fields:&[&str]){
         // lets generate the vec1 permutations
         for (x, xfield) in fields.iter().enumerate(){
-            tb.add("    id!(").ident(xfield).add(")=>self.pod_swizzle_vec1(vt, &pod.data,").unsuf_usize(x).add(", trap),");
+            tb.add("    id!(").ident(xfield).add(")=>self.pod_swizzle_vec1(*vt, data,").unsuf_usize(x).add(", trap),");
         }
         // lets generate the vec2 permutations
         for (x, xfield) in fields.iter().enumerate(){
             for (y, yfield) in fields.iter().enumerate(){
-                tb.add("    id!(").ident(&format!("{}{}",xfield,yfield)).add(")=>self.pod_swizzle_vec(vt, &pod.data,[").unsuf_usize(x).add(",").unsuf_usize(y).add("], trap),");
+                tb.add("    id!(").ident(&format!("{}{}",xfield,yfield)).add(")=>self.pod_swizzle_vec(*vt, data,[").unsuf_usize(x).add(",").unsuf_usize(y).add("], builtins, trap),");
             }
         }
         for (x, xfield) in fields.iter().enumerate(){
             for (y, yfield) in fields.iter().enumerate(){
                 for (z, zfield) in fields.iter().enumerate(){
-                    tb.add("    id!(").ident(&format!("{}{}{}",xfield,yfield,zfield)).add(")=>self.pod_swizzle_vec(vt, &pod.data,[").unsuf_usize(x).add(",").unsuf_usize(y).add(",").unsuf_usize(z).add("], trap),");
+                    tb.add("    id!(").ident(&format!("{}{}{}",xfield,yfield,zfield)).add(")=>self.pod_swizzle_vec(*vt, data,[").unsuf_usize(x).add(",").unsuf_usize(y).add(",").unsuf_usize(z).add("], builtins, trap),");
                 }
             }
         }
@@ -36,7 +36,7 @@ pub fn pod_swizzle_vec_match_impl(_input: TokenStream) -> TokenStream {
             for (y, yfield) in fields.iter().enumerate(){
                 for (z, zfield) in fields.iter().enumerate(){
                     for (w, wfield) in fields.iter().enumerate(){
-                        tb.add("    id!(").ident(&format!("{}{}{}{}",xfield,yfield,zfield,wfield)).add(")=>self.pod_swizzle_vec(vt, &pod.data,[").unsuf_usize(x).add(",").unsuf_usize(y).add(",").unsuf_usize(z).add(",").unsuf_usize(w).add("], trap),");
+                        tb.add("    id!(").ident(&format!("{}{}{}{}",xfield,yfield,zfield,wfield)).add(")=>self.pod_swizzle_vec(*vt, data,[").unsuf_usize(x).add(",").unsuf_usize(y).add(",").unsuf_usize(z).add(",").unsuf_usize(w).add("], builtins, trap),");
                     };
                 }
             }
