@@ -40,7 +40,7 @@ let code = script!{
     let Display = {mac:"", ip:"", width:0, height:0}.freeze_api()
     let displays = [
         Display{mac:"00-00-5e-00-53-12" ip:"192.0.2.58", width:1920, height:1080},
-        Display{mac:"00-00-5E-00-53-13" ip:"192.0.2.69", width:1920, height:1080},
+        Display{mac:"00-00-5E-00-53-13" ip:"192.0.2.57", width:1920, height:1080},
         Display{mac:"00-00-5E-00-53-11" ip:"192.0.2.70", width:1080, height:1920}
     ] 
                 
