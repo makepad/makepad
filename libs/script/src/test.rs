@@ -48,15 +48,25 @@ pub fn test(){
         }
     }    
         
-    let _code = script!{
+    let code = script!{
         use mod.pod
         let x = pod.vec3f(1,2,3);
-        ~x.xy
+        ~x.zyzx
+        
+        let s1 = pod.struct{a:pod.f16, b:pod.f16}
+        let s2 = pod.struct{x:pod.f16, y:s1}
+        let v = s2(3,s1(1,2))
+        ~v.y
+        // we need to trace this function and transform it to wgsl
+        fn pixel(){
+            return pod.vec4f(1,2,3,4)
+        }
+        
     };
         
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod

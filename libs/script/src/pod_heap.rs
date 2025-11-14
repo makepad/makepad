@@ -7,7 +7,9 @@ use crate::pod::*;
 
 
 impl ScriptHeap{
-        
+    
+    // POD TYPES
+    
     pub fn new_pod_type(&mut self, ty:ScriptPodTy, default:ScriptValue)->ScriptPodType{
         if let Some(ptr) = self.pod_types_free.pop(){
             let pod_type = &mut self.pod_types[ptr.index as usize];
@@ -26,7 +28,232 @@ impl ScriptHeap{
             ptr
         }
     }
+    
+    pub fn pod_type(&mut self, ty:ScriptValue)->Option<ScriptPodType>{
+        if let Some(obj) = ty.as_object(){
+            let object = &self.objects[obj.index as usize];
+            return object.tag.as_pod_type()
+        }
+        None
+    }
+        
+    fn pod_type_inline(&self, val:ScriptValue, builtins:&ScriptPodBuiltins)->Option<(ScriptValue,ScriptPodTypeInline)>{
+        if let Some(obj) = val.as_object(){
+            let object = &self.objects[obj.index as usize];
+            if let Some(pt) = object.tag.as_pod_type(){
+                return Some((NIL,ScriptPodTypeInline{
+                    self_ref: pt,
+                    data: self.pod_types[pt.index as usize].clone()
+                }));
+            }
+        }
+        if let Some(pod_ptr) = val.as_pod(){
+            let pod = &self.pods[pod_ptr.index as usize];
+            let object = &self.objects[pod.ty.index as usize];
+            if let Some(pt) = object.tag.as_pod_type(){
+                return Some((val, ScriptPodTypeInline{
+                    self_ref: pt,
+                    data: self.pod_types[pt.index as usize].clone()
+                }));
+            }
+        }
+        if val.is_f64(){
+            let pod_type = &self.pod_types[builtins.pod_f32.index as usize];
+            return Some((val, ScriptPodTypeInline{
+                self_ref: builtins.pod_f32,
+                data: pod_type.clone()
+            }));
+        }
+        if val.is_f32(){
+            let pod_type = &self.pod_types[builtins.pod_f32.index as usize];
+            return Some((val, ScriptPodTypeInline{
+                self_ref: builtins.pod_f32,
+                data: pod_type.clone()
+            }));
+        }
+        if val.is_u32(){
+            let pod_type = &self.pod_types[builtins.pod_u32.index as usize];
+            return Some((val, ScriptPodTypeInline{
+                self_ref: builtins.pod_u32,
+                data: pod_type.clone()
+            }));
+        }
+        if val.is_i32(){
+            let pod_type = &self.pod_types[builtins.pod_i32.index as usize];
+            return Some((val, ScriptPodTypeInline{
+                self_ref: builtins.pod_i32,
+                data: pod_type.clone()
+            }));
+        }
+        if val.is_f16(){
+            let pod_type = &self.pod_types[builtins.pod_f16.index as usize];
+            return Some((val, ScriptPodTypeInline{
+                self_ref: builtins.pod_f16,
+                data: pod_type.clone()
+            }));
+        }
+        if val.is_bool(){
+            let pod_type = &self.pod_types[builtins.pod_bool.index as usize];
+            return Some((val, ScriptPodTypeInline{
+                self_ref: builtins.pod_bool,
+                data: pod_type.clone()
+            }));
+        }
+        None
+    }
+    pub fn finalize_maybe_pod_type(&mut self, ptr:ScriptObject, builtins:&ScriptPodBuiltins, trap:&ScriptTrap){
+        let object = &self.objects[ptr.index as usize];
+        if object.tag.is_pod_type(){
+            let mut kvs = Vec::new();
+            let mut pod_type = id!(pod_unknown);
+            let mut walk = ptr;
+            loop{
+                let object = &self.objects[walk.index as usize];
+                if object.tag.is_vec2(){
+                    for kv in object.vec.iter().rev(){
+                        kvs.push(kv);
+                    }
+                }
+                if let Some(next_ptr) = object.proto.as_object(){
+                    walk = next_ptr
+                }
+                else {
+                    pod_type = object.proto.as_id().unwrap_or(pod_type);
+                    break;
+                } 
+            }
+            // alright we have our properties
+            // now lets build a pod_type from it
+            match pod_type{
+                id!(pod_array)=>{
+                    if kvs.len() == 1{
+                        if let Some((_,ty)) = self.pod_type_inline(kvs[0].value, builtins){
+                            let pt = self.new_pod_type(ScriptPodTy::VariableArray{
+                                align_of: ty.data.ty.align_of(),
+                                ty: Box::new(ty),
+                            }, NIL);
+                            self.set_object_pod_type(ptr, pt);
+                            self.set_notproto(ptr);
+                            self.freeze(ptr);
+                            return
+                        }
+                    }
+                    else if kvs.len() ==2 {
+                        if let Some((_,ty)) = self.pod_type_inline(kvs[1].value, builtins){
+                            if let Some(len) = kvs[0].value.as_number(){
+                                let len = len as usize;
+                                let align_of = ty.data.ty.align_of();
+                                let size_of = align_of * len;
+                                let rem = size_of % align_of;
+                                let size_of = if rem != 0{size_of + (align_of - rem)}else{size_of};
+                                                                
+                                let pt = self.new_pod_type(ScriptPodTy::FixedArray{
+                                    ty: Box::new(ty),
+                                    align_of,
+                                    size_of,
+                                    len
+                                }, NIL);
+                                self.set_object_pod_type(ptr, pt);
+                                self.set_notproto(ptr);
+                                self.freeze(ptr);
+                                return
+                            }
+                        }
+                    }
+                    trap.err_pod_array_def_incorrect();
+                    return
+                }
+                id!(pod_struct)=>{
+                    // alright lets build a struct
+                    let mut fields = Vec::new();
+                    let mut align_of = 0;
+                    for kv in kvs.iter().rev(){
+                        if let Some((default,ty)) = self.pod_type_inline(kv.value, builtins){
+                            if let Some(name) = kv.key.as_id(){
+                                align_of = align_of.max(ty.data.ty.align_of());
+                                fields.push(ScriptPodField{
+                                    name,
+                                    ty,
+                                    default
+                                });
+                                continue
+                            }
+                        }
+                        trap.err_pod_field_not_pod();
+                    }
+                                        
+                    let mut offset_of = 0;
+                    for field in &fields{
+                        let align_bytes = field.ty.data.ty.align_of();
+                        let size_bytes =  field.ty.data.ty.size_of();
+                        let rem = offset_of % align_bytes;
+                        if rem != 0{ // align offset
+                            offset_of += align_bytes - rem
+                        }
+                                                
+                        offset_of += size_bytes;
+                    }
+                    // align final offset
+                    let rem = offset_of % align_of;
+                    if rem != 0{
+                        offset_of += align_of - rem
+                    }
+                                        
+                    let pt = self.new_pod_type(ScriptPodTy::Struct{
+                        align_of,
+                        size_of: offset_of,
+                        fields,
+                    }, NIL);
+                    self.set_object_pod_type(ptr, pt);
+                    self.set_notproto(ptr);
+                    self.freeze(ptr);
+                }
+                _x=>{
+                    trap.err_pod_type_not_extendable();
+                    return
+                }
+            }
+        }
+    }
+        
+    pub fn pod_def_atom(&mut self, pod_module:ScriptObject, name: LiveId, ty: ScriptPodTy, helper_name:LiveId, default:ScriptValue)->ScriptPodType{
+        let pod_obj = self.new_with_proto(helper_name.into());
+        if ty != ScriptPodTy::UndefinedStruct && 
+        ty != ScriptPodTy::UndefinedArray{
+            self.set_notproto(pod_obj);
+        }
+        let pt = self.new_pod_type(ty, default);
+        self.set_object_storage_vec2(pod_obj);
+        self.set_object_pod_type(pod_obj, pt); 
+        self.set_value_def(pod_module, name.into(), pod_obj.into());
+        pt
+    }
+        
+    pub fn pod_def_vec(&mut self, pod_module:ScriptObject, name:LiveId, builtin: ScriptPodVec)->ScriptPodType{
+        let pod_obj = self.new_with_proto(name.into());
+        let vec_ty = self.new_pod_type(ScriptPodTy::Vec(builtin), NIL);
+        self.set_object_pod_type(pod_obj, vec_ty);
+        self.set_notproto(pod_obj);
+        self.freeze(pod_obj);
+        self.set_value_def(pod_module, name.into(), pod_obj.into());
+        return vec_ty
+    }
             
+    pub fn pod_def_mat(&mut self, pod_module:ScriptObject, name:LiveId, builtin:ScriptPodMat)->ScriptPodType{
+        let pod_obj = self.new_with_proto(name.into());
+        let mat_ty = self.new_pod_type(ScriptPodTy::Mat(builtin), NIL);
+        self.set_object_pod_type(pod_obj, mat_ty);
+        self.set_notproto(pod_obj);
+        self.freeze(pod_obj);
+        self.set_value_def(pod_module, name.into(), pod_obj.into());
+        return mat_ty
+    }
+    
+    
+    // PODS
+    
+    
+    
     pub fn new_pod(&mut self, ty:ScriptPodType)->ScriptPod{
         let pod_ty = &self.pod_types[ty.index as usize];
         if let Some(ptr) = self.pods_free.pop(){
@@ -47,48 +274,132 @@ impl ScriptHeap{
         }
     }
     
-    pub fn pod_def_atom(&mut self, pod_module:ScriptObject, name: LiveId, ty: ScriptPodTy, helper_name:LiveId, default:ScriptValue)->ScriptPodType{
-        let pod_obj = self.new_with_proto(helper_name.into());
-        if ty != ScriptPodTy::UndefinedStruct && 
-           ty != ScriptPodTy::UndefinedArray{
-            self.set_notproto(pod_obj);
-        }
-        let pt = self.new_pod_type(ty, default);
-        self.set_object_storage_vec2(pod_obj);
-        self.set_object_pod_type(pod_obj, pt); 
-        self.set_value_def(pod_module, name.into(), pod_obj.into());
-        pt
-    }
     
-    pub fn pod_def_vec(&mut self, pod_module:ScriptObject, name:LiveId, builtin: ScriptPodVec)->ScriptPodType{
-        let pod_obj = self.new_with_proto(name.into());
-        let vec_ty = self.new_pod_type(ScriptPodTy::Vec(builtin), NIL);
-        self.set_object_pod_type(pod_obj, vec_ty);
-        self.set_notproto(pod_obj);
-        self.freeze(pod_obj);
-        self.set_value_def(pod_module, name.into(), pod_obj.into());
-        return vec_ty
+    // POD writing
+    
+                
+    pub fn set_pod_field(&self, pod:ScriptPod, field:ScriptValue, _value:ScriptValue, _trap:&ScriptTrap)->ScriptValue{
+        let _pod = &self.pods[pod.index as usize];
+        println!("WANT TO SET FIELD {}", field);
+        todo!()
     }
         
-    pub fn pod_def_mat(&mut self, pod_module:ScriptObject, name:LiveId, builtin:ScriptPodMat)->ScriptPodType{
-        let pod_obj = self.new_with_proto(name.into());
-        let mat_ty = self.new_pod_type(ScriptPodTy::Mat(builtin), NIL);
-        self.set_object_pod_type(pod_obj, mat_ty);
-        self.set_notproto(pod_obj);
-        self.freeze(pod_obj);
-        self.set_value_def(pod_module, name.into(), pod_obj.into());
-        return mat_ty
-    }
-            
-    pub fn pod_type(&mut self, ty:ScriptValue)->Option<ScriptPodType>{
-        if let Some(obj) = ty.as_object(){
-            let object = &self.objects[obj.index as usize];
-            return object.tag.as_pod_type()
+    pub fn pod_pop_to_me(&mut self,  pod_ptr:ScriptPod, offset:&mut ScriptPodOffset, _field:ScriptValue, value:ScriptValue, trap:&ScriptTrap){
+        let pod = &mut self.pods[pod_ptr.index as usize];
+        let mut out_data = Vec::new();
+        std::mem::swap(&mut out_data, &mut pod.data);
+        let pod_ty = pod.ty;
+        let pod_type = &self.pod_types[pod_ty.index as usize];
+        // alright lets write 'value' into our current offset slot
+        // our current offset slot is
+        match &pod_type.ty{
+            ScriptPodTy::Struct{align_of,fields,..}=>{
+                // struct. ok so we are at field 
+                if let Some(field) = fields.get(offset.field_index){
+                    // align the field offset
+                    let align_bytes = field.ty.data.ty.align_of();
+                    let rem = offset.offset_of % align_of;
+                    if rem != 0{
+                        offset.offset_of += align_bytes - rem
+                    }
+                                        
+                    self.pod_write_field(field, offset.offset_of, &mut out_data, value, trap);
+                    // alright lets do the align and all that
+                    offset.field_index += 1;
+                    offset.offset_of += field.ty.data.ty.size_of();
+                }
+                else{
+                    trap.err_pod_too_much_data();
+                }
+            },
+            ScriptPodTy::FixedArray{align_of:_,size_of:_,len:_,ty:_}=>{
+                todo!()
+            },
+            ScriptPodTy::Vec(ot)=>{
+                offset.offset_of += self.pod_write_vec(ot, offset.offset_of, &mut out_data, value, trap);
+            }
+            ScriptPodTy::Mat(mt)=>{
+                if let Some(value) = value.as_number(){
+                    if offset.offset_of >= mt.elem_size() * mt.dim(){
+                        trap.err_pod_too_much_data();
+                    }
+                    else{
+                        out_data[offset.offset_of>>2] = (value as f32).to_bits();
+                        offset.offset_of += mt.elem_size()
+                    }
+                }
+                else if let Some(_in_pod) = value.as_pod(){
+                    trap.err_pod_type_not_matching();
+                }
+                else{
+                    trap.err_pod_type_not_matching();
+                }
+            }
+            _=>{
+                trap.err_unexpected();
+            }
         }
-        None
+        std::mem::swap(&mut out_data, &mut self.pods[pod_ptr.index as usize].data);
     }
     
+          
+    pub fn pod_check_arg_total(&mut self,  pod:ScriptPod, offset:ScriptPodOffset, trap:&ScriptTrap){
+        let pod = &mut self.pods[pod.index as usize];
+        let pod_type = &self.pod_types[pod.ty.index as usize];
+        let size_of = pod_type.ty.size_of();
+        if offset.offset_of == 0{ // empty. lets do it zero'ed
+            return
+        }
+        // not enough
+                        
+        if size_of != offset.offset_of{
+            // if we have a vec or struct with 0 or 1
+            match &pod_type.ty{
+                ScriptPodTy::Vec(vt)=>{
+                    if offset.offset_of == vt.elem_size(){
+                        if vt.elem_size() == 2{
+                            let fill = pod.data[0]&0xffff;
+                            for i in 0..pod_type.ty.size_of()>>2{
+                                pod.data[i] = (fill) | (fill<<16)
+                            }
+                        }
+                        else{
+                            let fill = pod.data[0];
+                            for i in 1..pod_type.ty.size_of()>>2{
+                                pod.data[i] = fill
+                            }
+                        }
+                        return
+                    }
+                }
+                ScriptPodTy::Mat(mt)=>{
+                    if offset.offset_of == mt.elem_size(){
+                        if mt.elem_size() == 2{
+                            let fill = pod.data[0]&0xffff;
+                            for i in 0..pod_type.ty.size_of()>>2{
+                                pod.data[i] = (fill) | (fill<<16)
+                            }
+                        }
+                        else{
+                            let fill = pod.data[0];
+                            for i in 1..pod_type.ty.size_of()>>2{
+                                pod.data[i] = fill
+                            }
+                        }
+                        return
+                    }
+                }
+                _=>{
+                }
+            }
+        }
+        else{
+            return
+        }
+        trap.err_pod_not_enough_data();
+    }
         
+    
     fn pod_write_vec(&self, ot:&ScriptPodVec, offset_of:usize, out_data:&mut[u32], value:ScriptValue, trap:&ScriptTrap)->usize{
         if let Some(value) = value.as_number(){
             if offset_of >= ot.elem_size() * ot.dims(){
@@ -295,9 +606,11 @@ impl ScriptHeap{
             }
             ScriptPodTy::Vec(_vt)=>{ 
                 println!("setting a vec via pop");
+                todo!()
             }
             ScriptPodTy::Mat(_mt)=>{
                 println!("setting a mat via pop");
+                todo!()
             }
             ScriptPodTy::F16=>{
                 if let Some(value) = value.as_number(){
@@ -342,122 +655,205 @@ impl ScriptHeap{
         }
     }
     
-    fn pod_read_field(&self, field:&ScriptPodField, offset_of:usize, in_data:&[u32], trap:&ScriptTrap)->ScriptValue{    
-                        
-        match &field.ty.data.ty{
-            ScriptPodTy::NIL | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct =>{
-                trap.err_unexpected();
-                return NIL
-            }
-            ScriptPodTy::Bool=>{
-                if in_data[offset_of>>2]==1{return TRUE} else {FALSE}
-            }
-            ScriptPodTy::U32 | ScriptPodTy::AtomicU32=>{
-                return ScriptValue::from_u32(in_data[offset_of>>2])
-            }
-            ScriptPodTy::I32 |ScriptPodTy::AtomicI32=>{
-                return ScriptValue::from_i32(in_data[offset_of>>2] as i32)
-            }
-            ScriptPodTy::F32=>{
-                return ScriptValue::from_f32(f32::from_bits(in_data[offset_of>>2]))
-            }
-            ScriptPodTy::Vec(_vt)=>{
-                // we have to return a vec from a slice
-                return NIL
-            }
-            ScriptPodTy::Mat(_mt)=>{
-                // return a mat froma slice
-                return NIL
-            }
-            ScriptPodTy::F16=>{
-                if offset_of&3 >= 2{
-                    return ScriptValue::from_f16(f16_to_f32((in_data[offset_of>>2] >> 16) as u16))
-                }
-                else{
-                    return ScriptValue::from_f16(f16_to_f32(in_data[offset_of>>2] as u16))
-                }
-            }
-            ScriptPodTy::Struct{..}=>{
-                // ok what now
-                return NIL
-            }
-            ScriptPodTy::Enum{..}=>{
-                todo!()
-            }
-            ScriptPodTy::FixedArray{..}=>{
-                todo!()
-            }
-            ScriptPodTy::VariableArray{..}=>{
-                todo!()
-            }
-        }
-    }
     
-        
-    pub fn set_pod_field(&self, pod:ScriptPod, field:ScriptValue, _value:ScriptValue, _trap:&ScriptTrap)->ScriptValue{
-        let _pod = &self.pods[pod.index as usize];
-        println!("WANT TO SET FIELD {}", field);
-        todo!()
-    }
     
-            
-    pub fn pod_pop_to_me(&mut self,  pod_ptr:ScriptPod, offset:&mut ScriptPodOffset, _field:ScriptValue, value:ScriptValue, trap:&ScriptTrap){
+    // POD Reading
+    
+    
+    
+    pub fn pod_read_field(&mut self, pod_ptr:ScriptPod, field:ScriptValue, builtins:&ScriptPodBuiltins, trap:&ScriptTrap)->ScriptValue{
+        // alright lets get a field
+        let field_name = if let Some(id) = field.as_id(){id}
+        else{
+            return trap.err_pod_invalid_field_name()
+        };
         let pod = &mut self.pods[pod_ptr.index as usize];
-        let mut out_data = Vec::new();
-        std::mem::swap(&mut out_data, &mut pod.data);
         let pod_ty = pod.ty;
         let pod_type = &self.pod_types[pod_ty.index as usize];
+                        
         // alright lets write 'value' into our current offset slot
         // our current offset slot is
         match &pod_type.ty{
             ScriptPodTy::Struct{align_of,fields,..}=>{
-                // struct. ok so we are at field 
-                if let Some(field) = fields.get(offset.field_index){
-                    // align the field offset
+                let mut offset_of = 0;
+                // alright we have to return a field now
+                // what do we do
+                // do we 'new' pod types? or provide a 'window'
+                for field in fields{
                     let align_bytes = field.ty.data.ty.align_of();
-                    let rem = offset.offset_of % align_of;
+                    let rem = offset_of % align_of;
                     if rem != 0{
-                        offset.offset_of += align_bytes - rem
+                        offset_of += align_bytes - rem
                     }
-                    
-                    self.pod_write_field(field, offset.offset_of, &mut out_data, value, trap);
-                    // alright lets do the align and all that
-                    offset.field_index += 1;
-                    offset.offset_of += field.ty.data.ty.size_of();
+                    if field.name == field_name{
+                                                
+                        match &field.ty.data.ty{
+                            ScriptPodTy::NIL | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct =>{
+                                trap.err_unexpected();
+                                return NIL
+                            }
+                            ScriptPodTy::Bool=>{
+                                if pod.data[offset_of>>2]==1{return TRUE} else {return FALSE}
+                            }
+                            ScriptPodTy::U32 | ScriptPodTy::AtomicU32=>{
+                                return ScriptValue::from_u32(pod.data[offset_of>>2])
+                            }
+                            ScriptPodTy::I32 |ScriptPodTy::AtomicI32=>{
+                                return ScriptValue::from_i32(pod.data[offset_of>>2] as i32)
+                            }
+                            ScriptPodTy::F32=>{
+                                return ScriptValue::from_f32(f32::from_bits(pod.data[offset_of>>2]))
+                            }
+                            ScriptPodTy::Vec(vt)=>{
+                                let range = (offset_of>>2)..((offset_of + vt.align_of())>>2);
+                                let pod_type = vt.builtin(builtins);
+                                let out_pod_ptr = self.new_pod(pod_type);
+                                let mut out_data = Vec::new();
+                                std::mem::swap(&mut self.pods[out_pod_ptr.index as usize].data, &mut out_data);
+                                out_data.clear();
+                                out_data.extend(&self.pods[pod_ptr.index as usize].data[range]);
+                                std::mem::swap(&mut self.pods[out_pod_ptr.index as usize].data, &mut out_data);
+                                return out_pod_ptr.into()
+                            }
+                            ScriptPodTy::Mat(mt)=>{
+                                let range = (offset_of>>2)..((offset_of + mt.size_of())>>2);
+                                let pod_type = mt.builtin(builtins);
+                                let out_pod_ptr = self.new_pod(pod_type);
+                                let mut out_data = Vec::new();
+                                std::mem::swap(&mut self.pods[out_pod_ptr.index as usize].data, &mut out_data);
+                                out_data.clear();
+                                out_data.extend(&self.pods[pod_ptr.index as usize].data[range]);
+                                std::mem::swap(&mut self.pods[out_pod_ptr.index as usize].data, &mut out_data);
+                                return out_pod_ptr.into()
+                            }
+                            ScriptPodTy::F16=>{
+                                if offset_of&3 >= 2{
+                                    return ScriptValue::from_f16(f16_to_f32((pod.data[offset_of>>2] >> 16) as u16))
+                                }
+                                else{
+                                    return ScriptValue::from_f16(f16_to_f32(pod.data[offset_of>>2] as u16))
+                                }
+                            }
+                             ScriptPodTy::FixedArray{size_of,..} | ScriptPodTy::Struct{size_of,..}=>{
+                                let range = (offset_of>>2)..((offset_of + size_of)>>2);
+                                let pod_type = field.ty.self_ref;
+                                let out_pod_ptr = self.new_pod(pod_type);
+                                let mut out_data = Vec::new();
+                                std::mem::swap(&mut self.pods[out_pod_ptr.index as usize].data, &mut out_data);
+                                out_data.clear();
+                                out_data.extend(&self.pods[pod_ptr.index as usize].data[range]);
+                                std::mem::swap(&mut self.pods[out_pod_ptr.index as usize].data, &mut out_data);
+                                return out_pod_ptr.into()
+                            }
+                            ScriptPodTy::Enum{..}=>{
+                                todo!()
+                            }
+                            ScriptPodTy::VariableArray{..}=>{
+                                todo!()
+                            }
+                        }
+                        
+                    }
+                    offset_of += field.ty.data.ty.size_of();
                 }
-                else{
-                    trap.err_pod_too_much_data();
+                return trap.err_pod_invalid_field_name()
+            },
+            ScriptPodTy::Vec(vt)=>{
+                // we support reading fields and swizzles
+                let mut data = [0u32;4];
+                let data_in = &pod.data;
+                for i in 0..data.len().min(data_in.len()){
+                    data[i] = data_in[i]
                 }
-            },
-            ScriptPodTy::FixedArray{align_of:_,size_of:_,len:_,ty:_}=>{
-                
-            },
-            ScriptPodTy::Vec(ot)=>{
-                offset.offset_of += self.pod_write_vec(ot, offset.offset_of, &mut out_data, value, trap);
+                return makepad_script_derive::pod_swizzle_vec_match!();
             }
-            ScriptPodTy::Mat(mt)=>{
-                if let Some(value) = value.as_number(){
-                    if offset.offset_of >= mt.elem_size() * mt.dim(){
-                        trap.err_pod_too_much_data();
-                    }
-                    else{
-                        out_data[offset.offset_of>>2] = (value as f32).to_bits();
-                        offset.offset_of += mt.elem_size()
-                    }
-                }
-                else if let Some(_in_pod) = value.as_pod(){
-                    trap.err_pod_type_not_matching();
-                }
-                else{
-                    trap.err_pod_type_not_matching();
-                }
+            ScriptPodTy::Mat(_mt)=>{
             }
             _=>{
-                trap.err_unexpected();
+                                                                
             }
         }
-        std::mem::swap(&mut out_data, &mut self.pods[pod_ptr.index as usize].data);
+        NIL
     }
+    
+        
+        
+        
+    // Swizzle reading
+        
+        
+        
+    pub fn pod_swizzle_vec1(&self, vec:ScriptPodVec, data:[u32;4], x:usize, trap:&ScriptTrap)->ScriptValue{
+        if x >= vec.dims(){
+            return trap.err_pod_invalid_field_name()
+        }
+        match vec{
+            ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>{
+                return ScriptValue::from_f32(f32::from_bits(data[x]))
+            },
+            ScriptPodVec::Vec2h | ScriptPodVec::Vec3h  | ScriptPodVec::Vec4h=>{
+                if x&1 == 1{
+                    return ScriptValue::from_f16(f16_to_f32((data[x>>1] >> 16) as u16))
+                }
+                else{
+                    return ScriptValue::from_f16(f16_to_f32(data[x>>1] as u16))
+                }
+            },
+            ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>{
+                return ScriptValue::from_u32(data[x])
+            },
+            ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>{
+                return ScriptValue::from_i32(data[x] as i32)
+            },
+        }
+    }
+        
+    pub fn pod_swizzle_vec<const N:usize>(&mut self, vec:ScriptPodVec, data:[u32;4], swiz:[usize;N], builtins:&ScriptPodBuiltins, _trap:&ScriptTrap)->ScriptValue{
+        let pod_type = match N{
+            2=> match vec{
+                ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>builtins.pod_vec2f,
+                ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>builtins.pod_vec2h,
+                ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>builtins.pod_vec2u,
+                ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>builtins.pod_vec2i,
+            }
+            3=>match vec{
+                ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>builtins.pod_vec3f,
+                ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>builtins.pod_vec3h,
+                ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>builtins.pod_vec3u,
+                ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>builtins.pod_vec3i,
+            }
+            4=>match vec{
+                ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>builtins.pod_vec4f,
+                ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>builtins.pod_vec4h,
+                ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>builtins.pod_vec4u,
+                ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>builtins.pod_vec4i,
+            }
+            _=>panic!()
+        };
+        // lets create a pod with type_name
+        let pod_ptr = self.new_pod(pod_type);
+        let pod = &mut self.pods[pod_ptr.index as usize];
+        let pod_data = &mut pod.data;
+                
+        match vec{
+            ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f |
+            ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u | 
+            ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>{
+                for (i, swiz) in swiz.iter().enumerate(){
+                    pod_data[i] = data[*swiz];
+                }
+                pod_ptr.into()
+            },
+            ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>{
+                // alright lets swizzle a half float into u32
+                pod_ptr.into()
+            },
+        }
+    }
+    
+    
+    // Debug printing
+    
     
     pub fn pod_debug_print(&self, pod_type:&ScriptPodTypeData, offset_of: usize, data:&[u32]){
         // alright we have a range of data, and a podtype we should be able to print it
@@ -601,341 +997,8 @@ impl ScriptHeap{
             }
         }
     }
-        
-    pub fn pod_check_arg_total(&mut self,  pod:ScriptPod, offset:ScriptPodOffset, trap:&ScriptTrap){
-        let pod = &mut self.pods[pod.index as usize];
-        let pod_type = &self.pod_types[pod.ty.index as usize];
-        let size_of = pod_type.ty.size_of();
-        if offset.offset_of == 0{ // empty. lets do it zero'ed
-            return
-        }
-        // not enough
-        
-        if size_of != offset.offset_of{
-            // if we have a vec or struct with 0 or 1
-            match &pod_type.ty{
-                ScriptPodTy::Vec(vt)=>{
-                    if offset.offset_of == vt.elem_size(){
-                        if vt.elem_size() == 2{
-                            let fill = pod.data[0]&0xffff;
-                            for i in 0..pod_type.ty.size_of()>>2{
-                                pod.data[i] = (fill) | (fill<<16)
-                            }
-                        }
-                        else{
-                            let fill = pod.data[0];
-                            for i in 1..pod_type.ty.size_of()>>2{
-                                pod.data[i] = fill
-                            }
-                        }
-                        return
-                    }
-                }
-                ScriptPodTy::Mat(mt)=>{
-                    if offset.offset_of == mt.elem_size(){
-                        if mt.elem_size() == 2{
-                            let fill = pod.data[0]&0xffff;
-                            for i in 0..pod_type.ty.size_of()>>2{
-                                pod.data[i] = (fill) | (fill<<16)
-                            }
-                        }
-                        else{
-                            let fill = pod.data[0];
-                            for i in 1..pod_type.ty.size_of()>>2{
-                                pod.data[i] = fill
-                            }
-                        }
-                        return
-                    }
-                }
-                _=>{
-                }
-            }
-        }
-        else{
-            return
-        }
-        trap.err_pod_not_enough_data();
-    }
     
-    fn pod_type_inline(&self, val:ScriptValue, pod_builtins:&ScriptPodBuiltins)->Option<(ScriptValue,ScriptPodTypeInline)>{
-        if let Some(obj) = val.as_object(){
-            let object = &self.objects[obj.index as usize];
-            if let Some(pt) = object.tag.as_pod_type(){
-                return Some((NIL,ScriptPodTypeInline{
-                    self_ref: pt,
-                    data: self.pod_types[pt.index as usize].clone()
-                }));
-            }
-        }
-        if let Some(pod_ptr) = val.as_pod(){
-            let pod = &self.pods[pod_ptr.index as usize];
-            let object = &self.objects[pod.ty.index as usize];
-            if let Some(pt) = object.tag.as_pod_type(){
-                return Some((val, ScriptPodTypeInline{
-                    self_ref: pt,
-                    data: self.pod_types[pt.index as usize].clone()
-                }));
-            }
-        }
-        if val.is_f64(){
-            let pod_type = &self.pod_types[pod_builtins.pod_f32.index as usize];
-            return Some((val, ScriptPodTypeInline{
-                self_ref: pod_builtins.pod_f32,
-                data: pod_type.clone()
-            }));
-        }
-        if val.is_f32(){
-            let pod_type = &self.pod_types[pod_builtins.pod_f32.index as usize];
-            return Some((val, ScriptPodTypeInline{
-                self_ref: pod_builtins.pod_f32,
-                data: pod_type.clone()
-            }));
-        }
-        if val.is_u32(){
-            let pod_type = &self.pod_types[pod_builtins.pod_u32.index as usize];
-            return Some((val, ScriptPodTypeInline{
-                self_ref: pod_builtins.pod_u32,
-                data: pod_type.clone()
-            }));
-        }
-        if val.is_i32(){
-            let pod_type = &self.pod_types[pod_builtins.pod_i32.index as usize];
-            return Some((val, ScriptPodTypeInline{
-                self_ref: pod_builtins.pod_i32,
-                data: pod_type.clone()
-            }));
-        }
-        if val.is_f16(){
-            let pod_type = &self.pod_types[pod_builtins.pod_f16.index as usize];
-            return Some((val, ScriptPodTypeInline{
-                self_ref: pod_builtins.pod_f16,
-                data: pod_type.clone()
-            }));
-        }
-        if val.is_bool(){
-            let pod_type = &self.pod_types[pod_builtins.pod_bool.index as usize];
-            return Some((val, ScriptPodTypeInline{
-                self_ref: pod_builtins.pod_bool,
-                data: pod_type.clone()
-            }));
-        }
-        None
-    }
-    pub fn finalize_maybe_pod_type(&mut self, ptr:ScriptObject, pod_builtins:&ScriptPodBuiltins, trap:&ScriptTrap){
-        let object = &self.objects[ptr.index as usize];
-        if object.tag.is_pod_type(){
-            let mut kvs = Vec::new();
-            let mut pod_type = id!(pod_unknown);
-            let mut walk = ptr;
-            loop{
-                let object = &self.objects[walk.index as usize];
-                if object.tag.is_vec2(){
-                    for kv in object.vec.iter().rev(){
-                        kvs.push(kv);
-                    }
-                }
-                if let Some(next_ptr) = object.proto.as_object(){
-                    walk = next_ptr
-                }
-                else {
-                    pod_type = object.proto.as_id().unwrap_or(pod_type);
-                    break;
-                } 
-            }
-            // alright we have our properties
-            // now lets build a pod_type from it
-            match pod_type{
-                id!(pod_array)=>{
-                    if kvs.len() == 1{
-                        if let Some((_,ty)) = self.pod_type_inline(kvs[0].value, pod_builtins){
-                            let pt = self.new_pod_type(ScriptPodTy::VariableArray{
-                                align_of: ty.data.ty.align_of(),
-                                ty: Box::new(ty),
-                            }, NIL);
-                            self.set_object_pod_type(ptr, pt);
-                            self.set_notproto(ptr);
-                            self.freeze(ptr);
-                            return
-                        }
-                    }
-                    else if kvs.len() ==2 {
-                        if let Some((_,ty)) = self.pod_type_inline(kvs[1].value, pod_builtins){
-                            if let Some(len) = kvs[0].value.as_number(){
-                                let len = len as usize;
-                                let align_of = ty.data.ty.align_of();
-                                let size_of = align_of * len;
-                                let rem = size_of % align_of;
-                                let size_of = if rem != 0{size_of + (align_of - rem)}else{size_of};
-                                
-                                let pt = self.new_pod_type(ScriptPodTy::FixedArray{
-                                    ty: Box::new(ty),
-                                    align_of,
-                                    size_of,
-                                    len
-                                }, NIL);
-                                self.set_object_pod_type(ptr, pt);
-                                self.set_notproto(ptr);
-                                self.freeze(ptr);
-                                return
-                            }
-                        }
-                    }
-                    trap.err_pod_array_def_incorrect();
-                    return
-                }
-                id!(pod_struct)=>{
-                    // alright lets build a struct
-                    let mut fields = Vec::new();
-                    let mut align_of = 0;
-                    for kv in kvs.iter().rev(){
-                        if let Some((default,ty)) = self.pod_type_inline(kv.value, pod_builtins){
-                            if let Some(name) = kv.key.as_id(){
-                                align_of = align_of.max(ty.data.ty.align_of());
-                                fields.push(ScriptPodField{
-                                    name,
-                                    ty,
-                                    default
-                                });
-                                continue
-                            }
-                        }
-                        trap.err_pod_field_not_pod();
-                    }
-                    
-                    let mut offset_of = 0;
-                    for field in &fields{
-                        let align_bytes = field.ty.data.ty.align_of();
-                        let size_bytes =  field.ty.data.ty.size_of();
-                        let rem = offset_of % align_bytes;
-                        if rem != 0{ // align offset
-                            offset_of += align_bytes - rem
-                        }
-                        
-                        offset_of += size_bytes;
-                    }
-                    // align final offset
-                    let rem = offset_of % align_of;
-                    if rem != 0{
-                        offset_of += align_of - rem
-                    }
-                    
-                    let pt = self.new_pod_type(ScriptPodTy::Struct{
-                        align_of,
-                        size_of: offset_of,
-                        fields,
-                    }, NIL);
-                    self.set_object_pod_type(ptr, pt);
-                    self.set_notproto(ptr);
-                    self.freeze(ptr);
-                }
-                _x=>{
-                    trap.err_pod_type_not_extendable();
-                    return
-                }
-            }
-        }
-    }
-    
-    pub fn pod_swizzle_vec1(&self, vec:&ScriptPodVec, data:&[u32], x:usize, trap:&ScriptTrap)->ScriptValue{
-        if x >= vec.dims(){
-            return trap.err_pod_invalid_field_name()
-        }
-        match vec{
-            ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>{
-                return ScriptValue::from_f32(f32::from_bits(data[x]))
-            },
-            ScriptPodVec::Vec2h | ScriptPodVec::Vec3h  | ScriptPodVec::Vec4h=>{
-                if x&1 == 1{
-                    return ScriptValue::from_f16(f16_to_f32((data[x>>1] >> 16) as u16))
-                }
-                else{
-                    return ScriptValue::from_f16(f16_to_f32(data[x>>1] as u16))
-                }
-            },
-            ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>{
-                return ScriptValue::from_u32(data[x])
-            },
-            ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>{
-                return ScriptValue::from_i32(data[x] as i32)
-            },
-        }
-    }
-    
-    pub fn pod_swizzle_vec<const N:usize>(&self, vec:&ScriptPodVec, _data:&[u32], _swiz:[usize;N], _trap:&ScriptTrap)->ScriptValue{
-        match N{
-            2=>{
-                
-            }
-            3=>{
-                
-            }
-            4=>{
-                
-            }
-            _=>panic!()
-        }
-        match vec{
-            ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>{
-                // alright we have a vec
-                // and we have an output swizzle. 
-                NIL
-            },
-            ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>{
-                NIL
-            },
-            ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>{
-                NIL
-            },
-            ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>{
-                NIL
-            },
-        }
-    }
-    
-    pub fn pod_field(&self, pod_ptr:ScriptPod, field:ScriptValue, trap:&ScriptTrap)->ScriptValue{
-        // alright lets get a field
-        let field_name = if let Some(id) = field.as_id(){id}
-        else{
-            return trap.err_pod_invalid_field_name()
-        };
-        let pod = &self.pods[pod_ptr.index as usize];
-        let pod_ty = pod.ty;
-        let pod_type = &self.pod_types[pod_ty.index as usize];
-        // alright lets write 'value' into our current offset slot
-        // our current offset slot is
-        match &pod_type.ty{
-            ScriptPodTy::Struct{align_of,fields,..}=>{
-                let mut offset_of = 0;
-                // alright we have to return a field now
-                // what do we do
-                // do we 'new' pod types? or provide a 'window'
-                for field in fields{
-                    let align_bytes = field.ty.data.ty.align_of();
-                    let rem = offset_of % align_of;
-                    if rem != 0{
-                        offset_of += align_bytes - rem
-                    }
-                    if field.name == field_name{
-                        // lets return the struct value
-                        return self.pod_read_field(field, offset_of, &pod.data, trap);
-                    }
-                    offset_of += field.ty.data.ty.size_of();
-                }
-                return trap.err_pod_invalid_field_name()
-            },
-            ScriptPodTy::Vec(vt)=>{ 
-                // we support reading fields and swizzles
-                return makepad_script_derive::pod_swizzle_vec_match!();
-            }
-            ScriptPodTy::Mat(_mt)=>{
-            }
-            _=>{
-                                
-            }
-        }
-        NIL
-    }
+      
 }
 
 

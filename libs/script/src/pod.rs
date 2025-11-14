@@ -44,7 +44,7 @@ pub struct ScriptPodTypeInline{
     pub data: ScriptPodTypeData
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScriptPodVec{
     Vec2f,
     Vec3f,
@@ -59,7 +59,7 @@ pub enum ScriptPodVec{
     Vec3i,
     Vec4i,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScriptPodMat{
     Mat2x2f,
     Mat3x2f,
@@ -94,6 +94,23 @@ impl ScriptPodVec{
             Self::Vec4h=>id!(vec4h),
             Self::Vec4u=>id!(vec4u),
             Self::Vec4i=>id!(vec4i),
+        }
+    }
+    
+    pub fn builtin(&self, builtin: &ScriptPodBuiltins)->ScriptPodType{
+        match self{
+            Self::Vec2f=>builtin.pod_vec2f,
+            Self::Vec2h=>builtin.pod_vec2h,
+            Self::Vec2u=>builtin.pod_vec2u,
+            Self::Vec2i=>builtin.pod_vec2i,
+            Self::Vec3f=>builtin.pod_vec3f,
+            Self::Vec3h=>builtin.pod_vec3h,
+            Self::Vec3u=>builtin.pod_vec3u,
+            Self::Vec3i=>builtin.pod_vec3i,
+            Self::Vec4f=>builtin.pod_vec4f,
+            Self::Vec4h=>builtin.pod_vec4h,
+            Self::Vec4u=>builtin.pod_vec4u,
+            Self::Vec4i=>builtin.pod_vec4i,
         }
     }
     
@@ -154,6 +171,20 @@ impl ScriptPodMat{
             Self::Mat2x4f=>id!(mat2x4f),
             Self::Mat3x4f=>id!(mat3x4f),
             Self::Mat4x4f=>id!(mat4x4f),
+        }
+    }
+    
+    pub fn builtin(&self, builtin: &ScriptPodBuiltins)->ScriptPodType{
+        match self{
+            Self::Mat2x2f=>builtin.pod_mat2x2f,
+            Self::Mat3x2f=>builtin.pod_mat3x2f,
+            Self::Mat4x2f=>builtin.pod_mat4x2f,
+            Self::Mat2x3f=>builtin.pod_mat2x3f,
+            Self::Mat3x3f=>builtin.pod_mat3x3f,
+            Self::Mat4x3f=>builtin.pod_mat4x3f,
+            Self::Mat2x4f=>builtin.pod_mat2x4f,
+            Self::Mat3x4f=>builtin.pod_mat3x4f,
+            Self::Mat4x4f=>builtin.pod_mat4x4f,
         }
     }
     
