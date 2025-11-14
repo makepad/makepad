@@ -60,4 +60,9 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         }
         NIL
     });
+    
+    native.add_method(heap, std, id!(to_metal_shader), script_args!(entry=NIL), |vm, _args|{
+        
+        return vm.thread.last_err
+    });
 }

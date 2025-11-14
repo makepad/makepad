@@ -688,7 +688,7 @@ impl ScriptHeap{
                     if field.name == field_name{
                                                 
                         match &field.ty.data.ty{
-                            ScriptPodTy::NIL | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct =>{
+                            ScriptPodTy::NIL | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct => {
                                 trap.err_unexpected();
                                 return NIL
                             }
@@ -698,11 +698,19 @@ impl ScriptHeap{
                             ScriptPodTy::U32 | ScriptPodTy::AtomicU32=>{
                                 return ScriptValue::from_u32(pod.data[offset_of>>2])
                             }
-                            ScriptPodTy::I32 |ScriptPodTy::AtomicI32=>{
+                            ScriptPodTy::I32 | ScriptPodTy::AtomicI32=>{
                                 return ScriptValue::from_i32(pod.data[offset_of>>2] as i32)
                             }
                             ScriptPodTy::F32=>{
                                 return ScriptValue::from_f32(f32::from_bits(pod.data[offset_of>>2]))
+                            }
+                            ScriptPodTy::F16=>{
+                                if offset_of&3 >= 2{
+                                    return ScriptValue::from_f16(f16_to_f32((pod.data[offset_of>>2] >> 16) as u16))
+                                }
+                                else{
+                                    return ScriptValue::from_f16(f16_to_f32(pod.data[offset_of>>2] as u16))
+                                }
                             }
                             ScriptPodTy::Vec(vt)=>{
                                 let range = (offset_of>>2)..((offset_of + vt.align_of())>>2);
@@ -725,14 +733,6 @@ impl ScriptHeap{
                                 out_data.extend(&self.pods[pod_ptr.index as usize].data[range]);
                                 std::mem::swap(&mut self.pods[out_pod_ptr.index as usize].data, &mut out_data);
                                 return out_pod_ptr.into()
-                            }
-                            ScriptPodTy::F16=>{
-                                if offset_of&3 >= 2{
-                                    return ScriptValue::from_f16(f16_to_f32((pod.data[offset_of>>2] >> 16) as u16))
-                                }
-                                else{
-                                    return ScriptValue::from_f16(f16_to_f32(pod.data[offset_of>>2] as u16))
-                                }
                             }
                              ScriptPodTy::FixedArray{size_of,..} | ScriptPodTy::Struct{size_of,..}=>{
                                 let range = (offset_of>>2)..((offset_of + size_of)>>2);
