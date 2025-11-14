@@ -277,7 +277,7 @@ impl DrawText {
         turtle.move_to(new_turtle_pos);
 
         turtle.set_wrap_spacing((
-           last_row.line_spacing_above_in_lpxs - last_row.ascender_in_lpxs
+           last_row.ascender_in_lpxs * last_row.line_spacing_scale - last_row.ascender_in_lpxs
         )as f64);
         
         cx.emit_turtle_walk(makepad_platform::Rect {
