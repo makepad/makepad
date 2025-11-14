@@ -988,7 +988,11 @@ impl ScriptThread{
                     let value = heap.value(obj, field, &self.trap);
                     self.push_stack_unchecked(value);
                 }
-                else{
+                else if let Some(pod) = object.as_pod(){
+                    let value = heap.pod_field(pod, field, &self.trap);
+                    self.push_stack_unchecked(value);
+                }
+                else {
                     let field = field.as_id().unwrap_or(id!());
                     let type_index = object.value_type().to_redux();
                     let getter = &code.native.borrow().getters[type_index.to_index()];

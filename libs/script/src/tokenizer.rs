@@ -22,7 +22,11 @@ pub enum ScriptToken{
     CloseSquare,
     StringUnfinished,
     String(ScriptValue),
-    Number(f64),
+    F32(f32),
+    U32(u32),
+    I32(i32),
+    F16(f32),
+    F64(f64),
     Color(u32),
     RustValue(u32),
 }
@@ -31,8 +35,12 @@ impl ScriptToken{
     pub fn identifier(&self)->(LiveId, bool){match self{ScriptToken::Identifier{id,starts_with_ds}=>(*id,*starts_with_ds),_=>(id!(),false)}}
     pub fn operator(&self)->LiveId{match self{ScriptToken::Operator(id)=>*id,_=>id!()}}
     pub fn separator(&self)->LiveId{match self{ScriptToken::Separator(id)=>*id,_=>id!()}}
-    pub fn number(&self)->f64{match self{ScriptToken::Number(v)=>*v,_=>0.0}}
-    pub fn as_number(&self)->Option<f64>{match self{ScriptToken::Number(v)=>Some(*v),_=>None}}
+    pub fn f64(&self)->f64{match self{ScriptToken::F64(v)=>*v,_=>0.0}}
+    pub fn as_f64(&self)->Option<f64>{match self{ScriptToken::F64(v)=>Some(*v),_=>None}}
+    pub fn as_f32(&self)->Option<f32>{match self{ScriptToken::F32(v)=>Some(*v),_=>None}}
+    pub fn as_u32(&self)->Option<u32>{match self{ScriptToken::U32(v)=>Some(*v),_=>None}}
+    pub fn as_i32(&self)->Option<i32>{match self{ScriptToken::I32(v)=>Some(*v),_=>None}}
+    pub fn as_f16(&self)->Option<f32>{match self{ScriptToken::F16(v)=>Some(*v),_=>None}}
     pub fn as_color(&self)->Option<u32>{match self{ScriptToken::Color(v)=>Some(*v),_=>None}}
     pub fn as_string(&self)->Option<ScriptValue>{match self{ScriptToken::String(v)=>Some(*v),_=>None}}
     pub fn as_rust_value(&self)->Option<u32>{match self{ScriptToken::RustValue(v)=>Some(*v),_=>None}}
@@ -46,7 +54,11 @@ impl ScriptToken{
     pub fn is_open_square(&self)->bool{match self{ScriptToken::OpenSquare=>true,_=>false}}
     pub fn is_close_square(&self)->bool{match self{ScriptToken::CloseSquare=>true,_=>false}}
     pub fn is_string(&self)->bool{match self{ScriptToken::StringUnfinished|ScriptToken::String(_)=>true,_=>false}}
-    pub fn is_number(&self)->bool{match self{ScriptToken::Number(_)=>true,_=>false}}
+    pub fn is_f64(&self)->bool{match self{ScriptToken::F64(_)=>true,_=>false}}
+    pub fn is_f32(&self)->bool{match self{ScriptToken::F32(_)=>true,_=>false}}
+    pub fn is_u32(&self)->bool{match self{ScriptToken::U32(_)=>true,_=>false}}
+    pub fn is_i32(&self)->bool{match self{ScriptToken::I32(_)=>true,_=>false}}
+    pub fn is_f16(&self)->bool{match self{ScriptToken::F16(_)=>true,_=>false}}
     pub fn is_color(&self)->bool{match self{ScriptToken::Color(_)=>true,_=>false}}
     pub fn is_rust_value(&self)->bool{match self{ScriptToken::RustValue(_)=>true,_=>false}}
 }
@@ -141,7 +153,11 @@ impl ScriptTokenizer{
                     heap.cast_to_string(v,&mut s);
                     print!("\"{}\"",s)
                 }
-                ScriptToken::Number(v)=>print!("{v}"),
+                ScriptToken::F64(v)=>print!("{v}"),
+                ScriptToken::F32(v)=>print!("{v}"),
+                ScriptToken::I32(v)=>print!("{v}"),
+                ScriptToken::U32(v)=>print!("{v}"),
+                ScriptToken::F16(v)=>print!("{v}"),
                 ScriptToken::Color(v)=>print!("{:08x}", v),
                 ScriptToken::RustValue(v)=>print!("#({v})"),
             }
@@ -184,7 +200,7 @@ impl ScriptTokenizer{
         });
     }
     
-    fn emit_number(&mut self){
+    fn emit_f64(&mut self){
         let number = if let Ok(v) = self.temp.parse::<f64>(){
             self.temp.clear();
             v
@@ -196,10 +212,74 @@ impl ScriptTokenizer{
         self.temp.clear();
         self.tokens.push(ScriptTokenPos{
             pos: self.pos - len,
-            token: ScriptToken::Number(number)
+            token: ScriptToken::F64(number)
         });
     }
     
+    fn emit_f32(&mut self){
+        let number = if let Ok(v) = self.temp.parse::<f32>(){
+            self.temp.clear();
+            v
+        }
+        else{
+            0.0
+        };
+        let len = self.temp.len();
+        self.temp.clear();
+        self.tokens.push(ScriptTokenPos{
+            pos: self.pos - len,
+            token: ScriptToken::F32(number)
+        });
+    }
+    
+    fn emit_u32(&mut self){
+        let number = if let Ok(v) = self.temp.parse::<u32>(){
+            self.temp.clear();
+            v
+        }
+        else{
+            0
+        };
+        let len = self.temp.len();
+        self.temp.clear();
+        self.tokens.push(ScriptTokenPos{
+            pos: self.pos - len,
+            token: ScriptToken::U32(number)
+        });
+    }
+    
+    fn emit_i32(&mut self){
+        let number = if let Ok(v) = self.temp.parse::<i32>(){
+            self.temp.clear();
+            v
+        }
+        else{
+            0
+        };
+        let len = self.temp.len();
+        self.temp.clear();
+        self.tokens.push(ScriptTokenPos{
+            pos: self.pos - len,
+            token: ScriptToken::I32(number)
+        });
+    }
+    
+    fn emit_f16(&mut self){
+        let number = if let Ok(v) = self.temp.parse::<f32>(){
+            self.temp.clear();
+            v
+        }
+        else{
+            0.0
+        };
+        let len = self.temp.len();
+        self.temp.clear();
+        self.tokens.push(ScriptTokenPos{
+            pos: self.pos - len,
+            token: ScriptToken::F16(number)
+        });
+    }    
+        
     fn emit_identifier(&mut self, starts_with_ds:bool){
         let id = match LiveId::from_str_with_lut(&self.temp){
             Err(str)=>{
@@ -623,7 +703,7 @@ impl ScriptTokenizer{
                     }
                     else if c == '.' && self.temp.chars().last() == Some('.'){
                         self.temp.pop();
-                        self.emit_number();
+                        self.emit_f64();
                         self.temp.push('.');
                         self.temp.push('.');
                         self.emit_operator();
@@ -638,43 +718,60 @@ impl ScriptTokenizer{
                     else if (c == 'x' || c == 'X') && self.temp.chars().position(|v| v == 'x' ||  v == 'X').is_none(){
                         self.temp.push(c);    
                     }
+                    else if c == 'f'{
+                        self.emit_f32();
+                        self.state = State::Whitespace
+                    } 
+                    else if  c == 'u'{
+                        self.emit_u32();
+                        self.state = State::Whitespace
+                    }
+                    else if c =='i'{
+                        self.emit_i32();
+                        self.state = State::Whitespace
+                    }
+                    else if c == 'h'{
+                        self.emit_f16();
+                        self.state = State::Whitespace
+                    }
                     else if c == '_'{ // skip these
+                        self.state = State::Whitespace
                     }
                     else if c == '$' || c.is_alphabetic(){
-                        self.emit_number();
+                        self.emit_f64();
                         self.state = State::Identifier(c == '$');
                         self.temp.push(c);
                     }
                     else if c == '#'{
-                        self.emit_number();
+                        self.emit_f64();
                         self.state = State::Color;
                         self.temp.push(c);
                     }
                     else if is_operator(c){
-                        self.emit_number();
+                        self.emit_f64();
                         self.state = State::Operator;
                         self.temp.push(c);
                     }
                     else if is_separator(c){
-                        self.emit_number();
+                        self.emit_f64();
                         self.emit_separator(c);
                         self.state = State::Whitespace;
                     }
                     else if c == '"'{
-                        self.emit_number();
+                        self.emit_f64();
                         self.state = State::String(true);
                     }
                     else if c == '\''{ 
-                        self.emit_number();
+                        self.emit_f64();
                         self.state = State::String(false);
                     }
                     else if let Some(tok) = is_block(c){
-                        self.emit_number();
+                        self.emit_f64();
                         self.emit_token_here(tok);
                         self.state = State::Whitespace;
                     }
                     else{
-                        self.emit_number();
+                        self.emit_f64();
                         self.state = State::Whitespace;
                     }
                 }

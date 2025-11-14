@@ -328,7 +328,8 @@ impl ScriptValueType{
     pub const ERR_POD_ARRAY_DEF_INCORRECT: Self = Self(Self::ERR_FIRST.0 + 36);
     pub const ERR_POD_TOO_MUCH_DATA: Self = Self(Self::ERR_FIRST.0 + 37);
     pub const ERR_POD_NOT_ENOUGH_DATA: Self = Self(Self::ERR_FIRST.0 + 38);
-    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 39);
+    pub const ERR_POD_INVALID_FIELD_NAME: Self = Self(Self::ERR_FIRST.0 + 39);
+    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 40);
     
     pub const HANDLE_FIRST: Self = Self(0x50);
     pub const HANDLE_LAST: Self = Self(0x7F);
@@ -451,6 +452,7 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_POD_ARRAY_DEF_INCORRECT=>write!(f,"PodArrayDefIncorrect"),
             Self::ERR_POD_TOO_MUCH_DATA=>write!(f,"PodTooMuchData"),
             Self::ERR_POD_NOT_ENOUGH_DATA=>write!(f,"PodNotEnoughData"),
+            Self::ERR_POD_INVALID_FIELD_NAME=>write!(f,"PodInvalidFieldName"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
             _=>write!(f,"ScriptValueType?")
@@ -575,7 +577,8 @@ impl ScriptValue{
     err_fn!(err_pod_array_def_incorrect, ERR_POD_ARRAY_DEF_INCORRECT);
     err_fn!(err_pod_too_much_data, ERR_POD_TOO_MUCH_DATA);
     err_fn!(err_pod_not_enough_data, ERR_POD_NOT_ENOUGH_DATA);
-    
+    err_fn!(err_pod_invalid_field_name, ERR_POD_INVALID_FIELD_NAME);
+        
     pub const fn raw(&self)->u64{self.0}
     
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ScriptValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()}
@@ -1121,6 +1124,18 @@ impl fmt::Display for ScriptValue {
                 write!(f, "{s}")
             }){
             return r;
+        }
+        if let Some(v) = self.as_f32(){
+            return write!(f, "{}", v)
+        }
+        if let Some(v) = self.as_i32(){
+            return write!(f, "{}", v)
+        }
+        if let Some(v) = self.as_u32(){
+            return write!(f, "{}", v)
+        }
+        if let Some(v) = self.as_f16(){
+            return write!(f, "{}", v)
         }
         if let Some(ptr) = self.as_object(){
             return write!(f, "[ScriptObject:{}]",ptr.index)
