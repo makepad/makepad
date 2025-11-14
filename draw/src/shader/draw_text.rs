@@ -190,7 +190,11 @@ impl DrawText {
             margin: walk.margin,
             width: turtle::Size::Fixed(max_size_in_lpxs.width as f64),
             height: turtle::Size::Fixed(max_size_in_lpxs.height as f64),
-            metrics: Metrics::default(),
+            metrics: Metrics {
+                descender: -laidout_text.rows.last().unwrap().descender_in_lpxs as f64,
+                line_gap: 0.0,
+                line_scale: 1.0,
+            }
         });
 
         if self.debug {
