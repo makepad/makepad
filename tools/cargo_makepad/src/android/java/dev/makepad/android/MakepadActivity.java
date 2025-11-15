@@ -70,14 +70,14 @@ class MakepadSurface
 {
 
     // The X,Y coordinates and pointer ID of the most recent ACTION_DOWN touch.
-    private float latestDownTouchX;
-    private float latestDownTouchY;
-    private int latestDownTouchPointerId;
+    private float latestDownTouchX = Float.NaN;
+    private float latestDownTouchY = Float.NaN;
+    private int latestDownTouchPointerId = -1;
 
     // The X,Y coordinates and pointer ID of the most recent non-ACTION_DOWN touch event.
-    private float latestTouchX;
-    private float latestTouchY;
-    private int latestTouchPointerId;
+    private float latestTouchX = Float.NaN;
+    private float latestTouchY = Float.NaN;
+    private int latestTouchPointerId = -1;
 
 
     public MakepadSurface(Context context){
@@ -136,7 +136,10 @@ class MakepadSurface
             latestDownTouchX = event.getX(index);
             latestDownTouchY = event.getY(index);
             latestDownTouchPointerId = pointerId;
-            latestTouchPointerId = -1; // invalidate the previous latestTouchX/Y values.
+            // Re-set the latestTouchX/Y values on each down-touch.
+            latestTouchX = latestDownTouchX;
+            latestTouchY = latestDownTouchY;
+            latestTouchPointerId = -1;
         }
         else if (actionMasked == MotionEvent.ACTION_MOVE) {
             latestTouchX = event.getX(index);
@@ -238,10 +241,6 @@ class MakepadSurface
                 MakepadNative.surfaceOnCharacter(character);
             }
         }
-
-        // if ((keyCode == KeyEvent.KEYCODE_BACK)) {
-        //     Log.d("Makepad", "KEYCODE_BACK");
-        // }
 
         if ((keyCode == KeyEvent.KEYCODE_VOLUME_UP) || (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
             return super.onKeyUp(keyCode, event);
