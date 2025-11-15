@@ -162,8 +162,6 @@ class MakepadSurface
 
         // If the touch has moved more than the touch slop, ignore this long click.
         if (isTouchBeyondSlopDistance(view)) {
-            // Log.d("Makepad", "onLongClick returning false due to slop movement");
-
             // Returning false here indicates that we have not handled the long click event,
             // which does *not* trigger the haptic feedback (vibration motor) to buzz.
             return false;
