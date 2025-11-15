@@ -48,7 +48,7 @@ pub fn test(){
         }
     }    
         
-    let code = script!{
+    let _code = script!{
         use mod.pod
         use mod.std
         
