@@ -300,7 +300,7 @@ impl ScriptPodTy{
     
     pub fn size_of(&self)->usize{
         match self{
-            Self::NIL | Self::UndefinedArray | Self::UndefinedStruct => 0,
+            Self::NIL | Self::UndefinedArray | Self::UndefinedStruct  => 0,
             Self::Bool => 4,
             Self::AtomicU32 => 4,
             Self::AtomicI32 => 4,

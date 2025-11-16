@@ -955,7 +955,9 @@ impl ScriptThread{
                     self.trap.goto_next()
                 }
                 else{ // jump to else
-                    self.push_stack_unchecked(NIL);
+                    if opargs.is_need_nil(){ // no else coming
+                        self.push_stack_unchecked(NIL);
+                    }
                     self.trap.goto_rel(opargs.to_u32());
                 }
             }
@@ -1083,7 +1085,8 @@ impl ScriptThread{
                 else{
                     self.pop_stack_resolved(heap)
                 };
-                let id = self.pop_stack_value().as_id().unwrap_or(id!());
+                let id = self.pop_stack_value();
+                let id = id.as_id().unwrap_or(id!());
                 self.def_scope_value(heap, id, value);
                 self.trap.goto_next();
             }

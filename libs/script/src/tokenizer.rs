@@ -596,6 +596,14 @@ impl ScriptTokenizer{
                         self.append_unfinished_string('\\');
                         self.state = State::String(double);
                     }
+                    else if c == '"'{
+                        self.append_unfinished_string('"');
+                        self.state = State::String(double);
+                    }
+                    else if c == '\''{
+                        self.append_unfinished_string('\'');
+                        self.state = State::String(double);
+                    }
                     else if c == 'r'{
                         self.append_unfinished_string('\r');
                         self.state = State::String(double);
