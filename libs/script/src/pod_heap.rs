@@ -562,7 +562,7 @@ impl ScriptHeap{
     fn pod_write_field(&self, field:&ScriptPodField, offset_of:usize, out_data:&mut[u32], value:ScriptValue, trap:&ScriptTrap){    
                 
         match &field.ty.data.ty{
-            ScriptPodTy::NIL | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct =>{
+            ScriptPodTy::NIL | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct  =>{
                 trap.err_unexpected();
                 return 
             }

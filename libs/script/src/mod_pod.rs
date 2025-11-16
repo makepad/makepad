@@ -52,6 +52,27 @@ pub struct ScriptPodBuiltins{
     pub pod_mat4x4f: ScriptPodType,
 }
 
+impl ScriptPodBuiltins{
+    pub fn value_to_exact_type(&self, val:ScriptValue)->Option<ScriptPodType>{
+        if val.is_f32(){
+            return Some(self.pod_f32)
+        }
+        if val.is_u32(){
+            return Some(self.pod_u32)
+        }
+        if val.is_i32(){
+            return Some(self.pod_i32)
+        }
+        if val.is_f16(){
+            return Some(self.pod_f16)
+        }
+        if val.is_bool(){
+            return Some(self.pod_bool)
+        }
+        None
+    }
+}
+
 pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->ScriptPodBuiltins{
     
     let pod = heap.new_module(id!(pod));

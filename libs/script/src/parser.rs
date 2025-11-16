@@ -1040,7 +1040,7 @@ impl ScriptParser{
                 if id == id!(elif){
                     let else_start = self.code_len() as u32;
                     self.push_code(Opcode::IF_ELSE.into(), self.index);
-                    self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 -if_start) );
+                    self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 - if_start) );
 
                     self.state.push(State::IfElse{else_start});
                     self.state.push(State::IfTest{index:self.index});
@@ -1050,11 +1050,11 @@ impl ScriptParser{
                 if id == id!(else){
                     let else_start = self.code_len() as u32;
                     self.push_code(Opcode::IF_ELSE.into(), self.index);
-                    self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 -if_start) );
+                    self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 - if_start));
                     self.state.push(State::IfElse{else_start});
                     return 1
                 }
-                self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 -if_start) );
+                self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 - if_start).set_need_nil() );
                // self.push_code_none(NIL);
                 if was_block{ // allow expression to chain
                     self.state.push(State::EndExpr)
@@ -1517,6 +1517,5 @@ impl ScriptParser{
             }
             self.index += step;
         }
-        //println!("MADE CODE: {:?}", self.opcodes);
     }
 }

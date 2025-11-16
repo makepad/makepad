@@ -89,6 +89,32 @@ impl ScriptStringData{
             vm.thread.trap.err_unexpected()
         });
         
+        native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(strip_prefix), script_args_def!(pat = NIL), |vm, args|{
+            let this = script_value!(vm, args.this);
+            let pat = script_value!(vm, args.pat);
+            if let Some(Some(s)) = vm.heap.string_mut_self_with(this,|heap,this|{
+                heap.string_mut_self_with(pat,|heap,pat|{
+                    heap.new_string_from_str(if let Some(s) = this.strip_prefix(pat){s}else{this})
+                })
+            }){
+                return s.into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+        
+        native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(strip_suffix), script_args_def!(pat = NIL), |vm, args|{
+            let this = script_value!(vm, args.this);
+            let pat = script_value!(vm, args.pat);
+            if let Some(Some(s)) = vm.heap.string_mut_self_with(this,|heap,this|{
+                heap.string_mut_self_with(pat,|heap,pat|{
+                    heap.new_string_from_str(if let Some(s) = this.strip_suffix(pat){s}else{this})
+                })
+            }){
+                return s.into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
+        
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(split), script_args_def!(pat = NIL), |vm, args|{
             let this = script_value!(vm, args.this);
             let pat = script_value!(vm, args.pat);

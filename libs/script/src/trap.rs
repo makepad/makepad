@@ -86,6 +86,8 @@ impl ScriptTrap{
     err_fwd!(err_pod_too_much_data);
     err_fwd!(err_pod_not_enough_data);
     err_fwd!(err_pod_invalid_field_name);
-        
+    err_fwd!(err_no_matching_shader_type);
+    err_fwd!(err_opcode_not_supported_in_shader);
+                
 }
 

@@ -37,11 +37,11 @@ let code = script!{
                 
     let comfy_ip = "10.0.0.123:8000"
     let openai_base = "http://127.0.0.1:8080";
-    let Display = {mac:"", ip:"", width:0, height:0}.freeze_api()
+    let Display = {mac:"", ip:"", landscape:false}.freeze_api()
     let displays = [
-        Display{mac:"28-07-08-2c-d9-42" ip:"10.0.0.122", width:1920, height:1080},
-        Display{mac:"B0-f2-f6-60-f6-e1" ip:"10.0.0.120", width:1920, height:1080},
-        Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.133", width:1080, height:1920}
+        Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.133", landscape:false}
+        Display{mac:"28-07-08-2c-d9-42" ip:"10.0.0.122", landscape:true},
+        Display{mac:"B0-f2-f6-60-f6-e1" ip:"10.0.0.120", landscape:true},
     ] 
                 
     fn openai_completion(messages){
@@ -89,7 +89,7 @@ let code = script!{
         task
     }
                             
-    fn comfy_last_image(prompt_id){
+    fn comfy_last_image(prompt_id, model){
         let task = std.task()
         let req = net.HttpRequest{
             url: "http://"+comfy_ip+"/history/"+prompt_id
@@ -98,23 +98,44 @@ let code = script!{
         net.http_request(req) do net.HttpEvents{
             on_response: |res| {
                 let data = res.body.parse_json()
-                let image = ok{data[prompt_id].outputs["9"].images[0]}
+                let image = ok{data[prompt_id].outputs[model.save].images[0]}
                 task.end(image)
             }
             on_error: |e| ~e
         }
         task
     }
-                
-    fn connect_comfy_websocket(){
+    
+    let models = {
+        flux:{
+            file: "./examples/comfyui/flux_dev_full_text_to_image.json"
+            sampler: "31"
+            image: "27"
+            prompt: "41"
+            save: "9"
+            width: 1600
+            height: 900
+        }
+        qwen:{
+            file: "./examples/comfyui/image_qwen_image.json"
+            sampler: "3"
+            image: "58"
+            prompt: "6"
+            save:"60"
+            width: 1664
+            height: 928
+        }
+    }
+    
+    fn connect_comfy_websocket(model){
         let task = std.task()
         net.web_socket("ws://"+comfy_ip+"/ws?clientId=1234") do net.WebSocketEvents{
             on_string:fn(str){
                 let str = str.parse_json()
-                if ok{str.data.nodes["31"].state == "running"}
-                    task.emit(@progress str.data.nodes["31"].value)
-                if ok{str.data.nodes["9"].state == "finished"}{
-                    let prompt_id = str.data.nodes["9"].prompt_id;
+                if ok{str.data.nodes[model.sampler].state == "running"}
+                    task.emit(@progress str.data.nodes[model.sampler].value)
+                if ok{str.data.nodes[model.save].state == "finished"}{
+                    let prompt_id = str.data.nodes[model.save].prompt_id;
                     task.emit(@done, prompt_id)
                 }
             }
@@ -122,14 +143,20 @@ let code = script!{
         task
     }
                         
-    fn comfy_render(prompt, display){
+    fn comfy_render(prompt, display, model){
         let task = std.task()
         std.print("Rendering AI: ");
-        let flow = fs.read("./examples/comfyui/flux_dev.json").parse_json()
-        flow["6"].inputs.text = prompt
-        flow["31"].inputs.seed = std.random_u32()
-        flow["27"].inputs.width = display.width
-        flow["27"].inputs.height = display.height
+        let flow = fs.read(model.file).parse_json()
+        
+        flow[model.prompt].inputs.clip_l = prompt.style_and_keywords
+        flow[model.prompt].inputs.t5xxl = prompt.visual_description
+        
+        flow[model.sampler].inputs.seed = std.random_u32()
+        flow[model.image].inputs.width = 
+            if display.landscape model.width else model.height
+        flow[model.image].inputs.height = 
+            if display.landscape model.height else model.width
+            
         let req = net.HttpRequest{
             url: "http://" + comfy_ip + "/prompt"
             method: net.HttpMethod.POST
@@ -163,29 +190,32 @@ let code = script!{
     // main application flow
                 
     std.random_seed()
-                
-    let web_socket = connect_comfy_websocket()
+        
+    let model = models.flux;
+                    
+    let web_socket = connect_comfy_websocket(model)
                 
     let display_iter = 0
     let messages = []
-                
+    
     fn post(){ 
         // handle AI prompt messages
         
-        let prompt = fs.read("/Users/admin/makepad/makepad/local/prompt.txt").parse_json();
-        if messages.len() > 150 messages.clear()
+        let prompt = fs.read("/Users/admin/prompt.txt").parse_json();
+        if messages.len() > 40 messages.clear()
         if prompt.clear || messages.len() == 0{
             messages.clear()
             messages.push({content:prompt.system.trim() role:"user"})
             messages.push({content:prompt.prompt.trim() role:"user"})
         }
         else{
+            messages[0] = {content:prompt.system.trim() role:"user"}
             messages.push({content:prompt.prompt.trim() role:"user"})
         }
+        let display = displays[display_iter % displays.len()]
         display_iter += 1
         // rotate displays
-        let display = displays[display_iter % displays.len()]
-                                
+                                        
         let image_prompt = openai_completion(messages).last()
         
         // put the answer back in the messages array
@@ -194,10 +224,13 @@ let code = script!{
         // flush the websocket queue
         web_socket.queue.clear()
         
-        std.println("Rendering prompt:"+image_prompt)
-        let prompt_id = comfy_render(image_prompt display).last()
-        // this loop needs some more features like match or a for loop with array destructuring'
         
+        let image_prompt = image_prompt.strip_prefix("```json").strip_suffix("```").parse_json();
+        
+        std.println("Rendering prompt: "+image_prompt.visual_description+" keywords: "+image_prompt.style_and_keywords)
+        
+        let prompt_id = comfy_render(image_prompt display model).last()
+        // this loop needs some more features like match or a for loop with array destructuring'
         loop{
             let d = web_socket.next();
             if d[0] == @progress std.println("Progress: "+d[1])
@@ -206,7 +239,7 @@ let code = script!{
             }
         }
         std.println("Fetching last image from comfy");
-        let image = comfy_last_image(prompt_id).last()
+        let image = comfy_last_image(prompt_id, model).last()
         // fetch the image from comfy
         let data = comfy_image_download(image).last()
         let path = "/Users/admin/makepad/makepad/local/eink.png"
