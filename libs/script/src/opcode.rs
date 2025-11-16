@@ -8,7 +8,7 @@ impl OpcodeArgs{
     pub const TYPE_NIL:u32 =  1 <<28;
     pub const TYPE_NUMBER:u32 =  2 <<28;
     pub const TYPE_MASK: u32 = 3 <<28;
-    //pub const STATEMENT_FLAG:u32 =  1 <<31;
+    pub const NEED_NIL_FLAG:u32 =  1 <<31;
     pub const POP_TO_ME_FLAG:u32 =  1 <<30;
     pub const MAX_U32: u32 = (1<<28) - 1;
     
@@ -22,6 +22,10 @@ impl OpcodeArgs{
     pub fn from_u32(jump_to_next:u32)->Self{
         Self(Self::TYPE_NUMBER | (jump_to_next&0x0fff_ffff))
     }
+    
+    pub fn set_need_nil(self)->Self{
+        Self(self.0 | Self::NEED_NIL_FLAG)
+    }
         
     pub fn to_u32(&self)->u32{
         self.0 & 0x1fff_ffff
@@ -34,7 +38,11 @@ impl OpcodeArgs{
    // pub fn is_statement(&self)->bool{
    //     self.0 & Self::STATEMENT_FLAG != 0
    // }
-    
+   
+   pub fn is_need_nil(&self)->bool{
+       self.0 & Self::NEED_NIL_FLAG != 0
+   }
+   
     pub fn is_pop_to_me(&self)->bool{
         self.0 & Self::POP_TO_ME_FLAG != 0
     }

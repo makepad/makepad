@@ -32,6 +32,7 @@ pub mod pod;
 pub mod pod_heap;
 pub mod function;
 pub mod test;
+pub mod shader;
 
 pub use gc::*;
 pub use makepad_live_id::*;

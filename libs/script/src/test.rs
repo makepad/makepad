@@ -48,27 +48,21 @@ pub fn test(){
         }
     }    
         
-    let _code = script!{
-        use mod.pod
-        use mod.std
+    let code = script!{
+        // alright..
+        use mod.shader
         
-        // we need to trace this function and transform it to wgsl
         fn pixel(){
-            let a = 1
-            let b = 2
-            a + b
+            let x = 1
+            1 + 2
         }
         
-        // we turn pixel into a shader
-        std.to_shader(pixel)
-        
-        
-
+        ~shader.compile(pixel)
     };
         
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod

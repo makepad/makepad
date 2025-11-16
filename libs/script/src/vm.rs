@@ -9,6 +9,7 @@ use crate::mod_std::*;
 use crate::mod_math::*;
 use crate::mod_pod::*;
 use crate::object::*;
+use crate::shader::*;
 use std::cell::RefCell;
 use std::any::Any;
 
@@ -295,6 +296,7 @@ impl ScriptVmBase{
         let mut native = ScriptNative::new(&mut heap);
         define_math_module(&mut heap, &mut native);
         define_std_module(&mut heap, &mut native);
+        define_shader_module(&mut heap, &mut native);
         let pod_builtins = define_pod_module(&mut heap, &mut native);
             
         let builtins = ScriptBuiltins::new(&mut heap, pod_builtins);
