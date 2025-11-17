@@ -228,7 +228,7 @@ pub struct Label {
     #[live(Flow::right_wrap())] flow: Flow,
     #[live] padding: Padding,
     
-    #[rust] area: Area,
+    #[area] area: Area,
     //margin: Margin,
     #[live] text: ArcStringMut,
 
