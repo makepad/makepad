@@ -10,207 +10,207 @@ use crate::pod::*;
 use std::any::Any;
 
 macro_rules! f64_scope_assign_op_impl{
-    ($obj:ident, $heap:ident, $op:tt)=>{{
-        let value = $obj.pop_stack_resolved($heap);
-        let id = $obj.pop_stack_value();
+    ($self:ident, $heap:ident, $op:tt)=>{{
+        let value = $self.pop_stack_resolved($heap);
+        let id = $self.pop_stack_value();
         if let Some(id) = id.as_id(){
-            let va = $obj.scope_value($heap, id);
+            let va = $self.scope_value($heap, id);
             if va.is_err(){
-                $obj.push_stack_unchecked(va);
+                $self.push_stack_unchecked(va);
             }
             else{
-                let fa = $heap.cast_to_f64(va, $obj.trap.ip);
-                let fb = $heap.cast_to_f64(value, $obj.trap.ip);
-                let value = $obj.set_scope_value($heap, id, ScriptValue::from_f64_traced_nan((fa $op fb), $obj.trap.ip));
-                $obj.push_stack_unchecked(value);
+                let fa = $heap.cast_to_f64(va, $self.trap.ip);
+                let fb = $heap.cast_to_f64(value, $self.trap.ip);
+                let value = $self.set_scope_value($heap, id, ScriptValue::from_f64_traced_nan((fa $op fb), $self.trap.ip));
+                $self.push_stack_unchecked(value);
             }
         }
         else{
-            let value = $obj.trap.err_not_assignable();
-            $obj.push_stack_unchecked(value);
+            let value = $self.trap.err_not_assignable();
+            $self.push_stack_unchecked(value);
         }
-        $obj.trap.goto_next();
+        $self.trap.goto_next();
     }}
 }
 
 macro_rules! fu64_scope_assign_op_impl{
-    ($obj:ident, $heap:ident, $op:tt)=>{{
-        let value = $obj.pop_stack_resolved($heap);
-        let id = $obj.pop_stack_value();
+    ($self:ident, $heap:ident, $op:tt)=>{{
+        let value = $self.pop_stack_resolved($heap);
+        let id = $self.pop_stack_value();
         if let Some(id) = id.as_id(){
-            let old_value = $obj.scope_value($heap, id);
+            let old_value = $self.scope_value($heap, id);
             if old_value.is_err(){
-                $obj.push_stack_unchecked(old_value);
+                $self.push_stack_unchecked(old_value);
             }
             else{
-                let ua = $heap.cast_to_f64(old_value, $obj.trap.ip) as u64;
-                let ub = $heap.cast_to_f64(value, $obj.trap.ip) as u64;
-                let value = $obj.set_scope_value($heap, id, ScriptValue::from_f64_traced_nan((ua $op ub) as f64, $obj.trap.ip));
-                $obj.push_stack_unchecked(value);
+                let ua = $heap.cast_to_f64(old_value, $self.trap.ip) as u64;
+                let ub = $heap.cast_to_f64(value, $self.trap.ip) as u64;
+                let value = $self.set_scope_value($heap, id, ScriptValue::from_f64_traced_nan((ua $op ub) as f64, $self.trap.ip));
+                $self.push_stack_unchecked(value);
             }
         }
         else{
-            let value = $obj.trap.err_not_assignable();
-            $obj.push_stack_unchecked(value);
+            let value = $self.trap.err_not_assignable();
+            $self.push_stack_unchecked(value);
         }
-        $obj.trap.goto_next();
+        $self.trap.goto_next();
     }}
 }
 
 macro_rules! f64_field_assign_op_impl{
-    ($obj:ident, $heap:ident, $op:tt)=>{{
-        let value = $obj.pop_stack_resolved($heap);
-        let field = $obj.pop_stack_value();
-        let object = $obj.pop_stack_resolved($heap);
+    ($self:ident, $heap:ident, $op:tt)=>{{
+        let value = $self.pop_stack_resolved($heap);
+        let field = $self.pop_stack_value();
+        let object = $self.pop_stack_resolved($heap);
         if let Some(obj) = object.as_object(){
-            let old_value = $heap.value(obj, field, &$obj.trap);
-            let fa = $heap.cast_to_f64(old_value, $obj.trap.ip);
-            let fb = $heap.cast_to_f64(value, $obj.trap.ip);
-            let value = $heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(fa $op fb, $obj.trap.ip), &mut $obj.trap);
-            $obj.push_stack_unchecked(value);
+            let old_value = $heap.value(obj, field, &$self.trap);
+            let fa = $heap.cast_to_f64(old_value, $self.trap.ip);
+            let fb = $heap.cast_to_f64(value, $self.trap.ip);
+            let value = $heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(fa $op fb, $self.trap.ip), &mut $self.trap);
+            $self.push_stack_unchecked(value);
         }
         else{
-            let value = $obj.trap.err_not_assignable();
-            $obj.push_stack_unchecked(value);
+            let value = $self.trap.err_not_assignable();
+            $self.push_stack_unchecked(value);
         }
-        $obj.trap.goto_next();
+        $self.trap.goto_next();
     }}
 }
 
 macro_rules! fu64_field_assign_op_impl{
-    ($obj:ident, $heap:ident, $op:tt)=>{{
-        let value = $obj.pop_stack_resolved($heap);
-        let field = $obj.pop_stack_value();
-        let object = $obj.pop_stack_resolved($heap);
+    ($self:ident, $heap:ident, $op:tt)=>{{
+        let value = $self.pop_stack_resolved($heap);
+        let field = $self.pop_stack_value();
+        let object = $self.pop_stack_resolved($heap);
         if let Some(obj) = object.as_object(){
-            let old_value = $heap.value(obj, field, &$obj.trap);
-            let fa = $heap.cast_to_f64(old_value, $obj.trap.ip) as u64;
-            let fb = $heap.cast_to_f64(value, $obj.trap.ip) as u64;
+            let old_value = $heap.value(obj, field, &$self.trap);
+            let fa = $heap.cast_to_f64(old_value, $self.trap.ip) as u64;
+            let fb = $heap.cast_to_f64(value, $self.trap.ip) as u64;
             
-            let value = $heap.set_value(obj, field, ScriptValue::from_f64_traced_nan((fa $op fb) as f64, $obj.trap.ip), &mut $obj.trap);
-            $obj.push_stack_unchecked(value);
+            let value = $heap.set_value(obj, field, ScriptValue::from_f64_traced_nan((fa $op fb) as f64, $self.trap.ip), &mut $self.trap);
+            $self.push_stack_unchecked(value);
         }
         else{
-            let value = $obj.trap.err_not_assignable();
-            $obj.push_stack_unchecked(value);
+            let value = $self.trap.err_not_assignable();
+            $self.push_stack_unchecked(value);
         }
-        $obj.trap.goto_next();
+        $self.trap.goto_next();
     }}
 }
 
 macro_rules! f64_index_assign_op_impl{
-    ($obj:ident, $heap:ident, $op:tt)=>{{
-        let value = $obj.pop_stack_resolved($heap);
-        let index = $obj.pop_stack_resolved($heap);
-        let object = $obj.pop_stack_resolved($heap);
+    ($self:ident, $heap:ident, $op:tt)=>{{
+        let value = $self.pop_stack_resolved($heap);
+        let index = $self.pop_stack_resolved($heap);
+        let object = $self.pop_stack_resolved($heap);
         if let Some(obj) = object.as_object(){
-            let old_value = $heap.value(obj, index, &$obj.trap);
-            let fa = $heap.cast_to_f64(old_value, $obj.trap.ip);
-            let fb = $heap.cast_to_f64(value, $obj.trap.ip);
-            let value = $heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(fa $op fb, $obj.trap.ip), &$obj.trap);
-            $obj.push_stack_unchecked(value);
+            let old_value = $heap.value(obj, index, &$self.trap);
+            let fa = $heap.cast_to_f64(old_value, $self.trap.ip);
+            let fb = $heap.cast_to_f64(value, $self.trap.ip);
+            let value = $heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(fa $op fb, $self.trap.ip), &$self.trap);
+            $self.push_stack_unchecked(value);
         }
         else if let Some(arr) = object.as_array(){
             let index = index.as_index();
-            let old_value = $heap.array_index(arr, index, &$obj.trap);
-            let fa = $heap.cast_to_f64(old_value, $obj.trap.ip);
-            let fb = $heap.cast_to_f64(value, $obj.trap.ip);
-            let value = $heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(fa $op fb, $obj.trap.ip), &$obj.trap);
-            $obj.push_stack_unchecked(value);
+            let old_value = $heap.array_index(arr, index, &$self.trap);
+            let fa = $heap.cast_to_f64(old_value, $self.trap.ip);
+            let fb = $heap.cast_to_f64(value, $self.trap.ip);
+            let value = $heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(fa $op fb, $self.trap.ip), &$self.trap);
+            $self.push_stack_unchecked(value);
         }
         else{
-            let value = $obj.trap.err_not_assignable();
-            $obj.push_stack_unchecked(value);
+            let value = $self.trap.err_not_assignable();
+            $self.push_stack_unchecked(value);
         }
-        $obj.trap.goto_next();
+        $self.trap.goto_next();
     }}
 }
 
 macro_rules! fu64_index_assign_op_impl{
-    ($obj:ident, $heap:ident, $op:tt)=>{{
-        let value = $obj.pop_stack_resolved($heap);
-        let index = $obj.pop_stack_resolved($heap);
-        let object = $obj.pop_stack_resolved($heap);
+    ($self:ident, $heap:ident, $op:tt)=>{{
+        let value = $self.pop_stack_resolved($heap);
+        let index = $self.pop_stack_resolved($heap);
+        let object = $self.pop_stack_resolved($heap);
         if let Some(obj) = object.as_object(){
-            let old_value = $heap.value(obj, index, &$obj.trap);
-            let fa = $heap.cast_to_f64(old_value, $obj.trap.ip) as u64;
-            let fb = $heap.cast_to_f64(value, $obj.trap.ip) as u64;
-            let value = $heap.set_value(obj, index, ScriptValue::from_f64_traced_nan((fa $op fb) as f64, $obj.trap.ip), &mut $obj.trap);
-            $obj.push_stack_unchecked(value);
+            let old_value = $heap.value(obj, index, &$self.trap);
+            let fa = $heap.cast_to_f64(old_value, $self.trap.ip) as u64;
+            let fb = $heap.cast_to_f64(value, $self.trap.ip) as u64;
+            let value = $heap.set_value(obj, index, ScriptValue::from_f64_traced_nan((fa $op fb) as f64, $self.trap.ip), &mut $self.trap);
+            $self.push_stack_unchecked(value);
         }
         else if let Some(arr) = object.as_array(){
             let index = index.as_index();
-            let old_value = $heap.array_index(arr, index, &$obj.trap);
-            let fa = $heap.cast_to_f64(old_value, $obj.trap.ip) as u64;
-            let fb = $heap.cast_to_f64(value, $obj.trap.ip) as u64;
-            let value = $heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan((fa $op fb) as f64, $obj.trap.ip), &$obj.trap);
-            $obj.push_stack_unchecked(value);
+            let old_value = $heap.array_index(arr, index, &$self.trap);
+            let fa = $heap.cast_to_f64(old_value, $self.trap.ip) as u64;
+            let fb = $heap.cast_to_f64(value, $self.trap.ip) as u64;
+            let value = $heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan((fa $op fb) as f64, $self.trap.ip), &$self.trap);
+            $self.push_stack_unchecked(value);
         }
         else{
-            let value = $obj.trap.err_not_assignable();
-            $obj.push_stack_unchecked(value);
+            let value = $self.trap.err_not_assignable();
+            $self.push_stack_unchecked(value);
         }
-        $obj.trap.goto_next();
+        $self.trap.goto_next();
     }}
 }
 
 macro_rules! f64_op_impl{
-    ($obj:ident, $heap:ident, $args:ident, $op:tt)=>{{
+    ($self:ident, $heap:ident, $args:ident, $op:tt)=>{{
         let fb = if $args.is_u32(){
             $args.to_u32() as f64
         }
         else{
-            let b = $obj.pop_stack_resolved($heap);
-            $heap.cast_to_f64(b, $obj.trap.ip)
+            let b = $self.pop_stack_resolved($heap);
+            $heap.cast_to_f64(b, $self.trap.ip)
         };
-        let a = $obj.pop_stack_resolved($heap);
-        let fa = $heap.cast_to_f64(a, $obj.trap.ip);
-        $obj.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa $op fb, $obj.trap.ip));
-        $obj.trap.goto_next();
+        let a = $self.pop_stack_resolved($heap);
+        let fa = $heap.cast_to_f64(a, $self.trap.ip);
+        $self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa $op fb, $self.trap.ip));
+        $self.trap.goto_next();
     }}
 }
 
 macro_rules! fu64_op_impl{
-    ($obj:ident, $heap:ident, $args:ident, $op:tt)=>{{
+    ($self:ident, $heap:ident, $args:ident, $op:tt)=>{{
         let ub = if $args.is_u32(){
             $args.to_u32() as u64
         }
         else{
-            let b = $obj.pop_stack_resolved($heap);
-            $heap.cast_to_f64(b, $obj.trap.ip) as u64
+            let b = $self.pop_stack_resolved($heap);
+            $heap.cast_to_f64(b, $self.trap.ip) as u64
         };
-        let a = $obj.pop_stack_resolved($heap);
-        let ua = $heap.cast_to_f64(a, $obj.trap.ip) as u64;
-        $obj.push_stack_unchecked(ScriptValue::from_f64_traced_nan((ua $op ub) as f64, $obj.trap.ip));
-        $obj.trap.goto_next();
+        let a = $self.pop_stack_resolved($heap);
+        let ua = $heap.cast_to_f64(a, $self.trap.ip) as u64;
+        $self.push_stack_unchecked(ScriptValue::from_f64_traced_nan((ua $op ub) as f64, $self.trap.ip));
+        $self.trap.goto_next();
     }}
 } 
 
 macro_rules! f64_cmp_impl{
-    ($obj:ident, $heap:ident, $args:ident, $op:tt)=>{{
+    ($self:ident, $heap:ident, $args:ident, $op:tt)=>{{
         let fb = if $args.is_u32(){
             $args.to_u32() as f64
         }
         else{
-            let b = $obj.pop_stack_resolved($heap);
-            $heap.cast_to_f64(b, $obj.trap.ip)
+            let b = $self.pop_stack_resolved($heap);
+            $heap.cast_to_f64(b, $self.trap.ip)
         };
-        let a = $obj.pop_stack_resolved($heap);
-        let fa = $heap.cast_to_f64(a, $obj.trap.ip);
-        //let fb = $heap.cast_to_f64(b, $obj.ip);
-        $obj.push_stack_unchecked(ScriptValue::from_bool(fa $op fb));
-        $obj.trap.goto_next();
+        let a = $self.pop_stack_resolved($heap);
+        let fa = $heap.cast_to_f64(a, $self.trap.ip);
+        //let fb = $heap.cast_to_f64(b, $self.ip);
+        $self.push_stack_unchecked(ScriptValue::from_bool(fa $op fb));
+        $self.trap.goto_next();
     }}
 }
 
 macro_rules! bool_op_impl{
-    ($obj:ident, $heap:ident, $op:tt)=>{{
-        let b = $obj.pop_stack_resolved($heap);
-        let a = $obj.pop_stack_resolved($heap);
+    ($self:ident, $heap:ident, $op:tt)=>{{
+        let b = $self.pop_stack_resolved($heap);
+        let a = $self.pop_stack_resolved($heap);
         let ba = $heap.cast_to_bool(a);
         let bb = $heap.cast_to_bool(b);
-        $obj.push_stack_unchecked(ScriptValue::from_bool((ba $op bb)));
-        $obj.trap.goto_next();
+        $self.push_stack_unchecked(ScriptValue::from_bool((ba $op bb)));
+        $self.trap.goto_next();
     }}
 } 
 

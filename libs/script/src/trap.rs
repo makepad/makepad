@@ -88,6 +88,7 @@ impl ScriptTrap{
     err_fwd!(err_pod_invalid_field_name);
     err_fwd!(err_no_matching_shader_type);
     err_fwd!(err_opcode_not_supported_in_shader);
-                
+    err_fwd!(err_no_wgsl_conversion_available);
+    
 }
 

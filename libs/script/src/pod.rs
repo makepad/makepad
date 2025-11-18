@@ -58,6 +58,9 @@ pub enum ScriptPodVec{
     Vec2i,
     Vec3i,
     Vec4i,
+    Vec2b,
+    Vec3b,
+    Vec4b,
 }
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScriptPodMat{
@@ -83,74 +86,86 @@ impl ScriptPodVec{
     pub fn name(&self)->LiveId{
         match self{
             Self::Vec2f=>id!(vec2f),
-            Self::Vec2h=>id!(vec2h),
-            Self::Vec2u=>id!(vec2u),
-            Self::Vec2i=>id!(vec2i),
             Self::Vec3f=>id!(vec3f),
-            Self::Vec3h=>id!(vec3h),
-            Self::Vec3u=>id!(vec3u),
-            Self::Vec3i=>id!(vec3i),
             Self::Vec4f=>id!(vec4f),
+            Self::Vec2h=>id!(vec2h),
+            Self::Vec3h=>id!(vec3h),
             Self::Vec4h=>id!(vec4h),
+            Self::Vec2u=>id!(vec2u),
+            Self::Vec3u=>id!(vec3u),
             Self::Vec4u=>id!(vec4u),
+            Self::Vec2i=>id!(vec2i),
+            Self::Vec3i=>id!(vec3i),
             Self::Vec4i=>id!(vec4i),
+            Self::Vec2b=>id!(vec2b),
+            Self::Vec3b=>id!(vec3b),
+            Self::Vec4b=>id!(vec4b),
         }
     }
     
     pub fn builtin(&self, builtin: &ScriptPodBuiltins)->ScriptPodType{
         match self{
             Self::Vec2f=>builtin.pod_vec2f,
-            Self::Vec2h=>builtin.pod_vec2h,
-            Self::Vec2u=>builtin.pod_vec2u,
-            Self::Vec2i=>builtin.pod_vec2i,
             Self::Vec3f=>builtin.pod_vec3f,
-            Self::Vec3h=>builtin.pod_vec3h,
-            Self::Vec3u=>builtin.pod_vec3u,
-            Self::Vec3i=>builtin.pod_vec3i,
             Self::Vec4f=>builtin.pod_vec4f,
+            Self::Vec2h=>builtin.pod_vec2h,
+            Self::Vec3h=>builtin.pod_vec3h,
             Self::Vec4h=>builtin.pod_vec4h,
+            Self::Vec2u=>builtin.pod_vec2u,
+            Self::Vec3u=>builtin.pod_vec3u,
             Self::Vec4u=>builtin.pod_vec4u,
+            Self::Vec2i=>builtin.pod_vec2i,
+            Self::Vec3i=>builtin.pod_vec3i,
             Self::Vec4i=>builtin.pod_vec4i,
+            Self::Vec2b=>builtin.pod_vec2b,
+            Self::Vec3b=>builtin.pod_vec3b,
+            Self::Vec4b=>builtin.pod_vec4b,
         }
     }
     
     pub fn dims(&self)->usize{
         match self{
-            Self::Vec2f|Self::Vec2h|Self::Vec2u|Self::Vec2i=>2,
-            Self::Vec3f|Self::Vec3h|Self::Vec3u|Self::Vec3i=>3,
-            Self::Vec4f|Self::Vec4h|Self::Vec4u|Self::Vec4i=>4,
+            Self::Vec2f|Self::Vec2h|Self::Vec2u|Self::Vec2i|Self::Vec2b=>2,
+            Self::Vec3f|Self::Vec3h|Self::Vec3u|Self::Vec3i|Self::Vec3b=>3,
+            Self::Vec4f|Self::Vec4h|Self::Vec4u|Self::Vec4i|Self::Vec4b=>4,
         }
     }
     pub fn align_of(&self)->usize{
         match self{
             Self::Vec2f=>8,
-            Self::Vec2h=>4,
-            Self::Vec2u=>8,
-            Self::Vec2i=>8,
             Self::Vec3f=>16,
-            Self::Vec3h=>8,
-            Self::Vec3u=>16,
-            Self::Vec3i=>16,
             Self::Vec4f=>8,
+            Self::Vec2h=>4,
+            Self::Vec3h=>8,
             Self::Vec4h=>16,
+            Self::Vec2u=>8,
+            Self::Vec3u=>16,
             Self::Vec4u=>16,
+            Self::Vec2i=>8,
+            Self::Vec3i=>16,
             Self::Vec4i=>16,
+            Self::Vec2b=>8,
+            Self::Vec3b=>16,
+            Self::Vec4b=>16,
         }
     }
     pub fn size_of(&self)->usize{
         match self{
             Self::Vec2f=>8,
-            Self::Vec2h=>4,
-            Self::Vec2u=>8,
-            Self::Vec2i=>8,
             Self::Vec3f=>12,
-            Self::Vec3h=>6,
-            Self::Vec3u=>12,
-            Self::Vec3i=>12,
             Self::Vec4f=>16,
+            Self::Vec2h=>4,
+            Self::Vec3h=>6,
             Self::Vec4h=>8,
+            Self::Vec2u=>8,
+            Self::Vec3u=>12,
             Self::Vec4u=>16,
+            Self::Vec2i=>8,
+            Self::Vec3i=>12,
             Self::Vec4i=>16,
+            Self::Vec2b=>8,
+            Self::Vec3b=>12,
+            Self::Vec4b=>16,
         }
     }
 }
@@ -241,13 +256,13 @@ pub enum ScriptPodTy{
     UndefinedArray,
     UndefinedStruct,
     // limited to the types WGSL supports
+    F32,
+    F16,
+    U32,
+    I32,
     Bool,
     AtomicU32,
     AtomicI32,
-    U32,
-    I32,
-    F32,
-    F16,
     Vec(ScriptPodVec),
     Mat(ScriptPodMat),
     Struct{
@@ -282,13 +297,13 @@ impl ScriptPodTy{
     pub fn align_of(&self)->usize{
         match self{
             Self::NIL | Self::UndefinedArray | Self::UndefinedStruct => 0,
+            Self::F32 => 4,
+            Self::F16 => 2,
+            Self::U32 => 4,
+            Self::I32 => 4,
             Self::Bool => 4,
             Self::AtomicU32 => 4,
             Self::AtomicI32 => 4,
-            Self::U32 => 4,
-            Self::I32 => 4,
-            Self::F32 => 4,
-            Self::F16 => 2,
             Self::Vec(bt)=>bt.align_of(),
             Self::Mat(bt)=>bt.align_of(),
             Self::Struct{align_of,..}=>*align_of,
@@ -301,13 +316,13 @@ impl ScriptPodTy{
     pub fn size_of(&self)->usize{
         match self{
             Self::NIL | Self::UndefinedArray | Self::UndefinedStruct  => 0,
+            Self::F32 => 4,
+            Self::F16 => 2,
+            Self::U32 => 4,
+            Self::I32 => 4,
             Self::Bool => 4,
             Self::AtomicU32 => 4,
             Self::AtomicI32 => 4,
-            Self::U32 => 4,
-            Self::I32 => 4,
-            Self::F32 => 4,
-            Self::F16 => 2,
             Self::Vec(bt)=>bt.size_of(),
             Self::Mat(bt)=>bt.size_of(),
             Self::Struct{size_of,..}=>*size_of,

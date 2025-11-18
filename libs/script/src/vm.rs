@@ -234,6 +234,7 @@ impl <'a> ScriptVm<'a>{
             body.parser.parse(&body.tokenizer.tokens, &block.values);
             drop(bodies);
             // lets point our thread to it
+            
             self.thread.run_root(&mut self.heap, &self.code, self.host, body_id)
         }
         else{

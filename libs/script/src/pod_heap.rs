@@ -428,6 +428,28 @@ impl ScriptHeap{
                     ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>{
                         out_data[o2] = value as i32 as u32;
                     }
+                    ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b=>{
+                        out_data[o2] = value as i32 as u32;
+                    }
+                }
+                return ot.elem_size()
+            }
+        }
+        else if let Some(value) = value.as_bool(){
+            if offset_of >= ot.elem_size() * ot.dims(){
+                trap.err_pod_too_much_data();
+                return 0
+            }
+            else{
+                let o = offset_of;
+                let o2 = o>>2;
+                match ot{
+                    ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b=>{
+                        out_data[o2] = if value{1} else {0}
+                    }
+                    _=>{
+                        trap.err_pod_type_not_matching();
+                    }
                 }
                 return ot.elem_size()
             }
@@ -461,6 +483,7 @@ impl ScriptHeap{
                                 ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>for i in 0..it.dims(){
                                     out_data[o2+i] = (in_pod.data[i] as f32).to_bits();
                                 }
+                                ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b|
                                 ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>for i in 0..it.dims(){
                                     out_data[o2+i] = (in_pod.data[i] as i32 as f32).to_bits();
                                 }
@@ -491,6 +514,7 @@ impl ScriptHeap{
                                         out_data[op>>2] = u as u32;
                                     }
                                 }
+                                ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b|
                                 ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>for i in 0..it.dims(){
                                     let u = f32_to_f16(in_pod.data[i] as i32 as f32);
                                     let op = o + (i<<1);
@@ -519,6 +543,7 @@ impl ScriptHeap{
                                 ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>for i in 0..it.dims(){
                                     out_data[o2+i] = in_pod.data[i];
                                 }
+                                ScriptPodVec::Vec2b | ScriptPodVec::Vec3b| ScriptPodVec::Vec4b|
                                 ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>for i in 0..it.dims(){
                                     out_data[o2+i] = in_pod.data[i] as i32 as u32;
                                 }
@@ -540,7 +565,32 @@ impl ScriptHeap{
                                 ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>for i in 0..it.dims(){
                                     out_data[o2+i] = in_pod.data[i] as i32 as u32;
                                 }
+                                ScriptPodVec::Vec2b | ScriptPodVec::Vec3b| ScriptPodVec::Vec4b|
                                 ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>for i in 0..it.dims(){
+                                    out_data[o2+i] = in_pod.data[i];
+                                }
+                            }
+                        }
+                        ScriptPodVec::Vec2b | ScriptPodVec::Vec3b| ScriptPodVec::Vec4b=>{
+                            match it{
+                                ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>for i in 0..it.dims(){
+                                    out_data[o2+i] = if f32::from_bits(in_pod.data[i]) as u32 != 0{1} else {0};
+                                }
+                                ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>for i in 0..it.dims(){
+                                    if i&1 == 1{
+                                        out_data[o2+i] = if f16_to_f32((in_pod.data[i>>1]>>16) as u16) as i32 as u32 != 0{1} else{0}
+                                    }
+                                    else{
+                                        out_data[o2+i] = if f16_to_f32(in_pod.data[i>>1] as u16) as i32 as u32 != 0{1} else{0}
+                                    }
+                                }
+                                ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>for i in 0..it.dims(){
+                                    out_data[o2+i] = if in_pod.data[i] as i32 as u32 != 0{1} else {0};
+                                }
+                                ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>for i in 0..it.dims(){
+                                    out_data[o2+i] = if in_pod.data[i] != 0{1} else {0};
+                                }
+                                ScriptPodVec::Vec2b | ScriptPodVec::Vec3b| ScriptPodVec::Vec4b=>for i in 0..it.dims(){
                                     out_data[o2+i] = in_pod.data[i];
                                 }
                             }
@@ -805,6 +855,9 @@ impl ScriptHeap{
             ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>{
                 return ScriptValue::from_i32(data[x] as i32)
             },
+            ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b=>{
+                return ScriptValue::from_bool(data[x] as i32 != 0)
+            },
         }
     }
         
@@ -815,18 +868,21 @@ impl ScriptHeap{
                 ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>builtins.pod_vec2h,
                 ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>builtins.pod_vec2u,
                 ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>builtins.pod_vec2i,
+                ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b=>builtins.pod_vec2b,
             }
             3=>match vec{
                 ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>builtins.pod_vec3f,
                 ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>builtins.pod_vec3h,
                 ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>builtins.pod_vec3u,
                 ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>builtins.pod_vec3i,
+                ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b=>builtins.pod_vec3b,
             }
             4=>match vec{
                 ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f=>builtins.pod_vec4f,
                 ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h=>builtins.pod_vec4h,
                 ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u=>builtins.pod_vec4u,
                 ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>builtins.pod_vec4i,
+                ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b=>builtins.pod_vec4b,
             }
             _=>panic!()
         };
@@ -838,7 +894,8 @@ impl ScriptHeap{
         match vec{
             ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f |
             ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u | 
-            ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i=>{
+            ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i |
+            ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b =>{
                 for (i, swiz) in swiz.iter().enumerate(){
                     pod_data[i] = data[*swiz];
                 }
