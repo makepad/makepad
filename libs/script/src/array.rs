@@ -3,7 +3,6 @@ use crate::heap::*;
 use crate::native::*;
 use crate::makepad_live_id::*;
 use crate::object::*;
-use crate::*;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashMap;

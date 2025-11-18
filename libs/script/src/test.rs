@@ -46,23 +46,19 @@ pub fn test(){
                 return ScriptHandle{ty:ht,index:0}.into()
             });
         }
-    }    
-        
-    let code = script!{
-        // alright..
+    }
+    
+    let _code = script!{
         use mod.shader
-        
         fn pixel(){
-            let x = 1
-            1 + 2
+            (1 + 2) * 3
         }
-        
         ~shader.compile(pixel)
     };
-        
+    
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod

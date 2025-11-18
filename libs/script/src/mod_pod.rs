@@ -32,15 +32,18 @@ pub struct ScriptPodBuiltins{
     pub pod_vec2f: ScriptPodType,
     pub pod_vec3f: ScriptPodType,
     pub pod_vec4f: ScriptPodType,
+    pub pod_vec2h: ScriptPodType,
+    pub pod_vec3h: ScriptPodType,
+    pub pod_vec4h: ScriptPodType,
     pub pod_vec2u: ScriptPodType,
     pub pod_vec3u: ScriptPodType,
     pub pod_vec4u: ScriptPodType,
     pub pod_vec2i: ScriptPodType,
     pub pod_vec3i: ScriptPodType,
     pub pod_vec4i: ScriptPodType,
-    pub pod_vec2h: ScriptPodType,
-    pub pod_vec3h: ScriptPodType,
-    pub pod_vec4h: ScriptPodType,
+    pub pod_vec2b: ScriptPodType,
+    pub pod_vec3b: ScriptPodType,
+    pub pod_vec4b: ScriptPodType,
     pub pod_mat2x2f: ScriptPodType,
     pub pod_mat2x3f: ScriptPodType,
     pub pod_mat2x4f: ScriptPodType,
@@ -107,7 +110,10 @@ pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->Scrip
     let pod_vec2h = heap.pod_def_vec(pod, id_lut!(vec2h), ScriptPodVec::Vec2h);
     let pod_vec3h = heap.pod_def_vec(pod, id_lut!(vec3h), ScriptPodVec::Vec3h);
     let pod_vec4h = heap.pod_def_vec(pod, id_lut!(vec4h), ScriptPodVec::Vec4h);
-    
+    let pod_vec2b = heap.pod_def_vec(pod, id_lut!(vec2b), ScriptPodVec::Vec2b);
+    let pod_vec3b = heap.pod_def_vec(pod, id_lut!(vec3b), ScriptPodVec::Vec3b);
+    let pod_vec4b = heap.pod_def_vec(pod, id_lut!(vec4b), ScriptPodVec::Vec4b);
+        
     let pod_mat2x2f = heap.pod_def_mat(pod, id_lut!(mat2x2f), ScriptPodMat::Mat2x2f);
     let pod_mat2x3f = heap.pod_def_mat(pod, id_lut!(mat2x3f), ScriptPodMat::Mat2x3f);
     let pod_mat2x4f = heap.pod_def_mat(pod, id_lut!(mat2x4f), ScriptPodMat::Mat2x4f);
@@ -131,15 +137,18 @@ pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->Scrip
         pod_vec2f, 
         pod_vec3f, 
         pod_vec4f, 
+        pod_vec2h, 
+        pod_vec3h, 
+        pod_vec4h,
         pod_vec2u, 
         pod_vec3u, 
         pod_vec4u, 
         pod_vec2i, 
         pod_vec3i, 
         pod_vec4i, 
-        pod_vec2h, 
-        pod_vec3h, 
-        pod_vec4h,
+        pod_vec2b, 
+        pod_vec3b, 
+        pod_vec4b, 
         pod_mat2x2f,
         pod_mat2x3f,
         pod_mat2x4f,
