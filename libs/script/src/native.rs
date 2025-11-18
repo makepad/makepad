@@ -8,7 +8,6 @@ use crate::array::*;
 use crate::string::*;
 use crate::function::*;
 
-use crate::*;
 
 #[macro_export]
 macro_rules! script_value_f64{
