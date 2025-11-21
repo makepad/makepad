@@ -611,6 +611,9 @@ pub struct TextInput {
     #[rust] selection: Selection,
     #[rust] history: History,
     #[rust] blink_timer: Timer,
+    #[rust] preserved_selection_cursor: Option<Cursor>,
+    /// Skip finger move after long press to prevent selection changes
+    #[rust] ignore_next_move: bool, 
 }
 
  impl LiveHook for TextInput{
@@ -893,7 +896,7 @@ impl TextInput {
             .laidout_text
             .as_ref()
             .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
-        
+
         self.draw_selection.begin_many_instances(cx);
         for SelectionRect { rect_in_lpxs, .. } in laidout_text.selection_rects(
             self.selection_to_password_selection(self.selection)
@@ -909,6 +912,57 @@ impl TextInput {
             );
         }
         self.draw_selection.end_many_instances(cx);
+    }
+
+    /// Calculate the bounding rectangle of the current text selection in screen coordinates
+    /// We use the draw_bg area which should give us the actual drawn position
+    fn get_selection_rect(&self, cx: &Cx) -> Rect {
+        let widget_rect = self.draw_bg.area().rect(cx);
+
+        // If no layout yet, return a small rect below the widget
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return rect(widget_rect.pos.x, widget_rect.pos.y + widget_rect.size.y, 10.0, 20.0);
+        };
+
+        // Get all selection rectangles
+        let selection_rects = laidout_text.selection_rects(
+            self.selection_to_password_selection(self.selection)
+        );
+
+        if selection_rects.is_empty() {
+            // No selection, return position below the widget
+            return rect(widget_rect.pos.x, widget_rect.pos.y + widget_rect.size.y, 10.0, 20.0);
+        }
+
+        // Calculate bounding box of all selection rects
+        let first = &selection_rects[0].rect_in_lpxs;
+        let mut min_x = first.origin.x;
+        let mut min_y = first.origin.y;
+        let mut max_x = first.origin.x + first.size.width;
+        let mut max_y = first.origin.y + first.size.height;
+
+        for SelectionRect { rect_in_lpxs, .. } in selection_rects.iter().skip(1) {
+            min_x = min_x.min(rect_in_lpxs.origin.x);
+            min_y = min_y.min(rect_in_lpxs.origin.y);
+            max_x = max_x.max(rect_in_lpxs.origin.x + rect_in_lpxs.size.width);
+            max_y = max_y.max(rect_in_lpxs.origin.y + rect_in_lpxs.size.height);
+        }
+
+        // Convert to screen coordinates using widget position as base
+        let text_offset_x = widget_rect.pos.x + self.layout.padding.left as f64;
+        let text_offset_y = widget_rect.pos.y + self.layout.padding.top as f64;
+
+        let sel_x = text_offset_x + (min_x * self.draw_text.font_scale) as f64;
+        let sel_y = text_offset_y + (min_y * self.draw_text.font_scale) as f64;
+        let sel_width = ((max_x - min_x) * self.draw_text.font_scale) as f64;
+        let sel_height = ((max_y - min_y) * self.draw_text.font_scale) as f64;
+
+        rect(
+            sel_x,
+            sel_y,
+            sel_width.max(10.0),
+            sel_height.max(20.0),
+        )
     }
 
     fn scroll_to_cursor(&mut self, cx: &mut Cx2d) {
@@ -1085,6 +1139,13 @@ impl TextInput {
         self.animator_play(cx, ids!(blink.on));
         cx.stop_timer(self.blink_timer);
         cx.hide_text_ime();
+        // Only hide clipboard actions on mobile platforms where they're supported
+        match cx.os_type() {
+            OsType::Android(_) | OsType::Ios(_) => {
+                cx.hide_clipboard_actions();
+            }
+            _ => {}
+        }
         cx.widget_action(uid, scope_path, TextInputAction::KeyFocusLost);
     }
 
@@ -1378,20 +1439,57 @@ impl Widget for TextInput {
                     warning!("can't move cursor because layout was invalidated by earlier event");
                     return;
                 };
-                self.set_cursor(
-                    cx,
-                    cursor,
+
+                let selection = self.selection();
+                let has_selection = selection.cursor != selection.anchor;
+                let touching_selection = if has_selection {
+                    let sel_start = selection.start().index;
+                    let sel_end = selection.end().index;
+                    cursor.index >= sel_start && cursor.index <= sel_end
+                } else {
                     false
-                );
+                };
+
+                if tap_count > 1 || !touching_selection {
+                    self.set_cursor(cx, cursor, false);
+                    self.preserved_selection_cursor = None;
+                } else {
+                    self.preserved_selection_cursor = Some(cursor);
+                }
+
                 match tap_count {
-                    2 => self.select_word(cx),
-                    3 => self.select_all(cx),
+                    2 => {
+                        self.select_word(cx);
+                        if device.is_touch() {
+                            let has_selection = !self.selected_text().is_empty();
+                            let selection_rect = self.get_selection_rect(cx);
+                            cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
+                        }
+                    }
+                    3 => {
+                        self.select_all(cx);
+                        if device.is_touch() {
+                            let has_selection = !self.selected_text().is_empty();
+                            let selection_rect = self.get_selection_rect(cx);
+                            cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
+                        }
+                    }
                     _ => {}
                 }
 
                 self.animator_play(cx, ids!(hover.down));
             }
             Hit::FingerUp(fe) => {
+                self.ignore_next_move = false;
+
+                if fe.was_tap() {
+                    if let Some(cursor) = self.preserved_selection_cursor.take() {
+                        self.set_cursor(cx, cursor, false);
+                    }
+                } else {
+                    self.preserved_selection_cursor = None;
+                }
+
                 if fe.is_over && fe.was_tap() {
                     if fe.has_hovers() {
                         self.animator_play(cx, ids!(hover.on));
@@ -1402,12 +1500,48 @@ impl Widget for TextInput {
                     self.animator_play(cx, ids!(hover.off));
                 }
             }
+            Hit::FingerLongPress(lp) => {
+                self.preserved_selection_cursor = None;
+
+                // Select word at long press position
+                let rel = lp.abs - self.text_area.rect(cx).pos;
+                if let Ok(cursor) = self.point_in_lpxs_to_cursor(
+                    Point::new(rel.x as f32, rel.y as f32)
+                ) {
+                    // Check if cursor is over actual text
+                    if cursor.index < self.text.len() {
+                        self.set_cursor(cx, cursor, false);
+                        self.select_word(cx);
+                    } else {
+                        // Long press on empty space just position the cursor
+                        self.set_cursor(cx, cursor, false);
+                    }
+                }
+
+                // Show clipboard actions menu with updated selection
+                if lp.device.is_touch() {
+                    let has_selection = !self.selected_text().is_empty();
+                    let selection_rect = self.get_selection_rect(cx);
+                    cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
+                }
+
+                // Skip next move to prevent selection change when finger lifts
+                self.ignore_next_move = true;
+            }
             Hit::FingerMove(FingerMoveEvent {
                 abs,
                 tap_count,
                 device,
                 ..
             }) if device.is_primary_hit() => {
+                // Skip first move after long press to prevent selection changes
+                if self.ignore_next_move {
+                    self.ignore_next_move = false;
+                    return;
+                }
+
+                // Clear preserved cursor - user is dragging to select
+                self.preserved_selection_cursor = None;
                 self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;

@@ -303,6 +303,11 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) -> 
             (compiled_java_classes_dir.join("VideoPlayer$3.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$1.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$2.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadActivity$3.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadActivity$3$1.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadActivity$3$2.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadActivity$4.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadActivity$5.class").to_str().unwrap()),
             (build_paths.java_class.to_str().unwrap()),
             (build_paths.xr_class.to_str().unwrap()),
         ]

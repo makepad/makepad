@@ -64,10 +64,12 @@ impl Widget for KeyboardView {
                 AnimState::Opening{duration, start_time, ease, height}=>{
                     if e.time - start_time < *duration{
                         self.keyboard_shift = ease.map((e.time - start_time)/duration) * height;
+                        cx.keyboard_shift = self.keyboard_shift;
                         self.next_frame = cx.new_next_frame();
                     }
                     else{
                         self.keyboard_shift = *height;
+                        cx.keyboard_shift = self.keyboard_shift;
                         self.anim_state = AnimState::Open;
                     }
                     self.redraw(cx);
@@ -75,10 +77,12 @@ impl Widget for KeyboardView {
                 AnimState::Closing{duration, start_time, ease, height}=>{
                     if e.time - start_time < *duration{
                         self.keyboard_shift = (1.0-ease.map((e.time - start_time)/duration)) * height;
+                        cx.keyboard_shift = self.keyboard_shift;
                         self.next_frame = cx.new_next_frame();
                     }
-                    else{ 
+                    else{
                         self.keyboard_shift = 0.0;
+                        cx.keyboard_shift = self.keyboard_shift;
                         self.anim_state = AnimState::Closed;
                     }
                     self.redraw(cx);
@@ -112,6 +116,7 @@ impl Widget for KeyboardView {
                     VirtualKeyboardEvent::DidShow{time:_, height}=>{
                         if let AnimState::Closed = self.anim_state{
                             self.keyboard_shift = self.compute_max_height(*height, cx);
+                            cx.keyboard_shift = self.keyboard_shift;
                         }
                         self.anim_state = AnimState::Open;
                         self.redraw(cx);
@@ -119,6 +124,7 @@ impl Widget for KeyboardView {
                     VirtualKeyboardEvent::DidHide{time:_}=>{
                         self.anim_state = AnimState::Closed;
                         self.keyboard_shift = 0.0;
+                        cx.keyboard_shift = self.keyboard_shift;
                         self.redraw(cx);
                     }
                 }
