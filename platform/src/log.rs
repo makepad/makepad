@@ -1,87 +1,15 @@
-use crate::makepad_micro_serde::*;
-
-#[macro_export]
-macro_rules!log {
-    ( $ ( $ t: tt) *) => {
-        $crate::log::log_with_level(
-            file!(), 
-            line!()-1, 
-            column!()-1, 
-            line!()-1, 
-            column!() + 3, 
-            format!( $ ( $ t) *), 
-            $ crate::log::LogLevel::Log
-        )
-    }
-}
-
-#[macro_export]
-macro_rules!error {
-    ( $ ( $ t: tt) *) => {
-        $crate::log::log_with_level(
-            file!(), 
-            line!()-1, 
-            column!()-1, 
-            line!()-1, 
-            column!() + 3, 
-            format!( $ ( $ t) *), 
-            $crate::log::LogLevel::Error
-        )
-    }
-}
-
-#[macro_export]
-macro_rules! fmt_over {
-    ($dst:expr, $($arg:tt)*) => {
-        {
-            $dst.clear();
-            use std::fmt::Write;
-            $dst.write_fmt(std::format_args!($($arg)*)).unwrap();
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! fmt_over_ref {
-    ($dst:expr, $($arg:tt)*) => {
-        {
-            $dst.clear();
-            use std::fmt::Write;
-            $dst.write_fmt(std::format_args!($($arg)*)).unwrap();
-            &$dst
-        }
-    };
-}
-
-#[macro_export]
-macro_rules!warning {
-    ( $ ( $ t: tt) *) => {
-        $crate::log::log_with_level(
-            file!(), 
-            line!()-1, 
-            column!()-1, 
-            line!()-1, 
-            column!() + 3, 
-            format!( $ ( $ t) *), 
-            $ crate::log::LogLevel::Warning
-        )
-    }
-}
-
-
-#[derive(Clone, PartialEq, Eq, Copy, Debug, SerBin, DeBin)]
-pub enum LogLevel{
-    Warning,
-    Error,
-    Log,
-    Wait,
-    Panic,
-}
-
+pub use crate::makepad_error_log::*;
 use crate::cx::Cx;
 use crate::studio::{AppToStudio,StudioLogItem};
 
-pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:String, level:LogLevel){
+impl Cx{
+    pub fn init_log(){
+        let mut logger = LOG_WITH_LEVEL.write().expect("Logger lock poisoned");
+        *logger = log_with_level_makepad_platform;
+    }
+}
+
+pub(crate) fn log_with_level_makepad_platform(file_name:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:String, level:LogLevel){
     // lets send out our log message on the studio websocket 
     #[cfg(target_arch = "wasm32")]{
         extern "C" {
@@ -183,4 +111,28 @@ macro_rules!profile_end_log {
             $ crate::log::LogLevel::Log
         )
     }
+}
+
+
+#[macro_export]
+macro_rules! fmt_over {
+    ($dst:expr, $($arg:tt)*) => {
+        {
+            $dst.clear();
+            use std::fmt::Write;
+            $dst.write_fmt(std::format_args!($($arg)*)).unwrap();
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! fmt_over_ref {
+    ($dst:expr, $($arg:tt)*) => {
+        {
+            $dst.clear();
+            use std::fmt::Write;
+            $dst.write_fmt(std::format_args!($($arg)*)).unwrap();
+            &$dst
+        }
+    };
 }

@@ -89,7 +89,7 @@ impl ScriptCode{
                         return Some(
                             ScriptLoc{
                                 file: block.file.clone(),
-                                line: rc.0 + block.line as u32 + 1,
+                                line: rc.0 + block.line as u32,
                                 col: rc.1
                             }
                         )

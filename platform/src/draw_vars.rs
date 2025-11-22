@@ -12,6 +12,7 @@ use {
             LiveNode,
             LiveNodeSliceApi
         },
+        makepad_error_log::*,
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_shader_compiler::*,
         makepad_live_id::*,

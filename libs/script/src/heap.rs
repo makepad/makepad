@@ -330,78 +330,78 @@ impl ScriptHeap{
         false
     }
         
-    pub fn print(&self, value:ScriptValue){
+    pub fn to_debug_string(&self, value:ScriptValue, out:&mut String){
         if let Some(obj) = value.as_object(){
             let object = &self.objects[obj.index as usize];
             if object.tag.is_script_fn(){
-                print!("Fn");
+                write!(out, "Fn").ok();
             }
             else if object.tag.is_native_fn(){
-                print!("Native");
+               write!(out, "Native").ok();
             }
             let mut ptr = obj;
             // scan up the chain to set the proto value
-            print!("{{");
+            write!(out, "{{").ok();
             let mut first = true;
             loop{
                 let object = &self.objects[ptr.index as usize];
                 
                 object.map_iter(|key,value|{
-                    if !first{print!(", ")}
+                    if !first{write!(out, ", ").ok();}
                     if key != NIL{
-                        self.print(key);
-                        print!(":");
+                        self.to_debug_string(key, out);
+                        write!(out, ":").ok();
                     }
-                    self.print(value);
+                    self.to_debug_string(value, out);
                     first = false;
                 });
                 for kv in object.vec.iter(){
-                    if !first{print!(", ")}
+                    if !first{write!(out, ", ").ok();}
                     if kv.key != NIL{
-                        print!("{}:", kv.key)
+                        write!(out, "{}:", kv.key).ok();
                     }
-                    self.print(kv.value);
+                    self.to_debug_string(kv.value, out);
                     first = false;
                 }
                 if let Some(next_ptr) = object.proto.as_object(){
-                    if !first{print!(",")}
-                    print!("^");
+                    if !first{write!(out, ",").ok();}
+                    write!(out, "^").ok();
                     ptr = next_ptr
                 }
                 else{
-                    print!("/{}", object.proto);
+                    write!(out, "/{}", object.proto).ok();
                     break;
                 }
             }
-            print!("}}");
+            write!(out, "}}").ok();
         }
         else if let Some(arr) = value.as_array(){
             let array = &self.arrays[arr.index as usize];
             let len = array.storage.len();
-            print!("[");
+            write!(out, "[").ok();
             for i in 0..len{
-                if i!=0{print!(", ")}
-                self.print(array.storage.index(i).unwrap());
+                if i!=0{write!(out, ", ").ok();}
+                self.to_debug_string(array.storage.index(i).unwrap(), out);
             }
-            print!("]");
+            write!(out, "]").ok();
         }
         else if let Some(s) = value.as_string(){
             let s = if let Some(s) = &self.strings[s.index as usize]{&s.string.0}else{""};
-            print!("\"");
-            print!("{}", s);
-            print!("\"");
+            write!(out, "\"").ok();
+            write!(out, "{}", s).ok();
+            write!(out, "\"").ok();
         }
         else if value.as_inline_string(|s|{
-            print!("\"");
-            print!("{}", s);
-            print!("\"");
+            write!(out, "\"").ok();
+            write!(out, "{}", s).ok();
+            write!(out, "\"").ok();
         }).is_some(){}
         else if let Some(pod) = value.as_pod(){
             let pod = &self.pods[pod.index as usize];
             let pod_type = &self.pod_types[pod.ty.index as usize];
             self.pod_debug_print(pod_type, 0, &pod.data);
         }else{
-            print!("{}", value)
+            write!(out, "{}", value).ok();
         }
     }
     

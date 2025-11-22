@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use crate::makepad_math::{Rect, Vec4, DVec2};
+use crate::makepad_error_log::*;
 use crate::cx::Cx;
 use crate::area::Area;
 use crate::draw_list::DrawListId;

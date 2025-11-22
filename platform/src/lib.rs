@@ -76,6 +76,7 @@ pub use makepad_futures;
  
 pub use {
     makepad_script,
+    makepad_script::makepad_error_log,
     makepad_shader_compiler,
     makepad_shader_compiler::makepad_derive_live,
     makepad_shader_compiler::makepad_math,

@@ -381,7 +381,7 @@ impl ScriptParser{
         if let Some(code) = self.opcodes.last_mut(){
             if let Some((opcode,_)) = code.as_opcode(){
                 if opcode == Opcode::POP_TO_ME{
-                    self.opcodes.pop();
+                    self.pop_code();
                     return;
                 }
             }
@@ -753,8 +753,8 @@ impl ScriptParser{
                                 let mut value = State::operator_to_opcode(what_op);
                                 value.set_opcode_args(OpcodeArgs::from_u32(num as u32));
                                 self.push_code(value, index);
+                                return 0
                             }
-                            return 0
                         }
                     }
                 }
@@ -1257,6 +1257,11 @@ impl ScriptParser{
                     self.push_code(value, self.index);
                     self.state.push(State::EndExpr);
                     return 1
+                }
+                if op == id!(*){
+                    self.push_code(ScriptValue::from_id(id!(*)), self.index);
+                    self.state.push(State::EndExpr);
+                    return 1;
                 }
                 if op == id!(-) || op == id!(+) || op == id!(!) || op == id!(~){
                     self.state.push(State::EmitUnary{what_op:op, index:self.index});
