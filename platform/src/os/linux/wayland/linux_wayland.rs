@@ -319,7 +319,7 @@ impl WaylandCx {
                 },
                 CxOsOp::RepositionWindow(window_id, size) => {
                 },
-                CxOsOp::ShowClipboardActions(_) =>{
+                CxOsOp::ShowClipboardActions { .. } =>{
                 },
                 CxOsOp::CopyToClipboard(content) => {
                 }
