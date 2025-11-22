@@ -37,6 +37,9 @@ public class MakepadNative {
     public native static void onWebSocketClosed(long callback);
     public native static void onWebSocketError(String error, long callback);
 
+    // clipboard
+    public native static void onClipboardAction(String action);
+    public native static void onClipboardPaste(String content);
 
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);

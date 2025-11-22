@@ -461,6 +461,39 @@ impl IosApp {
         }
     }
 
+    pub fn paste_from_clipboard(&self) -> String {
+        unsafe {
+            let pasteboard: ObjcId = self.pasteboard;
+            let nsstring: ObjcId = msg_send![pasteboard, string];
+            if nsstring != nil {
+                nsstring_to_string(nsstring)
+            } else {
+                String::new()
+            }
+        }
+    }
+
+    pub fn show_clipboard_actions(&self, _has_selection: bool) {
+        // Note: Full UIMenuController implementation requires:
+        // 1. A custom UIView that can become first responder
+        // 2. Implementation of canPerformAction:withSender:
+        // 3. Action methods (copy:, paste:, cut:, selectAll:)
+        // 4. Proper positioning of the menu
+        //
+        // This is a placeholder that logs the intent.
+        // The hidden textfield approach currently used for IME doesn't
+        // easily support UIMenuController as it's designed for keyboard input only.
+        //
+        // For full implementation, we need to either:
+        // A) Add a custom responder view to the view hierarchy, OR
+        // B) Make the MTKView conform to the required protocols
+
+        crate::log!("iOS: showClipboardActions called - UIMenuController not yet implemented");
+
+        // TODO: Implement UIMenuController properly
+        // Reference implementation needed similar to Android's ActionMode
+    }
+
     pub fn get_ios_directory_paths() -> String {
         unsafe {
             let file_manager: ObjcId = msg_send![class!(NSFileManager), defaultManager];

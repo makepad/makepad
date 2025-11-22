@@ -85,7 +85,8 @@ pub enum CxOsOp {
 
     StartDragging(Vec<DragItem>),
     UpdateMacosMenu(MacosMenu),
-    ShowClipboardActions(String),
+    ShowClipboardActions { has_selection: bool, rect: Rect, keyboard_shift: f64 },
+    HideClipboardActions,
     CopyToClipboard(String),
 
     CheckPermission {
@@ -164,7 +165,8 @@ impl std::fmt::Debug for CxOsOp {
 
             Self::StartDragging(..)=>write!(f, "StartDragging"),
             Self::UpdateMacosMenu(..)=>write!(f, "UpdateMacosMenu"),
-            Self::ShowClipboardActions(..)=>write!(f, "ShowClipboardActions"),
+            Self::ShowClipboardActions { .. }=>write!(f, "ShowClipboardActions"),
+            Self::HideClipboardActions=>write!(f, "HideClipboardActions"),
             Self::CopyToClipboard(..)=>write!(f, "CopyToClipboard"),
 
             Self::CheckPermission{..}=>write!(f, "CheckPermission"),
@@ -321,9 +323,36 @@ impl Cx {
         self.platform_ops.push(CxOsOp::HideTextIME);
     }
 
-    pub fn show_clipboard_actions(&mut self, selected: String) {
+    /// Shows the native clipboard actions menu (Copy/Paste/Cut/Select All).
+    ///
+    /// Displays a platform-specific floating menu with text editing actions. The menu items
+    /// are enabled/disabled based on the current selection state:
+    /// - Copy/Cut: Only shown when `has_selection` is true
+    /// - Paste: Only shown when clipboard has content
+    /// - Select All: Always shown
+    ///
+    /// # Parameters
+    /// * `has_selection` - Whether text is currently selected (enables Copy/Cut actions)
+    /// * `rect` - Selection bounding box in logical pixels (for menu positioning)
+    /// * `keyboard_shift` - Vertical offset caused by virtual keyboard (in logical pixels)
+    ///
+    /// # Platform Support
+    /// - Android: Uses ActionMode with floating toolbar
+    /// - iOS: TODO - Will use UIMenuController
+    /// - Other platforms: No-op
+    ///
+    /// # Note
+    /// The actual clipboard operations (copy/cut/paste) are performed by querying
+    /// the text selection from Rust directly. The `has_selection` parameter is only
+    /// used to determine which menu items to show, not for the operations themselves.
+    pub fn show_clipboard_actions(&mut self, has_selection: bool, rect: Rect, keyboard_shift: f64) {
         self.platform_ops
-            .push(CxOsOp::ShowClipboardActions(selected));
+            .push(CxOsOp::ShowClipboardActions { has_selection, rect, keyboard_shift });
+    }
+
+    /// Hides the clipboard actions menu
+    pub fn hide_clipboard_actions(&mut self) {
+        self.platform_ops.push(CxOsOp::HideClipboardActions);
     }
 
     /// Copies the given string to the clipboard.

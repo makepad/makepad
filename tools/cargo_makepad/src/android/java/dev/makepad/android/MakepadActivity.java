@@ -26,7 +26,10 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.ActionMode;
 import android.view.Display;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
@@ -160,10 +163,7 @@ class MakepadSurface
     public boolean onLongClick(View view) {
         long timeMillis = SystemClock.uptimeMillis();
 
-        // If the touch has moved more than the touch slop, ignore this long click.
         if (isTouchBeyondSlopDistance(view)) {
-            // Returning false here indicates that we have not handled the long click event,
-            // which does *not* trigger the haptic feedback (vibration motor) to buzz.
             return false;
         }
 
@@ -305,6 +305,12 @@ public class MakepadActivity
     static Handler mWebSocketsHandler;
     static HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
     static HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
+
+    // clipboard actions (ActionMode for copy/paste/cut)
+    private ActionMode mActionMode;
+    private boolean mHasSelection = false;
+    private int[] mSelectionBounds = new int[4]; // left, top, right, bottom
+    private int mKeyboardShift = 0; // keyboard shift amount from Rust
 
     static {
         System.loadLibrary("makepad");
@@ -539,10 +545,197 @@ public class MakepadActivity
         clipboard.setPrimaryClip(clip);
     }
 
+    public String pasteFromClipboard() {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard.hasPrimaryClip()) {
+            ClipData clipData = clipboard.getPrimaryClip();
+            if (clipData != null && clipData.getItemCount() > 0) {
+                ClipData.Item item = clipData.getItemAt(0);
+                CharSequence text = item.getText();
+                if (text != null) {
+                    return text.toString();
+                }
+            }
+        }
+        return "";
+    }
+
     private String getApplicationName() {
         ApplicationInfo applicationInfo = getApplicationContext().getApplicationInfo();
         CharSequence appName = applicationInfo.loadLabel(getPackageManager());
         return appName.toString();
+    }
+
+    public void showClipboardActions(final boolean hasSelection, final int left, final int top, final int right, final int bottom, final int keyboardShift) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                mHasSelection = hasSelection;
+                mSelectionBounds[0] = left;
+                mSelectionBounds[1] = top;
+                mSelectionBounds[2] = right;
+                mSelectionBounds[3] = bottom;
+                mKeyboardShift = keyboardShift;
+
+                // If ActionMode is already showing, finish it first
+                if (mActionMode != null) {
+                    mActionMode.finish();
+                }
+
+                // Start ActionMode with our callback
+                // Use TYPE_FLOATING (API 23+) to show near finger, falls back to primary for older versions
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    mActionMode = startActionMode(new ActionMode.Callback2() {
+                        @Override
+                        public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+                            return onCreateActionModeInternal(mode, menu);
+                        }
+
+                        @Override
+                        public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+                            return onPrepareActionModeInternal(mode, menu);
+                        }
+
+                        @Override
+                        public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+                            return onActionItemClickedInternal(mode, item);
+                        }
+
+                        @Override
+                        public void onDestroyActionMode(ActionMode mode) {
+                            onDestroyActionModeInternal(mode);
+                        }
+
+                        @Override
+                        public void onGetContentRect(ActionMode mode, View view, android.graphics.Rect outRect) {
+                            // The content rect tells Android what area to AVOID covering (not where to position)
+                            // Android's FloatingToolbar will automatically position itself above or below this rect
+                            // based on available screen space
+
+                            // Use asymmetric padding: more above (for better spacing when popup appears above),
+                            // less below (already looks good), and some on sides for visual balance
+                            int topPadding = 16;      // More padding above pushes popup higher
+                            int bottomPadding = 2;    // Minimal padding below (already good spacing)
+                            int sidePadding = 2;      // Horizontal padding for visual balance
+
+                            int left = mSelectionBounds[0] - sidePadding;
+                            int top = mSelectionBounds[1] - topPadding;
+                            int right = mSelectionBounds[2] + sidePadding;
+                            int bottom = mSelectionBounds[3] + bottomPadding;
+
+                            outRect.set(left, top, right, bottom);
+                        }
+                    }, ActionMode.TYPE_FLOATING);
+                } else {
+                    mActionMode = startActionMode(new ActionMode.Callback() {
+                        @Override
+                        public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+                            return onCreateActionModeInternal(mode, menu);
+                        }
+
+                        @Override
+                        public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+                            return onPrepareActionModeInternal(mode, menu);
+                        }
+
+                        @Override
+                        public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+                            return onActionItemClickedInternal(mode, item);
+                        }
+
+                        @Override
+                        public void onDestroyActionMode(ActionMode mode) {
+                            onDestroyActionModeInternal(mode);
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    public void dismissClipboardActions() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mActionMode != null) {
+                    mActionMode.finish();
+                    mActionMode = null;
+                }
+            }
+        });
+    }
+
+    // Helper methods for ActionMode callbacks (shared between Callback and Callback2)
+    private boolean onCreateActionModeInternal(ActionMode mode, Menu menu) {
+        // Add menu items: Copy, Cut, Paste, Select All
+        menu.add(0, android.R.id.copy, 0, android.R.string.copy);
+        menu.add(0, android.R.id.cut, 0, android.R.string.cut);
+        menu.add(0, android.R.id.paste, 0, android.R.string.paste);
+        menu.add(0, android.R.id.selectAll, 0, android.R.string.selectAll);
+        return true;
+    }
+
+    private boolean onPrepareActionModeInternal(ActionMode mode, Menu menu) {
+        // Enable/disable menu items based on state
+        boolean hasSelection = mHasSelection;
+        boolean hasClipboard = false;
+
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard.hasPrimaryClip()) {
+            hasClipboard = true;
+        }
+
+        MenuItem copyItem = menu.findItem(android.R.id.copy);
+        MenuItem cutItem = menu.findItem(android.R.id.cut);
+        MenuItem pasteItem = menu.findItem(android.R.id.paste);
+
+        if (copyItem != null) copyItem.setVisible(hasSelection);
+        if (cutItem != null) cutItem.setVisible(hasSelection);
+        if (pasteItem != null) pasteItem.setVisible(hasClipboard);
+
+        return true;
+    }
+
+    private boolean onActionItemClickedInternal(ActionMode mode, MenuItem item) {
+        int id = item.getItemId();
+
+        if (id == android.R.id.copy) {
+            MakepadNative.onClipboardAction("copy");
+            mode.finish();
+            return true;
+        } else if (id == android.R.id.cut) {
+            MakepadNative.onClipboardAction("cut");
+            mode.finish();
+            return true;
+        } else if (id == android.R.id.paste) {
+            String content = pasteFromClipboard();
+            MakepadNative.onClipboardPaste(content);
+            mode.finish();
+            return true;
+        } else if (id == android.R.id.selectAll) {
+            MakepadNative.onClipboardAction("select_all");
+
+            // After select all, re-show the menu with Copy/Cut options
+            // Post delayed to give Rust time to update selection
+            final ActionMode currentMode = mode;
+            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (currentMode != null) {
+                        mHasSelection = true;
+                        currentMode.invalidate();
+                    }
+                }
+            }, 50); // 50ms delay
+
+            return true; // Don't finish mode - let it update
+        }
+        return false;
+    }
+
+    private void onDestroyActionModeInternal(ActionMode mode) {
+        mActionMode = null;
+        mHasSelection = false;
     }
 
     public void requestHttp(long id, long metadataId, String url, String method, String headers, byte[] body) {

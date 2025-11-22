@@ -276,12 +276,16 @@ impl Cx {
                                 response: response.clone()
                             });
                             self.call_event_handler(&e);
-                            // let response = response.borrow();
-                            // if let Some(response) = response.as_ref(){
-                            //     to_java.copy_to_clipboard(response);
-                            // }
                         } else if makepad_keycode == KeyCode::KeyV {
-                            //to_java.paste_from_clipboard();
+                            let content = unsafe { android_jni::to_java_paste_from_clipboard() };
+                            if !content.is_empty() {
+                                e = Event::TextInput(TextInputEvent {
+                                    input: content,
+                                    replace_last: false,
+                                    was_paste: true,
+                                });
+                                self.call_event_handler(&e);
+                            }
                         }
                     } else {
                         if makepad_keycode == KeyCode::Back {
@@ -500,6 +504,53 @@ impl Cx {
                 } else {
                     self.call_event_handler(&Event::WindowLostFocus(window_id));
                 }
+            }
+            FromJavaMessage::ClipboardAction { action } => {
+                if action == "copy" {
+                    let response = Rc::new(RefCell::new(None));
+                    let e = Event::TextCopy(TextClipboardEvent {
+                        response: response.clone()
+                    });
+                    self.call_event_handler(&e);
+                    // Get the copied text from the widget's response
+                    if let Some(text) = response.borrow().as_ref() {
+                        // Copy to clipboard
+                        unsafe { to_java_copy_to_clipboard(text.clone()); }
+                    };
+                } else if action == "cut" {
+                    let response = Rc::new(RefCell::new(None));
+                    let e = Event::TextCut(TextClipboardEvent {
+                        response: response.clone()
+                    });
+                    self.call_event_handler(&e);
+                    // Get the cut text from the widget's response
+                    if let Some(text) = response.borrow().as_ref() {
+                        // Copy to clipboard
+                        unsafe { to_java_copy_to_clipboard(text.clone()); }
+                    };
+                } else if action == "select_all" {
+                    // Simulate Ctrl+A keypress to trigger select_all in widgets
+                    let e = Event::KeyDown(KeyEvent {
+                        key_code: KeyCode::KeyA,
+                        is_repeat: false,
+                        modifiers: KeyModifiers {
+                            shift: false,
+                            control: true,  // Ctrl modifier
+                            alt: false,
+                            logo: false,
+                        },
+                        time: self.seconds_since_app_start(),
+                    });
+                    self.call_event_handler(&e);
+                }
+            }
+            FromJavaMessage::ClipboardPaste { content } => {
+                let e = Event::TextInput(TextInputEvent {
+                    input: content,
+                    replace_last: false,
+                    was_paste: true,
+                });
+                self.call_event_handler(&e);
             }
             FromJavaMessage::Init(_) => {
             }
@@ -926,6 +977,12 @@ impl Cx {
                 },
                 CxOsOp::CopyToClipboard(content) => {
                     unsafe {android_jni::to_java_copy_to_clipboard(content);}
+                },
+                CxOsOp::ShowClipboardActions { has_selection, rect, keyboard_shift } => {
+                    unsafe {android_jni::to_java_show_clipboard_actions(has_selection, rect, keyboard_shift, self.os.dpi_factor);}
+                },
+                CxOsOp::HideClipboardActions => {
+                    unsafe {android_jni::to_java_dismiss_clipboard_actions();}
                 },
                 CxOsOp::CheckPermission {permission, request_id} => {
                     self.handle_permission_check(permission, request_id);
