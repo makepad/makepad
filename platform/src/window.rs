@@ -3,6 +3,7 @@ use {
         makepad_live_compiler::*,
         makepad_live_id::*,
         makepad_math::*,
+        makepad_error_log::*,
         id_pool::*,
         event::{
             WindowGeom

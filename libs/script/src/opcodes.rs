@@ -1,4 +1,5 @@
 use crate::makepad_live_id::*;
+use crate::makepad_error_log::*;
 use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
@@ -972,10 +973,28 @@ impl ScriptThread{
                 let field = self.pop_stack_value();
                 let object = self.pop_stack_resolved(heap);
                 if let Some(obj) = object.as_object(){
-                    let value = heap.value(obj, field, &self.trap);
-                    if !value.is_nil(){
-                        if let Some(field) = field.as_id(){
-                            self.def_scope_value(heap, field, value);
+                    if field.as_id() == Some(id!(*)) {
+                        let mut items = Vec::new();
+                        if let Some(obj_data) = heap.objects.get(obj.index as usize) {
+                            for (k, v) in obj_data.map.iter() {
+                                items.push((*k, v.value));
+                            }
+                            for item in &obj_data.vec {
+                                items.push((item.key, item.value));
+                            }
+                        }
+                        for (k, v) in items {
+                            if let Some(id) = k.as_id() {
+                                self.def_scope_value(heap, id, v);
+                            }
+                        }
+                    }
+                    else{
+                        let value = heap.value(obj, field, &self.trap);
+                        if !value.is_nil(){
+                            if let Some(field) = field.as_id(){
+                                self.def_scope_value(heap, field, value);
+                            }
                         }
                     }
                 }
@@ -1108,29 +1127,29 @@ impl ScriptThread{
             }
 // Log            
             Opcode::LOG=>{
-                
                 if let Some(loc) = code.ip_to_loc(self.trap.ip){
                     let value = self.peek_stack_resolved(heap);
                     if value != NIL{
-                        
                         if let Some(err) = value.as_err(){
                             if let Some(loc2) = code.ip_to_loc(err.ip){
-                                println!("{} {} {}", loc, value, loc2);
+                                log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} {}", value, loc2), LogLevel::Log);
                             }
                         }
                         if let Some(nanip) = value.as_f64_traced_nan(){
                             if let Some(loc2) = code.ip_to_loc(nanip){
-                                println!("{} NaN Traced to {}", loc, loc2);
+                                log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} NaN Traced to {}", value, loc2), LogLevel::Log);
                             }
                         }
                         else{
-                            print!("{} {:?}: ", loc, value.value_type());
-                            heap.print(value);
-                            println!("");
+                            let mut out = String::new();
+                            heap.to_debug_string(value, &mut out);
+                            log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{:?}:{out}", value.value_type()), LogLevel::Log);
+                            //heap.print(value);
+                            //println!("");
                         }
                     }
                     else{
-                        println!("{} nil", loc);
+                        log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("nil"), LogLevel::Log);
                     }
                 }
                 self.trap.goto_next();

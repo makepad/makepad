@@ -49,11 +49,23 @@ pub fn test(){
     }
     
     let _code = script!{
+        use mod.std.*
         use mod.shader
-        fn pixel(){
-            (1 + 2) * 3
+        use mod.pod
+        
+        /*
+        let sdf = pod.struct{
+            field: pod.f32,
+            new: || sdf(field: 1.0)
+        }*/
+        
+        let shader = {
+            fn pixel(){
+                let x = vec2f(0.0, 0.0)
+            }
         }
-        ~shader.compile(pixel)
+        
+        ~shader.compile_draw(shader)
     };
     
     // lets define a handle type with some methods on it
@@ -62,7 +74,7 @@ pub fn test(){
         use mod.std.assert
         use mod.std.println
         use mod.pod
-        
+                
         // array operations
         let x = 1+2 assert(x == 3)
         let iv = [1 2 3 4] let ov = []
@@ -254,15 +266,19 @@ pub fn test(){
         // swizzle
         let x = pod.vec3f(1,2,3);
         assert(x.zyzx.x == 3f)
-        
         // nested construction and read access to substructures (with copy)
         let s1 = pod.struct{a:pod.f16, b:pod.f16}
         let s2 = pod.struct{x:pod.f16, y:s1}
         let v = s2(3,s1(1,2))
         assert(v.y.b == 2h)
         
-        
-                
+        // test wildcard use
+        let m = {a_wild:1, b_wild:2}
+        use m.*
+        assert(a_wild == 1)
+        assert(b_wild == 2)
+        ~@hi
+        ~@ho
     };
         
     let _code = script!{

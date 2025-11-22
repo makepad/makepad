@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use {
     crate::{
+        makepad_error_log::*,
         makepad_math::Mat4,
         id_pool::*,
     }

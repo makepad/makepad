@@ -42,8 +42,8 @@ let code = script!{
         Display{mac:"00-00-5E-00-53-11" ip:"192.0.2.70", landscape:false}
         Display{mac:"00-00-5e-00-53-12" ip:"192.0.2.58", landscape:true},
         Display{mac:"00-00-5E-00-53-13" ip:"192.0.2.57", landscape:true},
-    ] 
-                
+    ]
+    
     fn openai_completion(messages){
         let task = std.task()
         let req = net.HttpRequest{

@@ -5,6 +5,7 @@ use {
     },
     crate::{
         id_pool::*,
+        makepad_error_log::*,
         makepad_live_compiler::{
             LiveType,
             LiveId,

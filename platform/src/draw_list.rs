@@ -3,6 +3,7 @@ use {
         makepad_live_compiler::{
             LiveId,
         },
+        makepad_error_log::*,
         makepad_math::*,
         cx::Cx,
         os::{

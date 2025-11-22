@@ -17,7 +17,7 @@ use std::fmt::Write;
 pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     let math = heap.new_module(id!(shader));
         
-    native.add_method(heap, math, id!(compile), script_args!(code=NIL), |vm, args|{
+    native.add_method(heap, math, id!(compile_draw), script_args!(code=NIL), |vm, args|{
         // lets fetch the code
         let fnobj = script_value!(vm, args.code);
         let mut compiler = ShaderCompiler{
@@ -29,6 +29,8 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         };
         if let Some(fnobj) = fnobj.as_object(){
             if let Some(fnptr) = vm.heap.as_fn(fnobj){
+                // lets inherit the scope for this entrypoint
+                
                 if let ScriptFnPtr::Script(fnip) = fnptr{
                     compiler.compile(vm, fnip);
                     return NIL
@@ -66,9 +68,12 @@ struct WgslBackend{
 impl ShaderOutput for WgslBackend{
 }
 
+
 #[derive(Default)]
 struct ShaderCompiler{
     pub stack: ShaderStack,
+    pub _script_scope: ScriptObject,
+    pub _shader_scope: LiveIdMap<LiveId, ScriptPodType>,
     pub mes: Vec<ShaderMe>,
     pub trap: ScriptTrap,
 }
@@ -162,7 +167,6 @@ impl ShaderStack{
         self.free.push(s);
     }
 }
-
 
 
 impl ShaderCompiler{
@@ -495,9 +499,11 @@ impl ShaderCompiler{
                 if let Some(me) = self.mes.last_mut(){
                     match me{
                         ShaderMe::Body{out}=>{
-                            let (_ty,s) = self.stack.pop(&self.trap);
+                            let (ty,s) = self.stack.pop(&self.trap);
+                            println!("TYPE: {:?}", ty);
                             out.push_str("return ");
                             out.push_str(&s);
+                            out.push_str(";\n");
                             self.stack.free_string(s);
                         }
                         _=>todo!()
@@ -565,6 +571,7 @@ impl ShaderCompiler{
                     ShaderMe::Body{out}=>{
                         let (_ty,s) = self.stack.pop(&self.trap);
                         out.push_str(&s);
+                        out.push_str(";\n");
                         self.stack.free_string(s);
                     }
                     _=>todo!()

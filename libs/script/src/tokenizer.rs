@@ -507,6 +507,9 @@ impl ScriptTokenizer{
                     if c == '|' && self.temp == "="{
                         self.emit_operator();
                     }
+                    if c == '*' && self.temp == "."{
+                        self.emit_operator();
+                    }
                     if c == '~' || self.temp == ":" || self.temp == "~"{
                         self.emit_operator();
                     }
