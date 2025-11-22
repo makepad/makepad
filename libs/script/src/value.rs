@@ -277,7 +277,7 @@ impl ScriptValueType{
     pub const OPCODE: Self = Self(13);
     pub const STRING: Self = Self(14);
     pub const ERROR: Self = Self(15);
-        
+    
     pub const REDUX_MARKER: Self = Self(16);
     
     pub const INLINE_STRING_0: Self = Self(16);

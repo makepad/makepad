@@ -1,30 +1,74 @@
 use std::fmt::Write;
-
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-pub mod error_log_desktop;
+use std::sync::RwLock;
+use makepad_micro_serde::*;
 
 #[macro_export]
 macro_rules!log {
     ( $ ( $ t: tt) *) => {
-        $crate::makepad_error_log::log_with_type(file!(), line!(), column!()+1, line!(), column!() + 4, &format!( $ ( $ t) *), $ crate::makepad_error_log::LogType::Log)
+        $crate::log_with_level(
+            file!(), 
+            line!()-1, 
+            column!()-1, 
+            line!()-1, 
+            column!() + 3, 
+            format!( $ ( $ t) *), 
+            $ crate::LogLevel::Log
+        )
     }
 }
 
 #[macro_export]
 macro_rules!error {
     ( $ ( $ t: tt) *) => {
-        $crate::makepad_error_log::log_with_type(file!(), line!(), column!()+1, line!(), column!() + 4, &format!( $ ( $ t) *), $ crate::makepad_error_log::LogType::Log)
+        $crate::log_with_level(
+            file!(), 
+            line!()-1, 
+            column!()-1, 
+            line!()-1, 
+            column!() + 3, 
+            format!( $ ( $ t) *), 
+            $crate::LogLevel::Error
+        )
     }
 }
 
-pub enum LogType {
-    Error,
-    Log,
-    Panic
+#[macro_export]
+macro_rules!warning {
+    ( $ ( $ t: tt) *) => {
+        $crate::log_with_level(
+            file!(), 
+            line!()-1, 
+            column!()-1, 
+            line!()-1, 
+            column!() + 3, 
+            format!( $ ( $ t) *), 
+            $ crate::LogLevel::Warning
+        )
+    }
 }
 
-impl LogType {
-    pub fn make_json(&self, file: &str, line_start: u32, column_start: u32, line_end: u32, column_end: u32, message: &str) -> String {
+fn log_with_level_rustc(file_name:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:String, level:LogLevel){
+    println!("{}", level.make_rustc_json(file_name, line_start, column_start, line_end, column_end, &message));
+}
+
+pub static LOG_WITH_LEVEL: RwLock<fn(&str, u32, u32, u32, u32, String, LogLevel)> = RwLock::new(log_with_level_rustc);
+
+pub fn log_with_level(file_name:&str, line_start:u32, column_start:u32, line_end:u32, column_end:u32, message:String, level:LogLevel){
+    let logger = LOG_WITH_LEVEL.read().expect("Logger lock poisoned");
+    logger(file_name, line_start, column_start, line_end, column_end, message, level);
+}
+
+#[derive(Clone, PartialEq, Eq, Copy, Debug, SerBin, DeBin)]
+pub enum LogLevel{
+    Warning,
+    Error,
+    Log,
+    Wait,
+    Panic,
+}
+
+impl LogLevel {
+    pub fn make_rustc_json(&self, file: &str, line_start: u32, column_start: u32, line_end: u32, column_end: u32, message: &str) -> String {
         let mut out = String::new();
         let _ = write!(out, "{{\"reason\":\"makepad-error-log\",");
         let _ = write!(out, "\"message\":{{\"message\":\"");
@@ -41,9 +85,11 @@ impl LogType {
         }
         let _ = write!(out, "\",");
         let _ = match self {
-            LogType::Error => write!(out, "\"level\":\"error\","),
-            LogType::Log => write!(out, "\"level\":\"log\","),
-            LogType::Panic => write!(out, "\"level\":\"panic\","),
+            LogLevel::Error => write!(out, "\"level\":\"error\","),
+            LogLevel::Log => write!(out, "\"level\":\"log\","),
+            LogLevel::Panic => write!(out, "\"level\":\"panic\","),
+            LogLevel::Warning => write!(out, "\"level\":\"warning\","),
+            LogLevel::Wait => write!(out, "\"level\":\"wait\","),
         };
         let _ = write!(out, "\"spans\":[{{");
         let _ = write!(out, "\"file_name\":\"{}\",", file);
@@ -60,49 +106,5 @@ impl LogType {
         let _ = write!(out, "}}");
         let _ = write!(out, "}}");
         out
-    }
-}
-
-#[cfg(target_os = "android")]
-#[macro_use]
-pub mod error_log_android;
-
-#[cfg(target_arch = "wasm32")]
-#[macro_use]
-pub mod error_log_wasm;
-
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-pub use error_log_desktop::*;
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-pub use error_log_desktop as makepad_error_log;
-
-#[cfg(target_os = "android")]
-pub use error_log_android::*;
-#[cfg(target_os = "android")]
-pub use error_log_android as makepad_error_log;
-
-#[cfg(target_arch = "wasm32")]
-pub use error_log_wasm::*;
-#[cfg(target_arch = "wasm32")]
-pub use error_log_wasm as makepad_error_log;
-
-use std::time::Instant;
-
-pub fn profile_start() -> Instant {
-    Instant::now()
-}
-
-#[macro_export]
-macro_rules!profile_end {
-    ( $ inst: expr) => {
-        $crate::makepad_error_log::log_with_type(
-            file!(),
-            line!(),
-            column!(),
-            line!(),
-            column!() + 4,
-            &format!("Profile time {} ms", ( $ inst.elapsed().as_nanos() as f64) / 1000000f64),
-            $crate::makepad_error_log::LogType::Log
-        )
     }
 }

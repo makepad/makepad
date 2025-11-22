@@ -2,6 +2,7 @@
 use {
     std::f64::consts::PI,
     crate::{
+        makepad_error_log::*,
         makepad_live_compiler::{
             LiveRef,
             LiveNodeReader,

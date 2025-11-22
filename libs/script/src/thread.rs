@@ -1,4 +1,5 @@
 use crate::makepad_live_id::*;
+use crate::makepad_error_log::*;
 use crate::heap::*;
 use crate::value::*;
 use crate::opcode::*;
@@ -327,10 +328,10 @@ impl ScriptThread{
                                 if let Some(ptr) = value.as_err(){
                                     if let Some(loc2) = code.ip_to_loc(ptr.ip){
                                         if in_rust{
-                                            println!("{}(in rust) {}", value, loc2);
+                                            log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}(in rust)", value), LogLevel::Error);
                                         }
                                         else{
-                                            println!("{} {}", value, loc2);
+                                            log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}", value), LogLevel::Error);
                                         }
                                     }
                                 }

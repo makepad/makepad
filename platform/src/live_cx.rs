@@ -1,6 +1,7 @@
 use {
     crate::{
         makepad_micro_serde::*,
+        makepad_error_log::*,
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_compiler::{
             LiveFileChange,

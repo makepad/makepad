@@ -3,6 +3,7 @@ use {
         id_pool::*,
         cx::Cx,
         makepad_math::*,
+        makepad_error_log::*,
         os::CxOsTexture,
     },
     std::rc::Rc,

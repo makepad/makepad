@@ -1,6 +1,7 @@
 use {
     crate::{
         makepad_math::*,
+        makepad_error_log::*,
         makepad_shader_compiler::{
             ShaderTy
         },

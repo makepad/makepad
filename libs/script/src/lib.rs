@@ -1,5 +1,6 @@
 pub use makepad_live_id;
 pub use makepad_live_id::makepad_live_id_macros;
+pub use makepad_error_log;
 pub mod tokenizer; 
 pub mod object;
 pub mod object_heap;
