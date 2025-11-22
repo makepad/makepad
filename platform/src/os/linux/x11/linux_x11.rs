@@ -364,7 +364,7 @@ impl X11Cx {
                             window.xlib_window.set_position(size);
                         }
                     },
-                    CxOsOp::ShowClipboardActions(_) =>{
+                    CxOsOp::ShowClipboardActions { .. } =>{
                     },
                     CxOsOp::CopyToClipboard(content) => {
                         if let Some(window) = opengl_windows.get(0) {

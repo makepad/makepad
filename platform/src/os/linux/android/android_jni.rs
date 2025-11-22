@@ -122,6 +122,12 @@ pub enum FromJavaMessage {
     WindowFocusChanged {
         has_focus: bool,
     },
+    ClipboardAction {
+        action: String, // "copy", "cut", "select_all"
+    },
+    ClipboardPaste {
+        content: String,
+    },
 }
 unsafe impl Send for FromJavaMessage {}
 
@@ -724,6 +730,28 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onPermissionDeni
     Java_dev_makepad_android_MakepadNative_onPermissionResult(env, class, permission, request_id, 3); // 3 = DeniedPermanent (assume worst case)
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onClipboardAction(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    action: jni_sys::jstring,
+) {
+    send_from_java_message(FromJavaMessage::ClipboardAction {
+        action: jstring_to_string(env, action),
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onClipboardPaste(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    content: jni_sys::jstring,
+) {
+    send_from_java_message(FromJavaMessage::ClipboardPaste {
+        content: jstring_to_string(env, content),
+    });
+}
+
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
     let chars = (**env).GetStringUTFChars.unwrap()(env, java_string, std::ptr::null_mut());
     let rust_string = std::ffi::CStr::from_ptr(chars).to_str().unwrap().to_string();
@@ -804,6 +832,31 @@ pub unsafe fn to_java_copy_to_clipboard(content: String) {
     let content = CString::new(content.clone()).unwrap();
     let content = ((**env).NewStringUTF.unwrap())(env, content.as_ptr());
     ndk_utils::call_void_method!(env, get_activity(), "copyToClipboard", "(Ljava/lang/String;)V", content);
+}
+
+pub unsafe fn to_java_paste_from_clipboard() -> String {
+    let env = attach_jni_env();
+    let result = ndk_utils::call_object_method!(env, get_activity(), "pasteFromClipboard", "()Ljava/lang/String;");
+    if result.is_null() {
+        return String::new();
+    }
+    jstring_to_string(env, result)
+}
+
+pub unsafe fn to_java_show_clipboard_actions(has_selection: bool, rect: crate::makepad_math::Rect, keyboard_shift: f64, dpi_factor: f64) {
+    let env = attach_jni_env();
+    // Apply DPI scaling
+    let left = (rect.pos.x * dpi_factor) as i32;
+    let top = (rect.pos.y * dpi_factor) as i32;
+    let right = ((rect.pos.x + rect.size.x) * dpi_factor) as i32;
+    let bottom = ((rect.pos.y + rect.size.y) * dpi_factor) as i32;
+    let shift = (keyboard_shift * dpi_factor) as i32;
+    ndk_utils::call_void_method!(env, get_activity(), "showClipboardActions", "(ZIIIII)V", has_selection as jni_sys::jboolean as std::ffi::c_uint, left, top, right, bottom, shift);
+}
+
+pub unsafe fn to_java_dismiss_clipboard_actions() {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(env, get_activity(), "dismissClipboardActions", "()V");
 }
 
 pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {
