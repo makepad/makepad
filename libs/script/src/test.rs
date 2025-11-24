@@ -64,7 +64,10 @@ pub fn test(){
         
         let test_shader = {
             pixel: fn(){
-                test2(2)
+                let t = 1
+                let t = 2
+                test2(1i)
+                test2(2f)
             }
         }
         ~shader.compile_draw(test_shader)
