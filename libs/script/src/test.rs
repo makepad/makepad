@@ -48,29 +48,30 @@ pub fn test(){
         }
     }
     
-    let _code = script!{
+    let code = script!{
         use mod.std.*
         use mod.shader
-        use mod.pod
+        use mod.pod.*
         
         /*
         let sdf = pod.struct{
             field: pod.f32,
             new: || sdf(field: 1.0)
         }*/
-        
-        let shader = {
-            fn pixel(){
-                let x = vec2f(0.0, 0.0)
+        let x = vec2f(0.0);
+        let test_shader = {
+            x: vec2f(0.0, 0.0)
+            pixel: fn(){
+                let x = vec3f(1)
+                x
             }
         }
-        
-        ~shader.compile_draw(shader)
+        ~shader.compile_draw(test_shader)
     };
     
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod
@@ -254,9 +255,12 @@ pub fn test(){
             a: pod.f32
             b: pod.f32
             c: pod.f32
+            method: || this.c
         }
         let x = struct_3(1,2,3);
         assert(x.c == 3f);
+        
+        assert(x.method() == 3f)
         
         let x = pod.vec3f(1,2,3);
         assert(x.z == 3f);
@@ -277,8 +281,6 @@ pub fn test(){
         use m.*
         assert(a_wild == 1)
         assert(b_wild == 2)
-        ~@hi
-        ~@ho
     };
         
     let _code = script!{

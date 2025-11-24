@@ -33,6 +33,7 @@ pub enum ScriptPodEnumVariant{
 // we're going to try to follow std140 datamapping for wgsl
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScriptPodTypeData{
+    pub object: ScriptObject,
     pub default: ScriptValue,
     //pub cached_align_of2: usize,
     pub ty: ScriptPodTy
@@ -81,8 +82,18 @@ impl ScriptPodVec{
             Self::Vec2h|Self::Vec3h|Self::Vec4h=>2,
             _=>4,
         }
-                
     }
+    
+    pub fn elem_ty(&self)->ScriptPodTy{
+        match self{
+            Self::Vec2f | Self::Vec3f | Self::Vec4f=>ScriptPodTy::F32,
+            Self::Vec2h | Self::Vec3h | Self::Vec4h=>ScriptPodTy::F16,
+            Self::Vec2u | Self::Vec3u | Self::Vec4u=>ScriptPodTy::U32,
+            Self::Vec2i | Self::Vec3i | Self::Vec4i=>ScriptPodTy::I32,
+            Self::Vec2b | Self::Vec3b | Self::Vec4b=>ScriptPodTy::Bool,
+        }
+    }
+    
     pub fn name(&self)->LiveId{
         match self{
             Self::Vec2f=>id!(vec2f),
@@ -284,6 +295,15 @@ pub enum ScriptPodTy{
     VariableArray{
         align_of: usize,
         ty: Box<ScriptPodTypeInline>,
+    }
+}
+
+impl ScriptPodTy{
+    pub fn is_number(&self)->bool{
+        match self{
+            Self::F32 | Self::F16 | Self::U32 | Self::I32 => true,
+            _ => false
+        }
     }
 }
 

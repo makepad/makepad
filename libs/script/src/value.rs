@@ -332,7 +332,11 @@ impl ScriptValueType{
     pub const ERR_NO_MATCHING_SHADER_TYPE: Self = Self(Self::ERR_FIRST.0 + 40);
     pub const ERR_OPCODE_NOT_SUPPORTED_IN_SHADER: Self = Self(Self::ERR_FIRST.0 + 41);
     pub const ERR_NO_WGSL_CONVERSION_AVAILABLE: Self = Self(Self::ERR_FIRST.0 + 42);
-    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 43);
+    pub const ERR_RETURN_TYPE_CHANGED: Self = Self(Self::ERR_FIRST.0 + 43);
+    pub const ERR_INVALID_CONSTRUCTOR_ARG: Self = Self(Self::ERR_FIRST.0 + 44);
+    pub const ERR_HAVE_TO_INITIALISE_VARIABLE: Self = Self(Self::ERR_FIRST.0 + 45);
+             
+    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 46);
     
     pub const HANDLE_FIRST: Self = Self(0x50);
     pub const HANDLE_LAST: Self = Self(0x7F);
@@ -459,6 +463,9 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_NO_MATCHING_SHADER_TYPE=>write!(f,"NoMatchingShaderType"),
             Self::ERR_OPCODE_NOT_SUPPORTED_IN_SHADER=>write!(f,"NotSupportedInShader"),
             Self::ERR_NO_WGSL_CONVERSION_AVAILABLE=>write!(f,"NoWgslConversionAvailable"),
+            Self::ERR_RETURN_TYPE_CHANGED=>write!(f,"ReturnTypeChanged"),
+            Self::ERR_INVALID_CONSTRUCTOR_ARG=>write!(f,"InvalidConstructorArg"),
+            Self::ERR_HAVE_TO_INITIALISE_VARIABLE=>write!(f,"HaveToInitialiseVariable"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
             _=>write!(f,"ScriptValueType?")
@@ -587,7 +594,10 @@ impl ScriptValue{
     err_fn!(err_no_matching_shader_type, ERR_NO_MATCHING_SHADER_TYPE);
     err_fn!(err_opcode_not_supported_in_shader, ERR_OPCODE_NOT_SUPPORTED_IN_SHADER);
     err_fn!(err_no_wgsl_conversion_available, ERR_NO_WGSL_CONVERSION_AVAILABLE);
-                
+    err_fn!(err_return_type_changed, ERR_RETURN_TYPE_CHANGED);
+    err_fn!(err_invalid_constructor_arg, ERR_INVALID_CONSTRUCTOR_ARG);
+    err_fn!(err_have_to_initialise_variable, ERR_HAVE_TO_INITIALISE_VARIABLE);
+    
     pub const fn raw(&self)->u64{self.0}
     
     pub const fn is_err(&self)->bool{(self.0&Self::TYPE_MASK) >=ScriptValueType::ERR_FIRST.to_u64() &&(self.0&Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()}

@@ -10,6 +10,7 @@ use crate::opcode::*;
 use crate::pod::*;
 use crate::mod_pod::*;
 use std::fmt::Write;
+use crate::makepad_error_log::*;
 
 // we collect functions, we do the type inferencing 
 // and we just emit topdown.
@@ -17,23 +18,34 @@ use std::fmt::Write;
 pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     let math = heap.new_module(id!(shader));
         
-    native.add_method(heap, math, id!(compile_draw), script_args!(code=NIL), |vm, args|{
+    native.add_method(heap, math, id!(compile_draw), script_args!(object=NIL), |vm, args|{
         // lets fetch the code
-        let fnobj = script_value!(vm, args.code);
-        let mut compiler = ShaderCompiler{
-            stack: ShaderStack{
-                stack_limit: 1000000,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        if let Some(fnobj) = fnobj.as_object(){
-            if let Some(fnptr) = vm.heap.as_fn(fnobj){
-                // lets inherit the scope for this entrypoint
-                
-                if let ScriptFnPtr::Script(fnip) = fnptr{
-                    compiler.compile(vm, fnip);
-                    return NIL
+        let object = script_value!(vm, args.object);
+        
+        // ok we're going to take a function, and then call it to generate/typetrace it out
+        // for every function we make a 'shadercompiler'
+        
+        if let Some(object) = object.as_object(){
+            if let Some(fnobj) = vm.heap.object_method(object, id!(pixel).into(), &vm.thread.trap).as_object(){
+                if let Some(fnptr) = vm.heap.as_fn(fnobj){
+                    if let ScriptFnPtr::Script(fnip) = fnptr{
+                        let mut compiler = ShaderCompiler{
+                            script_scope: fnobj,
+                            stack: ShaderStack{
+                                stack_limit: 1000000,
+                                ..Default::default()
+                            },
+                            mes: vec![ShaderMe::FnBody{
+                                ret:None
+                            }],
+                            ..Default::default()
+                        };
+                        compiler.compile(vm, fnip);
+                        // alright we should have output now
+                        println!("COMPILED:\n{}", compiler.out);
+                        
+                        return NIL
+                    }
                 }
             }
         }
@@ -44,19 +56,39 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
 
 #[derive(Debug)]
 pub enum ShaderMe{
-    Body{out:String},
-    Call{this:Option<ShaderType>, args:ScriptObject, out:String},
-    Pod{pod:ScriptPodType, offset:ScriptPodOffset, out:String},
+    FnBody{ret:Option<ShaderType>},
+    LoopBody,
+    IfBody,
+    Call{out:String, this:ShaderThis, args:Vec<ShaderArg>},
+    Pod{out:String, pod_ty:ScriptPodType, offset:ScriptPodOffset},
 }
 
 #[derive(Debug)]
+pub enum ShaderThis{
+    Free,
+    Shader,
+    Pod(ScriptPodType)
+}
+
+#[derive(Debug, PartialEq)]
 pub enum ShaderType{
-    _Function,
     Pod(ScriptPodType),
     Id(LiveId),
     AbstractInt,
     AbstractFloat,
     Error(ScriptValue)
+}
+
+impl ShaderType{
+    fn make_concrete(&self, builtins:&ScriptPodBuiltins, trap:&ScriptTrap)->Self{
+        match self{
+            Self::Pod(ty) => Self::Pod(*ty),
+            Self::Id(_id) => Self::Error(trap.err_no_matching_shader_type()),
+            Self::AbstractInt => Self::Pod(builtins.pod_i32),
+            Self::AbstractFloat => Self::Pod(builtins.pod_f32),
+            Self::Error(e) => Self::Error(*e),
+        }
+    }
 }
 
 trait ShaderOutput{
@@ -68,12 +100,29 @@ struct WgslBackend{
 impl ShaderOutput for WgslBackend{
 }
 
+#[derive(Debug)]
+pub struct ShaderArg{
+    _name: LiveId,
+    _ty: ScriptPodType,
+}
+
+pub struct ShaderFunction{
+    _args: Vec<ShaderArg>,
+    _out: String,
+    _ret: Option<ScriptPodType>,
+}
+
+struct ShaderScopeLet{
+    _shadow: usize,
+    ty: ScriptPodType
+}
 
 #[derive(Default)]
 struct ShaderCompiler{
+    pub out: String,
     pub stack: ShaderStack,
-    pub _script_scope: ScriptObject,
-    pub _shader_scope: LiveIdMap<LiveId, ScriptPodType>,
+    pub script_scope: ScriptObject,
+    pub shader_scope: LiveIdMap<LiveId, ShaderScopeLet>,
     pub mes: Vec<ShaderMe>,
     pub trap: ScriptTrap,
 }
@@ -354,7 +403,6 @@ impl ShaderCompiler{
     
     fn compile(&mut self, vm:&mut ScriptVm, fnip:ScriptIp){
         let mut out = WgslBackend{};
-        self.mes.push(ShaderMe::Body{out:String::new()});
         // alright lets go trace the opcodes
         self.trap.ip = fnip;
         self.trap.in_rust = true;
@@ -377,7 +425,7 @@ impl ShaderCompiler{
                         // check if we have a try clause
                         if let Some(ptr) = value.as_err(){
                             if let Some(loc2) = vm.code.ip_to_loc(ptr.ip){
-                                println!("{} {} - {}", value, loc2, opcode);
+                                log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}", value), LogLevel::Error);
                             }
                         }
                     },
@@ -389,9 +437,6 @@ impl ShaderCompiler{
             }
                         
             body = &bodies[self.trap.ip.body as usize];
-        }
-        if let Some(ShaderMe::Body{out}) = self.mes.pop(){
-            println!("{}", out);
         }
     }
     
@@ -486,9 +531,62 @@ impl ShaderCompiler{
             Opcode::BEGIN_ARRAY=>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::END_ARRAY=>{self.trap.err_opcode_not_supported_in_shader();},
 // Calling
-            Opcode::CALL_ARGS=>{self.trap.err_not_impl();},
-            Opcode::CALL_EXEC | Opcode::METHOD_CALL_EXEC=>{self.trap.err_not_impl();},
-            Opcode::METHOD_CALL_ARGS=>{self.trap.err_not_impl();},
+            Opcode::CALL_ARGS=>{
+                let (ty, _s) = self.stack.pop(&self.trap);
+                if let ShaderType::Id(id) = ty{
+                    // alright lets look it up on our scope
+                    let value = vm.heap.scope_value(self.script_scope, id.into(), &self.trap);
+                    // lets check if our obj is a PodType
+                    if let Some(pod_ty) = vm.heap.pod_type(value){
+                        let mut out = self.stack.new_string();
+                        // alright lets see what Id we got
+                        
+                        vm.code.builtins.pod.wgsl_name(pod_ty, id, |s|{
+                            write!(out, "{}(", s).ok();
+                        });
+                        
+                        self.mes.push(ShaderMe::Pod{
+                            out,
+                            pod_ty: pod_ty,
+                            offset: ScriptPodOffset::default(),
+                        });
+                        
+                        self.maybe_pop_to_me(vm, opargs);
+                        return
+                    }
+                    if let Some(obj) = value.as_object(){
+                        if let Some(_obj) = vm.heap.as_fn(obj){
+                            self.maybe_pop_to_me(vm, opargs);
+                            todo!();
+                            // its a script function
+                            // we need to switch to type-inferring this one w arguments
+                            // then hop into it, and serialise it out to our function list
+                        }
+                    }
+                }
+                self.trap.err_not_fn();
+            },
+            Opcode::CALL_EXEC | Opcode::METHOD_CALL_EXEC=>{
+                if let Some(me) = self.mes.pop(){
+                    match me{
+                        ShaderMe::Pod{pod_ty, mut out, offset}=>{
+                            // lets check if our field count works out
+                            vm.heap.pod_check_constructor_arg_count(pod_ty, &offset, &self.trap);
+                            out.push_str(")");
+                            self.stack.push(&self.trap, ShaderType::Pod(pod_ty), out);
+                        }
+                        _=>{self.trap.err_not_impl();}
+                    }
+                }
+            },
+            Opcode::METHOD_CALL_ARGS=>{
+                // resolve object on the scope
+                // it could be a POD on the shader scope
+                // or a POD on 'this'
+                // or an object from the outside
+                
+                self.trap.err_not_impl();
+            },
 // Fn def
             Opcode::FN_ARGS=>{self.trap.err_not_impl();},
             Opcode::FN_LET_ARGS=>{self.trap.err_not_impl();},
@@ -496,17 +594,21 @@ impl ShaderCompiler{
             Opcode::FN_ARG_TYPED=>{self.trap.err_not_impl();},
             Opcode::FN_BODY=>{self.trap.err_not_impl();},
             Opcode::RETURN=>{
-                if let Some(me) = self.mes.last_mut(){
-                    match me{
-                        ShaderMe::Body{out}=>{
-                            let (ty,s) = self.stack.pop(&self.trap);
-                            println!("TYPE: {:?}", ty);
-                            out.push_str("return ");
-                            out.push_str(&s);
-                            out.push_str(";\n");
-                            self.stack.free_string(s);
+                // lets find our FnBody
+                if let Some(me) = self.mes.iter_mut().rev().find(|v| if let ShaderMe::FnBody{..} = v{true}else{false}){
+                    if let ShaderMe::FnBody{ret} = me{
+                        let (ty,s) = self.stack.pop(&self.trap);
+                        let ty = ty.make_concrete(&vm.code.builtins.pod, &self.trap);
+                        if let Some(ret) = ret{
+                            if ty != *ret{
+                                self.trap.err_return_type_changed();
+                            }
                         }
-                        _=>todo!()
+                        *ret = Some(ty);
+                        self.out.push_str("return ");
+                        self.out.push_str(&s);
+                        self.out.push_str(";\n");
+                        self.stack.free_string(s);
                     }
                 }
                 
@@ -525,11 +627,28 @@ impl ShaderCompiler{
             Opcode::ME_FIELD=>{self.trap.err_not_impl();},
             Opcode::PROTO_FIELD=>{self.trap.err_not_impl();},
                         
-            Opcode::POP_TO_ME=>{self.trap.err_not_impl();},
+            Opcode::POP_TO_ME=>{
+                self.pop_to_me(vm);    
+            },
 // Array index            
             Opcode::ARRAY_INDEX=>{self.trap.err_not_impl();},
 // Let                   
-            Opcode::LET_DYN=>{self.trap.err_not_impl();},
+            Opcode::LET_DYN=>{
+                if opargs.is_nil(){
+                    self.trap.err_have_to_initialise_variable();
+                    self.stack.pop(&self.trap);
+                }
+                else{
+                    let (_ty_value, value) = self.stack.pop(&self.trap);
+                    let (ty_id, _id) = self.stack.pop(&self.trap);
+                    if let ShaderType::Id(id) = ty_id{
+                        write!(self.out, "let {id} = {value};\n").ok();
+                    }
+                    else{
+                        self.trap.err_unexpected();
+                    }
+                }
+            },
             Opcode::LET_TYPED=>{self.trap.err_not_impl();},
 // Tree search            
             Opcode::SEARCH_TREE=>{self.trap.err_opcode_not_supported_in_shader();},
@@ -565,19 +684,55 @@ impl ShaderCompiler{
                 // unknown instruction
             }
         }
-        if opargs.is_pop_to_me(){
-            if let Some(me) = self.mes.last_mut(){
-                match me{
-                    ShaderMe::Body{out}=>{
-                        let (_ty,s) = self.stack.pop(&self.trap);
-                        out.push_str(&s);
-                        out.push_str(";\n");
-                        self.stack.free_string(s);
-                    }
-                    _=>todo!()
+        self.maybe_pop_to_me(vm, opargs);
+    }
+    
+    fn pop_to_me(&mut self, vm:&ScriptVm){
+        if let Some(me) = self.mes.last_mut(){
+            match me{
+                ShaderMe::FnBody{ ret:_}=>{
+                    let (_ty,s) = self.stack.pop(&self.trap);
+                    self.out.push_str(&s);
+                    self.out.push_str(";\n");
+                    self.stack.free_string(s);
                 }
+                ShaderMe::Pod{out, offset, pod_ty}=>{
+                    let (ty, s) = self.stack.pop(&self.trap);
+                    // if ty is an Id, we have to resolve it including ty
+                    if offset.field_index > 0 {
+                        out.push_str(", ");
+                    }
+                    match ty{
+                        ShaderType::Pod(pod_ty_field)=>{
+                            vm.heap.pod_check_constructor_arg(*pod_ty, pod_ty_field, offset, &self.trap);
+                        }
+                        ShaderType::Id(id)=>{
+                            if let Some(v) = self.shader_scope.get(&id){
+                                vm.heap.pod_check_constructor_arg(*pod_ty, v.ty, offset, &self.trap);
+                            }
+                            else{
+                                // look value up on script scope
+                                // we need to log this value somewhere
+                                // if its a buffer or an immediate value
+                            }
+                        }
+                        ShaderType::AbstractInt | ShaderType::AbstractFloat=>{
+                            vm.heap.pod_check_abstract_constructor_arg(*pod_ty, offset, &self.trap);
+                        }
+                        ShaderType::Error(_e)=>{
+                        }
+                    }
+                    out.push_str(&s);
+                    self.stack.free_string(s);
+                }
+                _=>todo!()
             }
         }
-        
+    }
+    
+    fn maybe_pop_to_me(&mut self, vm:&ScriptVm, opargs:OpcodeArgs){
+        if opargs.is_pop_to_me(){
+            self.pop_to_me(vm);
+        }
     }
 }
