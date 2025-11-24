@@ -16,10 +16,9 @@ impl ScriptHeap{
         self.value(pod_ty.object, key, trap)
     }
     
-    pub fn new_pod_type(&mut self, object:ScriptObject, ty:ScriptPodTy, default:ScriptValue)->ScriptPodType{
+    pub fn new_pod_type(&mut self, object:ScriptObject, name: LiveId, ty:ScriptPodTy, default:ScriptValue)->ScriptPodType{
         if let Some(ptr) = self.pod_types_free.pop(){
             let pod_type = &mut self.pod_types[ptr.index as usize];
-            //pod_type.cached_align_of = ty.align_of();
             pod_type.object = object;
             pod_type.ty = ty;
             pod_type.default = default;
@@ -28,7 +27,7 @@ impl ScriptHeap{
         else{
             let ptr = ScriptPodType{index: self.pod_types.len() as u32};
             self.pod_types.push(ScriptPodTypeData{
-                //cached_align_of: ty.align_of(),
+                name: Some(name),
                 object,
                 ty,
                 default
@@ -43,6 +42,11 @@ impl ScriptHeap{
             return object.tag.as_pod_type()
         }
         None
+    }
+    
+    pub fn pod_type_name(&mut self, ty:ScriptPodType)->Option<LiveId>{
+        let ty = &self.pod_types[ty.index as usize];
+        ty.name
     }
         
     fn pod_type_inline(&self, val:ScriptValue, builtins:&ScriptPodBuiltins)->Option<(ScriptValue,ScriptPodTypeInline)>{
@@ -136,7 +140,7 @@ impl ScriptHeap{
                 id!(pod_array)=>{
                     if kvs.len() == 1{
                         if let Some((_,ty)) = self.pod_type_inline(kvs[0].value, builtins){
-                            let pt = self.new_pod_type(ptr, ScriptPodTy::VariableArray{
+                            let pt = self.new_pod_type(ptr, id!(), ScriptPodTy::VariableArray{
                                 align_of: ty.data.ty.align_of(),
                                 ty: Box::new(ty),
                             }, NIL);
@@ -155,7 +159,7 @@ impl ScriptHeap{
                                 let rem = size_of % align_of;
                                 let size_of = if rem != 0{size_of + (align_of - rem)}else{size_of};
                                                                 
-                                let pt = self.new_pod_type(ptr, ScriptPodTy::FixedArray{
+                                let pt = self.new_pod_type(ptr, id!(), ScriptPodTy::FixedArray{
                                     ty: Box::new(ty),
                                     align_of,
                                     size_of,
@@ -216,7 +220,7 @@ impl ScriptHeap{
                         offset_of += align_of - rem
                     }
                                         
-                    let pt = self.new_pod_type(ptr, ScriptPodTy::Struct{
+                    let pt = self.new_pod_type(ptr, id!(), ScriptPodTy::Struct{
                         align_of,
                         size_of: offset_of,
                         fields,
@@ -239,7 +243,7 @@ impl ScriptHeap{
         ty != ScriptPodTy::UndefinedArray{
             self.set_notproto(pod_obj);
         }
-        let pt = self.new_pod_type(pod_obj, ty, default);
+        let pt = self.new_pod_type(pod_obj, name, ty, default);
         self.set_object_storage_vec2(pod_obj);
         self.set_object_pod_type(pod_obj, pt); 
         self.set_value_def(pod_module, name.into(), pod_obj.into());
@@ -248,7 +252,7 @@ impl ScriptHeap{
         
     pub fn pod_def_vec(&mut self, pod_module:ScriptObject, name:LiveId, builtin: ScriptPodVec)->ScriptPodType{
         let pod_obj = self.new_with_proto(name.into());
-        let vec_ty = self.new_pod_type(pod_obj, ScriptPodTy::Vec(builtin), NIL);
+        let vec_ty = self.new_pod_type(pod_obj, name, ScriptPodTy::Vec(builtin), NIL);
         self.set_object_pod_type(pod_obj, vec_ty);
         self.set_notproto(pod_obj);
         self.freeze(pod_obj);
@@ -258,7 +262,7 @@ impl ScriptHeap{
     
     pub fn pod_def_mat(&mut self, pod_module:ScriptObject, name:LiveId, builtin:ScriptPodMat)->ScriptPodType{
         let pod_obj = self.new_with_proto(name.into());
-        let mat_ty = self.new_pod_type(pod_obj, ScriptPodTy::Mat(builtin), NIL);
+        let mat_ty = self.new_pod_type(pod_obj, name, ScriptPodTy::Mat(builtin), NIL);
         self.set_object_pod_type(pod_obj, mat_ty);
         self.set_notproto(pod_obj);
         self.freeze(pod_obj);
@@ -628,7 +632,7 @@ impl ScriptHeap{
     fn pod_write_field(&self, field:&ScriptPodField, offset_of:usize, out_data:&mut[u32], value:ScriptValue, trap:&ScriptTrap){    
                 
         match &field.ty.data.ty{
-            ScriptPodTy::NIL | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct  =>{
+            ScriptPodTy::Void | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct  =>{
                 trap.err_unexpected();
                 return 
             }
@@ -754,7 +758,7 @@ impl ScriptHeap{
                     if field.name == field_name{
                                                 
                         match &field.ty.data.ty{
-                            ScriptPodTy::NIL | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct => {
+                            ScriptPodTy::Void | ScriptPodTy::UndefinedArray | ScriptPodTy::UndefinedStruct => {
                                 trap.err_unexpected();
                                 return NIL
                             }
@@ -1147,8 +1151,8 @@ impl ScriptHeap{
     pub fn pod_debug_print(&self, pod_type:&ScriptPodTypeData, offset_of: usize, data:&[u32]){
         // alright we have a range of data, and a podtype we should be able to print it
         match &pod_type.ty{
-            ScriptPodTy::NIL=>{
-                print!("ScriptPodTy::NIL");
+            ScriptPodTy::Void=>{
+                print!("ScriptPodTy::Void");
             }
             ScriptPodTy::UndefinedArray=>{
                 print!("ScriptPodTy::UndefinedArray");

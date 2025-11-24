@@ -58,12 +58,13 @@ pub fn test(){
             field: pod.f32,
             new: || sdf(field: 1.0)
         }*/
-        let x = vec2f(0.0);
+        
+        let test1 = |x| x + 1
+        let test2 = |x| test1(x + 1)
+        
         let test_shader = {
-            x: vec2f(0.0, 0.0)
             pixel: fn(){
-                let x = 1
-                x + 2
+                test2(2)
             }
         }
         ~shader.compile_draw(test_shader)
