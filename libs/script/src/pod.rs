@@ -33,6 +33,7 @@ pub enum ScriptPodEnumVariant{
 // we're going to try to follow std140 datamapping for wgsl
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScriptPodTypeData{
+    pub name: Option<LiveId>,
     pub object: ScriptObject,
     pub default: ScriptValue,
     //pub cached_align_of2: usize,
@@ -263,7 +264,7 @@ impl ScriptPodMat{
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub enum ScriptPodTy{
     #[default]
-    NIL,
+    Void,
     UndefinedArray,
     UndefinedStruct,
     // limited to the types WGSL supports
@@ -316,7 +317,7 @@ pub struct ScriptPodOffset{
 impl ScriptPodTy{
     pub fn align_of(&self)->usize{
         match self{
-            Self::NIL | Self::UndefinedArray | Self::UndefinedStruct => 0,
+            Self::Void | Self::UndefinedArray | Self::UndefinedStruct => 0,
             Self::F32 => 4,
             Self::F16 => 2,
             Self::U32 => 4,
@@ -335,7 +336,7 @@ impl ScriptPodTy{
     
     pub fn size_of(&self)->usize{
         match self{
-            Self::NIL | Self::UndefinedArray | Self::UndefinedStruct  => 0,
+            Self::Void | Self::UndefinedArray | Self::UndefinedStruct  => 0,
             Self::F32 => 4,
             Self::F16 => 2,
             Self::U32 => 4,

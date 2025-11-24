@@ -20,6 +20,7 @@ macro_rules! script_pod_def{
 }
 
 pub struct ScriptPodBuiltins{
+    pub pod_void: ScriptPodType,
     pub pod_struct: ScriptPodType,
     pub pod_array: ScriptPodType,
     pub pod_bool: ScriptPodType,
@@ -56,6 +57,7 @@ pub struct ScriptPodBuiltins{
 }
 
 impl ScriptPodBuiltins{
+    /*
     pub fn wgsl_name<F:FnOnce(&str)>(&self, ty:ScriptPodType, id:LiveId, f:F){
         if ty == self.pod_bool{return f("bool")}
         if ty == self.pod_f32{return return f("f32")}
@@ -89,7 +91,7 @@ impl ScriptPodBuiltins{
         if ty == self.pod_mat4x3f{return return f("mat4x3f")}
         if ty == self.pod_mat4x4f{return return f("mat4x4f")}
         id.as_string(|s| f(s.unwrap_or("<notinterned>")))
-    }
+    }*/
     
     pub fn value_to_exact_type(&self, val:ScriptValue)->Option<ScriptPodType>{
         if val.is_f32(){
@@ -121,6 +123,8 @@ pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->Scrip
     
     let pod_bool = heap.pod_def_atom(pod, id_lut!(bool), ScriptPodTy::Bool, id_lut!(pod_bool), ScriptValue::from_bool(false));
     
+    let pod_void = heap.pod_def_atom(pod, id_lut!(f32), ScriptPodTy::Void, id_lut!(pod_void), ScriptValue::NIL);
+        
     let pod_f32 = heap.pod_def_atom(pod, id_lut!(f32), ScriptPodTy::F32, id_lut!(pod_f32), ScriptValue::from_f32(0.0));
         
     let pod_f16 = heap.pod_def_atom(pod, id_lut!(f16), ScriptPodTy::F16, id_lut!(pod_f16), ScriptValue::from_f16(0.0));
@@ -160,6 +164,7 @@ pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->Scrip
     let pod_mat4x4f = heap.pod_def_mat(pod, id_lut!(mat4x4f), ScriptPodMat::Mat4x4f);
                 
     let ps = ScriptPodBuiltins{
+        pod_void,
         pod_struct,
         pod_array,
         pod_bool,
