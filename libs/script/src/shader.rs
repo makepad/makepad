@@ -56,7 +56,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
 
 #[derive(Debug)]
 pub enum ShaderMe{
-    FnBody{ret:Option<ShaderType>},
+    FnBody{ret:Option<ScriptPodType>},
     LoopBody,
     IfBody,
     Call{out:String, this:ShaderThis, args:Vec<ShaderArg>},
@@ -80,13 +80,13 @@ pub enum ShaderType{
 }
 
 impl ShaderType{
-    fn make_concrete(&self, builtins:&ScriptPodBuiltins, trap:&ScriptTrap)->Self{
+    fn make_concrete(&self, builtins:&ScriptPodBuiltins)->Option<ScriptPodType>{
         match self{
-            Self::Pod(ty) => Self::Pod(*ty),
-            Self::Id(_id) => Self::Error(trap.err_no_matching_shader_type()),
-            Self::AbstractInt => Self::Pod(builtins.pod_i32),
-            Self::AbstractFloat => Self::Pod(builtins.pod_f32),
-            Self::Error(e) => Self::Error(*e),
+            Self::Pod(ty) => Some(*ty),
+            Self::Id(_id) => None,
+            Self::AbstractInt => Some(builtins.pod_i32),
+            Self::AbstractFloat => Some(builtins.pod_f32),
+            Self::Error(_e) => None,
         }
     }
 }
@@ -112,8 +112,9 @@ pub struct ShaderFunction{
     _ret: Option<ScriptPodType>,
 }
 
-struct ShaderScopeLet{
-    _shadow: usize,
+struct ShaderScopeItem{
+    shadow: usize,
+    is_var: bool,
     ty: ScriptPodType
 }
 
@@ -122,7 +123,7 @@ struct ShaderCompiler{
     pub out: String,
     pub stack: ShaderStack,
     pub script_scope: ScriptObject,
-    pub shader_scope: LiveIdMap<LiveId, ShaderScopeLet>,
+    pub shader_scope: LiveIdMap<LiveId, ShaderScopeItem>,
     pub mes: Vec<ShaderMe>,
     pub trap: ScriptTrap,
 }
@@ -155,9 +156,9 @@ macro_rules! impl_float_arithmetic {
         let (t2, s2) = if $opargs.is_u32(){
             (ShaderType::AbstractInt, free_fmt!($self, "{}", $opargs.to_u32()))
         }else{
-            $self.stack.pop(&$self.trap)
+            $self.pop_resolved($vm)
         };
-        let (t1, s1) = $self.stack.pop(&$self.trap);
+        let (t1, s1) = $self.pop_resolved($vm);
         let mut s = $self.stack.new_string();
         write!(s, "({} {} {})", s1, stringify!($op), s2).ok();
         let ty = $self.type_table_float_arithmetic(t1, t2, &$vm.code.builtins.pod);
@@ -170,9 +171,9 @@ macro_rules! impl_int_arithmetic {
         let (t2, s2) = if $opargs.is_u32(){
             (ShaderType::AbstractInt, free_fmt!($self, "{}", $opargs.to_u32()))
         }else{
-            $self.stack.pop(&$self.trap)
+            $self.pop_resolved($vm)
         };
-        let (t1, s1) = $self.stack.pop(&$self.trap);
+        let (t1, s1) = $self.pop_resolved($vm);
         let mut s = $self.stack.new_string();
         write!(s, "({} {} {})", s1, stringify!($op), s2).ok();
         let ty = $self.type_table_int_arithmetic(t1, t2, &$vm.code.builtins.pod);
@@ -219,6 +220,23 @@ impl ShaderStack{
 
 
 impl ShaderCompiler{
+        
+    fn pop_resolved(&mut self, vm:&ScriptVm)->(ShaderType,String){
+        let (ty, s) = self.stack.pop(&self.trap);
+        // if ty is an id, look it up
+        match ty{
+            ShaderType::Id(id)=>{
+                // look it up on our scope
+                if let Some(sc) = self.shader_scope.get(&id){
+                    return (ShaderType::Pod(sc.ty), s)
+                }
+                // alright lets look it up on our script scope
+                let _value = vm.heap.scope_value(self.script_scope, id.into(), &self.trap);
+                todo!()
+            },
+            _=>(ty, s),
+        }
+    }
     
     fn type_table_float_arithmetic(&mut self, lhs: ShaderType, rhs: ShaderType, builtins:&ScriptPodBuiltins )->ShaderType{
         let r = match lhs{
@@ -534,7 +552,7 @@ impl ShaderCompiler{
             Opcode::CALL_ARGS=>{
                 let (ty, _s) = self.stack.pop(&self.trap);
                 if let ShaderType::Id(id) = ty{
-                    // alright lets look it up on our scope
+                    // alright lets look it up on our script scope
                     let value = vm.heap.scope_value(self.script_scope, id.into(), &self.trap);
                     // lets check if our obj is a PodType
                     if let Some(pod_ty) = vm.heap.pod_type(value){
@@ -598,13 +616,15 @@ impl ShaderCompiler{
                 if let Some(me) = self.mes.iter_mut().rev().find(|v| if let ShaderMe::FnBody{..} = v{true}else{false}){
                     if let ShaderMe::FnBody{ret} = me{
                         let (ty,s) = self.stack.pop(&self.trap);
-                        let ty = ty.make_concrete(&vm.code.builtins.pod, &self.trap);
-                        if let Some(ret) = ret{
-                            if ty != *ret{
-                                self.trap.err_return_type_changed();
+                        let ty = ty.make_concrete(&vm.code.builtins.pod);
+                        if let Some(ty) = ty{
+                            if let Some(ret) = ret{
+                                if ty != *ret{
+                                    self.trap.err_return_type_changed();
+                                }
                             }
+                            *ret = Some(ty);
                         }
-                        *ret = Some(ty);
                         self.out.push_str("return ");
                         self.out.push_str(&s);
                         self.out.push_str(";\n");
@@ -639,10 +659,35 @@ impl ShaderCompiler{
                     self.stack.pop(&self.trap);
                 }
                 else{
-                    let (_ty_value, value) = self.stack.pop(&self.trap);
+                    let (ty_value, value) = self.stack.pop(&self.trap);
                     let (ty_id, _id) = self.stack.pop(&self.trap);
                     if let ShaderType::Id(id) = ty_id{
-                        write!(self.out, "let {id} = {value};\n").ok();
+                        // lets define our let type
+                        if let Some(ty) = ty_value.make_concrete(&vm.code.builtins.pod){
+                            if let Some(sc) = self.shader_scope.get_mut(&id){
+                                sc.shadow += 1;
+                                sc.ty = ty;
+                                sc.is_var = false;
+                            }
+                            else{
+                                self.shader_scope.insert(id, ShaderScopeItem{
+                                    is_var: false,
+                                    shadow: 0,
+                                    ty,
+                                });
+                            }
+                        }
+                        else{
+                            self.trap.err_no_matching_shader_type();
+                        }
+                        if let Some(sc) = self.shader_scope.get(&id){
+                            if sc.shadow>0{
+                                write!(self.out, "let {id}{} = {value};\n", sc.shadow).ok();
+                            }
+                            else{
+                                write!(self.out, "let {id} = {value};\n").ok();
+                            }
+                        }
                     }
                     else{
                         self.trap.err_unexpected();
