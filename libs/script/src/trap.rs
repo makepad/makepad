@@ -89,6 +89,9 @@ impl ScriptTrap{
     err_fwd!(err_no_matching_shader_type);
     err_fwd!(err_opcode_not_supported_in_shader);
     err_fwd!(err_no_wgsl_conversion_available);
+    err_fwd!(err_return_type_changed);
+    err_fwd!(err_invalid_constructor_arg);
+    err_fwd!(err_have_to_initialise_variable);
     
 }
 
