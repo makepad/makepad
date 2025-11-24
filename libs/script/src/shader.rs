@@ -31,6 +31,8 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                         let mut output = ShaderOutput::default();
                         compiler.compile_fn(vm, &mut output, fnip);
                         output.functions.push(ShaderFn{
+                            overload: 0,
+                            name: id!(pixel),
                             call_sig: "fn pixel()".into(),
                             args:Default::default(),
                             fnobj,
@@ -92,6 +94,8 @@ impl ShaderType{
 #[derive(Debug)]
 pub struct ShaderFn{
     call_sig: String,
+    overload: usize,
+    name: LiveId,
     args: Vec<ScriptPodType>,
     fnobj: ScriptObject,
     out: String,
@@ -402,6 +406,12 @@ impl ShaderFnCompiler{
             ShaderType::Id(id)=>{
                 // look it up on our scope
                 if let Some(sc) = self.shader_scope.get(&id){
+                    if sc.shadow>0{
+                        let mut s2 = self.stack.new_string();
+                        write!(s2, "_s{}{s}", sc.shadow).ok();
+                        self.stack.free_string(s);
+                        return (ShaderType::Pod(sc.ty), s2)
+                    }
                     return (ShaderType::Pod(sc.ty), s)
                 }
                 // alright lets look it up on our script scope
@@ -663,14 +673,32 @@ impl ShaderFnCompiler{
                                 let ret = if let Some(fun) = output.functions.iter().find(|v|{
                                     v.fnobj == fnobj && v.args == args
                                 }){
+                                    if fun.overload != 0{
+                                        let mut n = self.stack.new_string();
+                                        write!(n, "_f{}",  fun.overload ).ok();
+                                        out.insert_str(0, &n);
+                                        self.stack.free_string(n);
+                                    }
                                     fun.ret
                                 }
                                 else{
+                                    let overload = output.functions.iter().filter(|v|{v.name == name}).count();
+                                    // allow multiple typetraces of the same function:
+                                    // add a counter to the fn name somehow
                                     // lets run a compile
                                     let mut compiler = ShaderFnCompiler::new(fnobj);
                                     // we need to pass in a vec of types to the function
                                     let mut call_sig = String::new();
-                                    write!(call_sig, "fn {}(", name).ok();
+                                    if overload != 0{
+                                        let mut n = self.stack.new_string();
+                                        write!(n, "_f{}",  overload).ok();
+                                        out.insert_str(0, &n);
+                                        self.stack.free_string(n);
+                                        write!(call_sig, "fn _f{}{}", overload, name).ok();
+                                    }
+                                    else{
+                                        write!(call_sig, "fn {}(", name).ok();
+                                    }
                                     for i in 0..argc{
                                         // put in argument types
                                         let kv = vm.heap.vec_key_value(fnobj, i, &self.trap);
@@ -716,7 +744,9 @@ impl ShaderFnCompiler{
                                                 }
                                                 
                                                 output.functions.push(ShaderFn{
+                                                    overload,
                                                     call_sig,
+                                                    name,
                                                     args,
                                                     fnobj,
                                                     out: compiler.out,
@@ -830,7 +860,7 @@ impl ShaderFnCompiler{
                         }
                         if let Some(sc) = self.shader_scope.get(&id){
                             if sc.shadow>0{
-                                write!(self.out, "let {id}{} = {value};\n", sc.shadow).ok();
+                                write!(self.out, "let _s{}{id} = {value};\n", sc.shadow).ok();
                             }
                             else{
                                 write!(self.out, "let {id} = {value};\n").ok();

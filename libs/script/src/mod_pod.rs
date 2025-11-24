@@ -57,42 +57,7 @@ pub struct ScriptPodBuiltins{
 }
 
 impl ScriptPodBuiltins{
-    /*
-    pub fn wgsl_name<F:FnOnce(&str)>(&self, ty:ScriptPodType, id:LiveId, f:F){
-        if ty == self.pod_bool{return f("bool")}
-        if ty == self.pod_f32{return return f("f32")}
-        if ty == self.pod_f16{return return f("f16")}
-        if ty == self.pod_u32{return return f("u32")}
-        if ty == self.pod_i32{return return f("i32")}
-        if ty == self.pod_atomic_u32{return return f("atomic<u32>")} 
-        if ty == self.pod_atomic_i32{return return f("atomic<i32>")}
-        if ty == self.pod_vec2f{return return f("vec2f")}
-        if ty == self.pod_vec3f{return return f("vec3f")}
-        if ty == self.pod_vec4f{return return f("vec4f")}
-        if ty == self.pod_vec2h{return return f("vec2h")}
-        if ty == self.pod_vec3h{return return f("vec3h")}
-        if ty == self.pod_vec4h{return return f("vec4h")}
-        if ty == self.pod_vec2u{return return f("vec2u")}
-        if ty == self.pod_vec3u{return return f("vec3u")}
-        if ty == self.pod_vec4u{return return f("vec4u")}
-        if ty == self.pod_vec2i{return return f("vec2i")}
-        if ty == self.pod_vec3i{return return f("vec3i")}
-        if ty == self.pod_vec4i{return return f("vec4i")}
-        if ty == self.pod_vec2b{return return f("vec2b")}
-        if ty == self.pod_vec3b{return return f("vec3b")}
-        if ty == self.pod_vec4b{return return f("vec4b")}
-        if ty == self.pod_mat2x2f{return return f("mat2x2f")}
-        if ty == self.pod_mat2x3f{return return f("mat2x3f")}
-        if ty == self.pod_mat2x4f{return return f("mat2x4f")}
-        if ty == self.pod_mat3x2f{return return f("mat3x2f")}
-        if ty == self.pod_mat3x3f{return return f("mat3x3f")}
-        if ty == self.pod_mat3x4f{return return f("mat3x4f")}
-        if ty == self.pod_mat4x2f{return return f("mat4x2f")}
-        if ty == self.pod_mat4x3f{return return f("mat4x3f")}
-        if ty == self.pod_mat4x4f{return return f("mat4x4f")}
-        id.as_string(|s| f(s.unwrap_or("<notinterned>")))
-    }*/
-    
+ 
     pub fn value_to_exact_type(&self, val:ScriptValue)->Option<ScriptPodType>{
         if val.is_f32(){
             return Some(self.pod_f32)
