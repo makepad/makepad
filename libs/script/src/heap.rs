@@ -329,9 +329,22 @@ impl ScriptHeap{
         }
         false
     }
-        
-    pub fn to_debug_string(&self, value:ScriptValue, out:&mut String){
+    
+    pub fn println(&self, value:ScriptValue){
+        let mut out = String::new();
+        let mut recur = Vec::new();
+        self.to_debug_string(value, &mut recur, &mut out);
+        println!("{out}");
+    }
+    
+    pub fn to_debug_string(&self, value:ScriptValue, recur:&mut Vec<ScriptValue>, out:&mut String){
         if let Some(obj) = value.as_object(){
+            if recur.iter().any(|v| *v == value){
+                write!(out, "<recur>").ok();
+                return
+            }
+            recur.push(value);
+            
             let object = &self.objects[obj.index as usize];
             if object.tag.is_script_fn(){
                 write!(out, "Fn").ok();
@@ -349,10 +362,10 @@ impl ScriptHeap{
                 object.map_iter(|key,value|{
                     if !first{write!(out, ", ").ok();}
                     if key != NIL{
-                        self.to_debug_string(key, out);
+                        self.to_debug_string(key, recur, out);
                         write!(out, ":").ok();
                     }
-                    self.to_debug_string(value, out);
+                    self.to_debug_string(value, recur, out);
                     first = false;
                 });
                 for kv in object.vec.iter(){
@@ -360,7 +373,7 @@ impl ScriptHeap{
                     if kv.key != NIL{
                         write!(out, "{}:", kv.key).ok();
                     }
-                    self.to_debug_string(kv.value, out);
+                    self.to_debug_string(kv.value, recur, out);
                     first = false;
                 }
                 if let Some(next_ptr) = object.proto.as_object(){
@@ -374,16 +387,23 @@ impl ScriptHeap{
                 }
             }
             write!(out, "}}").ok();
+            recur.pop();
         }
         else if let Some(arr) = value.as_array(){
+            if recur.iter().any(|v| *v == value){
+                write!(out, "<recur>").ok();
+                return
+            }
+            recur.push(value);
             let array = &self.arrays[arr.index as usize];
             let len = array.storage.len();
             write!(out, "[").ok();
             for i in 0..len{
                 if i!=0{write!(out, ", ").ok();}
-                self.to_debug_string(array.storage.index(i).unwrap(), out);
+                self.to_debug_string(array.storage.index(i).unwrap(), recur, out);
             }
             write!(out, "]").ok();
+            recur.pop();
         }
         else if let Some(s) = value.as_string(){
             let s = if let Some(s) = &self.strings[s.index as usize]{&s.string.0}else{""};

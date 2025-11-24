@@ -788,7 +788,10 @@ impl ScriptThread{
                 let fnobj = if let Some(obj) = this.as_object(){
                     heap.object_method(obj, method, &mut Default::default())
                 }
-                else{ // we're calling a method on some other thing
+                else if let Some(pod) = this.as_pod(){ // we're calling a method on some other thing
+                    heap.pod_method(pod, method, &mut Default::default())
+                }
+                else{
                     NIL
                 };
                                 
@@ -1142,7 +1145,8 @@ impl ScriptThread{
                         }
                         else{
                             let mut out = String::new();
-                            heap.to_debug_string(value, &mut out);
+                            let mut recur = Vec::new();
+                            heap.to_debug_string(value, &mut recur, &mut out);
                             log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{:?}:{out}", value.value_type()), LogLevel::Log);
                             //heap.print(value);
                             //println!("");
