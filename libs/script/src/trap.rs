@@ -92,6 +92,7 @@ impl ScriptTrap{
     err_fwd!(err_return_type_changed);
     err_fwd!(err_invalid_constructor_arg);
     err_fwd!(err_have_to_initialise_variable);
-    
+    err_fwd!(err_struct_name_not_consistent);
+    err_fwd!(err_recursion_not_allowed);
 }
 

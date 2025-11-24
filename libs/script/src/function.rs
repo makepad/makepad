@@ -68,7 +68,7 @@ impl ScriptHeap{
             None
         }
     }   
-            
+    
     pub fn unnamed_fn_arg(&mut self, top_ptr:ScriptObject, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
         let object = &self.objects[top_ptr.index as usize];
                 
