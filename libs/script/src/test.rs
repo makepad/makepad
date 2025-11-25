@@ -59,15 +59,14 @@ pub fn test(){
             new: || sdf(field: 1.0)
         }*/
         
-        let test1 = |x| x + 1
-        let test2 = |x| test1(x + 1)
-        
         let test_shader = {
             pixel: fn(){
-                let t = 1
-                let t = 2
-                test2(1i)
-                test2(2f)
+                if 1 == 2{
+                    3
+                }
+                else{
+                    4
+                }
             }
         }
         ~shader.compile_draw(test_shader)
