@@ -35,6 +35,7 @@ pub mod function;
 pub mod test;
 pub mod shader;
 pub mod shader_tables;
+pub mod shader_builtins;
 
 pub use gc::*;
 pub use makepad_live_id::*;
