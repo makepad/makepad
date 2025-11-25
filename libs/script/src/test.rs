@@ -61,14 +61,11 @@ pub fn test(){
         
         let test_shader = {
             pixel: fn(){
-                if 1 == 2{
-                    3
-                }
-                elif 2==3{
-                    4
+                if x{
+                    1i
                 }
                 else{
-                    5
+                    2f
                 }
             }
         }

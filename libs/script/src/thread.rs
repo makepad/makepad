@@ -311,32 +311,32 @@ impl ScriptThread{
             if let Some((opcode, args)) = opcode.as_opcode(){
                 self.opcode(opcode, args, heap, code, host);
                 // if exception tracing
-                if let Some(trap) = self.trap.on.take(){
-                    match trap{
-                        ScriptTrapOn::Error{value, in_rust}=>{
-                            // check if we have a try clause
-                            if self.call_has_try(){
-                                let try_frame = self.tries.pop().unwrap();
-                                self.truncate_bases(try_frame.bases, heap);
-                                if try_frame.push_nil{
-                                    self.push_stack_unchecked(NIL)
+                if let Some(err) = self.trap.err.take(){
+                    if self.call_has_try(){
+                        let try_frame = self.tries.pop().unwrap();
+                        self.truncate_bases(try_frame.bases, heap);
+                        if try_frame.push_nil{
+                            self.push_stack_unchecked(NIL)
+                        }
+                        self.trap.goto(try_frame.start_ip + try_frame.jump);
+                        self.last_err = err.value;
+                    }
+                    else{
+                        if let Some(ptr) = err.value.as_err(){
+                            if let Some(loc2) = code.ip_to_loc(ptr.ip){
+                                if err.in_rust{
+                                    log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}(in rust)", err.value), LogLevel::Error);
                                 }
-                                self.trap.goto(try_frame.start_ip + try_frame.jump);
-                                self.last_err = value;
-                            }
-                            else{
-                                if let Some(ptr) = value.as_err(){
-                                    if let Some(loc2) = code.ip_to_loc(ptr.ip){
-                                        if in_rust{
-                                            log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}(in rust)", value), LogLevel::Error);
-                                        }
-                                        else{
-                                            log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}", value), LogLevel::Error);
-                                        }
-                                    }
+                                else{
+                                    log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}", err.value), LogLevel::Error);
                                 }
                             }
                         }
+                    }
+                }
+                if let Some(trap) = self.trap.on.take(){
+                    match trap{
+                        
                         ScriptTrapOn::Pause=>{
                             return NIL
                         }

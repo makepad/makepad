@@ -323,3 +323,31 @@ pub fn type_table_eq(lhs: ShaderType, rhs: ShaderType, trap:&ScriptTrap, builtin
     }
     r
 }
+
+pub fn type_table_if_else(lhs: ShaderType, rhs: ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
+    let r = match lhs{
+        ShaderType::AbstractFloat => match rhs{
+             ShaderType::AbstractFloat => ShaderType::AbstractFloat,
+             ShaderType::AbstractInt => ShaderType::AbstractFloat,
+             ShaderType::Pod(x) if x == builtins.pod_f32 || x == builtins.pod_f16 => ShaderType::Pod(x),
+             _=>ShaderType::Error(NIL),
+        }
+        ShaderType::AbstractInt => match rhs{
+             ShaderType::AbstractFloat => ShaderType::AbstractFloat,
+             ShaderType::AbstractInt => ShaderType::AbstractInt,
+             ShaderType::Pod(x) if x == builtins.pod_f32 || x == builtins.pod_f16 || x == builtins.pod_i32 || x == builtins.pod_u32 => ShaderType::Pod(x),
+             _=>ShaderType::Error(NIL),
+        }
+        ShaderType::Pod(x) => match rhs{
+             ShaderType::AbstractFloat if x == builtins.pod_f32 || x == builtins.pod_f16 => ShaderType::Pod(x),
+             ShaderType::AbstractInt if x == builtins.pod_f32 || x == builtins.pod_f16 || x == builtins.pod_i32 || x == builtins.pod_u32 => ShaderType::Pod(x),
+             ShaderType::Pod(y) if x == y => ShaderType::Pod(x),
+             _=>ShaderType::Error(NIL),
+        }
+        _=>ShaderType::Error(NIL),
+    };
+    if let ShaderType::Error(_) = r{
+        trap.err_if_else_type_different();
+    }
+    r
+}
