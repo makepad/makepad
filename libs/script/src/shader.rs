@@ -879,6 +879,30 @@ impl ShaderFnCompiler{
                 }
             },
             Opcode::LET_TYPED=>{self.trap.err_not_impl();},
+            Opcode::VAR_DYN=>{
+                if opargs.is_nil(){
+                    self.trap.err_have_to_initialise_variable();
+                    self.stack.pop(&self.trap);
+                }
+                else{
+                    let (ty_value, value) = self.stack.pop(&self.trap);
+                    let (ty_id, _id) = self.stack.pop(&self.trap);
+                    if let ShaderType::Id(id) = ty_id{
+                        // lets define our let type
+                        if let Some(ty) = ty_value.make_concrete(&vm.code.builtins.pod){
+                            let name = self.shader_scope.define_var(id, ty, true);
+                            write!(self.out, "var {} = {};\n", name, value).ok();
+                        }
+                        else{
+                            self.trap.err_no_matching_shader_type();
+                        }
+                    }
+                    else{
+                        self.trap.err_unexpected();
+                    }
+                }
+            },
+            Opcode::VAR_TYPED=>{self.trap.err_not_impl();},
 // Tree search            
             Opcode::SEARCH_TREE=>{self.trap.err_opcode_not_supported_in_shader();},
 // Log            

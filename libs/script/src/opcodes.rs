@@ -1123,6 +1123,30 @@ impl ScriptThread{
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 self.def_scope_value(heap, id, value);
                 self.trap.goto_next();
+            }
+            Opcode::VAR_DYN=>{
+                let value = if opargs.is_nil(){
+                    NIL
+                }
+                else{
+                    self.pop_stack_resolved(heap)
+                };
+                let id = self.pop_stack_value();
+                let id = id.as_id().unwrap_or(id!());
+                self.def_scope_value(heap, id, value);
+                self.trap.goto_next();
+            }
+            Opcode::VAR_TYPED=>{
+                let value = if opargs.is_nil(){
+                    NIL
+                }
+                else{
+                    self.pop_stack_resolved(heap)
+                };
+                let _ty = self.pop_stack_value();
+                let id = self.pop_stack_value().as_id().unwrap_or(id!());
+                self.def_scope_value(heap, id, value);
+                self.trap.goto_next();
             } 
 // Tree search            
             Opcode::SEARCH_TREE=>{

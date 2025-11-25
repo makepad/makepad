@@ -91,6 +91,12 @@ enum State{
     LetTypedAssign{index:u32},
     EmitLetDyn{index:u32},
     EmitLetTyped{index:u32},
+    Var{index:u32},
+    VarDynOrTyped{index:u32},
+    VarType{index:u32},
+    VarTypedAssign{index:u32},
+    EmitVarDyn{index:u32},
+    EmitVarTyped{index:u32},
 }
 
 // we have a stack, and we have operations
@@ -549,6 +555,58 @@ impl ScriptParser{
             }
             State::EmitLetTyped{index}=>{
                 self.push_code(Opcode::LET_TYPED.into(), index);
+            }
+            State::Var{index}=>{
+                if id.not_empty(){ // lets expect an assignment expression
+                    // push the id on to the stack
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::VarDynOrTyped{index});
+                    return 1
+                }
+                else{ // unknown
+                    error!(self, tokenizer, "Var expected identifier");
+                }
+            }
+            State::VarDynOrTyped{index}=>{
+                if op == id!(=){ // assignment following
+                    self.state.push(State::EmitVarDyn{index});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
+                else if op == id!(:){ // type following
+                    self.state.push(State::VarType{index});
+                    return 1
+                }
+                else{
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::VAR_DYN, OpcodeArgs::NIL), index);
+                }
+            }
+            State::VarType{index}=>{
+                if id.not_empty(){ // lets expect an assignment expression
+                    // push the id on to the stack
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::VarTypedAssign{index});
+                    return 1
+                }
+                else{ // unknown
+                    error!(self, tokenizer, "Var type expected");
+                }
+            }
+            State::VarTypedAssign{index}=>{
+                if op == id!(=){ // assignment following
+                    self.state.push(State::EmitVarTyped{index});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
+                else{
+                    self.push_code(ScriptValue::from_opcode_args(Opcode::VAR_TYPED, OpcodeArgs::NIL), index);
+                }
+            }
+            State::EmitVarDyn{index}=>{
+                self.push_code(Opcode::VAR_DYN.into(), index);
+            }
+            State::EmitVarTyped{index}=>{
+                self.push_code(Opcode::VAR_TYPED.into(), index);
             }
             State::EndRound=>{
                 // we expect a ) here
@@ -1178,6 +1236,11 @@ impl ScriptParser{
                 if id == id!(let){
                     // we have to have an identifier after let
                     self.state.push(State::Let{index:self.index});
+                    return 1
+                }
+                if id == id!(var){
+                    // we have to have an identifier after var
+                    self.state.push(State::Var{index:self.index});
                     return 1
                 }
                 if id == id!(return){

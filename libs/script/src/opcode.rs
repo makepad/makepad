@@ -199,6 +199,8 @@ impl Opcode{
     pub const OK_TEST:Self = Self(112);
     pub const OK_END:Self = Self(113);
     pub const USE:Self = Self(114);
+    pub const VAR_TYPED:Self = Self(115);
+    pub const VAR_DYN:Self = Self(116);
 }
 
 
@@ -331,6 +333,8 @@ impl fmt::Display for Opcode {
                         
             Self::LET_TYPED => return write!(f, "let_ty"),
             Self::LET_DYN => return write!(f, "let"),
+            Self::VAR_TYPED => return write!(f, "var_ty"),
+            Self::VAR_DYN => return write!(f, "var"),
                                         
             Self::SEARCH_TREE => return write!(f, "$"),
             Self::STRING_STREAM => return write!(f, "<STRINGSTREAM>"),
