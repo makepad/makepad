@@ -231,7 +231,7 @@ impl <'a> ScriptVm<'a>{
                 
         if let ScriptSource::Block{block} = &body.source{
             body.tokenizer.tokenize(&block.code, &mut self.heap);
-            body.parser.parse(&body.tokenizer.tokens, &block.values);
+            body.parser.parse(&body.tokenizer, &block.file, (block.line, block.column), &block.values);
             drop(bodies);
             // lets point our thread to it
             

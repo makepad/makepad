@@ -58,7 +58,12 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
 pub enum ShaderMe{
     FnBody{ret:Option<ScriptPodType>},
     LoopBody,
-    IfBody,
+    IfBody{
+        target_ip: u32,
+        start_pos: usize,
+        stack_depth: usize,
+        phi: Option<String>
+    },
     BuiltinCall{out:String, fnptr: NativeId, args:Vec<ScriptPodType>},
     ScriptCall{out:String, name:LiveId, fnobj: ScriptObject, this:ShaderThis, args:Vec<ScriptPodType>},
     Pod{out:String, pod_ty:ScriptPodType, offset:ScriptPodOffset},
@@ -333,6 +338,43 @@ impl ShaderFnCompiler{
         self.stack.push(&self.trap, ty, s);
     }
     
+    fn handle_if_else_phi(&mut self, vm:&ScriptVm, output:&mut ShaderOutput){
+        if let Some(ShaderMe::IfBody{target_ip, phi, start_pos, stack_depth}) = self.mes.last(){
+            if self.trap.ip.index >= *target_ip{
+                if self.stack.types.len() > *stack_depth{
+                    let (ty, val) = self.stack.pop(&self.trap);
+                    if let Some(phi) = phi{
+                        self.out.push_str(&format!("{} = {};\n", phi, val));
+                        self.stack.free_string(val);
+                        // declare the phi at start
+                        let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap();
+                        let ty_name = if let Some(name) = vm.heap.pod_type_name(ty){
+                            name
+                        }
+                        else if let Some(name) = output.find_struct_name(ty){
+                            name
+                        }
+                        else{
+                            id!(unknown)
+                        };
+                        let mut s = self.stack.new_string();
+                        write!(s, "let {phi}:{ty_name};\n").ok();                            
+                        self.out.insert_str(*start_pos, &s);
+                        self.stack.free_string(s);
+                        let mut s = self.stack.new_string();
+                        write!(s, "{}", phi).ok();
+                        self.stack.push(&self.trap, ShaderType::Pod(ty), s);
+                    }
+                    else{
+                        self.stack.free_string(val);
+                    }
+                }
+                self.out.push_str("}\n");
+                self.mes.pop();
+            }
+        }
+    }
+    
     fn compile_fn(&mut self, vm:&mut ScriptVm, output:&mut ShaderOutput, fnip:ScriptIp)->ScriptPodType{
         self.mes.push(ShaderMe::FnBody{
             ret:None
@@ -343,6 +385,7 @@ impl ShaderFnCompiler{
         let bodies = vm.code.bodies.borrow();
         let mut body = &bodies[self.trap.ip.body as usize];
         while (self.trap.ip.index as usize) < body.parser.opcodes.len(){
+            self.handle_if_else_phi(vm, output);
             let opcode = body.parser.opcodes[self.trap.ip.index as usize];
             if let Some((opcode, args)) = opcode.as_opcode(){
                 self.opcode(vm, output, opcode, args);
@@ -694,9 +737,44 @@ impl ShaderFnCompiler{
             },
             Opcode::RETURN_IF_ERR=>{self.trap.err_opcode_not_supported_in_shader();},
 // IF            
-            Opcode::IF_TEST=>{self.trap.err_not_impl();},
+            Opcode::IF_TEST=>{
+                let (_ty, val) = self.stack.pop(&self.trap);
+                let start_pos = self.out.len();
+                self.out.push_str("if(");
+                self.out.push_str(&val);
+                self.out.push_str("){\n");
+                self.stack.free_string(val);
+                
+                self.mes.push(ShaderMe::IfBody{
+                    target_ip: self.trap.ip.index + opargs.to_u32(),
+                    start_pos,
+                    stack_depth: self.stack.types.len(),
+                    phi: None
+                });
+            }
                         
-            Opcode::IF_ELSE=>{self.trap.err_not_impl();},
+            Opcode::IF_ELSE=>{
+                if let Some(ShaderMe::IfBody{target_ip, start_pos, stack_depth, phi}) = self.mes.last_mut(){
+                     if self.stack.types.len() > *stack_depth{
+                         let (_ty, val) = self.stack.pop(&self.trap);
+                         let phi_name = if let Some(p) = phi{
+                             p.clone()
+                         }
+                         else{
+                             let s = format!("_phi_{}", start_pos); 
+                             *phi = Some(s.clone());
+                             s
+                         };
+                         self.out.push_str(&format!("{} = {};\n", phi_name, val));
+                         self.stack.free_string(val);
+                     }
+                     self.out.push_str("}\nelse{\n");
+                     *target_ip = self.trap.ip.index + opargs.to_u32();
+                }
+                else{
+                    self.trap.err_unexpected();
+                }
+            }
 // Use            
             Opcode::USE=>{self.trap.err_opcode_not_supported_in_shader();},
 // Field            

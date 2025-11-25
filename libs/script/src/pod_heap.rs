@@ -36,7 +36,7 @@ impl ScriptHeap{
         }
     }
     
-    pub fn pod_type(&mut self, ty:ScriptValue)->Option<ScriptPodType>{
+    pub fn pod_type(&self, ty:ScriptValue)->Option<ScriptPodType>{
         if let Some(obj) = ty.as_object(){
             let object = &self.objects[obj.index as usize];
             return object.tag.as_pod_type()
@@ -44,7 +44,7 @@ impl ScriptHeap{
         None
     }
     
-    pub fn pod_type_name(&mut self, ty:ScriptPodType)->Option<LiveId>{
+    pub fn pod_type_name(&self, ty:ScriptPodType)->Option<LiveId>{
         let ty = &self.pod_types[ty.index as usize];
         ty.name
     }
