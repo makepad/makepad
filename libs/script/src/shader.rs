@@ -62,7 +62,8 @@ pub enum ShaderMe{
         target_ip: u32,
         start_pos: usize,
         stack_depth: usize,
-        phi: Option<String>
+        phi: Option<String>,
+        phi_type: Option<ShaderType>
     },
     BuiltinCall{out:String, fnptr: NativeId, args:Vec<ScriptPodType>},
     ScriptCall{out:String, name:LiveId, fnobj: ScriptObject, this:ShaderThis, args:Vec<ScriptPodType>},
@@ -76,7 +77,7 @@ pub enum ShaderThis{
     Pod(ScriptPodType)
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ShaderType{
     Pod(ScriptPodType),
     Id(LiveId),
@@ -339,7 +340,7 @@ impl ShaderFnCompiler{
     }
     
     fn handle_if_else_phi(&mut self, vm:&ScriptVm, output:&mut ShaderOutput){
-        if let Some(ShaderMe::IfBody{target_ip, phi, start_pos, stack_depth}) = self.mes.last(){
+        if let Some(ShaderMe::IfBody{target_ip, phi, start_pos, stack_depth, phi_type}) = self.mes.last(){
             if self.trap.ip.index >= *target_ip{
                 if self.stack.types.len() > *stack_depth{
                     let (ty, val) = self.stack.pop(&self.trap);
@@ -347,7 +348,8 @@ impl ShaderFnCompiler{
                         self.out.push_str(&format!("{} = {};\n", phi, val));
                         self.stack.free_string(val);
                         // declare the phi at start
-                        let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap();
+                        let ty = type_table_if_else(phi_type.unwrap(), ty, &self.trap, &vm.code.builtins.pod);
+                        let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                         let ty_name = if let Some(name) = vm.heap.pod_type_name(ty){
                             name
                         }
@@ -385,27 +387,28 @@ impl ShaderFnCompiler{
         let bodies = vm.code.bodies.borrow();
         let mut body = &bodies[self.trap.ip.body as usize];
         while (self.trap.ip.index as usize) < body.parser.opcodes.len(){
-            self.handle_if_else_phi(vm, output);
             let opcode = body.parser.opcodes[self.trap.ip.index as usize];
             if let Some((opcode, args)) = opcode.as_opcode(){
                 self.opcode(vm, output, opcode, args);
                 self.trap.goto_next();
+                self.handle_if_else_phi(vm, output);
             }
             else{ // id or immediate value
                 self.push_immediate(opcode, &vm.code.builtins.pod);
                 self.trap.goto_next();
+                self.handle_if_else_phi(vm, output);
             }
             // alright lets see if we have a trap, ifso we can log it
+            if let Some(err) = self.trap.err.take(){
+                if let Some(ptr) = err.value.as_err(){
+                    if let Some(loc2) = vm.code.ip_to_loc(ptr.ip){
+                        log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}", err.value), LogLevel::Error);
+                    }
+                }
+            }
             if let Some(trap) = self.trap.on.take(){
                 match trap{
-                    ScriptTrapOn::Error{value,..}=>{
-                        // check if we have a try clause
-                        if let Some(ptr) = value.as_err(){
-                            if let Some(loc2) = vm.code.ip_to_loc(ptr.ip){
-                                log_with_level(&loc2.file, loc2.line, loc2.col, loc2.line, loc2.col, format!("{}", value), LogLevel::Error);
-                            }
-                        }
-                    },
+                    
                     ScriptTrapOn::Return(_value)=>{
                         break
                     }
@@ -749,14 +752,16 @@ impl ShaderFnCompiler{
                     target_ip: self.trap.ip.index + opargs.to_u32(),
                     start_pos,
                     stack_depth: self.stack.types.len(),
-                    phi: None
+                    phi: None,
+                    phi_type: None
                 });
             }
                         
             Opcode::IF_ELSE=>{
-                if let Some(ShaderMe::IfBody{target_ip, start_pos, stack_depth, phi}) = self.mes.last_mut(){
+                if let Some(ShaderMe::IfBody{target_ip, start_pos, stack_depth, phi, phi_type}) = self.mes.last_mut(){
                      if self.stack.types.len() > *stack_depth{
-                         let (_ty, val) = self.stack.pop(&self.trap);
+                         let (ty, val) = self.stack.pop(&self.trap);
+                         *phi_type = Some(ty);
                          let phi_name = if let Some(p) = phi{
                              p.clone()
                          }

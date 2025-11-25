@@ -337,7 +337,8 @@ impl ScriptValueType{
     pub const ERR_HAVE_TO_INITIALISE_VARIABLE: Self = Self(Self::ERR_FIRST.0 + 45);
     pub const ERR_STRUCT_NAME_NOT_CONSISTENT: Self = Self(Self::ERR_FIRST.0 + 46);
     pub const ERR_RECURSION_NOT_ALLOWED: Self  = Self(Self::ERR_FIRST.0 + 47);
-    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 48);
+    pub const ERR_IF_ELSE_TYPE_DIFFERENT: Self = Self(Self::ERR_FIRST.0 + 48);
+    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 49);
     
     pub const HANDLE_FIRST: Self = Self(0x50);
     pub const HANDLE_LAST: Self = Self(0x7F);
@@ -469,6 +470,7 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_HAVE_TO_INITIALISE_VARIABLE=>write!(f,"HaveToInitialiseVariable"),
             Self::ERR_STRUCT_NAME_NOT_CONSISTENT=>write!(f,"StructNameNotConsistent"),
             Self::ERR_RECURSION_NOT_ALLOWED=>write!(f,"RecursionNotAllowed"),
+            Self::ERR_IF_ELSE_TYPE_DIFFERENT=>write!(f,"IfElseTypeDifferent"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
             _=>write!(f,"ScriptValueType?")
@@ -602,6 +604,7 @@ impl ScriptValue{
     err_fn!(err_have_to_initialise_variable, ERR_HAVE_TO_INITIALISE_VARIABLE);
     err_fn!(err_struct_name_not_consistent, ERR_STRUCT_NAME_NOT_CONSISTENT);
     err_fn!(err_recursion_not_allowed, ERR_RECURSION_NOT_ALLOWED);
+    err_fn!(err_if_else_type_different, ERR_IF_ELSE_TYPE_DIFFERENT);
             
     pub const fn raw(&self)->u64{self.0}
     
