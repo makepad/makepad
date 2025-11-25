@@ -146,11 +146,16 @@ impl ShaderOutput{
 }
 
 #[derive(Default)]
+struct ShaderScope{
+    pub shader_scope: Vec<LiveIdMap<LiveId, ShaderScopeItem>>,
+}
+
+#[derive(Default)]
 struct ShaderFnCompiler{
     pub out: String,
     pub stack: ShaderStack,
     pub script_scope: ScriptObject,
-    pub shader_scope: LiveIdMap<LiveId, ShaderScopeItem>,
+    pub shader_scope: ShaderScope,
     pub mes: Vec<ShaderMe>,
     pub trap: ScriptTrap,
 }
@@ -178,6 +183,47 @@ macro_rules! free_fmt {
     }};
 }
 
+impl ShaderScope{
+        
+    fn enter_scope(&mut self) {
+        self.shader_scope.push(Default::default());
+    }
+    
+    fn exit_scope(&mut self) {
+        self.shader_scope.pop();
+    }
+    
+    fn find_var(&self, id: LiveId) -> Option<(&ShaderScopeItem, String)> {
+        for scope in self.shader_scope.iter().rev() {
+            if let Some(item) = scope.get(&id) {
+                let name = if item.shadow > 0 {
+                    format!("_s{}{}", item.shadow, id)
+                } else {
+                    format!("{}", id)
+                };
+                return Some((item, name));
+            }
+        }
+        None
+    }
+    
+    fn define_var(&mut self, id: LiveId, ty: ScriptPodType, is_var: bool) -> String {
+        let scope = self.shader_scope.last_mut().unwrap();
+        if let Some(item) = scope.get_mut(&id) {
+            item.shadow += 1;
+            item.ty = ty;
+            item.is_var = is_var;
+            format!("_s{}{}", item.shadow, id)
+        } else {
+            scope.insert(id, ShaderScopeItem {
+                shadow: 0,
+                is_var,
+                ty
+            });
+            format!("{}", id)
+        }
+    }
+}
 
 impl ShaderStack{    
     fn pop(&mut self, trap:&ScriptTrap)->(ShaderType,String){
@@ -227,24 +273,23 @@ impl ShaderFnCompiler{
                 ..Default::default()
             },
             mes: vec![],
+            shader_scope: ShaderScope{shader_scope:vec![Default::default()]},
             ..Default::default()
         }
     }
     
+
     fn pop_resolved(&mut self, vm:&ScriptVm)->(ShaderType,String){
         let (ty, s) = self.stack.pop(&self.trap);
         // if ty is an id, look it up
         match ty{
             ShaderType::Id(id)=>{
                 // look it up on our scope
-                if let Some(sc) = self.shader_scope.get(&id){
-                    if sc.shadow>0{
-                        let mut s2 = self.stack.new_string();
-                        write!(s2, "_s{}{s}", sc.shadow).ok();
-                        self.stack.free_string(s);
-                        return (ShaderType::Pod(sc.ty), s2)
-                    }
-                    return (ShaderType::Pod(sc.ty), s)
+                if let Some((sc, name)) = self.shader_scope.find_var(id){
+                    let mut s2 = self.stack.new_string();
+                    write!(s2, "{}", name).ok();
+                    self.stack.free_string(s);
+                    return (ShaderType::Pod(sc.ty), s2)
                 }
                 // alright lets look it up on our script scope
                 let _value = vm.heap.scope_value(self.script_scope, id.into(), &self.trap);
@@ -377,6 +422,7 @@ impl ShaderFnCompiler{
                     self.stack.free_string(val);
                 }
                 self.out.push_str("}\n");
+                self.shader_scope.exit_scope();
                 self.mes.pop();
             }
         }
@@ -646,11 +692,7 @@ impl ShaderFnCompiler{
                                             else{
                                                 todo!()
                                             }
-                                            compiler.shader_scope.insert(id, ShaderScopeItem{
-                                                shadow: 0,
-                                                is_var: false,
-                                                ty: arg_ty
-                                            });
+                                            compiler.shader_scope.define_var(id, arg_ty, false);
                                         }
                                     }
                                     write!(call_sig, ")").ok();
@@ -751,6 +793,7 @@ impl ShaderFnCompiler{
                 self.out.push_str("if(");
                 self.out.push_str(&val);
                 self.out.push_str("){\n");
+                self.shader_scope.enter_scope();
                 self.stack.free_string(val);
                 
                 self.mes.push(ShaderMe::IfBody{
@@ -779,6 +822,8 @@ impl ShaderFnCompiler{
                          self.stack.free_string(val);
                      }
                      self.out.push_str("}\nelse{\n");
+                     self.shader_scope.exit_scope();
+                     self.shader_scope.enter_scope();
                      *target_ip = self.trap.ip.index + opargs.to_u32();
                 }
                 else{
@@ -810,29 +855,11 @@ impl ShaderFnCompiler{
                     if let ShaderType::Id(id) = ty_id{
                         // lets define our let type
                         if let Some(ty) = ty_value.make_concrete(&vm.code.builtins.pod){
-                            if let Some(sc) = self.shader_scope.get_mut(&id){
-                                sc.shadow += 1;
-                                sc.ty = ty;
-                                sc.is_var = false;
-                            }
-                            else{
-                                self.shader_scope.insert(id, ShaderScopeItem{
-                                    is_var: false,
-                                    shadow: 0,
-                                    ty,
-                                });
-                            }
+                            let name = self.shader_scope.define_var(id, ty, false);
+                            write!(self.out, "let {} = {};\n", name, value).ok();
                         }
                         else{
                             self.trap.err_no_matching_shader_type();
-                        }
-                        if let Some(sc) = self.shader_scope.get(&id){
-                            if sc.shadow>0{
-                                write!(self.out, "let _s{}{id} = {value};\n", sc.shadow).ok();
-                            }
-                            else{
-                                write!(self.out, "let {id} = {value};\n").ok();
-                            }
                         }
                     }
                     else{
@@ -855,29 +882,12 @@ impl ShaderFnCompiler{
                 let (val_id, _) = self.stack.pop(&self.trap);
                 if let ShaderType::Range{start, end, ty} = source{
                     if let ShaderType::Id(id) = val_id{
-                         let shadow = if let Some(sc) = self.shader_scope.get_mut(&id){
-                            sc.shadow += 1;
-                            sc.ty = ty;
-                            sc.shadow
-                        }
-                        else{
-                            self.shader_scope.insert(id, ShaderScopeItem{
-                                is_var: false,
-                                shadow: 0,
-                                ty,
-                            });
-                            0
-                        };
-                        let var_name = if shadow>0{
-                            format!("_s{}{id}", shadow)
-                        }
-                        else{
-                            format!("{id}")
-                        };
+                        self.shader_scope.enter_scope();
+                        let var_name = self.shader_scope.define_var(id, ty, false);
                         write!(self.out, "for(var {0} = {1}; {0} < {2}; {0}++){{\n", var_name, start, end).ok();
                         self.mes.push(ShaderMe::ForLoop{
                             var_id: id,
-                            shadow
+                            shadow: 0
                         });
                     }
                     else{
@@ -893,16 +903,9 @@ impl ShaderFnCompiler{
             Opcode::LOOP=>{self.trap.err_not_impl();},
             Opcode::FOR_END=>{
                 if let Some(me) = self.mes.pop(){
-                    if let ShaderMe::ForLoop{var_id, shadow} = me{
+                    if let ShaderMe::ForLoop{..} = me{
                         self.out.push_str("}\n");
-                        if let Some(sc) = self.shader_scope.get_mut(&var_id){
-                            if sc.shadow > 0{
-                                sc.shadow -= 1;
-                            }
-                            else{
-                                self.shader_scope.remove(&var_id);
-                            }
-                        }
+                        self.shader_scope.exit_scope();
                     }
                     else{
                         self.trap.err_unexpected();
@@ -968,7 +971,7 @@ impl ShaderFnCompiler{
                             vm.heap.pod_check_constructor_arg(*pod_ty, pod_ty_field, offset, &self.trap);
                         }
                         ShaderType::Id(id)=>{
-                            if let Some(v) = self.shader_scope.get(&id){
+                            if let Some((v, _name)) = self.shader_scope.find_var(id){
                                 vm.heap.pod_check_constructor_arg(*pod_ty, v.ty, offset, &self.trap);
                             }
                             else{
