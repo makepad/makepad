@@ -9,6 +9,7 @@ use crate::vm::*;
 use crate::opcode::*;
 use crate::pod::*;
 use crate::mod_pod::*;
+use crate::shader_tables::*;
 use std::fmt::Write;
 use crate::makepad_error_log::*;
 
@@ -165,189 +166,8 @@ macro_rules! free_fmt {
     }};
 }
 
-macro_rules! impl_float_arithmetic {
-    ($self:ident, $vm:ident, $opargs:ident, $op:tt)=>{{
-        let (t2, s2) = if $opargs.is_u32(){
-            (ShaderType::AbstractInt, free_fmt!($self, "{}", $opargs.to_u32()))
-        }else{
-            $self.pop_resolved($vm)
-        };
-        let (t1, s1) = $self.pop_resolved($vm);
-        let mut s = $self.stack.new_string();
-        write!(s, "({} {} {})", s1, stringify!($op), s2).ok();
-        let ty = type_table_float_arithmetic(t1, t2, &$self.trap, &$vm.code.builtins.pod);
-        $self.stack.push(&$self.trap, ty, s);
-    }};
-}
 
-macro_rules! impl_int_arithmetic {
-    ($self:ident, $vm:ident, $opargs:ident, $op:tt)=>{{
-        let (t2, s2) = if $opargs.is_u32(){
-            (ShaderType::AbstractInt, free_fmt!($self, "{}", $opargs.to_u32()))
-        }else{
-            $self.pop_resolved($vm)
-        };
-        let (t1, s1) = $self.pop_resolved($vm);
-        let mut s = $self.stack.new_string();
-        write!(s, "({} {} {})", s1, stringify!($op), s2).ok();
-        let ty = type_table_int_arithmetic(t1, t2, &$self.trap, &$vm.code.builtins.pod);
-        $self.stack.push(&$self.trap, ty, s);
-    }};
-}
-
-
-fn type_table_float_arithmetic(lhs: ShaderType, rhs: ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
-    let r = match lhs{
-        ShaderType::AbstractFloat => match rhs{
-            ShaderType::AbstractFloat=>ShaderType::AbstractFloat,
-            ShaderType::AbstractInt=>ShaderType::AbstractFloat,
-            ShaderType::Pod(x) if x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_f32),
-            ShaderType::Pod(x) if x == builtins.pod_f16=>ShaderType::Pod(builtins.pod_f16),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::AbstractInt => match rhs{
-            ShaderType::AbstractFloat=>ShaderType::AbstractFloat,
-            ShaderType::AbstractInt=>ShaderType::AbstractInt,
-            ShaderType::Pod(x) if x == builtins.pod_u32=>ShaderType::Pod(builtins.pod_u32),
-            ShaderType::Pod(x) if x == builtins.pod_i32=>ShaderType::Pod(builtins.pod_i32),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_f32=> match rhs{
-            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_f32),
-            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_f32),
-            ShaderType::Pod(x) if x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_f32),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_f16=> match rhs{
-            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_f16),
-            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_f16),
-            ShaderType::Pod(x) if x == builtins.pod_f16=>ShaderType::Pod(builtins.pod_f16),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_u32=> match rhs{
-            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_u32),
-            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_u32),
-            ShaderType::Pod(x) if x == builtins.pod_u32=>ShaderType::Pod(builtins.pod_u32),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_i32=> match rhs{
-            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_i32),
-            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_i32),
-            ShaderType::Pod(x) if x == builtins.pod_i32=>ShaderType::Pod(builtins.pod_i32),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec2f=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec2f=>ShaderType::Pod(builtins.pod_vec2f),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec3f=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec3f=>ShaderType::Pod(builtins.pod_vec3f),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec4f=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec4f=>ShaderType::Pod(builtins.pod_vec4f),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec2h=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec2h=>ShaderType::Pod(builtins.pod_vec2h),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec3h=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec3h=>ShaderType::Pod(builtins.pod_vec3h),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec4h=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec4h=>ShaderType::Pod(builtins.pod_vec4h),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec2u=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec2u=>ShaderType::Pod(builtins.pod_vec2u),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec3u=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec3u=>ShaderType::Pod(builtins.pod_vec3u),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec4u=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec4u=>ShaderType::Pod(builtins.pod_vec4u),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec2i=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec2i=>ShaderType::Pod(builtins.pod_vec2i),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec3i=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec3i=>ShaderType::Pod(builtins.pod_vec3i),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec4i=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec4i=>ShaderType::Pod(builtins.pod_vec4i),
-            _=>ShaderType::Error(NIL),
-        }
-        _=>ShaderType::Error(NIL),
-    };
-    if let ShaderType::Error(_) = r{
-        trap.err_no_wgsl_conversion_available();
-    }
-    r
-}
-    
-fn type_table_int_arithmetic(lhs: ShaderType, rhs: ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
-    let r = match lhs{
-        ShaderType::AbstractFloat => match rhs{
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::AbstractInt => match rhs{
-            ShaderType::AbstractInt=>ShaderType::AbstractInt,
-            ShaderType::Pod(x) if x == builtins.pod_u32=>ShaderType::Pod(builtins.pod_u32),
-            ShaderType::Pod(x) if x == builtins.pod_i32=>ShaderType::Pod(builtins.pod_i32),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_u32=> match rhs{
-            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_u32),
-            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_u32),
-            ShaderType::Pod(x) if x == builtins.pod_u32=>ShaderType::Pod(builtins.pod_u32),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_i32=> match rhs{
-            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_i32),
-            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_i32),
-            ShaderType::Pod(x) if x == builtins.pod_i32=>ShaderType::Pod(builtins.pod_i32),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec2u=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec2u=>ShaderType::Pod(builtins.pod_vec2u),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec3u=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec3u=>ShaderType::Pod(builtins.pod_vec3u),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec4u=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec4u=>ShaderType::Pod(builtins.pod_vec4u),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec2i=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec2i=>ShaderType::Pod(builtins.pod_vec2i),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec3i=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec3i=>ShaderType::Pod(builtins.pod_vec3i),
-            _=>ShaderType::Error(NIL),
-        }
-        ShaderType::Pod(x) if x == builtins.pod_vec4i=> match rhs{
-            ShaderType::Pod(x) if x == builtins.pod_vec4i=>ShaderType::Pod(builtins.pod_vec4i),
-            _=>ShaderType::Error(NIL),
-        }
-        _=>ShaderType::Error(NIL),
-    };
-    if let ShaderType::Error(_) = r{
-        trap.err_no_wgsl_conversion_available();
-    }
-    r
-}
-
-impl ShaderStack{
+impl ShaderStack{    
     fn pop(&mut self, trap:&ScriptTrap)->(ShaderType,String){
         if let Some(s) = self.types.pop(){
             return (s,self.strings.pop().unwrap())
@@ -452,6 +272,66 @@ impl ShaderFnCompiler{
         }
         self.trap.err_no_matching_shader_type();
     }
+
+    fn impl_eq(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
+        let (t2, s2) = if opargs.is_u32(){
+             let mut s = self.stack.new_string();
+             write!(s, "{}", opargs.to_u32()).ok();
+             (ShaderType::AbstractInt, s)
+        }else{
+             self.pop_resolved(vm)
+        };
+        let (t1, s1) = self.pop_resolved(vm);
+        let mut s = self.stack.new_string();
+        write!(s, "({} {} {})", s1, op, s2).ok();
+        let ty = type_table_eq(t1, t2, &self.trap, &vm.code.builtins.pod);
+        self.stack.push(&self.trap, ty, s);
+    }
+
+    fn impl_logic(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
+        let (t2, s2) = if opargs.is_u32(){
+             let mut s = self.stack.new_string();
+             write!(s, "{}", opargs.to_u32()).ok();
+             (ShaderType::AbstractInt, s)
+        }else{
+             self.pop_resolved(vm)
+        };
+        let (t1, s1) = self.pop_resolved(vm);
+        let mut s = self.stack.new_string();
+        write!(s, "({} {} {})", s1, op, s2).ok();
+        let ty = type_table_logic(t1, t2, &self.trap, &vm.code.builtins.pod);
+        self.stack.push(&self.trap, ty, s);
+    }
+
+    fn impl_float_arithmetic(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
+        let (t2, s2) = if opargs.is_u32(){
+            let mut s = self.stack.new_string();
+            write!(s, "{}", opargs.to_u32()).ok();
+            (ShaderType::AbstractInt, s)
+        }else{
+            self.pop_resolved(vm)
+        };
+        let (t1, s1) = self.pop_resolved(vm);
+        let mut s = self.stack.new_string();
+        write!(s, "({} {} {})", s1, op, s2).ok();
+        let ty = type_table_float_arithmetic(t1, t2, &self.trap, &vm.code.builtins.pod);
+        self.stack.push(&self.trap, ty, s);
+    }
+
+    fn impl_int_arithmetic(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
+        let (t2, s2) = if opargs.is_u32(){
+            let mut s = self.stack.new_string();
+            write!(s, "{}", opargs.to_u32()).ok();
+            (ShaderType::AbstractInt, s)
+        }else{
+            self.pop_resolved(vm)
+        };
+        let (t1, s1) = self.pop_resolved(vm);
+        let mut s = self.stack.new_string();
+        write!(s, "({} {} {})", s1, op, s2).ok();
+        let ty = type_table_int_arithmetic(t1, t2, &self.trap, &vm.code.builtins.pod);
+        self.stack.push(&self.trap, ty, s);
+    }
     
     fn compile_fn(&mut self, vm:&mut ScriptVm, output:&mut ShaderOutput, fnip:ScriptIp)->ScriptPodType{
         self.mes.push(ShaderMe::FnBody{
@@ -505,16 +385,16 @@ impl ShaderFnCompiler{
             }
             Opcode::NEG=>{
             }
-            Opcode::MUL=>impl_float_arithmetic!(self, vm, opargs, *),
-            Opcode::DIV=>impl_float_arithmetic!(self, vm, opargs, /),
-            Opcode::MOD=>impl_float_arithmetic!(self, vm, opargs, %),
-            Opcode::ADD=>impl_float_arithmetic!(self, vm, opargs, +),
-            Opcode::SUB=>impl_float_arithmetic!(self, vm, opargs, -),
-            Opcode::SHL=>impl_int_arithmetic!(self, vm, opargs, >>),
-            Opcode::SHR=>impl_int_arithmetic!(self, vm, opargs, <<),
-            Opcode::AND=>impl_int_arithmetic!(self, vm, opargs, &),
-            Opcode::OR=>impl_int_arithmetic!(self, vm, opargs, |),
-            Opcode::XOR=>impl_int_arithmetic!(self, vm, opargs, ^),
+            Opcode::MUL=>self.impl_float_arithmetic(vm, opargs, "*"),
+            Opcode::DIV=>self.impl_float_arithmetic(vm, opargs, "/"),
+            Opcode::MOD=>self.impl_float_arithmetic(vm, opargs, "%"),
+            Opcode::ADD=>self.impl_float_arithmetic(vm, opargs, "+"),
+            Opcode::SUB=>self.impl_float_arithmetic(vm, opargs, "-"),
+            Opcode::SHL=>self.impl_int_arithmetic(vm, opargs, ">>"),
+            Opcode::SHR=>self.impl_int_arithmetic(vm, opargs, "<<"),
+            Opcode::AND=>self.impl_int_arithmetic(vm, opargs, "&"),
+            Opcode::OR=>self.impl_int_arithmetic(vm, opargs, "|"),
+            Opcode::XOR=>self.impl_int_arithmetic(vm, opargs, "^"),
                         
 // ASSIGN
             Opcode::ASSIGN=>{self.trap.err_not_impl();},
@@ -567,16 +447,16 @@ impl ShaderFnCompiler{
 // CONCAT  
             Opcode::CONCAT=>{self.trap.err_opcode_not_supported_in_shader();},
 // EQUALITY
-            Opcode::EQ=>{self.trap.err_not_impl();},
-            Opcode::NEQ=>{self.trap.err_not_impl();},
+            Opcode::EQ=>{self.impl_eq(vm, opargs, "==");},
+            Opcode::NEQ=>{self.impl_eq(vm, opargs, "!=");},
                         
-            Opcode::LT=>{self.trap.err_not_impl();},
-            Opcode::GT=>{self.trap.err_not_impl();},
-            Opcode::LEQ=>{self.trap.err_not_impl();},
-            Opcode::GEQ=>{self.trap.err_not_impl();},
+            Opcode::LT=>{self.impl_eq(vm, opargs, "<");},
+            Opcode::GT=>{self.impl_eq(vm, opargs, ">");},
+            Opcode::LEQ=>{self.impl_eq(vm, opargs, "<=");},
+            Opcode::GEQ=>{self.impl_eq(vm, opargs, ">=");},
                         
-            Opcode::LOGIC_AND =>{self.trap.err_not_impl();},
-            Opcode::LOGIC_OR =>{self.trap.err_not_impl();},
+            Opcode::LOGIC_AND =>{self.impl_logic(vm, opargs, "&&");},
+            Opcode::LOGIC_OR =>{self.impl_logic(vm, opargs, "||");},
             Opcode::NIL_OR =>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::SHALLOW_EQ =>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::SHALLOW_NEQ=>{self.trap.err_opcode_not_supported_in_shader();},
@@ -694,7 +574,7 @@ impl ShaderFnCompiler{
                                         write!(n, "_f{}",  overload).ok();
                                         out.insert_str(0, &n);
                                         self.stack.free_string(n);
-                                        write!(call_sig, "fn _f{}{}", overload, name).ok();
+                                        write!(call_sig, "fn _f{}{}(", overload, name).ok();
                                     }
                                     else{
                                         write!(call_sig, "fn {}(", name).ok();
