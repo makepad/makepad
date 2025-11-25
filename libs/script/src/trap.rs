@@ -1,11 +1,13 @@
 use crate::value::*;
 
 #[derive(Debug, Clone, Copy)]
+pub struct ScriptError{
+    pub in_rust: bool,
+    pub value: ScriptValue
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum ScriptTrapOn{
-    Error{
-        in_rust: bool,
-        value: ScriptValue
-    },
     Pause,
     Return(ScriptValue),
 }
@@ -13,6 +15,7 @@ use std::cell::Cell;
 #[derive(Default, Debug)]
 pub struct ScriptTrap{
     pub in_rust: bool,
+    pub(crate) err: Cell<Option<ScriptError>>,
     pub(crate) on: Cell<Option<ScriptTrapOn>>,
     pub ip: ScriptIp,
 }
@@ -40,7 +43,7 @@ macro_rules! err_fwd{
 }
 impl ScriptTrap{
     pub fn err(&self, err:ScriptValue)->ScriptValue{
-        self.on.set(Some(ScriptTrapOn::Error{
+        self.err.set(Some(ScriptError{
             in_rust:self.in_rust,
             value:err
         }));
@@ -94,5 +97,6 @@ impl ScriptTrap{
     err_fwd!(err_have_to_initialise_variable);
     err_fwd!(err_struct_name_not_consistent);
     err_fwd!(err_recursion_not_allowed);
+    err_fwd!(err_if_else_type_different);
 }
 
