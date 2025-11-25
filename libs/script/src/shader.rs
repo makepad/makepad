@@ -10,6 +10,7 @@ use crate::opcode::*;
 use crate::pod::*;
 use crate::mod_pod::*;
 use crate::shader_tables::*;
+use crate::shader_builtins::*;
 use std::fmt::Write;
 use crate::makepad_error_log::*;
 
@@ -69,7 +70,7 @@ pub enum ShaderMe{
         phi: Option<String>,
         phi_type: Option<ShaderType>
     },
-    BuiltinCall{out:String, fnptr: NativeId, args:Vec<ScriptPodType>},
+    BuiltinCall{out:String, name:LiveId, fnptr: NativeId, args:Vec<ScriptPodType>},
     ScriptCall{out:String, name:LiveId, fnobj: ScriptObject, this:ShaderThis, args:Vec<ScriptPodType>},
     Pod{out:String, pod_ty:ScriptPodType, offset:ScriptPodOffset},
 }
@@ -618,8 +619,17 @@ impl ShaderFnCompiler{
                                     });
                                 }
                                 // builtin shader fns
-                                ScriptFnPtr::Native(_native_id)=>{
-                                    todo!()
+                                ScriptFnPtr::Native(fnptr)=>{
+                                    let mut out = self.stack.new_string();
+                                    write!(out, "{}(", name).ok();
+                                    self.mes.push(ShaderMe::BuiltinCall{
+                                        out,
+                                        name,
+                                        fnptr,
+                                        args: Default::default()
+                                    });
+                                    self.maybe_pop_to_me(vm, opargs);
+                                    return
                                 }
                             }
                             
@@ -737,6 +747,11 @@ impl ShaderFnCompiler{
                                 self.stack.push(&self.trap, ShaderType::Pod(ret), out);
                                 
                             }
+                        }
+                        ShaderMe::BuiltinCall{mut out, name, fnptr:_, args}=>{
+                             let ret = type_table_builtin(name, &args, &vm.code.builtins.pod, &self.trap);
+                             out.push_str(")");
+                             self.stack.push(&self.trap, ShaderType::Pod(ret), out);
                         }
                         _=>{self.trap.err_not_impl();}
                     }
@@ -991,6 +1006,20 @@ impl ShaderFnCompiler{
                     self.stack.free_string(s);
                 }
                 ShaderMe::ScriptCall{out, args, ..}=>{
+                    let (ty, s) = self.stack.pop(&self.trap);
+                    if args.len() > 0 {
+                        out.push_str(", ");
+                    }
+                    if let Some(ty) = ty.make_concrete(&vm.code.builtins.pod){
+                        args.push(ty);
+                    }
+                    else{
+                        self.trap.err_no_matching_shader_type();
+                    }
+                    out.push_str(&s);
+                    self.stack.free_string(s);
+                }
+                ShaderMe::BuiltinCall{out, args, ..}=>{
                     let (ty, s) = self.stack.pop(&self.trap);
                     if args.len() > 0 {
                         out.push_str(", ");
