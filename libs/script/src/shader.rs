@@ -943,7 +943,34 @@ impl ShaderFnCompiler{
 // Use            
             Opcode::USE=>{self.trap.err_opcode_not_supported_in_shader();},
 // Field            
-            Opcode::FIELD=>{self.trap.err_not_impl();},
+            Opcode::FIELD=>{
+                let (field_ty, field_s) = self.stack.pop(&self.trap);
+                let (instance_ty, instance_s) = self.pop_resolved(vm);
+                
+                if let ShaderType::Id(field_id) = field_ty {
+                    if let ShaderType::Pod(pod_ty) = instance_ty {
+                        if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
+                            let mut s = self.stack.new_string();
+                            write!(s, "{}.{}", instance_s, field_id).ok();
+                            self.stack.push(&self.trap, ShaderType::Pod(ret_ty), s);
+                        }
+                        else{
+                            self.trap.err_not_found();
+                            self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                        }
+                    }
+                    else{
+                        self.trap.err_no_matching_shader_type();
+                        self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                    }
+                }
+                else{
+                    self.trap.err_unexpected();
+                    self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                }
+                self.stack.free_string(field_s);
+                self.stack.free_string(instance_s);
+            },
             Opcode::FIELD_NIL=>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::ME_FIELD=>{self.trap.err_not_impl();},
             Opcode::PROTO_FIELD=>{self.trap.err_not_impl();},

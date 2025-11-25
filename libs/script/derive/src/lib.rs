@@ -36,3 +36,8 @@ pub fn derive_script_hook(input: TokenStream) -> TokenStream {
 pub fn pod_swizzle_vec_match(input: TokenStream) -> TokenStream {
     pod_swizzle_vec_match_impl(input)
 }
+
+#[proc_macro]
+pub fn pod_swizzle_vec_type(input: TokenStream) -> TokenStream {
+    pod_swizzle_vec_type_impl(input)
+}
