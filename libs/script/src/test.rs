@@ -52,6 +52,7 @@ pub fn test(){
         use mod.std.*
         use mod.shader
         use mod.pod.*
+        use mod.math.*
         
         /*
         let sdf = pod.struct{
@@ -59,10 +60,11 @@ pub fn test(){
             new: || sdf(field: 1.0)
         }*/
         
+        
+        // alright. lets figure out the shader this
         let test_shader = {
+            
             pixel: fn(){
-                for i in 0..10{
-                }
             }
         }
         ~shader.compile_draw(test_shader)
