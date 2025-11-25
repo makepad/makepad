@@ -58,6 +58,10 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
 pub enum ShaderMe{
     FnBody{ret:Option<ScriptPodType>},
     LoopBody,
+    ForLoop{
+        var_id: LiveId,
+        shadow: usize,
+    },
     IfBody{
         target_ip: u32,
         start_pos: usize,
@@ -77,12 +81,13 @@ pub enum ShaderThis{
     Pod(ScriptPodType)
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ShaderType{
     Pod(ScriptPodType),
     Id(LiveId),
     AbstractInt,
     AbstractFloat,
+    Range{start:String, end:String, ty:ScriptPodType},
     Error(ScriptValue)
 }
 
@@ -93,6 +98,7 @@ impl ShaderType{
             Self::Id(_id) => None,
             Self::AbstractInt => Some(builtins.pod_i32),
             Self::AbstractFloat => Some(builtins.pod_f32),
+            Self::Range{ty,..} => Some(*ty),
             Self::Error(_e) => None,
         }
     }
@@ -290,7 +296,7 @@ impl ShaderFnCompiler{
         let (t1, s1) = self.pop_resolved(vm);
         let mut s = self.stack.new_string();
         write!(s, "({} {} {})", s1, op, s2).ok();
-        let ty = type_table_eq(t1, t2, &self.trap, &vm.code.builtins.pod);
+        let ty = type_table_eq(&t1, &t2, &self.trap, &vm.code.builtins.pod);
         self.stack.push(&self.trap, ty, s);
     }
 
@@ -305,7 +311,7 @@ impl ShaderFnCompiler{
         let (t1, s1) = self.pop_resolved(vm);
         let mut s = self.stack.new_string();
         write!(s, "({} {} {})", s1, op, s2).ok();
-        let ty = type_table_logic(t1, t2, &self.trap, &vm.code.builtins.pod);
+        let ty = type_table_logic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
         self.stack.push(&self.trap, ty, s);
     }
 
@@ -320,7 +326,7 @@ impl ShaderFnCompiler{
         let (t1, s1) = self.pop_resolved(vm);
         let mut s = self.stack.new_string();
         write!(s, "({} {} {})", s1, op, s2).ok();
-        let ty = type_table_float_arithmetic(t1, t2, &self.trap, &vm.code.builtins.pod);
+        let ty = type_table_float_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
         self.stack.push(&self.trap, ty, s);
     }
 
@@ -335,7 +341,7 @@ impl ShaderFnCompiler{
         let (t1, s1) = self.pop_resolved(vm);
         let mut s = self.stack.new_string();
         write!(s, "({} {} {})", s1, op, s2).ok();
-        let ty = type_table_int_arithmetic(t1, t2, &self.trap, &vm.code.builtins.pod);
+        let ty = type_table_int_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
         self.stack.push(&self.trap, ty, s);
     }
     
@@ -345,31 +351,30 @@ impl ShaderFnCompiler{
                 if self.stack.types.len() > *stack_depth{
                     let (ty, val) = self.stack.pop(&self.trap);
                     if let Some(phi) = phi{
-                        self.out.push_str(&format!("{} = {};\n", phi, val));
-                        self.stack.free_string(val);
-                        // declare the phi at start
-                        let ty = type_table_if_else(phi_type.unwrap(), ty, &self.trap, &vm.code.builtins.pod);
-                        let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
-                        let ty_name = if let Some(name) = vm.heap.pod_type_name(ty){
-                            name
+                        if let Some(phi_type) = phi_type{
+                            self.out.push_str(&format!("{} = {};\n", phi, val));
+                            // declare the phi at start
+                            let ty = type_table_if_else(phi_type, &ty, &self.trap, &vm.code.builtins.pod);
+                            let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
+                            let ty_name = if let Some(name) = vm.heap.pod_type_name(ty){
+                                name
+                            }
+                            else if let Some(name) = output.find_struct_name(ty){
+                                name
+                            }
+                            else{
+                                id!(unknown)
+                            };
+                            let mut s = self.stack.new_string();
+                            write!(s, "let {phi}:{ty_name};\n").ok();                            
+                            self.out.insert_str(*start_pos, &s);
+                            self.stack.free_string(s);
+                            let mut s = self.stack.new_string();
+                            write!(s, "{}", phi).ok();
+                            self.stack.push(&self.trap, ShaderType::Pod(ty), s);
                         }
-                        else if let Some(name) = output.find_struct_name(ty){
-                            name
-                        }
-                        else{
-                            id!(unknown)
-                        };
-                        let mut s = self.stack.new_string();
-                        write!(s, "let {phi}:{ty_name};\n").ok();                            
-                        self.out.insert_str(*start_pos, &s);
-                        self.stack.free_string(s);
-                        let mut s = self.stack.new_string();
-                        write!(s, "{}", phi).ok();
-                        self.stack.push(&self.trap, ShaderType::Pod(ty), s);
                     }
-                    else{
-                        self.stack.free_string(val);
-                    }
+                    self.stack.free_string(val);
                 }
                 self.out.push_str("}\n");
                 self.mes.pop();
@@ -845,16 +850,86 @@ impl ShaderFnCompiler{
                         
             Opcode::SCOPE=>{self.trap.err_opcode_not_supported_in_shader();},
 // For            
-            Opcode::FOR_1 =>{self.trap.err_not_impl();},
+            Opcode::FOR_1 =>{
+                let (source, _) = self.stack.pop(&self.trap);
+                let (val_id, _) = self.stack.pop(&self.trap);
+                if let ShaderType::Range{start, end, ty} = source{
+                    if let ShaderType::Id(id) = val_id{
+                         let shadow = if let Some(sc) = self.shader_scope.get_mut(&id){
+                            sc.shadow += 1;
+                            sc.ty = ty;
+                            sc.shadow
+                        }
+                        else{
+                            self.shader_scope.insert(id, ShaderScopeItem{
+                                is_var: false,
+                                shadow: 0,
+                                ty,
+                            });
+                            0
+                        };
+                        let var_name = if shadow>0{
+                            format!("_s{}{id}", shadow)
+                        }
+                        else{
+                            format!("{id}")
+                        };
+                        write!(self.out, "for(var {0} = {1}; {0} < {2}; {0}++){{\n", var_name, start, end).ok();
+                        self.mes.push(ShaderMe::ForLoop{
+                            var_id: id,
+                            shadow
+                        });
+                    }
+                    else{
+                        self.trap.err_unexpected();
+                    }
+                }
+                else{
+                    self.trap.err_unexpected();
+                }
+            },
             Opcode::FOR_2 =>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::FOR_3=>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::LOOP=>{self.trap.err_not_impl();},
-            Opcode::FOR_END=>{self.trap.err_not_impl();},
+            Opcode::FOR_END=>{
+                if let Some(me) = self.mes.pop(){
+                    if let ShaderMe::ForLoop{var_id, shadow} = me{
+                        self.out.push_str("}\n");
+                        if let Some(sc) = self.shader_scope.get_mut(&var_id){
+                            if sc.shadow > 0{
+                                sc.shadow -= 1;
+                            }
+                            else{
+                                self.shader_scope.remove(&var_id);
+                            }
+                        }
+                    }
+                    else{
+                        self.trap.err_unexpected();
+                    }
+                }
+                else{
+                     self.trap.err_unexpected();
+                }
+            },
             Opcode::BREAK=>{self.trap.err_not_impl();},
             Opcode::BREAKIFNOT=>{self.trap.err_not_impl();},
             Opcode::CONTINUE=>{self.trap.err_not_impl();},
 // Range            
-            Opcode::RANGE=>{self.trap.err_not_impl();},
+            Opcode::RANGE=>{
+                let (_end_ty, end_s) = self.stack.pop(&self.trap);
+                let (start_ty, start_s) = self.stack.pop(&self.trap);
+                if let Some(ty) = start_ty.make_concrete(&vm.code.builtins.pod){
+                    self.stack.push(&self.trap, ShaderType::Range{
+                        start: start_s,
+                        end: end_s,
+                        ty
+                    }, String::new());
+                }
+                else{
+                     self.trap.err_no_matching_shader_type();
+                }
+            },
 // Is            
             Opcode::IS=>{self.trap.err_opcode_not_supported_in_shader();},
 // Try / OK            
@@ -906,7 +981,7 @@ impl ShaderFnCompiler{
                         ShaderType::AbstractInt | ShaderType::AbstractFloat=>{
                             vm.heap.pod_check_abstract_constructor_arg(*pod_ty, offset, &self.trap);
                         }
-                        ShaderType::Error(_e)=>{
+                        ShaderType::Range{..}|ShaderType::Error(_)=>{
                         }
                     }
                     out.push_str(&s);

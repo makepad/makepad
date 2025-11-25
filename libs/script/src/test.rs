@@ -61,11 +61,8 @@ pub fn test(){
         
         let test_shader = {
             pixel: fn(){
-                if x{
-                    1i
-                }
-                else{
-                    2f
+                for i in 0..10{
+                    
                 }
             }
         }
