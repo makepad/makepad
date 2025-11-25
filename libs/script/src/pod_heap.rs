@@ -731,6 +731,25 @@ impl ScriptHeap{
     
     
     
+    pub fn pod_field_type(&self, pod_ty:ScriptPodType, field_name:LiveId, builtins:&ScriptPodBuiltins)->Option<ScriptPodType>{
+        let pod_ty = &self.pod_types[pod_ty.index as usize];
+        match &pod_ty.ty{
+            ScriptPodTy::Struct{fields,..}=>{
+                for field in fields{
+                    if field.name == field_name{
+                        return Some(field.ty.self_ref)
+                    }
+                }
+                None
+            }
+            ScriptPodTy::Vec(vt)=>{
+                println!("VEC TYPE");
+                return makepad_script_derive::pod_swizzle_vec_type!();
+            }
+            _=>None
+        }
+    }
+    
     pub fn pod_read_field(&mut self, pod_ptr:ScriptPod, field:ScriptValue, builtins:&ScriptPodBuiltins, trap:&ScriptTrap)->ScriptValue{
         // alright lets get a field
         let field_name = if let Some(id) = field.as_id(){id}
