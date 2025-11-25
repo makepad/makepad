@@ -675,7 +675,38 @@ impl ShaderFnCompiler{
             Opcode::XOR=>self.handle_int_arithmetic(vm, opargs, "^"),
                         
 // ASSIGN
-            Opcode::ASSIGN=>{self.trap.err_not_impl();},
+            Opcode::ASSIGN=>{
+                let (value_ty, value) = self.stack.pop(&self.trap);
+                let (id_ty, _id) = self.stack.pop(&self.trap);
+                if let ShaderType::Id(id) = id_ty{
+                    if let Some((var, name)) = self.shader_scope.find_var(id){
+                        if !var.is_var{
+                            self.trap.err_let_is_immutable();
+                        }
+                        //if var.ty != value_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(var.ty){
+                             // error?
+                        //}
+                        
+                        // write!(self.out, "{} = {};\n", name, value).ok();
+                        // ok instead of writing it we want to push it as a void expression
+                        // so it can be used as an expression in another expression
+                        
+                        let mut s = self.stack.new_string();
+                        write!(s, "{} = {}", name, value).ok();
+                        self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), s);
+                        
+                    }
+                    else{
+                        self.trap.err_not_found();
+                        self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                    }
+                }
+                else{
+                    self.trap.err_not_assignable();
+                    self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                }
+                self.stack.free_string(value);
+            },
             Opcode::ASSIGN_ADD=>{self.trap.err_not_impl();},
             Opcode::ASSIGN_SUB=>{self.trap.err_not_impl();},
             Opcode::ASSIGN_MUL=>{self.trap.err_not_impl();},
@@ -787,9 +818,17 @@ impl ShaderFnCompiler{
                             }
                         }
                         *ret = Some(ty);
-                        self.out.push_str("return ");
-                        self.out.push_str(&s);
-                        self.out.push_str(";\n");
+                        
+                        if ty == vm.code.builtins.pod.pod_void{
+                            self.out.push_str(&s);
+                            self.out.push_str(";\nreturn;\n");
+                        }
+                        else{
+                            self.out.push_str("return ");
+                            self.out.push_str(&s);
+                            self.out.push_str(";\n");
+                        }
+                        
                         self.stack.free_string(s);
                     }
                 }
