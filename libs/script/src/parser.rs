@@ -3,6 +3,13 @@ use crate::makepad_live_id::live_id::*;
 use crate::value::*;
 use crate::opcode::*;
 use crate::makepad_live_id::makepad_live_id_macros::*;
+use crate::makepad_error_log::*;
+
+macro_rules! error {
+    ($self:expr, $tokenizer:expr, $($arg:tt)*) => {
+        $self.report_error($tokenizer, format!("{} (from: {}:{})", format!($($arg)*), file!(), line!()))
+    }
+}
 
 #[derive(Debug, Eq, PartialEq)]
 enum State{
@@ -154,38 +161,6 @@ impl State{
             id!(<) | id!(>) | id!(<=) | id!(>=) => true,
             _=> false
         }
-        /*
-            id!(is) |
-            id!(==) | id!(!=) | 
-            id!(===) => Opcode::SHALLOW_EQ,
-            id!(!==) => Opcode::SHALLOW_NEQ,
-                                    
-            id!(&&) => Opcode::LOGIC_AND,
-            id!(||)  => Opcode::LOGIC_OR,
-            id!(|?) => Opcode::NIL_OR,
-            id!(:) => Opcode::ASSIGN_ME,
-            id!(<:) => Opcode::ASSIGN_ME_BEFORE,
-            id!(>:) => Opcode::ASSIGN_ME_AFTER,
-            id!(^:) => Opcode::ASSIGN_ME_BEGIN,
-            id!(=) => Opcode::ASSIGN,
-            id!(+=) => Opcode::ASSIGN_ADD,
-            id!(-=) => Opcode::ASSIGN_SUB,
-            id!(*=) => Opcode::ASSIGN_MUL,
-            id!(/=) => Opcode::ASSIGN_DIV,
-            id!(%=) => Opcode::ASSIGN_MOD,
-            id!(&=) => Opcode::ASSIGN_AND,
-            id!(|=) => Opcode::ASSIGN_OR,
-            id!(^=) => Opcode::ASSIGN_XOR,
-            id!(<<=) => Opcode::ASSIGN_SHL,
-            id!(>>=)  => Opcode::ASSIGN_SHR,
-            id!(?=)  => Opcode::ASSIGN_IFNIL,
-            id!(..) => Opcode::RANGE,
-            id!(.)  => Opcode::FIELD,
-            id!(.?)  => Opcode::FIELD_NIL,
-            id!(me.) => Opcode::ME_FIELD,
-            id!(?) => Opcode::RETURN_IF_ERR,
-            _=> Opcode::NOP,
-        }*/
     }
     
     fn operator_to_field_assign(op:LiveId)->ScriptValue{
@@ -311,6 +286,9 @@ pub struct ScriptParser{
     pub source_map: Vec<Option<u32>>,
     
     state: Vec<State>,
+    pub file: String,
+    pub line_offset: usize,
+    pub col_offset: usize,
 }
 
 impl Default for ScriptParser{
@@ -320,11 +298,18 @@ impl Default for ScriptParser{
             opcodes: Default::default(),
             source_map: Default::default(),
             state: vec![State::BeginStmt{last_was_sep:false}],
+            file: String::new(),
+            line_offset: 0,
+            col_offset: 0
         }
     }
 }
 
 impl ScriptParser{
+    pub fn report_error(&self, tokenizer:&ScriptTokenizer, msg: String){
+        let (line, col) = tokenizer.token_index_to_row_col(self.index).unwrap_or((0,0));
+        log_with_level(&self.file, line as u32 + self.line_offset as u32, col as u32 + self.col_offset as u32, line as u32 + self.line_offset as u32, col as u32 + self.col_offset as u32, msg, LogLevel::Error);
+    }
     
     fn code_len(&self)->u32{
         self.opcodes.len() as _
@@ -393,7 +378,7 @@ impl ScriptParser{
         self.opcodes[index as usize].set_opcode_args(args);
     }
     
-    fn parse_step(&mut self, tok:ScriptToken, values: &[ScriptValue])->u32{
+    fn parse_step(&mut self, tokenizer: &ScriptTokenizer, tok:ScriptToken, values: &[ScriptValue])->u32{
         
         let op = tok.operator();
         let sep = tok.separator();
@@ -414,7 +399,7 @@ impl ScriptParser{
                         return 1
                     }
                     else{
-                        println!("Too many identifiers in for");
+                        error!(self, tokenizer, "Too many identifiers in for");
                         return 0
                     }
                 }
@@ -422,7 +407,7 @@ impl ScriptParser{
                     self.state.push(State::ForIdent{idents, index});
                     return 1
                 }
-                println!("Unexpected state in parsing for");
+                error!(self, tokenizer, "Unexpected state in parsing for");
             }
             State::ForBody{idents, index}=>{
                 // alright lets emit a for instruction
@@ -438,7 +423,7 @@ impl ScriptParser{
                     self.push_code(Opcode::FOR_3.into(), index);
                 }
                 else{
-                    println!("Wrong number of identifiers for for loop {idents}");
+                    error!(self, tokenizer, "Wrong number of identifiers for for loop {idents}");
                     return 0
                 }
                 if tok.is_open_curly(){
@@ -498,7 +483,7 @@ impl ScriptParser{
                     return 1
                 }
                 else {
-                    println!("Expected }} not found in for");
+                    error!(self, tokenizer, "Expected }} not found in for");
                     return 0
                 }
             }
@@ -509,7 +494,7 @@ impl ScriptParser{
                         self.push_code(Opcode::USE.into(), index)
                     }
                     else{
-                        println!("Error use expected field operation")
+                        error!(self, tokenizer, "Error use expected field operation")
                     }
                 }
             }
@@ -521,7 +506,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{ // unknown
-                    println!("Let expected identifier");
+                    error!(self, tokenizer, "Let expected identifier");
                 }
             }
             State::LetDynOrTyped{index}=>{
@@ -546,7 +531,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{ // unknown
-                    println!("Let type expected");
+                    error!(self, tokenizer, "Let type expected");
                 }
             }
             State::LetTypedAssign{index}=>{
@@ -573,7 +558,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{
-                    println!("Expected )")
+                    error!(self, tokenizer, "Expected )")
                 }
             }
             State::EmitFnArgTyped{index}=>{
@@ -606,7 +591,7 @@ impl ScriptParser{
                 }
                 else{
                     self.state.push(State::EmitFnArgDyn{index});
-                    println!("Argument type expected in function");
+                    error!(self, tokenizer, "Argument type expected in function");
                 }
             }
             State::FnLetMaybeArgs=>{
@@ -623,7 +608,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{
-                    println!("Expected either {{ or ( in function definition");
+                    error!(self, tokenizer, "Expected either {{ or ( in function definition");
                 }
             }
             State::FnArgType{lambda, index}=>{
@@ -634,7 +619,7 @@ impl ScriptParser{
                 }
                 else{
                     self.state.push(State::EmitFnArgDyn{index});
-                    println!("Argument type expected in function")
+                    error!(self, tokenizer, "Argument type expected in function")
                 }
             }
             State::FnArgTypeAssign{lambda, index}=>{
@@ -679,7 +664,7 @@ impl ScriptParser{
                     return 1
                 }
                 // unexpected token, but just stay in the arg list mode
-                println!("Unexpected token in function argument list {:?}", tok);
+                error!(self, tokenizer, "Unexpected token in function argument list {:?}", tok);
                 self.state.push(State::FnArgList{lambda});
                 return 1
             }
@@ -696,7 +681,7 @@ impl ScriptParser{
                     self.state.push(State::BeginExpr{required:true});
                 }
                 else{
-                    println!("Unexpected token in function definition, expected {{ {:?}", tok);
+                    error!(self, tokenizer, "Unexpected token in function definition, expected {{ {:?}", tok);
                 }
             }
             State::EscapedId=>{
@@ -705,7 +690,7 @@ impl ScriptParser{
                     return 1
                 }
                 else{
-                    println!("Expected identifier after @");
+                    error!(self, tokenizer, "Expected identifier after @");
                 }
             }
             State::EndFnExpr{fn_slot, index}=>{
@@ -732,7 +717,7 @@ impl ScriptParser{
                     return 1
                 }
                 else {
-                    println!("Expected }} not found");
+                    error!(self, tokenizer, "Expected }} not found");
                     return 0
                 }
             }
@@ -788,7 +773,7 @@ impl ScriptParser{
                     return 1
                 }
                 else {
-                    println!("Expected ] not found");
+                    error!(self, tokenizer, "Expected ] not found");
                     return 0
                 }
             }
@@ -799,7 +784,7 @@ impl ScriptParser{
                     return 1
                 }
                 else {
-                    println!("Expected }} not found");
+                    error!(self, tokenizer, "Expected }} not found");
                     return 0
                 }
             }
@@ -811,7 +796,7 @@ impl ScriptParser{
                     return 1
                 }
                 else {
-                    println!("Expected }} not found");
+                    error!(self, tokenizer, "Expected }} not found");
                     return 0
                 }
             }
@@ -849,7 +834,7 @@ impl ScriptParser{
                     return 1
                 }
                 else {
-                    println!("Expected ) not found");
+                    error!(self, tokenizer, "Expected ) not found");
                     return 0
                 }
             }
@@ -860,8 +845,8 @@ impl ScriptParser{
                     return 1
                 }
                 else {
-                    println!("AT TOK {:?}", tok);
-                    println!("Expected ] not found");
+                    error!(self, tokenizer, "AT TOK {:?}", tok);
+                    error!(self, tokenizer, "Expected ] not found");
                     return 0
                 }
             }
@@ -958,7 +943,7 @@ impl ScriptParser{
                     return 1
                 }
                 else {
-                    println!("Expected }} not found");
+                    error!(self, tokenizer, "Expected }} not found");
                     self.state.push(State::TryOk{was_block:false});
                     return 0
                 }
@@ -998,7 +983,7 @@ impl ScriptParser{
                     return 1
                 }
                 else {
-                    println!("Expected }} not found");
+                    error!(self, tokenizer, "Expected }} not found");
                     return 0
                 }
             }
@@ -1011,7 +996,7 @@ impl ScriptParser{
                     return 1
                 }
                 if id == id!(else){ 
-                    println!("Unexpected else, use {{}} to disambiguate");
+                    error!(self, tokenizer, "Unexpected else, use {{}} to disambiguate");
                     return 1
                 }
                 self.state.push(State::IfTrueExpr{if_start});
@@ -1032,17 +1017,16 @@ impl ScriptParser{
                 }
                 else {
                     self.state.push(State::EndExpr);
-                    println!("Expected }} not found");
+                    error!(self, tokenizer, "Expected }} not found");
                     return 0
                 }
             }
             State::IfMaybeElse{if_start, was_block}=>{
                 if id == id!(elif){
-                    let else_start = self.code_len() as u32;
                     self.push_code(Opcode::IF_ELSE.into(), self.index);
                     self.set_opcode_args(if_start, OpcodeArgs::from_u32(self.code_len() as u32 - if_start) );
 
-                    self.state.push(State::IfElse{else_start});
+                    self.state.push(State::IfMaybeElse{if_start, was_block});
                     self.state.push(State::IfTest{index:self.index});
                     self.state.push(State::BeginExpr{required:true});
                     return 1
@@ -1091,7 +1075,7 @@ impl ScriptParser{
                 }
                 else {
                     self.state.push(State::EndExpr);
-                    println!("Expected }} not found");
+                    error!(self, tokenizer, "Expected }} not found");
                     return 0
                 }
             }
@@ -1112,7 +1096,7 @@ impl ScriptParser{
                             return 1
                         }
                         else{
-                            println!("Found +{{ protoinherit. Left hand side must be field:")
+                            error!(self, tokenizer, "Found +{{ protoinherit. Left hand side must be field:")
                         }
                     }*/
                     self.push_code(Opcode::BEGIN_BARE.into(), self.index);
@@ -1292,7 +1276,7 @@ impl ScriptParser{
                    // self.push_code(NIL, self.index);
                 }
                 if required{
-                    println!("Expected expression after {:?} found {:?}", self.state, tok);
+                    error!(self, tokenizer, "Expected expression after {:?} found {:?}", self.state, tok);
                     self.push_code_none(NIL);
                 }
             }
@@ -1457,7 +1441,7 @@ impl ScriptParser{
             }
             State::EndStmt{last}=>{
                 if last == self.index{
-                    println!("Parser stuck on character {:?}, skipping", tok);
+                    error!(self, tokenizer, "Parser stuck on character {:?}, skipping", tok);
                     self.state.push(State::BeginStmt{last_was_sep:false});
                     return 1
                 }
@@ -1496,9 +1480,13 @@ impl ScriptParser{
         0
     }
     
-    pub fn parse(&mut self, tokens:&[ScriptTokenPos], values: &[ScriptValue]){
+    pub fn parse(&mut self, tokenizer: &ScriptTokenizer, file: &str, offsets: (usize, usize), values: &[ScriptValue]){
+        self.file = file.to_string();
+        self.line_offset = offsets.0;
+        self.col_offset = offsets.1;
         // wait for the tokens to be consumed
         let mut steps_zero = 0;
+        let tokens = &tokenizer.tokens;
         while self.index < tokens.len() as u32 && self.state.len()>0{
             
             let tok = if let Some(tok) = tokens.get(self.index as usize){
@@ -1508,7 +1496,7 @@ impl ScriptParser{
                 ScriptToken::StreamEnd
             };
             
-            let step = self.parse_step(tok, values);
+            let step = self.parse_step(tokenizer, tok, values);
             if step == 0{
                 steps_zero += 1;
             }
@@ -1517,11 +1505,11 @@ impl ScriptParser{
             }
            // println!("{:?} {:?}", self.code, self.state);
             if self.state.len()<=1 && steps_zero > 1000{
-                println!("Parser stuck {:?} {} {:?}", self.state, step, tokens[self.index as usize]);
+                error!(self, tokenizer, "Parser stuck {:?} {} {:?}", self.state, step, tokens[self.index as usize]);
                 break;
             }
             self.index += step;
         }
-        println!("{:?}", self.opcodes)
+        //println!("{:?}", self.opcodes)
     }
 }

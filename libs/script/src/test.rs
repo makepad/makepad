@@ -64,8 +64,11 @@ pub fn test(){
                 if 1 == 2{
                     3
                 }
-                else{
+                elif 2==3{
                     4
+                }
+                else{
+                    5
                 }
             }
         }
