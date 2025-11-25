@@ -118,6 +118,8 @@ impl ScriptObjectTag{
     pub const NOTPROTO: u64 = 0x2000<<40;
     // automatically convert between id and string keys when looking up
     pub const STRING_KEYS: u64 = 0x4000<<40;
+        
+    
     pub const FREEZE_MASK: u64 = Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN;
     
     const PROTO_FWD:u64 =
