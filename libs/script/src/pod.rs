@@ -115,6 +115,26 @@ impl ScriptPodVec{
         }
     }
     
+    pub fn swizzle_type(&self, lanes:usize, builtin: &ScriptPodBuiltins)->ScriptPodType{
+        match self{
+            Self::Vec2f=>match lanes{2=>builtin.pod_vec2f,3=>builtin.pod_vec3f,4=>builtin.pod_vec4f,_=>builtin.pod_f32},
+            Self::Vec3f=>match lanes{2=>builtin.pod_vec2f,3=>builtin.pod_vec3f,4=>builtin.pod_vec4f,_=>builtin.pod_f32},
+            Self::Vec4f=>match lanes{2=>builtin.pod_vec2f,3=>builtin.pod_vec3f,4=>builtin.pod_vec4f,_=>builtin.pod_f32},
+            Self::Vec2h=>match lanes{2=>builtin.pod_vec2h,3=>builtin.pod_vec3h,4=>builtin.pod_vec4h,_=>builtin.pod_f16},
+            Self::Vec3h=>match lanes{2=>builtin.pod_vec2h,3=>builtin.pod_vec3h,4=>builtin.pod_vec4h,_=>builtin.pod_f16},
+            Self::Vec4h=>match lanes{2=>builtin.pod_vec2h,3=>builtin.pod_vec3h,4=>builtin.pod_vec4h,_=>builtin.pod_f16},
+            Self::Vec2u=>match lanes{2=>builtin.pod_vec2u,3=>builtin.pod_vec3u,4=>builtin.pod_vec4u,_=>builtin.pod_u32},
+            Self::Vec3u=>match lanes{2=>builtin.pod_vec2u,3=>builtin.pod_vec3u,4=>builtin.pod_vec4u,_=>builtin.pod_u32},
+            Self::Vec4u=>match lanes{2=>builtin.pod_vec2u,3=>builtin.pod_vec3u,4=>builtin.pod_vec4u,_=>builtin.pod_u32},
+            Self::Vec2i=>match lanes{2=>builtin.pod_vec2i,3=>builtin.pod_vec3i,4=>builtin.pod_vec4i,_=>builtin.pod_i32},
+            Self::Vec3i=>match lanes{2=>builtin.pod_vec2i,3=>builtin.pod_vec3i,4=>builtin.pod_vec4i,_=>builtin.pod_i32},
+            Self::Vec4i=>match lanes{2=>builtin.pod_vec2i,3=>builtin.pod_vec3i,4=>builtin.pod_vec4i,_=>builtin.pod_i32},
+            Self::Vec2b=>match lanes{2=>builtin.pod_vec2b,3=>builtin.pod_vec3b,4=>builtin.pod_vec4b,_=>builtin.pod_bool},
+            Self::Vec3b=>match lanes{2=>builtin.pod_vec2b,3=>builtin.pod_vec3b,4=>builtin.pod_vec4b,_=>builtin.pod_bool},
+            Self::Vec4b=>match lanes{2=>builtin.pod_vec2b,3=>builtin.pod_vec3b,4=>builtin.pod_vec4b,_=>builtin.pod_bool},
+        }
+    }
+    
     pub fn builtin(&self, builtin: &ScriptPodBuiltins)->ScriptPodType{
         match self{
             Self::Vec2f=>builtin.pod_vec2f,
