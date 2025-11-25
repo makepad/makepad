@@ -682,7 +682,7 @@ impl ScriptValue{
     pub const fn is_let_opcode(&self)->bool{
         if self.is_opcode(){
             let code = Opcode(((self.0>>32) & 0xff) as u8);
-            return code.0 == Opcode::LET_TYPED.0 || code.0 == Opcode::LET_DYN.0
+            return code.0 == Opcode::LET_TYPED.0 || code.0 == Opcode::LET_DYN.0 || code.0 == Opcode::VAR_TYPED.0 || code.0 == Opcode::VAR_DYN.0
         }
         false
     }
