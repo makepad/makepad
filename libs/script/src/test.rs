@@ -53,20 +53,16 @@ pub fn test(){
         use mod.shader
         use mod.pod.*
         use mod.math.*
-        
-        /*
-        let sdf = pod.struct{
-            field: pod.f32,
-            new: || sdf(field: 1.0)
-        }*/
-        
-        
+
+        let sdf = struct{
+            field: f32,
+            set_field: |v| this.field = v 
+            new: || sdf(1.0)
+        }
         // alright. lets figure out the shader this
         let test_shader = {
-            
             pixel: fn(){
-                let x = vec2f(1);
-                x.x
+                let x = sdf.new()
             }
         }
         ~shader.compile_draw(test_shader)
