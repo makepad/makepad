@@ -4,7 +4,8 @@ use crate::heap::*;
 use crate::trap::*;
 use crate::mod_pod::*;
 use crate::pod::*;
-
+use std::collections::BTreeSet;
+use std::fmt::Write;
 
 impl ScriptHeap{
     
@@ -37,6 +38,75 @@ impl ScriptHeap{
         }
     }
     
+    pub fn pod_type_wgsl_def(&self, pod_ty: ScriptPodType, referenced:&mut BTreeSet<ScriptPodType>, out:&mut String){
+        let pod_type = &self.pod_types[pod_ty.index as usize];
+        if let ScriptPodTy::Struct{fields, ..} = &pod_type.ty {
+            let name = pod_type.name.unwrap();
+            writeln!(out, "struct {} {{", name).unwrap();
+            for field in fields {
+                let ty_name = self.pod_type_wgsl_type_name(&field.ty, referenced);
+                writeln!(out, "    {}: {},", field.name, ty_name).unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+    }
+    
+    pub fn pod_type_wgsl_struct_defs(&self, root_structs: &BTreeSet<ScriptPodType>, out: &mut String){
+        let mut visited = BTreeSet::new();
+        let mut worklist: Vec<_> = root_structs.iter().cloned().collect();
+        
+        while let Some(ty) = worklist.pop() {
+             if visited.contains(&ty) { continue; }
+             visited.insert(ty);
+             
+             let pod_type = &self.pod_types[ty.index as usize];
+             
+             let mut referenced = BTreeSet::new();
+             match &pod_type.ty {
+                 ScriptPodTy::Struct{..} => {
+                      self.pod_type_wgsl_def(ty, &mut referenced, out);
+                 }
+                 ScriptPodTy::FixedArray{ty: inner, ..} | ScriptPodTy::VariableArray{ty: inner, ..} => {
+                      let _ = self.pod_type_wgsl_type_name(inner, &mut referenced);
+                 }
+                 _ => {}
+             }
+             
+             for ref_ty in referenced {
+                 if !visited.contains(&ref_ty) {
+                     worklist.push(ref_ty);
+                 }
+             }
+        }
+    }
+    
+    fn pod_type_wgsl_type_name(&self, ty: &ScriptPodTypeInline, referenced:&mut BTreeSet<ScriptPodType>) -> String {
+        match &ty.data.ty {
+            ScriptPodTy::F32 => "f32".to_string(),
+            ScriptPodTy::F16 => "f16".to_string(),
+            ScriptPodTy::U32 => "u32".to_string(),
+            ScriptPodTy::I32 => "i32".to_string(),
+            ScriptPodTy::Bool => "bool".to_string(),
+            ScriptPodTy::AtomicU32 => "atomic<u32>".to_string(),
+            ScriptPodTy::AtomicI32 => "atomic<i32>".to_string(),
+            ScriptPodTy::Vec(v) => v.name().to_string(),
+            ScriptPodTy::Mat(m) => m.name().to_string(),
+            ScriptPodTy::Struct{..} => {
+                referenced.insert(ty.self_ref);
+                ty.data.name.unwrap().to_string()
+            }
+            ScriptPodTy::FixedArray{ty: inner, len, ..} => {
+                let inner_name = self.pod_type_wgsl_type_name(inner, referenced);
+                format!("array<{}, {}>", inner_name, len)
+            }
+            ScriptPodTy::VariableArray{ty: inner, ..} => {
+                 let inner_name = self.pod_type_wgsl_type_name(inner, referenced);
+                 format!("array<{}>", inner_name)
+            }
+            _ => "unknown".to_string()
+        }
+    }
+    
     pub fn pod_type(&self, ty:ScriptValue)->Option<ScriptPodType>{
         if let Some(obj) = ty.as_object(){
             let object = &self.objects[obj.index as usize];
@@ -48,6 +118,11 @@ impl ScriptHeap{
     pub fn pod_type_name(&self, ty:ScriptPodType)->Option<LiveId>{
         let ty = &self.pod_types[ty.index as usize];
         ty.name
+    }
+    
+    pub fn pod_type_name_set(&mut self, ty:ScriptPodType, name:LiveId){
+        let ty = &mut self.pod_types[ty.index as usize];
+        ty.name = Some(name);
     }
         
     fn pod_type_inline(&self, val:ScriptValue, builtins:&ScriptPodBuiltins)->Option<(ScriptValue,ScriptPodTypeInline)>{
