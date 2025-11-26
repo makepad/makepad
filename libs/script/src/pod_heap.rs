@@ -44,8 +44,9 @@ impl ScriptHeap{
             let name = pod_type.name.unwrap();
             writeln!(out, "struct {} {{", name).unwrap();
             for field in fields {
-                let ty_name = self.pod_type_wgsl_type_name(&field.ty, referenced);
-                writeln!(out, "    {}: {},", field.name, ty_name).unwrap();
+                write!(out, "    {}: ", field.name).unwrap();
+                self.pod_type_wgsl_type_name_referenced(&field.ty, referenced, out);
+                writeln!(out, ",").unwrap();
             }
             writeln!(out, "}}").unwrap();
         }
@@ -54,56 +55,78 @@ impl ScriptHeap{
     pub fn pod_type_wgsl_struct_defs(&self, root_structs: &BTreeSet<ScriptPodType>, out: &mut String){
         let mut visited = BTreeSet::new();
         let mut worklist: Vec<_> = root_structs.iter().cloned().collect();
-        
+                
+        let mut referenced = BTreeSet::new();
         while let Some(ty) = worklist.pop() {
              if visited.contains(&ty) { continue; }
              visited.insert(ty);
              
              let pod_type = &self.pod_types[ty.index as usize];
-             
-             let mut referenced = BTreeSet::new();
+             referenced.clear();
              match &pod_type.ty {
                  ScriptPodTy::Struct{..} => {
                       self.pod_type_wgsl_def(ty, &mut referenced, out);
                  }
                  ScriptPodTy::FixedArray{ty: inner, ..} | ScriptPodTy::VariableArray{ty: inner, ..} => {
-                      let _ = self.pod_type_wgsl_type_name(inner, &mut referenced);
+                      let mut dummy = String::new();
+                      self.pod_type_wgsl_type_name_referenced(inner, &mut referenced, &mut dummy);
                  }
                  _ => {}
              }
              
-             for ref_ty in referenced {
+             for ref_ty in &referenced {
                  if !visited.contains(&ref_ty) {
-                     worklist.push(ref_ty);
+                     worklist.push(*ref_ty);
                  }
              }
         }
     }
     
-    fn pod_type_wgsl_type_name(&self, ty: &ScriptPodTypeInline, referenced:&mut BTreeSet<ScriptPodType>) -> String {
+    fn pod_type_wgsl_type_name_referenced(&self, ty: &ScriptPodTypeInline, referenced:&mut BTreeSet<ScriptPodType>, out:&mut String) {
         match &ty.data.ty {
-            ScriptPodTy::F32 => "f32".to_string(),
-            ScriptPodTy::F16 => "f16".to_string(),
-            ScriptPodTy::U32 => "u32".to_string(),
-            ScriptPodTy::I32 => "i32".to_string(),
-            ScriptPodTy::Bool => "bool".to_string(),
-            ScriptPodTy::AtomicU32 => "atomic<u32>".to_string(),
-            ScriptPodTy::AtomicI32 => "atomic<i32>".to_string(),
-            ScriptPodTy::Vec(v) => v.name().to_string(),
-            ScriptPodTy::Mat(m) => m.name().to_string(),
             ScriptPodTy::Struct{..} => {
                 referenced.insert(ty.self_ref);
-                ty.data.name.unwrap().to_string()
+                write!(out, "{}", ty.data.name.unwrap()).unwrap();
             }
             ScriptPodTy::FixedArray{ty: inner, len, ..} => {
-                let inner_name = self.pod_type_wgsl_type_name(inner, referenced);
-                format!("array<{}, {}>", inner_name, len)
+                out.push_str("array<");
+                self.pod_type_wgsl_type_name_referenced(inner, referenced, out);
+                write!(out, ", {}>", len).unwrap();
             }
             ScriptPodTy::VariableArray{ty: inner, ..} => {
-                 let inner_name = self.pod_type_wgsl_type_name(inner, referenced);
-                 format!("array<{}>", inner_name)
+                 out.push_str("array<");
+                 self.pod_type_wgsl_type_name_referenced(inner, referenced, out);
+                 out.push_str(">");
             }
-            _ => "unknown".to_string()
+            _=> self.pod_type_wgsl_type_name(ty, out)
+        }
+    }
+    
+    fn pod_type_wgsl_type_name(&self, ty: &ScriptPodTypeInline, out:&mut String) {
+        match &ty.data.ty {
+            ScriptPodTy::F32 => out.push_str("f32"),
+            ScriptPodTy::F16 => out.push_str("f16"),
+            ScriptPodTy::U32 => out.push_str("u32"),
+            ScriptPodTy::I32 => out.push_str("i32"),
+            ScriptPodTy::Bool => out.push_str("bool"),
+            ScriptPodTy::AtomicU32 => out.push_str("atomic<u32>"),
+            ScriptPodTy::AtomicI32 => out.push_str("atomic<i32>"),
+            ScriptPodTy::Vec(v) => write!(out, "{}", v.name()).unwrap(),
+            ScriptPodTy::Mat(m) => write!(out, "{}", m.name()).unwrap(),
+            ScriptPodTy::Struct{..} => {
+                write!(out, "{}", ty.data.name.unwrap()).unwrap();
+            }
+            ScriptPodTy::FixedArray{ty: inner, len, ..} => {
+                out.push_str("array<");
+                self.pod_type_wgsl_type_name(inner, out);
+                write!(out, ", {}>", len).unwrap();
+            }
+            ScriptPodTy::VariableArray{ty: inner, ..} => {
+                 out.push_str("array<");
+                 self.pod_type_wgsl_type_name(inner, out);
+                 out.push_str(">");
+            }
+            _ => out.push_str("unknown")
         }
     }
     
