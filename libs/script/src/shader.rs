@@ -13,6 +13,7 @@ use crate::shader_tables::*;
 use crate::shader_builtins::*;
 use std::fmt::Write;
 use crate::makepad_error_log::*;
+use std::collections::BTreeSet;
 
 pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     let math = heap.new_module(id!(shader));
@@ -42,8 +43,11 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                             ret: vm.code.builtins.pod.pod_void
                         });
                         // alright we should have output now
+                        let mut out = String::new();
+                        output.create_struct_defs(vm, &mut out);
+                        println!("Structs:\n{}", out);
                         for fns in output.functions{
-                            println!("COMPILED:{}\n{}\n",fns.call_sig, fns.out);
+                            println!("{}\n{}\n",fns.call_sig, fns.out);
                         }
                         return NIL
                     }
@@ -123,29 +127,19 @@ struct ShaderScopeItem{
     ty: ScriptPodType
 }
 
-#[derive(Debug)]
-struct ScriptPodTypeNamed{
-    name: LiveId,
-    ty: ScriptPodType
-}
-
 #[derive(Default, Debug)]
 struct ShaderOutput{
     pub recur_block: Vec<ScriptObject>,
-    pub structs: Vec<ScriptPodTypeNamed>,
+    pub structs: BTreeSet<ScriptPodType>,
     pub functions: Vec<ShaderFn>,
 } 
 
 impl ShaderOutput{
-    fn find_struct_name(&self, ty:ScriptPodType)->Option<LiveId>{
-        if let Some(v) = self.structs.iter().find(|v| v.ty == ty){
-            Some(v.name)
-        }
-        else{
-            None
-        }
+    fn create_struct_defs(&self, vm:&ScriptVm, out:&mut String){
+        vm.heap.pod_type_wgsl_struct_defs(&self.structs, out);
     }
 }
+
 
 #[derive(Default)]
 struct ShaderScope{
@@ -460,7 +454,7 @@ impl ShaderFnCompiler{
         self.stack.free_string(id_s);
     }
     
-    fn handle_if_else_phi(&mut self, vm:&ScriptVm, output:&mut ShaderOutput){
+    fn handle_if_else_phi(&mut self, vm:&ScriptVm){
         if let Some(ShaderMe::IfBody{target_ip, phi, start_pos, stack_depth, phi_type}) = self.mes.last(){
             if self.trap.ip.index >= *target_ip{
                 if self.stack.types.len() > *stack_depth{
@@ -472,9 +466,6 @@ impl ShaderFnCompiler{
                             let ty = type_table_if_else(phi_type, &ty, &self.trap, &vm.code.builtins.pod);
                             let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                             let ty_name = if let Some(name) = vm.heap.pod_type_name(ty){
-                                name
-                            }
-                            else if let Some(name) = output.find_struct_name(ty){
                                 name
                             }
                             else{
@@ -498,18 +489,16 @@ impl ShaderFnCompiler{
         }
     }
     
-    fn ensure_struct_name(&self, vm: &ScriptVm, output: &mut ShaderOutput, pod_ty: ScriptPodType, name: LiveId) -> LiveId {
+    fn ensure_struct_name(&self, vm: &mut ScriptVm, output: &mut ShaderOutput, pod_ty: ScriptPodType, used_name: LiveId) -> LiveId {
         if let Some(name) = vm.heap.pod_type_name(pod_ty) {
-            return name;
-        }
-        if let Some(sn) = output.structs.iter().find(|v| v.ty == pod_ty) {
-            if sn.name != name {
+            if name != used_name {
                 self.trap.err_struct_name_not_consistent();
             }
-            return sn.name;
+            return name;
         }
-        output.structs.push(ScriptPodTypeNamed { name, ty: pod_ty });
-        name
+        output.structs.insert(pod_ty);
+        vm.heap.pod_type_name_set(pod_ty, used_name);
+        used_name
     }
 
     fn handle_call_args(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs) {
@@ -593,16 +582,12 @@ impl ShaderFnCompiler{
                         if let ShaderThis::PodType(ty) = this{
                              if let Some(name) = vm.heap.pod_type_name(ty) {
                                  write!(method_name_prefix, "{}_", name).ok();
-                             } else if let Some(name) = output.find_struct_name(ty) {
-                                 write!(method_name_prefix, "{}_", name).ok();
-                             }
+                             } 
                         }
                         else if let ShaderThis::Pod(ty) = this {
                              if let Some(name) = vm.heap.pod_type_name(ty) {
                                  write!(method_name_prefix, "{}_", name).ok();
-                             } else if let Some(name) = output.find_struct_name(ty) {
-                                 write!(method_name_prefix, "{}_", name).ok();
-                             }
+                             } 
                         }
 
                         // lets see if we already have fnobj with our argstypes
@@ -640,8 +625,6 @@ impl ShaderFnCompiler{
                                 write!(call_sig, "this:").ok();
                                 if let Some(name) = vm.heap.pod_type_name(ty) {
                                     write!(call_sig, "{}", name).ok();
-                                } else if let Some(name) = output.find_struct_name(ty) {
-                                    write!(call_sig, "{}", name).ok();
                                 }
                                 compiler.shader_scope.define_var(id!(this), ty, false);
                                 if argc > 0 { call_sig.push_str(", "); }
@@ -657,8 +640,6 @@ impl ShaderFnCompiler{
                                     let arg_ty = args[i + arg_offset];
                                     write!(call_sig, "{}:", id).ok();
                                     if let Some(name) = vm.heap.pod_type_name(arg_ty) {
-                                        write!(call_sig, "{}", name).ok();
-                                    } else if let Some(name) = output.find_struct_name(arg_ty) {
                                         write!(call_sig, "{}", name).ok();
                                     } else {
                                         todo!()
@@ -677,8 +658,6 @@ impl ShaderFnCompiler{
                                         let ret = compiler.compile_fn(vm, output, fnip);
                                         output.recur_block.pop();
                                         if let Some(name) = vm.heap.pod_type_name(ret) {
-                                            write!(call_sig, "->{}", name).ok();
-                                        } else if let Some(name) = output.find_struct_name(ret) {
                                             write!(call_sig, "->{}", name).ok();
                                         } else {
                                             todo!()
@@ -821,12 +800,12 @@ impl ShaderFnCompiler{
             if let Some((opcode, args)) = opcode.as_opcode(){
                 self.opcode(vm, output, opcode, args);
                 self.trap.goto_next();
-                self.handle_if_else_phi(vm, output);
+                self.handle_if_else_phi(vm);
             }
             else{ // id or immediate value
                 self.push_immediate(opcode, &vm.code.builtins.pod);
                 self.trap.goto_next();
-                self.handle_if_else_phi(vm, output);
+                self.handle_if_else_phi(vm);
             }
             // alright lets see if we have a trap, ifso we can log it
             if let Some(err) = self.trap.err.take(){
