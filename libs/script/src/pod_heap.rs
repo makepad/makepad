@@ -16,10 +16,11 @@ impl ScriptHeap{
         self.value(pod_ty.object, key, trap)
     }
     
-    pub fn new_pod_type(&mut self, object:ScriptObject, name: LiveId, ty:ScriptPodTy, default:ScriptValue)->ScriptPodType{
+    pub fn new_pod_type(&mut self, object:ScriptObject, name: Option<LiveId>, ty:ScriptPodTy, default:ScriptValue)->ScriptPodType{
         if let Some(ptr) = self.pod_types_free.pop(){
             let pod_type = &mut self.pod_types[ptr.index as usize];
             pod_type.object = object;
+            pod_type.name = name;
             pod_type.ty = ty;
             pod_type.default = default;
             ptr
@@ -27,7 +28,7 @@ impl ScriptHeap{
         else{
             let ptr = ScriptPodType{index: self.pod_types.len() as u32};
             self.pod_types.push(ScriptPodTypeData{
-                name: Some(name),
+                name,
                 object,
                 ty,
                 default
@@ -140,7 +141,7 @@ impl ScriptHeap{
                 id!(pod_array)=>{
                     if kvs.len() == 1{
                         if let Some((_,ty)) = self.pod_type_inline(kvs[0].value, builtins){
-                            let pt = self.new_pod_type(ptr, id!(), ScriptPodTy::VariableArray{
+                            let pt = self.new_pod_type(ptr, None, ScriptPodTy::VariableArray{
                                 align_of: ty.data.ty.align_of(),
                                 ty: Box::new(ty),
                             }, NIL);
@@ -159,7 +160,7 @@ impl ScriptHeap{
                                 let rem = size_of % align_of;
                                 let size_of = if rem != 0{size_of + (align_of - rem)}else{size_of};
                                                                 
-                                let pt = self.new_pod_type(ptr, id!(), ScriptPodTy::FixedArray{
+                                let pt = self.new_pod_type(ptr, None, ScriptPodTy::FixedArray{
                                     ty: Box::new(ty),
                                     align_of,
                                     size_of,
@@ -220,7 +221,7 @@ impl ScriptHeap{
                         offset_of += align_of - rem
                     }
                                         
-                    let pt = self.new_pod_type(ptr, id!(), ScriptPodTy::Struct{
+                    let pt = self.new_pod_type(ptr, None, ScriptPodTy::Struct{
                         align_of,
                         size_of: offset_of,
                         fields,
@@ -243,7 +244,7 @@ impl ScriptHeap{
         ty != ScriptPodTy::UndefinedArray{
             self.set_notproto(pod_obj);
         }
-        let pt = self.new_pod_type(pod_obj, name, ty, default);
+        let pt = self.new_pod_type(pod_obj, Some(name), ty, default);
         self.set_object_storage_vec2(pod_obj);
         self.set_object_pod_type(pod_obj, pt); 
         self.set_value_def(pod_module, name.into(), pod_obj.into());
@@ -252,7 +253,7 @@ impl ScriptHeap{
         
     pub fn pod_def_vec(&mut self, pod_module:ScriptObject, name:LiveId, builtin: ScriptPodVec)->ScriptPodType{
         let pod_obj = self.new_with_proto(name.into());
-        let vec_ty = self.new_pod_type(pod_obj, name, ScriptPodTy::Vec(builtin), NIL);
+        let vec_ty = self.new_pod_type(pod_obj, Some(name), ScriptPodTy::Vec(builtin), NIL);
         self.set_object_pod_type(pod_obj, vec_ty);
         self.set_notproto(pod_obj);
         self.freeze(pod_obj);
@@ -262,7 +263,7 @@ impl ScriptHeap{
     
     pub fn pod_def_mat(&mut self, pod_module:ScriptObject, name:LiveId, builtin:ScriptPodMat)->ScriptPodType{
         let pod_obj = self.new_with_proto(name.into());
-        let mat_ty = self.new_pod_type(pod_obj, name, ScriptPodTy::Mat(builtin), NIL);
+        let mat_ty = self.new_pod_type(pod_obj, Some(name), ScriptPodTy::Mat(builtin), NIL);
         self.set_object_pod_type(pod_obj, mat_ty);
         self.set_notproto(pod_obj);
         self.freeze(pod_obj);
@@ -743,7 +744,6 @@ impl ScriptHeap{
                 None
             }
             ScriptPodTy::Vec(vt)=>{
-                println!("VEC TYPE");
                 return makepad_script_derive::pod_swizzle_vec_type!();
             }
             _=>None
