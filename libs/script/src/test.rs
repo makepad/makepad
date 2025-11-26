@@ -63,6 +63,7 @@ pub fn test(){
         let test_shader = {
             pixel: fn(){
                 let x = sdf.new()
+                x.set_field(1)
             }
         }
         ~shader.compile_draw(test_shader)
