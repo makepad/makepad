@@ -285,7 +285,7 @@ impl ScriptPodMat{
 pub enum ScriptPodTy{
     #[default]
     Void,
-    UndefinedArray,
+    ArrayBuilder,
     UndefinedStruct,
     // limited to the types WGSL supports
     F32,
@@ -337,7 +337,7 @@ pub struct ScriptPodOffset{
 impl ScriptPodTy{
     pub fn align_of(&self)->usize{
         match self{
-            Self::Void | Self::UndefinedArray | Self::UndefinedStruct => 0,
+            Self::Void | Self::ArrayBuilder | Self::UndefinedStruct => 0,
             Self::F32 => 4,
             Self::F16 => 2,
             Self::U32 => 4,
@@ -356,7 +356,7 @@ impl ScriptPodTy{
     
     pub fn size_of(&self)->usize{
         match self{
-            Self::Void | Self::UndefinedArray | Self::UndefinedStruct  => 0,
+            Self::Void | Self::ArrayBuilder | Self::UndefinedStruct  => 0,
             Self::F32 => 4,
             Self::F16 => 2,
             Self::U32 => 4,
@@ -378,8 +378,21 @@ impl ScriptPodTy{
 pub struct ScriptPodTag(u64);
 
 impl ScriptPodTag{
-    const MARK:u64 = 0x1;
-    const ALLOCED:u64 = 0x2;
+    const MARK:u64 = 0x1<<60;
+    const ALLOCED:u64 = 0x2<<60;
+    const ARRAY_BUILDER: u64 = 0x4<<60;
+    pub fn set_array_builder(&mut self, ty: ScriptPodType){
+        self.0 |= Self::ARRAY_BUILDER;
+        self.0 |= (ty.index as u64);
+    }
+    
+    pub fn as_array_builder(&self)->Option<ScriptPodType>{
+        if self.0 & Self::ARRAY_BUILDER != 0{
+            return Some(ScriptPodType{index: (self.0&0xffff_ffff) as u32})
+        }
+        None
+    }
+    
     pub fn is_marked(&self)->bool{
         self.0 & Self::MARK != 0
     }

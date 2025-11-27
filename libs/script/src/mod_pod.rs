@@ -84,7 +84,7 @@ pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->Scrip
     
     let pod_struct = heap.pod_def_atom(pod, id_lut!(struct), ScriptPodTy::UndefinedStruct, id_lut!(pod_struct), ScriptValue::NIL);
     
-    let pod_array = heap.pod_def_atom(pod, id_lut!(array), ScriptPodTy::UndefinedArray, id_lut!(pod_array), ScriptValue::NIL);
+    let pod_array = heap.pod_def_atom(pod, id_lut!(array), ScriptPodTy::ArrayBuilder, id_lut!(pod_array), ScriptValue::NIL);
     
     let pod_bool = heap.pod_def_atom(pod, id_lut!(bool), ScriptPodTy::Bool, id_lut!(pod_bool), ScriptValue::from_bool(false));
     
