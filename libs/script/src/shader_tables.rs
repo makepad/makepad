@@ -1,7 +1,8 @@
-use crate::value::NIL;
-use crate::trap::ScriptTrap;
 use crate::mod_pod::ScriptPodBuiltins;
+use crate::value::*;
+use crate::pod::*;
 use crate::shader::ShaderType;
+use crate::trap::ScriptTrap;
 
 pub fn type_table_neg(val: &ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
     let r = match val{
@@ -374,4 +375,24 @@ pub fn type_table_if_else(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, 
         trap.err_if_else_type_different();
     }
     r
+}
+
+pub fn type_table_elem_type(ty: &ScriptPodTy, _trap: &ScriptTrap, builtins: &ScriptPodBuiltins) -> Option<ScriptPodType> {
+    match ty {
+        ScriptPodTy::FixedArray{ty, ..} => Some(ty.self_ref),
+        ScriptPodTy::VariableArray{ty, ..} => Some(ty.self_ref),
+        ScriptPodTy::Vec(v) => match v {
+            ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f => Some(builtins.pod_f32),
+            ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h => Some(builtins.pod_f16),
+            ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u => Some(builtins.pod_u32),
+            ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i => Some(builtins.pod_i32),
+            ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b => Some(builtins.pod_bool),
+        },
+        ScriptPodTy::Mat(m) => match m {
+            ScriptPodMat::Mat2x2f | ScriptPodMat::Mat3x2f | ScriptPodMat::Mat4x2f => Some(builtins.pod_vec2f),
+            ScriptPodMat::Mat2x3f | ScriptPodMat::Mat3x3f | ScriptPodMat::Mat4x3f => Some(builtins.pod_vec3f),
+            ScriptPodMat::Mat2x4f | ScriptPodMat::Mat3x4f | ScriptPodMat::Mat4x4f => Some(builtins.pod_vec4f),
+        },
+        _ => None
+    }
 }

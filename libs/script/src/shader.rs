@@ -561,6 +561,104 @@ impl ShaderFnCompiler{
         self.stack.free_string(field_s);
         self.stack.free_string(instance_s);
     }
+
+    fn handle_float_arithmetic_index_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
+        let (t2, s2) = if opargs.is_u32(){
+            let mut s = self.stack.new_string();
+            write!(s, "{}", opargs.to_u32()).ok();
+            (ShaderType::AbstractInt, s)
+        }else{
+            self.pop_resolved(vm)
+        };
+        
+        let (index_ty, index_s) = self.pop_resolved(vm);
+        let (instance_ty, instance_s) = self.pop_resolved(vm);
+        
+        if let ShaderType::Pod(pod_ty) = instance_ty {
+            let builtins = &vm.code.builtins.pod;
+            let elem_ty = type_table_elem_type(&vm.heap.pod_types[pod_ty.index as usize].ty, &self.trap, builtins);
+
+            if let Some(ret_ty) = elem_ty {
+                match index_ty {
+                    ShaderType::AbstractInt => {},
+                    ShaderType::Pod(t) if t == builtins.pod_i32 || t == builtins.pod_u32 => {},
+                    _ => {self.trap.err_pod_type_not_matching();} 
+                }
+                
+                let t1 = ShaderType::Pod(ret_ty);
+                let op_res_ty = type_table_float_arithmetic(&t1, &t2, &self.trap, builtins);
+                
+                let val_ty = op_res_ty.make_concrete(builtins).unwrap_or(builtins.pod_void);
+                if val_ty != ret_ty{
+                     self.trap.err_pod_type_not_matching();
+                }
+
+                let mut s = self.stack.new_string();
+                write!(s, "{}[{}] {} {}", instance_s, index_s, op, s2).ok();
+                self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_void), s);
+            }
+            else{
+                self.trap.err_not_assignable();
+                self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_void), String::new());
+            }
+        }
+        else{
+            self.trap.err_no_matching_shader_type();
+            self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+        }
+        self.stack.free_string(s2);
+        self.stack.free_string(index_s);
+        self.stack.free_string(instance_s);
+    }
+
+    fn handle_int_arithmetic_index_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
+        let (t2, s2) = if opargs.is_u32(){
+            let mut s = self.stack.new_string();
+            write!(s, "{}", opargs.to_u32()).ok();
+            (ShaderType::AbstractInt, s)
+        }else{
+            self.pop_resolved(vm)
+        };
+        
+        let (index_ty, index_s) = self.pop_resolved(vm);
+        let (instance_ty, instance_s) = self.pop_resolved(vm);
+        
+        if let ShaderType::Pod(pod_ty) = instance_ty {
+            let builtins = &vm.code.builtins.pod;
+            let elem_ty = type_table_elem_type(&vm.heap.pod_types[pod_ty.index as usize].ty, &self.trap, builtins);
+
+            if let Some(ret_ty) = elem_ty {
+                match index_ty {
+                    ShaderType::AbstractInt => {},
+                    ShaderType::Pod(t) if t == builtins.pod_i32 || t == builtins.pod_u32 => {},
+                    _ => {self.trap.err_pod_type_not_matching();} 
+                }
+                
+                let t1 = ShaderType::Pod(ret_ty);
+                let op_res_ty = type_table_int_arithmetic(&t1, &t2, &self.trap, builtins);
+                
+                let val_ty = op_res_ty.make_concrete(builtins).unwrap_or(builtins.pod_void);
+                if val_ty != ret_ty{
+                     self.trap.err_pod_type_not_matching();
+                }
+
+                let mut s = self.stack.new_string();
+                write!(s, "{}[{}] {} {}", instance_s, index_s, op, s2).ok();
+                self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_void), s);
+            }
+            else{
+                self.trap.err_not_assignable();
+                self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_void), String::new());
+            }
+        }
+        else{
+            self.trap.err_no_matching_shader_type();
+            self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+        }
+        self.stack.free_string(s2);
+        self.stack.free_string(index_s);
+        self.stack.free_string(instance_s);
+    }
     
     fn handle_if_else_phi(&mut self, vm:&ScriptVm){
         if let Some(ShaderMe::IfBody{target_ip, phi, start_pos, stack_depth, phi_type}) = self.mes.last(){
@@ -1208,18 +1306,54 @@ impl ShaderFnCompiler{
             Opcode::ASSIGN_FIELD_SHR=>{self.handle_int_arithmetic_field_assign(vm, opargs, "<<=");},
             Opcode::ASSIGN_FIELD_IFNIL=>{self.trap.err_not_impl();},
                                     
-            Opcode::ASSIGN_INDEX=>{self.trap.err_not_impl();},
-// ASSIGN INDEX
-            Opcode::ASSIGN_INDEX_ADD=>{self.trap.err_not_impl();},
-            Opcode::ASSIGN_INDEX_SUB=>{self.trap.err_not_impl();},
-            Opcode::ASSIGN_INDEX_MUL=>{self.trap.err_not_impl();},
-            Opcode::ASSIGN_INDEX_DIV=>{self.trap.err_not_impl();},
-            Opcode::ASSIGN_INDEX_MOD=>{self.trap.err_not_impl();},
-            Opcode::ASSIGN_INDEX_AND=>{self.trap.err_not_impl();},
-            Opcode::ASSIGN_INDEX_OR=>{self.trap.err_not_impl();},
-            Opcode::ASSIGN_INDEX_XOR=>{self.trap.err_not_impl();},
-            Opcode::ASSIGN_INDEX_SHL=>{self.trap.err_not_impl();},
-            Opcode::ASSIGN_INDEX_SHR=>{self.trap.err_not_impl();},
+            Opcode::ASSIGN_INDEX=>{
+                let (value_ty, value_s) = self.pop_resolved(vm);
+                let (index_ty, index_s) = self.pop_resolved(vm);
+                let (instance_ty, instance_s) = self.pop_resolved(vm);
+                
+                if let ShaderType::Pod(pod_ty) = instance_ty {
+                    let builtins = &vm.code.builtins.pod;
+                    let elem_ty = type_table_elem_type(&vm.heap.pod_types[pod_ty.index as usize].ty, &self.trap, builtins);
+
+                    if let Some(ret_ty) = elem_ty {
+                        match index_ty {
+                            ShaderType::AbstractInt => {},
+                            ShaderType::Pod(t) if t == builtins.pod_i32 || t == builtins.pod_u32 => {},
+                            _ => {self.trap.err_pod_type_not_matching();} 
+                        }
+                        
+                        let val_ty = value_ty.make_concrete(builtins).unwrap_or(builtins.pod_void);
+                        if val_ty != ret_ty{
+                             self.trap.err_pod_type_not_matching();
+                        }
+
+                        let mut s = self.stack.new_string();
+                        write!(s, "{}[{}] = {}", instance_s, index_s, value_s).ok();
+                        self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_void), s);
+                    }
+                    else{
+                        self.trap.err_not_assignable();
+                        self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_void), String::new());
+                    }
+                }
+                else{
+                    self.trap.err_no_matching_shader_type();
+                    self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                }
+                self.stack.free_string(value_s);
+                self.stack.free_string(index_s);
+                self.stack.free_string(instance_s);
+            },
+            Opcode::ASSIGN_INDEX_ADD=>{self.handle_float_arithmetic_index_assign(vm, opargs, "+=");},
+            Opcode::ASSIGN_INDEX_SUB=>{self.handle_float_arithmetic_index_assign(vm, opargs, "-=");},
+            Opcode::ASSIGN_INDEX_MUL=>{self.handle_float_arithmetic_index_assign(vm, opargs, "*=");},
+            Opcode::ASSIGN_INDEX_DIV=>{self.handle_float_arithmetic_index_assign(vm, opargs, "/=");},
+            Opcode::ASSIGN_INDEX_MOD=>{self.handle_float_arithmetic_index_assign(vm, opargs, "%=");},
+            Opcode::ASSIGN_INDEX_AND=>{self.handle_int_arithmetic_index_assign(vm, opargs, "&=");},
+            Opcode::ASSIGN_INDEX_OR=>{self.handle_int_arithmetic_index_assign(vm, opargs, "|=");},
+            Opcode::ASSIGN_INDEX_XOR=>{self.handle_int_arithmetic_index_assign(vm, opargs, "^=");},
+            Opcode::ASSIGN_INDEX_SHL=>{self.handle_int_arithmetic_index_assign(vm, opargs, ">>=");},
+            Opcode::ASSIGN_INDEX_SHR=>{self.handle_int_arithmetic_index_assign(vm, opargs, "<<=");},
             Opcode::ASSIGN_INDEX_IFNIL=>{self.trap.err_not_impl();},
 // ASSIGN ME            
             Opcode::ASSIGN_ME=>{
