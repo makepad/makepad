@@ -886,7 +886,42 @@ impl ShaderFnCompiler{
             Opcode::ASSIGN_SHR=>{self.handle_int_arithmetic_assign(vm, opargs, "<<");},
             Opcode::ASSIGN_IFNIL=>{self.trap.err_not_impl();},
 // ASSIGN FIELD                       
-            Opcode::ASSIGN_FIELD=>{self.trap.err_not_impl();},
+            Opcode::ASSIGN_FIELD=>{
+                let (value_ty, value_s) = self.pop_resolved(vm);
+                let (field_ty, field_s) = self.stack.pop(&self.trap);
+                let (instance_ty, instance_s) = self.pop_resolved(vm);
+                
+                if let ShaderType::Id(field_id) = field_ty {
+                    if let ShaderType::Pod(pod_ty) = instance_ty {
+                        if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
+                            
+                            let val_ty = value_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
+                            if val_ty != ret_ty{
+                                 self.trap.err_pod_type_not_matching();
+                            }
+
+                            let mut s = self.stack.new_string();
+                            write!(s, "{}.{} = {}", instance_s, field_id, value_s).ok();
+                            self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), s);
+                        }
+                        else{
+                            self.trap.err_not_found();
+                            self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                        }
+                    }
+                    else{
+                        self.trap.err_no_matching_shader_type();
+                        self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                    }
+                }
+                else{
+                    self.trap.err_unexpected();
+                    self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                }
+                self.stack.free_string(value_s);
+                self.stack.free_string(field_s);
+                self.stack.free_string(instance_s);
+            },
             Opcode::ASSIGN_FIELD_ADD=>{self.trap.err_not_impl();},
             Opcode::ASSIGN_FIELD_SUB=>{self.trap.err_not_impl();},
             Opcode::ASSIGN_FIELD_MUL=>{self.trap.err_not_impl();},
