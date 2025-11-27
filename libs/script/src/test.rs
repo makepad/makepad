@@ -56,7 +56,7 @@ pub fn test(){
 
         let sdf = struct{
             field: f32,
-            set_field: |v| this.field = v 
+            set_field: |v| this.field += v 
             new: || sdf(1.0)
         }
         // alright. lets figure out the shader this
