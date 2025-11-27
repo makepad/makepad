@@ -10,30 +10,6 @@ use crate::trap::*;
 use crate::pod::*;
 use std::any::Any;
 
-macro_rules! f64_scope_assign_op_impl{
-    ($self:ident, $heap:ident, $op:tt)=>{{
-        let value = $self.pop_stack_resolved($heap);
-        let id = $self.pop_stack_value();
-        if let Some(id) = id.as_id(){
-            let va = $self.scope_value($heap, id);
-            if va.is_err(){
-                $self.push_stack_unchecked(va);
-            }
-            else{
-                let fa = $heap.cast_to_f64(va, $self.trap.ip);
-                let fb = $heap.cast_to_f64(value, $self.trap.ip);
-                let value = $self.set_scope_value($heap, id, ScriptValue::from_f64_traced_nan((fa $op fb), $self.trap.ip));
-                $self.push_stack_unchecked(value);
-            }
-        }
-        else{
-            let value = $self.trap.err_not_assignable();
-            $self.push_stack_unchecked(value);
-        }
-        $self.trap.goto_next();
-    }}
-}
-
 macro_rules! fu64_scope_assign_op_impl{
     ($self:ident, $heap:ident, $op:tt)=>{{
         let value = $self.pop_stack_resolved($heap);
@@ -319,10 +295,10 @@ impl ScriptThread{
             }
             
                         
-            Opcode::ASSIGN_SUB=>f64_scope_assign_op_impl!(self, heap, -),
-            Opcode::ASSIGN_MUL=>f64_scope_assign_op_impl!(self, heap, *),
-            Opcode::ASSIGN_DIV=>f64_scope_assign_op_impl!(self, heap, /),
-            Opcode::ASSIGN_MOD=>f64_scope_assign_op_impl!(self, heap, %),
+            Opcode::ASSIGN_SUB=>self.handle_f64_scope_assign_op(heap, |a,b| a-b),
+            Opcode::ASSIGN_MUL=>self.handle_f64_scope_assign_op(heap, |a,b| a*b),
+            Opcode::ASSIGN_DIV=>self.handle_f64_scope_assign_op(heap, |a,b| a/b),
+            Opcode::ASSIGN_MOD=>self.handle_f64_scope_assign_op(heap, |a,b| a%b),
             Opcode::ASSIGN_AND=>fu64_scope_assign_op_impl!(self, heap, &),
             Opcode::ASSIGN_OR=>fu64_scope_assign_op_impl!(self, heap, |),
             Opcode::ASSIGN_XOR=>fu64_scope_assign_op_impl!(self, heap, ^),
@@ -1524,5 +1500,29 @@ impl ScriptThread{
         let lp = self.loops.pop().unwrap();
         self.truncate_bases(lp.bases, heap);
         self.trap.goto(lp.start_ip + lp.jump - 1);
+    }
+    
+    pub fn handle_f64_scope_assign_op<F>(&mut self, heap:&mut ScriptHeap, f:F)
+    where F: FnOnce(f64, f64)->f64
+    {
+        let value = self.pop_stack_resolved(heap);
+        let id = self.pop_stack_value();
+        if let Some(id) = id.as_id(){
+            let va = self.scope_value(heap, id);
+            if va.is_err(){
+                self.push_stack_unchecked(va);
+            }
+            else{
+                let fa = heap.cast_to_f64(va, self.trap.ip);
+                let fb = heap.cast_to_f64(value, self.trap.ip);
+                let value = self.set_scope_value(heap, id, ScriptValue::from_f64_traced_nan(f(fa,fb), self.trap.ip));
+                self.push_stack_unchecked(value);
+            }
+        }
+        else{
+            let value = self.trap.err_not_assignable();
+            self.push_stack_unchecked(value);
+        }
+        self.trap.goto_next();
     }
 }

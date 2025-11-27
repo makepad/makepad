@@ -48,7 +48,7 @@ pub fn test(){
         }
     }
     
-    let code = script!{
+    let _code = script!{
         use mod.std.*
         use mod.shader
         use mod.pod.*
@@ -67,12 +67,13 @@ pub fn test(){
                 x.set_field(1f)
             }
         }
-        ~shader.compile_draw(test_shader)
+        let x = sdf(0,array(1f,2,3,4))
+        //~shader.compile_draw(test_shader)
     };
     
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod
