@@ -68,13 +68,13 @@ pub fn test(){
             }
         }
         let x = sdf(0,array(1f,2f,3f,4f))
-        ~x.arr
+        
         //~shader.compile_draw(test_shader)
     };
     
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod
@@ -258,10 +258,12 @@ pub fn test(){
             a: pod.f32
             b: pod.f32
             c: pod.f32
+            d: pod.array{pod.f32 2}
             method: || this.c
         }
-        let x = struct_3(1,2,3);
+        let x = struct_3(1,2,3,pod.array(4f 5f));
         assert(x.c == 3f);
+        assert(x.d[1] == 5f)
         
         assert(x.method() == 3f)
         

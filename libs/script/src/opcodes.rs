@@ -890,6 +890,11 @@ impl ScriptThread{
                     let value = heap.array_index(arr, index, &self.trap);
                     self.push_stack_unchecked(value)
                 }
+                else if let Some(pod) = object.as_pod(){
+                    let index = index.as_index();
+                    let value = heap.pod_array_index(pod, index, &code.builtins.pod, &self.trap);
+                    self.push_stack_unchecked(value)
+                }
                 else{
                     let value = self.trap.err_not_object();
                     self.push_stack_unchecked(value);
