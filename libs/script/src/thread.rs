@@ -141,7 +141,7 @@ impl ScriptThread{
         }
     }
         
-    pub fn pop_to_me(&mut self, heap:&mut ScriptHeap){
+    pub fn pop_to_me(&mut self, heap:&mut ScriptHeap, code:&ScriptCode){
                 
         let value = self.pop_stack_value();
         if self.call_has_me(){
@@ -161,7 +161,7 @@ impl ScriptThread{
                     }
                 }
                 ScriptMe::Pod{pod, offset}=>{
-                    heap.pod_pop_to_me(*pod, offset, key, value, &self.trap);
+                    heap.pod_pop_to_me(*pod, offset, key, value, &code.builtins.pod, &self.trap);
                 }
                 ScriptMe::Array(arr)=>{
                     heap.array_push(*arr, value, &self.trap)

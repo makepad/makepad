@@ -518,7 +518,7 @@ impl ScriptThread{
                         self.push_stack_unchecked(pod.into());
                         self.trap.goto_next();
                         if opargs.is_pop_to_me(){
-                            self.pop_to_me(heap);
+                            self.pop_to_me(heap, code);
                         }
                         return
                     }
@@ -720,7 +720,7 @@ impl ScriptThread{
                     self.trap.ip = ret;
                     self.push_stack_unchecked(value);
                     if call.args.is_pop_to_me(){
-                        self.pop_to_me(heap);
+                        self.pop_to_me(heap, code);
                     }
                 }
                 else{
@@ -736,7 +736,7 @@ impl ScriptThread{
                         self.trap.ip = ret;
                         self.push_stack_unchecked(value);
                         if call.args.is_pop_to_me(){
-                            self.pop_to_me(heap);
+                            self.pop_to_me(heap, code);
                         }
                     }
                     else{
@@ -873,7 +873,7 @@ impl ScriptThread{
             }
             
             Opcode::POP_TO_ME=>{
-                self.pop_to_me(heap);
+                self.pop_to_me(heap, code);
                 self.trap.goto_next();
             }
 // Array index            
@@ -1139,7 +1139,7 @@ impl ScriptThread{
             }
         }
         if opargs.is_pop_to_me(){
-            self.pop_to_me(heap);
+            self.pop_to_me(heap, code);
         }
     }
     
