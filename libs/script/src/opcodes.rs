@@ -10,187 +10,7 @@ use crate::trap::*;
 use crate::pod::*;
 use std::any::Any;
 
-macro_rules! fu64_scope_assign_op_impl{
-    ($self:ident, $heap:ident, $op:tt)=>{{
-        let value = $self.pop_stack_resolved($heap);
-        let id = $self.pop_stack_value();
-        if let Some(id) = id.as_id(){
-            let old_value = $self.scope_value($heap, id);
-            if old_value.is_err(){
-                $self.push_stack_unchecked(old_value);
-            }
-            else{
-                let ua = $heap.cast_to_f64(old_value, $self.trap.ip) as u64;
-                let ub = $heap.cast_to_f64(value, $self.trap.ip) as u64;
-                let value = $self.set_scope_value($heap, id, ScriptValue::from_f64_traced_nan((ua $op ub) as f64, $self.trap.ip));
-                $self.push_stack_unchecked(value);
-            }
-        }
-        else{
-            let value = $self.trap.err_not_assignable();
-            $self.push_stack_unchecked(value);
-        }
-        $self.trap.goto_next();
-    }}
-}
-
-macro_rules! f64_field_assign_op_impl{
-    ($self:ident, $heap:ident, $op:tt)=>{{
-        let value = $self.pop_stack_resolved($heap);
-        let field = $self.pop_stack_value();
-        let object = $self.pop_stack_resolved($heap);
-        if let Some(obj) = object.as_object(){
-            let old_value = $heap.value(obj, field, &$self.trap);
-            let fa = $heap.cast_to_f64(old_value, $self.trap.ip);
-            let fb = $heap.cast_to_f64(value, $self.trap.ip);
-            let value = $heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(fa $op fb, $self.trap.ip), &mut $self.trap);
-            $self.push_stack_unchecked(value);
-        }
-        else{
-            let value = $self.trap.err_not_assignable();
-            $self.push_stack_unchecked(value);
-        }
-        $self.trap.goto_next();
-    }}
-}
-
-macro_rules! fu64_field_assign_op_impl{
-    ($self:ident, $heap:ident, $op:tt)=>{{
-        let value = $self.pop_stack_resolved($heap);
-        let field = $self.pop_stack_value();
-        let object = $self.pop_stack_resolved($heap);
-        if let Some(obj) = object.as_object(){
-            let old_value = $heap.value(obj, field, &$self.trap);
-            let fa = $heap.cast_to_f64(old_value, $self.trap.ip) as u64;
-            let fb = $heap.cast_to_f64(value, $self.trap.ip) as u64;
-            
-            let value = $heap.set_value(obj, field, ScriptValue::from_f64_traced_nan((fa $op fb) as f64, $self.trap.ip), &mut $self.trap);
-            $self.push_stack_unchecked(value);
-        }
-        else{
-            let value = $self.trap.err_not_assignable();
-            $self.push_stack_unchecked(value);
-        }
-        $self.trap.goto_next();
-    }}
-}
-
-macro_rules! f64_index_assign_op_impl{
-    ($self:ident, $heap:ident, $op:tt)=>{{
-        let value = $self.pop_stack_resolved($heap);
-        let index = $self.pop_stack_resolved($heap);
-        let object = $self.pop_stack_resolved($heap);
-        if let Some(obj) = object.as_object(){
-            let old_value = $heap.value(obj, index, &$self.trap);
-            let fa = $heap.cast_to_f64(old_value, $self.trap.ip);
-            let fb = $heap.cast_to_f64(value, $self.trap.ip);
-            let value = $heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(fa $op fb, $self.trap.ip), &$self.trap);
-            $self.push_stack_unchecked(value);
-        }
-        else if let Some(arr) = object.as_array(){
-            let index = index.as_index();
-            let old_value = $heap.array_index(arr, index, &$self.trap);
-            let fa = $heap.cast_to_f64(old_value, $self.trap.ip);
-            let fb = $heap.cast_to_f64(value, $self.trap.ip);
-            let value = $heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(fa $op fb, $self.trap.ip), &$self.trap);
-            $self.push_stack_unchecked(value);
-        }
-        else{
-            let value = $self.trap.err_not_assignable();
-            $self.push_stack_unchecked(value);
-        }
-        $self.trap.goto_next();
-    }}
-}
-
-macro_rules! fu64_index_assign_op_impl{
-    ($self:ident, $heap:ident, $op:tt)=>{{
-        let value = $self.pop_stack_resolved($heap);
-        let index = $self.pop_stack_resolved($heap);
-        let object = $self.pop_stack_resolved($heap);
-        if let Some(obj) = object.as_object(){
-            let old_value = $heap.value(obj, index, &$self.trap);
-            let fa = $heap.cast_to_f64(old_value, $self.trap.ip) as u64;
-            let fb = $heap.cast_to_f64(value, $self.trap.ip) as u64;
-            let value = $heap.set_value(obj, index, ScriptValue::from_f64_traced_nan((fa $op fb) as f64, $self.trap.ip), &mut $self.trap);
-            $self.push_stack_unchecked(value);
-        }
-        else if let Some(arr) = object.as_array(){
-            let index = index.as_index();
-            let old_value = $heap.array_index(arr, index, &$self.trap);
-            let fa = $heap.cast_to_f64(old_value, $self.trap.ip) as u64;
-            let fb = $heap.cast_to_f64(value, $self.trap.ip) as u64;
-            let value = $heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan((fa $op fb) as f64, $self.trap.ip), &$self.trap);
-            $self.push_stack_unchecked(value);
-        }
-        else{
-            let value = $self.trap.err_not_assignable();
-            $self.push_stack_unchecked(value);
-        }
-        $self.trap.goto_next();
-    }}
-}
-
-macro_rules! f64_op_impl{
-    ($self:ident, $heap:ident, $args:ident, $op:tt)=>{{
-        let fb = if $args.is_u32(){
-            $args.to_u32() as f64
-        }
-        else{
-            let b = $self.pop_stack_resolved($heap);
-            $heap.cast_to_f64(b, $self.trap.ip)
-        };
-        let a = $self.pop_stack_resolved($heap);
-        let fa = $heap.cast_to_f64(a, $self.trap.ip);
-        $self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa $op fb, $self.trap.ip));
-        $self.trap.goto_next();
-    }}
-}
-
-macro_rules! fu64_op_impl{
-    ($self:ident, $heap:ident, $args:ident, $op:tt)=>{{
-        let ub = if $args.is_u32(){
-            $args.to_u32() as u64
-        }
-        else{
-            let b = $self.pop_stack_resolved($heap);
-            $heap.cast_to_f64(b, $self.trap.ip) as u64
-        };
-        let a = $self.pop_stack_resolved($heap);
-        let ua = $heap.cast_to_f64(a, $self.trap.ip) as u64;
-        $self.push_stack_unchecked(ScriptValue::from_f64_traced_nan((ua $op ub) as f64, $self.trap.ip));
-        $self.trap.goto_next();
-    }}
-} 
-
-macro_rules! f64_cmp_impl{
-    ($self:ident, $heap:ident, $args:ident, $op:tt)=>{{
-        let fb = if $args.is_u32(){
-            $args.to_u32() as f64
-        }
-        else{
-            let b = $self.pop_stack_resolved($heap);
-            $heap.cast_to_f64(b, $self.trap.ip)
-        };
-        let a = $self.pop_stack_resolved($heap);
-        let fa = $heap.cast_to_f64(a, $self.trap.ip);
-        //let fb = $heap.cast_to_f64(b, $self.ip);
-        $self.push_stack_unchecked(ScriptValue::from_bool(fa $op fb));
-        $self.trap.goto_next();
-    }}
-}
-
-macro_rules! bool_op_impl{
-    ($self:ident, $heap:ident, $op:tt)=>{{
-        let b = $self.pop_stack_resolved($heap);
-        let a = $self.pop_stack_resolved($heap);
-        let ba = $heap.cast_to_bool(a);
-        let bb = $heap.cast_to_bool(b);
-        $self.push_stack_unchecked(ScriptValue::from_bool((ba $op bb)));
-        $self.trap.goto_next();
-    }}
-} 
-
+    
 impl ScriptThread{
     
     pub fn opcode(&mut self,opcode: Opcode, opargs:OpcodeArgs, heap:&mut ScriptHeap, code:&ScriptCode, host:&mut dyn Any){
@@ -215,9 +35,9 @@ impl ScriptThread{
                 self.trap.goto_next();
             },
             
-            Opcode::MUL=>f64_op_impl!(self, heap, opargs, *),
-            Opcode::DIV=>f64_op_impl!(self, heap, opargs, /),
-            Opcode::MOD=>f64_op_impl!(self, heap, opargs, %),
+            Opcode::MUL=>self.handle_f64_op(heap, opargs, |a,b| a*b),
+            Opcode::DIV=>self.handle_f64_op(heap, opargs, |a,b| a/b),
+            Opcode::MOD=>self.handle_f64_op(heap, opargs, |a,b| a%b),
             Opcode::ADD=>{
                 let b = if opargs.is_u32(){
                     (opargs.to_u32()).into()
@@ -241,12 +61,12 @@ impl ScriptThread{
                 self.trap.goto_next();
             }
                         
-            Opcode::SUB=>f64_op_impl!(self, heap, opargs, -),
-            Opcode::SHL=>fu64_op_impl!(self, heap, opargs,>>),
-            Opcode::SHR=>fu64_op_impl!(self, heap, opargs,<<),
-            Opcode::AND=>fu64_op_impl!(self, heap,opargs,&),
-            Opcode::OR=>fu64_op_impl!(self, heap, opargs,|),
-            Opcode::XOR=>fu64_op_impl!(self, heap, opargs,^),
+            Opcode::SUB=>self.handle_f64_op(heap, opargs, |a,b| a-b),
+            Opcode::SHL=>self.handle_fu64_op(heap, opargs, |a,b| a>>b),
+            Opcode::SHR=>self.handle_fu64_op(heap, opargs, |a,b| a<<b),
+            Opcode::AND=>self.handle_fu64_op(heap, opargs, |a,b| a&b),
+            Opcode::OR=>self.handle_fu64_op(heap, opargs, |a,b| a|b),
+            Opcode::XOR=>self.handle_fu64_op(heap, opargs, |a,b| a^b),
             
 // ASSIGN
             Opcode::ASSIGN=>{
@@ -299,11 +119,12 @@ impl ScriptThread{
             Opcode::ASSIGN_MUL=>self.handle_f64_scope_assign_op(heap, |a,b| a*b),
             Opcode::ASSIGN_DIV=>self.handle_f64_scope_assign_op(heap, |a,b| a/b),
             Opcode::ASSIGN_MOD=>self.handle_f64_scope_assign_op(heap, |a,b| a%b),
-            Opcode::ASSIGN_AND=>fu64_scope_assign_op_impl!(self, heap, &),
-            Opcode::ASSIGN_OR=>fu64_scope_assign_op_impl!(self, heap, |),
-            Opcode::ASSIGN_XOR=>fu64_scope_assign_op_impl!(self, heap, ^),
-            Opcode::ASSIGN_SHL=>fu64_scope_assign_op_impl!(self, heap, <<),
-            Opcode::ASSIGN_SHR=>fu64_scope_assign_op_impl!(self, heap, >>),
+            Opcode::ASSIGN_AND=>self.handle_fu64_scope_assign_op(heap, |a,b| a&b),
+            Opcode::ASSIGN_OR=>self.handle_fu64_scope_assign_op(heap, |a,b| a|b),
+            Opcode::ASSIGN_XOR=>self.handle_fu64_scope_assign_op(heap, |a,b| a^b),
+            Opcode::ASSIGN_SHL=>self.handle_fu64_scope_assign_op(heap, |a,b| a<<b),
+            Opcode::ASSIGN_SHR=>self.handle_fu64_scope_assign_op(heap, |a,b| a>>b),
+
             Opcode::ASSIGN_IFNIL=>{
                 let value = self.pop_stack_resolved(heap);
                 let id = self.pop_stack_value();
@@ -365,15 +186,15 @@ impl ScriptThread{
                 }
                 self.trap.goto_next();
             }            
-            Opcode::ASSIGN_FIELD_SUB=>f64_field_assign_op_impl!(self, heap, -),
-            Opcode::ASSIGN_FIELD_MUL=>f64_field_assign_op_impl!(self, heap, *),
-            Opcode::ASSIGN_FIELD_DIV=>f64_field_assign_op_impl!(self, heap, /),
-            Opcode::ASSIGN_FIELD_MOD=>f64_field_assign_op_impl!(self, heap, %),
-            Opcode::ASSIGN_FIELD_AND=>fu64_field_assign_op_impl!(self, heap, &),
-            Opcode::ASSIGN_FIELD_OR=>fu64_field_assign_op_impl!(self, heap, |),
-            Opcode::ASSIGN_FIELD_XOR=>fu64_field_assign_op_impl!(self, heap, ^),
-            Opcode::ASSIGN_FIELD_SHL=>fu64_field_assign_op_impl!(self, heap, <<),
-            Opcode::ASSIGN_FIELD_SHR=>fu64_field_assign_op_impl!(self, heap, >>),
+            Opcode::ASSIGN_FIELD_SUB=>self.handle_f64_field_assign_op(heap, |a,b| a-b),
+            Opcode::ASSIGN_FIELD_MUL=>self.handle_f64_field_assign_op(heap, |a,b| a*b),
+            Opcode::ASSIGN_FIELD_DIV=>self.handle_f64_field_assign_op(heap, |a,b| a/b),
+            Opcode::ASSIGN_FIELD_MOD=>self.handle_f64_field_assign_op(heap, |a,b| a%b),
+            Opcode::ASSIGN_FIELD_AND=>self.handle_fu64_field_assign_op(heap, |a,b| a&b),
+            Opcode::ASSIGN_FIELD_OR=>self.handle_fu64_field_assign_op(heap, |a,b| a|b),
+            Opcode::ASSIGN_FIELD_XOR=>self.handle_fu64_field_assign_op(heap, |a,b| a^b),
+            Opcode::ASSIGN_FIELD_SHL=>self.handle_fu64_field_assign_op(heap, |a,b| a<<b),
+            Opcode::ASSIGN_FIELD_SHR=>self.handle_fu64_field_assign_op(heap, |a,b| a>>b),
             Opcode::ASSIGN_FIELD_IFNIL=>{
                 let value = self.pop_stack_resolved(heap);
                 let field = self.pop_stack_value();
@@ -459,15 +280,15 @@ impl ScriptThread{
                 }
                 self.trap.goto_next();
             },
-            Opcode::ASSIGN_INDEX_SUB=>f64_index_assign_op_impl!(self, heap, -),
-            Opcode::ASSIGN_INDEX_MUL=>f64_index_assign_op_impl!(self, heap, *),
-            Opcode::ASSIGN_INDEX_DIV=>f64_index_assign_op_impl!(self, heap, /),
-            Opcode::ASSIGN_INDEX_MOD=>f64_index_assign_op_impl!(self, heap, %),
-            Opcode::ASSIGN_INDEX_AND=>fu64_index_assign_op_impl!(self, heap, &),
-            Opcode::ASSIGN_INDEX_OR=>fu64_index_assign_op_impl!(self, heap, |),
-            Opcode::ASSIGN_INDEX_XOR=>fu64_index_assign_op_impl!(self, heap, ^),
-            Opcode::ASSIGN_INDEX_SHL=>fu64_index_assign_op_impl!(self, heap, <<),
-            Opcode::ASSIGN_INDEX_SHR=>fu64_index_assign_op_impl!(self, heap, >>),
+            Opcode::ASSIGN_INDEX_SUB=>self.handle_f64_index_assign_op(heap, |a,b| a-b),
+            Opcode::ASSIGN_INDEX_MUL=>self.handle_f64_index_assign_op(heap, |a,b| a*b),
+            Opcode::ASSIGN_INDEX_DIV=>self.handle_f64_index_assign_op(heap, |a,b| a/b),
+            Opcode::ASSIGN_INDEX_MOD=>self.handle_f64_index_assign_op(heap, |a,b| a%b),
+            Opcode::ASSIGN_INDEX_AND=>self.handle_fu64_index_assign_op(heap, |a,b| a&b),
+            Opcode::ASSIGN_INDEX_OR=>self.handle_fu64_index_assign_op(heap, |a,b| a|b),
+            Opcode::ASSIGN_INDEX_XOR=>self.handle_fu64_index_assign_op(heap, |a,b| a^b),
+            Opcode::ASSIGN_INDEX_SHL=>self.handle_fu64_index_assign_op(heap, |a,b| a<<b),
+            Opcode::ASSIGN_INDEX_SHR=>self.handle_fu64_index_assign_op(heap, |a,b| a>>b),
             Opcode::ASSIGN_INDEX_IFNIL=>{
                 let value = self.pop_stack_resolved(heap);
                 let index = self.pop_stack_resolved(heap);
@@ -588,13 +409,13 @@ impl ScriptThread{
                 self.trap.goto_next();
             }
             
-            Opcode::LT=>f64_cmp_impl!(self, heap, opargs, <),
-            Opcode::GT=>f64_cmp_impl!(self, heap, opargs, >),
-            Opcode::LEQ=>f64_cmp_impl!(self, heap, opargs, <=),
-            Opcode::GEQ=>f64_cmp_impl!(self, heap, opargs, >=),
+            Opcode::LT=>self.handle_f64_cmp_op(heap, opargs, |a,b| a<b),
+            Opcode::GT=>self.handle_f64_cmp_op(heap, opargs, |a,b| a>b),
+            Opcode::LEQ=>self.handle_f64_cmp_op(heap, opargs, |a,b| a<=b),
+            Opcode::GEQ=>self.handle_f64_cmp_op(heap, opargs, |a,b| a>=b),
             
-            Opcode::LOGIC_AND => bool_op_impl!(self, heap, &&),
-            Opcode::LOGIC_OR => bool_op_impl!(self, heap, ||),
+            Opcode::LOGIC_AND => self.handle_bool_op(heap, |a,b| a&&b),
+            Opcode::LOGIC_OR => self.handle_bool_op(heap, |a,b| a||b),
             Opcode::NIL_OR => {
                 let op1 = self.pop_stack_resolved(heap);
                 let op2 = self.pop_stack_resolved(heap);
@@ -1523,6 +1344,186 @@ impl ScriptThread{
             let value = self.trap.err_not_assignable();
             self.push_stack_unchecked(value);
         }
+        self.trap.goto_next();
+    }
+
+    pub fn handle_fu64_scope_assign_op<F>(&mut self, heap:&mut ScriptHeap, f:F)
+    where F: FnOnce(u64, u64)->u64
+    {
+        let value = self.pop_stack_resolved(heap);
+        let id = self.pop_stack_value();
+        if let Some(id) = id.as_id(){
+            let old_value = self.scope_value(heap, id);
+            if old_value.is_err(){
+                self.push_stack_unchecked(old_value);
+            }
+            else{
+                let ua = heap.cast_to_f64(old_value, self.trap.ip) as u64;
+                let ub = heap.cast_to_f64(value, self.trap.ip) as u64;
+                let value = self.set_scope_value(heap, id, ScriptValue::from_f64_traced_nan(f(ua,ub) as f64, self.trap.ip));
+                self.push_stack_unchecked(value);
+            }
+        }
+        else{
+            let value = self.trap.err_not_assignable();
+            self.push_stack_unchecked(value);
+        }
+        self.trap.goto_next();
+    }
+
+    pub fn handle_f64_field_assign_op<F>(&mut self, heap:&mut ScriptHeap, f:F)
+    where F: FnOnce(f64, f64)->f64
+    {
+        let value = self.pop_stack_resolved(heap);
+        let field = self.pop_stack_value();
+        let object = self.pop_stack_resolved(heap);
+        if let Some(obj) = object.as_object(){
+            let old_value = heap.value(obj, field, &self.trap);
+            let fa = heap.cast_to_f64(old_value, self.trap.ip);
+            let fb = heap.cast_to_f64(value, self.trap.ip);
+            let value = heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip), &mut self.trap);
+            self.push_stack_unchecked(value);
+        }
+        else{
+            let value = self.trap.err_not_assignable();
+            self.push_stack_unchecked(value);
+        }
+        self.trap.goto_next();
+    }
+
+    pub fn handle_fu64_field_assign_op<F>(&mut self, heap:&mut ScriptHeap, f:F)
+    where F: FnOnce(u64, u64)->u64
+    {
+        let value = self.pop_stack_resolved(heap);
+        let field = self.pop_stack_value();
+        let object = self.pop_stack_resolved(heap);
+        if let Some(obj) = object.as_object(){
+            let old_value = heap.value(obj, field, &self.trap);
+            let fa = heap.cast_to_f64(old_value, self.trap.ip) as u64;
+            let fb = heap.cast_to_f64(value, self.trap.ip) as u64;
+            
+            let value = heap.set_value(obj, field, ScriptValue::from_f64_traced_nan(f(fa, fb) as f64, self.trap.ip), &mut self.trap);
+            self.push_stack_unchecked(value);
+        }
+        else{
+            let value = self.trap.err_not_assignable();
+            self.push_stack_unchecked(value);
+        }
+        self.trap.goto_next();
+    }
+
+    pub fn handle_f64_index_assign_op<F>(&mut self, heap:&mut ScriptHeap, f:F)
+    where F: FnOnce(f64, f64)->f64
+    {
+        let value = self.pop_stack_resolved(heap);
+        let index = self.pop_stack_resolved(heap);
+        let object = self.pop_stack_resolved(heap);
+        if let Some(obj) = object.as_object(){
+            let old_value = heap.value(obj, index, &self.trap);
+            let fa = heap.cast_to_f64(old_value, self.trap.ip);
+            let fb = heap.cast_to_f64(value, self.trap.ip);
+            let value = heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip), &self.trap);
+            self.push_stack_unchecked(value);
+        }
+        else if let Some(arr) = object.as_array(){
+            let index = index.as_index();
+            let old_value = heap.array_index(arr, index, &self.trap);
+            let fa = heap.cast_to_f64(old_value, self.trap.ip);
+            let fb = heap.cast_to_f64(value, self.trap.ip);
+            let value = heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip), &self.trap);
+            self.push_stack_unchecked(value);
+        }
+        else{
+            let value = self.trap.err_not_assignable();
+            self.push_stack_unchecked(value);
+        }
+        self.trap.goto_next();
+    }
+
+    pub fn handle_fu64_index_assign_op<F>(&mut self, heap:&mut ScriptHeap, f:F)
+    where F: FnOnce(u64, u64)->u64
+    {
+        let value = self.pop_stack_resolved(heap);
+        let index = self.pop_stack_resolved(heap);
+        let object = self.pop_stack_resolved(heap);
+        if let Some(obj) = object.as_object(){
+            let old_value = heap.value(obj, index, &self.trap);
+            let fa = heap.cast_to_f64(old_value, self.trap.ip) as u64;
+            let fb = heap.cast_to_f64(value, self.trap.ip) as u64;
+            let value = heap.set_value(obj, index, ScriptValue::from_f64_traced_nan(f(fa, fb) as f64, self.trap.ip), &mut self.trap);
+            self.push_stack_unchecked(value);
+        }
+        else if let Some(arr) = object.as_array(){
+            let index = index.as_index();
+            let old_value = heap.array_index(arr, index, &self.trap);
+            let fa = heap.cast_to_f64(old_value, self.trap.ip) as u64;
+            let fb = heap.cast_to_f64(value, self.trap.ip) as u64;
+            let value = heap.set_array_index(arr, index, ScriptValue::from_f64_traced_nan(f(fa, fb) as f64, self.trap.ip), &self.trap);
+            self.push_stack_unchecked(value);
+        }
+        else{
+            let value = self.trap.err_not_assignable();
+            self.push_stack_unchecked(value);
+        }
+        self.trap.goto_next();
+    }
+
+    pub fn handle_f64_op<F>(&mut self, heap:&mut ScriptHeap, args:OpcodeArgs, f:F)
+    where F: FnOnce(f64, f64)->f64
+    {
+        let fb = if args.is_u32(){
+            args.to_u32() as f64
+        }
+        else{
+            let b = self.pop_stack_resolved(heap);
+            heap.cast_to_f64(b, self.trap.ip)
+        };
+        let a = self.pop_stack_resolved(heap);
+        let fa = heap.cast_to_f64(a, self.trap.ip);
+        self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(f(fa, fb), self.trap.ip));
+        self.trap.goto_next();
+    }
+
+    pub fn handle_fu64_op<F>(&mut self, heap:&mut ScriptHeap, args:OpcodeArgs, f:F)
+    where F: FnOnce(u64, u64)->u64
+    {
+        let ub = if args.is_u32(){
+            args.to_u32() as u64
+        }
+        else{
+            let b = self.pop_stack_resolved(heap);
+            heap.cast_to_f64(b, self.trap.ip) as u64
+        };
+        let a = self.pop_stack_resolved(heap);
+        let ua = heap.cast_to_f64(a, self.trap.ip) as u64;
+        self.push_stack_unchecked(ScriptValue::from_f64_traced_nan(f(ua, ub) as f64, self.trap.ip));
+        self.trap.goto_next();
+    }
+
+    pub fn handle_f64_cmp_op<F>(&mut self, heap:&mut ScriptHeap, args:OpcodeArgs, f:F)
+    where F: FnOnce(f64, f64)->bool
+    {
+        let fb = if args.is_u32(){
+            args.to_u32() as f64
+        }
+        else{
+            let b = self.pop_stack_resolved(heap);
+            heap.cast_to_f64(b, self.trap.ip)
+        };
+        let a = self.pop_stack_resolved(heap);
+        let fa = heap.cast_to_f64(a, self.trap.ip);
+        self.push_stack_unchecked(ScriptValue::from_bool(f(fa, fb)));
+        self.trap.goto_next();
+    }
+
+    pub fn handle_bool_op<F>(&mut self, heap:&mut ScriptHeap, f:F)
+    where F: FnOnce(bool, bool)->bool
+    {
+        let b = self.pop_stack_resolved(heap);
+        let a = self.pop_stack_resolved(heap);
+        let ba = heap.cast_to_bool(a);
+        let bb = heap.cast_to_bool(b);
+        self.push_stack_unchecked(ScriptValue::from_bool(f(ba, bb)));
         self.trap.goto_next();
     }
 }
