@@ -372,7 +372,7 @@ impl ShaderFnCompiler{
         self.stack.push(&self.trap, ty, s);
     }
 
-    fn handle_float_arithmetic(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
+    fn handle_arithmetic(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str, is_int: bool){
         let (t2, s2) = if opargs.is_u32(){
             let mut s = self.stack.new_string();
             write!(s, "{}", opargs.to_u32()).ok();
@@ -383,26 +383,15 @@ impl ShaderFnCompiler{
         let (t1, s1) = self.pop_resolved(vm);
         let mut s = self.stack.new_string();
         write!(s, "({} {} {})", s1, op, s2).ok();
-        let ty = type_table_float_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
+        let ty = if is_int {
+            type_table_int_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod)
+        } else {
+            type_table_float_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod)
+        };
         self.stack.push(&self.trap, ty, s);
     }
 
-    fn handle_int_arithmetic(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
-        let (t2, s2) = if opargs.is_u32(){
-            let mut s = self.stack.new_string();
-            write!(s, "{}", opargs.to_u32()).ok();
-            (ShaderType::AbstractInt, s)
-        }else{
-            self.pop_resolved(vm)
-        };
-        let (t1, s1) = self.pop_resolved(vm);
-        let mut s = self.stack.new_string();
-        write!(s, "({} {} {})", s1, op, s2).ok();
-        let ty = type_table_int_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
-        self.stack.push(&self.trap, ty, s);
-    }
-    
-    fn handle_float_arithmetic_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
+    fn handle_arithmetic_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str, is_int: bool){
         let (t2, s2) = if opargs.is_u32(){
             let mut s = self.stack.new_string();
             write!(s, "{}", opargs.to_u32()).ok();
@@ -417,41 +406,11 @@ impl ShaderFnCompiler{
                     self.trap.err_let_is_immutable();
                 }
                 let t1 = ShaderType::Pod(var.ty);
-                let _ty = type_table_float_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
-                
-                let mut s = self.stack.new_string();
-                write!(s, "{} {} {}", name, op, s2).ok();
-                self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), s);
-            }
-            else{
-                self.trap.err_not_found();
-                self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
-            }
-        }
-        else{
-            self.trap.err_not_assignable();
-            self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
-        }
-        self.stack.free_string(s2);
-        self.stack.free_string(id_s);
-    }
-
-    fn handle_int_arithmetic_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
-        let (t2, s2) = if opargs.is_u32(){
-            let mut s = self.stack.new_string();
-            write!(s, "{}", opargs.to_u32()).ok();
-            (ShaderType::AbstractInt, s)
-        }else{
-            self.pop_resolved(vm)
-        };
-        let (id_ty, id_s) = self.stack.pop(&self.trap);
-        if let ShaderType::Id(id) = id_ty{
-            if let Some((var, name)) = self.shader_scope.find_var(id){
-                if !var.is_var{
-                    self.trap.err_let_is_immutable();
-                }
-                let t1 = ShaderType::Pod(var.ty);
-                let _ty = type_table_int_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
+                let _ty = if is_int {
+                    type_table_int_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod)
+                } else {
+                    type_table_float_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod)
+                };
                 
                 let mut s = self.stack.new_string();
                 write!(s, "{} {} {}", name, op, s2).ok();
@@ -470,7 +429,7 @@ impl ShaderFnCompiler{
         self.stack.free_string(id_s);
     }
     
-    fn handle_float_arithmetic_field_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
+    fn handle_arithmetic_field_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str, is_int: bool){
         let (t2, s2) = if opargs.is_u32(){
             let mut s = self.stack.new_string();
             write!(s, "{}", opargs.to_u32()).ok();
@@ -486,7 +445,11 @@ impl ShaderFnCompiler{
             if let ShaderType::Pod(pod_ty) = instance_ty {
                 if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
                     let t1 = ShaderType::Pod(ret_ty);
-                    let op_res_ty = type_table_float_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
+                    let op_res_ty = if is_int {
+                        type_table_int_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod)
+                    } else {
+                        type_table_float_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod)
+                    };
                     
                     let val_ty = op_res_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                     if val_ty != ret_ty{
@@ -516,53 +479,7 @@ impl ShaderFnCompiler{
         self.stack.free_string(instance_s);
     }
 
-    fn handle_int_arithmetic_field_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
-        let (t2, s2) = if opargs.is_u32(){
-            let mut s = self.stack.new_string();
-            write!(s, "{}", opargs.to_u32()).ok();
-            (ShaderType::AbstractInt, s)
-        }else{
-            self.pop_resolved(vm)
-        };
-        
-        let (field_ty, field_s) = self.stack.pop(&self.trap);
-        let (instance_ty, instance_s) = self.pop_resolved(vm);
-        
-        if let ShaderType::Id(field_id) = field_ty {
-            if let ShaderType::Pod(pod_ty) = instance_ty {
-                if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
-                    let t1 = ShaderType::Pod(ret_ty);
-                    let op_res_ty = type_table_int_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
-                    
-                    let val_ty = op_res_ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
-                    if val_ty != ret_ty{
-                         self.trap.err_pod_type_not_matching();
-                    }
-                    
-                    let mut s = self.stack.new_string();
-                    write!(s, "{0}.{1} {2} {3}", instance_s, field_id, op, s2).ok();
-                    self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), s);
-                }
-                else{
-                    self.trap.err_not_found();
-                    self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
-                }
-            }
-            else{
-                self.trap.err_no_matching_shader_type();
-                self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
-            }
-        }
-        else{
-            self.trap.err_unexpected();
-            self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
-        }
-        self.stack.free_string(s2);
-        self.stack.free_string(field_s);
-        self.stack.free_string(instance_s);
-    }
-
-    fn handle_float_arithmetic_index_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
+    fn handle_arithmetic_index_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str, is_int: bool){
         let (t2, s2) = if opargs.is_u32(){
             let mut s = self.stack.new_string();
             write!(s, "{}", opargs.to_u32()).ok();
@@ -586,56 +503,11 @@ impl ShaderFnCompiler{
                 }
                 
                 let t1 = ShaderType::Pod(ret_ty);
-                let op_res_ty = type_table_float_arithmetic(&t1, &t2, &self.trap, builtins);
-                
-                let val_ty = op_res_ty.make_concrete(builtins).unwrap_or(builtins.pod_void);
-                if val_ty != ret_ty{
-                     self.trap.err_pod_type_not_matching();
-                }
-
-                let mut s = self.stack.new_string();
-                write!(s, "{}[{}] {} {}", instance_s, index_s, op, s2).ok();
-                self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_void), s);
-            }
-            else{
-                self.trap.err_not_assignable();
-                self.stack.push(&self.trap, ShaderType::Pod(builtins.pod_void), String::new());
-            }
-        }
-        else{
-            self.trap.err_no_matching_shader_type();
-            self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
-        }
-        self.stack.free_string(s2);
-        self.stack.free_string(index_s);
-        self.stack.free_string(instance_s);
-    }
-
-    fn handle_int_arithmetic_index_assign(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str){
-        let (t2, s2) = if opargs.is_u32(){
-            let mut s = self.stack.new_string();
-            write!(s, "{}", opargs.to_u32()).ok();
-            (ShaderType::AbstractInt, s)
-        }else{
-            self.pop_resolved(vm)
-        };
-        
-        let (index_ty, index_s) = self.pop_resolved(vm);
-        let (instance_ty, instance_s) = self.pop_resolved(vm);
-        
-        if let ShaderType::Pod(pod_ty) = instance_ty {
-            let builtins = &vm.code.builtins.pod;
-            let elem_ty = type_table_elem_type(&vm.heap.pod_types[pod_ty.index as usize].ty, &self.trap, builtins);
-
-            if let Some(ret_ty) = elem_ty {
-                match index_ty {
-                    ShaderType::AbstractInt => {},
-                    ShaderType::Pod(t) if t == builtins.pod_i32 || t == builtins.pod_u32 => {},
-                    _ => {self.trap.err_pod_type_not_matching();} 
-                }
-                
-                let t1 = ShaderType::Pod(ret_ty);
-                let op_res_ty = type_table_int_arithmetic(&t1, &t2, &self.trap, builtins);
+                let op_res_ty = if is_int {
+                    type_table_int_arithmetic(&t1, &t2, &self.trap, builtins)
+                } else {
+                    type_table_float_arithmetic(&t1, &t2, &self.trap, builtins)
+                };
                 
                 let val_ty = op_res_ty.make_concrete(builtins).unwrap_or(builtins.pod_void);
                 if val_ty != ret_ty{
@@ -1210,16 +1082,16 @@ impl ShaderFnCompiler{
 // Arithmetic
             Opcode::NOT=>{}
             Opcode::NEG=>self.handle_neg(vm, opargs, "-"),
-            Opcode::MUL=>self.handle_float_arithmetic(vm, opargs, "*"),
-            Opcode::DIV=>self.handle_float_arithmetic(vm, opargs, "/"),
-            Opcode::MOD=>self.handle_float_arithmetic(vm, opargs, "%"),
-            Opcode::ADD=>self.handle_float_arithmetic(vm, opargs, "+"),
-            Opcode::SUB=>self.handle_float_arithmetic(vm, opargs, "-"),
-            Opcode::SHL=>self.handle_int_arithmetic(vm, opargs, ">>"),
-            Opcode::SHR=>self.handle_int_arithmetic(vm, opargs, "<<"),
-            Opcode::AND=>self.handle_int_arithmetic(vm, opargs, "&"),
-            Opcode::OR=>self.handle_int_arithmetic(vm, opargs, "|"),
-            Opcode::XOR=>self.handle_int_arithmetic(vm, opargs, "^"),
+            Opcode::MUL=>self.handle_arithmetic(vm, opargs, "*", false),
+            Opcode::DIV=>self.handle_arithmetic(vm, opargs, "/", false),
+            Opcode::MOD=>self.handle_arithmetic(vm, opargs, "%", false),
+            Opcode::ADD=>self.handle_arithmetic(vm, opargs, "+", false),
+            Opcode::SUB=>self.handle_arithmetic(vm, opargs, "-", false),
+            Opcode::SHL=>self.handle_arithmetic(vm, opargs, ">>", true),
+            Opcode::SHR=>self.handle_arithmetic(vm, opargs, "<<", true),
+            Opcode::AND=>self.handle_arithmetic(vm, opargs, "&", true),
+            Opcode::OR=>self.handle_arithmetic(vm, opargs, "|", true),
+            Opcode::XOR=>self.handle_arithmetic(vm, opargs, "^", true),
                         
 // ASSIGN
             Opcode::ASSIGN=>{
@@ -1246,16 +1118,16 @@ impl ShaderFnCompiler{
                 }
                 self.stack.free_string(value);
             },
-            Opcode::ASSIGN_ADD=>{self.handle_float_arithmetic_assign(vm, opargs, "+=");},
-            Opcode::ASSIGN_SUB=>{self.handle_float_arithmetic_assign(vm, opargs, "-=");},
-            Opcode::ASSIGN_MUL=>{self.handle_float_arithmetic_assign(vm, opargs, "*=");},
-            Opcode::ASSIGN_DIV=>{self.handle_float_arithmetic_assign(vm, opargs, "/=");},
-            Opcode::ASSIGN_MOD=>{self.handle_float_arithmetic_assign(vm, opargs, "%=");},
-            Opcode::ASSIGN_AND=>{self.handle_int_arithmetic_assign(vm, opargs, "&=");},
-            Opcode::ASSIGN_OR=>{self.handle_int_arithmetic_assign(vm, opargs, "|=");},
-            Opcode::ASSIGN_XOR=>{self.handle_int_arithmetic_assign(vm, opargs, "^=");},
-            Opcode::ASSIGN_SHL=>{self.handle_int_arithmetic_assign(vm, opargs, ">>=");},
-            Opcode::ASSIGN_SHR=>{self.handle_int_arithmetic_assign(vm, opargs, "<<=");},
+            Opcode::ASSIGN_ADD=>{self.handle_arithmetic_assign(vm, opargs, "+=", false);},
+            Opcode::ASSIGN_SUB=>{self.handle_arithmetic_assign(vm, opargs, "-=", false);},
+            Opcode::ASSIGN_MUL=>{self.handle_arithmetic_assign(vm, opargs, "*=", false);},
+            Opcode::ASSIGN_DIV=>{self.handle_arithmetic_assign(vm, opargs, "/=", false);},
+            Opcode::ASSIGN_MOD=>{self.handle_arithmetic_assign(vm, opargs, "%=", false);},
+            Opcode::ASSIGN_AND=>{self.handle_arithmetic_assign(vm, opargs, "&=", true);},
+            Opcode::ASSIGN_OR=>{self.handle_arithmetic_assign(vm, opargs, "|=", true);},
+            Opcode::ASSIGN_XOR=>{self.handle_arithmetic_assign(vm, opargs, "^=", true);},
+            Opcode::ASSIGN_SHL=>{self.handle_arithmetic_assign(vm, opargs, ">>=", true);},
+            Opcode::ASSIGN_SHR=>{self.handle_arithmetic_assign(vm, opargs, "<<=", true);},
             Opcode::ASSIGN_IFNIL=>{self.trap.err_not_impl();},
 // ASSIGN FIELD                       
             Opcode::ASSIGN_FIELD=>{
@@ -1294,16 +1166,16 @@ impl ShaderFnCompiler{
                 self.stack.free_string(field_s);
                 self.stack.free_string(instance_s);
             },
-            Opcode::ASSIGN_FIELD_ADD=>{self.handle_float_arithmetic_field_assign(vm, opargs, "+=");},
-            Opcode::ASSIGN_FIELD_SUB=>{self.handle_float_arithmetic_field_assign(vm, opargs, "-=");},
-            Opcode::ASSIGN_FIELD_MUL=>{self.handle_float_arithmetic_field_assign(vm, opargs, "*=");},
-            Opcode::ASSIGN_FIELD_DIV=>{self.handle_float_arithmetic_field_assign(vm, opargs, "/=");},
-            Opcode::ASSIGN_FIELD_MOD=>{self.handle_float_arithmetic_field_assign(vm, opargs, "%=");},
-            Opcode::ASSIGN_FIELD_AND=>{self.handle_int_arithmetic_field_assign(vm, opargs, "&=");},
-            Opcode::ASSIGN_FIELD_OR=>{self.handle_int_arithmetic_field_assign(vm, opargs, "|=");},
-            Opcode::ASSIGN_FIELD_XOR=>{self.handle_int_arithmetic_field_assign(vm, opargs, "^=");},
-            Opcode::ASSIGN_FIELD_SHL=>{self.handle_int_arithmetic_field_assign(vm, opargs, ">>=");},
-            Opcode::ASSIGN_FIELD_SHR=>{self.handle_int_arithmetic_field_assign(vm, opargs, "<<=");},
+            Opcode::ASSIGN_FIELD_ADD=>{self.handle_arithmetic_field_assign(vm, opargs, "+=", false);},
+            Opcode::ASSIGN_FIELD_SUB=>{self.handle_arithmetic_field_assign(vm, opargs, "-=", false);},
+            Opcode::ASSIGN_FIELD_MUL=>{self.handle_arithmetic_field_assign(vm, opargs, "*=", false);},
+            Opcode::ASSIGN_FIELD_DIV=>{self.handle_arithmetic_field_assign(vm, opargs, "/=", false);},
+            Opcode::ASSIGN_FIELD_MOD=>{self.handle_arithmetic_field_assign(vm, opargs, "%=", false);},
+            Opcode::ASSIGN_FIELD_AND=>{self.handle_arithmetic_field_assign(vm, opargs, "&=", true);},
+            Opcode::ASSIGN_FIELD_OR=>{self.handle_arithmetic_field_assign(vm, opargs, "|=", true);},
+            Opcode::ASSIGN_FIELD_XOR=>{self.handle_arithmetic_field_assign(vm, opargs, "^=", true);},
+            Opcode::ASSIGN_FIELD_SHL=>{self.handle_arithmetic_field_assign(vm, opargs, ">>=", true);},
+            Opcode::ASSIGN_FIELD_SHR=>{self.handle_arithmetic_field_assign(vm, opargs, "<<=", true);},
             Opcode::ASSIGN_FIELD_IFNIL=>{self.trap.err_not_impl();},
                                     
             Opcode::ASSIGN_INDEX=>{
@@ -1344,16 +1216,16 @@ impl ShaderFnCompiler{
                 self.stack.free_string(index_s);
                 self.stack.free_string(instance_s);
             },
-            Opcode::ASSIGN_INDEX_ADD=>{self.handle_float_arithmetic_index_assign(vm, opargs, "+=");},
-            Opcode::ASSIGN_INDEX_SUB=>{self.handle_float_arithmetic_index_assign(vm, opargs, "-=");},
-            Opcode::ASSIGN_INDEX_MUL=>{self.handle_float_arithmetic_index_assign(vm, opargs, "*=");},
-            Opcode::ASSIGN_INDEX_DIV=>{self.handle_float_arithmetic_index_assign(vm, opargs, "/=");},
-            Opcode::ASSIGN_INDEX_MOD=>{self.handle_float_arithmetic_index_assign(vm, opargs, "%=");},
-            Opcode::ASSIGN_INDEX_AND=>{self.handle_int_arithmetic_index_assign(vm, opargs, "&=");},
-            Opcode::ASSIGN_INDEX_OR=>{self.handle_int_arithmetic_index_assign(vm, opargs, "|=");},
-            Opcode::ASSIGN_INDEX_XOR=>{self.handle_int_arithmetic_index_assign(vm, opargs, "^=");},
-            Opcode::ASSIGN_INDEX_SHL=>{self.handle_int_arithmetic_index_assign(vm, opargs, ">>=");},
-            Opcode::ASSIGN_INDEX_SHR=>{self.handle_int_arithmetic_index_assign(vm, opargs, "<<=");},
+            Opcode::ASSIGN_INDEX_ADD=>{self.handle_arithmetic_index_assign(vm, opargs, "+=", false);},
+            Opcode::ASSIGN_INDEX_SUB=>{self.handle_arithmetic_index_assign(vm, opargs, "-=", false);},
+            Opcode::ASSIGN_INDEX_MUL=>{self.handle_arithmetic_index_assign(vm, opargs, "*=", false);},
+            Opcode::ASSIGN_INDEX_DIV=>{self.handle_arithmetic_index_assign(vm, opargs, "/=", false);},
+            Opcode::ASSIGN_INDEX_MOD=>{self.handle_arithmetic_index_assign(vm, opargs, "%=", false);},
+            Opcode::ASSIGN_INDEX_AND=>{self.handle_arithmetic_index_assign(vm, opargs, "&=", true);},
+            Opcode::ASSIGN_INDEX_OR=>{self.handle_arithmetic_index_assign(vm, opargs, "|=", true);},
+            Opcode::ASSIGN_INDEX_XOR=>{self.handle_arithmetic_index_assign(vm, opargs, "^=", true);},
+            Opcode::ASSIGN_INDEX_SHL=>{self.handle_arithmetic_index_assign(vm, opargs, ">>=", true);},
+            Opcode::ASSIGN_INDEX_SHR=>{self.handle_arithmetic_index_assign(vm, opargs, "<<=", true);},
             Opcode::ASSIGN_INDEX_IFNIL=>{self.trap.err_not_impl();},
 // ASSIGN ME            
             Opcode::ASSIGN_ME=>{
