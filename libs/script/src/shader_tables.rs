@@ -3,6 +3,30 @@ use crate::trap::ScriptTrap;
 use crate::mod_pod::ScriptPodBuiltins;
 use crate::shader::ShaderType;
 
+pub fn type_table_neg(val: &ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
+    let r = match val{
+        ShaderType::AbstractInt => ShaderType::AbstractInt,
+        ShaderType::AbstractFloat => ShaderType::AbstractFloat,
+        ShaderType::Pod(x) if *x == builtins.pod_f32 => ShaderType::Pod(builtins.pod_f32),
+        ShaderType::Pod(x) if *x == builtins.pod_f16 => ShaderType::Pod(builtins.pod_f16),
+        ShaderType::Pod(x) if *x == builtins.pod_i32 => ShaderType::Pod(builtins.pod_i32),
+        ShaderType::Pod(x) if *x == builtins.pod_vec2f => ShaderType::Pod(builtins.pod_vec2f),
+        ShaderType::Pod(x) if *x == builtins.pod_vec3f => ShaderType::Pod(builtins.pod_vec3f),
+        ShaderType::Pod(x) if *x == builtins.pod_vec4f => ShaderType::Pod(builtins.pod_vec4f),
+        ShaderType::Pod(x) if *x == builtins.pod_vec2h => ShaderType::Pod(builtins.pod_vec2h),
+        ShaderType::Pod(x) if *x == builtins.pod_vec3h => ShaderType::Pod(builtins.pod_vec3h),
+        ShaderType::Pod(x) if *x == builtins.pod_vec4h => ShaderType::Pod(builtins.pod_vec4h),
+        ShaderType::Pod(x) if *x == builtins.pod_vec2i => ShaderType::Pod(builtins.pod_vec2i),
+        ShaderType::Pod(x) if *x == builtins.pod_vec3i => ShaderType::Pod(builtins.pod_vec3i),
+        ShaderType::Pod(x) if *x == builtins.pod_vec4i => ShaderType::Pod(builtins.pod_vec4i),
+        _=>ShaderType::Error(NIL),
+    };
+    if let ShaderType::Error(_) = r{
+        trap.err_opcode_not_defined_for_shader_type();
+    }
+    r
+}
+
 pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, builtins:&ScriptPodBuiltins )->ShaderType{
     let r = match lhs{
         ShaderType::AbstractFloat => match rhs{

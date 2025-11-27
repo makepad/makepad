@@ -56,8 +56,9 @@ pub fn test(){
 
         let sdf = struct{
             field: f32,
+            arr: array{f32;4},
             set_field: |v| this.field += v 
-            new: || sdf(1.0)
+            new: || sdf(1.0, array(1,2,3,4))
         }
         // alright. lets figure out the shader this
         let test_shader = {
