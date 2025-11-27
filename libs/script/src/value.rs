@@ -342,7 +342,8 @@ impl ScriptValueType{
     pub const ERR_OPCODE_NOT_DEFINED_FOR_SHADER_TYPE: Self = Self(Self::ERR_FIRST.0 + 50);
     pub const ERR_NOT_AN_ARRAY: Self = Self(Self::ERR_FIRST.0 + 51);
     pub const ERR_INDEX_OUT_OF_BOUNDS: Self = Self(Self::ERR_FIRST.0 + 52);
-    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 53);
+    pub const ERR_USE_ONLY_NAMED_OR_ORDERED_POD_FIELDS: Self = Self(Self::ERR_FIRST.0 + 53);
+    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 54);
     
     pub const HANDLE_FIRST: Self = Self(0x50);
     pub const HANDLE_LAST: Self = Self(0x7F);
@@ -479,6 +480,7 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_OPCODE_NOT_DEFINED_FOR_SHADER_TYPE=>write!(f,"OpcodeNotDefinedForShaderType"),
             Self::ERR_NOT_AN_ARRAY=>write!(f,"NotAnArray"),
             Self::ERR_INDEX_OUT_OF_BOUNDS=>write!(f,"IndexOutOfBounds"),
+            Self::ERR_USE_ONLY_NAMED_OR_ORDERED_POD_FIELDS=>write!(f,"UseOnlyNamedOrOrderedPodFields"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
             _=>write!(f,"ScriptValueType?")
@@ -617,6 +619,7 @@ impl ScriptValue{
     err_fn!(err_opcode_not_defined_for_shader_type, ERR_OPCODE_NOT_DEFINED_FOR_SHADER_TYPE);
     err_fn!(err_not_an_array, ERR_NOT_AN_ARRAY);
     err_fn!(err_index_out_of_bounds, ERR_INDEX_OUT_OF_BOUNDS);
+    err_fn!(err_use_only_named_or_ordered_pod_fields, ERR_USE_ONLY_NAMED_OR_ORDERED_POD_FIELDS);
 
     pub const fn raw(&self)->u64{self.0}
     

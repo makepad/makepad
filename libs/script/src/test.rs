@@ -56,9 +56,9 @@ pub fn test(){
 
         let sdf = struct{
             field: f32,
-            arr: array{f32;4},
+            arr: array{f32 4},
             set_field: |v| this.field += v 
-            new: || sdf(1.0, array(1,2,3,4))
+            new: || sdf(arr:array(1f,2f,3f,4f), field:1.0)
         }
         // alright. lets figure out the shader this
         let test_shader = {
@@ -68,13 +68,12 @@ pub fn test(){
             }
         }
         let x = sdf(0,array(1f,2f,3f,4f))
-        
-        //~shader.compile_draw(test_shader)
+        ~shader.compile_draw(test_shader)
     };
     
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod
