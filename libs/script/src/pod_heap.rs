@@ -37,6 +37,17 @@ impl ScriptHeap{
             ptr
         }
     }
+
+    pub fn new_pod_array_type(&mut self, ty:ScriptPodTy, default:ScriptValue)->ScriptPodType{
+        for (i, pod_type) in self.pod_types.iter().enumerate() {
+            if pod_type.ty == ty {
+                return ScriptPodType{index: i as u32};
+            }
+        }
+        
+        let dummy_obj = self.new_object();
+        self.new_pod_type(dummy_obj, None, ty, default)
+    }
     
     pub fn pod_type_wgsl_def(&self, pod_ty: ScriptPodType, referenced:&mut BTreeSet<ScriptPodType>, out:&mut String){
         let pod_type = &self.pod_types[pod_ty.index as usize];

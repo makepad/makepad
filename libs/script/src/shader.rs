@@ -60,6 +60,13 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
 }
 
 #[derive(Debug)]
+pub struct ShaderPodArg{
+    pub name: Option<LiveId>,
+    pub ty: ShaderType,
+    pub s: String
+}
+
+#[derive(Debug)]
 pub enum ShaderMe{
     FnBody{ret:Option<ScriptPodType>},
     LoopBody,
@@ -76,7 +83,8 @@ pub enum ShaderMe{
     },
     BuiltinCall{out:String, name:LiveId, fnptr: NativeId, args:Vec<ScriptPodType>},
     ScriptCall{out:String, name:LiveId, fnobj: ScriptObject, this:ShaderThis, args:Vec<ScriptPodType>},
-    Pod{out:String, pod_ty:ScriptPodType, offset:ScriptPodOffset},
+    Pod{pod_ty:ScriptPodType, args: Vec<ShaderPodArg>},
+    ArrayConstruct{args:Vec<String>, elem_ty:Option<ScriptPodType>},
 }
 
 #[derive(Debug)]
@@ -609,15 +617,23 @@ impl ShaderFnCompiler{
             // lets check if our obj is a PodType
             if let Some(pod_ty) = vm.heap.pod_type(value) {
                 
-                let mut out = self.stack.new_string();
+                if let ScriptPodTy::ArrayBuilder = &vm.heap.pod_types[pod_ty.index as usize].ty {
+                    self.mes.push(ShaderMe::ArrayConstruct {
+                        args: Vec::new(),
+                        elem_ty: None,
+                    });
+                    self.maybe_pop_to_me(vm, opargs);
+                    return;
+                }
+
+                let mut _out = self.stack.new_string();
                 // alright lets see what Id we got
-                let name = self.ensure_struct_name(vm, output, pod_ty, name);
-                write!(out, "{}(", name).ok();
+                let _name = self.ensure_struct_name(vm, output, pod_ty, name);
+                //write!(out, "{}(", name).ok();
                 
                 self.mes.push(ShaderMe::Pod {
-                    out,
                     pod_ty: pod_ty,
-                    offset: ScriptPodOffset::default(),
+                    args: Vec::new()
                 });
                 
                 self.maybe_pop_to_me(vm, opargs);
@@ -661,127 +677,285 @@ impl ShaderFnCompiler{
         self.trap.err_not_fn();
     }
 
+    fn handle_array_construct(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, args: Vec<String>, elem_ty: Option<ScriptPodType>) {
+        let elem_ty = elem_ty.unwrap_or(vm.code.builtins.pod.pod_f32);
+        let count = args.len();
+        
+        let elem_data = vm.heap.pod_types[elem_ty.index as usize].clone();
+        let elem_inline = ScriptPodTypeInline{
+            self_ref: elem_ty,
+            data: elem_data
+        };
+        
+        let align_of = elem_inline.data.ty.align_of();
+        let raw_size = elem_inline.data.ty.size_of();
+        let stride = if raw_size % align_of != 0 { raw_size + (align_of - (raw_size % align_of)) } else { raw_size };
+        let total_size = stride * count;
+        
+        let array_ty = vm.heap.new_pod_array_type(ScriptPodTy::FixedArray{
+            align_of,
+            size_of: total_size,
+            len: count,
+            ty: Box::new(elem_inline)
+        }, NIL);
+        
+        let mut out = self.stack.new_string();
+        
+        if let Some(name) = vm.heap.pod_type_name(elem_ty) {
+             write!(out, "array<{}, {}>", name, count).ok();
+             if matches!(vm.heap.pod_types[elem_ty.index as usize].ty, ScriptPodTy::Struct{..}) {
+                 output.structs.insert(elem_ty);
+             }
+        }
+        else {
+            self.trap.err_no_matching_shader_type();
+        }
+        
+        write!(out, "(").ok();
+        for (i, s) in args.iter().enumerate() {
+            if i > 0 { out.push_str(", "); }
+            out.push_str(s);
+        }
+        out.push_str(")");
+        
+        for s in args {
+            self.stack.free_string(s);
+        }
+        
+        self.stack.push(&self.trap, ShaderType::Pod(array_ty), out);
+    }
+
+    fn handle_pod_construct(&mut self, vm: &mut ScriptVm, pod_ty: ScriptPodType, args: Vec<ShaderPodArg>) {
+         let mut offset = ScriptPodOffset::default();
+         
+         let mut out = self.stack.new_string();
+         if let Some(name) = vm.heap.pod_type_name(pod_ty) {
+             write!(out, "{}(", name).ok();
+         }
+         else {
+             self.trap.err_no_matching_shader_type();
+         }
+         
+         let pod_ty_data = &vm.heap.pod_types[pod_ty.index as usize];
+         
+         if let Some(first) = args.first(){
+             if first.name.is_some(){ // Named args
+                  if let ScriptPodTy::Struct{fields, ..} = &pod_ty_data.ty {
+                       for (i, field) in fields.iter().enumerate(){
+                           if i > 0 { out.push_str(", "); }
+                           
+                           // Find the arg with this name
+                           if let Some(arg) = args.iter().find(|a| a.name.unwrap() == field.name) {
+                                // Check type
+                                match &arg.ty{
+                                    ShaderType::Pod(arg_pod_ty) => {
+                                         if *arg_pod_ty != field.ty.self_ref {
+                                              self.trap.err_pod_type_not_matching();
+                                         }
+                                    },
+                                    ShaderType::Id(id) => {
+                                         if let Some((v, _name)) = self.shader_scope.find_var(*id){
+                                              if v.ty != field.ty.self_ref {
+                                                   self.trap.err_pod_type_not_matching();
+                                              }
+                                         }
+                                         else{
+                                              self.trap.err_not_found();
+                                         }
+                                    },
+                                    ShaderType::AbstractInt => {
+                                         let builtins = &vm.code.builtins.pod;
+                                         if field.ty.self_ref != builtins.pod_i32 && field.ty.self_ref != builtins.pod_u32 && field.ty.self_ref != builtins.pod_f32 {
+                                              self.trap.err_pod_type_not_matching();
+                                         }
+                                    },
+                                    ShaderType::AbstractFloat => {
+                                          let builtins = &vm.code.builtins.pod;
+                                          if field.ty.self_ref != builtins.pod_f32 {
+                                               self.trap.err_pod_type_not_matching();
+                                          }
+                                    },
+                                     _ => {}
+                                }
+                                out.push_str(&arg.s);
+                           }
+                           else {
+                                self.trap.err_invalid_constructor_arg();
+                           }
+                       }
+                       
+                       if args.len() != fields.len() {
+                            self.trap.err_invalid_arg_count();
+                       }
+                  }
+                  else {
+                      self.trap.err_unexpected();
+                  }
+             }
+             else { // Positional args
+                  for (i, arg) in args.iter().enumerate() {
+                       if i > 0 { out.push_str(", "); }
+                       match &arg.ty{
+                            ShaderType::Pod(pod_ty_field)=>{
+                                vm.heap.pod_check_constructor_arg(pod_ty, *pod_ty_field, &mut offset, &self.trap);
+                            }
+                            ShaderType::Id(id)=>{
+                                if let Some((v, _name)) = self.shader_scope.find_var(*id){
+                                    vm.heap.pod_check_constructor_arg(pod_ty, v.ty, &mut offset, &self.trap);
+                                }
+                                else{
+                                    self.trap.err_not_found();
+                                }
+                            }
+                            ShaderType::AbstractInt | ShaderType::AbstractFloat=>{
+                                vm.heap.pod_check_abstract_constructor_arg(pod_ty, &mut offset, &self.trap);
+                            }
+                            ShaderType::Range{..}|ShaderType::Error(_)=>{
+                            }
+                        }
+                        out.push_str(&arg.s);
+                  }
+                  vm.heap.pod_check_constructor_arg_count(pod_ty, &offset, &self.trap);
+             }
+         }
+         else {
+              vm.heap.pod_check_constructor_arg_count(pod_ty, &offset, &self.trap);
+         }
+         
+         out.push_str(")");
+         
+         for arg in args {
+             self.stack.free_string(arg.s);
+         }
+         
+         self.stack.push(&self.trap, ShaderType::Pod(pod_ty), out);
+    }
+
+    fn handle_script_call(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, mut out: String, name: LiveId, fnobj: ScriptObject, this: ShaderThis, args: Vec<ScriptPodType>) {
+        // we should compare number of arguments (needs to be exact)
+        let argc = vm.heap.vec_len(fnobj);
+        let check_argc = if let ShaderThis::Pod(_) = this { argc + 1 } else { argc };
+        if check_argc != args.len() {
+            self.trap.err_invalid_arg_count();
+        } else { // lets type trace it
+            
+            let mut method_name_prefix = self.stack.new_string();
+            if let ShaderThis::PodType(ty) = this{
+                 if let Some(name) = vm.heap.pod_type_name(ty) {
+                     write!(method_name_prefix, "{}_", name).ok();
+                 } 
+            }
+            else if let ShaderThis::Pod(ty) = this {
+                 if let Some(name) = vm.heap.pod_type_name(ty) {
+                     write!(method_name_prefix, "{}_", name).ok();
+                 } 
+            }
+
+            // lets see if we already have fnobj with our argstypes
+            let ret = if let Some(fun) = output.functions.iter().find(|v| {
+                v.fnobj == fnobj && v.args == args
+            }) {
+                if fun.overload != 0 {
+                    let mut n = self.stack.new_string();
+                    write!(n, "_f{}", fun.overload).ok();
+                    out.insert_str(0, &n);
+                    self.stack.free_string(n);
+                }
+                out.insert_str(0, &method_name_prefix);
+                fun.ret
+            } else {
+                let overload = output.functions.iter().filter(|v| { v.name == name }).count();
+                // allow multiple typetraces of the same function:
+                // add a counter to the fn name somehow
+                // lets run a compile
+                let mut compiler = ShaderFnCompiler::new(fnobj);
+                // we need to pass in a vec of types to the function
+                let mut call_sig = String::new();
+                if overload != 0 {
+                    let mut n = self.stack.new_string();
+                    write!(n, "_f{}", overload).ok();
+                    out.insert_str(0, &n);
+                    self.stack.free_string(n);
+                    write!(call_sig, "fn _f{}{}{}(", overload, method_name_prefix, name).ok();
+                } else {
+                    write!(call_sig, "fn {}{}(", method_name_prefix, name).ok();
+                }
+                out.insert_str(0, &method_name_prefix);
+
+                if let ShaderThis::Pod(ty) = this {
+                    write!(call_sig, "this:").ok();
+                    if let Some(name) = vm.heap.pod_type_name(ty) {
+                        write!(call_sig, "{}", name).ok();
+                    }
+                    compiler.shader_scope.define_var(id!(this), ty, false);
+                    if argc > 0 { call_sig.push_str(", "); }
+                }
+                
+                let arg_offset = if let ShaderThis::Pod(_) = this { 1 } else { 0 };
+
+                for i in 0..argc {
+                    // put in argument types
+                    let kv = vm.heap.vec_key_value(fnobj, i, &self.trap);
+                    if let Some(id) = kv.key.as_id() {
+                        if i != 0 { call_sig.push_str(", "); }
+                        let arg_ty = args[i + arg_offset];
+                        write!(call_sig, "{}:", id).ok();
+                        if let Some(name) = vm.heap.pod_type_name(arg_ty) {
+                            write!(call_sig, "{}", name).ok();
+                        } else {
+                            todo!()
+                        }
+                        compiler.shader_scope.define_var(id, arg_ty, false);
+                    }
+                }
+                write!(call_sig, ")").ok();
+                if let Some(fnptr) = vm.heap.as_fn(fnobj) {
+                    if let ScriptFnPtr::Script(fnip) = fnptr {
+                        if output.recur_block.iter().any(|v| *v == fnobj) {
+                            self.trap.err_recursion_not_allowed();
+                            vm.code.builtins.pod.pod_void
+                        } else {
+                            output.recur_block.push(fnobj);
+                            let ret = compiler.compile_fn(vm, output, fnip);
+                            output.recur_block.pop();
+                            if let Some(name) = vm.heap.pod_type_name(ret) {
+                                write!(call_sig, "->{}", name).ok();
+                            } else {
+                                todo!()
+                            }
+                            
+                            output.functions.push(ShaderFn {
+                                overload,
+                                call_sig,
+                                name,
+                                args,
+                                fnobj,
+                                out: compiler.out,
+                                ret
+                            });
+                            ret
+                        }
+                    } else { panic!() }
+                } else { panic!() }
+            };
+            
+            out.push_str(")");
+            self.stack.push(&self.trap, ShaderType::Pod(ret), out);
+            self.stack.free_string(method_name_prefix);
+        }
+    }
+
     fn handle_call_exec(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
         if let Some(me) = self.mes.pop() {
             match me {
-                ShaderMe::Pod { pod_ty, mut out, offset } => {
-                    // lets check if our field count works out
-                    vm.heap.pod_check_constructor_arg_count(pod_ty, &offset, &self.trap);
-                    out.push_str(")");
-                    self.stack.push(&self.trap, ShaderType::Pod(pod_ty), out);
+                ShaderMe::ArrayConstruct { args, elem_ty } => {
+                    self.handle_array_construct(vm, output, args, elem_ty);
                 }
-                ShaderMe::ScriptCall { mut out, name, fnobj, this, args } => {
-                    // we should compare number of arguments (needs to be exact)
-                    let argc = vm.heap.vec_len(fnobj);
-                    let check_argc = if let ShaderThis::Pod(_) = this { argc + 1 } else { argc };
-                    if check_argc != args.len() {
-                        self.trap.err_invalid_arg_count();
-                    } else { // lets type trace it
-                        
-                        let mut method_name_prefix = self.stack.new_string();
-                        if let ShaderThis::PodType(ty) = this{
-                             if let Some(name) = vm.heap.pod_type_name(ty) {
-                                 write!(method_name_prefix, "{}_", name).ok();
-                             } 
-                        }
-                        else if let ShaderThis::Pod(ty) = this {
-                             if let Some(name) = vm.heap.pod_type_name(ty) {
-                                 write!(method_name_prefix, "{}_", name).ok();
-                             } 
-                        }
-
-                        // lets see if we already have fnobj with our argstypes
-                        let ret = if let Some(fun) = output.functions.iter().find(|v| {
-                            v.fnobj == fnobj && v.args == args
-                        }) {
-                            if fun.overload != 0 {
-                                let mut n = self.stack.new_string();
-                                write!(n, "_f{}", fun.overload).ok();
-                                out.insert_str(0, &n);
-                                self.stack.free_string(n);
-                            }
-                            out.insert_str(0, &method_name_prefix);
-                            fun.ret
-                        } else {
-                            let overload = output.functions.iter().filter(|v| { v.name == name }).count();
-                            // allow multiple typetraces of the same function:
-                            // add a counter to the fn name somehow
-                            // lets run a compile
-                            let mut compiler = ShaderFnCompiler::new(fnobj);
-                            // we need to pass in a vec of types to the function
-                            let mut call_sig = String::new();
-                            if overload != 0 {
-                                let mut n = self.stack.new_string();
-                                write!(n, "_f{}", overload).ok();
-                                out.insert_str(0, &n);
-                                self.stack.free_string(n);
-                                write!(call_sig, "fn _f{}{}{}(", overload, method_name_prefix, name).ok();
-                            } else {
-                                write!(call_sig, "fn {}{}(", method_name_prefix, name).ok();
-                            }
-                            out.insert_str(0, &method_name_prefix);
-
-                            if let ShaderThis::Pod(ty) = this {
-                                write!(call_sig, "this:").ok();
-                                if let Some(name) = vm.heap.pod_type_name(ty) {
-                                    write!(call_sig, "{}", name).ok();
-                                }
-                                compiler.shader_scope.define_var(id!(this), ty, false);
-                                if argc > 0 { call_sig.push_str(", "); }
-                            }
-                            
-                            let arg_offset = if let ShaderThis::Pod(_) = this { 1 } else { 0 };
-
-                            for i in 0..argc {
-                                // put in argument types
-                                let kv = vm.heap.vec_key_value(fnobj, i, &self.trap);
-                                if let Some(id) = kv.key.as_id() {
-                                    if i != 0 { call_sig.push_str(", "); }
-                                    let arg_ty = args[i + arg_offset];
-                                    write!(call_sig, "{}:", id).ok();
-                                    if let Some(name) = vm.heap.pod_type_name(arg_ty) {
-                                        write!(call_sig, "{}", name).ok();
-                                    } else {
-                                        todo!()
-                                    }
-                                    compiler.shader_scope.define_var(id, arg_ty, false);
-                                }
-                            }
-                            write!(call_sig, ")").ok();
-                            if let Some(fnptr) = vm.heap.as_fn(fnobj) {
-                                if let ScriptFnPtr::Script(fnip) = fnptr {
-                                    if output.recur_block.iter().any(|v| *v == fnobj) {
-                                        self.trap.err_recursion_not_allowed();
-                                        vm.code.builtins.pod.pod_void
-                                    } else {
-                                        output.recur_block.push(fnobj);
-                                        let ret = compiler.compile_fn(vm, output, fnip);
-                                        output.recur_block.pop();
-                                        if let Some(name) = vm.heap.pod_type_name(ret) {
-                                            write!(call_sig, "->{}", name).ok();
-                                        } else {
-                                            todo!()
-                                        }
-                                        
-                                        output.functions.push(ShaderFn {
-                                            overload,
-                                            call_sig,
-                                            name,
-                                            args,
-                                            fnobj,
-                                            out: compiler.out,
-                                            ret
-                                        });
-                                        ret
-                                    }
-                                } else { panic!() }
-                            } else { panic!() }
-                        };
-                        
-                        out.push_str(")");
-                        self.stack.push(&self.trap, ShaderType::Pod(ret), out);
-                        self.stack.free_string(method_name_prefix);
-                    }
+                ShaderMe::Pod { pod_ty, args } => {
+                    self.handle_pod_construct(vm, pod_ty, args);
+                }
+                ShaderMe::ScriptCall { out, name, fnobj, this, args } => {
+                    self.handle_script_call(vm, output, out, name, fnobj, this, args);
                 }
                 ShaderMe::BuiltinCall { mut out, name, fnptr: _, args } => {
                     let ret = type_table_builtin(name, &args, &vm.code.builtins.pod, &self.trap);
@@ -1048,7 +1222,35 @@ impl ShaderFnCompiler{
             Opcode::ASSIGN_INDEX_SHR=>{self.trap.err_not_impl();},
             Opcode::ASSIGN_INDEX_IFNIL=>{self.trap.err_not_impl();},
 // ASSIGN ME            
-            Opcode::ASSIGN_ME=>{self.trap.err_not_impl();},
+            Opcode::ASSIGN_ME=>{
+                let (val_ty, val_s) = self.stack.pop(&self.trap);
+                let (id_ty, id_s) = self.stack.pop(&self.trap);
+                if let ShaderType::Id(id) = id_ty{
+                     if let Some(ShaderMe::Pod{args, ..}) = self.mes.last_mut(){
+                         if let Some(last) = args.last(){
+                             if last.name.is_none() {
+                                 self.trap.err_use_only_named_or_ordered_pod_fields();
+                             }
+                         }
+                         args.push(ShaderPodArg{
+                             name: Some(id),
+                             ty: val_ty,
+                             s: val_s
+                         });
+                     }
+                     else{
+                         self.trap.err_unexpected();
+                         self.stack.free_string(val_s);
+                     }
+                     self.stack.free_string(id_s);
+                }
+                else{
+                    self.trap.err_unexpected();
+                    self.stack.free_string(val_s);
+                    self.stack.free_string(id_s);
+                    self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                }
+            },
                                     
             Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{self.trap.err_opcode_not_supported_in_shader();},
                                     
@@ -1358,32 +1560,50 @@ impl ShaderFnCompiler{
                     self.out.push_str(";\n");
                     self.stack.free_string(s);
                 }
-                ShaderMe::Pod{out, offset, pod_ty}=>{
+                ShaderMe::Pod{pod_ty:_, args}=>{
                     let (ty, s) = self.stack.pop(&self.trap);
-                    // if ty is an Id, we have to resolve it including ty
-                    if offset.field_index > 0 {
-                        out.push_str(", ");
+                    
+                    if let Some(last) = args.last(){
+                         let last_was_named = last.name.is_some();
+                         if last_was_named {
+                             self.trap.err_use_only_named_or_ordered_pod_fields();
+                         }
                     }
-                    match ty{
-                        ShaderType::Pod(pod_ty_field)=>{
-                            vm.heap.pod_check_constructor_arg(*pod_ty, pod_ty_field, offset, &self.trap);
-                        }
-                        ShaderType::Id(id)=>{
-                            if let Some((v, _name)) = self.shader_scope.find_var(id){
-                                vm.heap.pod_check_constructor_arg(*pod_ty, v.ty, offset, &self.trap);
-                            }
-                            else{
-                                self.trap.err_not_found();
-                            }
-                        }
-                        ShaderType::AbstractInt | ShaderType::AbstractFloat=>{
-                            vm.heap.pod_check_abstract_constructor_arg(*pod_ty, offset, &self.trap);
-                        }
-                        ShaderType::Range{..}|ShaderType::Error(_)=>{
+                    
+                    args.push(ShaderPodArg{
+                        name: None,
+                        ty,
+                        s
+                    });
+                }
+                ShaderMe::ArrayConstruct{args, elem_ty}=>{
+                    let (ty, s) = self.stack.pop(&self.trap);
+                    let arg_ty = if let ShaderType::Id(id) = ty {
+                         if let Some((v, _name)) = self.shader_scope.find_var(id){
+                             v.ty
+                         }
+                         else{
+                             self.trap.err_not_found();
+                             vm.code.builtins.pod.pod_void
+                         }
+                    }
+                    else if let Some(ty) = ty.make_concrete(&vm.code.builtins.pod){
+                        ty
+                    }
+                    else{
+                        self.trap.err_no_matching_shader_type();
+                        vm.code.builtins.pod.pod_void
+                    };
+                    
+                    if let Some(elem_ty) = elem_ty {
+                        if *elem_ty != arg_ty {
+                             self.trap.err_pod_type_not_matching();
                         }
                     }
-                    out.push_str(&s);
-                    self.stack.free_string(s);
+                    else {
+                        *elem_ty = Some(arg_ty);
+                    }
+                    args.push(s);
                 }
                 ShaderMe::ScriptCall{out, args, ..}=>{
                     let (ty, s) = self.stack.pop(&self.trap);

@@ -102,5 +102,6 @@ impl ScriptTrap{
     err_fwd!(err_opcode_not_defined_for_shader_type);
     err_fwd!(err_not_an_array);
     err_fwd!(err_index_out_of_bounds);
+    err_fwd!(err_use_only_named_or_ordered_pod_fields);
 }
 
