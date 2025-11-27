@@ -99,5 +99,6 @@ impl ScriptTrap{
     err_fwd!(err_recursion_not_allowed);
     err_fwd!(err_if_else_type_different);
     err_fwd!(err_let_is_immutable);
+    err_fwd!(err_opcode_not_defined_for_shader_type);
 }
 
