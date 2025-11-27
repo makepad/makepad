@@ -58,13 +58,17 @@ pub fn test(){
             field: f32,
             arr: array{f32 4},
             set_field: |v| this.field += v 
-            new: || sdf(arr:array(1f,2f,3f,4f), field:1.0)
+            new: || sdf(
+                arr:array(1f,2f,3f,4f), 
+                field:1.0
+            )
         }
         // alright. lets figure out the shader this
         let test_shader = {
             pixel: fn(){
                 let x = sdf.new()
                 x.set_field(1f)
+                x.arr[3] = 1f
             }
         }
         let x = sdf(0,array(1f,2f,3f,4f))
