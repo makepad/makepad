@@ -42,13 +42,13 @@ impl ScriptHeap{
         let pod_type = &self.pod_types[pod_ty.index as usize];
         if let ScriptPodTy::Struct{fields, ..} = &pod_type.ty {
             let name = pod_type.name.unwrap();
-            writeln!(out, "struct {} {{", name).unwrap();
+            writeln!(out, "struct {} {{", name).ok();
             for field in fields {
-                write!(out, "    {}: ", field.name).unwrap();
+                write!(out, "    {}: ", field.name).ok();
                 self.pod_type_wgsl_type_name_referenced(&field.ty, referenced, out);
-                writeln!(out, ",").unwrap();
+                writeln!(out, ",").ok();
             }
-            writeln!(out, "}}").unwrap();
+            writeln!(out, "}}").ok();
         }
     }
     
@@ -86,12 +86,12 @@ impl ScriptHeap{
         match &ty.data.ty {
             ScriptPodTy::Struct{..} => {
                 referenced.insert(ty.self_ref);
-                write!(out, "{}", ty.data.name.unwrap()).unwrap();
+                write!(out, "{}", ty.data.name.unwrap()).ok();
             }
             ScriptPodTy::FixedArray{ty: inner, len, ..} => {
                 out.push_str("array<");
                 self.pod_type_wgsl_type_name_referenced(inner, referenced, out);
-                write!(out, ", {}>", len).unwrap();
+                write!(out, ", {}>", len).ok();
             }
             ScriptPodTy::VariableArray{ty: inner, ..} => {
                  out.push_str("array<");
@@ -111,15 +111,15 @@ impl ScriptHeap{
             ScriptPodTy::Bool => out.push_str("bool"),
             ScriptPodTy::AtomicU32 => out.push_str("atomic<u32>"),
             ScriptPodTy::AtomicI32 => out.push_str("atomic<i32>"),
-            ScriptPodTy::Vec(v) => write!(out, "{}", v.name()).unwrap(),
-            ScriptPodTy::Mat(m) => write!(out, "{}", m.name()).unwrap(),
+            ScriptPodTy::Vec(v) => write!(out, "{}", v.name()).ok().unwrap_or(()),
+            ScriptPodTy::Mat(m) => write!(out, "{}", m.name()).ok().unwrap_or(()),
             ScriptPodTy::Struct{..} => {
-                write!(out, "{}", ty.data.name.unwrap()).unwrap();
+                write!(out, "{}", ty.data.name.unwrap()).ok().unwrap_or(());
             }
             ScriptPodTy::FixedArray{ty: inner, len, ..} => {
                 out.push_str("array<");
                 self.pod_type_wgsl_type_name(inner, out);
-                write!(out, ", {}>", len).unwrap();
+                write!(out, ", {}>", len).ok();
             }
             ScriptPodTy::VariableArray{ty: inner, ..} => {
                  out.push_str("array<");
