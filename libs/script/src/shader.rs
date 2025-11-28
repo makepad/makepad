@@ -853,10 +853,11 @@ impl ShaderFnCompiler{
                 out.insert_str(0, &method_name_prefix);
 
                 if let ShaderThis::Pod(ty) = this {
-                    write!(call_sig, "this:").ok();
+                    write!(call_sig, "this:ptr<function, ").ok();
                     if let Some(name) = vm.heap.pod_type_name(ty) {
                         write!(call_sig, "{}", name).ok();
                     }
+                    write!(call_sig, ">").ok();
                     compiler.shader_scope.define_var(id!(this), ty, false);
                     if argc > 0 { call_sig.push_str(", "); }
                 }
@@ -957,7 +958,7 @@ impl ShaderFnCompiler{
                             match fnptr {
                                 ScriptFnPtr::Script(_fnptr) => {
                                     let mut out = self.stack.new_string();
-                                    write!(out, "{}({}", method_id, this_s).ok();
+                                    write!(out, "{}(&{}", method_id, this_s).ok();
                                     self.mes.push(ShaderMe::ScriptCall {
                                         name: method_id,
                                         out,
