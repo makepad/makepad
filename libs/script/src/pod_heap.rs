@@ -843,12 +843,30 @@ impl ScriptHeap{
                 }
             }
             ScriptPodTy::Vec(_vt)=>{ 
-                println!("setting a vec via pop");
-                todo!()
+                if let Some(other_pod) = value.as_pod(){
+                    let other_pod = &self.pods[other_pod.index as usize];
+                    if other_pod.ty == field_ty.self_ref{
+                        let o = offset_of>>2;
+                        for i in 0..other_pod.data.len(){
+                            out_data[o+i] = other_pod.data[i]
+                        }
+                        return
+                    }
+                }
+                trap.err_pod_type_not_matching();
             }
             ScriptPodTy::Mat(_mt)=>{
-                println!("setting a mat via pop");
-                todo!()
+                if let Some(other_pod) = value.as_pod(){
+                    let other_pod = &self.pods[other_pod.index as usize];
+                    if other_pod.ty == field_ty.self_ref{
+                        let o = offset_of>>2;
+                        for i in 0..other_pod.data.len(){
+                            out_data[o+i] = other_pod.data[i]
+                        }
+                        return
+                    }
+                }
+                trap.err_pod_type_not_matching();
             }
             ScriptPodTy::F16=>{
                 if let Some(value) = value.as_number(){
