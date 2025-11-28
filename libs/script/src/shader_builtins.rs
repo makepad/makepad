@@ -95,15 +95,26 @@ pub fn type_table_builtin(
     let i32_t = builtins.pod_i32;
     
     let vec2f_t = builtins.pod_vec2f;
+    let vec3f_t = builtins.pod_vec3f;
+    let vec4f_t = builtins.pod_vec4f;
+
     let vec2h_t = builtins.pod_vec2h;
+    let vec3h_t = builtins.pod_vec3h;
+    let vec4h_t = builtins.pod_vec4h;
+
     let vec2u_t = builtins.pod_vec2u;
+    let vec3u_t = builtins.pod_vec3u;
+    let vec4u_t = builtins.pod_vec4u;
+
     let vec2i_t = builtins.pod_vec2i;
+    let vec3i_t = builtins.pod_vec3i;
+    let vec4i_t = builtins.pod_vec4i;
 
     // Helpers to check types
     let is_float = |t| t == f32_t || t == f16_t;
     let is_int = |t| t == u32_t || t == i32_t;
-    let is_vec_float = |t| t == vec2f_t || t == vec2h_t;
-    let is_vec_int = |t| t == vec2u_t || t == vec2i_t;
+    let is_vec_float = |t| t == vec2f_t || t == vec3f_t || t == vec4f_t || t == vec2h_t || t == vec3h_t || t == vec4h_t;
+    let is_vec_int = |t| t == vec2u_t || t == vec3u_t || t == vec4u_t || t == vec2i_t || t == vec3i_t || t == vec4i_t;
     
     let is_any_float = |t| is_float(t) || is_vec_float(t);
     let is_any_int = |t| is_int(t) || is_vec_int(t);
@@ -132,8 +143,8 @@ pub fn type_table_builtin(
             }
             let t = args[0];
             if is_any_float(t) {
-                if t == vec2f_t { return f32_t; }
-                if t == vec2h_t { return f16_t; }
+                if t == vec2f_t || t == vec3f_t || t == vec4f_t { return f32_t; }
+                if t == vec2h_t || t == vec3h_t || t == vec4h_t { return f16_t; }
                 return t; 
             }
             trap.err_invalid_arg_type();
@@ -174,7 +185,9 @@ pub fn type_table_builtin(
              if t1 == t2 && is_any_float(t1) {
                  return t1;
              }
-             if is_vec_float(t2) && (t1 == f32_t && t2 == vec2f_t || t1 == f16_t && t2 == vec2h_t) {
+             if is_vec_float(t2) && (
+                t1 == f32_t && (t2 == vec2f_t || t2 == vec3f_t || t2 == vec4f_t) || 
+                t1 == f16_t && (t2 == vec2h_t || t2 == vec3h_t || t2 == vec4h_t)) {
                  return t2;
              }
              trap.err_invalid_arg_type();
@@ -187,8 +200,8 @@ pub fn type_table_builtin(
              }
              let (t1, t2) = (args[0], args[1]);
              if t1 == t2 && is_any_float(t1) {
-                 if t1 == vec2f_t { return f32_t; }
-                 if t1 == vec2h_t { return f16_t; }
+                 if t1 == vec2f_t || t1 == vec3f_t || t1 == vec4f_t { return f32_t; }
+                 if t1 == vec2h_t || t1 == vec3h_t || t1 == vec4h_t { return f16_t; }
                  return t1;
              }
              trap.err_invalid_arg_type();
@@ -218,8 +231,8 @@ pub fn type_table_builtin(
              if t1 == t2 && is_any_float(t1) {
                  if t3 == t1 { return t1; }
                  // vector with scalar alpha
-                 if t1 == vec2f_t && t3 == f32_t { return t1; }
-                 if t1 == vec2h_t && t3 == f16_t { return t1; }
+                 if (t1 == vec2f_t || t1 == vec3f_t || t1 == vec4f_t) && t3 == f32_t { return t1; }
+                 if (t1 == vec2h_t || t1 == vec3h_t || t1 == vec4h_t) && t3 == f16_t { return t1; }
              }
              trap.err_invalid_arg_type();
              return builtins.pod_void;
