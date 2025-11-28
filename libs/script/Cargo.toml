@@ -11,6 +11,7 @@ metadata.makepad-auto-version = "yK9xdn_D0D3EdqleI-WHLtjk4rk="
 
 [dependencies]
 makepad-error-log = {path = "../error_log", version = "1.0.0" }
+makepad-math = {path = "../math", version = "1.0.0" }
 makepad-live-id = {path = "../live_id", version = "1.0.0" }
 makepad-script-derive = {path = "./derive", version = "1.0.0" }
 smallvec = "1.11.2" 
