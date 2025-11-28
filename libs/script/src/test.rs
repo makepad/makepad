@@ -56,10 +56,12 @@ pub fn test(){
 
         let sdf = struct{
             field: f32,
+            p: vec4f,
             arr: array{f32 4},
             set_field: |v| this.field += v 
             new: || sdf(
-                arr:array(1f,2f,3f,4f), 
+                arr:array(1f,2f,3f,4f)
+                p: vec4f(0)
                 field:1.0
             )
         }
@@ -68,10 +70,11 @@ pub fn test(){
             pixel: fn(){
                 let x = sdf.new()
                 x.set_field(1f)
+                x.p.y = 1f;
                 x.arr[3] = 1f
             }
         }
-        let x = sdf(0,array(1f,2f,3f,4f))
+        let x = sdf(0,vec4f(0),array(1f,2f,3f,4f))
         ~shader.compile_draw(test_shader)
     };
     
