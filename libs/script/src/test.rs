@@ -67,13 +67,16 @@ pub fn test(){
         }
         // alright. lets figure out the shader this
         let test_shader = {
-            x: instance(1.0)
+            x: shader.instance(1.0)
+            otherfn: |x| x+1
             pixel: fn(){
                 let x = sdf.new()
                 x.set_field(1f)
                 x.p.y = 1f;
                 x.arr[3] = 1f
+                this.otherfn(1)
                 mix(#f00,#0f0, this.x)
+                //1
             }
         }
         let x = sdf(0,vec4f(0),array(1f,2f,3f,4f))

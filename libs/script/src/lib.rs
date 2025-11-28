@@ -12,6 +12,7 @@ pub mod string_heap;
 pub mod mod_math;
 pub mod mod_std;
 pub mod mod_pod;
+pub mod mod_shader;
 #[macro_use]
 pub mod native;
 pub mod vm;
