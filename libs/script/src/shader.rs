@@ -1,5 +1,6 @@
 #[allow(unused)]
 use makepad_live_id::*;
+use makepad_math::*;
 use crate::heap::*;
 use crate::native::*;
 use crate::value::*;
@@ -90,7 +91,7 @@ pub enum ShaderMe{
 #[derive(Debug)]
 pub enum ShaderThis{
     None,
-    ShaderThis,
+    ShaderThis(ScriptObject),
     PodType(ScriptPodType),
     Pod(ScriptPodType)
 }
@@ -368,6 +369,10 @@ impl ShaderFnCompiler{
         }
         if let Some(v) = value.as_bool(){
             return push_fmt!(self, ShaderType::Pod(builtins.pod_bool), "{}", v);
+        }
+        if let Some(v) = value.as_color(){
+            let v = Vec4::from_u32(v);
+            return push_fmt!(self, ShaderType::Pod(builtins.pod_vec4f), "vec4f({},{},{},{})", v.x, v.y, v.z, v.w);
         }
         self.trap.err_no_matching_shader_type();
     }
