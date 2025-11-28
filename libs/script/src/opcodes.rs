@@ -1328,6 +1328,36 @@ impl ScriptThread{
         self.trap.goto(lp.start_ip + lp.jump - 1);
     }
     
+        
+    pub fn pop_to_me(&mut self, heap:&mut ScriptHeap, code:&ScriptCode){
+                        
+        let value = self.pop_stack_value();
+        if self.call_has_me(){
+                                                
+            let (key, value) = if let Some(id) = value.as_id(){
+                if value.is_escaped_id(){ (NIL, value) }
+                else{(value, self.scope_value(heap, id))}
+            }else{(NIL,value)};
+                        
+            match self.mes.last_mut().unwrap(){
+                ScriptMe::Call{args,..}=>{
+                    heap.unnamed_fn_arg(*args, value, &self.trap);
+                }
+                ScriptMe::Object(obj)=>{
+                    if !value.is_nil() && !value.is_err(){
+                        heap.vec_push(*obj, key, value, &self.trap);
+                    }
+                }
+                ScriptMe::Pod{pod, offset}=>{
+                    heap.pod_pop_to_me(*pod, offset, key, value, &code.builtins.pod, &self.trap);
+                }
+                ScriptMe::Array(arr)=>{
+                    heap.array_push(*arr, value, &self.trap)
+                }
+            }
+        }
+    }
+    
     pub fn handle_f64_scope_assign_op<F>(&mut self, heap:&mut ScriptHeap, f:F)
     where F: FnOnce(f64, f64)->f64
     {
