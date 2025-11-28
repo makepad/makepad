@@ -231,8 +231,7 @@ pub fn type_table_builtin(
              if t1 == t2 && is_any_float(t1) {
                  if t3 == t1 { return t1; }
                  // vector with scalar alpha
-                 if (t1 == vec2f_t || t1 == vec3f_t || t1 == vec4f_t) && t3 == f32_t { return t1; }
-                 if (t1 == vec2h_t || t1 == vec3h_t || t1 == vec4h_t) && t3 == f16_t { return t1; }
+                 if (t1 == vec2f_t || t1 == vec3f_t || t1 == vec4f_t) && (is_float(t3) || is_int(t3)){ return t1; }
              }
              trap.err_invalid_arg_type();
              return builtins.pod_void;

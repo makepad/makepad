@@ -51,6 +51,10 @@ pub struct ScriptPodType{
     pub(crate) index: u32    
 }
 
+impl ScriptPodType{
+    pub const VOID:ScriptPodType = ScriptPodType{index:0};
+}
+
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ScriptObject{
     pub(crate) index: u32    

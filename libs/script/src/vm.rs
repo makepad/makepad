@@ -8,8 +8,8 @@ use crate::native::*;
 use crate::mod_std::*;
 use crate::mod_math::*;
 use crate::mod_pod::*;
+use crate::mod_shader::*;
 use crate::object::*;
-use crate::shader::*;
 use std::cell::RefCell;
 use std::any::Any;
 
