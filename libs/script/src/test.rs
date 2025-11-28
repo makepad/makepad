@@ -59,7 +59,7 @@ pub fn test(){
             p: vec4f,
             arr: array{f32 4},
             set_field: |v| this.field += v 
-            new: || sdf(
+            new: || this(
                 arr:array(1f,2f,3f,4f)
                 p: vec4f(0)
                 field:1.0

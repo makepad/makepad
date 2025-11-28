@@ -129,10 +129,29 @@ pub struct ShaderFn{
     ret: ScriptPodType,
 }
 
-struct ShaderScopeItem{
-    shadow: usize,
-    is_var: bool,
-    ty: ScriptPodType
+#[derive(Debug)]
+enum ShaderScopeItem{
+    Let{ty:ScriptPodType, shadow:usize},
+    Var{ty:ScriptPodType, shadow:usize},
+    PodType{ty:ScriptPodType, shadow:usize}
+}
+
+impl ShaderScopeItem{
+    fn ty(&self)->ScriptPodType{
+        match self{
+            Self::Let{ty,..}=>*ty,
+            Self::Var{ty,..}=>*ty,
+            Self::PodType{ty,..}=>*ty,
+        }
+    }
+    
+    fn shadow(&self)->usize{
+        match self{
+            Self::Let{shadow,..}=>*shadow,
+            Self::Var{shadow,..}=>*shadow,
+            Self::PodType{shadow,..}=>*shadow,
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -200,8 +219,8 @@ impl ShaderScope{
     fn find_var(&self, id: LiveId) -> Option<(&ShaderScopeItem, String)> {
         for scope in self.shader_scope.iter().rev() {
             if let Some(item) = scope.get(&id) {
-                let name = if item.shadow > 0 {
-                    format!("_s{}{}", item.shadow, id)
+                let name = if item.shadow() > 0 {
+                    format!("_s{}{}", item.shadow(), id)
                 } else {
                     format!("{}", id)
                 };
@@ -211,19 +230,38 @@ impl ShaderScope{
         None
     }
     
-    fn define_var(&mut self, id: LiveId, ty: ScriptPodType, is_var: bool) -> String {
+    fn define_var(&mut self, id: LiveId, ty: ScriptPodType) -> String {
         let scope = self.shader_scope.last_mut().unwrap();
         if let Some(item) = scope.get_mut(&id) {
-            item.shadow += 1;
-            item.ty = ty;
-            item.is_var = is_var;
-            format!("_s{}{}", item.shadow, id)
+            let shadow = item.shadow() + 1;
+            *item = ShaderScopeItem::Var{ty, shadow};
+            format!("_s{}{}", shadow, id)
         } else {
-            scope.insert(id, ShaderScopeItem {
-                shadow: 0,
-                is_var,
-                ty
-            });
+            scope.insert(id, ShaderScopeItem::Var{ty, shadow:0});
+            format!("{}", id)
+        }
+    }
+
+    fn define_let(&mut self, id: LiveId, ty: ScriptPodType) -> String {
+        let scope = self.shader_scope.last_mut().unwrap();
+        if let Some(item) = scope.get_mut(&id) {
+            let shadow = item.shadow() + 1;
+            *item = ShaderScopeItem::Let{ty, shadow};
+            format!("_s{}{}", shadow, id)
+        } else {
+            scope.insert(id, ShaderScopeItem::Let{ty, shadow:0});
+            format!("{}", id)
+        }
+    }
+
+    fn define_pod_type(&mut self, id: LiveId, ty: ScriptPodType) -> String {
+        let scope = self.shader_scope.last_mut().unwrap();
+        if let Some(item) = scope.get_mut(&id) {
+            let shadow = item.shadow() + 1;
+            *item = ShaderScopeItem::PodType{ty, shadow};
+            format!("_s{}{}", shadow, id)
+        } else {
+            scope.insert(id, ShaderScopeItem::PodType{ty, shadow:0});
             format!("{}", id)
         }
     }
@@ -293,7 +331,7 @@ impl ShaderFnCompiler{
                     let mut s2 = self.stack.new_string();
                     write!(s2, "{}", name).ok();
                     self.stack.free_string(s);
-                    return (ShaderType::Pod(sc.ty), s2)
+                    return (ShaderType::Pod(sc.ty()), s2)
                 }
                 // alright lets look it up on our script scope
                 let _value = vm.heap.scope_value(self.script_scope, id.into(), &self.trap);
@@ -402,10 +440,10 @@ impl ShaderFnCompiler{
         let (id_ty, id_s) = self.stack.pop(&self.trap);
         if let ShaderType::Id(id) = id_ty{
             if let Some((var, name)) = self.shader_scope.find_var(id){
-                if !var.is_var{
+                if !matches!(var, ShaderScopeItem::Var{..}){
                     self.trap.err_let_is_immutable();
                 }
-                let t1 = ShaderType::Pod(var.ty);
+                let t1 = ShaderType::Pod(var.ty());
                 let _ty = if is_int {
                     type_table_int_arithmetic(&t1, &t2, &self.trap, &vm.code.builtins.pod)
                 } else {
@@ -569,7 +607,7 @@ impl ShaderFnCompiler{
     
     fn ensure_struct_name(&self, vm: &mut ScriptVm, output: &mut ShaderOutput, pod_ty: ScriptPodType, used_name: LiveId) -> LiveId {
         if let Some(name) = vm.heap.pod_type_name(pod_ty) {
-            if name != used_name {
+            if name != used_name  && used_name != id!(this){
                 self.trap.err_struct_name_not_consistent();
             }
             return name;
@@ -579,36 +617,45 @@ impl ShaderFnCompiler{
         used_name
     }
 
+    fn handle_pod_type_call(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, pod_ty:ScriptPodType, name:LiveId){
+        if let ScriptPodTy::ArrayBuilder = &vm.heap.pod_types[pod_ty.index as usize].ty {
+            self.mes.push(ShaderMe::ArrayConstruct {
+                args: Vec::new(),
+                elem_ty: None,
+            });
+            self.maybe_pop_to_me(vm, opargs);
+            return;
+        }
+
+        // alright lets see what Id we got
+        let _name = self.ensure_struct_name(vm, output, pod_ty, name);
+        //write!(out, "{}(", name).ok();
+        
+        self.mes.push(ShaderMe::Pod {
+            pod_ty: pod_ty,
+            args: Vec::new()
+        });
+        
+        self.maybe_pop_to_me(vm, opargs);
+    }
+
     fn handle_call_args(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs) {
         let (ty, _s) = self.stack.pop(&self.trap);
         if let ShaderType::Id(name) = ty {
+            // Check shader scope for PodType
+            if let Some((ShaderScopeItem::PodType{ty, ..}, _)) = self.shader_scope.find_var(name) {
+                 self.handle_pod_type_call(vm, output, opargs, *ty, name);
+                 return;
+            }
+            
             // alright lets look it up on our script scope
             let value = vm.heap.scope_value(self.script_scope, name.into(), &self.trap);
             // lets check if our obj is a PodType
             if let Some(pod_ty) = vm.heap.pod_type(value) {
-                
-                if let ScriptPodTy::ArrayBuilder = &vm.heap.pod_types[pod_ty.index as usize].ty {
-                    self.mes.push(ShaderMe::ArrayConstruct {
-                        args: Vec::new(),
-                        elem_ty: None,
-                    });
-                    self.maybe_pop_to_me(vm, opargs);
-                    return;
-                }
-
-                let mut _out = self.stack.new_string();
-                // alright lets see what Id we got
-                let _name = self.ensure_struct_name(vm, output, pod_ty, name);
-                //write!(out, "{}(", name).ok();
-                
-                self.mes.push(ShaderMe::Pod {
-                    pod_ty: pod_ty,
-                    args: Vec::new()
-                });
-                
-                self.maybe_pop_to_me(vm, opargs);
+                self.handle_pod_type_call(vm, output, opargs, pod_ty, name);
                 return;
             }
+            
             if let Some(fnobj) = value.as_object() {
                 if let Some(fnptr) = vm.heap.as_fn(fnobj) {
                     match fnptr {
@@ -725,7 +772,7 @@ impl ShaderFnCompiler{
                                     },
                                     ShaderType::Id(id) => {
                                          if let Some((v, _name)) = self.shader_scope.find_var(*id){
-                                              if v.ty != field.ty.self_ref {
+                                              if v.ty() != field.ty.self_ref {
                                                    self.trap.err_pod_type_not_matching();
                                               }
                                          }
@@ -771,7 +818,7 @@ impl ShaderFnCompiler{
                             }
                             ShaderType::Id(id)=>{
                                 if let Some((v, _name)) = self.shader_scope.find_var(*id){
-                                    vm.heap.pod_check_constructor_arg(pod_ty, v.ty, &mut offset, &self.trap);
+                                    vm.heap.pod_check_constructor_arg(pod_ty, v.ty(), &mut offset, &self.trap);
                                 }
                                 else{
                                     self.trap.err_not_found();
@@ -804,9 +851,10 @@ impl ShaderFnCompiler{
     fn handle_script_call(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, mut out: String, name: LiveId, fnobj: ScriptObject, this: ShaderThis, args: Vec<ScriptPodType>) {
         // we should compare number of arguments (needs to be exact)
         let argc = vm.heap.vec_len(fnobj);
-        let check_argc = if let ShaderThis::Pod(_) = this { argc + 1 } else { argc };
-        if check_argc != args.len() {
-            self.trap.err_invalid_arg_count();
+        
+        if argc != args.len() {
+            let e = self.trap.err_invalid_arg_count();
+            self.stack.push(&self.trap, ShaderType::Error(e), out);
         } else { // lets type trace it
             
             let mut method_name_prefix = self.stack.new_string();
@@ -858,25 +906,26 @@ impl ShaderFnCompiler{
                         write!(call_sig, "{}", name).ok();
                     }
                     write!(call_sig, ">").ok();
-                    compiler.shader_scope.define_var(id!(this), ty, false);
+                    compiler.shader_scope.define_let(id!(this), ty);
                     if argc > 0 { call_sig.push_str(", "); }
                 }
+                if let ShaderThis::PodType(ty) = this{
+                    compiler.shader_scope.define_pod_type(id!(this), ty);
+                }
                 
-                let arg_offset = if let ShaderThis::Pod(_) = this { 1 } else { 0 };
-
                 for i in 0..argc {
                     // put in argument types
                     let kv = vm.heap.vec_key_value(fnobj, i, &self.trap);
                     if let Some(id) = kv.key.as_id() {
                         if i != 0 { call_sig.push_str(", "); }
-                        let arg_ty = args[i + arg_offset];
+                        let arg_ty = args[i];
                         write!(call_sig, "{}:", id).ok();
                         if let Some(name) = vm.heap.pod_type_name(arg_ty) {
                             write!(call_sig, "{}", name).ok();
                         } else {
                             todo!()
                         }
-                        compiler.shader_scope.define_var(id, arg_ty, false);
+                        compiler.shader_scope.define_let(id, arg_ty);
                     }
                 }
                 write!(call_sig, ")").ok();
@@ -890,10 +939,10 @@ impl ShaderFnCompiler{
                             let ret = compiler.compile_fn(vm, output, fnip);
                             output.recur_block.pop();
                             if let Some(name) = vm.heap.pod_type_name(ret) {
-                                write!(call_sig, "->{}", name).ok();
-                            } else {
-                                todo!()
-                            }
+                                if name != id!(void){
+                                    write!(call_sig, "->{}", name).ok();
+                                }
+                            } 
                             
                             output.functions.push(ShaderFn {
                                 overload,
@@ -909,7 +958,6 @@ impl ShaderFnCompiler{
                     } else { panic!() }
                 } else { panic!() }
             };
-            
             out.push_str(")");
             self.stack.push(&self.trap, ShaderType::Pod(ret), out);
             self.stack.free_string(method_name_prefix);
@@ -948,7 +996,7 @@ impl ShaderFnCompiler{
                 
                 // Try to resolve as variable on shader scope
                 if let Some((var, _name)) = self.shader_scope.find_var(this_id){
-                    let pod_ty = var.ty;
+                    let pod_ty = var.ty();
                     // It is a Pod instance. Look up method on the type.
                     let pod_ty_data = &vm.heap.pod_types[pod_ty.index as usize];
                     let fnobj = vm.heap.value(pod_ty_data.object, method_id.into(), &self.trap);
@@ -964,7 +1012,7 @@ impl ShaderFnCompiler{
                                         out,
                                         fnobj,
                                         this: ShaderThis::Pod(pod_ty),
-                                        args: vec![pod_ty],
+                                        args: vec![],
                                     });
                                 }
                                 ScriptFnPtr::Native(fnptr) => {
@@ -974,7 +1022,7 @@ impl ShaderFnCompiler{
                                         out,
                                         name: method_id,
                                         fnptr,
-                                        args: vec![pod_ty]
+                                        args: vec![]
                                     });
                                 }
                             }
@@ -1036,7 +1084,7 @@ impl ShaderFnCompiler{
         let (id_ty, _id) = self.stack.pop(&self.trap);
         if let ShaderType::Id(id) = id_ty {
             if let Some((var, name)) = self.shader_scope.find_var(id) {
-                if !var.is_var {
+                if !matches!(var, ShaderScopeItem::Var{..}) {
                     self.trap.err_let_is_immutable();
                 }
                 let mut s = self.stack.new_string();
@@ -1273,7 +1321,7 @@ impl ShaderFnCompiler{
             if let ShaderType::Id(id) = ty_id {
                 // lets define our let type
                 if let Some(ty) = ty_value.make_concrete(&vm.code.builtins.pod) {
-                    let name = self.shader_scope.define_var(id, ty, false);
+                    let name = self.shader_scope.define_let(id, ty);
                     write!(self.out, "let {} = {};\n", name, value).ok();
                 } else {
                     self.trap.err_no_matching_shader_type();
@@ -1294,7 +1342,7 @@ impl ShaderFnCompiler{
             if let ShaderType::Id(id) = ty_id {
                 // lets define our let type
                 if let Some(ty) = ty_value.make_concrete(&vm.code.builtins.pod) {
-                    let name = self.shader_scope.define_var(id, ty, true);
+                    let name = self.shader_scope.define_var(id, ty);
                     write!(self.out, "var {} = {};\n", name, value).ok();
                 } else {
                     self.trap.err_no_matching_shader_type();
@@ -1311,7 +1359,7 @@ impl ShaderFnCompiler{
         if let ShaderType::Range { start, end, ty } = source {
             if let ShaderType::Id(id) = val_id {
                 self.shader_scope.enter_scope();
-                let var_name = self.shader_scope.define_var(id, ty, false);
+                let var_name = self.shader_scope.define_var(id, ty);
                 write!(self.out, "for(var {0} = {1}; {0} < {2}; {0}++){{\n", var_name, start, end).ok();
                 self.mes.push(ShaderMe::ForLoop {
                     var_id: id,
@@ -1596,7 +1644,7 @@ impl ShaderFnCompiler{
                     let (ty, s) = self.stack.pop(&self.trap);
                     let arg_ty = if let ShaderType::Id(id) = ty {
                          if let Some((v, _name)) = self.shader_scope.find_var(id){
-                             v.ty
+                             v.ty()
                          }
                          else{
                              self.trap.err_not_found();
@@ -1628,7 +1676,7 @@ impl ShaderFnCompiler{
                     }
                     if let ShaderType::Id(id) = ty{
                          if let Some((v, _name)) = self.shader_scope.find_var(id){
-                             args.push(v.ty);
+                             args.push(v.ty());
                          }
                          else{
                              self.trap.err_not_found();
@@ -1650,7 +1698,7 @@ impl ShaderFnCompiler{
                     }
                     if let ShaderType::Id(id) = ty{
                          if let Some((v, _name)) = self.shader_scope.find_var(id){
-                             args.push(v.ty);
+                             args.push(v.ty());
                          }
                          else{
                              self.trap.err_not_found();
