@@ -81,6 +81,9 @@ impl ScriptPodBuiltins{
 pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->ScriptPodBuiltins{
     
     let pod = heap.new_module(id!(pod));
+        
+    let pod_void = heap.pod_def_atom(pod, id_lut!(void), ScriptPodTy::Void, id_lut!(pod_void), ScriptValue::NIL);
+    assert!(pod_void == ScriptPodType::VOID);
     
     let pod_struct = heap.pod_def_atom(pod, id_lut!(struct), ScriptPodTy::UndefinedStruct, id_lut!(pod_struct), ScriptValue::NIL);
     
@@ -88,7 +91,6 @@ pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->Scrip
     
     let pod_bool = heap.pod_def_atom(pod, id_lut!(bool), ScriptPodTy::Bool, id_lut!(pod_bool), ScriptValue::from_bool(false));
     
-    let pod_void = heap.pod_def_atom(pod, id_lut!(f32), ScriptPodTy::Void, id_lut!(pod_void), ScriptValue::NIL);
         
     let pod_f32 = heap.pod_def_atom(pod, id_lut!(f32), ScriptPodTy::F32, id_lut!(pod_f32), ScriptValue::from_f32(0.0));
         

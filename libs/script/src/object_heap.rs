@@ -3,7 +3,7 @@ use crate::traits::*;
 use crate::heap::*;
 use crate::makepad_live_id::*;
 use crate::trap::*;
-
+use crate::mod_shader::ShaderIoType;
 use crate::*;
 
 impl ScriptHeap{
@@ -150,6 +150,15 @@ impl ScriptHeap{
         object.tag.set_string_keys();
     }
     
+    pub fn set_shader_io(&mut self, obj: ScriptObject, io:ShaderIoType){
+        let object = &mut  self.objects[obj.index as usize];
+        object.tag.set_shader_io(io);
+    }
+    
+    pub fn as_shader_io(&mut self, obj: ScriptObject)->Option<ShaderIoType>{
+        let object = &mut  self.objects[obj.index as usize];
+        object.tag.as_shader_io()
+    }
         
     // Writing object values 
             

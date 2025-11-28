@@ -6,13 +6,15 @@ use crate::heap::*;
 use crate::native::*;
 use crate::makepad_live_id::*;
 use crate::function::*;
-
+use crate::mod_shader::ShaderIoType;
 use crate::*;
 use ::std::collections::hash_map::Entry;
 use ::std::collections::HashMap;
 use ::std::rc::Rc;
 use ::std::cell::RefCell;
 //use std::collections::btree_map::BTreeMap;
+
+
 
 #[derive(Default)]
 pub struct ScriptObjectTag(u64); 
@@ -135,6 +137,7 @@ impl ScriptObjectTag{
     pub const REF_KIND_NATIVE_FN: u64 = 0x2<<58;
     pub const REF_KIND_TYPE_INDEX: u64 = 0x3<<58;
     pub const REF_KIND_POD_TYPE: u64 = 0x4<<58;
+    pub const REF_KIND_SHADER_IO: u64 = 0x5<<58;
     pub const REF_KIND_MASK:  u64 = 0xF<<58;
     pub const REF_DATA_MASK: u64 = 0xFF_FFFF_FFFF;
     
@@ -415,7 +418,24 @@ impl ScriptObjectTag{
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_POD_TYPE
     }
     
-    
+    pub fn set_shader_io(&mut self, ty:ShaderIoType){
+        self.0 &= !(Self::REF_DATA_MASK);
+        self.0 &= !(Self::REF_KIND_MASK);
+        self.0 |= ty.0 as u64 | Self::REF_KIND_SHADER_IO
+    }
+        
+    pub fn as_shader_io(&self)->Option<ShaderIoType>{
+        if self.is_shader_io(){
+            Some(ShaderIoType(self.0 as u32))
+        }
+        else{
+            None
+        }
+    }
+        
+    pub fn is_shader_io(&self)->bool{
+        self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SHADER_IO
+    }
     
 }
 
