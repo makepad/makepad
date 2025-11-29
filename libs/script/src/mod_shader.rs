@@ -7,9 +7,11 @@ use crate::value::*;
 use crate::shader::*;
 use crate::function::*;
 
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct ShaderIoType(pub(crate) u32);
 
 pub const SHADER_IO_INSTANCE: ShaderIoType = ShaderIoType(0);
+pub const SHADER_IO_UNIFORM: ShaderIoType = ShaderIoType(1);
 
 pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     let shader = heap.new_module(id!(shader));
@@ -18,6 +20,13 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
         vm.heap.set_shader_io(obj, SHADER_IO_INSTANCE);
+        obj.into()
+    });
+
+    native.add_method(heap, shader, id!(uniform), script_args!(value=NIL), |vm, args|{
+        let value = script_value!(vm, args.value);
+        let obj = vm.heap.new_with_proto(value);
+        vm.heap.set_shader_io(obj, SHADER_IO_UNIFORM);
         obj.into()
     });
     
