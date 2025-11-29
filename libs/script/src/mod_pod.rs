@@ -59,6 +59,9 @@ pub struct ScriptPodBuiltins{
 impl ScriptPodBuiltins{
  
     pub fn value_to_exact_type(&self, val:ScriptValue)->Option<ScriptPodType>{
+        if val.is_f64(){
+            return Some(self.pod_f32)
+        }
         if val.is_f32(){
             return Some(self.pod_f32)
         }

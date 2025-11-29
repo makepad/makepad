@@ -37,10 +37,10 @@ let code = script!{
                 
     let comfy_ip = "192.0.2.59:8000"
     let openai_base = "http://127.0.0.1:8080";
-    let Display = {mac:"", ip:"", landscape:false}.freeze_api()
+    let Display = {mac:"" ip:"" landscape:false}.freeze_api()
     let displays = [
-        Display{mac:"00-00-5E-00-53-11" ip:"192.0.2.70", landscape:false}
-        Display{mac:"00-00-5e-00-53-12" ip:"192.0.2.58", landscape:true},
+        Display{mac:"00-00-5E-00-53-11" ip:"192.0.2.56", landscape:false}
+        Display{mac:"00-00-5e-00-53-12" ip:"192.0.2.62", landscape:true},
         Display{mac:"00-00-5E-00-53-13" ip:"192.0.2.57", landscape:true},
     ]
     
@@ -202,6 +202,7 @@ let code = script!{
         // handle AI prompt messages
         
         let prompt = fs.read("/Users/me/prompt.txt").parse_json();
+        /*
         if messages.len() > 40 messages.clear()
         if prompt.clear || messages.len() == 0{
             messages.clear()
@@ -212,20 +213,24 @@ let code = script!{
             messages[0] = {content:prompt.system.trim() role:"user"}
             messages.push({content:prompt.prompt.trim() role:"user"})
         }
+        // rotate displays
+        */                                
         let display = displays[display_iter % displays.len()]
         display_iter += 1
-        // rotate displays
-                                        
-        let image_prompt = openai_completion(messages).last()
+        //let image_prompt = openai_completion(messages).last()
+        
+        let image_prompt = {
+            visual_description:prompt.prompt,
+            style_and_keywords:prompt.prompt
+        }
         
         // put the answer back in the messages array
-        messages.push({content:image_prompt role:"assistant"})
+        //messages.push({content:image_prompt role:"assistant"})
                 
         // flush the websocket queue
         web_socket.queue.clear()
         
-        
-        let image_prompt = image_prompt.strip_prefix("```json").strip_suffix("```").parse_json();
+        //let image_prompt = image_prompt.strip_prefix("```json").strip_suffix("```").parse_json();
         
         std.println("Rendering prompt: "+image_prompt.visual_description+" keywords: "+image_prompt.style_and_keywords)
         

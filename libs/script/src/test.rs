@@ -53,7 +53,7 @@ pub fn test(){
         use mod.shader
         use mod.pod.*
         use mod.math.*
-
+        
         let sdf = struct{
             field: f32,
             p: vec4f,
@@ -74,7 +74,7 @@ pub fn test(){
                 x.set_field(1f)
                 x.p.y = 1f;
                 x.arr[3] = 1f
-                this.otherfn(1)
+                this.otherfn(1f)
                 mix(#f00,#0f0, this.x)
                 //1
             }

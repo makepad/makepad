@@ -9,6 +9,7 @@ use crate::pod::*;
 use crate::mod_pod::*;
 use crate::shader_tables::*;
 use crate::shader_builtins::*;
+use crate::mod_shader::*;
 use std::fmt::Write;
 use crate::makepad_error_log::*;
 use std::collections::BTreeSet;
@@ -112,11 +113,14 @@ impl ShaderScopeItem{
 pub struct ShaderSamplerOptions{
 }
 
-#[derive(Debug)]
-pub enum ShaderStorageFlags{
-    Read,
-    Write,
-    ReadWrite,
+#[derive(Debug, Default)]
+pub struct ShaderStorageFlags(u32);
+impl ShaderStorageFlags{
+    pub fn set_read(&mut self){self.0 |= 1}
+    pub fn set_write(&mut self){self.0 |= 1}
+    pub fn is_read(&self)->bool{self.0 & 1 != 0}
+    pub fn is_write(&self)->bool{self.0 & 2 != 0}
+    pub fn is_readwrite(&self)->bool{self.0 & 3 == 3}
 }
 
 #[derive(Debug)]
@@ -1374,10 +1378,25 @@ impl ShaderFnCompiler{
         }
     }
 
-    fn handle_field(&mut self, vm: &mut ScriptVm) {
+    fn type_from_value(vm: &ScriptVm, value: ScriptValue) -> ShaderType {
+        if let Some(pod_ty) = vm.code.builtins.pod.value_to_exact_type(value){
+            return ShaderType::Pod(pod_ty);
+        }
+        if let Some(pod_ty) = vm.heap.pod_type(value){
+            return ShaderType::PodType(pod_ty);
+        }
+        if let Some(pod) = value.as_pod(){
+             let pod = &vm.heap.pods[pod.index as usize];
+             return ShaderType::Pod(pod.ty);
+        }
+        ShaderType::None
+    }
+
+    fn handle_field(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
         let (field_ty, field_s) = self.stack.pop(&self.trap);
         let (instance_ty, instance_s) = self.pop_resolved(vm);
-
+        
+        
         if let ShaderType::Id(field_id) = field_ty {
             if let ShaderType::Pod(pod_ty) = instance_ty {
                 if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
@@ -1388,18 +1407,51 @@ impl ShaderFnCompiler{
                     self.trap.err_not_found();
                     self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                 }
-            } else if let ShaderType::ThisIo(_obj) = instance_ty{
-                println!("READING FIELD ON THISIO need to look up the type, register it onto the ");
-                self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                self.stack.free_string(field_s);
+                self.stack.free_string(instance_s);
+                return
+            } else if let ShaderType::ThisIo(obj) = instance_ty{
+                let value = vm.heap.value(obj, field_id.into(), &self.trap);
+                if let Some(value_obj) = value.as_object(){
+                    if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
+                        let proto = vm.heap.proto(value.as_object().unwrap());
+                        println!("GOT HERE {:?}", proto);
+                        let ty = Self::type_from_value(vm, proto);
+                        let concrete_ty = match ty {
+                            ShaderType::Pod(pt) => Some(pt),
+                            ShaderType::PodType(pt) => Some(pt),
+                            _ => None
+                        };
+                                                 
+                        if let Some(pod_ty) = concrete_ty {
+                            let kind = match io_type{
+                                SHADER_IO_INSTANCE=>Some(ShaderIoKind::DynInstance),
+                                SHADER_IO_UNIFORM=>Some(ShaderIoKind::DynUniform),
+                                _=>None
+                            };
+                              
+                            if let Some(kind) = kind{
+                                if !output.io.iter().any(|io| io.name == field_id) {
+                                    output.io.push(ShaderIo {
+                                        kind,
+                                        name: field_id,
+                                        ty: pod_ty
+                                    });
+                                }
+                                let mut s = self.stack.new_string();
+                                write!(s, "thisio_{}", field_id).ok();
+                                self.stack.push(&self.trap, ShaderType::Pod(pod_ty), s);
+                                self.stack.free_string(field_s);
+                                self.stack.free_string(instance_s);
+                                return
+                            }
+                        }
+                    }
+                }
             }
-            else{
-                self.trap.err_no_matching_shader_type();
-                self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
-            }
-        } else {
-            self.trap.err_unexpected();
-            self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
         }
+        self.trap.err_no_matching_shader_type();
+        self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
         self.stack.free_string(field_s);
         self.stack.free_string(instance_s);
     }
@@ -1568,8 +1620,7 @@ impl ShaderFnCompiler{
             Opcode::ASSIGN_ME_BEFORE | Opcode::ASSIGN_ME_AFTER=>{self.trap.err_opcode_not_supported_in_shader();},
                                     
             Opcode::ASSIGN_ME_BEGIN=>{self.trap.err_opcode_not_supported_in_shader();},
-                        
-                        
+            
 // CONCAT  
             Opcode::CONCAT=>{self.trap.err_opcode_not_supported_in_shader();},
 // EQUALITY
@@ -1619,10 +1670,10 @@ impl ShaderFnCompiler{
 // Use            
             Opcode::USE=>{self.trap.err_opcode_not_supported_in_shader();},
 // Field            
-            Opcode::FIELD=>self.handle_field(vm),
+            Opcode::FIELD=>self.handle_field(vm, output),
             Opcode::FIELD_NIL=>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::ME_FIELD=>{self.trap.err_not_impl();},
-            Opcode::PROTO_FIELD=>self.handle_field(vm),
+            Opcode::PROTO_FIELD=>self.handle_field(vm, output),
                         
             Opcode::POP_TO_ME=>{
                 self.pop_to_me(vm);    
