@@ -153,6 +153,9 @@ impl ScriptHeap{
         if let Some(v) = v.as_f64(){
             return v
         }
+        if let Some(v) = v.as_u40(){
+            return v as _
+        }
         if let Some(v) = v.as_string(){
             let str = self.string(v);
             if let Ok(v) = str.parse::<f64>(){
@@ -195,6 +198,9 @@ impl ScriptHeap{
         }
         if let Some(v) = v.as_f64(){
             return v != 0.0
+        }
+        if let Some(v) = v.as_u40(){
+            return v != 0
         }
         if let Some(v) = v.as_f32(){
             return v != 0.0
