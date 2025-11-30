@@ -36,8 +36,8 @@ pub struct ScriptTypeObject{
 }
 
 pub struct ScriptTypeCheck{
-    pub(crate) props: ScriptTypeProps,
-    pub(crate) object: Option<ScriptTypeObject>,
+    pub props: ScriptTypeProps,
+    pub object: Option<ScriptTypeObject>,
 }
 
 #[derive(Copy, Clone)]

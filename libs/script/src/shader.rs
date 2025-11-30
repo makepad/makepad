@@ -387,12 +387,10 @@ impl ShaderFnCompiler{
     
     fn push_immediate(&mut self, value:ScriptValue, builtins:&ScriptPodBuiltins){
         if let Some(v) = value.as_f64(){ // abstract int or float
-            if v.fract() != 0.0{
-                return push_fmt!(self, ShaderType::AbstractFloat, "{}", v);
-            }
-            else{
-                return push_fmt!(self, ShaderType::AbstractInt, "{}", v);
-            }
+            return push_fmt!(self, ShaderType::AbstractFloat, "{}", v);
+        }
+        if let Some(v) = value.as_u40(){
+            return push_fmt!(self, ShaderType::AbstractInt, "{}", v);
         }
         if let Some(id) = value.as_id(){
             return push_fmt!(self, ShaderType::Id(id), "{}", id);
@@ -1396,7 +1394,6 @@ impl ShaderFnCompiler{
         let (field_ty, field_s) = self.stack.pop(&self.trap);
         let (instance_ty, instance_s) = self.pop_resolved(vm);
         
-        
         if let ShaderType::Id(field_id) = field_ty {
             if let ShaderType::Pod(pod_ty) = instance_ty {
                 if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
@@ -1424,27 +1421,25 @@ impl ShaderFnCompiler{
                         };
                                                  
                         if let Some(pod_ty) = concrete_ty {
-                            let kind = match io_type{
-                                SHADER_IO_INSTANCE=>Some(ShaderIoKind::DynInstance),
-                                SHADER_IO_UNIFORM=>Some(ShaderIoKind::DynUniform),
-                                _=>None
+                            let (kind, prefix) = match io_type{
+                                SHADER_IO_INSTANCE=>(ShaderIoKind::DynInstance,"dyninst_"),
+                                SHADER_IO_UNIFORM=>(ShaderIoKind::DynUniform,"dynuni_"),
+                                _=>panic!()
                             };
                               
-                            if let Some(kind) = kind{
-                                if !output.io.iter().any(|io| io.name == field_id) {
-                                    output.io.push(ShaderIo {
-                                        kind,
-                                        name: field_id,
-                                        ty: pod_ty
-                                    });
-                                }
-                                let mut s = self.stack.new_string();
-                                write!(s, "thisio_{}", field_id).ok();
-                                self.stack.push(&self.trap, ShaderType::Pod(pod_ty), s);
-                                self.stack.free_string(field_s);
-                                self.stack.free_string(instance_s);
-                                return
+                            if !output.io.iter().any(|io| io.name == field_id) {
+                                output.io.push(ShaderIo {
+                                    kind,
+                                    name: field_id,
+                                    ty: pod_ty
+                                });
                             }
+                            let mut s = self.stack.new_string();
+                            write!(s, "{}{}", prefix, field_id).ok();
+                            self.stack.push(&self.trap, ShaderType::Pod(pod_ty), s);
+                            self.stack.free_string(field_s);
+                            self.stack.free_string(instance_s);
+                            return
                         }
                     }
                 }

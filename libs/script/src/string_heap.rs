@@ -166,6 +166,10 @@ impl ScriptHeap{
             write!(out, "{v}").ok();
             return
         }
+        if let Some(v) = v.as_u40(){
+            write!(out, "{v}").ok();
+            return
+        }
         if let Some(v) = v.as_bool(){
             write!(out, "{v}").ok();
             return
