@@ -1179,6 +1179,11 @@ impl ScriptParser{
                     self.state.push(State::EndExpr);
                     return 1
                 }
+                if let Some(v) = tok.as_u40(){
+                    self.push_code(ScriptValue::from_u40(v), self.index);
+                    self.state.push(State::EndExpr);
+                    return 1
+                }
                 if let Some(v) = tok.as_f32(){
                     self.push_code(ScriptValue::from_f32(v), self.index);
                     self.state.push(State::EndExpr);

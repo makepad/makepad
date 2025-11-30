@@ -27,6 +27,7 @@ pub enum ScriptToken{
     I32(i32),
     F16(f32),
     F64(f64),
+    U40(u64),
     Color(u32),
     RustValue(u32),
 }
@@ -37,6 +38,7 @@ impl ScriptToken{
     pub fn separator(&self)->LiveId{match self{ScriptToken::Separator(id)=>*id,_=>id!()}}
     pub fn f64(&self)->f64{match self{ScriptToken::F64(v)=>*v,_=>0.0}}
     pub fn as_f64(&self)->Option<f64>{match self{ScriptToken::F64(v)=>Some(*v),_=>None}}
+    pub fn as_u40(&self)->Option<u64>{match self{ScriptToken::U40(v)=>Some(*v),_=>None}}
     pub fn as_f32(&self)->Option<f32>{match self{ScriptToken::F32(v)=>Some(*v),_=>None}}
     pub fn as_u32(&self)->Option<u32>{match self{ScriptToken::U32(v)=>Some(*v),_=>None}}
     pub fn as_i32(&self)->Option<i32>{match self{ScriptToken::I32(v)=>Some(*v),_=>None}}
@@ -55,6 +57,7 @@ impl ScriptToken{
     pub fn is_close_square(&self)->bool{match self{ScriptToken::CloseSquare=>true,_=>false}}
     pub fn is_string(&self)->bool{match self{ScriptToken::StringUnfinished|ScriptToken::String(_)=>true,_=>false}}
     pub fn is_f64(&self)->bool{match self{ScriptToken::F64(_)=>true,_=>false}}
+    pub fn is_u40(&self)->bool{match self{ScriptToken::U40(_)=>true,_=>false}}
     pub fn is_f32(&self)->bool{match self{ScriptToken::F32(_)=>true,_=>false}}
     pub fn is_u32(&self)->bool{match self{ScriptToken::U32(_)=>true,_=>false}}
     pub fn is_i32(&self)->bool{match self{ScriptToken::I32(_)=>true,_=>false}}
@@ -153,6 +156,7 @@ impl ScriptTokenizer{
                     heap.cast_to_string(v,&mut s);
                     print!("\"{}\"",s)
                 }
+                ScriptToken::U40(v)=>print!("{v}"),
                 ScriptToken::F64(v)=>print!("{v}"),
                 ScriptToken::F32(v)=>print!("{v}"),
                 ScriptToken::I32(v)=>print!("{v}"),
@@ -202,6 +206,16 @@ impl ScriptTokenizer{
     
     fn emit_f64(&mut self){
         let number = if let Ok(v) = self.temp.parse::<f64>(){
+            // allow the shader compiler to recognise the difference btween 1 and 1.
+            if !(self.temp.contains('.')  || self.temp.contains('e') || self.temp.contains('E')) && v <= 0xFF_FFFF_FFFFu64 as f64{
+                let len = self.temp.len();
+                self.temp.clear();
+                self.tokens.push(ScriptTokenPos{
+                    pos: self.pos - len,
+                    token: ScriptToken::U40(v as u64)
+                });
+                return
+            }
             self.temp.clear();
             v
         }

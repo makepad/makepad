@@ -49,6 +49,16 @@ script_primitive!(
 );
 
 script_primitive!(
+    usize, 
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_number()},
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        *self = vm.cast_to_f64(value) as usize;
+    },
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{ScriptValue::from_f64(*self as f64)}
+);
+
+script_primitive!(
     ScriptObjectRef, 
     fn script_new(vm:&mut ScriptVm)->Self{vm.heap.new_object_ref(ScriptObject::ZERO)},
     fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_object()},
@@ -86,6 +96,15 @@ script_primitive!(
     }
 );
 
+script_primitive!(
+    makepad_math::DVec2, 
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_number()},
+    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){
+        todo!()
+    },
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{todo!()}
+);
 
 script_primitive!(
     u32, 

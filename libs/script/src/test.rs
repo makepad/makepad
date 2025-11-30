@@ -68,6 +68,7 @@ pub fn test(){
         // alright. lets figure out the shader this
         let test_shader = {
             x: shader.instance(1.0)
+            
             otherfn: |x| x+1
             pixel: fn(){
                 let x = sdf.new()

@@ -17,7 +17,7 @@ makepad-script = { path="../libs/script", version="1.0.0"}
 smallvec = "1.11.2"
 bitflags = "2"
 #naga = {version = "27", features = ["wgsl-in","msl-out"]}
-wgpu = {version = "27", default-features = false, features = ["metal"]}
+#wgpu = {version = "27", default-features = false, features = ["metal"]}
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }

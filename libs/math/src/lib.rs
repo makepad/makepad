@@ -8,3 +8,4 @@ pub use math_f32::*;
 pub use math_f64::*;
 pub use math_usize::*;
 pub use shader::*;
+pub use makepad_micro_serde;
