@@ -20,7 +20,7 @@ This is the repository for Makepad, a new way to build UIs in Rust for both nati
 
 ### What others are building with Makepad
 - [Robrix](https://github.com/project-robius/robrix) is a Matrix chat client written in Rust to demonstrate the functionality of Project Robius, a framework for multi-platform application development in Rust. Robrix is written using Makepad.
-- [Moly](https://github.com/moxin-org/moly) is an AI LLM client written in Rust, that demonstrates the power of Makepad and Project Robius, a framework for multi-platform application development in Rust.
+- [Moly](https://github.com/moly-ai/moly-ai) is an AI LLM client written in Rust, that demonstrates the power of Makepad and Project Robius, a framework for multi-platform application development in Rust.
 
 
 ## Prerequisites
