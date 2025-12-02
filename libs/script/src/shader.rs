@@ -411,7 +411,7 @@ impl ShaderFnCompiler{
             return push_fmt!(self, ShaderType::Pod(builtins.pod_bool), "{}", v);
         }
         if let Some(v) = value.as_color(){
-            let v = Vec4::from_u32(v);
+            let v = Vec4f::from_u32(v);
             return push_fmt!(self, ShaderType::Pod(builtins.pod_vec4f), "vec4f({},{},{},{})", v.x, v.y, v.z, v.w);
         }
         self.trap.err_no_matching_shader_type();

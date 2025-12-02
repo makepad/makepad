@@ -146,8 +146,8 @@ pub struct Piano {
     #[rust(100)]
     keyboard_velocity: u8,
     
-    #[live] black_size: Vec2,
-    #[live] white_size: Vec2,
+    #[live] black_size: Vec2f,
+    #[live] white_size: Vec2f,
     
     #[rust] white_keys: ComponentMap<PianoKeyId, PianoKey>,
     #[rust] black_keys: ComponentMap<PianoKeyId, PianoKey>,
@@ -399,8 +399,8 @@ impl Widget for Piano{
             }
         }
                 
-        let white_size:DVec2 = self.white_size.into();//dvec2(20.0, 100.0);
-        let black_size:DVec2 = self.black_size.into();//vec2(15.0, 62.0);
+        let white_size:Vec2d = self.white_size.into();//dvec2(20.0, 100.0);
+        let black_size:Vec2d = self.black_size.into();//vec2(15.0, 62.0);
         let piano_key = self.piano_key;
         // draw the white keys first because they go below the black ones
         let mut depth = 1.0;

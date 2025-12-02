@@ -105,7 +105,7 @@ impl CxDrawCallUniforms {
         unsafe {std::mem::transmute(self)}
     }
     /*
-    pub fn get_local_scroll(&self) -> Vec4 {
+    pub fn get_local_scroll(&self) -> Vec4f {
         self.draw_scroll
     }*/
     
@@ -113,14 +113,14 @@ impl CxDrawCallUniforms {
         self.draw_zbias = zbias;
     }
     /*
-    pub fn set_clip(&mut self, clip: (Vec2, Vec2)) {
+    pub fn set_clip(&mut self, clip: (Vec2f, Vec2f)) {
         self.draw_clip_x1 = clip.0.x;
         self.draw_clip_y1 = clip.0.y;
         self.draw_clip_x2 = clip.1.x;
         self.draw_clip_y2 = clip.1.y;
     }
     
-    pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2, options: &CxDrawShaderOptions) {
+    pub fn set_local_scroll(&mut self, scroll: Vec2f, local_scroll: Vec2f, options: &CxDrawShaderOptions) {
         self.draw_scroll.x = scroll.x;
         if !options.no_h_scroll {
             self.draw_scroll.x += local_scroll.x;
@@ -213,9 +213,9 @@ impl CxDrawCall {
 #[derive(Clone)]
 #[repr(C)]
 pub struct CxDrawListUniforms {
-    pub view_transform: Mat4,
-    pub view_clip: Vec4,
-    pub view_shift: Vec2,
+    pub view_transform: Mat4f,
+    pub view_clip: Vec4f,
+    pub view_shift: Vec2f,
     pub pad1: f32,
     pub pad2: f32       
 }
@@ -223,7 +223,7 @@ pub struct CxDrawListUniforms {
 impl Default for CxDrawListUniforms{
     fn default()->Self{
         Self{
-            view_transform: Mat4::identity(),
+            view_transform: Mat4f::identity(),
             view_clip: vec4(-100000.0, -100000.0, 100000.0, 100000.0),
             view_shift: vec2(0.0,0.0),
             pad1: 0.0,
@@ -304,22 +304,22 @@ pub struct CxDrawList {
 
 pub struct CxRectArea{
     pub rect: Rect,
-    pub draw_clip: (DVec2,DVec2)
+    pub draw_clip: (Vec2d,Vec2d)
 }
 
 impl CxDrawList {
 /*
-    pub fn intersect_clip(&mut self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {
+    pub fn intersect_clip(&mut self, clip: (Vec2f, Vec2f)) -> (Vec2f, Vec2f) {
         if !self.unclipped {
             let min_x = self.rect.pos.x - self.parent_scroll.x;
             let min_y = self.rect.pos.y - self.parent_scroll.y;
             let max_x = self.rect.pos.x + self.rect.size.x - self.parent_scroll.x;
             let max_y = self.rect.pos.y + self.rect.size.y - self.parent_scroll.y;
             
-            let ret = (Vec2 {
+            let ret = (Vec2f {
                 x: min_x.max(clip.0.x),
                 y: min_y.max(clip.0.y)
-            }, Vec2 {
+            }, Vec2f {
                 x: max_x.min(clip.1.x),
                 y: max_y.min(clip.1.y)
             });
@@ -481,18 +481,18 @@ impl CxDrawList {
         }
     }
     /*
-    pub fn get_local_scroll(&self) -> Vec2 {
+    pub fn get_local_scroll(&self) -> Vec2f {
         let xs = if self.no_v_scroll {0.} else {self.snapped_scroll.x};
         let ys = if self.no_h_scroll {0.} else {self.snapped_scroll.y};
-        Vec2 {x: xs, y: ys}
+        Vec2f {x: xs, y: ys}
     }*/
     /*
-    pub fn uniform_view_transform(&mut self, v: &Mat4) {
+    pub fn uniform_view_transform(&mut self, v: &Mat4f) {
         //dump in uniforms
         self.draw_list_uniforms.view_transform = *v;
     }
     
-    pub fn get_view_transform(&self) -> Mat4 {
+    pub fn get_view_transform(&self) -> Mat4f {
         self.draw_list_uniforms.view_transform
     }*/
 }

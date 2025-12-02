@@ -38,15 +38,15 @@ live_design! {
 #[repr(C)]
 pub struct DrawLine {
     #[deref] pub draw_super: DrawQuad,
-    #[calc]  pub line_start: Vec2,
-    #[calc]  pub line_end: Vec2,
+    #[calc]  pub line_start: Vec2f,
+    #[calc]  pub line_end: Vec2f,
     #[calc]  pub half_line_width: f32,
-    #[calc]  pub color: Vec4,    
+    #[calc]  pub color: Vec4f,    
 }
 
 impl DrawLine
 {
-    pub fn  get_bezier_point(&mut self,t: f64, control_points: &Vec<DVec2>,index: usize, count: usize) -> DVec2
+    pub fn  get_bezier_point(&mut self,t: f64, control_points: &Vec<Vec2d>,index: usize, count: usize) -> Vec2d
     {
         if count == 1
         {
@@ -58,7 +58,7 @@ impl DrawLine
     }
 
 
-    pub fn draw_bezier_abs(&mut self,  cx: &mut Cx2d, points: &Vec<DVec2>, color: Vec4, line_width: f64 )
+    pub fn draw_bezier_abs(&mut self,  cx: &mut Cx2d, points: &Vec<Vec2d>, color: Vec4f, line_width: f64 )
     {
         let step = 0.01;
         let mut t = 0.0;
@@ -78,7 +78,7 @@ impl DrawLine
 
     }
 
-    pub fn draw_line_abs(&mut self,  cx: &mut Cx2d, line_start: DVec2, line_end: DVec2, color: Vec4, line_width: f64 )
+    pub fn draw_line_abs(&mut self,  cx: &mut Cx2d, line_start: Vec2d, line_end: Vec2d, color: Vec4f, line_width: f64 )
     {
         let maxpixels = 300. as f64;
         
@@ -193,7 +193,7 @@ impl DrawLine
 
         } else {
              let mut actualstart = line_start;
-            let mut actualend: DVec2 = line_end;
+            let mut actualend: Vec2d = line_end;
 
             if actualend.y < actualstart.y {
                 std::mem::swap(&mut actualstart, &mut actualend);

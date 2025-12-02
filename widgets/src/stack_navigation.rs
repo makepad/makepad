@@ -199,7 +199,7 @@ impl Widget for StackNavigationView {
     fn draw_walk(&mut self, cx:&mut Cx2d, scope:&mut Scope, walk:Walk) -> DrawStep{
         let abs_pos = if self.full_screen {
             // In fully screen mode, position at the offset.
-            DVec2 {
+            Vec2d {
                 x: self.offset,
                 y: 0.,
             }
@@ -208,7 +208,7 @@ impl Widget for StackNavigationView {
 
             // Not in fully screen mode, position at the parent ignoring the offset 
             // (offset ignored since we're not animating the slide-in).
-            DVec2 {
+            Vec2d {
                 x: parent_rect.pos.x,
                 y: parent_rect.pos.y,
             }

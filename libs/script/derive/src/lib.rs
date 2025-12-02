@@ -12,6 +12,12 @@ pub fn script(input: TokenStream) -> TokenStream {
     script_impl(input)
 }
 
+#[proc_macro]
+pub fn script_run(input: TokenStream) -> TokenStream {
+    script_run_impl(input)
+}
+
+
 #[proc_macro_derive(Script, attributes(
     script,
     live,
@@ -26,6 +32,7 @@ pub fn script(input: TokenStream) -> TokenStream {
 pub fn derive_script(input: TokenStream) -> TokenStream {
     derive_script_impl(input)
 }
+
 
 #[proc_macro_derive(ScriptHook, attributes())]
 pub fn derive_script_hook(input: TokenStream) -> TokenStream {

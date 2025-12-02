@@ -112,23 +112,23 @@ pub struct DrawText {
     #[deref]
     pub draw_vars: DrawVars,
     #[calc]
-    pub rect_pos: Vec2,
+    pub rect_pos: Vec2f,
     #[calc]
-    pub rect_size: Vec2,
+    pub rect_size: Vec2f,
     #[calc]
-    pub draw_clip: Vec4,
+    pub draw_clip: Vec4f,
     #[live(1.0)] 
     pub depth_clip: f32,
     #[calc]
     pub glyph_depth: f32,
     #[live]
-    pub color: Vec4,
+    pub color: Vec4f,
     #[calc]
     pub texture_index: f32,
     #[calc]
-    pub t_min: Vec2,
+    pub t_min: Vec2f,
     #[calc]
-    pub t_max: Vec2,
+    pub t_max: Vec2f,
 }
 
 impl LiveHook for DrawText {
@@ -144,7 +144,7 @@ impl LiveHook for DrawText {
 }
 
 impl DrawText {
-    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, text: &str) {
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2d, text: &str) {
         let text = self.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
         self.draw_text(cx, Point::new(pos.x as f32, pos.y as f32), &text);
     }

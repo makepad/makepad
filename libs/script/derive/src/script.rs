@@ -11,6 +11,17 @@ use {
     std::fmt::Write
 };
 
+pub fn script_run_impl(input: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new();
+    let ts = script_impl(input);
+    tb.add("pub fn script_run(vm:&mut ScriptVm)->ScriptValue{");
+    tb.add("    let sb=").stream(Some(ts)).add(";");
+    tb.add("    vm.eval(sb)");
+    tb.add("}");
+    tb.end()
+}
+    
+
 pub fn script_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
@@ -30,7 +41,7 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
         tb.add("    values:{");
         tb.add("        let mut v = Vec::new();");
         for value in &values {
-            tb.add("v.push(cx.with_vm(|vm|{ {").stream(Some(value.clone())).add("}.script_to_value(vm) } ) );");
+            tb.add("v.push( {").stream(Some(value.clone())).add("}.script_to_value(vm) );");
         }
         tb.add("    v}");
         tb.add("}");

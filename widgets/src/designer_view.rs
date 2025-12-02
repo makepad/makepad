@@ -199,7 +199,7 @@ enum Edge{
 }
 
 impl ContainerData{
-    fn get_edge(&self, rel:DVec2, zoom:f64, pan: DVec2)->Option<Edge>{
+    fn get_edge(&self, rel:Vec2d, zoom:f64, pan: Vec2d)->Option<Edge>{
         let cp = rel * zoom + pan;
         let edge_outer:f64 = 5.0 * zoom ;
         let edge_inner:f64  = 5.0 * zoom ;
@@ -270,7 +270,7 @@ impl Widget for DesignerContainer {
 
 #[allow(unused)]
 enum FingerMove{
-    Pan{start_pan: DVec2},
+    Pan{start_pan: Vec2d},
     DragBody{ptr: LivePtr},
     DragEdge{edge: Edge, rect:Rect, id: LiveId},
     DragAll{rects:BTreeMap<LiveId,Rect>},
@@ -285,8 +285,8 @@ pub struct DesignerView {
     #[rust] reapply: bool,
     #[rust(1.5)] zoom: f64,
     #[rust] undo_group: u64,
-    #[rust] pan: DVec2,
-    #[live] clear_color: Vec4,
+    #[rust] pan: Vec2d,
+    #[live] clear_color: Vec4f,
     #[rust] finger_move: Option<FingerMove>,
     #[live] container: Option<LivePtr>,
     #[live] draw_bg: DrawColor,

@@ -70,9 +70,9 @@ pub struct DrawQuad {
     #[rust] pub many_instances: Option<ManyInstances>,
     #[live] pub geometry: GeometryQuad2D,
     #[deref] pub draw_vars: DrawVars,
-    #[calc] pub rect_pos: Vec2,
-    #[calc] pub rect_size: Vec2,
-    #[calc] pub draw_clip: Vec4,
+    #[calc] pub rect_pos: Vec2f,
+    #[calc] pub rect_size: Vec2f,
+    #[calc] pub draw_clip: Vec4f,
     #[live(1.0)] pub depth_clip: f32,
     #[live(1.0)] pub draw_depth: f32,
 }

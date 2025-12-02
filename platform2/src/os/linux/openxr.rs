@@ -17,7 +17,7 @@ use{
         event::Event,
         pass::{CxPassParent,PassId},
         cx::{Cx, OsType},
-        makepad_math::{Mat4},
+        makepad_math::{Mat4f},
     },
     std::sync::{mpsc},
     std::ptr,
@@ -872,10 +872,10 @@ impl CxOpenXrSession{
 #[derive(Default, Clone, Copy)]
 pub struct CxOpenXrEye{
     pub local_from_eye: XrPosef,
-    pub view_mat: Mat4,
-    pub proj_mat: Mat4,
-    pub depth_proj_mat: Mat4,
-    pub depth_view_mat: Mat4,
+    pub view_mat: Mat4f,
+    pub proj_mat: Mat4f,
+    pub depth_proj_mat: Mat4f,
+    pub depth_view_mat: Mat4f,
 }
 
 pub struct CxOpenXrFrame{
@@ -994,7 +994,7 @@ impl CxOpenXrFrame{
                 let local_from_depth_eye = depth_image.views[eye].pose;
                 let depth_eye_from_local = local_from_depth_eye.invert();
                 let depth_view_mat = depth_eye_from_local.to_mat4();
-                let depth_proj_mat = Mat4::from_camera_fov(
+                let depth_proj_mat = Mat4f::from_camera_fov(
                     &depth_image.views[eye].fov, 
                     depth_image.near_z,
                     if depth_image.far_z.is_finite(){depth_image.far_z}else{0.0}, 
@@ -1004,7 +1004,7 @@ impl CxOpenXrFrame{
             }
             let eye_from_local = local_from_eye.invert();
             eyes[eye].view_mat = eye_from_local.to_mat4();
-            eyes[eye].proj_mat = Mat4::from_camera_fov(&projections[eye].fov, 0.1, 100.0);
+            eyes[eye].proj_mat = Mat4f::from_camera_fov(&projections[eye].fov, 0.1, 100.0);
                         
         }
         

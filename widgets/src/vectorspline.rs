@@ -19,11 +19,11 @@ pub struct VectorSpline{
     #[live] draw_ls: DrawSpline,
     #[rust] area: Area,
     #[live(15.0)] line_width: f64,
-    #[live] color: Vec4,
-    #[rust(dvec2(350., 210.))] line_start: DVec2,
-    #[rust(dvec2(350., 10.))] line_start_controlpoint: DVec2,
-    #[rust(dvec2(1000., 10.))] line_end_controlpoint: DVec2,
-    #[rust(dvec2(1000., 1440.))] line_end: DVec2,
+    #[live] color: Vec4f,
+    #[rust(dvec2(350., 210.))] line_start: Vec2d,
+    #[rust(dvec2(350., 10.))] line_start_controlpoint: Vec2d,
+    #[rust(dvec2(1000., 10.))] line_end_controlpoint: Vec2d,
+    #[rust(dvec2(1000., 1440.))] line_end: Vec2d,
 }
 
 #[derive(Clone, WidgetAction)]

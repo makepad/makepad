@@ -78,12 +78,12 @@ impl<'a> DrawShaderGenerator<'a> {
                 Ty::Ivec2 => "ivec2(0)",
                 Ty::Ivec3 => "ivec3(0)",
                 Ty::Ivec4 => "ivec4(0)",
-                Ty::Vec2 => "vec2(0.0)",
-                Ty::Vec3 => "vec3(0.0)",
-                Ty::Vec4 => "vec4(0.0)",
+                Ty::Vec2f => "vec2(0.0)",
+                Ty::Vec3f => "vec3(0.0)",
+                Ty::Vec4f => "vec4(0.0)",
                 Ty::Mat2 => "mat2(0.0)",
                 Ty::Mat3 => "mat3(0.0)",
-                Ty::Mat4 => "mat4(0.0)",
+                Ty::Mat4f => "mat4(0.0)",
                 Ty::Enum {..} => "0.0",
                 _ => panic!("unexpected as initializeable type {:?}", ty),
             }
@@ -647,13 +647,13 @@ impl<'a> DrawShaderGenerator<'a> {
             Ty::Ivec2 => write!(self.string, "ivec2(int({0}[{1}]), int({0}[{2}]))", prefix, s, s + 1),
             Ty::Ivec3 => write!(self.string, "ivec3(int({0}[{1}]), int({0}[{2}]), int({0}[{3}]))", prefix, s, s + 1, s + 2),
             Ty::Ivec4 => write!(self.string, "ivec4(int({0}[{1}]), int({0}[{2}]), int({0}[{3}]), int({0}[{4}]))", prefix, s, s + 1, s + 2, s + 3),
-            Ty::Vec2 => write!(self.string, "vec2({0}[{1}], {0}[{2}])", prefix, s, s + 1),
-            Ty::Vec3 => write!(self.string, "vec3({0}[{1}], {0}[{2}], {0}[{3}])", prefix, s, s + 1, s + 2),
-            Ty::Vec4 => write!(self.string, "vec4({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}])", prefix, s, s + 1, s + 2, s + 3),
+            Ty::Vec2f => write!(self.string, "vec2({0}[{1}], {0}[{2}])", prefix, s, s + 1),
+            Ty::Vec3f => write!(self.string, "vec3({0}[{1}], {0}[{2}], {0}[{3}])", prefix, s, s + 1, s + 2),
+            Ty::Vec4f => write!(self.string, "vec4({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}])", prefix, s, s + 1, s + 2, s + 3),
             Ty::Mat2 => write!(self.string, "mat2({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}])", prefix, s, s + 1, s + 2, s + 3),
             Ty::Mat3 => write!(self.string, "mat3({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}], {0}[{5}], {0}[{6}], {0}[{7}], {0}[{8}], {0}[{9}])", prefix, s, s + 1, s + 2, s + 3, s + 4, s + 5, s + 6, s + 7, s + 8),
-            Ty::Mat4 => write!(self.string, "mat4({0}[{1}{i}], {0}[{2}{i}], {0}[{3}{i}], {0}[{4}{i}], {0}[{5}{i}], {0}[{6}{i}], {0}[{7}{i}], {0}[{8}{i}], {0}[{9}{i}], {0}[{10}{i}], {0}[{11}{i}], {0}[{12}{i}], {0}[{13}{i}], {0}[{14}{i}], {0}[{15}{i}], {0}[{16}{i}])", prefix, s, s + 1, s + 2, s + 3, s + 4, s + 5, s + 6, s + 7, s + 8, s + 9, s + 10, s + 11, s + 12, s + 13, s + 14, s + 15,),
-            //Ty::Mat4 => write!(self.string, "mat4({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}], {0}[{5}], {0}[{6}], {0}[{7}], {0}[{8}], {0}[{9}], {0}[{10}], {0}[{11}], {0}[{12}], {0}[{13}], {0}[{14}], {0}[{15}], {0}[{16}])", prefix, s, s + 4, s + 8, s + 12, s + 1, s + 5, s + 9, s + 13, s + 2, s + 6, s + 10, s + 14, s + 3, s + 7, s + 11, s + 15,),
+            Ty::Mat4f => write!(self.string, "mat4({0}[{1}{i}], {0}[{2}{i}], {0}[{3}{i}], {0}[{4}{i}], {0}[{5}{i}], {0}[{6}{i}], {0}[{7}{i}], {0}[{8}{i}], {0}[{9}{i}], {0}[{10}{i}], {0}[{11}{i}], {0}[{12}{i}], {0}[{13}{i}], {0}[{14}{i}], {0}[{15}{i}], {0}[{16}{i}])", prefix, s, s + 1, s + 2, s + 3, s + 4, s + 5, s + 6, s + 7, s + 8, s + 9, s + 10, s + 11, s + 12, s + 13, s + 14, s + 15,),
+            //Ty::Mat4f => write!(self.string, "mat4({0}[{1}], {0}[{2}], {0}[{3}], {0}[{4}], {0}[{5}], {0}[{6}], {0}[{7}], {0}[{8}], {0}[{9}], {0}[{10}], {0}[{11}], {0}[{12}], {0}[{13}], {0}[{14}], {0}[{15}], {0}[{16}])", prefix, s, s + 4, s + 8, s + 12, s + 1, s + 5, s + 9, s + 13, s + 2, s + 6, s + 10, s + 14, s + 3, s + 7, s + 11, s + 15,),
             Ty::Enum {..} => write!(self.string, "{}[{}]", prefix, s),
             _ => panic!("unexpected as initializeable type {:?}", ty),
         }.unwrap()
@@ -967,19 +967,19 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 self.write_ty_lit(string, TyLit::Ivec4);
                 write!(string, " {}", ident).unwrap();
             }
-            Ty::Vec2 => {
+            Ty::Vec2f => {
                 prefix(string, sep, is_inout);
-                self.write_ty_lit(string, TyLit::Vec2);
+                self.write_ty_lit(string, TyLit::Vec2f);
                 write!(string, " {}", ident).unwrap();
             }
-            Ty::Vec3 => {
+            Ty::Vec3f => {
                 prefix(string, sep, is_inout);
-                self.write_ty_lit(string, TyLit::Vec3);
+                self.write_ty_lit(string, TyLit::Vec3f);
                 write!(string, " {}", ident).unwrap();
             }
-            Ty::Vec4 => {
+            Ty::Vec4f => {
                 prefix(string, sep, is_inout);
-                self.write_ty_lit(string, TyLit::Vec4);
+                self.write_ty_lit(string, TyLit::Vec4f);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Mat2 => {
@@ -992,9 +992,9 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 self.write_ty_lit(string, TyLit::Mat3);
                 write!(string, " {}", ident).unwrap();
             }
-            Ty::Mat4 => {
+            Ty::Mat4f => {
                 prefix(string, sep, is_inout);
-                self.write_ty_lit(string, TyLit::Mat4);
+                self.write_ty_lit(string, TyLit::Mat4f);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Texture2D => {
@@ -1085,12 +1085,12 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 TyLit::Ivec2 => "ivec2",
                 TyLit::Ivec3 => "ivec3",
                 TyLit::Ivec4 => "ivec4",
-                TyLit::Vec2 => "vec2",
-                TyLit::Vec3 => "vec3",
-                TyLit::Vec4 => "vec4",
+                TyLit::Vec2f => "vec2",
+                TyLit::Vec3f => "vec3",
+                TyLit::Vec4f => "vec4",
                 TyLit::Mat2 => "mat2",
                 TyLit::Mat3 => "mat3",
-                TyLit::Mat4 => "mat4",
+                TyLit::Mat4f => "mat4",
                 TyLit::Texture2D => "sampler2D",
                 TyLit::TextureOES => "samplerExternalOES",
             }

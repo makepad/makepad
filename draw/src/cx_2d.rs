@@ -5,7 +5,7 @@ use {
     },
     crate::{
         cx_draw::CxDraw,
-        makepad_math::{DVec2,Vec2Index},
+        makepad_math::{Vec2d,Vec2Index},
         makepad_platform::{
             DrawListId,
         },
@@ -22,7 +22,7 @@ pub struct Cx2d<'a, 'b> {
     pub (crate) turtles: Vec<Turtle>,
     pub (crate) finished_rows: Vec<usize>,
     pub (crate) finished_walks: Vec<FinishedWalk>,
-    pub (crate) turtle_clips: Vec<(DVec2, DVec2)>,
+    pub (crate) turtle_clips: Vec<(Vec2d, Vec2d)>,
     pub (crate) align_list: Vec<AlignEntry>,
 }
 

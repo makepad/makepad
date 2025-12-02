@@ -1,6 +1,6 @@
 use {
     crate::{
-        DVec2,
+        Vec2d,
         event::Event,
         cx::Cx,
         area::Area,
@@ -10,7 +10,7 @@ use {
 
 #[derive(Clone, Debug)]
 pub struct DesignerPickEvent {
-    pub abs: DVec2,
+    pub abs: Vec2d,
 }
 
 pub enum HitDesigner{

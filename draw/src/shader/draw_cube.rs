@@ -57,10 +57,10 @@ pub struct DrawCube {
     #[rust] pub many_instances: Option<ManyInstances>,
     #[live] pub geometry: GeometryCube3D,
     #[deref] pub draw_vars: DrawVars,
-    #[live] pub color: Vec4,
-    #[calc] pub transform: Mat4,
-    #[live(vec3(1.0,1.0,1.0))] pub cube_size: Vec3,
-    #[live(vec3(0.,0.,0.))] pub cube_pos: Vec3,
+    #[live] pub color: Vec4f,
+    #[calc] pub transform: Mat4f,
+    #[live(vec3(1.0,1.0,1.0))] pub cube_size: Vec3f,
+    #[live(vec3(0.,0.,0.))] pub cube_pos: Vec3f,
     #[live(1.0)] pub depth_clip: f32,
 }
 

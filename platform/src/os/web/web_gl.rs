@@ -29,7 +29,7 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
-        self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4::identity();
+        self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4f::identity();
 
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list() {
@@ -202,7 +202,7 @@ impl Cx {
         }*/
     }
     
-    pub fn setup_render_pass(&mut self, pass_id: PassId)->DVec2{
+    pub fn setup_render_pass(&mut self, pass_id: PassId)->Vec2d{
         self.passes[pass_id].paint_dirty = false;
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();

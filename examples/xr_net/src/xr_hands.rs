@@ -196,14 +196,14 @@ impl Widget for XrHands {
             cx: &mut Cx3d, 
             cube:&mut DrawCube, 
             tip: &mut DrawCube,
-            transform: &Mat4, 
+            transform: &Mat4f, 
             xr_state:&XrState, 
         ){
             // lets draw all the fingers
             for hand in [&xr_state.left_hand, &xr_state.right_hand]{
                 if hand.in_view(){
                     for (_index,joint) in hand.joints.iter().enumerate(){
-                        let mat = Mat4::mul(&joint.to_mat4(), transform);
+                        let mat = Mat4f::mul(&joint.to_mat4(), transform);
                         cube.cube_pos = vec3(0.0,0.0,0.0);
                         cube.transform = mat;
                         cube.depth_clip = 0.0;
@@ -213,7 +213,7 @@ impl Widget for XrHands {
                 for (i, knuckle) in XrHand::END_KNUCKLES.iter().enumerate(){
                     if !hand.tip_active(i){continue;}
                     let joint = &hand.joints[*knuckle];
-                    let mat = Mat4::mul(&joint.to_mat4(), transform);
+                    let mat = Mat4f::mul(&joint.to_mat4(), transform);
                     tip.cube_pos = vec3(0.0,0.0,-hand.tips[i]);
                     tip.transform = mat;
                     tip.depth_clip = 0.0;
@@ -226,17 +226,17 @@ impl Widget for XrHands {
             cx: &mut Cx3d, 
             draw_aim:&mut DrawCube, 
             draw_grip: &mut DrawCube,
-            transform: &Mat4, 
+            transform: &Mat4f, 
             xr_state:&XrState, 
         ){
             // lets draw our hand controllers
-            let mata = Mat4::mul(&xr_state.left_controller.aim_pose.to_mat4(), transform);
+            let mata = Mat4f::mul(&xr_state.left_controller.aim_pose.to_mat4(), transform);
             draw_aim.cube_pos = vec3(0.0,0.0,0.0);
             draw_aim.transform = mata;
             draw_aim.depth_clip = 0.0;
             draw_aim.draw(cx);
                                 
-            let mata = Mat4::mul(&xr_state.right_controller.grip_pose.to_mat4(), transform);
+            let mata = Mat4f::mul(&xr_state.right_controller.grip_pose.to_mat4(), transform);
             draw_grip.cube_pos = vec3(0.0,0.0,0.0);
             draw_grip.transform = mata;
             draw_grip.depth_clip = 0.0;
@@ -247,10 +247,10 @@ impl Widget for XrHands {
         fn draw_head(
             cx: &mut Cx3d, 
             cube:&mut DrawCube, 
-            transform: &Mat4, 
+            transform: &Mat4f, 
             xr_state:&XrState, 
         ){
-            let mata = Mat4::mul(&xr_state.head_pose.to_mat4(), transform);
+            let mata = Mat4f::mul(&xr_state.head_pose.to_mat4(), transform);
             cube.color = vec4(1.0,1.0,1.0,1.0);
             cube.cube_pos = vec3(0.0,0.0,0.0);
             cube.transform = mata;
@@ -270,7 +270,7 @@ impl Widget for XrHands {
             cube.cube_pos = vec3(0.0,0.1,0.0);
             cube.transform = anchor.to_mat4();
                 
-            /*Mat4::txyz_s_ry_rx_txyz(
+            /*Mat4f::txyz_s_ry_rx_txyz(
                 vec3(0.,0.,0.),
                 1.0,
                 rot,rot,
@@ -284,7 +284,7 @@ impl Widget for XrHands {
         
         self.draw_alignment(cx, xr_state);
             
-        draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &xr_state);
+        draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4f::identity(), &xr_state);
         
         for peer in &mut self.peers{
             let peer_state = peer.tween(xr_state.time);
@@ -298,7 +298,7 @@ impl Widget for XrHands {
                 }
             }
             else{
-                draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4::identity(), &peer_state)
+                draw_hands(cx, &mut self.draw_knuckle, &mut self.draw_tip, &Mat4f::identity(), &peer_state)
             }
         }
         //profile_end!(dt);         

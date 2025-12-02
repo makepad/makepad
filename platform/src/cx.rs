@@ -1,6 +1,5 @@
 use {
     makepad_futures::{executor, executor::{Executor, Spawner}},
-    makepad_script::ScriptVmBase,
     std::{
         collections::{
             HashMap,
@@ -37,7 +36,7 @@ use {
         action::ActionsBuf,
         cx_api::CxOsOp,
         area::Area,
-        script::script::CxScriptData,
+        //script::script::CxScriptData,
         gpu_info::GpuInfo,
         window::CxWindowPool,
         draw_list::CxDrawListPool,
@@ -56,9 +55,6 @@ use {
 //pub use makepad_shader_compiler::makepad_math::*;
  
 pub struct Cx {
-    
-    pub script_vm: Option<Box<ScriptVmBase>>,
-    pub script_data: CxScriptData,
     
     pub (crate) os_type: OsType,
     pub in_makepad_studio: bool,
@@ -286,10 +282,6 @@ impl Cx {
             *sender = Some(action_sender);
         }
         
-        let mut script_vm = Box::new(ScriptVmBase::new());
-        
-        crate::script::define_script_modules(&mut (*script_vm).as_ref());
-        
         Self {
             demo_time_repaint: false,
             null_texture,
@@ -362,8 +354,6 @@ impl Cx {
 
             widget_query_invalidation_event: None,
             
-            script_vm: Some(script_vm),
-            script_data: Default::default(),
         }
     }
 }

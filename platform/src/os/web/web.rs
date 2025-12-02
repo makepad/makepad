@@ -8,7 +8,7 @@ use {
         to_wasm::*,
     },
     crate::{
-        DVec2,
+        Vec2d,
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         thread::SignalToUI,
@@ -185,7 +185,6 @@ impl Cx {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
                     if tw.flags & 1 != 0{
                         self.handle_media_signals();
-                        self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                     if tw.flags & 2 != 0{
@@ -199,7 +198,6 @@ impl Cx {
                         timer_id: tw.timer_id as u64,
                         time: None
                     };
-                    self.handle_script_timer(&e);
                     self.call_event_handler(&Event::Timer(e));
                 }
                 
@@ -371,7 +369,6 @@ impl Cx {
         }
 
         if network_responses.len() != 0 {
-            self.handle_script_network_events(&network_responses);
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
         
@@ -659,7 +656,7 @@ impl CxOsApi for Cx {
             in_place: if let OpenUrlInPlace::Yes = in_place{true}else{false}
         });
     }
-    fn default_window_size(&self)->DVec2{self.os.window_geom.inner_size}
+    fn default_window_size(&self)->Vec2d{self.os.window_geom.inner_size}
     
     /*
     fn start_midi_input(&mut self) {

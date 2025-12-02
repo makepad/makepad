@@ -166,11 +166,11 @@ pub struct CommandTextInput {
 
     /// Strong color to highlight the item that would be submitted if `Return` is pressed.
     #[live]
-    pub color_focus: Vec4,
+    pub color_focus: Vec4f,
 
     /// Weak color to highlight the item that the pointer is hovering over.
     #[live]
-    pub color_hover: Vec4,
+    pub color_hover: Vec4f,
 
     /// To deal with focus requesting issues.
     #[rust]
@@ -771,7 +771,7 @@ impl CommandTextInput {
                     cx,
                     live! {
                         draw_bg: {
-                            color: (Vec4::all(0.)),
+                            color: (Vec4f::all(0.)),
                         }
                     },
                 );

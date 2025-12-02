@@ -238,16 +238,16 @@ impl<'a> DrawShaderGenerator<'a> {
             match field.kind {
                 DrawShaderFieldKind::Instance {..} => {
                     match field.ty_expr.ty.borrow().as_ref().unwrap() {
-                        Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
+                        Ty::Float | Ty::Vec2f | Ty::Vec3f | Ty::Vec4f => {
                             write!(self.string, "    ").unwrap();
                             self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
                             writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
                             index += 1;
                         },
-                        Ty::Mat4 => {
+                        Ty::Mat4f => {
                             for i in 0..4 {
                                 write!(self.string, "    ").unwrap();
-                                self.write_ty_lit(TyLit::Vec4);
+                                self.write_ty_lit(TyLit::Vec4f);
                                 write!(self.string, " {}{}", &DisplayDsIdent(field.ident), i).unwrap();
                                 writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
                                 index += 1;
@@ -256,7 +256,7 @@ impl<'a> DrawShaderGenerator<'a> {
                         Ty::Mat3 => {
                             for i in 0..3 {
                                 write!(self.string, "    ").unwrap();
-                                self.write_ty_lit(TyLit::Vec3);
+                                self.write_ty_lit(TyLit::Vec3f);
                                 write!(self.string, " {}{}", &DisplayDsIdent(field.ident), i).unwrap();
                                 writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
                                 index += 1;
@@ -264,7 +264,7 @@ impl<'a> DrawShaderGenerator<'a> {
                         },
                         Ty::Mat2 => {
                             write!(self.string, "    ").unwrap();
-                            self.write_ty_lit(TyLit::Vec4);
+                            self.write_ty_lit(TyLit::Vec4f);
                             write!(self.string, " {}", &DisplayDsIdent(field.ident)).unwrap();
                             writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
                             index += 1;
@@ -299,16 +299,16 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
                     match field.ty_expr.ty.borrow().as_ref().unwrap() {
-                        Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
+                        Ty::Float | Ty::Vec2f | Ty::Vec3f | Ty::Vec4f => {
                             write!(self.string, "    ").unwrap();
                             self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
                             writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
                             index += 1;
                         },
-                        Ty::Mat4 => {
+                        Ty::Mat4f => {
                             for i in 0..4 {
                                 write!(self.string, "    ").unwrap();
-                                self.write_ty_lit(TyLit::Vec4);
+                                self.write_ty_lit(TyLit::Vec4f);
                                 write!(self.string, " {}{}", &DisplayDsIdent(field.ident), i).unwrap();
                                 writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
                                 index += 1;
@@ -317,7 +317,7 @@ impl<'a> DrawShaderGenerator<'a> {
                         Ty::Mat3 => {
                             for i in 0..3 {
                                 write!(self.string, "    ").unwrap();
-                                self.write_ty_lit(TyLit::Vec3);
+                                self.write_ty_lit(TyLit::Vec3f);
                                 write!(self.string, " {}{}", &DisplayDsIdent(field.ident), i).unwrap();
                                 writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
                                 index += 1;
@@ -325,7 +325,7 @@ impl<'a> DrawShaderGenerator<'a> {
                         },
                         Ty::Mat2 => {
                             write!(self.string, "    ").unwrap();
-                            self.write_ty_lit(TyLit::Vec4);
+                            self.write_ty_lit(TyLit::Vec4f);
                             write!(self.string, " {}", &DisplayDsIdent(field.ident)).unwrap();
                             writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
                             index += 1;
@@ -364,21 +364,21 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
                     match field.ty_expr.ty.borrow().as_ref().unwrap() {
-                        Ty::Mat4 => {
+                        Ty::Mat4f => {
                             for _ in 0..4 {
                                 write!(self.string, "{}", sep).unwrap();
-                                self.write_var_init(&Ty::Vec4);
+                                self.write_var_init(&Ty::Vec4f);
                             }
                         },
                         Ty::Mat3 => {
                             for _ in 0..3 {
                                 write!(self.string, "{}", sep).unwrap();
-                                self.write_var_init(&Ty::Vec3);
+                                self.write_var_init(&Ty::Vec3f);
                             }
                         },
                         Ty::Mat2 => {
                             write!(self.string, "{}", sep).unwrap();
-                            self.write_var_init(&Ty::Vec4);
+                            self.write_var_init(&Ty::Vec4f);
                         },
                         _ => {
                             write!(self.string, "{}", sep).unwrap();
@@ -413,7 +413,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
                     match decl.ty_expr.ty.borrow().as_ref().unwrap(){
-                        Ty::Mat4=>{
+                        Ty::Mat4f=>{
                             for i in 0..4{
                                 writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", DisplayDsIdent(decl.ident), i).unwrap();
                             }
@@ -485,12 +485,12 @@ impl<'a> DrawShaderGenerator<'a> {
             Ty::Ivec2 => write!(self.string, "int2(0,0)").unwrap(),
             Ty::Ivec3 => write!(self.string, "int3(0,0,0)").unwrap(),
             Ty::Ivec4 => write!(self.string, "int4(0,0,0,0)").unwrap(),
-            Ty::Vec2 => write!(self.string, "float2(0.0,0.0)").unwrap(),
-            Ty::Vec3 => write!(self.string, "float3(0.0,0.0,0.0)").unwrap(),
-            Ty::Vec4 => write!(self.string, "float4(0.0,0.0,0.0,0.0)").unwrap(),
+            Ty::Vec2f => write!(self.string, "float2(0.0,0.0)").unwrap(),
+            Ty::Vec3f => write!(self.string, "float3(0.0,0.0,0.0)").unwrap(),
+            Ty::Vec4f => write!(self.string, "float4(0.0,0.0,0.0,0.0)").unwrap(),
             Ty::Mat2 => write!(self.string, "float2x2(0.0,0.0, 0.0,0.0)").unwrap(),
             Ty::Mat3 => write!(self.string, "float3x3(0.0,0.0,0.0, 0.0,0.0,0.0, 0.0,0.0,0.0)").unwrap(),
-            Ty::Mat4 => write!(self.string, "float4x4(0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0)").unwrap(),
+            Ty::Mat4f => write!(self.string, "float4x4(0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0)").unwrap(),
             Ty::Enum(_) => write!(self.string, "0").unwrap(),
             _ => panic!("Implement init for type")
         }
@@ -606,19 +606,19 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                 self.write_ty_lit(string, TyLit::Ivec4);
                 write!(string, " {}", ident).unwrap();
             }
-            Ty::Vec2 => {
+            Ty::Vec2f => {
                 prefix(string, sep, is_inout);
-                self.write_ty_lit(string, TyLit::Vec2);
+                self.write_ty_lit(string, TyLit::Vec2f);
                 write!(string, " {}", ident).unwrap();
             }
-            Ty::Vec3 => {
+            Ty::Vec3f => {
                 prefix(string, sep, is_inout);
-                self.write_ty_lit(string, TyLit::Vec3);
+                self.write_ty_lit(string, TyLit::Vec3f);
                 write!(string, " {}", ident).unwrap();
             }
-            Ty::Vec4 => {
+            Ty::Vec4f => {
                 prefix(string, sep, is_inout);
-                self.write_ty_lit(string, TyLit::Vec4);
+                self.write_ty_lit(string, TyLit::Vec4f);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Mat2 => {
@@ -631,9 +631,9 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                 self.write_ty_lit(string, TyLit::Mat3);
                 write!(string, " {}", ident).unwrap();
             }
-            Ty::Mat4 => {
+            Ty::Mat4f => {
                 prefix(string, sep, is_inout);
-                self.write_ty_lit(string, TyLit::Mat4);
+                self.write_ty_lit(string, TyLit::Mat4f);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Texture2D | Ty::TextureOES => panic!(), // TODO
@@ -734,7 +734,7 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                 };
                 
                 match ty {
-                    Ty::Mat4 => {
+                    Ty::Mat4f => {
                         write!(string, "float4x4(").unwrap();
                         for i in 0..4 {
                             for j in 0..4 {
@@ -805,12 +805,12 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                 TyLit::Ivec2 => "int2",
                 TyLit::Ivec3 => "int3",
                 TyLit::Ivec4 => "int4",
-                TyLit::Vec2 => "float2",
-                TyLit::Vec3 => "float3",
-                TyLit::Vec4 => "float4",
+                TyLit::Vec2f => "float2",
+                TyLit::Vec3f => "float3",
+                TyLit::Vec4f => "float4",
                 TyLit::Mat2 => "float2x2",
                 TyLit::Mat3 => "float3x3",
-                TyLit::Mat4 => "float4x4",
+                TyLit::Mat4f => "float4x4",
                 TyLit::Texture2D | TyLit::TextureOES => panic!(), // TODO
             }
         )

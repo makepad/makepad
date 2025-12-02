@@ -87,21 +87,21 @@ pub struct DrawIcon {
     
     #[live] pub svg_file: LiveDependency,
     #[live] pub svg_path: ArcStringMut,
-    #[live] pub translate: DVec2,
+    #[live] pub translate: Vec2d,
     #[live(1.0)] pub scale: f64,
     
     #[rust] pub many_instances: Option<ManyInstances>,
     #[live] pub geometry: GeometryQuad2D,
     #[deref] pub draw_vars: DrawVars,
-    #[calc] pub rect_pos: Vec2,
-    #[calc] pub rect_size: Vec2,
-    #[calc] pub draw_clip: Vec4,
+    #[calc] pub rect_pos: Vec2f,
+    #[calc] pub rect_size: Vec2f,
+    #[calc] pub draw_clip: Vec4f,
     #[live(1.0)] pub depth_clip: f32,
     #[live(1.0)] pub draw_depth: f32,
     
-    #[live] pub color: Vec4,
-    #[calc] pub icon_t1: Vec2,
-    #[calc] pub icon_t2: Vec2,
+    #[live] pub color: Vec4f,
+    #[calc] pub icon_t1: Vec2f,
+    #[calc] pub icon_t2: Vec2f,
 }
 
 impl LiveHook for DrawIcon{

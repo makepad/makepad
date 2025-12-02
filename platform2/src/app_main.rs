@@ -28,7 +28,7 @@ macro_rules!app_main {
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(move | cx, event | {
                 
                 if let Event::Startup = event {
-                    *app.borrow_mut() = Some(cx.with_vm(|vm| $app::script_new(vm)));
+                    *app.borrow_mut() = Some(cx.with_vm(|vm| $app::run(vm)));
                 }
                 if let Event::LiveEdit = event{
                     //app.borrow_mut().update_main(cx);

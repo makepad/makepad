@@ -1,5 +1,5 @@
 These are all the layout attributes that control how widgets affect their child elements and how they embed themselves in parent elements.
-### abs_pos (Vec2)
+### abs_pos (Vec2f)
 Absolute positioning of layout elements. Usage is not advised.
 ### align (Align)
 Controls the placement of child-elements.
@@ -19,7 +19,7 @@ Determines the height of elements.
 Sets the margin outside the element.
 ### padding (Padding)
 Sets the padding inside the element.
-### scroll (Vec2)
+### scroll (Vec2f)
 The scroll position.
 ### spacing (float)
 The amount of spacing between stacked elements.

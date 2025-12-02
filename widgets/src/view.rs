@@ -37,8 +37,8 @@ pub enum ViewDebug {
     Padding,
     A,
     All,
-    #[live(Vec4::default())]
-    Color(Vec4),
+    #[live(Vec4f::default())]
+    Color(Vec4f),
 }
 
 impl LiveHook for ViewDebug {
@@ -69,12 +69,12 @@ impl LiveHook for ViewDebug {
         nodes: &[LiveNode],
     ) -> Option<usize> {
         match &nodes[index].value {
-            LiveValue::Vec4(v) => {
+            LiveValue::Vec4f(v) => {
                 *self = Self::Color(*v);
                 Some(index + 1)
             }
             LiveValue::Color(v) => {
-                *self = Self::Color(Vec4::from_u32(*v));
+                *self = Self::Color(Vec4f::from_u32(*v));
                 Some(index + 1)
             }
             LiveValue::Bool(v) => {
@@ -184,7 +184,7 @@ pub struct View {
     #[rust]
     scroll_bars_obj: Option<Box<ScrollBars>>,
     #[rust]
-    view_size: Option<DVec2>,
+    view_size: Option<Vec2d>,
     
     #[rust]
     area: Area,
@@ -428,7 +428,7 @@ impl ViewRef {
         }
     }
 
-    pub fn set_scroll_pos(&self, cx: &mut Cx, v: DVec2) {
+    pub fn set_scroll_pos(&self, cx: &mut Cx, v: Vec2d) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_scroll_pos(cx, v)
         }
@@ -967,34 +967,34 @@ impl Widget for View {
                 cx.debug.area(self.area, *c);
             }
             ViewDebug::R => {
-                cx.debug.area(self.area, Vec4::R);
+                cx.debug.area(self.area, Vec4f::R);
             }
             ViewDebug::G => {
-                cx.debug.area(self.area, Vec4::G);
+                cx.debug.area(self.area, Vec4f::G);
             }
             ViewDebug::B => {
-                cx.debug.area(self.area, Vec4::B);
+                cx.debug.area(self.area, Vec4f::B);
             }
             ViewDebug::M | ViewDebug::Margin => {
                 let tl = dvec2(self.walk.margin.left, self.walk.margin.top);
                 let br = dvec2(self.walk.margin.right, self.walk.margin.bottom);
-                cx.debug.area_offset(self.area, tl, br, Vec4::B);
-                cx.debug.area(self.area, Vec4::R);
+                cx.debug.area_offset(self.area, tl, br, Vec4f::B);
+                cx.debug.area(self.area, Vec4f::R);
             }
             ViewDebug::P | ViewDebug::Padding => {
                 let tl = dvec2(-self.layout.padding.left, -self.walk.margin.top);
                 let br = dvec2(-self.layout.padding.right, -self.layout.padding.bottom);
-                cx.debug.area_offset(self.area, tl, br, Vec4::G);
-                cx.debug.area(self.area, Vec4::R);
+                cx.debug.area_offset(self.area, tl, br, Vec4f::G);
+                cx.debug.area(self.area, Vec4f::R);
             }
             ViewDebug::All | ViewDebug::A => {
                 let tl = dvec2(self.walk.margin.left, self.walk.margin.top);
                 let br = dvec2(self.walk.margin.right, self.walk.margin.bottom);
-                cx.debug.area_offset(self.area, tl, br, Vec4::B);
+                cx.debug.area_offset(self.area, tl, br, Vec4f::B);
                 let tl = dvec2(-self.layout.padding.left, -self.walk.margin.top);
                 let br = dvec2(-self.layout.padding.right, -self.layout.padding.bottom);
-                cx.debug.area_offset(self.area, tl, br, Vec4::G);
-                cx.debug.area(self.area, Vec4::R);
+                cx.debug.area_offset(self.area, tl, br, Vec4f::G);
+                cx.debug.area(self.area, Vec4f::R);
             }
         }
         DrawStep::done()
@@ -1030,7 +1030,7 @@ impl View {
         }
     }
     
-    pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: DVec2) {
+    pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: Vec2d) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.set_scroll_pos(cx, v);
         } else {
@@ -1043,7 +1043,7 @@ impl View {
     }
 
     pub fn walk_from_previous_size(&self, walk: Walk) -> Walk {
-        let view_size = self.view_size.unwrap_or(DVec2::default());
+        let view_size = self.view_size.unwrap_or(Vec2d::default());
         Walk {
             abs_pos: walk.abs_pos,
             width: if walk.width.is_fill() {

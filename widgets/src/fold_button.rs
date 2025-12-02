@@ -92,8 +92,8 @@ pub struct FoldButton {
     #[animator] animator: Animator,
     
     #[redraw] #[live] draw_bg: DrawQuad,
-    #[live] abs_size: DVec2,
-    #[live] abs_offset: DVec2,
+    #[live] abs_size: Vec2d,
+    #[live] abs_offset: Vec2d,
     #[walk] walk: Walk,
     #[live] active: f64,
     #[action_data] #[rust] action_data: WidgetActionData,
@@ -121,7 +121,7 @@ impl FoldButton {
         self.draw_bg.area()
     }
     
-    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, fade: f64) {
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2d, fade: f64) {
         self.draw_bg.apply_over(cx, live!{fade: (fade)});
         self.draw_bg.draw_abs(cx, Rect {
             pos: pos + self.abs_offset,

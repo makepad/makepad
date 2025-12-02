@@ -169,10 +169,10 @@ impl DrawVars {
 
             fn live_type_to_shader_ty(live_type: LiveType) -> Option<ShaderTy> {
                 if live_type == LiveType::of::<f32>() {Some(ShaderTy::Float)}
-                else if live_type == LiveType::of::<Vec2>() {Some(ShaderTy::Vec2)}
-                else if live_type == LiveType::of::<Vec3>() {Some(ShaderTy::Vec3)}
-                else if live_type == LiveType::of::<Vec4>() {Some(ShaderTy::Vec4)}
-                else if live_type == LiveType::of::<Mat4>() {Some(ShaderTy::Mat4)}
+                else if live_type == LiveType::of::<Vec2f>() {Some(ShaderTy::Vec2f)}
+                else if live_type == LiveType::of::<Vec3f>() {Some(ShaderTy::Vec3f)}
+                else if live_type == LiveType::of::<Vec4f>() {Some(ShaderTy::Vec4f)}
+                else if live_type == LiveType::of::<Mat4f>() {Some(ShaderTy::Mat4f)}
                 else {None}
             }
             // ok ! we have to compile it
@@ -584,14 +584,14 @@ impl DrawVars {
                 return index;
             }
             2 => {
-                let mut v: Vec2 = Vec2::default();
+                let mut v: Vec2f = Vec2f::default();
                 let index = v.apply(cx, apply, index, nodes);
                 output[offset + 0] = v.x;
                 output[offset + 1] = v.y;
                 return index;
             }
             3 => {
-                let mut v: Vec3 = Vec3::default();
+                let mut v: Vec3f = Vec3f::default();
                 let index = v.apply(cx, apply, index, nodes);
                 output[offset + 0] = v.x;
                 output[offset + 1] = v.y;
@@ -599,7 +599,7 @@ impl DrawVars {
                 return index;
             }
             4 => {
-                let mut v: Vec4 = Vec4::default();
+                let mut v: Vec4f = Vec4f::default();
                 let index = v.apply(cx, apply, index, nodes);
                 output[offset + 0] = v.x;
                 output[offset + 1] = v.y;

@@ -103,9 +103,9 @@ live_design!{
 
 #[derive(Live, Widget)]
 pub struct Window {
-    //#[rust] caption_size: DVec2,
-    #[live] last_mouse_pos: DVec2,
-    #[live] mouse_cursor_size: DVec2,
+    //#[rust] caption_size: Vec2d,
+    #[live] last_mouse_pos: Vec2d,
+    #[live] mouse_cursor_size: Vec2d,
     #[live] demo: bool,
     #[rust] demo_next_frame: NextFrame,
     #[live] cursor_draw_list: DrawList2d,
@@ -122,7 +122,7 @@ pub struct Window {
     #[rust(Texture::new(cx))] depth_texture: Texture,
     #[live] hide_caption_on_fullscreen: bool, 
     #[live] show_performance_view: bool,
-    #[rust(Mat4::nonuniform_scaled_translation(vec3(0.0004,-0.0004,-0.0004),vec3(-0.25,0.25,-0.5)))] xr_view_matrix: Mat4,
+    #[rust(Mat4f::nonuniform_scaled_translation(vec3(0.0004,-0.0004,-0.0004),vec3(-0.25,0.25,-0.5)))] xr_view_matrix: Mat4f,
     #[deref] view: View,
     // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
     /*#[rust(Menu::main(vec![
@@ -245,7 +245,7 @@ impl Window {
         
         self.overlay.end(cx);
         // lets get te pass size
-        fn encode_size(x: f64)->Vec4{
+        fn encode_size(x: f64)->Vec4f{
             let x = x as usize;
             let r = ((x >> 8)&0xff) as f32 / 255.0;
             let b = ((x >> 0)&0xff) as f32 / 255.0;
@@ -271,22 +271,22 @@ impl Window {
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass);
     }
-    pub fn resize(&self, cx: &mut Cx, size: DVec2) {
+    pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
         self.window.resize(cx, size);
     }
-    pub fn reposition(&self, cx: &mut Cx, size: DVec2) {
+    pub fn reposition(&self, cx: &mut Cx, size: Vec2d) {
         self.window.reposition(cx, size);
     }
     pub fn set_fullscreen(&mut self, cx: &mut Cx) {
         self.window.fullscreen(cx);
     }
-    pub fn configure_window(&mut self, cx: &mut Cx, inner_size: DVec2, position: DVec2, is_fullscreen: bool, title: String) {
+    pub fn configure_window(&mut self, cx: &mut Cx, inner_size: Vec2d, position: Vec2d, is_fullscreen: bool, title: String) {
         self.window.configure_window(cx, inner_size, position, is_fullscreen, title);
     }
 }
 
 impl WindowRef{
-    pub fn get_inner_size(&self, cx:&Cx)->DVec2{
+    pub fn get_inner_size(&self, cx:&Cx)->Vec2d{
         if let Some(inner) = self.borrow(){
             inner.window.get_inner_size(cx)
         }
@@ -295,7 +295,7 @@ impl WindowRef{
         }
     }
 
-    pub fn get_position(&self, cx:&Cx)->DVec2{
+    pub fn get_position(&self, cx:&Cx)->Vec2d{
         if let Some(inner) = self.borrow(){
             inner.window.get_position(cx)
         }
@@ -311,13 +311,13 @@ impl WindowRef{
             false
         }
     }
-    pub fn resize(&self, cx: &mut Cx, size: DVec2) {
+    pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
         if let Some(inner) = self.borrow() {
             inner.resize(cx, size);
         }
     }
 
-    pub fn reposition(&self, cx: &mut Cx, size: DVec2) {
+    pub fn reposition(&self, cx: &mut Cx, size: Vec2d) {
         if let Some(inner) = self.borrow() {
             inner.reposition(cx, size);
         }
@@ -338,7 +338,7 @@ impl WindowRef{
     /// The `title` argument sets the window's title bar text.
     /// 
     /// This only works in app startup. 
-    pub fn configure_window(&self, cx: &mut Cx, inner_size: DVec2, position: DVec2, fullscreen: bool, title: String) {
+    pub fn configure_window(&self, cx: &mut Cx, inner_size: Vec2d, position: Vec2d, fullscreen: bool, title: String) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.configure_window(cx, inner_size, position, fullscreen, title);
         }

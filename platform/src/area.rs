@@ -295,7 +295,7 @@ impl Area {
         }
     }
     
-    pub fn abs_to_rel(&self, cx: &Cx, abs: DVec2) -> DVec2 {
+    pub fn abs_to_rel(&self, cx: &Cx, abs: Vec2d) -> Vec2d {
         return match self {
             Area::Instance(inst) => {
                 if inst.instance_count == 0 {
@@ -319,7 +319,7 @@ impl Area {
                     let buf = draw_item.instances.as_ref().unwrap();
                     let x = buf[inst.instance_offset + rect_pos + 0] as f64; 
                     let y = buf[inst.instance_offset + rect_pos + 1] as f64;
-                    return DVec2 {
+                    return Vec2d {
                         x: abs.x - x,
                         y: abs.y - y
                     }
@@ -329,7 +329,7 @@ impl Area {
             Area::Rect(ra) => {
                 let draw_list = &cx.draw_lists[ra.draw_list_id];
                 let rect_area = &draw_list.rect_areas[ra.rect_id];
-                DVec2 {
+                Vec2d {
                     x: abs.x - rect_area.rect.pos.x,
                     y: abs.y - rect_area.rect.pos.y
                 }

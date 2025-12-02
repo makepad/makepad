@@ -123,7 +123,7 @@ impl Widget for Modal {
         if self.is_open {
             let _ = self
                 .bg_view
-                .draw_walk(cx, scope, walk.with_abs_pos(DVec2 { x: 0., y: 0. }));
+                .draw_walk(cx, scope, walk.with_abs_pos(Vec2d { x: 0., y: 0. }));
             let _ = self.content.draw_all(cx, scope);
         }
 

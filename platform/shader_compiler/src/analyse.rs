@@ -322,7 +322,7 @@ impl<'a> DrawShaderAnalyser<'a> {
             DrawShaderFieldKind::Geometry {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
                 match ty {
-                    Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat4 => {}
+                    Ty::Float | Ty::Vec2f | Ty::Vec3f | Ty::Vec4f | Ty::Mat4f => {}
                     _ => {
                         return Err(LiveError {
                             origin: live_error_origin!(),
@@ -338,7 +338,7 @@ impl<'a> DrawShaderAnalyser<'a> {
             DrawShaderFieldKind::Instance {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
                 match ty {
-                    Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat2 | Ty::Mat3 | Ty::Mat4 | Ty::Enum(_) => {}
+                    Ty::Float | Ty::Vec2f | Ty::Vec3f | Ty::Vec4f | Ty::Mat2 | Ty::Mat3 | Ty::Mat4f | Ty::Enum(_) => {}
                     _ => {
                         return Err(LiveError {
                             origin: live_error_origin!(),
@@ -372,7 +372,7 @@ impl<'a> DrawShaderAnalyser<'a> {
             DrawShaderFieldKind::Varying {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
                 match ty {
-                    Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
+                    Ty::Float | Ty::Vec2f | Ty::Vec3f | Ty::Vec4f => {}
                     _ => {
                         return Err(LiveError {
                             origin: live_error_origin!(),
@@ -403,7 +403,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         
         if def.ident == Ident(live_id!(vertex)) {
             match return_ty {
-                Ty::Vec4 => {}
+                Ty::Vec4f => {}
                 _ => {
                     return Err(LiveError {
                         origin: live_error_origin!(),
@@ -416,7 +416,7 @@ impl<'a> DrawShaderAnalyser<'a> {
             }
         } else if def.ident == Ident(live_id!(fragment)) {
             match return_ty {
-                Ty::Vec4 => {}
+                Ty::Vec4f => {}
                 _ => {
                     return Err(LiveError {
                         origin: live_error_origin!(),

@@ -1,6 +1,8 @@
 use {
     crate::{
         //makepad_live_id::*,
+        makepad_script::*,
+        script::vm::*,
         makepad_math::*,
         makepad_error_log::*,
         id_pool::*,
@@ -29,11 +31,11 @@ impl WindowHandle {
 #[derive(Default)]
 pub struct CxWindowPool(IdPool<CxWindow>);
 impl CxWindowPool {
-    fn _alloc(&mut self) -> WindowHandle {
+    fn alloc(&mut self) -> WindowHandle {
         WindowHandle(self.0.alloc())
     }
     
-    pub fn window_id_contains(&self, pos:DVec2)->(WindowId, DVec2){
+    pub fn window_id_contains(&self, pos:Vec2d)->(WindowId, Vec2d){
         for (index,item) in self.0.pool.iter().enumerate(){
             let window = &item.item;
             if pos.x>= window.window_geom.position.x &&
@@ -47,7 +49,7 @@ impl CxWindowPool {
     }
     
     
-    pub fn relative_to_window_id(&self, pos:DVec2)->(WindowId, DVec2){
+    pub fn relative_to_window_id(&self, pos:Vec2d)->(WindowId, Vec2d){
         for (index,item) in self.0.pool.iter().enumerate(){
             let window = &item.item;
             if pos.x>= window.window_geom.position.x &&
@@ -98,11 +100,11 @@ impl std::ops::IndexMut<WindowId> for CxWindowPool {
         &mut d.item
     }
 }
-/*
-impl LiveHook for WindowHandle {}
-impl LiveNew for WindowHandle {
 
-    fn new(cx: &mut Cx) -> Self {
+impl ScriptHook for WindowHandle {}
+impl ScriptNew for WindowHandle {
+    fn script_new(vm:&mut ScriptVm)->Self{
+        let cx = vm.cx_mut();
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
         cxwindow.is_created = false;
@@ -112,86 +114,48 @@ impl LiveNew for WindowHandle {
         cx.platform_ops.push(CxOsOp::CreateWindow(window.window_id()));
         window
     }
-    
-    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
-        LiveTypeInfo {
-            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: LiveType::of::<Self>(),
-            fields: Vec::new(),
-            live_ignore: true,
-            type_name: id_lut!(Window)
+}
+
+impl ScriptApply for WindowHandle {
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue) {
+        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(inner_size)){
+            vm.host.cx_mut().windows[self.window_id()].create_inner_size = Some(v);
+        }
+        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(title)){
+            vm.host.cx_mut().windows[self.window_id()].create_title = v;
+        }
+        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(kind_id)){
+            vm.host.cx_mut().windows[self.window_id()].kind_id = v;
+        }
+        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(position)){
+            vm.host.cx_mut().windows[self.window_id()].create_position = Some(v);
+        }
+        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(dpi_override)){
+            vm.host.cx_mut().windows[self.window_id()].dpi_override = Some(v);
+        }
+        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(topmost)){
+            self.set_topmost(vm.host.cx_mut(), v);
         }
     }
 }
 
-impl LiveApply for WindowHandle {
-    //fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
-    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
-        
-        if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, live_id!(View));
-            return nodes.skip_node(start_index);
-        }
-        
-        let mut index = start_index + 1;
-        loop {
-            if nodes[index].value.is_close() {
-                index += 1;
-                break;
-            }
-            match nodes[index].id {
-                live_id!(inner_size) => {
-                    let v:Vec2 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    cx.windows[self.window_id()].create_inner_size = Some(v.into());
-                },
-                live_id!(title) => {
-                    let v = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    cx.windows[self.window_id()].create_title = v;
-                }
-                live_id!(kind_id) => {
-                    let v = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    cx.windows[self.window_id()].kind_id = v;
-                }
-                live_id!(position) => {
-                    let v:Vec2 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    cx.windows[self.window_id()].create_position = Some(v.into());
-                }
-                live_id!(dpi_override) => {
-                    let v:f64 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    //log!("DPI OVERRIDE {}", v);
-                    cx.windows[self.window_id()].dpi_override = Some(v);
-                }
-                live_id!(topmost) => {
-                    let v:bool = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
-                    self.set_topmost(cx, v);
-                }
-                _ => {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                    index = nodes.skip_node(index);
-                }
-            }
-        }
-        return index;
-    }
-}
-*/
 impl WindowHandle {
     pub fn set_pass(&self, cx: &mut Cx, pass: &Pass) {
         cx.windows[self.window_id()].main_pass_id = Some(pass.pass_id());
         cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());
     }
-    pub fn configure_window(&mut self, cx: &mut Cx, inner_size: DVec2, position: DVec2, is_fullscreen: bool, title: String) {
+    pub fn configure_window(&mut self, cx: &mut Cx, inner_size: Vec2d, position: Vec2d, is_fullscreen: bool, title: String) {
         let window = &mut cx.windows[self.window_id()];
         window.create_title = title;
         window.create_position = Some(position);
         window.create_inner_size = Some(inner_size);
         window.is_fullscreen = is_fullscreen;
     }
-    pub fn get_inner_size(&self, cx: &Cx) -> DVec2 {
+    pub fn get_inner_size(&self, cx: &Cx) -> Vec2d {
         cx.windows[self.window_id()].get_inner_size()
     }
     
-    pub fn get_position(&self, cx: &Cx) -> DVec2 {
+    pub fn get_position(&self, cx: &Cx) -> Vec2d {
         cx.windows[self.window_id()].get_position()
     }
     
@@ -235,11 +199,11 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::SetTopmost(self.window_id(), set_topmost));
     }
     
-    pub fn resize(&self, cx: &mut Cx, size: DVec2) {
+    pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
         cx.push_unique_platform_op(CxOsOp::ResizeWindow(self.window_id(), size));
     }
 
-    pub fn reposition(&self, cx: &mut Cx, position: DVec2) {
+    pub fn reposition(&self, cx: &mut Cx, position: Vec2d) {
         cx.push_unique_platform_op(CxOsOp::RepositionWindow(self.window_id(), position));
     }
 
@@ -255,8 +219,8 @@ impl WindowHandle {
 #[derive(Clone, Default)]
 pub struct CxWindow {
     pub create_title: String,
-    pub create_position: Option<DVec2>,
-    pub create_inner_size: Option<DVec2>,
+    pub create_position: Option<Vec2d>,
+    pub create_inner_size: Option<Vec2d>,
     pub kind_id: usize,
     pub dpi_override: Option<f64>,
     pub os_dpi_factor: Option<f64>,
@@ -267,7 +231,7 @@ pub struct CxWindow {
 }
 
 impl CxWindow {
-    pub fn remap_dpi_override(&self, pos:DVec2)->DVec2{
+    pub fn remap_dpi_override(&self, pos:Vec2d)->Vec2d{
         if let Some(dpi_override) = self.dpi_override{
             if let Some(os_dpi_factor) = self.os_dpi_factor{
                 return pos * ( os_dpi_factor / dpi_override)
@@ -276,11 +240,11 @@ impl CxWindow {
         return pos
     }
     
-    pub fn get_inner_size(&self) -> DVec2 {
+    pub fn get_inner_size(&self) -> Vec2d {
         self.window_geom.inner_size
     }
     
-    pub fn get_position(&self) -> DVec2 {
+    pub fn get_position(&self) -> Vec2d {
         self.window_geom.position
     }
 

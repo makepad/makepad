@@ -25,15 +25,15 @@ pub use {
 
 #[derive(Clone, Copy)]
 pub struct CxIconSlot {
-    pub t1: Vec2,
-    pub t2: Vec2,
+    pub t1: Vec2f,
+    pub t2: Vec2f,
     pub chan: f32
 }
 
 #[derive(Clone)]
 pub struct CxIconEntry {
     path_hash: CxIconPathHash,
-    pos: DVec2,
+    pos: Vec2d,
     slot: CxIconSlot,
     args: CxIconArgs,
 }
@@ -75,7 +75,7 @@ pub struct CxIconAtlas {
 
 #[derive(Default)]
 pub struct CxIconAtlasAlloc {
-    pub texture_size: DVec2,
+    pub texture_size: Vec2d,
     pub xpos: f64,
     pub ypos: f64,
     pub hmax: f64,
@@ -85,9 +85,9 @@ pub struct CxIconAtlasAlloc {
 #[derive(Clone, Debug)]
 pub struct CxIconArgs {
     pub linearize: f64,
-    pub size: DVec2,
-    pub translate: DVec2,
-    pub subpixel: DVec2,
+    pub size: Vec2d,
+    pub translate: Vec2d,
+    pub subpixel: Vec2d,
     pub scale: f64,
 }
 
@@ -114,7 +114,7 @@ impl CxIconAtlas {
             svg_deps: HashMap::new(),
             paths: HashMap::new(),
             alloc: CxIconAtlasAlloc {
-                texture_size: DVec2 {x: 2048.0, y: 2048.0},
+                texture_size: Vec2d {x: 2048.0, y: 2048.0},
                 xpos: 0.0,
                 ypos: 0.0,
                 hmax: 0.0,
@@ -128,7 +128,7 @@ impl CxIconAtlas {
             Ok(path) => {
                 let mut min = dvec2(f64::INFINITY, f64::INFINITY);
                 let mut max = dvec2(-f64::INFINITY, -f64::INFINITY);
-                fn bound(p: &Point, min: &mut DVec2, max: &mut DVec2) {
+                fn bound(p: &Point, min: &mut Vec2d, max: &mut Vec2d) {
                     if p.x < min.x {min.x = p.x}
                     if p.y < min.y {min.y = p.y}
                     if p.x > max.x {max.x = p.x}
@@ -288,7 +288,7 @@ impl CxIconAtlas {
     
 }
 impl CxIconAtlasAlloc {
-    pub fn alloc_icon_slot(&mut self, w: f64, h: f64) -> (CxIconSlot,DVec2) {
+    pub fn alloc_icon_slot(&mut self, w: f64, h: f64) -> (CxIconSlot,Vec2d) {
         if w + self.xpos >= self.texture_size.x {
             self.xpos = 0.0;
             self.ypos += self.hmax + 1.0;
@@ -364,8 +364,8 @@ impl DrawTrapezoidVector {
         };
         
         for trapezoid in trapezoids {
-            self.a_xs = Vec2 {x: trapezoid.xs[0], y: trapezoid.xs[1]};
-            self.a_ys = Vec4 {x: trapezoid.ys[0], y: trapezoid.ys[1], z: trapezoid.ys[2], w: trapezoid.ys[3]};
+            self.a_xs = Vec2f {x: trapezoid.xs[0], y: trapezoid.xs[1]};
+            self.a_ys = Vec4f {x: trapezoid.ys[0], y: trapezoid.ys[1], z: trapezoid.ys[2], w: trapezoid.ys[3]};
             self.chan = 0.0 as f32;
             many.instances.extend_from_slice(self.draw_vars.as_slice());
         }
@@ -439,10 +439,10 @@ impl<'a> CxDraw<'a> {
             
             let clear = if atlas.clear_buffer {
                 atlas.clear_buffer = false;
-                PassClearColor::ClearWith(Vec4::default())
+                PassClearColor::ClearWith(Vec4f::default())
             }
             else {
-                PassClearColor::InitWith(Vec4::default())
+                PassClearColor::InitWith(Vec4f::default())
             };
             
             draw_atlas.atlas_pass.clear_color_textures(self.cx);

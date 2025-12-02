@@ -9,9 +9,9 @@ use {
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_id::*,
         makepad_math::{
-            Vec2,
+            Vec2f,
             vec3,
-            Vec4
+            Vec4f
         },
         live_token::{LiveToken, TokenWithSpan, LiveTokenId},
         live_ptr::{LiveFileId, LiveModuleId, LivePtr},
@@ -734,7 +734,7 @@ impl<'a> LiveParser<'a> {
                     self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
-                        value: LiveValue::Vec2(Vec2 {x: x as f32, y: y as f32})
+                        value: LiveValue::Vec2f(Vec2f {x: x as f32, y: y as f32})
                     });
                 }
                 else {
@@ -757,7 +757,7 @@ impl<'a> LiveParser<'a> {
                     self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
-                        value: LiveValue::Vec3(vec3(x as f32, y as f32, z as f32))
+                        value: LiveValue::Vec3f(vec3(x as f32, y as f32, z as f32))
                     });
                 }
                 else {
@@ -782,7 +782,7 @@ impl<'a> LiveParser<'a> {
                     self.ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
-                        value: LiveValue::Vec4(Vec4 {x: x as f32, y: y as f32, z: z as f32, w: w as f32})
+                        value: LiveValue::Vec4f(Vec4f {x: x as f32, y: y as f32, z: z as f32, w: w as f32})
                     });
                 }
                 else {

@@ -6,7 +6,7 @@ use crate::heap::*;
 
 pub fn test(){
     let mut vmbase = ScriptVmBase::new();
-    let cx = &mut vmbase.as_ref();
+    let vm = &mut vmbase.as_ref();
     
     
     #[derive(Script)]
@@ -307,7 +307,7 @@ pub fn test(){
         
     let dt = std::time::Instant::now();
         
-    cx.eval(code);
+    vm.eval(code);
     println!("Duration {}", dt.elapsed().as_secs_f64())
         
 }

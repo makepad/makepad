@@ -66,8 +66,8 @@ live_design!{
 pub struct DrawImage {
     #[deref] draw_super: DrawQuad,
     #[live] pub opacity: f32,
-    #[live] image_scale: Vec2,
-    #[live] image_pan: Vec2,
+    #[live] image_scale: Vec2f,
+    #[live] image_pan: Vec2f,
     #[live] async_load: f32
 }
 

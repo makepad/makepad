@@ -19,7 +19,7 @@ use {
 pub struct DragEvent {
     pub modifiers: KeyModifiers,
     pub handled: Arc<Mutex<bool>>,
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub items: Arc<Vec<DragItem >>,
     pub response: Arc<Mutex<DragResponse >>,
 }
@@ -28,14 +28,14 @@ pub struct DragEvent {
 pub struct DropEvent {
     pub modifiers: KeyModifiers,
     pub handled: Arc<Mutex<bool>>,
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub items: Arc<Vec<DragItem >>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DragHitEvent {
     pub modifiers: KeyModifiers,
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub rect: Rect,
     pub state: DragState,
     pub items: Arc<Vec<DragItem >>,
@@ -45,7 +45,7 @@ pub struct DragHitEvent {
 #[derive(Clone, Debug)]
 pub struct DropHitEvent {
     pub modifiers: KeyModifiers,
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub rect: Rect,
     pub items: Arc<Vec<DragItem >>,
 }

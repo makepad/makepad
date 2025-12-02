@@ -450,27 +450,27 @@ live_primitive!(
 
 
 live_primitive!(
-    DVec2,
-    DVec2::default(),
+    Vec2d,
+    Vec2d::default(),
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Uint64(v) => {
-                *self = DVec2::all(*v as f64);
+                *self = Vec2d::all(*v as f64);
                 index + 1
             }
             LiveValue::Int64(v) => {
-                *self = DVec2::all(*v as f64);
+                *self = Vec2d::all(*v as f64);
                 index + 1
             }
             LiveValue::Float32(v) => {
-                *self = DVec2::all(*v as f64);
+                *self = Vec2d::all(*v as f64);
                 index + 1
             }
             LiveValue::Float64(v) => {
-                *self = DVec2::all(*v);
+                *self = Vec2d::all(*v);
                 index + 1
             }
-            LiveValue::Vec2(val) => {
+            LiveValue::Vec2f(val) => {
                 *self = val.clone().into();
                 index + 1
             }
@@ -485,38 +485,38 @@ live_primitive!(
             },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec2");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec2f");
                 nodes.skip_node(index)
             }
         }
     },
     fn to_live_value(&self) -> LiveValue {
-        LiveValue::Vec2(self.clone().into())
+        LiveValue::Vec2f(self.clone().into())
     }
 );
 
 live_primitive!(
-    Vec2,
-    Vec2::default(),
+    Vec2f,
+    Vec2f::default(),
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Uint64(v) => {
-                *self = Vec2::all(*v as f32);
+                *self = Vec2f::all(*v as f32);
                 index + 1
             }
             LiveValue::Int64(v) => {
-                *self = Vec2::all(*v as f32);
+                *self = Vec2f::all(*v as f32);
                 index + 1
             }
             LiveValue::Float32(v) => {
-                *self = Vec2::all(*v as f32);
+                *self = Vec2f::all(*v as f32);
                 index + 1
             }
             LiveValue::Float64(v) => {
-                *self = Vec2::all(*v as f32);
+                *self = Vec2f::all(*v as f32);
                 index + 1
             }
-            LiveValue::Vec2(val) => {
+            LiveValue::Vec2f(val) => {
                 *self = *val;
                 index + 1
             }
@@ -531,42 +531,42 @@ live_primitive!(
             },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec2");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec2f");
                 nodes.skip_node(index)
             }
         }
     },
     fn to_live_value(&self) -> LiveValue {
-        LiveValue::Vec2(*self)
+        LiveValue::Vec2f(*self)
     }
 );
 
 live_primitive!(
-    Vec3,
-    Vec3::default(),
+    Vec3f,
+    Vec3f::default(),
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            LiveValue::Vec2(v) => {
+            LiveValue::Vec2f(v) => {
                 *self = vec3(v.x, v.y, 0.0);
                 index + 1
             }
             LiveValue::Uint64(v) => {
-                *self = Vec3::all(*v as f32);
+                *self = Vec3f::all(*v as f32);
                 index + 1
             }            
             LiveValue::Int64(v) => {
-                *self = Vec3::all(*v as f32);
+                *self = Vec3f::all(*v as f32);
                 index + 1
             }
             LiveValue::Float32(v) => {
-                *self = Vec3::all(*v as f32);
+                *self = Vec3f::all(*v as f32);
                 index + 1
             }
             LiveValue::Float64(v) => {
-                *self = Vec3::all(*v as f32);
+                *self = Vec3f::all(*v as f32);
                 index + 1
             }
-            LiveValue::Vec3(val) => {
+            LiveValue::Vec3f(val) => {
                 *self = *val;
                 index + 1
             }
@@ -581,51 +581,51 @@ live_primitive!(
             },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec3");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec3f");
                 nodes.skip_node(index)
             }
         }
     },
     fn to_live_value(&self) -> LiveValue {
-        LiveValue::Vec3(*self)
+        LiveValue::Vec3f(*self)
     }
 );
 
 live_primitive!(
-    Vec4,
-    Vec4::default(),
+    Vec4f,
+    Vec4f::default(),
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            LiveValue::Vec2(v) => {
-                *self = Vec4{x:v.x, y:v.y, z:v.x, w:v.y};
+            LiveValue::Vec2f(v) => {
+                *self = Vec4f{x:v.x, y:v.y, z:v.x, w:v.y};
                 index + 1
             }
-            LiveValue::Vec3(v) => {
-                *self = Vec4{x:v.x, y:v.y, z:v.z, w:1.0};
+            LiveValue::Vec3f(v) => {
+                *self = Vec4f{x:v.x, y:v.y, z:v.z, w:1.0};
                 index + 1
             }
-            LiveValue::Vec4(v) => {
-                *self = Vec4{x:v.x, y:v.y, z:v.z, w:v.w};
+            LiveValue::Vec4f(v) => {
+                *self = Vec4f{x:v.x, y:v.y, z:v.z, w:v.w};
                 index + 1
             }
             LiveValue::Uint64(v) => {
-                *self = Vec4::all(*v as f32);
+                *self = Vec4f::all(*v as f32);
                 index + 1
             }  
             LiveValue::Int64(v) => {
-                *self = Vec4::all(*v as f32);
+                *self = Vec4f::all(*v as f32);
                 index + 1
             }
             LiveValue::Float32(v) => {
-                *self = Vec4::all(*v as f32);
+                *self = Vec4f::all(*v as f32);
                 index + 1
             }
             LiveValue::Float64(v) => {
-                *self = Vec4::all(*v as f32);
+                *self = Vec4f::all(*v as f32);
                 index + 1
             }
             LiveValue::Color(v) => {
-                *self = Vec4::from_u32(*v);
+                *self = Vec4f::from_u32(*v);
                 index + 1
             }
             LiveValue::Array => {
@@ -639,7 +639,7 @@ live_primitive!(
             },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec4");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec4f");
                 nodes.skip_node(index)
             }
         }
@@ -651,8 +651,8 @@ live_primitive!(
 
 
 live_primitive!(
-    Mat4,
-    Mat4::default(),
+    Mat4f,
+    Mat4f::default(),
     fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Array => {
@@ -666,7 +666,7 @@ live_primitive!(
             },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec4");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec4f");
                 nodes.skip_node(index)
             }
         }

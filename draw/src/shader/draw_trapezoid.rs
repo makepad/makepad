@@ -118,8 +118,8 @@ pub struct DrawTrapezoidVector {
     #[rust] pub trapezoidator: Trapezoidator,
     #[live] pub geometry: GeometryQuad2D,
     #[deref] pub draw_vars: DrawVars,
-    #[calc] pub a_xs: Vec2,
-    #[calc] pub a_ys: Vec4,
+    #[calc] pub a_xs: Vec2f,
+    #[calc] pub a_ys: Vec4f,
     #[calc] pub chan: f32,
 }
 

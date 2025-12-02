@@ -6,7 +6,7 @@ use {
         ops::DerefMut,
     },
     crate::{
-        makepad_math::Vec4,
+        makepad_math::Vec4f,
         makepad_live_tokenizer::{
             LiveId,
             Delim,
@@ -64,9 +64,9 @@ impl LiveToken {
             _ => None
         }
     }
-    pub fn as_vec4(&self) -> Option<Vec4> {
+    pub fn as_vec4(&self) -> Option<Vec4f> {
         match self {
-            Self::Color(c) => Some(Vec4::from_u32(*c)),
+            Self::Color(c) => Some(Vec4f::from_u32(*c)),
             _ => None
         }
     }    

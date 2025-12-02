@@ -15,20 +15,20 @@ use {
 
 pub trait DrawListExt{
     fn draw_list_id(&self) -> DrawListId;
-    fn set_view_transform(&self, cx: &mut Cx, mat: &Mat4);
+    fn set_view_transform(&self, cx: &mut Cx, mat: &Mat4f);
     fn begin_always(&mut self, cx: &mut CxDraw);
     fn begin_maybe(&mut self, cx: &mut CxDraw, will_redraw: bool) -> Redrawing ;
     fn end(&mut self, cx: &mut CxDraw) ;
-    fn get_view_transform(&self, cx: &Cx) -> Mat4;
+    fn get_view_transform(&self, cx: &Cx) -> Mat4f;
     fn redraw(&self, cx: &mut Cx) ;
     fn redraw_self_and_children(&self, cx: &mut Cx);
 }
 
 impl DrawListExt for DrawList{
     fn draw_list_id(&self) -> DrawListId {self.id()}
-    fn set_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
+    fn set_view_transform(&self, cx: &mut Cx, mat: &Mat4f) {
                 
-        fn set_view_transform_recur(draw_list_id: DrawListId, cx: &mut Cx, mat: &Mat4) {
+        fn set_view_transform_recur(draw_list_id: DrawListId, cx: &mut Cx, mat: &Mat4f) {
             /*if cx.draw_lists[draw_list_id].locked_view_transform {
                 return
             }*/
@@ -106,7 +106,7 @@ impl DrawListExt for DrawList{
         }
     }
             
-    fn get_view_transform(&self, cx: &Cx) -> Mat4 {
+    fn get_view_transform(&self, cx: &Cx) -> Mat4f {
         let cxview = &cx.draw_lists[self.id()];
         return cxview.draw_list_uniforms.view_transform
     }
