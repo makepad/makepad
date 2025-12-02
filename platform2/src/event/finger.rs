@@ -125,7 +125,7 @@ impl MouseButton {
 
 #[derive(Clone, Debug)]
 pub struct MouseDownEvent {
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub button: MouseButton,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
@@ -136,7 +136,7 @@ pub struct MouseDownEvent {
 
 #[derive(Clone, Debug)]
 pub struct MouseMoveEvent {
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub time: f64,
@@ -145,7 +145,7 @@ pub struct MouseMoveEvent {
 
 #[derive(Clone, Debug)]
 pub struct MouseUpEvent {
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub button: MouseButton,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
@@ -154,7 +154,7 @@ pub struct MouseUpEvent {
 
 #[derive(Clone, Debug)]
 pub struct MouseLeaveEvent {
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub time: f64,
@@ -164,8 +164,8 @@ pub struct MouseLeaveEvent {
 #[derive(Clone, Debug)]
 pub struct ScrollEvent {
     pub window_id: WindowId,
-    pub scroll: DVec2,
-    pub abs: DVec2,
+    pub scroll: Vec2d,
+    pub abs: Vec2d,
     pub modifiers: KeyModifiers,
     pub handled_x: Cell<bool>,
     pub handled_y: Cell<bool>,
@@ -176,7 +176,7 @@ pub struct ScrollEvent {
 #[derive(Clone, Debug)]
 pub struct LongPressEvent {
     pub window_id: WindowId,
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub uid: u64,
     pub time: f64,
 }
@@ -194,12 +194,12 @@ pub enum TouchState {
 #[derive(Clone, Debug)]
 pub struct TouchPoint {
     pub state: TouchState,
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub time: f64,
     pub uid: u64,
     pub rotation_angle: f64,
     pub force: f64,
-    pub radius: DVec2,
+    pub radius: Vec2d,
     pub handled: Cell<Area>,
     pub sweep_lock: Cell<Area>,
 }
@@ -266,13 +266,13 @@ impl Margin {
 }
 
 impl Margin {
-    pub fn left_top(&self) -> DVec2 {
+    pub fn left_top(&self) -> Vec2d {
         dvec2(self.left, self.top)
     }
-    pub fn right_bottom(&self) -> DVec2 {
+    pub fn right_bottom(&self) -> Vec2d {
         dvec2(self.right, self.bottom)
     }
-    pub fn size(&self) -> DVec2 {
+    pub fn size(&self) -> Vec2d {
         dvec2(self.left + self.right, self.top + self.bottom)
     }
     pub fn width(&self) -> f64 {
@@ -282,7 +282,7 @@ impl Margin {
         self.top + self.bottom
     }
     
-    pub fn rect_contains_with_margin(pos: DVec2, rect: &Rect, margin: &Option<Margin>) -> bool {
+    pub fn rect_contains_with_margin(pos: Vec2d, rect: &Rect, margin: &Option<Margin>) -> bool {
         if let Some(margin) = margin {
             return
             pos.x >= rect.pos.x - margin.left
@@ -312,13 +312,13 @@ pub struct CxDigitCapture {
     pub sweep_area: Area,
     pub switch_capture: Option<Area>,
     pub time: f64,
-    pub abs_start: DVec2,
+    pub abs_start: Vec2d,
 }
 
 #[derive(Default, Clone)]
 pub struct CxDigitTap {
     digit_id: DigitId,
-    last_pos: DVec2,
+    last_pos: Vec2d,
     last_time: f64,
     count: u32
 }
@@ -418,7 +418,7 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn capture_digit(&mut self, digit_id: DigitId, area: Area, sweep_area: Area, time: f64, abs_start: DVec2) {
+    pub (crate) fn capture_digit(&mut self, digit_id: DigitId, area: Area, sweep_area: Area, time: f64, abs_start: Vec2d) {
         /*if let Some(capture) = self.captures.iter_mut().find( | v | v.digit_id == digit_id) {
             capture.sweep_area = sweep_area;
             capture.area = area;
@@ -475,7 +475,7 @@ impl CxFingers {
         self.tap.count
     }
     
-    pub (crate) fn process_tap_count(&mut self, pos: DVec2, time: f64) -> u32 {
+    pub (crate) fn process_tap_count(&mut self, pos: Vec2d, time: f64) -> u32 {
         // TODO: query the platform for its multi-press / double-click timeout.
         //       e.g., see Android's ViewConfiguration.getMultiPressTimeout().
         if (time - self.tap.last_time) < TAP_COUNT_TIME
@@ -632,7 +632,7 @@ impl DigitDevice {
 #[derive(Clone, Debug)]
 pub struct FingerDownEvent {
     pub window_id: WindowId,
-    pub abs: DVec2,
+    pub abs: Vec2d,
     
     pub digit_id: DigitId,
     pub device: DigitDevice,
@@ -658,7 +658,7 @@ impl FingerDownEvent {
 #[derive(Clone, Debug)]
 pub struct FingerMoveEvent {
     pub window_id: WindowId,
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub digit_id: DigitId,
     pub device: DigitDevice,
     
@@ -666,7 +666,7 @@ pub struct FingerMoveEvent {
     pub modifiers: KeyModifiers,
     pub time: f64,
     
-    pub abs_start: DVec2,
+    pub abs_start: Vec2d,
     pub rect: Rect,
     pub is_over: bool,
 }
@@ -686,9 +686,9 @@ impl FingerMoveEvent {
 pub struct FingerUpEvent {
     pub window_id: WindowId,
     /// The absolute position of this finger-up event.
-    pub abs: DVec2,
+    pub abs: Vec2d,
     /// The absolute position of the original finger-down event.
-    pub abs_start: DVec2,
+    pub abs_start: Vec2d,
     /// The time at which the original finger-down event occurred.
     pub capture_time: f64,
     /// The time at which this finger-up event occurred.
@@ -728,7 +728,7 @@ impl FingerUpEvent {
 pub struct FingerLongPressEvent {
     pub window_id: WindowId,
     /// The absolute position of this long-press event.
-    pub abs: DVec2,
+    pub abs: Vec2d,
     /// The time at which the original finger-down event occurred.
     pub capture_time: f64,
     /// The time at which this long-press event occurred.
@@ -750,7 +750,7 @@ pub enum HoverState {
 #[derive(Clone, Debug)]
 pub struct FingerHoverEvent {
     pub window_id: WindowId,
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub digit_id: DigitId,
     pub device: DigitDevice,
     pub modifiers: KeyModifiers,
@@ -762,8 +762,8 @@ pub struct FingerHoverEvent {
 pub struct FingerScrollEvent {
     pub window_id: WindowId,
     pub digit_id: DigitId,
-    pub abs: DVec2,
-    pub scroll: DVec2,
+    pub abs: Vec2d,
+    pub scroll: Vec2d,
     pub device: DigitDevice,
     pub modifiers: KeyModifiers,
     pub time: f64,
@@ -843,7 +843,7 @@ impl Event {
     }
 
     pub fn hits_with_test<F>(&self, cx: &mut Cx, area: Area, hit_test:F) -> Hit 
-    where F: Fn(DVec2, &Rect, &Option<Margin>)->bool{
+    where F: Fn(Vec2d, &Rect, &Option<Margin>)->bool{
         self.hits_with_options_and_test(cx, area,  HitOptions::new(), hit_test)
     }
 
@@ -862,7 +862,7 @@ impl Event {
     }
     
     pub fn hits_with_options_and_test<F>(&self, cx: &mut Cx, area: Area, options: HitOptions, hit_test:F) -> Hit 
-    where F: Fn(DVec2, &Rect, &Option<Margin>)->bool
+    where F: Fn(Vec2d, &Rect, &Option<Margin>)->bool
     {
         if !area.is_valid(cx) {
             return Hit::Nothing

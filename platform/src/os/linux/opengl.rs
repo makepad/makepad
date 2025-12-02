@@ -7,7 +7,7 @@ use {
         draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput},
         event::{Event, TextureHandleReadyEvent},
         makepad_live_id::*,
-        makepad_math::{DVec2, Vec4},
+        makepad_math::{Vec2d, Vec4f},
         makepad_shader_compiler::generate_glsl,
         pass::{PassClearColor, PassClearDepth, PassId},
         texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureUpdated}
@@ -27,7 +27,7 @@ impl Cx {
         zbias_step: f32,
     ) {
         let mut to_dispatch = Vec::new();
-        //self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4::identity();
+        //self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4f::identity();
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
 
@@ -288,7 +288,7 @@ impl Cx {
         }
     }
 
-    pub fn setup_render_pass(&mut self, pass_id: PassId,) -> Option<(DVec2,f64)> {
+    pub fn setup_render_pass(&mut self, pass_id: PassId,) -> Option<(Vec2d,f64)> {
 
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
@@ -322,7 +322,7 @@ impl Cx {
             return
         };
 
-        let mut clear_color = Vec4::default();
+        let mut clear_color = Vec4f::default();
         let mut clear_depth = 1.0;
         let mut clear_flags = 0;
         let gl = self.os.gl();

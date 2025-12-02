@@ -10,7 +10,7 @@ use {
     crate::{
         makepad_objc_sys::runtime::{ObjcId, nil},
         makepad_math::{
-            DVec2,
+            Vec2d,
         },
         os::{
             apple::apple_sys::*,

@@ -11,9 +11,9 @@ use {
             live_object
         },
         makepad_math::{
-            Vec2,
-            Vec3,
-            Vec4
+            Vec2f,
+            Vec3f,
+            Vec4f
         },
         makepad_live_tokenizer::LiveId,
         live_token::LiveTokenId,
@@ -80,9 +80,9 @@ pub trait LiveNodeVecApi {
     fn push_int64(&mut self, id: LiveId, v: i64);
     fn push_float64(&mut self, id: LiveId, v: f64);
     fn push_color(&mut self, id: LiveId, v: u32);
-    fn push_vec2(&mut self, id: LiveId, v: Vec2);
-    fn push_vec3(&mut self, id: LiveId, v: Vec3);
-    fn push_vec4(&mut self, id: LiveId, v: Vec4);
+    fn push_vec2(&mut self, id: LiveId, v: Vec2f);
+    fn push_vec3(&mut self, id: LiveId, v: Vec3f);
+    fn push_vec4(&mut self, id: LiveId, v: Vec4f);
     fn push_id(&mut self, id: LiveId, v: LiveId);
     fn push_bare_enum(&mut self, id: LiveId, variant: LiveId);
     
@@ -685,14 +685,14 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 LiveValue::Color(v) => {
                     writeln!(f, "{}{} <Color>{:08x}", node.id, pt, v).unwrap();
                 },
-                LiveValue::Vec2(v) => {
-                    writeln!(f, "{}{} <Vec2> {:?}", node.id, pt, v).unwrap();
+                LiveValue::Vec2f(v) => {
+                    writeln!(f, "{}{} <Vec2f> {:?}", node.id, pt, v).unwrap();
                 },
-                LiveValue::Vec3(v) => {
-                    writeln!(f, "{}{} <Vec3> {:?}", node.id, pt, v).unwrap();
+                LiveValue::Vec3f(v) => {
+                    writeln!(f, "{}{} <Vec3f> {:?}", node.id, pt, v).unwrap();
                 },
-                LiveValue::Vec4(v) => {
-                    writeln!(f, "{}{} <Vec4> {:?}", node.id, pt, v).unwrap();
+                LiveValue::Vec4f(v) => {
+                    writeln!(f, "{}{} <Vec4f> {:?}", node.id, pt, v).unwrap();
                 },
                 LiveValue::Id(id) => {
                     writeln!(f, "{}{} <Id> {}", node.id, pt, id).unwrap();
@@ -969,9 +969,9 @@ impl LiveNodeVecApi for LiveNodeVec {
     fn push_int64(&mut self, id: LiveId, v: i64) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Int64(v)})}
     fn push_float64(&mut self, id: LiveId, v: f64) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Float64(v)})}
     fn push_color(&mut self, id: LiveId, v: u32) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Color(v)})}
-    fn push_vec2(&mut self, id: LiveId, v: Vec2) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec2(v)})}
-    fn push_vec3(&mut self, id: LiveId, v: Vec3) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec3(v)})}
-    fn push_vec4(&mut self, id: LiveId, v: Vec4) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec4(v)})}
+    fn push_vec2(&mut self, id: LiveId, v: Vec2f) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec2f(v)})}
+    fn push_vec3(&mut self, id: LiveId, v: Vec3f) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec3f(v)})}
+    fn push_vec4(&mut self, id: LiveId, v: Vec4f) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec4f(v)})}
     fn push_id(&mut self, id: LiveId, v: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Id(v)})}
     
     fn push_bare_enum(&mut self, id: LiveId, variant: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::BareEnum(variant)})}

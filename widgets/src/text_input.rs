@@ -862,7 +862,7 @@ impl TextInput {
         text_rect
     }
 
-    fn draw_cursor(&mut self, cx: &mut Cx2d, text_rect: Rect) -> DVec2 {
+    fn draw_cursor(&mut self, cx: &mut Cx2d, text_rect: Rect) -> Vec2d {
         let CursorPosition {
             row_index,
             x_in_lpxs,

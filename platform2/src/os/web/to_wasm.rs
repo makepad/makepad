@@ -3,7 +3,7 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_wasm_bridge::*,
-        makepad_math::{dvec2, DVec2},
+        makepad_math::{dvec2, Vec2d},
         cx::{OsType, XrCapabilities, WebParams},
         window::CxWindowPool,
         area::Area,
@@ -88,10 +88,10 @@ impl Into<WindowGeom> for WWindowInfo {
         WindowGeom {
             is_fullscreen: self.is_fullscreen,
             is_topmost: false,
-            inner_size: DVec2 {x: self.inner_width, y: self.inner_height},
+            inner_size: Vec2d {x: self.inner_width, y: self.inner_height},
             dpi_factor: self.dpi_factor,
-            outer_size: DVec2 {x: 0., y: 0.},
-            position: DVec2 {x: 0., y: 0.},
+            outer_size: Vec2d {x: 0., y: 0.},
+            position: Vec2d {x: 0., y: 0.},
             xr_is_presenting: self.xr_is_presenting,
             can_fullscreen: self.can_fullscreen
         }

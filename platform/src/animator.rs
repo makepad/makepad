@@ -803,19 +803,19 @@ impl Animator {
                             }
                             LiveValue::Color(va) => match b {
                                 LiveValue::Color(vb) => {
-                                    LiveValue::Color(Vec4::from_lerp(Vec4::from_u32(*va), Vec4::from_u32(*vb), mix as f32).to_u32())
+                                    LiveValue::Color(Vec4f::from_lerp(Vec4f::from_u32(*va), Vec4f::from_u32(*vb), mix as f32).to_u32())
                                 }
                                 _ => LiveValue::None
                             }
-                            LiveValue::Vec2(va) => match b {
-                                LiveValue::Vec2(vb) => {
-                                    LiveValue::Vec2(Vec2::from_lerp(*va, *vb, mix as f32))
+                            LiveValue::Vec2f(va) => match b {
+                                LiveValue::Vec2f(vb) => {
+                                    LiveValue::Vec2f(Vec2f::from_lerp(*va, *vb, mix as f32))
                                 }
                                 _ => LiveValue::None
                             }
-                            LiveValue::Vec3(va) => match b {
-                                LiveValue::Vec3(vb) => {
-                                    LiveValue::Vec3(Vec3::from_lerp(*va, *vb, mix as f32))
+                            LiveValue::Vec3f(va) => match b {
+                                LiveValue::Vec3f(vb) => {
+                                    LiveValue::Vec3f(Vec3f::from_lerp(*va, *vb, mix as f32))
                                 }
                                 _ => LiveValue::None
                             }

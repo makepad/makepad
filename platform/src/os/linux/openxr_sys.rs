@@ -904,8 +904,8 @@ pub const XP_API_VERSION_1_0:XrVersion = XrVersion(
 );
 
 pub type XrFovf = crate::makepad_math::CameraFov;
-pub type XrVector3f = crate::makepad_math::Vec3;
-pub type XrVector2f = crate::makepad_math::Vec2;
+pub type XrVector3f = crate::makepad_math::Vec3f;
+pub type XrVector2f = crate::makepad_math::Vec2f;
 pub type XrQuaternionf = crate::makepad_math::Quat;
 pub type XrPosef = crate::makepad_math::Pose;
 

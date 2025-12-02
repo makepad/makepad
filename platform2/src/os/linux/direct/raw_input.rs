@@ -627,7 +627,7 @@ pub struct RawInput {
     width: f64,
     height: f64,
     dpi_factor: f64,
-    abs: DVec2,
+    abs: Vec2d,
 }
 
 

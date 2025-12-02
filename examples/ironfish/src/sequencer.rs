@@ -106,7 +106,7 @@ pub struct Sequencer {
     #[live] grid_x: usize,
     #[live] grid_y: usize,
     
-    #[live] button_size: DVec2,
+    #[live] button_size: Vec2d,
     
     #[rust] buttons: ComponentMap<SeqButtonId, SeqButton>,
 }

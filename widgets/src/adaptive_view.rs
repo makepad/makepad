@@ -106,7 +106,7 @@ pub struct AdaptiveView {
 
     /// The most recent size of the parent.
     #[rust]
-    parent_size: DVec2,
+    parent_size: Vec2d,
 }
 
 pub struct WidgetVariant {
@@ -303,7 +303,7 @@ impl AdaptiveView {
     /// The selector is a closure that takes a `DisplayContext` and returns a `LiveId`, corresponding to the template to use.
     pub fn set_variant_selector(
         &mut self,
-        selector: impl FnMut(&mut Cx, &DVec2) -> LiveId + 'static,
+        selector: impl FnMut(&mut Cx, &Vec2d) -> LiveId + 'static,
     ) {
         self.variant_selector = Some(Box::new(selector));
         self.should_reapply_selector = true;
@@ -327,7 +327,7 @@ impl AdaptiveViewRef {
     /// The selector is a closure that takes a `DisplayContext` and returns a `LiveId`, corresponding to the template to use.
     pub fn set_variant_selector(
         &self,
-        selector: impl FnMut(&mut Cx, &DVec2) -> LiveId + 'static,
+        selector: impl FnMut(&mut Cx, &Vec2d) -> LiveId + 'static,
     ) {
         let Some(mut inner) = self.borrow_mut() else {
             return;
@@ -340,4 +340,4 @@ impl AdaptiveViewRef {
 pub type VariantSelector = dyn FnMut(&mut Cx, &ParentSize) -> LiveId;
 
 /// The size of the parent obtained from running `cx.peek_walk_turtle(walk)` before the widget is drawn.
-type ParentSize = DVec2;
+type ParentSize = Vec2d;

@@ -157,7 +157,7 @@ impl Pass {
         &cxpass.debug_name
     }
 
-    pub fn set_size(&self, cx: &mut Cx, pass_size: DVec2) {
+    pub fn set_size(&self, cx: &mut Cx, pass_size: Vec2d) {
         let mut pass_size = pass_size;
         if pass_size.x < 1.0 {pass_size.x = 1.0};
         if pass_size.y < 1.0 {pass_size.y = 1.0};
@@ -165,7 +165,7 @@ impl Pass {
         cxpass.pass_rect = Some(CxPassRect::Size(pass_size));
     }
 
-    pub fn size(&self, cx: &mut Cx)->Option<DVec2> {
+    pub fn size(&self, cx: &mut Cx)->Option<Vec2d> {
         let cxpass = &mut cx.passes[self.pass_id()];
         if let Some(CxPassRect::Size(size)) = &cxpass.pass_rect{
             return Some(*size)
@@ -173,7 +173,7 @@ impl Pass {
         None
     }
 
-    pub fn set_window_clear_color(&self, cx: &mut Cx, clear_color: Vec4) {
+    pub fn set_window_clear_color(&self, cx: &mut Cx, clear_color: Vec4f) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.clear_color = clear_color;
     }
@@ -228,13 +228,13 @@ impl Pass {
 
 #[derive(Clone)]
 pub enum PassClearColor {
-    InitWith(Vec4),
-    ClearWith(Vec4)
+    InitWith(Vec4f),
+    ClearWith(Vec4f)
 }
 
 impl Default for PassClearColor {
     fn default() -> Self {
-        Self::ClearWith(Vec4::default())
+        Self::ClearWith(Vec4f::default())
     }
 }
 
@@ -253,15 +253,15 @@ pub struct CxPassColorTexture {
 #[derive(Default, Clone)]
 #[repr(C)]
 pub struct PassUniforms {
-    pub camera_projection: Mat4,
-    pub camera_projection_r: Mat4,
-    pub camera_view: Mat4,
-    pub camera_view_r: Mat4,
-    pub depth_projection: Mat4,
-    pub depth_projection_r: Mat4,
-    pub depth_view: Mat4,
-    pub depth_view_r: Mat4,
-    pub camera_inv: Mat4,
+    pub camera_projection: Mat4f,
+    pub camera_projection_r: Mat4f,
+    pub camera_view: Mat4f,
+    pub camera_view_r: Mat4f,
+    pub depth_projection: Mat4f,
+    pub depth_projection_r: Mat4f,
+    pub depth_view: Mat4f,
+    pub depth_view_r: Mat4f,
+    pub camera_inv: Mat4f,
     pub dpi_factor: f32,
     pub dpi_dilate: f32,
     pub time: f32,
@@ -278,8 +278,8 @@ impl PassUniforms {
 #[derive(Clone, Debug)]
 pub enum CxPassRect {
     Area(Area),
-    AreaOrigin(Area, DVec2),
-    Size(DVec2)
+    AreaOrigin(Area, Vec2d),
+    Size(Vec2d)
 }
 
 #[derive(Clone)]
@@ -291,14 +291,14 @@ pub struct CxPass {
     pub clear_depth: PassClearDepth,
     pub dont_clear: bool,
     pub depth_init: f64,
-    pub clear_color: Vec4,
+    pub clear_color: Vec4f,
     pub dpi_factor: Option<f64>,
     pub main_draw_list_id: Option<DrawListId>,
     pub parent: CxPassParent,
     pub paint_dirty: bool,
     pub pass_rect: Option<CxPassRect>,
-    pub view_shift: DVec2,
-    pub view_scale: DVec2,
+    pub view_shift: Vec2d,
+    pub view_scale: Vec2d,
     pub pass_uniforms: PassUniforms,
     pub zbias_step: f32,
     pub os: CxOsPass,
@@ -316,7 +316,7 @@ impl Default for CxPass {
             depth_texture: None,
             dpi_factor: None,
             clear_depth: PassClearDepth::ClearWith(1.0),
-            clear_color: Vec4::default(),
+            clear_color: Vec4f::default(),
             depth_init: 1.0,
             main_draw_list_id: None,
             view_shift: dvec2(0.0,0.0),
@@ -348,12 +348,12 @@ impl CxPass {
         self.pass_uniforms.dpi_dilate = dpi_dilate as f32;
     }
 
-    pub fn set_ortho_matrix(&mut self, offset: DVec2, size: DVec2) {
+    pub fn set_ortho_matrix(&mut self, offset: Vec2d, size: Vec2d) {
 
         let offset = offset + self.view_shift;
         let size = size * self.view_scale;
 
-        let ortho = Mat4::ortho(
+        let ortho = Mat4f::ortho(
             offset.x as f32,
             (offset.x + size.x) as f32,
             offset.y as f32,
@@ -364,6 +364,6 @@ impl CxPass {
             1.0
         );
         self.pass_uniforms.camera_projection = ortho;
-        self.pass_uniforms.camera_view = Mat4::identity();
+        self.pass_uniforms.camera_view = Mat4f::identity();
     }
 }

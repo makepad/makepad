@@ -137,7 +137,7 @@ pub struct ColorPicker {
 
 #[derive(Clone, Debug, DefaultNone)]
 pub enum ColorPickerAction {
-    Change {rgba: Vec4},
+    Change {rgba: Vec4f},
     DoneChanging,
     None
 }
@@ -151,7 +151,7 @@ pub enum ColorPickerDragMode {
 
 impl ColorPicker {
     
-    pub fn handle_finger(&mut self, cx: &mut Cx, rel: DVec2, scope:&mut Scope) {
+    pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2d, scope:&mut Scope) {
         
         fn clamp(x: f64, mi: f64, ma: f64) -> f64 {if x < mi {mi} else if x > ma {ma} else {x}}
         
@@ -193,12 +193,12 @@ impl ColorPicker {
         }
     }
     
-    pub fn to_rgba(&self) -> Vec4 {
-        Vec4::from_hsva(Vec4 {x: self.hue, y: self.sat, z: self.val, w: 1.0})
+    pub fn to_rgba(&self) -> Vec4f {
+        Vec4f::from_hsva(Vec4f {x: self.hue, y: self.sat, z: self.val, w: 1.0})
     }
     
     
-    pub fn draw_color_picker(&mut self, cx: &mut Cx2d, rgba: Vec4, walk:Walk) {
+    pub fn draw_color_picker(&mut self, cx: &mut Cx2d, rgba: Vec4f, walk:Walk) {
         if self.drag_mode == ColorPickerDragMode::None {
             // lets convert to rgba
             let old_rgba = self.to_rgba();

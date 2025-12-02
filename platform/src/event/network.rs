@@ -1,5 +1,5 @@
 use crate::makepad_micro_serde::*;
-use crate::makepad_script::*;
+use crate::makepad_live_id::*;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::collections::BTreeMap;
 use std::str;
@@ -12,17 +12,17 @@ pub struct NetworkResponseItem{
 
 pub type NetworkResponsesEvent = Vec<NetworkResponseItem>;
 
-#[derive(Clone, Debug, Script, ScriptHook)]
+#[derive(Clone, Debug)]
 pub struct HttpError{
-    #[live] pub message: String,
-    #[live] pub metadata_id: LiveId
+    pub message: String,
+    pub metadata_id: LiveId
 }
 
 
-#[derive(Clone, Debug, Script, ScriptHook)]
+#[derive(Clone, Debug)]
 pub struct HttpProgress{
-    #[live] pub loaded:u64, 
-    #[live] pub total:u64,
+    pub loaded:u64, 
+    pub total:u64,
 }
 
 #[derive(Clone, Debug)]
@@ -78,15 +78,15 @@ pub struct HttpRequest {
 }
 */
 
-#[derive(PartialEq, Debug, Script, ScriptHook, Default)]
+#[derive(PartialEq, Debug,  Default)]
 pub struct HttpRequest {
-    #[live] pub metadata_id: LiveId,
-    #[live] pub url: String,
-    #[live] pub method: HttpMethod,
-    #[live] pub headers: BTreeMap<String, Vec<String>>,
-    #[live] pub ignore_ssl_cert: bool,
-    #[live] pub is_streaming: bool,
-    #[live] pub body: Option<Vec<u8>>, 
+    pub metadata_id: LiveId,
+    pub url: String,
+    pub method: HttpMethod,
+    pub headers: BTreeMap<String, Vec<String>>,
+    pub ignore_ssl_cert: bool,
+    pub is_streaming: bool,
+    pub body: Option<Vec<u8>>, 
 }
 
 #[derive(Debug)]
@@ -179,12 +179,12 @@ impl HttpRequest {
     }
 }
 
-#[derive(Debug, Clone, Script, ScriptHook)]
+#[derive(Debug, Clone)]
 pub struct HttpResponse {
-    #[live] pub metadata_id: LiveId,
-    #[live] pub status_code: u16,
-    #[live] pub headers: BTreeMap<String, Vec<String>>,
-    #[live] pub body: Option<Vec<u8>>,
+    pub metadata_id: LiveId,
+    pub status_code: u16,
+    pub headers: BTreeMap<String, Vec<String>>,
+    pub body: Option<Vec<u8>>,
 }
 
 impl HttpResponse {
@@ -244,10 +244,9 @@ impl HttpResponse {
     }
 }
 
-#[derive(PartialEq, Debug, Script, ScriptHook, Default)]
+#[derive(PartialEq, Debug, Default)]
 pub enum HttpMethod{
     #[default]
-    #[pick]
     GET,
     HEAD,
     POST,

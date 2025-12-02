@@ -23,7 +23,7 @@ pub mod audio;
 pub mod midi;
 pub mod video;
 pub mod scope;
-pub mod script;
+//pub mod script;
 
 mod draw_matrix;
 mod draw_shader; 
@@ -75,8 +75,7 @@ pub use ::windows as windows;
 pub use makepad_futures;
  
 pub use {
-    makepad_script,
-    makepad_script::makepad_error_log,
+    makepad_error_log,
     makepad_shader_compiler,
     makepad_shader_compiler::makepad_derive_live,
     makepad_shader_compiler::makepad_math,
@@ -90,14 +89,14 @@ pub use {
     //makepad_image_formats::image,
     makepad_derive_live::*,
     
-    makepad_script::vm::*,
-    makepad_script::traits::*,
-    makepad_script::script,
+    //makepad_script::vm::*,
+    //makepad_script::traits::*,
+    //makepad_script::script,
     log::*,
     makepad_math::*,
     makepad_live_id::*,
     app_main::*,
-    makepad_script::vm,
+    //makepad_script::vm,
     makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,

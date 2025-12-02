@@ -6,7 +6,7 @@ use {
         rc::Rc,
     },
     crate::{
-        makepad_math::{DVec2,dvec2},
+        makepad_math::{Vec2d,dvec2},
         makepad_platform::{
             DrawEvent,
             Area,
@@ -156,11 +156,11 @@ impl<'a> CxDraw<'a>{
         self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::Area(area));
     }
             
-    pub fn set_pass_area_with_origin(&mut self, pass: &Pass, area: Area, origin:DVec2) {
+    pub fn set_pass_area_with_origin(&mut self, pass: &Pass, area: Area, origin:Vec2d) {
         self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::AreaOrigin(area, origin));
     }
             
-    pub fn set_pass_shift_scale(&mut self, pass: &Pass, shift: DVec2, scale: DVec2) {
+    pub fn set_pass_shift_scale(&mut self, pass: &Pass, shift: Vec2d, scale: Vec2d) {
         self.passes[pass.pass_id()].view_shift = shift;
         self.passes[pass.pass_id()].view_scale = scale;
     }
@@ -170,7 +170,7 @@ impl<'a> CxDraw<'a>{
         self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::ScaledArea(area, scale));
     }   */
     
-    pub fn current_pass_size(&self) -> DVec2 {
+    pub fn current_pass_size(&self) -> Vec2d {
         self.cx.get_pass_rect(
             self.pass_stack.last().unwrap().pass_id, 
             self.current_dpi_factor()

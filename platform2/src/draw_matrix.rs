@@ -2,7 +2,7 @@
 use {
     crate::{
         makepad_error_log::*,
-        makepad_math::Mat4,
+        makepad_math::Mat4f,
         id_pool::*,
     }
 };
@@ -19,10 +19,10 @@ pub struct CxDrawMatrix{
     parent_version: u64,
     
     local_version: u64,
-    local: Mat4,
+    local: Mat4f,
     
-    object_to_world: Mat4,
-    world_to_object: Option<Mat4>
+    object_to_world: Mat4f,
+    world_to_object: Option<Mat4f>
 }
 
 impl DrawMatrixId{
@@ -59,7 +59,7 @@ impl CxDrawMatrixPool {
         DrawMatrix(self.pool.alloc())
     }
     
-    pub fn update_local(&mut self, index:DrawMatrixId, new_mat:&Mat4){
+    pub fn update_local(&mut self, index:DrawMatrixId, new_mat:&Mat4f){
         let d = &mut self.pool.pool[index.0];
         if d.local != *new_mat{
             d.local_version += 1;
@@ -81,7 +81,7 @@ impl CxDrawMatrixPool {
         }
     }
     
-    /*pub fn get_object_to_world(&mut self, index:DrawMatrixId)->&Mat4{
+    /*pub fn get_object_to_world(&mut self, index:DrawMatrixId)->&Mat4f{
         // ok this on demand updates the matrix stack
         
     }*/

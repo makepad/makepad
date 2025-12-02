@@ -7,7 +7,7 @@ use {
     },
     crate::{
         makepad_live_id::LiveId,
-        makepad_math::DVec2,
+        makepad_math::Vec2d,
         os::{
             apple::apple_sys::*,
             macos::{
@@ -393,7 +393,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_mouse_up(MouseButton::from_raw_button(raw_button), modifiers);
     }
     
-    fn mouse_pos_from_event(view: &Object, event: ObjcId) -> DVec2 {
+    fn mouse_pos_from_event(view: &Object, event: ObjcId) -> Vec2d {
         let window_point: NSPoint = unsafe {msg_send![event, locationInWindow]};
         let view_point = window_point_to_view_point(view, window_point);
         ns_point_to_dvec2(view_point)
@@ -408,8 +408,8 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
     
-    fn ns_point_to_dvec2(point: NSPoint) -> DVec2 {
-        DVec2 {
+    fn ns_point_to_dvec2(point: NSPoint) -> Vec2d {
+        Vec2d {
             x: point.x,
             y: point.y,
         }
@@ -681,7 +681,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         window.end_live_resize();
     }
     
-    fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Arc<Vec<DragItem >>, DVec2) {
+    fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Arc<Vec<DragItem >>, Vec2d) {
         //let window = get_cocoa_window(this);
         let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]

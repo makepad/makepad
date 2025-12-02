@@ -525,7 +525,7 @@ impl DropDown {
                     }
 
                     let area = self.draw_bg.area().rect(cx);
-                    let shift = DVec2 {
+                    let shift = Vec2d {
                         x: 0.0,
                         y: area.size.y,
                     };

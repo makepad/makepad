@@ -517,13 +517,13 @@ pub struct D3d11Window {
     pub win32_window: Box<Win32Window>,
     pub render_target_view: Option<ID3D11RenderTargetView >,
     pub swap_texture: Option<ID3D11Texture2D >,
-    pub alloc_size: DVec2,
+    pub alloc_size: Vec2d,
     pub first_draw: bool,
     pub swap_chain: IDXGISwapChain1,
 }
 
 impl D3d11Window {
-    pub fn new(window_id: WindowId, d3d11_cx: &D3d11Cx, inner_size: DVec2, position: Option<DVec2>, title: &str, is_fullscreen: bool) -> D3d11Window {
+    pub fn new(window_id: WindowId, d3d11_cx: &D3d11Cx, inner_size: Vec2d, position: Option<Vec2d>, title: &str, is_fullscreen: bool) -> D3d11Window {
 
         // create window, and then initialize it; this is needed because
         // GWLP_USERDATA needs to reference a stable and existing window
@@ -585,7 +585,7 @@ impl D3d11Window {
     // switch back to swapchain
     pub fn stop_resize(&mut self) {
         self.is_in_resize = false;
-        self.alloc_size = DVec2::default();
+        self.alloc_size = Vec2d::default();
     }
     
     

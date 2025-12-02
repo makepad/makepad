@@ -16,9 +16,9 @@ struct DeferredFill {
 pub enum AlignEntry{
     Unset,
     Area(Area),
-    ShiftTurtle{area:Area, shift:DVec2, skip:usize},
+    ShiftTurtle{area:Area, shift:Vec2d, skip:usize},
     SkipTurtle{skip:usize},
-    BeginTurtle(DVec2,DVec2),
+    BeginTurtle(Vec2d,Vec2d),
     EndTurtle
 }
 
@@ -28,7 +28,7 @@ pub enum AlignEntry{
 pub struct Walk {
     #[doc(hidden)]
     #[live]
-    pub abs_pos: Option<DVec2>,
+    pub abs_pos: Option<Vec2d>,
 
     /// The margin around this walk's rectangle.
     #[live]
@@ -340,7 +340,7 @@ pub enum Base {
 #[derive(Copy, Clone, Debug, Live, LiveHook, LiveRegister)]
 #[live_ignore]
 pub struct Layout {
-    #[live] pub scroll: DVec2,
+    #[live] pub scroll: Vec2d,
     #[live(true)] pub clip_x: bool,
     #[live(true)] pub clip_y: bool,
 
@@ -571,17 +571,17 @@ impl Padding {
     }
 
     /// Returns a vector containing the left and top padding.
-    pub fn left_top(self) -> DVec2 {
+    pub fn left_top(self) -> Vec2d {
         dvec2(self.left, self.top)
     }
 
     /// Returns a vector containing the right and bottom padding.
-    pub fn right_bottom(self) -> DVec2 {
+    pub fn right_bottom(self) -> Vec2d {
         dvec2(self.right, self.bottom)
     }
 
     /// Returns a vector containing both the padding width and height.
-    pub fn size(self) -> DVec2 {
+    pub fn size(self) -> Vec2d {
         dvec2(self.width(), self.height())
     }
 
@@ -638,8 +638,8 @@ pub struct Turtle {
     finished_walks_start: usize,
     deferred_fills: Vec<DeferredFill>,
     resolved_fills: Vec<f64>,
-    pos: DVec2,
-    origin: DVec2,
+    pos: Vec2d,
+    origin: Vec2d,
     guard: Area
 }
 
@@ -696,17 +696,17 @@ impl Turtle {
     }
 
     /// Returns the origin of this turtle's inner rectangle.
-    pub fn inner_origin(&self) -> DVec2 {
+    pub fn inner_origin(&self) -> Vec2d {
         self.origin + self.padding().left_top()
     }
 
     /// Returns the origin of this turtle's inner rectangle, without scrolling applied.
-    pub fn unscrolled_inner_origin(&self) -> DVec2 {
+    pub fn unscrolled_inner_origin(&self) -> Vec2d {
         self.origin + self.scroll()
     }
 
     /// Returns the size of this turtle's inner rectangle.
-    pub fn inner_size(&self) -> DVec2 {
+    pub fn inner_size(&self) -> Vec2d {
         dvec2(self.inner_width(), self.inner_height())
     }
 
@@ -799,17 +799,17 @@ impl Turtle {
     }
 
     /// Returns the origin of this turtle's rectangle.
-    pub fn origin(&self) -> DVec2 {
+    pub fn origin(&self) -> Vec2d {
         self.origin
     }
 
     /// Returns the origin of this turtle's rectangle, without scrolling applied.
-    pub fn origin_unscrolled(&self) -> DVec2 {
+    pub fn origin_unscrolled(&self) -> Vec2d {
         self.origin + self.layout.scroll
     }
 
     /// Returns the size of this turtle's rectangle.
-    pub fn size(&self) -> DVec2 {
+    pub fn size(&self) -> Vec2d {
         dvec2(self.width(), self.height())
     }
 
@@ -916,17 +916,17 @@ impl Turtle {
     }
 
     /// Returns the origin of this turtle's outer rectangle.
-    pub fn outer_origin(&self) -> DVec2 {
+    pub fn outer_origin(&self) -> Vec2d {
         self.origin() - self.margin().left_top()
     }
 
     /// Returns the origin of this turtle's outer rectangle, without scrolling applied.
-    pub fn unscrolled_outer_origin(&self) -> DVec2 {
+    pub fn unscrolled_outer_origin(&self) -> Vec2d {
         self.origin_unscrolled() - self.margin().left_top()
     }
 
     /// Returns the size of this turtle's outer rectangle.
-    pub fn outer_size(&self) -> DVec2 {
+    pub fn outer_size(&self) -> Vec2d {
         dvec2(self.outer_width(), self.outer_height())
     }
 
@@ -1005,7 +1005,7 @@ impl Turtle {
 
     /// Returns the size of the rectangle of this turtle's next walk, based on the given desired
     /// `width`, `height`, and `margin`.
-    pub fn next_walk_size(&self, width: Size, height: Size, margin: Margin) -> DVec2 {
+    pub fn next_walk_size(&self, width: Size, height: Size, margin: Margin) -> Vec2d {
         dvec2(
             self.next_walk_width(width, margin),
             self.next_walk_height(height, margin),
@@ -1102,12 +1102,12 @@ impl Turtle {
     }
 
     /// Moves this turtle to the given position.
-    pub fn move_to(&mut self, pos: DVec2) {
+    pub fn move_to(&mut self, pos: Vec2d) {
         self.pos = pos
     }
 
     /// Moves this turtle right and down by the given amount.
-    pub fn move_right_down(&mut self, amount: DVec2) {
+    pub fn move_right_down(&mut self, amount: Vec2d) {
         self.move_to(self.pos() + amount);
     }
 
@@ -1122,7 +1122,7 @@ impl Turtle {
     }
 
     /// Allocates additional size to the right of and below this turtle's position.
-    pub fn allocate_size(&mut self, additional: DVec2) {
+    pub fn allocate_size(&mut self, additional: Vec2d) {
         self.allocate_width(additional.x);
         self.allocate_height(additional.y);
     }
@@ -1210,7 +1210,7 @@ pub enum DeferredWalk {
     /// An unresolved deferred walk.
     Unresolved {
         index: usize,
-        pos: DVec2,
+        pos: Vec2d,
         margin: Margin,
         other_axis: Size,
     },
@@ -1263,7 +1263,7 @@ pub struct FinishedWalk {
     deferred_before_count: usize,
 
     /// The size of the outer rectangle of this finished walk.
-    outer_size: DVec2,
+    outer_size: Vec2d,
 
     metrics: Metrics,
 }
@@ -1287,7 +1287,7 @@ impl<'a,'b> Cx2d<'a,'b> {
     /// 
     /// This is either zero if the current turtle's next walk would be its first, or the current
     /// turtle's spacing in the direction of it's flow otherwise.
-    pub fn turtle_next_walk_offset(&self) -> DVec2 {
+    pub fn turtle_next_walk_offset(&self) -> Vec2d {
         if self.turtle_next_walk_is_first() {
             dvec2(0.0, 0.0)
         } else {
@@ -1313,7 +1313,7 @@ impl<'a,'b> Cx2d<'a,'b> {
     }
 
     /// Starts a root turtle.
-    pub fn begin_root_turtle(&mut self, size: DVec2, layout: Layout) {
+    pub fn begin_root_turtle(&mut self, size: Vec2d, layout: Layout) {
         self.align_list.push(AlignEntry::BeginTurtle(dvec2(0.0,0.0), size));
 
         let turtle = Turtle {
@@ -1324,7 +1324,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             finished_walks_start: self.finished_walks.len(),
             deferred_fills: Vec::new(),
             resolved_fills: Vec::new(),
-            pos: DVec2 {
+            pos: Vec2d {
                 x: layout.padding.left,
                 y: layout.padding.top
             },
@@ -1343,7 +1343,7 @@ impl<'a,'b> Cx2d<'a,'b> {
     }
 
     /// Starts a root turtle with clipping disabled.
-    pub fn begin_unclipped_root_turtle(&mut self, size:DVec2,layout: Layout) {
+    pub fn begin_unclipped_root_turtle(&mut self, size:Vec2d,layout: Layout) {
         self.begin_root_turtle(size, layout);
         *self.align_list.last_mut().unwrap() = AlignEntry::Unset;
     }
@@ -1433,7 +1433,7 @@ impl<'a,'b> Cx2d<'a,'b> {
             deferred_fills: Vec::new(),
             resolved_fills: Vec::new(),
             wrap_spacing: 0.0,
-            pos: DVec2 {
+            pos: Vec2d {
                 x: origin.x + layout.padding.left,
                 y: origin.y + layout.padding.top
             },
@@ -1863,7 +1863,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         self.finished_walks.truncate(turtle.finished_walks_start);
     }
     
-    pub fn end_pass_sized_turtle_with_shift(&mut self, area:Area, shift:DVec2){
+    pub fn end_pass_sized_turtle_with_shift(&mut self, area:Area, shift:Vec2d){
         let turtle = self.turtles.pop().unwrap();
         // lets perform clipping on our alignlist.
         self.align_list.push(AlignEntry::EndTurtle);
@@ -1907,7 +1907,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         self.turtle().rect_is_visible(rect)
     }
        
-    pub fn peek_walk_pos(&self, walk: Walk) -> DVec2 {
+    pub fn peek_walk_pos(&self, walk: Walk) -> Vec2d {
         if let Some(pos) = walk.abs_pos {
             pos + walk.margin.left_top()
         }
@@ -2166,7 +2166,7 @@ impl<'a,'b> Cx2d<'a,'b> {
         }
     }
     
-    pub fn shift_align_range(&mut self, range: &TurtleAlignRange, shift: DVec2) {
+    pub fn shift_align_range(&mut self, range: &TurtleAlignRange, shift: Vec2d) {
         self.move_align_list(range.start, range.end, shift.x, shift.y, true);
     }
     
@@ -2202,7 +2202,7 @@ impl Turtle {
         self.row_height() + self.wrap_spacing
     }
     
-    pub fn used(&self) -> DVec2 {
+    pub fn used(&self) -> Vec2d {
         dvec2(self.used_width, self.used_height)
     }
     
@@ -2220,25 +2220,25 @@ impl Turtle {
         return view.intersects(geom)
     }
     
-    pub fn rel_pos(&self) -> DVec2 {
-        DVec2 {
+    pub fn rel_pos(&self) -> Vec2d {
+        Vec2d {
             x: self.pos.x - self.origin.x,
             y: self.pos.y - self.origin.y
         }
     }
     
-    pub fn rel_pos_padded(&self) -> DVec2 {
-        DVec2 {
+    pub fn rel_pos_padded(&self) -> Vec2d {
+        Vec2d {
             x: self.pos.x - self.origin.x - self.layout.padding.left,
             y: self.pos.y - self.origin.y - self.layout.padding.right
         }
     }
     
-    pub fn pos(&self) -> DVec2 {
+    pub fn pos(&self) -> Vec2d {
         self.pos
     }
 
-    pub fn scroll(&self) -> DVec2 {
+    pub fn scroll(&self) -> Vec2d {
         self.layout.scroll
     }
 
@@ -2268,7 +2268,7 @@ impl Walk {
         }
     }
     
-    pub fn with_abs_pos(mut self, v: DVec2) -> Self {
+    pub fn with_abs_pos(mut self, v: Vec2d) -> Self {
         self.abs_pos = Some(v);
         self
     }
@@ -2287,7 +2287,7 @@ impl Walk {
 }
 
 impl Layout {
-    pub fn with_scroll(mut self, v: DVec2) -> Self {
+    pub fn with_scroll(mut self, v: Vec2d) -> Self {
         self.scroll = v;
         self
     }

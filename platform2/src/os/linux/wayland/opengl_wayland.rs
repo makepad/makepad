@@ -12,7 +12,7 @@ use tempfile;
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols::xdg::decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1};
 use crate::egl_sys::{EGLNativeWindowType, EGLSurface, NativeWindowType};
-use crate::makepad_math::DVec2;
+use crate::makepad_math::Vec2d;
 
 use crate::opengl_cx::OpenglCx;
 use crate::wayland::wayland_state::WaylandState;
@@ -26,7 +26,7 @@ pub(crate) struct WaylandWindow {
     pub xdg_surface: xdg_surface::XdgSurface,
     pub viewport: wp_viewport::WpViewport,
     pub window_geom: WindowGeom,
-    pub cal_size: DVec2,
+    pub cal_size: Vec2d,
     pub wl_egl_surface: WlEglSurface,
     pub egl_surface: EGLSurface,
 }
@@ -41,8 +41,8 @@ impl WaylandWindow {
         viewporter: &wp_viewporter::WpViewporter,
         qhandle: &QueueHandle<WaylandState>,
         opengl_cx: &OpenglCx,
-        inner_size: DVec2,
-        position: Option<DVec2>,
+        inner_size: Vec2d,
+        position: Option<Vec2d>,
         title: &str,
         is_fullscreen: bool,
     ) -> WaylandWindow {
@@ -97,14 +97,14 @@ impl WaylandWindow {
             viewport,
             xdg_surface: shell_surface,
             window_id,
-            cal_size: DVec2::default(),
+            cal_size: Vec2d::default(),
             window_geom: geom,
             wl_egl_surface,
             egl_surface,
         }
     }
     pub fn resize_buffers(&mut self) -> bool {
-        let cal_size = DVec2 {
+        let cal_size = Vec2d {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
         };

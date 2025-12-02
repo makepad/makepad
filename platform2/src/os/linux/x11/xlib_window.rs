@@ -15,7 +15,7 @@ use {
     crate::{
         area::Area,
         window::WindowId,
-        makepad_math::DVec2,
+        makepad_math::Vec2d,
         event::*,
         cursor::MouseCursor,
     },
@@ -33,9 +33,9 @@ pub struct XlibWindow {
     pub window_id: WindowId,
     pub last_window_geom: WindowGeom,
     
-    pub ime_spot: DVec2,
+    pub ime_spot: Vec2d,
     pub current_cursor: MouseCursor,
-    pub last_mouse_pos: DVec2,
+    pub last_mouse_pos: Vec2d,
 }
 /*
 #[derive(Clone)]
@@ -61,13 +61,13 @@ impl XlibWindow {
             window_id,
             last_window_geom: WindowGeom::default(),
             last_nc_mode: None,
-            ime_spot: DVec2::default(),
+            ime_spot: Vec2d::default(),
             current_cursor: MouseCursor::Default,
-            last_mouse_pos: DVec2::default(),
+            last_mouse_pos: Vec2d::default(),
         }
     }
     
-    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>, is_fullscreen: bool, visual_info: x11_sys::XVisualInfo, custom_window_chrome: bool) {
+    pub fn init(&mut self, title: &str, size: Vec2d, position: Option<Vec2d>, is_fullscreen: bool, visual_info: x11_sys::XVisualInfo, custom_window_chrome: bool) {
         unsafe {
             let display = get_xlib_app_global().display;
             
@@ -347,11 +347,11 @@ impl XlibWindow {
         maximized
     }
     
-    pub fn set_ime_spot(&mut self, spot: DVec2) {
+    pub fn set_ime_spot(&mut self, spot: Vec2d) {
         self.ime_spot = spot;
     }
     
-    pub fn get_position(&self) -> DVec2 {
+    pub fn get_position(&self) -> Vec2d {
         unsafe {
             let mut xwa = mem::MaybeUninit::uninit();
             let display = get_xlib_app_global().display;
@@ -361,7 +361,7 @@ impl XlibWindow {
                 xwa.as_mut_ptr()
             );
             let xwa = xwa.assume_init();
-            return DVec2 {x: xwa.x as f64, y: xwa.y as f64}
+            return Vec2d {x: xwa.x as f64, y: xwa.y as f64}
             /*
             let mut child = mem::uninitialized();
             let default_screen = X11_sys::XDefaultScreen(display);
@@ -373,28 +373,28 @@ impl XlibWindow {
         }
     }
     
-    pub fn get_inner_size(&self) -> DVec2 {
+    pub fn get_inner_size(&self) -> Vec2d {
         let dpi_factor = self.get_dpi_factor();
         unsafe {
             let mut xwa = mem::MaybeUninit::uninit();
             let display = get_xlib_app_global().display;
             x11_sys::XGetWindowAttributes(display, self.window.unwrap(), xwa.as_mut_ptr());
             let xwa = xwa.assume_init();
-            return DVec2 {x: xwa.width as f64 / dpi_factor, y: xwa.height as f64 / dpi_factor}
+            return Vec2d {x: xwa.width as f64 / dpi_factor, y: xwa.height as f64 / dpi_factor}
         }
     }
     
-    pub fn get_outer_size(&self) -> DVec2 {
+    pub fn get_outer_size(&self) -> Vec2d {
         unsafe {
             let mut xwa = mem::MaybeUninit::uninit();
             let display = get_xlib_app_global().display;
             x11_sys::XGetWindowAttributes(display, self.window.unwrap(), xwa.as_mut_ptr());
             let xwa = xwa.assume_init();
-            return DVec2 {x: xwa.width as f64, y: xwa.height as f64}
+            return Vec2d {x: xwa.width as f64, y: xwa.height as f64}
         }
     }
     
-    pub fn set_position(&mut self, pos: DVec2) {
+    pub fn set_position(&mut self, pos: Vec2d) {
         unsafe {
             let display = get_xlib_app_global().display;
             let dpi_factor = self.get_dpi_factor();
@@ -409,10 +409,10 @@ impl XlibWindow {
         }
     }
     
-    pub fn set_outer_size(&self, _size: DVec2) {
+    pub fn set_outer_size(&self, _size: Vec2d) {
     }
     
-    pub fn set_inner_size(&self, _size: DVec2) {
+    pub fn set_inner_size(&self, _size: Vec2d) {
     }
     
     pub fn get_dpi_factor(&self) -> f64 {
@@ -500,7 +500,7 @@ impl XlibWindow {
         }));
     }
     
-    pub fn send_mouse_move(&mut self, pos: DVec2, modifiers: KeyModifiers) {
+    pub fn send_mouse_move(&mut self, pos: Vec2d, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         self.do_callback(XlibEvent::MouseMove(MouseMoveEvent {
             window_id: self.window_id,

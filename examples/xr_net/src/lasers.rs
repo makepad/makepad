@@ -80,7 +80,7 @@ struct Bullet{
 struct AngleVel{
     angle: f32,
     angle_velo: f32,
-    pos: Vec3,
+    pos: Vec3f,
     pos_velo: f32,
 }
 
@@ -115,7 +115,7 @@ impl XrPeer{
 }
 
 impl Bullets{
-    fn draw(&mut self, cx:&mut Cx3d, cube:&mut DrawBullet, xr_state:&XrState, anchor_map:&Mat4, idx:usize,tc:f32){
+    fn draw(&mut self, cx:&mut Cx3d, cube:&mut DrawBullet, xr_state:&XrState, anchor_map:&Mat4f, idx:usize,tc:f32){
         while self.last_angles.len() < idx + 1{
             self.last_angles.push(Default::default());
         }
@@ -164,7 +164,7 @@ impl Bullets{
             }
         }
         for bullet in &self.bullets{
-            let mat = Mat4::mul(&bullet.pose.to_mat4(), anchor_map);
+            let mat = Mat4f::mul(&bullet.pose.to_mat4(), anchor_map);
             cube.index = bullet.index as f32;
             cube.life = (xr_state.time - bullet.shot_at) as f32;
             cube.transform = mat;
@@ -233,7 +233,7 @@ impl Widget for XrLasers {
         
         //let dt = profile_start();
         let mut idx = 0;
-        self.bullets.draw(cx, &mut self.draw_bullet, &xr_state, &Mat4::identity(), idx, self.tap_count);
+        self.bullets.draw(cx, &mut self.draw_bullet, &xr_state, &Mat4f::identity(), idx, self.tap_count);
         idx += 1;
         for peer in &mut self.peers{
             let peer_state = peer.tween(xr_state.time);

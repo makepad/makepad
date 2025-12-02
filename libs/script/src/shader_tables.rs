@@ -290,7 +290,7 @@ pub fn type_table_eq(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, built
              ShaderType::Pod(y) if *y == builtins.pod_bool => bool_ty,
              _=>ShaderType::Error(NIL),
         }
-        // Vec2
+        // Vec2f
         ShaderType::Pod(x) if *x == builtins.pod_vec2f => match rhs {
              ShaderType::Pod(y) if *y == builtins.pod_vec2f => vec2b_ty,
              _=>ShaderType::Error(NIL),
@@ -307,7 +307,7 @@ pub fn type_table_eq(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, built
              ShaderType::Pod(y) if *y == builtins.pod_vec2i => vec2b_ty,
              _=>ShaderType::Error(NIL),
         }
-        // Vec3
+        // Vec3f
         ShaderType::Pod(x) if *x == builtins.pod_vec3f => match rhs {
              ShaderType::Pod(y) if *y == builtins.pod_vec3f => vec3b_ty,
              _=>ShaderType::Error(NIL),
@@ -324,7 +324,7 @@ pub fn type_table_eq(lhs: &ShaderType, rhs: &ShaderType, trap:&ScriptTrap, built
              ShaderType::Pod(y) if *y == builtins.pod_vec3i => vec3b_ty,
              _=>ShaderType::Error(NIL),
         }
-        // Vec4
+        // Vec4f
         ShaderType::Pod(x) if *x == builtins.pod_vec4f => match rhs {
              ShaderType::Pod(y) if *y == builtins.pod_vec4f => vec4b_ty,
              _=>ShaderType::Error(NIL),

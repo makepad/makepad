@@ -5,7 +5,7 @@ use {
         os::raw::c_void,
     },
     crate::{
-        makepad_math::DVec2,
+        makepad_math::Vec2d,
         window::WindowId,
         os::{
             apple::apple_sys::*,
@@ -40,9 +40,9 @@ pub struct MacosWindow {
     pub(crate) window_id: WindowId,
     pub(crate) view: ObjcId,
     pub(crate) window: ObjcId,
-    pub(crate) ime_spot: DVec2,
+    pub(crate) ime_spot: Vec2d,
     pub(crate) is_fullscreen: bool,
-    pub(crate) last_mouse_pos: DVec2,
+    pub(crate) last_mouse_pos: Vec2d,
     window_delegate: ObjcId,
     live_resize_timer: ObjcId,
     last_window_geom: Option<WindowGeom>,
@@ -68,14 +68,14 @@ impl MacosWindow {
                 window_id: window_id,
                 view: view,
                 last_window_geom: None,
-                ime_spot: DVec2::default(),
-                last_mouse_pos: DVec2::default(),
+                ime_spot: Vec2d::default(),
+                last_mouse_pos: Vec2d::default(),
             }
         }
     }
     
     // complete window initialization with pointers to self
-    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>, is_fullscreen: bool) {
+    pub fn init(&mut self, title: &str, size: Vec2d, position: Option<Vec2d>, is_fullscreen: bool) {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
@@ -156,7 +156,7 @@ impl MacosWindow {
         }
     }
     
-    pub fn set_ime_spot(&mut self, spot: DVec2) {
+    pub fn set_ime_spot(&mut self, spot: Vec2d) {
         self.ime_spot = spot;
     }
     
@@ -253,7 +253,7 @@ impl MacosWindow {
         MacosApp::do_callback(event);
     }
     
-    pub fn set_position(&mut self, pos: DVec2) {
+    pub fn set_position(&mut self, pos: Vec2d) {
         let mut window_frame: NSRect = unsafe {msg_send![self.window, frame]};
         window_frame.origin.x = pos.x as f64;
         window_frame.origin.y = pos.y as f64;
@@ -261,12 +261,12 @@ impl MacosWindow {
         unsafe {let () = msg_send![self.window, setFrame: window_frame display: YES];};
     }
     
-    pub fn get_position(&self) -> DVec2 {
+    pub fn get_position(&self) -> Vec2d {
         let window_frame: NSRect = unsafe {msg_send![self.window, frame]};
-        DVec2 {x: window_frame.origin.x, y: window_frame.origin.y}
+        Vec2d {x: window_frame.origin.x, y: window_frame.origin.y}
     }
     
-    pub fn get_ime_origin(&self) -> DVec2 {
+    pub fn get_ime_origin(&self) -> Vec2d {
         let shift_x = 5.0; // unknown why
         let shift_y = -10.0;
         let rect = NSRect {
@@ -275,20 +275,20 @@ impl MacosWindow {
             size: NSSize {width: 0.0, height: 0.0},
         };
         let out: NSRect = unsafe {msg_send![self.window, convertRectToScreen: rect]};
-        DVec2 {x: out.origin.x + shift_x, y: out.origin.y + shift_y}
+        Vec2d {x: out.origin.x + shift_x, y: out.origin.y + shift_y}
     }
     
-    pub fn get_inner_size(&self) -> DVec2 {
+    pub fn get_inner_size(&self) -> Vec2d {
         let view_frame: NSRect = unsafe {msg_send![self.view, frame]};
-        DVec2 {x: view_frame.size.width, y: view_frame.size.height}
+        Vec2d {x: view_frame.size.width, y: view_frame.size.height}
     }
     
-    pub fn get_outer_size(&self) -> DVec2 {
+    pub fn get_outer_size(&self) -> Vec2d {
         let window_frame: NSRect = unsafe {msg_send![self.window, frame]};
-        DVec2 {x: window_frame.size.width, y: window_frame.size.height}
+        Vec2d {x: window_frame.size.width, y: window_frame.size.height}
     }
     
-    pub fn set_outer_size(&self, size: DVec2) {
+    pub fn set_outer_size(&self, size: Vec2d) {
         let mut window_frame: NSRect = unsafe {msg_send![self.window, frame]};
         window_frame.size.width = size.x;
         window_frame.size.height = size.y;
@@ -371,7 +371,7 @@ impl MacosWindow {
         }));
     }
     
-    pub fn send_mouse_move(&mut self, _event: ObjcId, pos: DVec2, modifiers: KeyModifiers) {
+    pub fn send_mouse_move(&mut self, _event: ObjcId, pos: Vec2d, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         
         with_macos_app(|app| app.startup_focus_hack());
@@ -387,7 +387,7 @@ impl MacosWindow {
         //get_macos_app_global().ns_event = ptr::null_mut();
     }
     
-    pub fn send_scroll(&mut self, scroll:DVec2, modifiers: KeyModifiers, is_mouse:bool){
+    pub fn send_scroll(&mut self, scroll:Vec2d, modifiers: KeyModifiers, is_mouse:bool){
         self.do_callback(
             MacosEvent::Scroll(ScrollEvent {
                 window_id: self.window_id,

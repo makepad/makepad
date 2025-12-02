@@ -52,9 +52,9 @@ pub fn generate_builtins()-> HashMap<Ident, Builtin>{
     let x = [
         builtin!(abs, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4,
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f,
             (Ty::Int) -> Ty::Int,
             (Ty::Ivec2) -> Ty::Ivec2,
             (Ty::Ivec3) -> Ty::Ivec3,
@@ -62,15 +62,15 @@ pub fn generate_builtins()-> HashMap<Ident, Builtin>{
         ]),
         builtin!(acos, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(acos, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(all, [
             (Ty::Bvec2) -> Ty::Bool,
@@ -84,73 +84,73 @@ pub fn generate_builtins()-> HashMap<Ident, Builtin>{
         ]),
         builtin!(asin, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(atan, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4,
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f,
             (Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(ceil, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(clamp, [
             (Ty::Float, Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4, Ty::Vec4) -> Ty::Vec4,
-            (Ty::Vec2, Ty::Float, Ty::Float) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Float, Ty::Float) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Float, Ty::Float) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f,
+            (Ty::Vec2f, Ty::Float, Ty::Float) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Float, Ty::Float) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Float, Ty::Float) -> Ty::Vec4f
         ]),
         builtin!(cos, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(cross, [
-            (Ty::Vec3, Ty::Vec3) -> Ty::Vec3
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f
         ]),
         builtin!(degrees, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(dFdx, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(dFdy, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(distance, [
             (Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Float,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Float,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Float
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Float,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Float,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Float
         ]),
         builtin!(dot, [
             (Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Float,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Float,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Float
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Float,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Float,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Float
         ]),
         builtin!(equal, [
             (Ty::Bvec2, Ty::Bvec2) -> Ty::Bvec2,
@@ -159,145 +159,145 @@ pub fn generate_builtins()-> HashMap<Ident, Builtin>{
             (Ty::Ivec2, Ty::Ivec2) -> Ty::Bvec2,
             (Ty::Ivec3, Ty::Ivec3) -> Ty::Bvec3,
             (Ty::Ivec4, Ty::Ivec4) -> Ty::Bvec4,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Bvec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Bvec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Bvec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Bvec2,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Bvec3,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Bvec4
         ]),
         builtin!(exp, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(exp2, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(faceforward, [
             (Ty::Float, Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4, Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(floor, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(fract, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(greaterThan, [
             (Ty::Ivec2, Ty::Ivec2) -> Ty::Bvec2,
             (Ty::Ivec3, Ty::Ivec3) -> Ty::Bvec3,
             (Ty::Ivec4, Ty::Ivec4) -> Ty::Bvec4,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Bvec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Bvec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Bvec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Bvec2,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Bvec3,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Bvec4
         ]),
         builtin!(greaterThanEqual, [
             (Ty::Ivec2, Ty::Ivec2) -> Ty::Bvec2,
             (Ty::Ivec3, Ty::Ivec3) -> Ty::Bvec3,
             (Ty::Ivec4, Ty::Ivec4) -> Ty::Bvec4,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Bvec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Bvec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Bvec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Bvec2,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Bvec3,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Bvec4
         ]),
         builtin!(inversesqrt, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(inverse, [
-            (Ty::Mat4) -> Ty::Mat4
+            (Ty::Mat4f) -> Ty::Mat4f
         ]),
         builtin!(length, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Float,
-            (Ty::Vec3) -> Ty::Float,
-            (Ty::Vec4) -> Ty::Float
+            (Ty::Vec2f) -> Ty::Float,
+            (Ty::Vec3f) -> Ty::Float,
+            (Ty::Vec4f) -> Ty::Float
         ]),
         builtin!(lessThan, [
             (Ty::Ivec2, Ty::Ivec2) -> Ty::Bvec2,
             (Ty::Ivec3, Ty::Ivec3) -> Ty::Bvec3,
             (Ty::Ivec4, Ty::Ivec4) -> Ty::Bvec4,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Bvec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Bvec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Bvec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Bvec2,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Bvec3,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Bvec4
         ]),
         builtin!(lessThanEqual, [
             (Ty::Ivec2, Ty::Ivec2) -> Ty::Bvec2,
             (Ty::Ivec3, Ty::Ivec3) -> Ty::Bvec3,
             (Ty::Ivec4, Ty::Ivec4) -> Ty::Bvec4,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Bvec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Bvec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Bvec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Bvec2,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Bvec3,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Bvec4
         ]),
         builtin!(log, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(log2, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(matrixCompMult, [
             (Ty::Mat2, Ty::Mat2) -> Ty::Mat2,
             (Ty::Mat3, Ty::Mat3) -> Ty::Mat3,
-            (Ty::Mat4, Ty::Mat4) -> Ty::Mat4
+            (Ty::Mat4f, Ty::Mat4f) -> Ty::Mat4f
         ]),
         builtin!(max, [
             (Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Vec4,
-            (Ty::Vec2, Ty::Float) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Float) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Float) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f,
+            (Ty::Vec2f, Ty::Float) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Float) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Float) -> Ty::Vec4f
         ]),
         builtin!(min, [
             (Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Vec4,
-            (Ty::Vec2, Ty::Float) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Float) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Float) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f,
+            (Ty::Vec2f, Ty::Float) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Float) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Float) -> Ty::Vec4f
         ]),
         builtin!(mix, [
             (Ty::Float, Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4, Ty::Vec4) -> Ty::Vec4,
-            (Ty::Vec2, Ty::Vec2, Ty::Float) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3, Ty::Float) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4, Ty::Float) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f,
+            (Ty::Vec2f, Ty::Vec2f, Ty::Float) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f, Ty::Float) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f, Ty::Float) -> Ty::Vec4f
         ]),
         builtin!(mod, [
             (Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Vec4,
-            (Ty::Vec2, Ty::Float) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Float) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Float) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f,
+            (Ty::Vec2f, Ty::Float) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Float) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Float) -> Ty::Vec4f
         ]),
         builtin!(normalize, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(not, [
             (Ty::Bvec2) -> Ty::Bvec2,
@@ -311,90 +311,90 @@ pub fn generate_builtins()-> HashMap<Ident, Builtin>{
             (Ty::Ivec2, Ty::Ivec2) -> Ty::Bvec2,
             (Ty::Ivec3, Ty::Ivec3) -> Ty::Bvec3,
             (Ty::Ivec4, Ty::Ivec4) -> Ty::Bvec4,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Bvec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Bvec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Bvec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Bvec2,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Bvec3,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Bvec4
         ]),
         builtin!(pow, [
             (Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(radians, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(reflect, [
             (Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(refract, [
             (Ty::Float, Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2, Ty::Float) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3, Ty::Float) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4, Ty::Float) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f, Ty::Float) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f, Ty::Float) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f, Ty::Float) -> Ty::Vec4f
         ]),
         builtin!(sample2d, [
-            (Ty::Texture2D, Ty::Vec2) -> Ty::Vec4
+            (Ty::Texture2D, Ty::Vec2f) -> Ty::Vec4f
         ]),
         builtin!(sample2d_rt, [
-            (Ty::Texture2D, Ty::Vec2) -> Ty::Vec4
+            (Ty::Texture2D, Ty::Vec2f) -> Ty::Vec4f
         ]),
         builtin!(sample2dOES, [
-            (Ty::TextureOES, Ty::Vec2) -> Ty::Vec4
+            (Ty::TextureOES, Ty::Vec2f) -> Ty::Vec4f
         ]),
         builtin!(depth_clip, [
-            (Ty::Vec4, Ty::Vec4, Ty::Float) -> Ty::Vec4
+            (Ty::Vec4f, Ty::Vec4f, Ty::Float) -> Ty::Vec4f
         ]),
         builtin!(sign, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(sin, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(smoothstep, [
             (Ty::Float, Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Vec2, Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4, Ty::Vec4) -> Ty::Vec4,
-            (Ty::Float, Ty::Float, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Float, Ty::Float, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Float, Ty::Float, Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f, Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f,
+            (Ty::Float, Ty::Float, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Float, Ty::Float, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Float, Ty::Float, Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(sqrt, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(step, [
             (Ty::Float, Ty::Float) -> Ty::Float,
-            (Ty::Float, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Float, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Float, Ty::Vec4) -> Ty::Vec4,
-            (Ty::Vec2, Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3, Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4, Ty::Vec4) -> Ty::Vec4
+            (Ty::Float, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Float, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Float, Ty::Vec4f) -> Ty::Vec4f,
+            (Ty::Vec2f, Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f, Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f, Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(tan, [
             (Ty::Float) -> Ty::Float,
-            (Ty::Vec2) -> Ty::Vec2,
-            (Ty::Vec3) -> Ty::Vec3,
-            (Ty::Vec4) -> Ty::Vec4
+            (Ty::Vec2f) -> Ty::Vec2f,
+            (Ty::Vec3f) -> Ty::Vec3f,
+            (Ty::Vec4f) -> Ty::Vec4f
         ]),
         builtin!(transpose, [
-            (Ty::Mat4) -> Ty::Mat4,
+            (Ty::Mat4f) -> Ty::Mat4f,
             (Ty::Mat3) -> Ty::Mat3
         ]),
 

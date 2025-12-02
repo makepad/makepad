@@ -116,7 +116,7 @@ struct WidgetItem{
 
 struct AlignItem {
     align_range: TurtleAlignRange,
-    size: DVec2,
+    size: Vec2d,
     shift: f64,
     index: usize
 }
@@ -232,8 +232,8 @@ impl PortalList {
                     
                     let mut pos = first_pos.min(min); // lets do a maximum for first scroll
                     for item in list {
-                        let shift = DVec2::from_index_pair(vi, pos, 0.0);
-                        cx.shift_align_range(&item.align_range, shift - DVec2::from_index_pair(vi, item.shift, 0.0));
+                        let shift = Vec2d::from_index_pair(vi, pos, 0.0);
+                        cx.shift_align_range(&item.align_range, shift - Vec2d::from_index_pair(vi, item.shift, 0.0));
                         pos += item.size.index(vi);
                         visible_items += 1;
                     }
@@ -266,8 +266,8 @@ impl PortalList {
                         let item = &list[i];
                         let visible = pos > 0.0;
                         pos -= item.size.index(vi);
-                        let shift = DVec2::from_index_pair(vi, pos, 0.0);
-                        cx.shift_align_range(&item.align_range, shift - DVec2::from_index_pair(vi, item.shift, 0.0));
+                        let shift = Vec2d::from_index_pair(vi, pos, 0.0);
+                        cx.shift_align_range(&item.align_range, shift - Vec2d::from_index_pair(vi, item.shift, 0.0));
                         if visible { // move up
                             self.first_scroll = pos;
                             self.first_id = item.index;
@@ -281,8 +281,8 @@ impl PortalList {
                     let mut pos = start_pos;
                     for i in first_index..list.len() {
                         let item = &list[i];
-                        let shift = DVec2::from_index_pair(vi, pos, 0.0);
-                        cx.shift_align_range(&item.align_range, shift - DVec2::from_index_pair(vi, item.shift, 0.0));
+                        let shift = Vec2d::from_index_pair(vi, pos, 0.0);
+                        cx.shift_align_range(&item.align_range, shift - Vec2d::from_index_pair(vi, item.shift, 0.0));
                         pos += item.size.index(vi);
                         let invisible = pos < 0.0;
                         if invisible { // move down
@@ -625,7 +625,7 @@ impl PortalList {
     /// TODO: FIXME: this may not properly handle bottom-up lists
     ///              or lists that go from right to left.
     pub fn position_of_item(&self, cx: &Cx, entry_id: usize) -> Option<f64> {
-        const ZEROED: Rect = Rect { pos: DVec2 { x: 0.0, y: 0.0 }, size: DVec2 { x: 0.0, y: 0.0 } };
+        const ZEROED: Rect = Rect { pos: Vec2d { x: 0.0, y: 0.0 }, size: Vec2d { x: 0.0, y: 0.0 } };
 
         if let Some(item) = self.items.get(&entry_id) {
             let item_rect = item.widget.area().rect(cx);

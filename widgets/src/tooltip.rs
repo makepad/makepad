@@ -120,7 +120,7 @@ impl Widget for Tooltip {
 }
 
 impl Tooltip {
-    pub fn set_pos(&mut self, cx: &mut Cx, pos: DVec2) {
+    pub fn set_pos(&mut self, cx: &mut Cx, pos: Vec2d) {
         self.apply_over(
             cx,
             live! {
@@ -134,7 +134,7 @@ impl Tooltip {
         self.redraw(cx);
     }
 
-    pub fn show_with_options(&mut self, cx: &mut Cx, pos: DVec2, text: &str) {
+    pub fn show_with_options(&mut self, cx: &mut Cx, pos: Vec2d, text: &str) {
         self.set_text(cx, text);
         self.set_pos(cx, pos);
         self.show(cx);
@@ -153,7 +153,7 @@ impl TooltipRef {
         }
     }
 
-    pub fn set_pos(&self, cx: &mut Cx, pos: DVec2) {
+    pub fn set_pos(&self, cx: &mut Cx, pos: Vec2d) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_pos(cx, pos);
         }
@@ -165,7 +165,7 @@ impl TooltipRef {
         }
     }
 
-    pub fn show_with_options(&self, cx: &mut Cx, pos: DVec2, text: &str) {
+    pub fn show_with_options(&self, cx: &mut Cx, pos: Vec2d, text: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.show_with_options(cx, pos, text);
         }

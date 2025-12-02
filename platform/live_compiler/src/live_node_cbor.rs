@@ -293,14 +293,14 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     encode_str("as", &mut out);
                     encode_u32(*v, &mut out);
                 },
-                LiveValue::Vec2(v) => {
+                LiveValue::Vec2f(v) => {
                     out.push(1 + CBOR_MAP_START);
                     encode_str("in", &mut out);
                     out.push(2 + CBOR_ARRAY_START);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.x, &mut out);
                 },
-                LiveValue::Vec3(v) => {
+                LiveValue::Vec3f(v) => {
                     out.push(1 + CBOR_MAP_START);
                     encode_str("in", &mut out);
                     out.push(3 + CBOR_ARRAY_START);
@@ -308,7 +308,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     encode_f32(v.x, &mut out);
                     encode_f32(v.z, &mut out);
                 },
-                LiveValue::Vec4(v) => {
+                LiveValue::Vec4f(v) => {
                     out.push(1 + CBOR_MAP_START);
                     encode_str("in", &mut out);
                     out.push(4 + CBOR_ARRAY_START);

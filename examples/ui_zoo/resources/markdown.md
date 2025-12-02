@@ -41,7 +41,7 @@ A widget that renders Markdown-formatted text.
 - clip_y (bool)
 - flow (Flow)
 - padding (Padding)
-- scroll (Vec2)
+- scroll (Vec2f)
 - spacing (float)
 
 #### quote_walk
@@ -55,7 +55,7 @@ A widget that renders Markdown-formatted text.
 - clip_y (bool)
 - flow (Flow)
 - padding (Padding)
-- scroll (Vec2)
+- scroll (Vec2f)
 - spacing (float)
 
 #### list_item_walk

@@ -229,13 +229,11 @@ impl Cx {
                 self.call_event_handler(&Event::TextCut(e))
             }
             Win32Event::Timer(e) => {
-                self.handle_script_timer(&e);
                 self.call_event_handler(&Event::Timer(e))
             }
             Win32Event::Signal => {
                 if SignalToUI::check_and_clear_ui_signal() {
                     self.handle_media_signals();
-                    self.handle_script_signals();
                     self.call_event_handler(&Event::Signal);
                 }
                 if SignalToUI::check_and_clear_action_signal() {
@@ -297,7 +295,6 @@ impl Cx {
             out.push(event);
         }
         if out.len()>0{
-            self.handle_script_network_events(&out);
             self.call_event_handler(& Event::NetworkResponses(out))
         }
     }

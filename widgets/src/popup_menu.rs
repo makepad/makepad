@@ -543,7 +543,7 @@ impl PopupMenuItem {
 
 impl PopupMenu {
     
-    pub fn menu_contains_pos(&self, cx: &mut Cx, pos: DVec2) -> bool {
+    pub fn menu_contains_pos(&self, cx: &mut Cx, pos: Vec2d) -> bool {
         self.draw_bg.area().clipped_rect(cx).contains(pos)
     }
     
@@ -558,7 +558,7 @@ impl PopupMenu {
         self.count = 0;
     }
     
-    pub fn end(&mut self, cx: &mut Cx2d, shift_area: Area, shift: DVec2) {
+    pub fn end(&mut self, cx: &mut Cx2d, shift_area: Area, shift: Vec2d) {
         // ok so.
         /*
         let menu_rect1 = cx.turtle().padded_rect_used();

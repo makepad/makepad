@@ -56,6 +56,11 @@ pub use crate::{
         GeometryQuad2D,
     },*/
 };
+
+pub fn script_run(vm:&mut ScriptVm)->ScriptValue{
+    crate::shader::draw_quad::script_run(vm);
+    NIL
+}
 /*
 pub fn live_design(cx: &mut Cx) {
     crate::geometry::geometry_gen::live_design(cx);

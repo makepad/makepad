@@ -33,7 +33,7 @@ impl LiveHook for GeometryQuad2D {
 
 impl GeometryFields for GeometryQuad2D {
     fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
-        fields.push(GeometryField {id: live_id!(geom_pos), ty: ShaderTy::Vec2});
+        fields.push(GeometryField {id: live_id!(geom_pos), ty: ShaderTy::Vec2f});
     }
     
     fn get_geometry_id(&self) -> Option<GeometryId> {
@@ -84,10 +84,10 @@ impl LiveHook for GeometryCube3D {
 
 impl GeometryFields for GeometryCube3D {
     fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
-        fields.push(GeometryField {id: live_id!(geom_pos), ty: ShaderTy::Vec3});
+        fields.push(GeometryField {id: live_id!(geom_pos), ty: ShaderTy::Vec3f});
         fields.push(GeometryField {id: live_id!(geom_id), ty: ShaderTy::Float});
-        fields.push(GeometryField {id: live_id!(geom_normal), ty: ShaderTy::Vec3});
-        fields.push(GeometryField {id: live_id!(geom_uv), ty: ShaderTy::Vec2});
+        fields.push(GeometryField {id: live_id!(geom_normal), ty: ShaderTy::Vec3f});
+        fields.push(GeometryField {id: live_id!(geom_uv), ty: ShaderTy::Vec2f});
     }
     
     fn get_geometry_id(&self) -> Option<GeometryId> {

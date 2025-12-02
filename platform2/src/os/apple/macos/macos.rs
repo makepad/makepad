@@ -23,7 +23,7 @@ use {
 pub struct MetalWindow {
     pub window_id: WindowId,
     pub window_geom: WindowGeom,
-    cal_size: DVec2,
+    cal_size: Vec2d,
     pub ca_layer: ObjcId,
     pub cocoa_window: Box<MacosWindow>,
     pub is_resizing: bool
@@ -33,8 +33,8 @@ impl MetalWindow {
     pub (crate) fn new(
         window_id: WindowId,
         metal_cx: &MetalCx,
-        inner_size: DVec2,
-        position: Option<DVec2>,
+        inner_size: Vec2d,
+        position: Option<Vec2d>,
         title: &str,
         is_fullscreen: bool,
     ) -> MetalWindow {
@@ -66,7 +66,7 @@ impl MetalWindow {
         MetalWindow {
             is_resizing: false,
             window_id,
-            cal_size: DVec2::default(),
+            cal_size: Vec2d::default(),
             ca_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window
@@ -84,7 +84,7 @@ impl MetalWindow {
     }
     
     pub (crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
-        let cal_size = DVec2 {
+        let cal_size = Vec2d {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
         };
@@ -462,7 +462,7 @@ impl Cx {
         }
     }
     
-    fn dpi_override_scale(&self, pos:&mut DVec2, window_id:WindowId){
+    fn dpi_override_scale(&self, pos:&mut Vec2d, window_id:WindowId){
         *pos = self.windows[window_id].remap_dpi_override(*pos)
     }
     

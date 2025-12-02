@@ -300,9 +300,9 @@ pub struct Win32Window {
     
     pub mouse_buttons_down: usize,
     pub last_key_mod: KeyModifiers,
-    pub ime_spot: DVec2,
+    pub ime_spot: Vec2d,
     pub current_cursor: MouseCursor,
-    pub last_mouse_pos: DVec2,
+    pub last_mouse_pos: Vec2d,
     pub ignore_wmsize: usize,
     pub hwnd: HWND,
     pub track_mouse_event: bool,
@@ -314,7 +314,7 @@ impl Win32Window {
     // 2-stage initialization (new and init) to connect GWLP_USERDATA 
 
     // create window structure and register drag/drop
-    pub fn new(window_id: WindowId,title: &str, position: Option<DVec2>, is_fullscreen: bool) -> Win32Window {
+    pub fn new(window_id: WindowId,title: &str, position: Option<Vec2d>, is_fullscreen: bool) -> Win32Window {
 
         let title = encode_wide(title);
         
@@ -361,9 +361,9 @@ impl Win32Window {
             mouse_buttons_down: 0,
             last_window_geom: WindowGeom::default(),
             last_key_mod: KeyModifiers::default(),
-            ime_spot: DVec2::default(),
+            ime_spot: Vec2d::default(),
             current_cursor: MouseCursor::Default,
-            last_mouse_pos: DVec2::default(),
+            last_mouse_pos: Vec2d::default(),
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
@@ -372,7 +372,7 @@ impl Win32Window {
     }
 
     // initialize GWLP_USERDATA and registration of global stuff, and set outer size
-    pub fn init(&mut self,size: DVec2) {
+    pub fn init(&mut self,size: Vec2d) {
 
         unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, self as *const _ as isize) };
 
@@ -519,7 +519,7 @@ impl Win32Window {
             },
             WM_MOUSEWHEEL => {
                 let delta = (wparam.0 >> 16) as u16 as i16 as f64;
-                window.send_scroll(DVec2 {x: 0.0, y: -delta}, Self::get_key_modifiers(), true);
+                window.send_scroll(Vec2d {x: 0.0, y: -delta}, Self::get_key_modifiers(), true);
             },
             WM_LBUTTONDOWN => {
                 // hack for drag/drop: save which window was last clicked on in win32_app
@@ -708,7 +708,7 @@ impl Win32Window {
                                         logo: false,  // Windows doesn't have a logo button
                                     },
                                     handled: Arc::new(Mutex::new(false)),
-                                    abs: DVec2 { x: point.x as f64 / dpi_factor,y: point.y as f64 / dpi_factor, },
+                                    abs: Vec2d { x: point.x as f64 / dpi_factor,y: point.y as f64 / dpi_factor, },
                                     items: Arc::new(vec![drag_item]),
                                     response: Arc::new(Mutex::new(response)),
                                 }
@@ -735,7 +735,7 @@ impl Win32Window {
                                         logo: false,  // Windows doesn't have a logo button
                                     },
                                     handled: Arc::new(Mutex::new(false)),
-                                    abs: DVec2 { x: point.x as f64 / dpi_factor,y: point.y as f64 / dpi_factor, },
+                                    abs: Vec2d { x: point.x as f64 / dpi_factor,y: point.y as f64 / dpi_factor, },
                                     items: Arc::new(vec![drag_item]),
                                 }
                             )
@@ -779,11 +779,11 @@ impl Win32Window {
         }
     }
     
-    pub fn get_mouse_pos_from_lparam(&self, lparam: LPARAM) -> DVec2 {
+    pub fn get_mouse_pos_from_lparam(&self, lparam: LPARAM) -> Vec2d {
         let dpi = self.get_dpi_factor();
         let ycoord = (lparam.0 >> 16) as u16 as i16 as f64;
         let xcoord = (lparam.0 & 0xffff) as u16 as i16 as f64;
-        DVec2 {x: xcoord / dpi, y: ycoord / dpi}
+        Vec2d {x: xcoord / dpi, y: ycoord / dpi}
     }
     
     pub fn get_key_modifiers() -> KeyModifiers {
@@ -903,37 +903,37 @@ impl Win32Window {
         with_win32_app(|app| app.time_now())
     }
     
-    pub fn set_ime_spot(&mut self, spot: DVec2) {
+    pub fn set_ime_spot(&mut self, spot: Vec2d) {
         self.ime_spot = spot;
     }
     
-    pub fn get_position(&self) -> DVec2 {
+    pub fn get_position(&self) -> Vec2d {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
             GetWindowRect(self.hwnd, &mut rect).unwrap();
-            DVec2 {x: rect.left as f64, y: rect.top as f64}
+            Vec2d {x: rect.left as f64, y: rect.top as f64}
         }
     }
     
-    pub fn get_inner_size(&self) -> DVec2 {
+    pub fn get_inner_size(&self) -> Vec2d {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
             GetClientRect(self.hwnd, &mut rect).unwrap();
             let dpi = self.get_dpi_factor();
-            DVec2 {x: (rect.right - rect.left) as f64 / dpi, y: (rect.bottom - rect.top)as f64 / dpi}
+            Vec2d {x: (rect.right - rect.left) as f64 / dpi, y: (rect.bottom - rect.top)as f64 / dpi}
         }
     }
     
-    pub fn get_outer_size(&self) -> DVec2 {
+    pub fn get_outer_size(&self) -> Vec2d {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
             GetWindowRect(self.hwnd, &mut rect).unwrap();
             let dpi = self.get_dpi_factor();
-            DVec2 {x: (rect.right - rect.left) as f64/ dpi, y: (rect.bottom - rect.top)as f64/ dpi}
+            Vec2d {x: (rect.right - rect.left) as f64/ dpi, y: (rect.bottom - rect.top)as f64/ dpi}
         }
     }
     
-    pub fn set_position(&mut self, pos: DVec2) {
+    pub fn set_position(&mut self, pos: Vec2d) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
             GetWindowRect(self.hwnd, &mut window_rect).unwrap();
@@ -949,7 +949,7 @@ impl Win32Window {
         }
     }
     
-    pub fn set_outer_size(&self, size: DVec2) {
+    pub fn set_outer_size(&self, size: Vec2d) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
             GetWindowRect(self.hwnd, &mut window_rect).unwrap();
@@ -965,7 +965,7 @@ impl Win32Window {
         }
     }
     
-    pub fn set_inner_size(&self, size: DVec2) {
+    pub fn set_inner_size(&self, size: Vec2d) {
         unsafe {
             let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
             GetWindowRect(self.hwnd, &mut window_rect).unwrap();
@@ -1051,7 +1051,7 @@ impl Win32Window {
         }));
     }
     
-    pub fn send_mouse_move(&mut self, pos: DVec2, modifiers: KeyModifiers) {
+    pub fn send_mouse_move(&mut self, pos: Vec2d, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         self.do_callback(Win32Event::MouseMove(MouseMoveEvent {
             window_id: self.window_id,
@@ -1062,7 +1062,7 @@ impl Win32Window {
         }));
     }
 
-    pub fn send_mouse_leave(&mut self, pos: DVec2, modifiers: KeyModifiers) {
+    pub fn send_mouse_leave(&mut self, pos: Vec2d, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         self.do_callback(Win32Event::MouseLeave(MouseLeaveEvent {
             window_id: self.window_id,
@@ -1073,7 +1073,7 @@ impl Win32Window {
         }));
     }
     
-    pub fn send_scroll(&mut self, scroll: DVec2, modifiers: KeyModifiers, is_mouse: bool) {
+    pub fn send_scroll(&mut self, scroll: Vec2d, modifiers: KeyModifiers, is_mouse: bool) {
         self.do_callback(
             Win32Event::Scroll(ScrollEvent {
                 window_id: self.window_id,

@@ -532,12 +532,12 @@ pub enum ShaderTy {
     Ivec2,
     Ivec3,
     Ivec4,
-    Vec2,
-    Vec3,
-    Vec4,
+    Vec2f,
+    Vec3f,
+    Vec4f,
     Mat2,
     Mat3,
-    Mat4,
+    Mat4f,
     Texture2D,
     TextureOES,
     Array {elem_ty: Rc<ShaderTy>, len: usize},
@@ -562,12 +562,12 @@ pub enum TyLit {
     Ivec2,
     Ivec3,
     Ivec4,
-    Vec2,
-    Vec3,
-    Vec4,
+    Vec2f,
+    Vec3f,
+    Vec4f,
     Mat2,
     Mat3,
-    Mat4,
+    Mat4f,
     Texture2D,
     TextureOES,
 }
@@ -585,7 +585,7 @@ pub enum Val {
     Bool(bool),
     Int(i32),
     Float(f32),
-    Vec4(Vec4),
+    Vec4f(Vec4f),
 }
 
 
@@ -987,12 +987,12 @@ impl Ty {
             Ty::Ivec2 => Some(TyLit::Ivec2),
             Ty::Ivec3 => Some(TyLit::Ivec3),
             Ty::Ivec4 => Some(TyLit::Ivec4),
-            Ty::Vec2 => Some(TyLit::Vec2),
-            Ty::Vec3 => Some(TyLit::Vec3),
-            Ty::Vec4 => Some(TyLit::Vec4),
+            Ty::Vec2f => Some(TyLit::Vec2f),
+            Ty::Vec3f => Some(TyLit::Vec3f),
+            Ty::Vec4f => Some(TyLit::Vec4f),
             Ty::Mat2 => Some(TyLit::Mat2),
             Ty::Mat3 => Some(TyLit::Mat3),
-            Ty::Mat4 => Some(TyLit::Mat4),
+            Ty::Mat4f => Some(TyLit::Mat4f),
             Ty::Texture2D => Some(TyLit::Bool),
             Ty::TextureOES => Some(TyLit::Bool),
             Ty::Array {..} => None,
@@ -1019,16 +1019,16 @@ impl Ty {
                 | Ty::Ivec2
                 | Ty::Ivec3
                 | Ty::Ivec4
-                | Ty::Vec2
-                | Ty::Vec3
-                | Ty::Vec4 => true,
+                | Ty::Vec2f
+                | Ty::Vec3f
+                | Ty::Vec4f => true,
             _ => false,
         }
     }
     
     pub fn is_matrix(&self) -> bool {
         match self {
-            Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
+            Ty::Mat2 | Ty::Mat3 | Ty::Mat4f => true,
             _ => false,
         }
     }
@@ -1037,11 +1037,11 @@ impl Ty {
         match self {
             Ty::Void => 0,
             Ty::Bool | Ty::Int | Ty::Float => 1,
-            Ty::Bvec2 | Ty::Ivec2 | Ty::Vec2 => 2,
-            Ty::Bvec3 | Ty::Ivec3 | Ty::Vec3 => 3,
-            Ty::Bvec4 | Ty::Ivec4 | Ty::Vec4 | Ty::Mat2 => 4,
+            Ty::Bvec2 | Ty::Ivec2 | Ty::Vec2f => 2,
+            Ty::Bvec3 | Ty::Ivec3 | Ty::Vec3f => 3,
+            Ty::Bvec4 | Ty::Ivec4 | Ty::Vec4f | Ty::Mat2 => 4,
             Ty::Mat3 => 9,
-            Ty::Mat4 => 16,
+            Ty::Mat4f => 16,
             Ty::Texture2D {..} => panic!(),
             Ty::TextureOES {..} => panic!(),
             Ty::Array {elem_ty, len} => elem_ty.slots() * len,
@@ -1068,12 +1068,12 @@ impl Ty {
                 Ty::Ivec2 => TyExprKind::Lit {ty_lit: TyLit::Ivec2},
                 Ty::Ivec3 => TyExprKind::Lit {ty_lit: TyLit::Ivec3},
                 Ty::Ivec4 => TyExprKind::Lit {ty_lit: TyLit::Ivec4},
-                Ty::Vec2 => TyExprKind::Lit {ty_lit: TyLit::Vec2},
-                Ty::Vec3 => TyExprKind::Lit {ty_lit: TyLit::Vec3},
-                Ty::Vec4 => TyExprKind::Lit {ty_lit: TyLit::Vec4},
+                Ty::Vec2f => TyExprKind::Lit {ty_lit: TyLit::Vec2f},
+                Ty::Vec3f => TyExprKind::Lit {ty_lit: TyLit::Vec3f},
+                Ty::Vec4f => TyExprKind::Lit {ty_lit: TyLit::Vec4f},
                 Ty::Mat2 => TyExprKind::Lit {ty_lit: TyLit::Mat2},
                 Ty::Mat3 => TyExprKind::Lit {ty_lit: TyLit::Mat3},
-                Ty::Mat4 => TyExprKind::Lit {ty_lit: TyLit::Mat4},
+                Ty::Mat4f => TyExprKind::Lit {ty_lit: TyLit::Mat4f},
                 Ty::Texture2D => TyExprKind::Lit {ty_lit: TyLit::Texture2D},
                 Ty::TextureOES => TyExprKind::Lit {ty_lit: TyLit::TextureOES},
                 Ty::Array {elem_ty, len} => {
@@ -1102,9 +1102,9 @@ impl Ty {
             LiveEval::Bool(_) => Some(Self::Float),
             LiveEval::Int64(_) => Some(Self::Int),
             LiveEval::Float64(_) => Some(Self::Float),
-            LiveEval::Vec2(_) => Some(Self::Vec2),
-            LiveEval::Vec3(_) => Some(Self::Vec3),
-            LiveEval::Vec4(_) => Some(Self::Vec4),
+            LiveEval::Vec2f(_) => Some(Self::Vec2f),
+            LiveEval::Vec3f(_) => Some(Self::Vec3f),
+            LiveEval::Vec4f(_) => Some(Self::Vec4f),
             _ => None
         }
     }*/
@@ -1119,9 +1119,9 @@ impl Ty {
                 live_id!(bool) => Self::Bool,
                 live_id!(int) => Self::Int,
                 live_id!(float) => Self::Float,
-                live_id!(vec2) => Self::Vec2,
-                live_id!(vec3) => Self::Vec3,
-                live_id!(vec4) => Self::Vec4,
+                live_id!(vec2) => Self::Vec2f,
+                live_id!(vec3) => Self::Vec3f,
+                live_id!(vec4) => Self::Vec4f,
                 live_id!(texture2d) => Self::Texture2D,
                 live_id!(textureOES) => Self::TextureOES,
                 _ => {
@@ -1136,10 +1136,10 @@ impl Ty {
             LiveValue::Int64(_) => Self::Int,
             LiveValue::Float32(_) => Self::Float,
             LiveValue::Float64(_) => Self::Float,
-            LiveValue::Color(_) => Self::Vec4,
-            LiveValue::Vec2(_) => Self::Vec2,
-            LiveValue::Vec3(_) => Self::Vec3,
-            LiveValue::Vec4(_) => Self::Vec4,
+            LiveValue::Color(_) => Self::Vec4f,
+            LiveValue::Vec2f(_) => Self::Vec2f,
+            LiveValue::Vec3f(_) => Self::Vec3f,
+            LiveValue::Vec4f(_) => Self::Vec4f,
             _ => return Err(LiveError {
                 origin: live_error_origin!(),
                 message: format!("Live value {:?} does not resolve to a shader type", value),
@@ -1181,12 +1181,12 @@ impl fmt::Display for Ty {
             Ty::Ivec2 => write!(f, "ivec2"),
             Ty::Ivec3 => write!(f, "ivec3"),
             Ty::Ivec4 => write!(f, "ivec4"),
-            Ty::Vec2 => write!(f, "vec2"),
-            Ty::Vec3 => write!(f, "vec3"),
-            Ty::Vec4 => write!(f, "vec4"),
+            Ty::Vec2f => write!(f, "vec2"),
+            Ty::Vec3f => write!(f, "vec3"),
+            Ty::Vec4f => write!(f, "vec4"),
             Ty::Mat2 => write!(f, "mat2"),
             Ty::Mat3 => write!(f, "mat3"),
-            Ty::Mat4 => write!(f, "mat4"),
+            Ty::Mat4f => write!(f, "mat4"),
             Ty::Texture2D => write!(f, "texture2D"),
             Ty::TextureOES => write!(f, "textureOES"),
             Ty::Array {elem_ty, len} => write!(f, "{}[{}]", elem_ty, len),
@@ -1202,10 +1202,10 @@ impl fmt::Display for Ty {
 impl TyLit {
     pub fn from_id(id: LiveId) -> Option<TyLit> {
         match id {
-            live_id!(vec4) => Some(TyLit::Vec4),
-            live_id!(vec3) => Some(TyLit::Vec3),
-            live_id!(vec2) => Some(TyLit::Vec2),
-            live_id!(mat4) => Some(TyLit::Mat4),
+            live_id!(vec4) => Some(TyLit::Vec4f),
+            live_id!(vec3) => Some(TyLit::Vec3f),
+            live_id!(vec2) => Some(TyLit::Vec2f),
+            live_id!(mat4) => Some(TyLit::Mat4f),
             live_id!(mat3) => Some(TyLit::Mat3),
             live_id!(mat2) => Some(TyLit::Mat2),
             live_id!(float) => Some(TyLit::Float),
@@ -1233,12 +1233,12 @@ impl TyLit {
             TyLit::Ivec2 => Ty::Ivec2,
             TyLit::Ivec3 => Ty::Ivec3,
             TyLit::Ivec4 => Ty::Ivec4,
-            TyLit::Vec2 => Ty::Vec2,
-            TyLit::Vec3 => Ty::Vec3,
-            TyLit::Vec4 => Ty::Vec4,
+            TyLit::Vec2f => Ty::Vec2f,
+            TyLit::Vec3f => Ty::Vec3f,
+            TyLit::Vec4f => Ty::Vec4f,
             TyLit::Mat2 => Ty::Mat2,
             TyLit::Mat3 => Ty::Mat3,
-            TyLit::Mat4 => Ty::Mat4,
+            TyLit::Mat4f => Ty::Mat4f,
             TyLit::Texture2D => Ty::Texture2D,
             TyLit::TextureOES => Ty::TextureOES,
         }
@@ -1261,12 +1261,12 @@ impl fmt::Display for TyLit {
                 TyLit::Ivec2 => "ivec2",
                 TyLit::Ivec3 => "ivec3",
                 TyLit::Ivec4 => "ivec4",
-                TyLit::Vec2 => "vec2",
-                TyLit::Vec3 => "vec3",
-                TyLit::Vec4 => "vec4",
+                TyLit::Vec2f => "vec2",
+                TyLit::Vec3f => "vec3",
+                TyLit::Vec4f => "vec4",
                 TyLit::Mat2 => "mat2",
                 TyLit::Mat3 => "mat3",
-                TyLit::Mat4 => "mat4",
+                TyLit::Mat4f => "mat4",
                 TyLit::Texture2D => "texture2D",
                 TyLit::TextureOES => "textureOES",
             }
@@ -1281,7 +1281,7 @@ impl Lit {
             Lit::Bool(_) => Ty::Bool,
             Lit::Int(_) => Ty::Int,
             Lit::Float(_) => Ty::Float,
-            Lit::Color(_) => Ty::Vec4
+            Lit::Color(_) => Ty::Vec4f
         }
     }
     
@@ -1290,7 +1290,7 @@ impl Lit {
             Lit::Bool(v) => Val::Bool(v),
             Lit::Int(v) => Val::Int(v),
             Lit::Float(v) => Val::Float(v),
-            Lit::Color(v) => Val::Vec4(Vec4::from_u32(v))
+            Lit::Color(v) => Val::Vec4f(Vec4f::from_u32(v))
         }
     }
     
@@ -1312,7 +1312,7 @@ impl fmt::Display for Lit {
             Lit::Int(lit) => write!(f, "{}", lit),
             Lit::Float(lit) => write!(f, "{}", PrettyPrintedF32(*lit)),
             Lit::Color(lit) => {
-                let v = Vec4::from_u32(*lit);
+                let v = Vec4f::from_u32(*lit);
                 write!(
                     f,
                     "vec4({},{},{},{})",
@@ -1413,7 +1413,7 @@ impl fmt::Display for Val {
             Val::Bool(val) => write!(f, "{}", val),
             Val::Int(val) => write!(f, "{}", val),
             Val::Float(v) => write!(f, "{}", PrettyPrintedF32(v)),
-            Val::Vec4(val) => write!(f, "{}", val),
+            Val::Vec4f(val) => write!(f, "{}", val),
         }
     }
 }

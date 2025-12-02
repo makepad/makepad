@@ -41,7 +41,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         for field in &mut fields {
             if field.attrs.is_empty() { // need field def
-                return error_result("Please annotate the field type with #[rust] for rust-only fields, and #[script] for scriptable mapped fields and #[deref] for a base class");
+                return error_result("Please annotate the field type with #[rust] for rust-only fields, and #[live] for scriptable mapped fields and #[deref] for a base class and #[script] to call script_new");
             }
         }
         
@@ -97,7 +97,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("impl").stream(generic.clone());
         tb.add("ScriptApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
-        tb.add("    fn script_type_id(&self)->std::any::TypeId{ ScriptTypeId::of::<Self>()}");
+        tb.add("    fn script_type_id(&self)->ScriptTypeId{ ScriptTypeId::of::<Self>()}");
         
         tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue) {");
         tb.add("       if <Self as ScriptHook>::on_skip_apply(self, vm, apply, value) || value.is_nil(){return};");
@@ -106,9 +106,9 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         
         for field in &fields {
-            if field.attrs.iter().any( | a | a.name == "live" || a.name =="script"){
-                tb.add("if let Some(v) = vm.heap.value_apply_if_dirty(value, ScriptValue::from_id(id!(")
-                    .ident(&field.name).add("))){");
+            if field.attrs.iter().any( | a | a.name == "live" ){
+                tb.add("if let Some(v) = vm.heap.value_apply_if_dirty(value, id!(")
+                    .ident(&field.name).add(").into()){");
                 tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(",vm, apply, v);");
                 tb.add("}");
             }
@@ -131,7 +131,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
                 tb.add("self.").ident(&field.name).add(".script_to_value_props(vm, obj)");
             }
-            if let Some(_) = field.attrs.iter().find(|a| a.name == "script" || a.name == "live"){
+            if let Some(_) = field.attrs.iter().find(|a| a.name == "live"){
                 tb.add("let value:ScriptValue = <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_to_value( &self.").ident(&field.name).add(", vm); ");
                 tb.add("vm.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
                 .ident(&field.name).add(")), value, &vm.thread.trap);");
@@ -150,20 +150,8 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         tb.add("impl").stream(generic.clone());
         tb.add("ScriptNew for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-        
-        tb.add("    fn script_default(vm:&mut ScriptVm)->ScriptValue{");
-        tb.add("        Self::script_proto(vm);");
-        tb.add("        Self::script_new(vm).script_to_value(vm)");
-        tb.add("    }");
-        
-        tb.add("    fn script_type_id_static()->std::any::TypeId{ ScriptTypeId::of::<Self>()}");
-        
-        tb.add("    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{");
-        tb.add("        if  <Self as ScriptHook>::on_type_check(heap, value){");
-        tb.add("            return true");
-        tb.add("        }");
-        tb.add("        if let Some(o) = value.as_object(){heap.type_matches_id(o, Self::script_type_id_static())}else{false}");
-        tb.add("    }");
+
+        tb.add("    fn script_type_id_static()->ScriptTypeId{ ScriptTypeId::of::<Self>()}");
         
         tb.add("    fn script_new(vm: &mut ScriptVm) -> Self {");
         tb.add("        let mut ret = Self {");

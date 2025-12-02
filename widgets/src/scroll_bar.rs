@@ -657,7 +657,7 @@ impl ScrollBar {
         }
     }
     
-    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: ScrollAxis, view_rect: Rect, view_total: DVec2) -> f64 {
+    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: ScrollAxis, view_rect: Rect, view_total: Vec2d) -> f64 {
         
         self.axis = axis;
         

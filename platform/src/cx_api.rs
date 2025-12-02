@@ -12,7 +12,7 @@ use {
         makepad_futures::executor::Spawner,
         makepad_live_id::*,
         event::xr::XrAnchor,
-        makepad_math::{DVec2, Rect},
+        makepad_math::{Vec2d, Rect},
         pass::{CxPassParent, CxPassRect, PassId},
         texture::Texture,
         window::WindowId,
@@ -43,7 +43,7 @@ pub trait CxOsApi {
 
     fn seconds_since_app_start(&self)->f64;
 
-    fn default_window_size(&self)->DVec2{dvec2(800.,600.)}
+    fn default_window_size(&self)->Vec2d{dvec2(800.,600.)}
 
     fn max_texture_width()->usize{4096}
 
@@ -59,8 +59,8 @@ pub trait CxOsApi {
 #[derive(PartialEq)]
 pub enum CxOsOp {
     CreateWindow(WindowId),
-    ResizeWindow(WindowId, DVec2),
-    RepositionWindow(WindowId, DVec2),
+    ResizeWindow(WindowId, Vec2d),
+    RepositionWindow(WindowId, Vec2d),
     CloseWindow(WindowId),
     MinimizeWindow(WindowId),
     Deminiaturize(WindowId),
@@ -72,7 +72,7 @@ pub enum CxOsOp {
     SetTopmost(WindowId, bool),
     ShowInDock(bool),
 
-    ShowTextIME(Area, DVec2),
+    ShowTextIME(Area, Vec2d),
     HideTextIME,
     SetCursor(MouseCursor),
     StartTimer {
@@ -306,7 +306,7 @@ impl Cx {
         }
     }
 
-    pub fn show_text_ime(&mut self, area: Area, pos: DVec2) {
+    pub fn show_text_ime(&mut self, area: Area, pos: Vec2d) {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
             self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
@@ -537,7 +537,7 @@ impl Cx {
                 })
             }*/
             Some(CxPassRect::Size(size)) => Some(Rect {
-                pos: DVec2::default(),
+                pos: Vec2d::default(),
                 size: (size * dpi).ceil() / dpi,
             }),
             None => None,

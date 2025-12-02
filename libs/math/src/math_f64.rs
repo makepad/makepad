@@ -23,29 +23,29 @@ impl fmt::Display for PrettyPrintedF64 {
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Rect {
-    pub pos: DVec2,
-    pub size: DVec2,
+    pub pos: Vec2d,
+    pub size: Vec2d,
 }
 
 impl Rect {
     
-    pub fn translate(self, pos: DVec2) -> Rect {
+    pub fn translate(self, pos: Vec2d) -> Rect {
         Rect {pos: self.pos + pos, size: self.size}
     }
     
-    pub fn contains(&self, pos: DVec2) -> bool {
+    pub fn contains(&self, pos: Vec2d) -> bool {
         pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
         pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y
     }
     
-    pub fn center(&self) -> DVec2 {
-        DVec2 {
+    pub fn center(&self) -> Vec2d {
+        Vec2d {
             x: self.pos.x + self.size.x * 0.5,
             y: self.pos.y + self.size.y * 0.5,
         }
     }
     
-    pub fn scale_and_shift(&self, center: DVec2, scale: f64, shift: DVec2) -> Rect {
+    pub fn scale_and_shift(&self, center: Vec2d, scale: f64, shift: Vec2d) -> Rect {
         Rect {
             pos: (self.pos - center) * scale + center + shift,
             size: self.size * scale
@@ -66,7 +66,7 @@ impl Rect {
         r.pos.y + r.size.y > self.pos. y
     }
     
-    pub fn add_margin(self, size: DVec2) -> Rect {
+    pub fn add_margin(self, size: Vec2d) -> Rect {
         Rect {pos: self.pos - size, size: self.size + 2.0 * size}
     }
     
@@ -104,7 +104,7 @@ impl Rect {
         }
     }
 
-    pub fn clip(&self, clip: (DVec2, DVec2)) -> Rect {
+    pub fn clip(&self, clip: (Vec2d, Vec2d)) -> Rect {
         let mut x1 = self.pos.x;
         let mut y1 = self.pos.y;
         let mut x2 = x1 + self.size.x;
@@ -177,43 +177,44 @@ impl Rect {
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
-pub struct DVec4 {
+pub struct Vec4d {
     pub x: f64,
     pub y: f64,
     pub z: f64,
     pub w: f64,
 }
-
+pub type DVec4 = Vec4d;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
-pub struct DVec3 {
+pub struct Vec3d {
     pub x: f64,
     pub y: f64,
     pub z: f64,
 }
-
+pub type DVec3 = Vec3d;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
-pub struct DVec2 {
+pub struct Vec2d {
     pub x: f64,
     pub y: f64,
 }
+pub type DVec2 = Vec2d;
 
-impl std::convert::From<Vec2> for DVec2 {
-    fn from(other: Vec2) -> DVec2 {DVec2 {x: other.x as f64, y: other.y as f64}}
+impl std::convert::From<Vec2f> for Vec2d {
+    fn from(other: Vec2f) -> Vec2d {Vec2d {x: other.x as f64, y: other.y as f64}}
 }
 
-impl std::convert::From<DVec2> for Vec2 {
-    fn from(other: DVec2) -> Vec2 {Vec2 {x: other.x as f32, y: other.y as f32}}
+impl std::convert::From<Vec2d> for Vec2f {
+    fn from(other: Vec2d) -> Vec2f {Vec2f {x: other.x as f32, y: other.y as f32}}
 }
 
-impl std::convert::From<(DVec2, DVec2)> for Rect {
-    fn from(o: (DVec2, DVec2)) -> Rect {Rect {pos: dvec2(o.0.x, o.0.y), size: dvec2(o.1.x - o.0.x, o.1.y - o.0.y)}}
+impl std::convert::From<(Vec2d, Vec2d)> for Rect {
+    fn from(o: (Vec2d, Vec2d)) -> Rect {Rect {pos: dvec2(o.0.x, o.0.y), size: dvec2(o.1.x - o.0.x, o.1.y - o.0.y)}}
 }
 
-impl DVec2 {
-    pub const fn new() -> DVec2 {
-        DVec2 {x: 0.0, y: 0.0}
+impl Vec2d {
+    pub const fn new() -> Vec2d {
+        Vec2d {x: 0.0, y: 0.0}
     }
 
     pub fn zero(&mut self) {
@@ -222,15 +223,15 @@ impl DVec2 {
     
     }
 
-    pub fn dpi_snap(&self, f:f64)->DVec2{
-        DVec2{
+    pub fn dpi_snap(&self, f:f64)->Vec2d{
+        Vec2d{
             x:(self.x * f).round() / f,
             y:(self.y * f).round() / f
         }
     }
     
-    pub const fn all(x: f64) -> DVec2 {
-        DVec2 {x, y: x}
+    pub const fn all(x: f64) -> Vec2d {
+        Vec2d {x, y: x}
     }
     
     pub const fn index(&self, index:Vec2Index)->f64{
@@ -254,33 +255,33 @@ impl DVec2 {
         }
     }
     
-    pub const fn into_vec2(self) -> Vec2 {
-        Vec2 {x: self.x as f32, y: self.y as f32}
+    pub const fn into_vec2(self) -> Vec2f {
+        Vec2f {x: self.x as f32, y: self.y as f32}
     }
     
-    pub fn from_lerp(a: DVec2, b: DVec2, f: f64) -> DVec2 {
+    pub fn from_lerp(a: Vec2d, b: Vec2d, f: f64) -> Vec2d {
         let nf = 1.0 - f;
-        DVec2 {
+        Vec2d {
             x: nf * a.x + f * b.x,
             y: nf * a.y + f * b.y,
         }
     }
     
-    pub fn floor(self) -> DVec2 {
-        DVec2 {
+    pub fn floor(self) -> Vec2d {
+        Vec2d {
             x: self.x.floor(), 
             y: self.y.floor(),
         }
     }
         
-    pub fn ceil(self) -> DVec2 {
-        DVec2 {
+    pub fn ceil(self) -> Vec2d {
+        Vec2d {
             x: self.x.ceil(), 
             y: self.y.ceil(),
         }
     }
     
-    pub fn distance(&self, other: &DVec2) -> f64 {
+    pub fn distance(&self, other: &Vec2d) -> f64 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
         (dx * dx + dy * dy).sqrt()
@@ -289,7 +290,7 @@ impl DVec2 {
     pub fn angle_in_radians(&self) -> f64 {
         self.y.atan2(self.x)
     }
-    pub fn swapxy(&self) -> DVec2{
+    pub fn swapxy(&self) -> Vec2d{
         dvec2(self.y,self.x)
     }
     pub fn angle_in_degrees(&self) -> f64 {
@@ -299,30 +300,30 @@ impl DVec2 {
     pub fn length(&self) -> f64 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
-    pub fn normalize(&self) -> DVec2
+    pub fn normalize(&self) -> Vec2d
     {
         let l  = self.length();
         if l == 0.0 {return dvec2(0.,0.);}
         return dvec2(self.x/l, self.y/l);
     }
 
-    pub fn clockwise_tangent(&self) -> DVec2
+    pub fn clockwise_tangent(&self) -> Vec2d
    {
         return dvec2(-self.y, self.x)
     }
 
-    pub fn counterclockwise_tangent(&self) -> DVec2
+    pub fn counterclockwise_tangent(&self) -> Vec2d
     {
          return dvec2(self.y, -self.x)
      }
 
-    pub fn normalize_to_x(&self) -> DVec2
+    pub fn normalize_to_x(&self) -> Vec2d
     {
         let l  = self.x;
         if l == 0.0 {return dvec2(1.,0.);}
         return dvec2(1., self.y/l);
     }
-    pub fn normalize_to_y(&self) -> DVec2
+    pub fn normalize_to_y(&self) -> Vec2d
     {
         let l  = self.y;
         if l == 0.0 {return dvec2(1.,0.);}
@@ -338,164 +339,164 @@ impl DVec2 {
     }
 }
 
-impl fmt::Display for DVec2 {
+impl fmt::Display for Vec2d {
     // This trait requires `fmt` with this exact signature.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "vec2f64({},{})", self.x, self.y)
     }
 }
 
-pub const fn dvec2(x: f64, y: f64) -> DVec2 {DVec2 {x, y}}
+pub const fn dvec2(x: f64, y: f64) -> Vec2d {Vec2d {x, y}}
 
-pub const fn rect(x: f64, y: f64, w:f64, h:f64) -> Rect {Rect{pos:DVec2 {x, y}, size:DVec2{x:w, y:h}}}
+pub const fn rect(x: f64, y: f64, w:f64, h:f64) -> Rect {Rect{pos:Vec2d {x, y}, size:Vec2d{x:w, y:h}}}
 
 
-//------ Vec2 operators
+//------ Vec2f operators
 
-impl ops::Add<DVec2> for DVec2 {
-    type Output = DVec2;
-    fn add(self, rhs: DVec2) -> DVec2 {
-        DVec2 {x: self.x + rhs.x, y: self.y + rhs.y}
+impl ops::Add<Vec2d> for Vec2d {
+    type Output = Vec2d;
+    fn add(self, rhs: Vec2d) -> Vec2d {
+        Vec2d {x: self.x + rhs.x, y: self.y + rhs.y}
     }
 }
 
-impl ops::Sub<DVec2> for DVec2 {
-    type Output = DVec2;
-    fn sub(self, rhs: DVec2) -> DVec2 {
-        DVec2 {x: self.x - rhs.x, y: self.y - rhs.y}
+impl ops::Sub<Vec2d> for Vec2d {
+    type Output = Vec2d;
+    fn sub(self, rhs: Vec2d) -> Vec2d {
+        Vec2d {x: self.x - rhs.x, y: self.y - rhs.y}
     }
 }
 
-impl ops::Mul<DVec2> for DVec2 {
-    type Output = DVec2;
-    fn mul(self, rhs: DVec2) -> DVec2 {
-        DVec2 {x: self.x * rhs.x, y: self.y * rhs.y}
+impl ops::Mul<Vec2d> for Vec2d {
+    type Output = Vec2d;
+    fn mul(self, rhs: Vec2d) -> Vec2d {
+        Vec2d {x: self.x * rhs.x, y: self.y * rhs.y}
     }
 }
 
-impl ops::Div<DVec2> for DVec2 {
-    type Output = DVec2;
-    fn div(self, rhs: DVec2) -> DVec2 {
-        DVec2 {x: self.x / rhs.x, y: self.y / rhs.y}
-    }
-}
-
-
-impl ops::Add<DVec2> for f64 {
-    type Output = DVec2;
-    fn add(self, rhs: DVec2) -> DVec2 {
-        DVec2 {x: self + rhs.x, y: self + rhs.y}
-    }
-}
-
-impl ops::Sub<DVec2> for f64 {
-    type Output = DVec2;
-    fn sub(self, rhs: DVec2) -> DVec2 {
-        DVec2 {x: self -rhs.x, y: self -rhs.y}
-    }
-}
-
-impl ops::Mul<DVec2> for f64 {
-    type Output = DVec2;
-    fn mul(self, rhs: DVec2) -> DVec2 {
-        DVec2 {x: self *rhs.x, y: self *rhs.y}
-    }
-}
-
-impl ops::Div<DVec2> for f64 {
-    type Output = DVec2;
-    fn div(self, rhs: DVec2) -> DVec2 {
-        DVec2 {x: self / rhs.x, y: self / rhs.y}
+impl ops::Div<Vec2d> for Vec2d {
+    type Output = Vec2d;
+    fn div(self, rhs: Vec2d) -> Vec2d {
+        Vec2d {x: self.x / rhs.x, y: self.y / rhs.y}
     }
 }
 
 
-impl ops::Add<f64> for DVec2 {
-    type Output = DVec2;
-    fn add(self, rhs: f64) -> DVec2 {
-        DVec2 {x: self.x + rhs, y: self.y + rhs}
+impl ops::Add<Vec2d> for f64 {
+    type Output = Vec2d;
+    fn add(self, rhs: Vec2d) -> Vec2d {
+        Vec2d {x: self + rhs.x, y: self + rhs.y}
     }
 }
 
-impl ops::Sub<f64> for DVec2 {
-    type Output = DVec2;
-    fn sub(self, rhs: f64) -> DVec2 {
-        DVec2 {x: self.x - rhs, y: self.y - rhs}
+impl ops::Sub<Vec2d> for f64 {
+    type Output = Vec2d;
+    fn sub(self, rhs: Vec2d) -> Vec2d {
+        Vec2d {x: self -rhs.x, y: self -rhs.y}
     }
 }
 
-impl ops::Mul<f64> for DVec2 {
-    type Output = DVec2;
-    fn mul(self, rhs: f64) -> DVec2 {
-        DVec2 {x: self.x * rhs, y: self.y * rhs}
+impl ops::Mul<Vec2d> for f64 {
+    type Output = Vec2d;
+    fn mul(self, rhs: Vec2d) -> Vec2d {
+        Vec2d {x: self *rhs.x, y: self *rhs.y}
     }
 }
 
-impl ops::Div<f64> for DVec2 {
-    type Output = DVec2;
-    fn div(self, rhs: f64) -> DVec2 {
-        DVec2 {x: self.x / rhs, y: self.y / rhs}
+impl ops::Div<Vec2d> for f64 {
+    type Output = Vec2d;
+    fn div(self, rhs: Vec2d) -> Vec2d {
+        Vec2d {x: self / rhs.x, y: self / rhs.y}
     }
 }
 
-impl ops::AddAssign<DVec2> for DVec2 {
-    fn add_assign(&mut self, rhs: DVec2) {
+
+impl ops::Add<f64> for Vec2d {
+    type Output = Vec2d;
+    fn add(self, rhs: f64) -> Vec2d {
+        Vec2d {x: self.x + rhs, y: self.y + rhs}
+    }
+}
+
+impl ops::Sub<f64> for Vec2d {
+    type Output = Vec2d;
+    fn sub(self, rhs: f64) -> Vec2d {
+        Vec2d {x: self.x - rhs, y: self.y - rhs}
+    }
+}
+
+impl ops::Mul<f64> for Vec2d {
+    type Output = Vec2d;
+    fn mul(self, rhs: f64) -> Vec2d {
+        Vec2d {x: self.x * rhs, y: self.y * rhs}
+    }
+}
+
+impl ops::Div<f64> for Vec2d {
+    type Output = Vec2d;
+    fn div(self, rhs: f64) -> Vec2d {
+        Vec2d {x: self.x / rhs, y: self.y / rhs}
+    }
+}
+
+impl ops::AddAssign<Vec2d> for Vec2d {
+    fn add_assign(&mut self, rhs: Vec2d) {
         self.x = self.x + rhs.x;
         self.y = self.y + rhs.y;
     }
 }
 
-impl ops::SubAssign<DVec2> for DVec2 {
-    fn sub_assign(&mut self, rhs: DVec2) {
+impl ops::SubAssign<Vec2d> for Vec2d {
+    fn sub_assign(&mut self, rhs: Vec2d) {
         self.x = self.x - rhs.x;
         self.y = self.y - rhs.y;
     }
 }
 
-impl ops::MulAssign<DVec2> for DVec2 {
-    fn mul_assign(&mut self, rhs: DVec2) {
+impl ops::MulAssign<Vec2d> for Vec2d {
+    fn mul_assign(&mut self, rhs: Vec2d) {
         self.x = self.x * rhs.x;
         self.y = self.y * rhs.y;
     }
 }
 
-impl ops::DivAssign<DVec2> for DVec2 {
-    fn div_assign(&mut self, rhs: DVec2) {
+impl ops::DivAssign<Vec2d> for Vec2d {
+    fn div_assign(&mut self, rhs: Vec2d) {
         self.x = self.x / rhs.x;
         self.y = self.y / rhs.y;
     }
 }
 
 
-impl ops::AddAssign<f64> for DVec2 {
+impl ops::AddAssign<f64> for Vec2d {
     fn add_assign(&mut self, rhs: f64) {
         self.x = self.x + rhs;
         self.y = self.y + rhs;
     }
 }
 
-impl ops::SubAssign<f64> for DVec2 {
+impl ops::SubAssign<f64> for Vec2d {
     fn sub_assign(&mut self, rhs: f64) {
         self.x = self.x - rhs;
         self.y = self.y - rhs;
     }
 }
 
-impl ops::MulAssign<f64> for DVec2 {
+impl ops::MulAssign<f64> for Vec2d {
     fn mul_assign(&mut self, rhs: f64) {
         self.x = self.x * rhs;
         self.y = self.y * rhs;
     }
 }
 
-impl ops::DivAssign<f64> for DVec2 {
+impl ops::DivAssign<f64> for Vec2d {
     fn div_assign(&mut self, rhs: f64) {
         self.x = self.x / rhs;
         self.y = self.y / rhs;
     }
 }
 
-impl ops::Neg for DVec2 {
-    type Output = DVec2;
-    fn neg(self) -> Self {DVec2 {x: -self.x, y: -self.y}}
+impl ops::Neg for Vec2d {
+    type Output = Vec2d;
+    fn neg(self) -> Self {Vec2d {x: -self.x, y: -self.y}}
 }

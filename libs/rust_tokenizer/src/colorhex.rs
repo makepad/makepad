@@ -1,17 +1,17 @@
 
   /*
-    pub fn from_hex_str(hex: &str) -> Result<Vec4, ()> {
+    pub fn from_hex_str(hex: &str) -> Result<Vec4f, ()> {
         Self::from_hex_bytes(hex.as_bytes())
     }*/
         /*
-    pub fn from_hex_bytes(bytes: &[u8]) -> Result<Vec4, ()> {
+    pub fn from_hex_bytes(bytes: &[u8]) -> Result<Vec4f, ()> {
         let color = if bytes.len()>2 && bytes[0] == '#' as u8 {
             hex_bytes_to_u32(&bytes[1..])?
         }
         else {
             hex_bytes_to_u32(bytes)?
         };
-        Ok(Vec4 {
+        Ok(Vec4f {
             x: (((color >> 24)&0xff) as f32) / 255.0,
             y: (((color >> 16)&0xff) as f32) / 255.0,
             z: (((color >> 8)&0xff) as f32) / 255.0,
