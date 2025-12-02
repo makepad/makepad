@@ -271,11 +271,11 @@ impl IosApp {
         IosApp::do_callback(IosEvent::Paint);
     }
     
-    pub fn update_touch(&mut self, uid: u64, abs: DVec2, state: TouchState) {
+    pub fn update_touch(&mut self, uid: u64, abs: Vec2d, state: TouchState) {
         self.update_touch_with_details(uid, abs, state, dvec2(0.0, 0.0), 0.0);
     }
 
-    pub fn update_touch_with_details(&mut self, uid: u64, abs: DVec2, state: TouchState, radius: DVec2, force: f64) {
+    pub fn update_touch_with_details(&mut self, uid: u64, abs: Vec2d, state: TouchState, radius: Vec2d, force: f64) {
         if let Some(touch) = self.touches.iter_mut().find( | v | v.uid == uid) {
             touch.state = state;
             touch.abs = abs;

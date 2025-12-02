@@ -97,7 +97,7 @@ script_primitive!(
 );
 
 script_primitive!(
-    makepad_math::DVec2, 
+    makepad_math::Vec2d, 
     fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
     fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_number()},
     fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){

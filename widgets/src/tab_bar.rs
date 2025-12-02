@@ -432,7 +432,7 @@ impl TabBar {
         self.view_area.redraw(cx)
     }
     
-    pub fn is_over_tab(&self, cx:&Cx, abs:DVec2)->Option<(LiveId,Rect)>{
+    pub fn is_over_tab(&self, cx:&Cx, abs:Vec2d)->Option<(LiveId,Rect)>{
         for (tab_id, (tab,_)) in self.tabs.iter() {
             let rect = tab.area().rect(cx);
             if rect.contains(abs){
@@ -442,7 +442,7 @@ impl TabBar {
         None
     }
     
-    pub fn is_over_tab_bar(&self, cx:&Cx, abs:DVec2)->Option<Rect>{
+    pub fn is_over_tab_bar(&self, cx:&Cx, abs:Vec2d)->Option<Rect>{
         let rect = self.scroll_bars.area().rect(cx);
         if rect.contains(abs){
             return Some(rect)

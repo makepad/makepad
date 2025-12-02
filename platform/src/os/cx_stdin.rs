@@ -6,7 +6,7 @@ use {
         cx::Cx,
         cursor::MouseCursor,
         makepad_micro_serde::*,
-        makepad_math::{dvec2,DVec2},
+        makepad_math::{dvec2,Vec2d},
         window::WindowId,
         area::Area,
         event::{
@@ -345,7 +345,7 @@ pub struct StdinMouseDown {
 }
 
 impl StdinMouseDown {
-    pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseDownEvent {
+    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseDownEvent {
         MouseDownEvent {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             button: MouseButton::from_bits_retain(self.button_raw_bits),
@@ -366,7 +366,7 @@ pub struct StdinMouseMove{
 }
 
 impl StdinMouseMove {
-    pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseMoveEvent {
+    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseMoveEvent {
         MouseMoveEvent{
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             window_id,
@@ -396,7 +396,7 @@ pub struct StdinTextInput{
 }
 
 impl StdinMouseUp {
-   pub fn into_event(self, window_id: WindowId, pos: DVec2) -> MouseUpEvent {
+   pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseUpEvent {
         MouseUpEvent {
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             button: MouseButton::from_bits_retain(self.button_raw_bits),
@@ -420,7 +420,7 @@ pub struct StdinScroll{
 }
 
 impl StdinScroll {
-    pub fn into_event(self, window_id: WindowId, pos: DVec2) -> ScrollEvent {
+    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> ScrollEvent {
         ScrollEvent{
             abs: dvec2(self.x - pos.x, self.y - pos.y),
             scroll: dvec2(self.sx, self.sy),

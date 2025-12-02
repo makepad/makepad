@@ -44,7 +44,7 @@ pub enum FromJavaMessage {
     SurfaceDestroyed,
     RenderLoop,
     LongClick {
-        abs: DVec2,
+        abs: Vec2d,
         pointer_id: u64,
         // The SystemClock time (in seconds) when the LongClick occurred.
         time: f64,
@@ -422,7 +422,7 @@ pub extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnLongClick(
     time_millis: jni_sys::jlong,
 ) {
     send_from_java_message(FromJavaMessage::LongClick {
-        abs: DVec2 { x: x as f64, y: y as f64 },
+        abs: Vec2d { x: x as f64, y: y as f64 },
         pointer_id: pointer_id as u64,
         time: time_millis as f64 / 1000.0,
     });

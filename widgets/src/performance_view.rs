@@ -190,12 +190,12 @@ impl PerformanceLiveGraph {
             for i in 0..(graph_height as i64 / self.data_increments) {
                 self.draw_bar.color = color_increment_lines;
                 let rect = Rect {
-                    pos: DVec2 {
+                    pos: Vec2d {
                         x: 0.,
                         // Negative so it draws to the positive side of the y axis.
                         y: -(i * self.data_increments - graph_zero_baseline as i64) as f64,
                     },
-                    size: DVec2 {
+                    size: Vec2d {
                         x: graph_width,
                         y: 1.,
                     },
@@ -213,11 +213,11 @@ impl PerformanceLiveGraph {
             };
 
             let rect = Rect {
-                pos: DVec2 {
+                pos: Vec2d {
                     x: i as f64 * self.bar_width,
                     y: graph_zero_baseline,
                 },
-                size: DVec2 {
+                size: Vec2d {
                     x: self.bar_width,
                     // Negative so it draws to the positive side of the y axis.
                     y: -(y_entry as f64) - 1.,

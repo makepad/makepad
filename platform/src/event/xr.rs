@@ -25,7 +25,7 @@ pub struct XrController {
     pub trigger: f32,
     pub grip: f32,
     pub buttons: u16,
-    pub stick: Vec2,
+    pub stick: Vec2f,
 }
 
 impl XrController{
@@ -187,16 +187,16 @@ impl XrHand{
         self.tips_active & (1<<tip) != 0
     }
     
-    fn tip_pos(&self,tip:usize, knuckle:usize)->Vec3{
+    fn tip_pos(&self,tip:usize, knuckle:usize)->Vec3f{
         let pos = vec4(0.0,0.0,-self.tips[tip],1.0);
-        self.joints[knuckle].to_mat4().transform_vec4(pos).to_vec3()
+        self.joints[knuckle].to_mat4().transform_vec4(pos).to_vec3f()
     }
     
-    pub fn tip_pos_thumb(&self)->Vec3{self.tip_pos(0, XrHand::THUMB_KNUCKLE2)}
-    pub fn tip_pos_index(&self)->Vec3{self.tip_pos(0, XrHand::INDEX_KNUCKLE3)}
-    pub fn tip_pos_middle(&self)->Vec3{self.tip_pos(0, XrHand::MIDDLE_KNUCKLE3)}
-    pub fn tip_pos_ring(&self)->Vec3{self.tip_pos(0, XrHand::RING_KNUCKLE3)}
-    pub fn tip_pos_little(&self)->Vec3{self.tip_pos(0, XrHand::LITTLE_KNUCKLE3)}
+    pub fn tip_pos_thumb(&self)->Vec3f{self.tip_pos(0, XrHand::THUMB_KNUCKLE2)}
+    pub fn tip_pos_index(&self)->Vec3f{self.tip_pos(0, XrHand::INDEX_KNUCKLE3)}
+    pub fn tip_pos_middle(&self)->Vec3f{self.tip_pos(0, XrHand::MIDDLE_KNUCKLE3)}
+    pub fn tip_pos_ring(&self)->Vec3f{self.tip_pos(0, XrHand::RING_KNUCKLE3)}
+    pub fn tip_pos_little(&self)->Vec3f{self.tip_pos(0, XrHand::LITTLE_KNUCKLE3)}
         
 }
 
@@ -204,7 +204,7 @@ impl XrHand{
 pub struct XrFingerTip{
     pub index: usize,
     pub is_left: bool,
-    pub pos: Vec3,
+    pub pos: Vec3f,
 }
 
 #[derive(Clone, Debug)]
@@ -217,8 +217,8 @@ pub struct XrLocalEvent{
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, PartialEq)]
 pub struct XrAnchor{
-    pub left: Vec3,
-    pub right: Vec3,
+    pub left: Vec3f,
+    pub right: Vec3f,
 }
 
 impl XrAnchor{
@@ -234,7 +234,7 @@ impl XrAnchor{
         Quat::look_rotation(forward, vec3(0.0,1.0,0.0))
     }
     
-    pub fn to_mat4(&self)->Mat4{
+    pub fn to_mat4(&self)->Mat4f{
         self.to_pose().to_mat4()
     }
         
@@ -242,8 +242,8 @@ impl XrAnchor{
         Pose{position: (self.left+self.right)/2.0, orientation:self.to_quat()}
     }
     
-    pub fn mapping_to(&self, other:&XrAnchor)->Mat4{
-        Mat4::mul(&self.to_pose().to_mat4().invert(), &other.to_pose().to_mat4())
+    pub fn mapping_to(&self, other:&XrAnchor)->Mat4f{
+        Mat4f::mul(&self.to_pose().to_mat4().invert(), &other.to_pose().to_mat4())
     }
 }
 
@@ -272,8 +272,8 @@ impl XrState{
         }
     }
     
-    pub fn vec_in_head_space(&self,pos:Vec3)->Vec3{
-        self.head_pose.to_mat4().transform_vec4(pos.to_vec4()).to_vec3()
+    pub fn vec_in_head_space(&self,pos:Vec3f)->Vec3f{
+        self.head_pose.to_mat4().transform_vec4(pos.to_vec4()).to_vec3f()
     }
     
     pub fn scene_anchor_pose(&self)->Option<Pose>{
@@ -317,7 +317,7 @@ impl XrUpdateEvent{
 impl XrLocalEvent{
     
     
-    pub fn from_update_event(e:&XrUpdateEvent, mat:&Mat4)->XrLocalEvent{
+    pub fn from_update_event(e:&XrUpdateEvent, mat:&Mat4f)->XrLocalEvent{
         // alright we have a matrix, take the inverse
         // then mul all the fingertips and store them in fingertips
         // then use that
@@ -328,7 +328,7 @@ impl XrLocalEvent{
             if hand.in_view(){
                 for (_index,_joint) in hand.joints.iter().enumerate(){
                     /*if XrHand::is_tip(index){
-                        let pos = inv.transform_vec4(joint.pose.position.to_vec4()).to_vec3();
+                        let pos = inv.transform_vec4(joint.pose.position.to_vec4()).to_vec3f();
                         // todo, ignore all non-push orientations (probably a halfdome)
                         finger_tips.push(XrFingerTip{
                             index: index,
@@ -349,7 +349,7 @@ impl XrLocalEvent{
     }
     
     pub fn hits_with_options_and_test<F>(&self, cx: &mut Cx, area: Area, options: HitOptions, hit_test:F) -> Hit 
-    where F: Fn(DVec2, &Rect, &Option<Margin>)->bool
+    where F: Fn(Vec2d, &Rect, &Option<Margin>)->bool
     {
         let rect = area.clipped_rect(cx);
         for tip in &self.finger_tips{

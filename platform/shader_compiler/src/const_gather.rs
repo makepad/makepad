@@ -22,7 +22,7 @@ impl<'a> ConstGatherer<'a> {
             return
         }
         match *expr.const_val.borrow() {
-            Some(Some(Val::Vec4(val))) => {
+            Some(Some(Val::Vec4f(val))) => {
                 expr.const_index.set(Some(
                     self.fn_def.const_table.borrow().as_ref().unwrap().len(),
                 ));

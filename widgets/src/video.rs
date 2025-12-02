@@ -381,7 +381,7 @@ pub enum VideoAction {
     PlayerReset,
     // The video view was secondary clicked (right-clicked) or long-pressed.
     SecondaryClicked {
-        abs: DVec2,
+        abs: Vec2d,
         modifiers: KeyModifiers,
     }
 }
@@ -566,7 +566,7 @@ impl Video {
         &mut self,
         cx: &mut Cx,
         scope: &mut Scope,
-        abs: DVec2,
+        abs: Vec2d,
         modifiers: KeyModifiers,
     ) {
         cx.widget_action(

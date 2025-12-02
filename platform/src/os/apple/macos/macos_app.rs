@@ -10,7 +10,7 @@ use {
     },
     crate::{
         makepad_live_id::*,
-        makepad_math::DVec2,
+        makepad_math::Vec2d,
         os::{
             apple::apple_sys::*,
             macos::{
@@ -533,9 +533,9 @@ impl MacosApp {
                 let dy: f64 = msg_send![ns_event, scrollingDeltaY];
                 let has_prec: BOOL = msg_send![ns_event, hasPreciseScrollingDeltas];
                 return if has_prec == YES {
-                    cocoa_window.send_scroll(DVec2 {x: -dx, y: -dy}, get_event_key_modifier(ns_event), false);
+                    cocoa_window.send_scroll(Vec2d {x: -dx, y: -dy}, get_event_key_modifier(ns_event), false);
                 } else {
-                    cocoa_window.send_scroll(DVec2 {x: -dx * 32., y: -dy * 32.}, get_event_key_modifier(ns_event), true);
+                    cocoa_window.send_scroll(Vec2d {x: -dx * 32., y: -dy * 32.}, get_event_key_modifier(ns_event), true);
                 }
             },
             NSEventType::NSEventTypePressure => {

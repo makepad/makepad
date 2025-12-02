@@ -1,6 +1,6 @@
 use crate::{
     makepad_wasm_bridge::*,
-    makepad_math::Vec4,
+    makepad_math::Vec4f,
     cursor::MouseCursor,
     draw_shader::DrawShaderTextureInput,
     draw_vars::{
@@ -232,7 +232,7 @@ pub struct WColor {
     pub a: f32
 }
 
-impl Into<WColor> for Vec4{
+impl Into<WColor> for Vec4f{
     fn into(self)->WColor{WColor{r:self.x, g:self.y, b:self.z,a:self.w}}
 }
 

@@ -133,20 +133,20 @@ pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, 
                     sep = ", ";
                 }
             }
-            Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
+            Ty::Vec2f | Ty::Vec3f | Ty::Vec4f => {
                 write!(string,"x");
             }
-            Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => {
+            Ty::Mat2 | Ty::Mat3 | Ty::Mat4f => {
                 let dst_size = match ty {
                     Ty::Mat2 => 2,
                     Ty::Mat3 => 3,
-                    Ty::Mat4 => 4,
+                    Ty::Mat4f => 4,
                     _ => panic!(),
                 };
                 let src_size = match param_ty {
                     Ty::Mat2 => 2,
                     Ty::Mat3 => 3,
-                    Ty::Mat4 => 4,
+                    Ty::Mat4f => 4,
                     _ => panic!(),
                 };
                 let mut sep = "";
@@ -451,9 +451,9 @@ impl<'a> ExprGenerator<'a> {
             };
         }
         match (in_expr.const_val.borrow().as_ref(), in_expr.const_index.get()) {
-            (Some(Some(Val::Vec4(_))), Some(mut index)) if self.const_table_offset.is_some() => {
+            (Some(Some(Val::Vec4f(_))), Some(mut index)) if self.const_table_offset.is_some() => {
                 let const_table_offset = self.const_table_offset.unwrap();
-                self.write_ty_lit(TyLit::Vec4);
+                self.write_ty_lit(TyLit::Vec4f);
                 write!(self.string, "(").unwrap();
                 let mut sep = "";
                 for _ in 0..4 {
@@ -480,8 +480,8 @@ impl<'a> ExprGenerator<'a> {
                 }
             }
             // TODO: Extract the next three cases into a write_val function
-            (Some(Some(Val::Vec4(val))), _) => {
-                self.write_ty_lit(TyLit::Vec4);
+            (Some(Some(Val::Vec4f(val))), _) => {
+                self.write_ty_lit(TyLit::Vec4f);
                 write!(
                     self.string,
                     "({}, {}, {}, {})",
@@ -587,11 +587,11 @@ impl<'a> ExprGenerator<'a> {
         
         // if left_expr or right_expr is a matrix, HLSL needs to use mul()
         let left_is_mat = match left_expr.ty.borrow().as_ref().unwrap() {
-            Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
+            Ty::Mat2 | Ty::Mat3 | Ty::Mat4f => true,
             _ => false
         };
         let right_is_mat = match right_expr.ty.borrow().as_ref().unwrap() {
-            Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
+            Ty::Mat2 | Ty::Mat3 | Ty::Mat4f => true,
             _ => false
         };
         
@@ -608,21 +608,21 @@ impl<'a> ExprGenerator<'a> {
         else if self.backend_writer.needs_unpack_for_matrix_multiplication() {
             if left_is_mat && !right_is_mat {
                 match right_expr.ty.borrow().as_ref().unwrap() {
-                    Ty::Vec4 => {
+                    Ty::Vec4f => {
                         write!(self.string, "(").unwrap();
                         self.generate_expr(left_expr);
                         write!(self.string, " {} ", op).unwrap();
-                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec4);
+                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec4f);
                         write!(self.string, "(").unwrap();
                         self.generate_expr(right_expr);
                         write!(self.string, "))").unwrap();
                         return
                     },
-                    Ty::Vec3 => {
+                    Ty::Vec3f => {
                         write!(self.string, "(").unwrap();
                         self.generate_expr(left_expr);
                         write!(self.string, " {} ", op).unwrap();
-                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec3);
+                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec3f);
                         write!(self.string, "(").unwrap();
                         self.generate_expr(right_expr);
                         write!(self.string, "))").unwrap();
@@ -633,9 +633,9 @@ impl<'a> ExprGenerator<'a> {
             }
             else if !left_is_mat && right_is_mat {
                 match left_expr.ty.borrow().as_ref().unwrap() {
-                    Ty::Vec4 => {
+                    Ty::Vec4f => {
                         write!(self.string, "(").unwrap();
-                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec4);
+                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec4f);
                         write!(self.string, "(").unwrap();
                         self.generate_expr(left_expr);
                         write!(self.string, ") {} ", op).unwrap();
@@ -643,9 +643,9 @@ impl<'a> ExprGenerator<'a> {
                         write!(self.string, ")").unwrap();
                         return
                     },
-                    Ty::Vec3 => {
+                    Ty::Vec3f => {
                         write!(self.string, "(").unwrap();
-                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec3);
+                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec3f);
                         write!(self.string, "(").unwrap();
                         self.generate_expr(left_expr);
                         write!(self.string, ") {} ", op).unwrap();

@@ -44,15 +44,15 @@ pub struct VectorLine {
     #[live(15.0)]
     line_width: f64,
     #[live]
-    color: Vec4,
+    color: Vec4f,
     #[live(true)]
     contained: bool,
     #[live(LineAlign::Top)]
     line_align: LineAlign,
     #[rust(dvec2(350., 10.))]
-    line_start: DVec2,
+    line_start: Vec2d,
     #[rust(dvec2(1000., 1440.))]
-    line_end: DVec2,
+    line_end: Vec2d,
 }
 
 #[derive(Clone, DefaultNone)]

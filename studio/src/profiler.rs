@@ -200,12 +200,12 @@ impl Widget for ProfilerEventChart {
                         break;
                     }
                     let color = LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32 | 0xff000000;
-                    self.draw_item.color = Vec4::from_u32(color);
+                    self.draw_item.color = Vec4f::from_u32(color);
                     self.draw_block(cx, &rect, sample.start, sample.end, Event::name_from_u32(sample.event_u32), sample.event_meta);
                 }
             }
             
-            self.draw_item.color = Vec4::from_u32(0x7f7f7fff);
+            self.draw_item.color = Vec4f::from_u32(0x7f7f7fff);
             if let Some(first) = pss.gpu.iter().position(|v| v.end > self.time_range.start){
                 // lets draw the time lines and time text
                 for i in first..pss.gpu.len(){

@@ -5,6 +5,13 @@ use{
 //    crate::colorhex::*
 };
 
+// backwards compatibility
+pub type Vec2 = Vec2f;
+pub type Vec3 = Vec3f;
+pub type Vec4 = Vec4f;
+pub const fn vec2(x: f32, y: f32) -> Vec2f {Vec2f {x, y}}
+pub const fn vec3(x: f32, y: f32, z: f32) -> Vec3f {Vec3f {x, y, z}}
+pub const fn vec4(x: f32, y: f32, z: f32, w: f32) -> Vec4f {Vec4f {x, y, z, w}}
 
 pub struct PrettyPrintedF32(pub f32);
 
@@ -18,17 +25,18 @@ impl fmt::Display for PrettyPrintedF32 {
     }
 }
 
-pub const VF00:Vec4 = Vec4{x:1.0,y:0.0,z:0.0,w:1.0};
-pub const V0F0:Vec4 = Vec4{x:0.0,y:1.0,z:0.0,w:1.0};
-pub const V00F:Vec4 = Vec4{x:0.0,y:0.0,z:1.0,w:1.0};
+pub const VF00:Vec4f = Vec4f{x:1.0,y:0.0,z:0.0,w:1.0};
+pub const V0F0:Vec4f = Vec4f{x:0.0,y:1.0,z:0.0,w:1.0};
+pub const V00F:Vec4f = Vec4f{x:0.0,y:0.0,z:1.0,w:1.0};
+
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(C)]
-pub struct Mat4 {
+pub struct Mat4f {
     pub v: [f32; 16],
 }
 
-impl Default for Mat4{
+impl Default for Mat4f{
     fn default()->Self{
         Self{v:[1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 0.,0.,0.,1.]}
     }
@@ -44,18 +52,18 @@ pub enum Vec2Index{
 #[derive(Clone, Copy, Default, PartialEq, Debug, SerBin, DeBin)]
 pub struct Pose {
     pub orientation: Quat,
-    pub position: Vec3
+    pub position: Vec3f
 }
 
 impl Pose {
-    pub fn new(orientation:Quat, position:Vec3)->Self{
+    pub fn new(orientation:Quat, position:Vec3f)->Self{
         Self{
             orientation,
             position
         }
     }
     
-    pub fn transform_vec3(&self, v:&Vec3)->Vec3{
+    pub fn transform_vec3(&self, v:&Vec3f)->Vec3f{
         let r0 = self.orientation.rotate_vec3(v);
         r0 + self.position
     }
@@ -74,11 +82,11 @@ impl Pose {
         }
     }
     
-    pub fn to_mat4(&self) -> Mat4 {
+    pub fn to_mat4(&self) -> Mat4f {
         
         let q = self.orientation;
         let t = self.position;/*
-        Mat4 {v: [
+        Mat4f {v: [
             (1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z),
             (2.0 * q.x * q.y - 2.0 * q.z * q.w),
             (2.0 * q.x * q.z + 2.0 * q.y * q.w),
@@ -96,7 +104,7 @@ impl Pose {
             0.0,
             1.0
         ]}*/
-        Mat4 {v: [
+        Mat4f {v: [
             (1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z),
             (2.0 * q.x * q.y + 2.0 * q.z * q.w),
             (2.0 * q.x * q.z - 2.0 * q.y * q.w),
@@ -119,7 +127,7 @@ impl Pose {
     pub fn from_lerp(a: Pose, b: Pose, f: f32) -> Self {
         Pose {
             orientation: Quat::from_slerp(a.orientation, b.orientation, f),
-            position: Vec3::from_lerp(a.position, b.position, f)
+            position: Vec3f::from_lerp(a.position, b.position, f)
         }
     }
     
@@ -133,16 +141,16 @@ impl Pose {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq, SerBin, DeBin)]
-pub struct Vec2 {
+pub struct Vec2f {
     pub x: f32,
     pub y: f32,
 }
 
 
-impl Vec2 {
+impl Vec2f {
 
-    pub fn new() -> Vec2 {
-        Vec2::default()
+    pub fn new() -> Vec2f {
+        Vec2f::default()
     }
     
     pub fn index(&self, index:Vec2Index)->f32{
@@ -168,23 +176,23 @@ impl Vec2 {
     }
     
 
-    pub fn into_dvec2(self)->DVec2{
-        DVec2{x:self.x as f64, y:self.y as f64}
+    pub fn into_vec2d(self)->Vec2d{
+        Vec2d{x:self.x as f64, y:self.y as f64}
     }
     
-    pub fn all(x: f32) -> Vec2 {
-        Vec2 {x, y: x}
+    pub fn all(x: f32) -> Vec2f {
+        Vec2f {x, y: x}
     }
     
-    pub fn from_lerp(a: Vec2, b: Vec2, f: f32) -> Vec2 {
+    pub fn from_lerp(a: Vec2f, b: Vec2f, f: f32) -> Vec2f {
         let nf = 1.0 - f;
-        Vec2{
+        Vec2f{
             x: nf * a.x + f * b.x,
             y: nf * a.y + f * b.y,
         }
     }
     
-    pub fn distance(&self, other: &Vec2) -> f32 {
+    pub fn distance(&self, other: &Vec2f) -> f32 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
         (dx * dx + dy * dy).sqrt()
@@ -206,64 +214,64 @@ impl Vec2 {
     pub fn lengthsquared(&self) -> f32 {
         self.x * self.x + self.y * self.y
     }
-    pub fn normalize(&self) -> Vec2
+    pub fn normalize(&self) -> Vec2f
     {
         let l  = self.length();
         if l == 0.0 {return vec2(0.,0.);}
         return vec2(self.x/l, self.y/l);
     }
-    pub fn normalize_to_x(&self) -> Vec2
+    pub fn normalize_to_x(&self) -> Vec2f
     {
         let l  = self.x;
         if l == 0.0 {return vec2(1.,0.);}
         return vec2(1., self.y/l);
     }
    
-    pub fn normalize_to_y(&self) -> Vec2
+    pub fn normalize_to_y(&self) -> Vec2f
     {
         let l  = self.y;
         if l == 0.0 {return vec2(1.,0.);}
         return vec2(self.x/l, 1.);
     }
-    pub fn to_vec3(&self) -> Vec3 {
-        Vec3 {x: self.x, y: self.y, z: 0.0}
+    pub fn to_vec3f(&self) -> Vec3f {
+        Vec3f {x: self.x, y: self.y, z: 0.0}
     }
 }
 
 
-impl fmt::Display for Vec2 {
+impl fmt::Display for Vec2f {
     // This trait requires `fmt` with this exact signature.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,"vec2({},{})",self.x, self.y)
+        write!(f,"vec2f({},{})",self.x, self.y)
     }
 }
 
-impl fmt::Display for Vec3 {
+impl fmt::Display for Vec3f {
     // This trait requires `fmt` with this exact signature.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,"vec3({},{},{})",self.x, self.y, self.z)
+        write!(f,"vec3f({},{},{})",self.x, self.y, self.z)
     }
 }
 
-pub const fn vec2(x: f32, y: f32) -> Vec2 {Vec2 {x, y}}
-pub const fn vec3(x: f32, y: f32, z: f32) -> Vec3 {Vec3 {x, y, z}}
-pub const fn vec4(x: f32, y: f32, z: f32, w: f32) -> Vec4 {Vec4 {x, y, z, w}}
+pub const fn vec2f(x: f32, y: f32) -> Vec2f {Vec2f {x, y}}
+pub const fn vec3f(x: f32, y: f32, z: f32) -> Vec3f {Vec3f {x, y, z}}
+pub const fn vec4f(x: f32, y: f32, z: f32, w: f32) -> Vec4f {Vec4f {x, y, z, w}}
 
 const TORAD: f32 = 0.017453292;
 const TODEG: f32 = 57.29578;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, PartialEq, Debug, SerBin, DeBin)]
-pub struct Vec3 {
+pub struct Vec3f {
     pub x: f32,
     pub y: f32,
     pub z: f32,
 }
 
-impl Vec3 {
+impl Vec3f {
     
-    pub fn from_lerp(a: Vec3, b: Vec3, f: f32) -> Vec3 {
-        Vec3 {
+    pub fn from_lerp(a: Vec3f, b: Vec3f, f: f32) -> Vec3f {
+        Vec3f {
             x: (b.x - a.x) * f + a.x,
             y: (b.y - a.y) * f + a.y,
             z: (b.z - a.z) * f + a.z,
@@ -277,45 +285,45 @@ impl Vec3 {
         self.z = 0.0;
     }
     
-    pub const fn all(x: f32) -> Vec3 {
-        Vec3 {x, y: x, z: x}
+    pub const fn all(x: f32) -> Vec3f {
+        Vec3f {x, y: x, z: x}
     }
     
-    pub const fn to_vec2(&self) -> Vec2 {
-        Vec2 {x: self.x, y: self.y}
+    pub const fn to_vec2(&self) -> Vec2f {
+        Vec2f {x: self.x, y: self.y}
     }
         
-    pub const fn to_vec4(&self) -> Vec4 {
-        Vec4 {x: self.x, y: self.y, z: self.z, w: 1.0}
+    pub const fn to_vec4(&self) -> Vec4f {
+        Vec4f {x: self.x, y: self.y, z: self.z, w: 1.0}
     }
         
-    pub fn scale(&self, f: f32) -> Vec3 {
-        Vec3 {x: self.x * f, y: self.y * f, z: self.z * f}
+    pub fn scale(&self, f: f32) -> Vec3f {
+        Vec3f {x: self.x * f, y: self.y * f, z: self.z * f}
     }
     
-    pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
-        Vec3 {
+    pub fn cross(a: Vec3f, b: Vec3f) -> Vec3f {
+        Vec3f {
             x: a.y * b.z - a.z * b.y,
             y: a.z * b.x - a.x * b.z,
             z: a.x * b.y - a.y * b.x,
         }
     }
     
-    pub fn dot(&self, other: Vec3) -> f32 {
+    pub fn dot(&self, other: Vec3f) -> f32 {
         self.x * other.x + self.y * other.y + self.z * other.z
     }
     
-    pub fn normalize(&self) -> Vec3 {
+    pub fn normalize(&self) -> Vec3f {
         let sz = self.x * self.x + self.y * self.y + self.z * self.z;
         if sz > 0.0 {
             let sr = 1.0 / sz.sqrt();
-            return Vec3 {
+            return Vec3f {
                 x: self.x * sr,
                 y: self.y * sr,
                 z: self.z * sr,
             };
         }
-        Vec3::default()
+        Vec3f::default()
     }
     
     pub fn length(&self) -> f32 {
@@ -325,8 +333,8 @@ impl Vec3 {
 }
 
 /*
-pub fn vec3(x:f32, y:f32, z:f32)->Vec3{
-    Vec3{x:x, y:y, z:z}
+pub fn vec3(x:f32, y:f32, z:f32)->Vec3f{
+    Vec3f{x:x, y:y, z:z}
 }*/
 
 
@@ -340,7 +348,7 @@ pub struct Plane {
 }
 
 impl Plane {
-    pub fn from_point_normal(p: Vec3, normal: Vec3) -> Self {
+    pub fn from_point_normal(p: Vec3f, normal: Vec3f) -> Self {
         let n = normal.normalize();
         Self {
             a: n.x,
@@ -350,12 +358,12 @@ impl Plane {
         }
     }
     
-    pub fn from_points(p1: Vec3, p2: Vec3, p3: Vec3) -> Self {
-        let normal = Vec3::cross(p2 - p1, p3 - p1);
+    pub fn from_points(p1: Vec3f, p2: Vec3f, p3: Vec3f) -> Self {
+        let normal = Vec3f::cross(p2 - p1, p3 - p1);
         Self::from_point_normal(p1, normal)
     }
     
-    pub fn intersect_line(&self, v1: Vec3, v2: Vec3) -> Vec3 {
+    pub fn intersect_line(&self, v1: Vec3f, v2: Vec3f) -> Vec3f {
         let diff = v1 - v2;
         let denom = self.a * diff.x + self.b * diff.y + self.c * diff.z;
         if denom == 0.0 {
@@ -368,14 +376,14 @@ impl Plane {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug,PartialEq, SerBin, DeBin)]
-pub struct Vec4 {
+pub struct Vec4f {
     pub x: f32,
     pub y: f32,
     pub z: f32,
     pub w: f32
 }
 
-impl fmt::Display for Vec4 {
+impl fmt::Display for Vec4f {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
@@ -388,27 +396,27 @@ impl fmt::Display for Vec4 {
     }
 }
 
-impl Vec4 {
-    pub const R: Vec4 = Vec4 {x: 1.0, y: 0.0, z: 0.0, w: 1.0};
-    pub const G: Vec4 = Vec4 {x: 0.0, y: 1.0, z: 0.0, w: 1.0};
-    pub const B: Vec4 = Vec4 {x: 0.0, y: 0.0, z: 1.0, w: 1.0};
+impl Vec4f {
+    pub const R: Vec4f = Vec4f {x: 1.0, y: 0.0, z: 0.0, w: 1.0};
+    pub const G: Vec4f = Vec4f {x: 0.0, y: 1.0, z: 0.0, w: 1.0};
+    pub const B: Vec4f = Vec4f {x: 0.0, y: 0.0, z: 1.0, w: 1.0};
 
     
     pub const fn all(v: f32) -> Self {
         Self {x: v, y: v, z: v, w: v}
     }
     
-    pub const fn to_vec3(&self) -> Vec3 {
-        Vec3 {x: self.x, y: self.y, z: self.z}
+    pub const fn to_vec3f(&self) -> Vec3f {
+        Vec3f {x: self.x, y: self.y, z: self.z}
     }
     
-    pub fn dot(&self, other: Vec4) -> f32 {
+    pub fn dot(&self, other: Vec4f) -> f32 {
         self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
     }
     
-    pub fn from_lerp(a: Vec4, b: Vec4, f: f32) -> Vec4 {
+    pub fn from_lerp(a: Vec4f, b: Vec4f, f: f32) -> Vec4f {
         let nf = 1.0 - f;
-        Vec4 {
+        Vec4f {
             x: nf * a.x + f * b.x,
             y: nf * a.y + f * b.y,
             z: nf * a.z + f * b.z,
@@ -416,7 +424,7 @@ impl Vec4 {
         }
     }
     
-    pub fn is_equal_enough(&self, other: &Vec4, epsilon:f32) -> bool {
+    pub fn is_equal_enough(&self, other: &Vec4f, epsilon:f32) -> bool {
         (self.x - other.x).abs() < epsilon
             && (self.y - other.y).abs() < epsilon
             && (self.z - other.z).abs() < epsilon
@@ -424,12 +432,12 @@ impl Vec4 {
     }
     
     
-    pub fn from_hsva(hsv: Vec4) -> Vec4 {
+    pub fn from_hsva(hsv: Vec4f) -> Vec4f {
         fn mix(x: f32, y: f32, t: f32) -> f32 {x + (y - x) * t}
         fn clamp(x: f32, mi: f32, ma: f32) -> f32 {if x < mi {mi} else if x > ma {ma} else {x}}
         fn fract(x: f32) -> f32 {x.fract()}
         fn abs(x: f32) -> f32 {x.abs()}
-        Vec4 {
+        Vec4f {
             x: hsv.z * mix(1.0, clamp(abs(fract(hsv.x + 1.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0), hsv.y),
             y: hsv.z * mix(1.0, clamp(abs(fract(hsv.x + 2.0 / 3.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0), hsv.y),
             z: hsv.z * mix(1.0, clamp(abs(fract(hsv.x + 1.0 / 3.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0), hsv.y),
@@ -437,7 +445,7 @@ impl Vec4 {
         }
     }
     
-    pub fn to_hsva(&self) -> Vec4 {
+    pub fn to_hsva(&self) -> Vec4f {
         let pc = self.y < self.z; //step(c[2],c[1])
         let p0 = if pc {self.z} else {self.y}; //mix(c[2],c[1],pc)
         let p1 = if pc {self.y} else {self.z}; //mix(c[1],c[2],pc)
@@ -452,7 +460,7 @@ impl Vec4 {
         
         let d = q0 - q3.min(q1);
         let e = 1.0e-10;
-        Vec4 {
+        Vec4f {
             x: (q2 + (q3 - q1) / (6.0 * d + e)).abs(),
             y: d / (q0 + e),
             z: q0,
@@ -461,8 +469,8 @@ impl Vec4 {
     }
     
     
-    pub fn from_u32(val: u32) -> Vec4 {
-        Vec4 {
+    pub fn from_u32(val: u32) -> Vec4f {
+        Vec4f {
             x: ((val >> 24) & 0xff) as f32 / 255.0,
             y: ((val >> 16) & 0xff) as f32 / 255.0,
             z: ((val >> 8) & 0xff) as f32 / 255.0,
@@ -478,18 +486,18 @@ impl Vec4 {
         (r<<24)|(g<<16)|(b<<8)|a
     }
 
-    pub const fn xy(&self) -> Vec2 {
-        Vec2{x:self.x, y:self.y}
+    pub const fn xy(&self) -> Vec2f {
+        Vec2f{x:self.x, y:self.y}
     }
 
-    pub const fn zw(&self) -> Vec2 {
-        Vec2{x:self.z, y:self.w}
+    pub const fn zw(&self) -> Vec2f {
+        Vec2f{x:self.z, y:self.w}
     }
 
 }
 
-impl From<(DVec2,DVec2)> for Vec4{
-    fn from(other:(DVec2,DVec2))->Vec4{
+impl From<(Vec2d,Vec2d)> for Vec4f{
+    fn from(other:(Vec2d,Vec2d))->Vec4f{
         vec4(other.0.x as f32, other.0.y as f32, other.1.x as f32, other.1.y as f32)
     }
 }
@@ -536,12 +544,12 @@ impl Quat {
         }
     }
         
-    pub fn rotate_vec3(&self, v:&Vec3)->Vec3{
+    pub fn rotate_vec3(&self, v:&Vec3f)->Vec3f{
         let q = Quat{x:v.x, y:v.y, z:v.z, w:0.0};
         let aq = Quat::multiply(&q, self);
         let ainv = self.invert();
         let aqainv = Quat::multiply(&ainv, &aq);
-        Vec3{x: aqainv.x, y: aqainv.y, z: aqainv.z}
+        Vec3f{x: aqainv.x, y: aqainv.y, z: aqainv.z}
     }
     
     pub fn dot(&self, other: Quat) -> f32 {
@@ -597,12 +605,12 @@ impl Quat {
         }
     }
     
-    pub fn look_rotation(forward: Vec3, up:Vec3)->Self{
+    pub fn look_rotation(forward: Vec3f, up:Vec3f)->Self{
         let forward = forward.normalize();
         let up = up.normalize();
         let v2 = forward;
-        let v0 = Vec3::cross(up, forward).normalize();
-        let v1 = Vec3::cross(v2, v0);
+        let v0 = Vec3f::cross(up, forward).normalize();
+        let v1 = Vec3f::cross(v2, v0);
         
         let num = (v0.x + v1.y) + v2.z;
         if num > 0.0{
@@ -648,14 +656,14 @@ impl Quat {
 }
 
 /*
-pub fn vec4(x:f32, y:f32, z:f32, w:f32)->Vec4{
-    Vec4{x:x, y:y, z:z, w:w}
+pub fn vec4(x:f32, y:f32, z:f32, w:f32)->Vec4f{
+    Vec4f{x:x, y:y, z:z, w:w}
 }*/
 
 
-impl Mat4 {
-    pub const fn identity() -> Mat4 {
-        Mat4 {v: [
+impl Mat4f {
+    pub const fn identity() -> Mat4f {
+        Mat4f {v: [
             1.0,
             0.0,
             0.0,
@@ -675,8 +683,8 @@ impl Mat4 {
         ]}
     }
     
-    pub fn transpose(&self) -> Mat4 {
-        Mat4 {v: [
+    pub fn transpose(&self) -> Mat4f {
+        Mat4f {v: [
             self.v[0],
             self.v[4],
             self.v[8],
@@ -696,7 +704,7 @@ impl Mat4 {
         ]}
     }
     
-    pub fn txyz_s_ry_rx_txyz(t1: Vec3, s: f32, ry: f32, rx: f32, t2: Vec3) -> Mat4 {
+    pub fn txyz_s_ry_rx_txyz(t1: Vec3f, s: f32, ry: f32, rx: f32, t2: Vec3f) -> Mat4f {
         
         let cx = f32::cos(rx * TORAD);
         let cy = f32::cos(ry * TORAD);
@@ -776,7 +784,7 @@ impl Mat4 {
         let m9 = s * (sy * sz + cy * sx * cz);
         let m10 = s * (cx * cy);
         */
-        Mat4 {v: [
+        Mat4f {v: [
             m0,
             m4,
             m8,
@@ -796,10 +804,10 @@ impl Mat4 {
         ]}
     }
     
-    pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4f {
         let f = 1.0 / f32::tan(fov_y * TORAD / 2.0);
         let nf = 1.0 / (near - far);
-        Mat4 {v: [
+        Mat4f {v: [
             f / aspect,
             0.0,
             0.0,
@@ -819,7 +827,7 @@ impl Mat4 {
         ]}
     }
     
-    pub fn from_camera_fov(fov:&CameraFov, near: f32, far: f32) -> Mat4 {
+    pub fn from_camera_fov(fov:&CameraFov, near: f32, far: f32) -> Mat4f {
         let tan_left = fov.angle_left.tan();
         let tan_right = fov.angle_right.tan();
         let tan_down = fov.angle_down.tan();
@@ -829,7 +837,7 @@ impl Mat4 {
         let tan_width = tan_right - tan_left;
         
         if far <= near{
-            Mat4 {v: [
+            Mat4f {v: [
                 2.0 / tan_width,
                 0.0,
                 0.0,
@@ -852,7 +860,7 @@ impl Mat4 {
             ]}
         }
         else{
-            Mat4 {v: [
+            Mat4f {v: [
                 2.0 / tan_width,
                 0.0,
                 0.0,
@@ -876,8 +884,8 @@ impl Mat4 {
         }
     }
     
-    pub const fn translation(v:Vec3) -> Mat4 {
-        Mat4 {v: [
+    pub const fn translation(v:Vec3f) -> Mat4f {
+        Mat4f {v: [
             1.0,
             0.0,
             0.0,
@@ -898,8 +906,8 @@ impl Mat4 {
         
     }
     
-    pub const fn nonuniform_scaled_translation(s:Vec3,  t:Vec3) -> Mat4 {
-        Mat4 {v: [
+    pub const fn nonuniform_scaled_translation(s:Vec3f,  t:Vec3f) -> Mat4f {
+        Mat4f {v: [
             s.x,
             0.0,
             0.0,
@@ -919,8 +927,8 @@ impl Mat4 {
         ]}
     }
     
-    pub const fn scaled_translation(s:f32,  t:Vec3) -> Mat4 {
-        Mat4 {v: [
+    pub const fn scaled_translation(s:f32,  t:Vec3f) -> Mat4f {
+        Mat4f {v: [
             s,
             0.0,
             0.0,
@@ -940,8 +948,8 @@ impl Mat4 {
         ]}
     }
         
-    pub const fn scale(s: f32) -> Mat4 {
-        Mat4 {v: [
+    pub const fn scale(s: f32) -> Mat4f {
+        Mat4f {v: [
             s,
             0.0,
             0.0,
@@ -962,7 +970,7 @@ impl Mat4 {
                 
     }
     
-    pub fn rotation(r:Vec3) -> Mat4 {
+    pub fn rotation(r:Vec3f) -> Mat4f {
         //const TORAD: f32 = 0.017453292;
         let cx = f32::cos(r.x);
         let cy = f32::cos(r.y);
@@ -979,7 +987,7 @@ impl Mat4 {
         let m8 = -sy * cz + cy * sx * sz;
         let m9 = sy * sz + cy * sx * cz;
         let m10 = cx * cy;
-        Mat4 {v: [
+        Mat4f {v: [
             m0,
             m4,
             m8,
@@ -999,17 +1007,17 @@ impl Mat4 {
         ]}
     }
     
-    pub fn ortho(left: f32, right: f32, top: f32, bottom: f32, near: f32, far: f32, scalex: f32, scaley: f32) -> Mat4 {
+    pub fn ortho(left: f32, right: f32, top: f32, bottom: f32, near: f32, far: f32, scalex: f32, scaley: f32) -> Mat4f {
         let lr = 1.0 / (left - right);
         let bt = 1.0 / (bottom - top);
         let nf = 1.0 / (near - far);
-        /*return Mat4{v:[
+        /*return Mat4f{v:[
             -2.0 * lr * scalex, 0.0, 0.0, (left+right) * lr,
             0.0, -2.0 * bt * scaley, 0.0, (top+bottom) * bt,
             0.0, 0.0, 2.0 * nf, (far + near) * nf,
             0.0, 0.0, 0.0, 1.0
         ]}*/
-        Mat4 {v: [
+        Mat4f {v: [
             -2.0 * lr * scalex,
             0.0,
             0.0,
@@ -1029,9 +1037,9 @@ impl Mat4 {
         ]}
     }
     
-    pub fn transform_vec4(&self, v: Vec4) -> Vec4 {
+    pub fn transform_vec4(&self, v: Vec4f) -> Vec4f {
         let m = &self.v;
-        Vec4 {
+        Vec4f {
             x: m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12] * v.w,
             y: m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13] * v.w,
             z: m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14] * v.w,
@@ -1039,13 +1047,13 @@ impl Mat4 {
         }
     }
     
-    pub fn mul(a: &Mat4, b: &Mat4) -> Mat4 {
+    pub fn mul(a: &Mat4f, b: &Mat4f) -> Mat4f {
         // this is probably stupid. Programmed JS for too long.
         let a = &a.v;
         let b = &b.v;
         #[inline]
         fn d(i: &[f32; 16], x: usize, y: usize) -> f32 {i[x + 4 * y]}
-        Mat4 {
+        Mat4f {
             v: [
                 d(a, 0, 0) * d(b, 0, 0) + d(a, 1, 0) * d(b, 0, 1) + d(a, 2, 0) * d(b, 0, 2) + d(a, 3, 0) * d(b, 0, 3),
                 d(a, 0, 0) * d(b, 1, 0) + d(a, 1, 0) * d(b, 1, 1) + d(a, 2, 0) * d(b, 1, 2) + d(a, 3, 0) * d(b, 1, 3),
@@ -1067,7 +1075,7 @@ impl Mat4 {
         }
     }
     
-    pub fn invert(&self) -> Mat4 {
+    pub fn invert(&self) -> Mat4f {
         let a = &self.v;
         let a00 = a[0];
         let a01 = a[1];
@@ -1103,11 +1111,11 @@ impl Mat4 {
         let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
         
         if det == 0.0 {
-            return Mat4::identity();
+            return Mat4f::identity();
         }
         
         let idet = 1.0 / det;
-        Mat4 {
+        Mat4f {
             v: [
                 (a11 * b11 - a12 * b10 + a13 * b09) * idet,
                 (a02 * b10 - a01 * b11 - a03 * b09) * idet,
@@ -1131,281 +1139,281 @@ impl Mat4 {
 }
 
 
-//------ Vec2 operators
+//------ Vec2f operators
 
-impl ops::Add<Vec2> for Vec2 {
-    type Output = Vec2;
-    fn add(self, rhs: Vec2) -> Vec2 {
-        Vec2 {x: self.x + rhs.x, y: self.y + rhs.y}
+impl ops::Add<Vec2f> for Vec2f {
+    type Output = Vec2f;
+    fn add(self, rhs: Vec2f) -> Vec2f {
+        Vec2f {x: self.x + rhs.x, y: self.y + rhs.y}
     }
 }
 
-impl ops::Sub<Vec2> for Vec2 {
-    type Output = Vec2;
-    fn sub(self, rhs: Vec2) -> Vec2 {
-        Vec2 {x: self.x - rhs.x, y: self.y - rhs.y}
+impl ops::Sub<Vec2f> for Vec2f {
+    type Output = Vec2f;
+    fn sub(self, rhs: Vec2f) -> Vec2f {
+        Vec2f {x: self.x - rhs.x, y: self.y - rhs.y}
     }
 }
 
-impl ops::Mul<Vec2> for Vec2 {
-    type Output = Vec2;
-    fn mul(self, rhs: Vec2) -> Vec2 {
-        Vec2 {x: self.x * rhs.x, y: self.y * rhs.y}
+impl ops::Mul<Vec2f> for Vec2f {
+    type Output = Vec2f;
+    fn mul(self, rhs: Vec2f) -> Vec2f {
+        Vec2f {x: self.x * rhs.x, y: self.y * rhs.y}
     }
 }
 
-impl ops::Div<Vec2> for Vec2 {
-    type Output = Vec2;
-    fn div(self, rhs: Vec2) -> Vec2 {
-        Vec2 {x: self.x / rhs.x, y: self.y / rhs.y}
-    }
-}
-
-
-impl ops::Add<Vec2> for f32 {
-    type Output = Vec2;
-    fn add(self, rhs: Vec2) -> Vec2 {
-        Vec2 {x: self + rhs.x, y: self + rhs.y}
-    }
-}
-
-impl ops::Sub<Vec2> for f32 {
-    type Output = Vec2;
-    fn sub(self, rhs: Vec2) -> Vec2 {
-        Vec2 {x: self -rhs.x, y: self -rhs.y}
-    }
-}
-
-impl ops::Mul<Vec2> for f32 {
-    type Output = Vec2;
-    fn mul(self, rhs: Vec2) -> Vec2 {
-        Vec2 {x: self *rhs.x, y: self *rhs.y}
-    }
-}
-
-impl ops::Div<Vec2> for f32 {
-    type Output = Vec2;
-    fn div(self, rhs: Vec2) -> Vec2 {
-        Vec2 {x: self / rhs.x, y: self / rhs.y}
+impl ops::Div<Vec2f> for Vec2f {
+    type Output = Vec2f;
+    fn div(self, rhs: Vec2f) -> Vec2f {
+        Vec2f {x: self.x / rhs.x, y: self.y / rhs.y}
     }
 }
 
 
-impl ops::Add<f32> for Vec2 {
-    type Output = Vec2;
-    fn add(self, rhs: f32) -> Vec2 {
-        Vec2 {x: self.x + rhs, y: self.y + rhs}
+impl ops::Add<Vec2f> for f32 {
+    type Output = Vec2f;
+    fn add(self, rhs: Vec2f) -> Vec2f {
+        Vec2f {x: self + rhs.x, y: self + rhs.y}
     }
 }
 
-impl ops::Sub<f32> for Vec2 {
-    type Output = Vec2;
-    fn sub(self, rhs: f32) -> Vec2 {
-        Vec2 {x: self.x - rhs, y: self.y - rhs}
+impl ops::Sub<Vec2f> for f32 {
+    type Output = Vec2f;
+    fn sub(self, rhs: Vec2f) -> Vec2f {
+        Vec2f {x: self -rhs.x, y: self -rhs.y}
     }
 }
 
-impl ops::Mul<f32> for Vec2 {
-    type Output = Vec2;
-    fn mul(self, rhs: f32) -> Vec2 {
-        Vec2 {x: self.x * rhs, y: self.y * rhs}
+impl ops::Mul<Vec2f> for f32 {
+    type Output = Vec2f;
+    fn mul(self, rhs: Vec2f) -> Vec2f {
+        Vec2f {x: self *rhs.x, y: self *rhs.y}
     }
 }
 
-impl ops::Div<f32> for Vec2 {
-    type Output = Vec2;
-    fn div(self, rhs: f32) -> Vec2 {
-        Vec2 {x: self.x / rhs, y: self.y / rhs}
+impl ops::Div<Vec2f> for f32 {
+    type Output = Vec2f;
+    fn div(self, rhs: Vec2f) -> Vec2f {
+        Vec2f {x: self / rhs.x, y: self / rhs.y}
     }
 }
 
-impl ops::AddAssign<Vec2> for Vec2 {
-    fn add_assign(&mut self, rhs: Vec2) {
+
+impl ops::Add<f32> for Vec2f {
+    type Output = Vec2f;
+    fn add(self, rhs: f32) -> Vec2f {
+        Vec2f {x: self.x + rhs, y: self.y + rhs}
+    }
+}
+
+impl ops::Sub<f32> for Vec2f {
+    type Output = Vec2f;
+    fn sub(self, rhs: f32) -> Vec2f {
+        Vec2f {x: self.x - rhs, y: self.y - rhs}
+    }
+}
+
+impl ops::Mul<f32> for Vec2f {
+    type Output = Vec2f;
+    fn mul(self, rhs: f32) -> Vec2f {
+        Vec2f {x: self.x * rhs, y: self.y * rhs}
+    }
+}
+
+impl ops::Div<f32> for Vec2f {
+    type Output = Vec2f;
+    fn div(self, rhs: f32) -> Vec2f {
+        Vec2f {x: self.x / rhs, y: self.y / rhs}
+    }
+}
+
+impl ops::AddAssign<Vec2f> for Vec2f {
+    fn add_assign(&mut self, rhs: Vec2f) {
         self.x = self.x + rhs.x;
         self.y = self.y + rhs.y;
     }
 }
 
-impl ops::SubAssign<Vec2> for Vec2 {
-    fn sub_assign(&mut self, rhs: Vec2) {
+impl ops::SubAssign<Vec2f> for Vec2f {
+    fn sub_assign(&mut self, rhs: Vec2f) {
         self.x = self.x - rhs.x;
         self.y = self.y - rhs.y;
     }
 }
 
-impl ops::MulAssign<Vec2> for Vec2 {
-    fn mul_assign(&mut self, rhs: Vec2) {
+impl ops::MulAssign<Vec2f> for Vec2f {
+    fn mul_assign(&mut self, rhs: Vec2f) {
         self.x = self.x * rhs.x;
         self.y = self.y * rhs.y;
     }
 }
 
-impl ops::DivAssign<Vec2> for Vec2 {
-    fn div_assign(&mut self, rhs: Vec2) {
+impl ops::DivAssign<Vec2f> for Vec2f {
+    fn div_assign(&mut self, rhs: Vec2f) {
         self.x = self.x / rhs.x;
         self.y = self.y / rhs.y;
     }
 }
 
 
-impl ops::AddAssign<f32> for Vec2 {
+impl ops::AddAssign<f32> for Vec2f {
     fn add_assign(&mut self, rhs: f32) {
         self.x = self.x + rhs;
         self.y = self.y + rhs;
     }
 }
 
-impl ops::SubAssign<f32> for Vec2 {
+impl ops::SubAssign<f32> for Vec2f {
     fn sub_assign(&mut self, rhs: f32) {
         self.x = self.x - rhs;
         self.y = self.y - rhs;
     }
 }
 
-impl ops::MulAssign<f32> for Vec2 {
+impl ops::MulAssign<f32> for Vec2f {
     fn mul_assign(&mut self, rhs: f32) {
         self.x = self.x * rhs;
         self.y = self.y * rhs;
     }
 }
 
-impl ops::DivAssign<f32> for Vec2 {
+impl ops::DivAssign<f32> for Vec2f {
     fn div_assign(&mut self, rhs: f32) {
         self.x = self.x / rhs;
         self.y = self.y / rhs;
     }
 }
 
-impl ops::Neg for Vec2 {
-    type Output = Vec2;
-    fn neg(self) -> Self { Vec2{x:-self.x, y:-self.y}}
+impl ops::Neg for Vec2f {
+    type Output = Vec2f;
+    fn neg(self) -> Self { Vec2f{x:-self.x, y:-self.y}}
 }
 
-impl ops::Neg for Vec3{
-    type Output = Vec3;
-    fn neg(self) -> Self { Vec3{x:-self.x, y:-self.y, z:-self.z}}
+impl ops::Neg for Vec3f{
+    type Output = Vec3f;
+    fn neg(self) -> Self { Vec3f{x:-self.x, y:-self.y, z:-self.z}}
 }
 
-impl ops::Neg for Vec4 {
-    type Output = Vec4;
-    fn neg(self) -> Self { Vec4{x:-self.x, y:-self.y, z:-self.z, w:-self.w}}
+impl ops::Neg for Vec4f {
+    type Output = Vec4f;
+    fn neg(self) -> Self { Vec4f{x:-self.x, y:-self.y, z:-self.z, w:-self.w}}
 }
 
 
-//------ Vec3 operators
+//------ Vec3f operators
 
-impl ops::Add<Vec3> for Vec3 {
-    type Output = Vec3;
-    fn add(self, rhs: Vec3) -> Vec3 {
-        Vec3 {x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z}
+impl ops::Add<Vec3f> for Vec3f {
+    type Output = Vec3f;
+    fn add(self, rhs: Vec3f) -> Vec3f {
+        Vec3f {x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z}
     }
 }
 
-impl ops::Sub<Vec3> for Vec3 {
-    type Output = Vec3;
-    fn sub(self, rhs: Vec3) -> Vec3 {
-        Vec3 {x: self.x - rhs.x, y: self.y - rhs.y, z: self.z - rhs.z}
+impl ops::Sub<Vec3f> for Vec3f {
+    type Output = Vec3f;
+    fn sub(self, rhs: Vec3f) -> Vec3f {
+        Vec3f {x: self.x - rhs.x, y: self.y - rhs.y, z: self.z - rhs.z}
     }
 }
 
-impl ops::Mul<Vec3> for Vec3 {
-    type Output = Vec3;
-    fn mul(self, rhs: Vec3) -> Vec3 {
-        Vec3 {x: self.x * rhs.x, y: self.y * rhs.y, z: self.z * rhs.z}
+impl ops::Mul<Vec3f> for Vec3f {
+    type Output = Vec3f;
+    fn mul(self, rhs: Vec3f) -> Vec3f {
+        Vec3f {x: self.x * rhs.x, y: self.y * rhs.y, z: self.z * rhs.z}
     }
 }
 
-impl ops::Div<Vec3> for Vec3 {
-    type Output = Vec3;
-    fn div(self, rhs: Vec3) -> Vec3 {
-        Vec3 {x: self.x / rhs.x, y: self.y / rhs.y, z: self.z / rhs.z}
+impl ops::Div<Vec3f> for Vec3f {
+    type Output = Vec3f;
+    fn div(self, rhs: Vec3f) -> Vec3f {
+        Vec3f {x: self.x / rhs.x, y: self.y / rhs.y, z: self.z / rhs.z}
     }
 }
 
-impl ops::Add<Vec3> for f32 {
-    type Output = Vec3;
-    fn add(self, rhs: Vec3) -> Vec3 {
-        Vec3 {x: self + rhs.x, y: self + rhs.y, z: self + rhs.z}
+impl ops::Add<Vec3f> for f32 {
+    type Output = Vec3f;
+    fn add(self, rhs: Vec3f) -> Vec3f {
+        Vec3f {x: self + rhs.x, y: self + rhs.y, z: self + rhs.z}
     }
 }
 
-impl ops::Sub<Vec3> for f32 {
-    type Output = Vec3;
-    fn sub(self, rhs: Vec3) -> Vec3 {
-        Vec3 {x: self -rhs.x, y: self -rhs.y, z: self -rhs.z}
+impl ops::Sub<Vec3f> for f32 {
+    type Output = Vec3f;
+    fn sub(self, rhs: Vec3f) -> Vec3f {
+        Vec3f {x: self -rhs.x, y: self -rhs.y, z: self -rhs.z}
     }
 }
 
-impl ops::Mul<Vec3> for f32 {
-    type Output = Vec3;
-    fn mul(self, rhs: Vec3) -> Vec3 {
-        Vec3 {x: self *rhs.x, y: self *rhs.y, z: self *rhs.z}
+impl ops::Mul<Vec3f> for f32 {
+    type Output = Vec3f;
+    fn mul(self, rhs: Vec3f) -> Vec3f {
+        Vec3f {x: self *rhs.x, y: self *rhs.y, z: self *rhs.z}
     }
 }
 
-impl ops::Div<Vec3> for f32 {
-    type Output = Vec3;
-    fn div(self, rhs: Vec3) -> Vec3 {
-        Vec3 {x: self / rhs.x, y: self / rhs.y, z: self / rhs.z}
-    }
-}
-
-
-impl ops::Add<f32> for Vec3 {
-    type Output = Vec3;
-    fn add(self, rhs: f32) -> Vec3 {
-        Vec3 {x: self.x + rhs, y: self.y + rhs, z: self.z + rhs}
-    }
-}
-
-impl ops::Sub<f32> for Vec3 {
-    type Output = Vec3;
-    fn sub(self, rhs: f32) -> Vec3 {
-        Vec3 {x: self.x - rhs, y: self.y - rhs, z: self.z - rhs}
-    }
-}
-
-impl ops::Mul<f32> for Vec3 {
-    type Output = Vec3;
-    fn mul(self, rhs: f32) -> Vec3 {
-        Vec3 {x: self.x * rhs, y: self.y * rhs, z: self.z * rhs}
-    }
-}
-
-impl ops::Div<f32> for Vec3 {
-    type Output = Vec3;
-    fn div(self, rhs: f32) -> Vec3 {
-        Vec3 {x: self.x / rhs, y: self.y / rhs, z: self.z / rhs}
+impl ops::Div<Vec3f> for f32 {
+    type Output = Vec3f;
+    fn div(self, rhs: Vec3f) -> Vec3f {
+        Vec3f {x: self / rhs.x, y: self / rhs.y, z: self / rhs.z}
     }
 }
 
 
-impl ops::AddAssign<Vec3> for Vec3 {
-    fn add_assign(&mut self, rhs: Vec3) {
+impl ops::Add<f32> for Vec3f {
+    type Output = Vec3f;
+    fn add(self, rhs: f32) -> Vec3f {
+        Vec3f {x: self.x + rhs, y: self.y + rhs, z: self.z + rhs}
+    }
+}
+
+impl ops::Sub<f32> for Vec3f {
+    type Output = Vec3f;
+    fn sub(self, rhs: f32) -> Vec3f {
+        Vec3f {x: self.x - rhs, y: self.y - rhs, z: self.z - rhs}
+    }
+}
+
+impl ops::Mul<f32> for Vec3f {
+    type Output = Vec3f;
+    fn mul(self, rhs: f32) -> Vec3f {
+        Vec3f {x: self.x * rhs, y: self.y * rhs, z: self.z * rhs}
+    }
+}
+
+impl ops::Div<f32> for Vec3f {
+    type Output = Vec3f;
+    fn div(self, rhs: f32) -> Vec3f {
+        Vec3f {x: self.x / rhs, y: self.y / rhs, z: self.z / rhs}
+    }
+}
+
+
+impl ops::AddAssign<Vec3f> for Vec3f {
+    fn add_assign(&mut self, rhs: Vec3f) {
         self.x = self.x + rhs.x;
         self.y = self.y + rhs.y;
         self.z = self.z + rhs.z;
     }
 }
 
-impl ops::SubAssign<Vec3> for Vec3 {
-    fn sub_assign(&mut self, rhs: Vec3) {
+impl ops::SubAssign<Vec3f> for Vec3f {
+    fn sub_assign(&mut self, rhs: Vec3f) {
         self.x = self.x - rhs.x;
         self.y = self.y - rhs.y;
         self.z = self.z - rhs.z;
     }
 }
 
-impl ops::MulAssign<Vec3> for Vec3 {
-    fn mul_assign(&mut self, rhs: Vec3) {
+impl ops::MulAssign<Vec3f> for Vec3f {
+    fn mul_assign(&mut self, rhs: Vec3f) {
         self.x = self.x * rhs.x;
         self.y = self.y * rhs.y;
         self.z = self.z * rhs.z;
     }
 }
 
-impl ops::DivAssign<Vec3> for Vec3 {
-    fn div_assign(&mut self, rhs: Vec3) {
+impl ops::DivAssign<Vec3f> for Vec3f {
+    fn div_assign(&mut self, rhs: Vec3f) {
         self.x = self.x / rhs.x;
         self.y = self.y / rhs.y;
         self.z = self.z / rhs.z;
@@ -1413,7 +1421,7 @@ impl ops::DivAssign<Vec3> for Vec3 {
 }
 
 
-impl ops::AddAssign<f32> for Vec3 {
+impl ops::AddAssign<f32> for Vec3f {
     fn add_assign(&mut self, rhs: f32) {
         self.x = self.x + rhs;
         self.y = self.y + rhs;
@@ -1421,7 +1429,7 @@ impl ops::AddAssign<f32> for Vec3 {
     }
 }
 
-impl ops::SubAssign<f32> for Vec3 {
+impl ops::SubAssign<f32> for Vec3f {
     fn sub_assign(&mut self, rhs: f32) {
         self.x = self.x - rhs;
         self.y = self.y - rhs;
@@ -1429,7 +1437,7 @@ impl ops::SubAssign<f32> for Vec3 {
     }
 }
 
-impl ops::MulAssign<f32> for Vec3 {
+impl ops::MulAssign<f32> for Vec3f {
     fn mul_assign(&mut self, rhs: f32) {
         self.x = self.x * rhs;
         self.y = self.y * rhs;
@@ -1437,7 +1445,7 @@ impl ops::MulAssign<f32> for Vec3 {
     }
 }
 
-impl ops::DivAssign<f32> for Vec3 {
+impl ops::DivAssign<f32> for Vec3f {
     fn div_assign(&mut self, rhs: f32) {
         self.x = self.x / rhs;
         self.y = self.y / rhs;
@@ -1445,95 +1453,95 @@ impl ops::DivAssign<f32> for Vec3 {
     }
 }
 
-//------ Vec4 operators
+//------ Vec4f operators
 
-impl ops::Add<Vec4> for Vec4 {
-    type Output = Vec4;
-    fn add(self, rhs: Vec4) -> Vec4 {
-        Vec4 {x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z, w: self.w + rhs.w}
+impl ops::Add<Vec4f> for Vec4f {
+    type Output = Vec4f;
+    fn add(self, rhs: Vec4f) -> Vec4f {
+        Vec4f {x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z, w: self.w + rhs.w}
     }
 }
 
-impl ops::Sub<Vec4> for Vec4 {
-    type Output = Vec4;
-    fn sub(self, rhs: Vec4) -> Vec4 {
-        Vec4 {x: self.x - rhs.x, y: self.y - rhs.y, z: self.z - rhs.z, w: self.w - rhs.w}
+impl ops::Sub<Vec4f> for Vec4f {
+    type Output = Vec4f;
+    fn sub(self, rhs: Vec4f) -> Vec4f {
+        Vec4f {x: self.x - rhs.x, y: self.y - rhs.y, z: self.z - rhs.z, w: self.w - rhs.w}
     }
 }
 
-impl ops::Mul<Vec4> for Vec4 {
-    type Output = Vec4;
-    fn mul(self, rhs: Vec4) -> Vec4 {
-        Vec4 {x: self.x * rhs.x, y: self.y * rhs.y, z: self.z * rhs.z, w: self.w * rhs.w}
+impl ops::Mul<Vec4f> for Vec4f {
+    type Output = Vec4f;
+    fn mul(self, rhs: Vec4f) -> Vec4f {
+        Vec4f {x: self.x * rhs.x, y: self.y * rhs.y, z: self.z * rhs.z, w: self.w * rhs.w}
     }
 }
 
-impl ops::Div<Vec4> for Vec4 {
-    type Output = Vec4;
-    fn div(self, rhs: Vec4) -> Vec4 {
-        Vec4 {x: self.x / rhs.x, y: self.y / rhs.y, z: self.z / rhs.z, w: self.w / rhs.w}
+impl ops::Div<Vec4f> for Vec4f {
+    type Output = Vec4f;
+    fn div(self, rhs: Vec4f) -> Vec4f {
+        Vec4f {x: self.x / rhs.x, y: self.y / rhs.y, z: self.z / rhs.z, w: self.w / rhs.w}
     }
 }
 
-impl ops::Add<Vec4> for f32 {
-    type Output = Vec4;
-    fn add(self, rhs: Vec4) -> Vec4 {
-        Vec4 {x: self + rhs.x, y: self + rhs.y, z: self + rhs.z, w: self + rhs.z}
+impl ops::Add<Vec4f> for f32 {
+    type Output = Vec4f;
+    fn add(self, rhs: Vec4f) -> Vec4f {
+        Vec4f {x: self + rhs.x, y: self + rhs.y, z: self + rhs.z, w: self + rhs.z}
     }
 }
 
-impl ops::Sub<Vec4> for f32 {
-    type Output = Vec4;
-    fn sub(self, rhs: Vec4) -> Vec4 {
-        Vec4 {x: self -rhs.x, y: self -rhs.y, z: self -rhs.z, w: self -rhs.z}
+impl ops::Sub<Vec4f> for f32 {
+    type Output = Vec4f;
+    fn sub(self, rhs: Vec4f) -> Vec4f {
+        Vec4f {x: self -rhs.x, y: self -rhs.y, z: self -rhs.z, w: self -rhs.z}
     }
 }
 
-impl ops::Mul<Vec4> for f32 {
-    type Output = Vec4;
-    fn mul(self, rhs: Vec4) -> Vec4 {
-        Vec4 {x: self *rhs.x, y: self *rhs.y, z: self *rhs.z, w: self *rhs.z}
+impl ops::Mul<Vec4f> for f32 {
+    type Output = Vec4f;
+    fn mul(self, rhs: Vec4f) -> Vec4f {
+        Vec4f {x: self *rhs.x, y: self *rhs.y, z: self *rhs.z, w: self *rhs.z}
     }
 }
 
-impl ops::Div<Vec4> for f32 {
-    type Output = Vec4;
-    fn div(self, rhs: Vec4) -> Vec4 {
-        Vec4 {x: self / rhs.x, y: self / rhs.y, z: self / rhs.z, w: self / rhs.z}
+impl ops::Div<Vec4f> for f32 {
+    type Output = Vec4f;
+    fn div(self, rhs: Vec4f) -> Vec4f {
+        Vec4f {x: self / rhs.x, y: self / rhs.y, z: self / rhs.z, w: self / rhs.z}
     }
 }
 
 
-impl ops::Add<f32> for Vec4 {
-    type Output = Vec4;
-    fn add(self, rhs: f32) -> Vec4 {
-        Vec4 {x: self.x + rhs, y: self.y + rhs, z: self.z + rhs, w: self.w + rhs}
+impl ops::Add<f32> for Vec4f {
+    type Output = Vec4f;
+    fn add(self, rhs: f32) -> Vec4f {
+        Vec4f {x: self.x + rhs, y: self.y + rhs, z: self.z + rhs, w: self.w + rhs}
     }
 }
 
-impl ops::Sub<f32> for Vec4 {
-    type Output = Vec4;
-    fn sub(self, rhs: f32) -> Vec4 {
-        Vec4 {x: self.x - rhs, y: self.y - rhs, z: self.z - rhs, w: self.w - rhs}
+impl ops::Sub<f32> for Vec4f {
+    type Output = Vec4f;
+    fn sub(self, rhs: f32) -> Vec4f {
+        Vec4f {x: self.x - rhs, y: self.y - rhs, z: self.z - rhs, w: self.w - rhs}
     }
 }
 
-impl ops::Mul<f32> for Vec4 {
-    type Output = Vec4;
-    fn mul(self, rhs: f32) -> Vec4 {
-        Vec4 {x: self.x * rhs, y: self.y * rhs, z: self.z * rhs, w: self.w * rhs}
+impl ops::Mul<f32> for Vec4f {
+    type Output = Vec4f;
+    fn mul(self, rhs: f32) -> Vec4f {
+        Vec4f {x: self.x * rhs, y: self.y * rhs, z: self.z * rhs, w: self.w * rhs}
     }
 }
 
-impl ops::Div<f32> for Vec4 {
-    type Output = Vec4;
-    fn div(self, rhs: f32) -> Vec4 {
-        Vec4 {x: self.x / rhs, y: self.y / rhs, z: self.z / rhs, w: self.w / rhs}
+impl ops::Div<f32> for Vec4f {
+    type Output = Vec4f;
+    fn div(self, rhs: f32) -> Vec4f {
+        Vec4f {x: self.x / rhs, y: self.y / rhs, z: self.z / rhs, w: self.w / rhs}
     }
 }
 
-impl ops::AddAssign<Vec4> for Vec4 {
-    fn add_assign(&mut self, rhs: Vec4) {
+impl ops::AddAssign<Vec4f> for Vec4f {
+    fn add_assign(&mut self, rhs: Vec4f) {
         self.x = self.x + rhs.x;
         self.y = self.y + rhs.y;
         self.z = self.z + rhs.z;
@@ -1541,8 +1549,8 @@ impl ops::AddAssign<Vec4> for Vec4 {
     }
 }
 
-impl ops::SubAssign<Vec4> for Vec4 {
-    fn sub_assign(&mut self, rhs: Vec4) {
+impl ops::SubAssign<Vec4f> for Vec4f {
+    fn sub_assign(&mut self, rhs: Vec4f) {
         self.x = self.x - rhs.x;
         self.y = self.y - rhs.y;
         self.z = self.z - rhs.z;
@@ -1550,8 +1558,8 @@ impl ops::SubAssign<Vec4> for Vec4 {
     }
 }
 
-impl ops::MulAssign<Vec4> for Vec4 {
-    fn mul_assign(&mut self, rhs: Vec4) {
+impl ops::MulAssign<Vec4f> for Vec4f {
+    fn mul_assign(&mut self, rhs: Vec4f) {
         self.x = self.x * rhs.x;
         self.y = self.y * rhs.y;
         self.z = self.z * rhs.z;
@@ -1559,8 +1567,8 @@ impl ops::MulAssign<Vec4> for Vec4 {
     }
 }
 
-impl ops::DivAssign<Vec4> for Vec4 {
-    fn div_assign(&mut self, rhs: Vec4) {
+impl ops::DivAssign<Vec4f> for Vec4f {
+    fn div_assign(&mut self, rhs: Vec4f) {
         self.x = self.x / rhs.x;
         self.y = self.y / rhs.y;
         self.z = self.z / rhs.z;
@@ -1569,7 +1577,7 @@ impl ops::DivAssign<Vec4> for Vec4 {
 }
 
 
-impl ops::AddAssign<f32> for Vec4 {
+impl ops::AddAssign<f32> for Vec4f {
     fn add_assign(&mut self, rhs: f32) {
         self.x = self.x + rhs;
         self.y = self.y + rhs;
@@ -1578,7 +1586,7 @@ impl ops::AddAssign<f32> for Vec4 {
     }
 }
 
-impl ops::SubAssign<f32> for Vec4 {
+impl ops::SubAssign<f32> for Vec4f {
     fn sub_assign(&mut self, rhs: f32) {
         self.x = self.x - rhs;
         self.y = self.y - rhs;
@@ -1587,7 +1595,7 @@ impl ops::SubAssign<f32> for Vec4 {
     }
 }
 
-impl ops::MulAssign<f32> for Vec4 {
+impl ops::MulAssign<f32> for Vec4f {
     fn mul_assign(&mut self, rhs: f32) {
         self.x = self.x * rhs;
         self.y = self.y * rhs;
@@ -1596,7 +1604,7 @@ impl ops::MulAssign<f32> for Vec4 {
     }
 }
 
-impl ops::DivAssign<f32> for Vec4 {
+impl ops::DivAssign<f32> for Vec4f {
     fn div_assign(&mut self, rhs: f32) {
         self.x = self.x / rhs;
         self.y = self.y / rhs;

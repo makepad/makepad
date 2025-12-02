@@ -275,7 +275,6 @@ impl Cx {
                     }
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
-                        self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                     if SignalToUI::check_and_clear_action_signal() {
@@ -283,7 +282,6 @@ impl Cx {
                     }
                     let events = self.os.stdin_timers.get_dispatch();
                     for event in events{
-                        self.handle_script_timer(&event);
                         self.call_event_handler(&Event::Timer(event));
                     }
                     if self.handle_live_edit() {

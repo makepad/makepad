@@ -664,11 +664,11 @@ pub struct HtmlLink {
     #[live] pressed: f32,
 
     /// The default font color for the link when not hovered on or pressed.
-    #[live] color: Option<Vec4>,
+    #[live] color: Option<Vec4f>,
     /// The font color used when the link is hovered on.
-    #[live] hover_color: Option<Vec4>,
+    #[live] hover_color: Option<Vec4f>,
     /// The font color used when the link is pressed.
-    #[live] pressed_color: Option<Vec4>,
+    #[live] pressed_color: Option<Vec4f>,
 
     #[live] pub text: ArcStringMut,
     #[live] pub url: String,

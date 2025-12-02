@@ -1228,7 +1228,7 @@ pub struct CxAndroidDisplay {
 
 pub struct CxOs {
     pub first_after_resize: bool,
-    pub display_size: DVec2,
+    pub display_size: Vec2d,
     pub dpi_factor: f64,
     pub keyboard_closed: f64,
     pub frame_time: i64,

@@ -1,4 +1,4 @@
-use crate::DVec2;
+use crate::Vec2d;
 
 const DEFAULT_MIN_DESKTOP_WIDTH: f64 = 860.;
 
@@ -9,7 +9,7 @@ pub struct DisplayContext {
     /// The event ID that last updated the display context
     pub updated_on_event_id: u64,
     /// The current screen size
-    pub screen_size: DVec2,
+    pub screen_size: Vec2d,
 }
 
 impl DisplayContext {

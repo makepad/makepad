@@ -163,7 +163,7 @@ fn parse_color(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenSt
             hex_bytes_to_u32(bytes)
         };
         if let Ok(val) = val{
-            tb.add("Vec4::from_u32(").suf_u32(val).add(")");
+            tb.add("Vec4f::from_u32(").suf_u32(val).add(")");
             return Ok(())
         }
     }

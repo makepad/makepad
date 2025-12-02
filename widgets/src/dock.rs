@@ -127,7 +127,7 @@ live_design!{
 pub struct DrawRoundCorner {
     #[deref] draw_super: DrawQuad,
     #[live] border_radius: f32,
-    #[live] flip: Vec2,
+    #[live] flip: Vec2f,
 }
 
 impl DrawRoundCorner {
@@ -444,7 +444,7 @@ impl Dock {
         cx.end_turtle_with_area(&mut self.area);
     }
 
-    fn find_drop_position(&self, cx: &Cx, abs: DVec2) -> Option<DropPosition> {
+    fn find_drop_position(&self, cx: &Cx, abs: Vec2d) -> Option<DropPosition> {
         for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
             let rect = tab_bar.contents_rect;
             if let Some((tab_id, rect)) = tab_bar.tab_bar.is_over_tab(cx, abs) {
@@ -470,7 +470,7 @@ impl Dock {
                         id: *tab_bar_id,
                         rect: Rect {
                             pos: rect.pos,
-                            size: DVec2 {
+                            size: Vec2d {
                                 x: rect.size.x / 2.0,
                                 y: rect.size.y,
                             },
@@ -481,11 +481,11 @@ impl Dock {
                         part: DropPart::Right,
                         id: *tab_bar_id,
                         rect: Rect {
-                            pos: DVec2 {
+                            pos: Vec2d {
                                 x: rect.pos.x + rect.size.x / 2.0,
                                 y: rect.pos.y,
                             },
-                            size: DVec2 {
+                            size: Vec2d {
                                 x: rect.size.x / 2.0,
                                 y: rect.size.y,
                             },
@@ -497,7 +497,7 @@ impl Dock {
                         id: *tab_bar_id,
                         rect: Rect {
                             pos: rect.pos,
-                            size: DVec2 {
+                            size: Vec2d {
                                 x: rect.size.x,
                                 y: rect.size.y / 2.0,
                             },
@@ -508,11 +508,11 @@ impl Dock {
                         part: DropPart::Bottom,
                         id: *tab_bar_id,
                         rect: Rect {
-                            pos: DVec2 {
+                            pos: Vec2d {
                                 x: rect.pos.x,
                                 y: rect.pos.y + rect.size.y / 2.0,
                             },
-                            size: DVec2 {
+                            size: Vec2d {
                                 x: rect.size.x,
                                 y: rect.size.y / 2.0,
                             },
@@ -722,7 +722,7 @@ impl Dock {
         false
     }
 
-    fn handle_drop(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, is_move: bool) -> bool {
+    fn handle_drop(&mut self, cx: &mut Cx, abs: Vec2d, item: LiveId, is_move: bool) -> bool {
         if let Some(pos) = self.find_drop_position(cx, abs) {
             self.needs_save = true;
             // ok now what
@@ -832,7 +832,7 @@ impl Dock {
         false
     }
 
-    fn drop_create(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String, template:LiveId) {
+    fn drop_create(&mut self, cx: &mut Cx, abs: Vec2d, item: LiveId, kind: LiveId, name: String, template:LiveId) {
         // lets add a tab
         if self.handle_drop(cx, abs, item, false) {
             self.needs_save = true;
@@ -847,7 +847,7 @@ impl Dock {
         }
     }
 
-    fn drop_clone(&mut self, cx: &mut Cx, abs: DVec2, item: LiveId, new_item: LiveId, template:LiveId) {
+    fn drop_clone(&mut self, cx: &mut Cx, abs: Vec2d, item: LiveId, new_item: LiveId, template:LiveId) {
         // lets add a tab
         if let Some(DockItem::Tab {name, kind, ..}) = self.dock_items.get(&item) {
             let name = name.clone();
@@ -1250,19 +1250,19 @@ impl DockRef {
         None
     }
 
-    pub fn drop_clone(&self, cx: &mut Cx, abs: DVec2, old_item: LiveId, new_item: LiveId, template:LiveId) {
+    pub fn drop_clone(&self, cx: &mut Cx, abs: Vec2d, old_item: LiveId, new_item: LiveId, template:LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
             dock.drop_clone(cx, abs, old_item, new_item, template);
         }
     }
 
-    pub fn drop_move(&self, cx: &mut Cx, abs: DVec2, item: LiveId) {
+    pub fn drop_move(&self, cx: &mut Cx, abs: Vec2d, item: LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
             dock.handle_drop(cx, abs, item, true);
         }
     }
 
-    pub fn drop_create(&self, cx: &mut Cx, abs: DVec2, item: LiveId, kind: LiveId, name: String, template:LiveId) {
+    pub fn drop_create(&self, cx: &mut Cx, abs: Vec2d, item: LiveId, kind: LiveId, name: String, template:LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
             dock.drop_create(cx, abs, item, kind, name, template);
         }

@@ -14,7 +14,7 @@ use {
         super::select_timer::SelectTimers,
     },
     crate::{
-        makepad_math::DVec2,
+        makepad_math::Vec2d,
         event::*,
         cursor::MouseCursor,
         os::cx_native::EventFlow,
@@ -266,7 +266,7 @@ impl XlibApp {
                             }*/
                         }
                         
-                        let pos = DVec2 {x: x as f64 / window.last_window_geom.dpi_factor, y: y as f64 / window.last_window_geom.dpi_factor};
+                        let pos = Vec2d {x: x as f64 / window.last_window_geom.dpi_factor, y: y as f64 / window.last_window_geom.dpi_factor};
                         
                         // query window for chrome
                         let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
@@ -344,7 +344,7 @@ impl XlibApp {
                             
                             self.do_callback(XlibEvent::Scroll(ScrollEvent {
                                 window_id: window.window_id,
-                                scroll: DVec2 {
+                                scroll: Vec2d {
                                     x: if button.button == 6 {-speed} else if button.button == 7 {speed} else {0.},
                                     y: if button.button == 4 {-speed} else if button.button == 5 {speed} else {0.}
                                 },

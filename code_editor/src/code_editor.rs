@@ -235,9 +235,9 @@ pub struct CodeEditor {
     #[live] draw_cursor_bg: DrawColor,
     #[live] draw_bg: DrawColor,
     #[rust(KeepCursorInView::Off)] pub keep_cursor_in_view: KeepCursorInView,
-    #[rust] last_cursor_screen_pos: Option<DVec2>,
-    #[live] pad_left_top: DVec2, 
-    #[rust] cell_size: DVec2,
+    #[rust] last_cursor_screen_pos: Option<Vec2d>,
+    #[live] pad_left_top: Vec2d, 
+    #[rust] cell_size: Vec2d,
     #[rust] cell_offset_y: f64,
     #[rust] gutter_rect: Rect,
     #[rust] gutter_chars: usize,
@@ -262,11 +262,11 @@ pub struct CodeEditor {
 
 pub enum KeepCursorInView {
     Once,
-    Always(DVec2, NextFrame),
+    Always(Vec2d, NextFrame),
     LockStart,
-    Locked(DVec2),
-    LockedCenter(DVec2, Position, Affinity),
-    FontResize(DVec2),
+    Locked(Vec2d),
+    LockedCenter(Vec2d, Position, Affinity),
+    FontResize(Vec2d),
     JumpToPosition,
     Off,
 }
@@ -482,17 +482,17 @@ impl CodeEditor {
         };
         self.gutter_rect = Rect {
             pos: turtle_rect.pos,
-            size: DVec2 {
+            size: Vec2d {
                 x: gutter_width,
                 y: if height_is_fit{MAX_HEIGHT}else{turtle_rect.size.y},
             },
         };
         self.viewport_rect = Rect {
-            pos: DVec2 {
+            pos: Vec2d {
                 x: turtle_rect.pos.x + gutter_width,
                 y: turtle_rect.pos.y,
             },
-            size: DVec2 {
+            size: Vec2d {
                 x: turtle_rect.size.x - gutter_width,
                 y:if height_is_fit{MAX_HEIGHT}else{turtle_rect.size.y},
             },
@@ -522,7 +522,7 @@ impl CodeEditor {
 
         let bg_rect = Rect {
             pos: self.unscrolled_rect.pos,
-            size: DVec2 {
+            size: Vec2d {
                 x: self.unscrolled_rect.size.x,
                 y:if height_is_fit{MAX_HEIGHT}else{self.unscrolled_rect.size.y},
             },
@@ -1068,7 +1068,7 @@ impl CodeEditor {
                     }
                     self.draw_gutter.draw_abs(
                         cx,
-                        DVec2 {
+                        Vec2d {
                             x: 0.0,
                             y: origin_y,
                         } * self.cell_size
@@ -1170,7 +1170,7 @@ impl CodeEditor {
                                             .grid_to_normalized_position(row_index, column_index);
                                         self.draw_text.draw_abs(
                                             cx,
-                                            DVec2 { x, y: origin_y + y } * self.cell_size
+                                            Vec2d { x, y: origin_y + y } * self.cell_size
                                                 + dvec2(
                                                     self.viewport_rect.pos.x,
                                                     self.viewport_rect.pos.y + self.cell_offset_y
@@ -1190,7 +1190,7 @@ impl CodeEditor {
                                     line.grid_to_normalized_position(row_index, column_index);
                                 self.draw_text.draw_abs(
                                     cx,
-                                    DVec2 { x, y: origin_y + y } * self.cell_size
+                                    Vec2d { x, y: origin_y + y } * self.cell_size
                                         + self.viewport_rect.pos,
                                     text,
                                 );
@@ -1234,9 +1234,9 @@ impl CodeEditor {
                             self.draw_indent_guide.draw_abs(
                                 cx,
                                 Rect {
-                                    pos: DVec2 { x, y: origin_y + y } * self.cell_size
+                                    pos: Vec2d { x, y: origin_y + y } * self.cell_size
                                         + self.viewport_rect.pos,
-                                    size: DVec2 {
+                                    size: Vec2d {
                                         x: 2.0,
                                         y: line.scale() * self.cell_size.y,
                                     },
@@ -1303,7 +1303,7 @@ impl CodeEditor {
         .draw_selection_layer(cx, session)
     }
 
-    fn pick(&self, session: &CodeSession, position: DVec2) -> ((Position, Affinity), bool) {
+    fn pick(&self, session: &CodeSession, position: Vec2d) -> ((Position, Affinity), bool) {
         let position = (position - self.viewport_rect.pos) / self.cell_size;
         
         if position.y < 0.0 {
@@ -1697,12 +1697,12 @@ impl<'a> DrawDecorationLayer<'a> {
         self.code_editor.draw_decoration.draw_abs(
             cx,
             Rect {
-                pos: DVec2 {
+                pos: Vec2d {
                     x: start_x,
                     y: origin_y + y,
                 } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: x - start_x,
                     y: line.scale(),
                 } * self.code_editor.cell_size,
@@ -1898,12 +1898,12 @@ impl<'a> DrawSelectionLayer<'a> {
         self.code_editor.draw_selection.draw(
             cx,
             Rect {
-                pos: DVec2 {
+                pos: Vec2d {
                     x: start_x,
                     y: origin_y + y,
                 } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: x - start_x,
                     y: line.scale(),
                 } * self.code_editor.cell_size,
@@ -1924,9 +1924,9 @@ impl<'a> DrawSelectionLayer<'a> {
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
-                pos: DVec2 { x, y: origin_y + y } * self.code_editor.cell_size
+                pos: Vec2d { x, y: origin_y + y } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: 2.0,
                     y: line.scale() * self.code_editor.cell_size.y,
                 },
@@ -1947,12 +1947,12 @@ impl<'a> DrawSelectionLayer<'a> {
         self.code_editor.draw_cursor_bg.draw_abs(
             cx,
             Rect {
-                pos: DVec2 {
+                pos: Vec2d {
                     x: self.code_editor.unscrolled_rect.pos.x,
                     y: (origin_y + y) * self.code_editor.cell_size.y
                         + self.code_editor.viewport_rect.pos.y,
                 },
-                size: DVec2 {
+                size: Vec2d {
                     x: self.code_editor.unscrolled_rect.size.x,
                     y: line.scale() * self.code_editor.cell_size.y,
                 },
@@ -1969,39 +1969,39 @@ struct ActiveSelection {
 #[derive(Live, LiveHook, LiveRegister)]
 struct TokenColors {
     #[live]
-    unknown: Vec4,
+    unknown: Vec4f,
     #[live]
-    branch_keyword: Vec4,
+    branch_keyword: Vec4f,
     #[live]
-    comment: Vec4,
+    comment: Vec4f,
     #[live]
-    constant: Vec4,
+    constant: Vec4f,
     #[live]
-    delimiter: Vec4,
+    delimiter: Vec4f,
     #[live]
-    delimiter_highlight: Vec4,
+    delimiter_highlight: Vec4f,
     #[live]
-    identifier: Vec4,
+    identifier: Vec4f,
     #[live]
-    loop_keyword: Vec4,
+    loop_keyword: Vec4f,
     #[live]
-    number: Vec4,
+    number: Vec4f,
     #[live]
-    other_keyword: Vec4,
+    other_keyword: Vec4f,
     #[live]
-    function: Vec4,
+    function: Vec4f,
     #[live]
-    punctuator: Vec4,
+    punctuator: Vec4f,
     #[live]
-    string: Vec4,
+    string: Vec4f,
     #[live]
-    typename: Vec4,
+    typename: Vec4f,
     #[live]
-    whitespace: Vec4,
+    whitespace: Vec4f,
     #[live]
-    error_decoration: Vec4,
+    error_decoration: Vec4f,
     #[live]
-    warning_decoration: Vec4,
+    warning_decoration: Vec4f,
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -2010,7 +2010,7 @@ pub struct DrawIndentGuide {
     #[deref]
     draw_super: DrawQuad,
     #[live]
-    color: Vec4,
+    color: Vec4f,
 }
 
 #[derive(Live, LiveHook, LiveRegister)]
@@ -2018,7 +2018,7 @@ struct DrawDecoration {
     #[deref]
     draw_super: DrawQuad,
     #[live]
-    color: Vec4,
+    color: Vec4f,
 }
 
 #[derive(Live, LiveHook, LiveRegister)]

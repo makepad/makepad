@@ -350,7 +350,6 @@ impl Cx {
                         ))
                     }
                 ];
-                self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
                 self.call_event_handler(&e);
             }
@@ -364,7 +363,6 @@ impl Cx {
                         })
                     }
                 ];
-                self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
                 self.call_event_handler(&e);
             }
@@ -582,14 +580,12 @@ impl Cx {
         // Timers
         let events = self.os.timers.get_dispatch();
         for event in events{
-            self.handle_script_timer(&event);
             self.call_event_handler(&Event::Timer(event));
         }        
         
         // Signals
         if SignalToUI::check_and_clear_ui_signal() {
             self.handle_media_signals();
-            self.handle_script_signals();
             self.call_event_handler(&Event::Signal);
         }
         if SignalToUI::check_and_clear_action_signal() {
@@ -1228,7 +1224,7 @@ pub struct CxAndroidDisplay {
 
 pub struct CxOs {
     pub first_after_resize: bool,
-    pub display_size: DVec2,
+    pub display_size: Vec2d,
     pub dpi_factor: f64,
     pub keyboard_closed: f64,
     pub frame_time: i64,

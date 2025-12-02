@@ -47,10 +47,39 @@ pub struct ScriptTypeIndex(pub(crate) u32);
 // implementation is procmacro generated
 pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
-    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool;
-    fn script_type_id_static()->ScriptTypeId;
+    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
+        if  <Self as ScriptHook>::on_type_check(heap, value){
+            return true
+        }
+        if let Some(o) = value.as_object(){
+            heap.type_matches_id(o, Self::script_type_id_static())
+        }
+        else{
+            false
+        }
+    }
+    
+    fn script_from_dirty(vm:&mut ScriptVm, object:ScriptValue, id:LiveId)->Option<Self> where Self:Sized{
+        if let Some(value) = vm.heap.value_apply_if_dirty(object, id.into()){
+            Some(ScriptNew::script_from_value(vm, value))
+        }
+        else{
+            None
+        }
+    }
+    
+    fn script_default(vm:&mut ScriptVm)->ScriptValue where Self:Sized{
+        Self::script_proto(vm);
+        Self::script_new(vm).script_to_value(vm)
+    }
+        
+    fn script_type_id_static()->ScriptTypeId{ ScriptTypeId::of::<Self>()}
     fn script_new(vm:&mut ScriptVm)->Self;
-    fn script_default(vm:&mut ScriptVm)->ScriptValue;
+    
+    fn script_run(vm:&mut ScriptVm, f:fn(&mut ScriptVm)->ScriptValue)->Self where Self:Sized{
+        let value = f(vm);
+        Self::script_from_value(vm, value)
+    }
     
     // default impls    
     
@@ -115,9 +144,9 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
 
 // this as well
 pub trait ScriptApply{
-    fn script_type_id(&self)->ScriptTypeId;
+    fn script_type_id(&self)->ScriptTypeId where Self:'static { ScriptTypeId::of::<Self>()}
     fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue);
-    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue;
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{NIL}
 }
 
 pub trait ScriptReset{

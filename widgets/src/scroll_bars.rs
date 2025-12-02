@@ -33,7 +33,7 @@ pub struct ScrollBars {
     #[live] scroll_bar_x: ScrollBar,
     #[live] scroll_bar_y: ScrollBar,
     #[rust] nav_scroll_index: Option<NavScrollIndex>,
-    #[rust] scroll: DVec2,
+    #[rust] scroll: Vec2d,
     #[rust] area: Area,
 }
 
@@ -53,7 +53,7 @@ impl ScrollBars {
         self.scroll.y = value;
     }
     
-    pub fn get_scroll_pos(&self) -> DVec2 {
+    pub fn get_scroll_pos(&self) -> Vec2d {
         self.scroll
     }
 
@@ -137,7 +137,7 @@ impl ScrollBars {
         }
     }
     
-    pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: DVec2) -> bool {
+    pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2d) -> bool {
         //let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:cx.redraw_id});
         let mut changed = false;
         if self.show_scroll_x {
@@ -157,7 +157,7 @@ impl ScrollBars {
         changed
     }
     
-    pub fn set_scroll_pos_no_clip(&mut self, cx: &mut Cx, pos: DVec2) -> bool {
+    pub fn set_scroll_pos_no_clip(&mut self, cx: &mut Cx, pos: Vec2d) -> bool {
         let mut changed = false;
         if self.show_scroll_x {
             if self.scroll_bar_x.set_scroll_pos_no_clip(cx, pos.x) {
@@ -174,8 +174,8 @@ impl ScrollBars {
         changed
     }
     
-    pub fn get_scroll_view_total(&mut self) -> DVec2 {
-        DVec2 {
+    pub fn get_scroll_view_total(&mut self) -> Vec2d {
+        Vec2d {
             x: if self.show_scroll_x {
                 self.scroll_bar_x.get_scroll_view_total()
             }else {0.},
@@ -185,8 +185,8 @@ impl ScrollBars {
         }
     }
     
-    pub fn get_scroll_view_visible(&mut self) -> DVec2 {
-        DVec2 {
+    pub fn get_scroll_view_visible(&mut self) -> Vec2d {
+        Vec2d {
             x: if self.show_scroll_x {
                 self.scroll_bar_x.get_scroll_view_visible()
             }else {0.},
@@ -230,7 +230,7 @@ impl ScrollBars {
         }
     }
     
-    pub fn set_scroll_target(&mut self, cx: &mut Cx, pos: DVec2) {
+    pub fn set_scroll_target(&mut self, cx: &mut Cx, pos: Vec2d) {
         if self.show_scroll_x {
             self.scroll_bar_x.set_scroll_target(cx, pos.x);
         }

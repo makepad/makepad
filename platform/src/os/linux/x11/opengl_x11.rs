@@ -6,7 +6,7 @@ use {
         gl_sys::{self, LibGl},
     }, x11_sys, xlib_window::XlibWindow
     }, crate::{
-        cx::Cx, event::*, makepad_math::DVec2, opengl_cx::OpenglCx, pass::{PassClearColor, PassClearDepth, PassId}, texture::{CxTexture, Texture}, window::WindowId, x11::linux_x11::X11Cx
+        cx::Cx, event::*, makepad_math::Vec2d, opengl_cx::OpenglCx, pass::{PassClearColor, PassClearDepth, PassId}, texture::{CxTexture, Texture}, window::WindowId, x11::linux_x11::X11Cx
     }, std::{
         ffi::CString, mem, os::{self, fd::{AsRawFd as _, FromRawFd as _, OwnedFd}, raw::{c_long, c_void}}
     }
@@ -209,7 +209,7 @@ pub struct OpenglWindow {
     pub window_id: WindowId,
     pub window_geom: WindowGeom,
     pub opening_repaint_count: u32,
-    pub cal_size: DVec2,
+    pub cal_size: Vec2d,
     pub xlib_window: Box<XlibWindow>,
     pub egl_surface: egl_sys::EGLSurface,
 }
@@ -218,8 +218,8 @@ impl OpenglWindow {
     pub fn new(
         window_id: WindowId,
         opengl_cx: &OpenglCx,
-        inner_size: DVec2,
-        position: Option<DVec2>,
+        inner_size: Vec2d,
+        position: Option<Vec2d>,
         title: &str,
         is_fullscreen: bool,
     ) -> OpenglWindow {
@@ -279,7 +279,7 @@ impl OpenglWindow {
             first_draw: true,
             window_id,
             opening_repaint_count: 0,
-            cal_size: DVec2::default(),
+            cal_size: Vec2d::default(),
             window_geom: xlib_window.get_window_geom(),
             xlib_window,
             egl_surface,
@@ -287,7 +287,7 @@ impl OpenglWindow {
     }
 
     pub fn resize_buffers(&mut self) -> bool {
-        let cal_size = DVec2 {
+        let cal_size = Vec2d {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
         };

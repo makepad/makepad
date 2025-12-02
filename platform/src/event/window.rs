@@ -15,9 +15,9 @@ pub struct WindowGeom {
     pub xr_is_presenting: bool,
     pub is_fullscreen: bool, 
     pub is_topmost: bool,
-    pub position: DVec2,
-    pub inner_size: DVec2,
-    pub outer_size: DVec2,
+    pub position: Vec2d,
+    pub inner_size: Vec2d,
+    pub outer_size: Vec2d,
 }
  
 
@@ -31,8 +31,8 @@ pub struct WindowGeomChangeEvent {
 #[derive(Clone, Debug)]
 pub struct WindowMovedEvent {
     pub window_id: WindowId,
-    pub old_pos: DVec2,
-    pub new_pos: DVec2,
+    pub old_pos: Vec2d,
+    pub new_pos: Vec2d,
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +63,6 @@ pub enum WindowDragQueryResponse {
 #[derive(Clone, Debug)]
 pub struct WindowDragQueryEvent {
     pub window_id: WindowId,
-    pub abs: DVec2,
+    pub abs: Vec2d,
     pub response: Rc<Cell<WindowDragQueryResponse>>,
 }

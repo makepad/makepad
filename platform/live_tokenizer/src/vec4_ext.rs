@@ -1,15 +1,15 @@
 
-use makepad_math::Vec4;
+use makepad_math::Vec4f;
 use crate::colorhex;
 
 pub trait Vec4Ext{
-    fn from_hex_str(hex: &str) -> Result<Vec4, ()> {Self::from_hex_bytes(hex.as_bytes())}
-    fn from_hex_bytes(bytes: &[u8]) -> Result<Vec4, ()>;
+    fn from_hex_str(hex: &str) -> Result<Vec4f, ()> {Self::from_hex_bytes(hex.as_bytes())}
+    fn from_hex_bytes(bytes: &[u8]) -> Result<Vec4f, ()>;
     fn append_hex_to_string(&self, out:&mut String);
-    fn color(value: &str) -> Vec4;
+    fn color(value: &str) -> Vec4f;
 }
 
-impl Vec4Ext for Vec4{
+impl Vec4Ext for Vec4f{
     fn append_hex_to_string(&self, out:&mut String) {
         fn int_to_hex(d: u8) -> char {
             if d >= 10 {
@@ -29,23 +29,23 @@ impl Vec4Ext for Vec4{
         out.push(int_to_hex((b) & 0xf));
     }
     
-    fn color(value: &str) -> Vec4 {
+    fn color(value: &str) -> Vec4f {
         if let Ok(val) = Self::from_hex_str(value) {
             val
         }
         else {
-            Vec4 {x: 1.0, y: 0.0, z: 1.0, w: 1.0}
+            Vec4f {x: 1.0, y: 0.0, z: 1.0, w: 1.0}
         }
     }
     
-    fn from_hex_bytes(bytes: &[u8]) -> Result<Vec4, ()> {
+    fn from_hex_bytes(bytes: &[u8]) -> Result<Vec4f, ()> {
         let color = if bytes.len()>2 && bytes[0] == b'#' {
             colorhex::hex_bytes_to_u32(&bytes[1..])?
         }
         else {
             colorhex::hex_bytes_to_u32(bytes)?
         };
-        Ok(Vec4 {
+        Ok(Vec4f {
             x: (((color >> 24)&0xff) as f32) / 255.0,
             y: (((color >> 16)&0xff) as f32) / 255.0,
             z: (((color >> 8)&0xff) as f32) / 255.0,

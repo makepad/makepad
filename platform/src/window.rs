@@ -35,7 +35,7 @@ impl CxWindowPool {
         WindowHandle(self.0.alloc())
     }
     
-    pub fn window_id_contains(&self, pos:DVec2)->(WindowId, DVec2){
+    pub fn window_id_contains(&self, pos:Vec2d)->(WindowId, Vec2d){
         for (index,item) in self.0.pool.iter().enumerate(){
             let window = &item.item;
             if pos.x>= window.window_geom.position.x &&
@@ -49,7 +49,7 @@ impl CxWindowPool {
     }
     
     
-    pub fn relative_to_window_id(&self, pos:DVec2)->(WindowId, DVec2){
+    pub fn relative_to_window_id(&self, pos:Vec2d)->(WindowId, Vec2d){
         for (index,item) in self.0.pool.iter().enumerate(){
             let window = &item.item;
             if pos.x>= window.window_geom.position.x &&
@@ -143,7 +143,7 @@ impl LiveApply for WindowHandle {
             }
             match nodes[index].id {
                 live_id!(inner_size) => {
-                    let v:Vec2 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
+                    let v:Vec2f = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     cx.windows[self.window_id()].create_inner_size = Some(v.into());
                 },
                 live_id!(title) => {
@@ -155,7 +155,7 @@ impl LiveApply for WindowHandle {
                     cx.windows[self.window_id()].kind_id = v;
                 }
                 live_id!(position) => {
-                    let v:Vec2 = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
+                    let v:Vec2f = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes);
                     cx.windows[self.window_id()].create_position = Some(v.into());
                 }
                 live_id!(dpi_override) => {
@@ -182,18 +182,18 @@ impl WindowHandle {
         cx.windows[self.window_id()].main_pass_id = Some(pass.pass_id());
         cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());
     }
-    pub fn configure_window(&mut self, cx: &mut Cx, inner_size: DVec2, position: DVec2, is_fullscreen: bool, title: String) {
+    pub fn configure_window(&mut self, cx: &mut Cx, inner_size: Vec2d, position: Vec2d, is_fullscreen: bool, title: String) {
         let window = &mut cx.windows[self.window_id()];
         window.create_title = title;
         window.create_position = Some(position);
         window.create_inner_size = Some(inner_size);
         window.is_fullscreen = is_fullscreen;
     }
-    pub fn get_inner_size(&self, cx: &Cx) -> DVec2 {
+    pub fn get_inner_size(&self, cx: &Cx) -> Vec2d {
         cx.windows[self.window_id()].get_inner_size()
     }
     
-    pub fn get_position(&self, cx: &Cx) -> DVec2 {
+    pub fn get_position(&self, cx: &Cx) -> Vec2d {
         cx.windows[self.window_id()].get_position()
     }
     
@@ -237,11 +237,11 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::SetTopmost(self.window_id(), set_topmost));
     }
     
-    pub fn resize(&self, cx: &mut Cx, size: DVec2) {
+    pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
         cx.push_unique_platform_op(CxOsOp::ResizeWindow(self.window_id(), size));
     }
 
-    pub fn reposition(&self, cx: &mut Cx, position: DVec2) {
+    pub fn reposition(&self, cx: &mut Cx, position: Vec2d) {
         cx.push_unique_platform_op(CxOsOp::RepositionWindow(self.window_id(), position));
     }
 
@@ -257,8 +257,8 @@ impl WindowHandle {
 #[derive(Clone, Default)]
 pub struct CxWindow {
     pub create_title: String,
-    pub create_position: Option<DVec2>,
-    pub create_inner_size: Option<DVec2>,
+    pub create_position: Option<Vec2d>,
+    pub create_inner_size: Option<Vec2d>,
     pub kind_id: usize,
     pub dpi_override: Option<f64>,
     pub os_dpi_factor: Option<f64>,
@@ -269,7 +269,7 @@ pub struct CxWindow {
 }
 
 impl CxWindow {
-    pub fn remap_dpi_override(&self, pos:DVec2)->DVec2{
+    pub fn remap_dpi_override(&self, pos:Vec2d)->Vec2d{
         if let Some(dpi_override) = self.dpi_override{
             if let Some(os_dpi_factor) = self.os_dpi_factor{
                 return pos * ( os_dpi_factor / dpi_override)
@@ -278,11 +278,11 @@ impl CxWindow {
         return pos
     }
     
-    pub fn get_inner_size(&self) -> DVec2 {
+    pub fn get_inner_size(&self) -> Vec2d {
         self.window_geom.inner_size
     }
     
-    pub fn get_position(&self) -> DVec2 {
+    pub fn get_position(&self) -> Vec2d {
         self.window_geom.position
     }
 

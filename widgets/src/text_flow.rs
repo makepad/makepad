@@ -252,11 +252,11 @@ pub enum FlowBlockType {
 #[repr(C)]
 pub struct DrawFlowBlock {
     #[deref] draw_super: DrawQuad,
-    #[live] pub line_color: Vec4,
-    #[live] pub sep_color: Vec4,
-    #[live] pub code_color: Vec4,
-    #[live] pub quote_bg_color: Vec4,
-    #[live] pub quote_fg_color: Vec4,
+    #[live] pub line_color: Vec4f,
+    #[live] pub sep_color: Vec4f,
+    #[live] pub code_color: Vec4f,
+    #[live] pub quote_bg_color: Vec4f,
+    #[live] pub quote_fg_color: Vec4f,
     #[live] pub block_type: FlowBlockType
 }
 
@@ -292,12 +292,12 @@ pub struct TextFlow {
     /// The default font size used for all text if not otherwise specified.
     #[live] pub font_size: f32,
     /// The default font color used for all text if not otherwise specified.
-    #[live] pub font_color: Vec4,
+    #[live] pub font_color: Vec4f,
     #[walk] walk: Walk,
     
     #[rust] area_stack: SmallVec<[Area;4]>,
     #[rust] pub font_sizes: SmallVec<[f32;8]>,
-    #[rust] pub font_colors: SmallVec<[Vec4;8]>,
+    #[rust] pub font_colors: SmallVec<[Vec4f;8]>,
    // #[rust] pub font: SmallVec<[Font;2]>,
     //#[rust] pub top_drop: SmallVec<[f64;4]>,
     #[rust] pub combine_spaces: SmallVec<[bool;4]>,
@@ -798,11 +798,11 @@ struct TextFlowLink {
     #[live] down: f32,
     
     /// The default font color for the link when not hovered on or down.
-    #[live] color: Option<Vec4>,
+    #[live] color: Option<Vec4f>,
     /// The font color used when the link is hovered on.
-    #[live] color_hover: Option<Vec4>,
+    #[live] color_hover: Option<Vec4f>,
     /// The font color used when the link is down.
-    #[live] color_down: Option<Vec4>,
+    #[live] color_down: Option<Vec4f>,
     
     #[live] pub text: ArcStringMut,
         

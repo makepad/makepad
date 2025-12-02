@@ -7,9 +7,9 @@ use {
     },
     crate::{
         makepad_math::{
-            Vec2,
-            Vec3,
-            Vec4
+            Vec2f,
+            Vec3f,
+            Vec4f
         },
         live_registry::LiveScopeTarget,
         makepad_live_tokenizer::{LiveId},
@@ -58,9 +58,9 @@ pub enum LiveValue {
     Float32(f32),
     Float64(f64),
     Color(u32),
-    Vec2(Vec2),
-    Vec3(Vec3),
-    Vec4(Vec4),
+    Vec2f(Vec2f),
+    Vec3f(Vec3f),
+    Vec4f(Vec4f),
 
     Id(LiveId),
     IdPath(Arc<Vec<LiveId>>),
@@ -579,9 +579,9 @@ impl LiveValue {
             Self::Float64(_) |
             Self::Float32(_) |
             Self::Color(_) |
-            Self::Vec2(_) |
-            Self::Vec3(_) |
-            Self::Vec4(_))
+            Self::Vec2f(_) |
+            Self::Vec3f(_) |
+            Self::Vec4f(_))
     }
 
     pub fn is_single_node(&self) -> bool {
@@ -628,23 +628,23 @@ impl LiveValue {
             _ => None
         }
     }    
-    pub fn as_vec2(&self) -> Option<Vec2> {
+    pub fn as_vec2(&self) -> Option<Vec2f> {
         match self {
-            Self::Vec2(v) => Some(*v),
+            Self::Vec2f(v) => Some(*v),
             _ => None
         }
     }
-    pub fn as_vec3(&self) -> Option<Vec3> {
+    pub fn as_vec3(&self) -> Option<Vec3f> {
         match self {
-            Self::Vec3(v) => Some(*v),
+            Self::Vec3f(v) => Some(*v),
             _ => None
         }
     }
     
-    pub fn as_vec4(&self) -> Option<Vec4> {
+    pub fn as_vec4(&self) -> Option<Vec4f> {
         match self {
-            Self::Vec4(v) => Some(*v),
-            Self::Color(c) => Some(Vec4::from_u32(*c)),
+            Self::Vec4f(v) => Some(*v),
+            Self::Color(c) => Some(Vec4f::from_u32(*c)),
             _ => None
         }
     }
@@ -707,9 +707,9 @@ impl LiveValue {
             Self::Float64(_) => 8,
             Self::Float32(_) => 9,
             Self::Color(_) => 10,
-            Self::Vec2(_) => 11,
-            Self::Vec3(_) => 12,
-            Self::Vec4(_) => 13,
+            Self::Vec2f(_) => 11,
+            Self::Vec3f(_) => 12,
+            Self::Vec4f(_) => 13,
             Self::Id(_) => 14,
             Self::IdPath{..}=>15,
             Self::ExprBinOp(_) => 16,

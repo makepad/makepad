@@ -245,7 +245,7 @@ pub struct CodeEditor {
     #[rust]
     viewport_rect: Rect,
     #[rust]
-    cell_size: DVec2,
+    cell_size: Vec2d,
     #[rust]
     start: usize,
     #[rust]
@@ -527,7 +527,7 @@ impl CodeEditor {
                                             };
                                             self.draw_text.draw_abs(
                                                 cx,
-                                                DVec2 {
+                                                Vec2d {
                                                     x: line.column_to_x(column),
                                                     y,
                                                 } * self.cell_size
@@ -544,7 +544,7 @@ impl CodeEditor {
                                     } => {
                                         self.draw_text.draw_abs(
                                             cx,
-                                            DVec2 {
+                                            Vec2d {
                                                 x: line.column_to_x(column),
                                                 y,
                                             } * self.cell_size
@@ -602,7 +602,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &CodeSession, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &CodeSession, point: Vec2d) -> Option<(Point, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -849,9 +849,9 @@ impl<'a> DrawSelections<'a> {
         self.code_editor.draw_selection.draw(
             cx,
             Rect {
-                pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
+                pos: Vec2d { x: start_x, y } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: line.column_to_x(column) - start_x,
                     y: line.scale(),
                 } * self.code_editor.cell_size,
@@ -863,12 +863,12 @@ impl<'a> DrawSelections<'a> {
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
-                pos: DVec2 {
+                pos: Vec2d {
                     x: line.column_to_x(column),
                     y,
                 } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: 2.0,
                     y: line.scale() * self.code_editor.cell_size.y,
                 },
@@ -885,21 +885,21 @@ struct ActiveSelection {
 #[derive(Live, LiveHook)]
 struct TokenColors {
     #[live]
-    unknown: Vec4,
+    unknown: Vec4f,
     #[live]
-    branch_keyword: Vec4,
+    branch_keyword: Vec4f,
     #[live]
-    identifier: Vec4,
+    identifier: Vec4f,
     #[live]
-    loop_keyword: Vec4,
+    loop_keyword: Vec4f,
     #[live]
-    number: Vec4,
+    number: Vec4f,
     #[live]
-    other_keyword: Vec4,
+    other_keyword: Vec4f,
     #[live]
-    punctuator: Vec4,
+    punctuator: Vec4f,
     #[live]
-    whitespace: Vec4,
+    whitespace: Vec4f,
 }
 
 #[derive(Live, LiveHook)]
@@ -4263,7 +4263,7 @@ pub struct CodeEditor {
     #[rust]
     viewport_rect: Rect,
     #[rust]
-    cell_size: DVec2,
+    cell_size: Vec2d,
     #[rust]
     start: usize,
     #[rust]
@@ -4545,7 +4545,7 @@ impl CodeEditor {
                                             };
                                             self.draw_text.draw_abs(
                                                 cx,
-                                                DVec2 {
+                                                Vec2d {
                                                     x: line.column_to_x(column),
                                                     y,
                                                 } * self.cell_size
@@ -4562,7 +4562,7 @@ impl CodeEditor {
                                     } => {
                                         self.draw_text.draw_abs(
                                             cx,
-                                            DVec2 {
+                                            Vec2d {
                                                 x: line.column_to_x(column),
                                                 y,
                                             } * self.cell_size
@@ -4620,7 +4620,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &CodeSession, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &CodeSession, point: Vec2d) -> Option<(Point, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -4867,9 +4867,9 @@ impl<'a> DrawSelections<'a> {
         self.code_editor.draw_selection.draw(
             cx,
             Rect {
-                pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
+                pos: Vec2d { x: start_x, y } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: line.column_to_x(column) - start_x,
                     y: line.scale(),
                 } * self.code_editor.cell_size,
@@ -4881,12 +4881,12 @@ impl<'a> DrawSelections<'a> {
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
-                pos: DVec2 {
+                pos: Vec2d {
                     x: line.column_to_x(column),
                     y,
                 } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: 2.0,
                     y: line.scale() * self.code_editor.cell_size.y,
                 },
@@ -4903,21 +4903,21 @@ struct ActiveSelection {
 #[derive(Live, LiveHook)]
 struct TokenColors {
     #[live]
-    unknown: Vec4,
+    unknown: Vec4f,
     #[live]
-    branch_keyword: Vec4,
+    branch_keyword: Vec4f,
     #[live]
-    identifier: Vec4,
+    identifier: Vec4f,
     #[live]
-    loop_keyword: Vec4,
+    loop_keyword: Vec4f,
     #[live]
-    number: Vec4,
+    number: Vec4f,
     #[live]
-    other_keyword: Vec4,
+    other_keyword: Vec4f,
     #[live]
-    punctuator: Vec4,
+    punctuator: Vec4f,
     #[live]
-    whitespace: Vec4,
+    whitespace: Vec4f,
 }
 
 #[derive(Live, LiveHook)]
@@ -8281,7 +8281,7 @@ pub struct CodeEditor {
     #[rust]
     viewport_rect: Rect,
     #[rust]
-    cell_size: DVec2,
+    cell_size: Vec2d,
     #[rust]
     start: usize,
     #[rust]
@@ -8563,7 +8563,7 @@ impl CodeEditor {
                                             };
                                             self.draw_text.draw_abs(
                                                 cx,
-                                                DVec2 {
+                                                Vec2d {
                                                     x: line.column_to_x(column),
                                                     y,
                                                 } * self.cell_size
@@ -8580,7 +8580,7 @@ impl CodeEditor {
                                     } => {
                                         self.draw_text.draw_abs(
                                             cx,
-                                            DVec2 {
+                                            Vec2d {
                                                 x: line.column_to_x(column),
                                                 y,
                                             } * self.cell_size
@@ -8638,7 +8638,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &CodeSession, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &CodeSession, point: Vec2d) -> Option<(Point, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -8885,9 +8885,9 @@ impl<'a> DrawSelections<'a> {
         self.code_editor.draw_selection.draw(
             cx,
             Rect {
-                pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
+                pos: Vec2d { x: start_x, y } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: line.column_to_x(column) - start_x,
                     y: line.scale(),
                 } * self.code_editor.cell_size,
@@ -8899,12 +8899,12 @@ impl<'a> DrawSelections<'a> {
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
-                pos: DVec2 {
+                pos: Vec2d {
                     x: line.column_to_x(column),
                     y,
                 } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: 2.0,
                     y: line.scale() * self.code_editor.cell_size.y,
                 },
@@ -8921,21 +8921,21 @@ struct ActiveSelection {
 #[derive(Live, LiveHook)]
 struct TokenColors {
     #[live]
-    unknown: Vec4,
+    unknown: Vec4f,
     #[live]
-    branch_keyword: Vec4,
+    branch_keyword: Vec4f,
     #[live]
-    identifier: Vec4,
+    identifier: Vec4f,
     #[live]
-    loop_keyword: Vec4,
+    loop_keyword: Vec4f,
     #[live]
-    number: Vec4,
+    number: Vec4f,
     #[live]
-    other_keyword: Vec4,
+    other_keyword: Vec4f,
     #[live]
-    punctuator: Vec4,
+    punctuator: Vec4f,
     #[live]
-    whitespace: Vec4,
+    whitespace: Vec4f,
 }
 
 #[derive(Live, LiveHook)]
@@ -12299,7 +12299,7 @@ pub struct CodeEditor {
     #[rust]
     viewport_rect: Rect,
     #[rust]
-    cell_size: DVec2,
+    cell_size: Vec2d,
     #[rust]
     start: usize,
     #[rust]
@@ -12581,7 +12581,7 @@ impl CodeEditor {
                                             };
                                             self.draw_text.draw_abs(
                                                 cx,
-                                                DVec2 {
+                                                Vec2d {
                                                     x: line.column_to_x(column),
                                                     y,
                                                 } * self.cell_size
@@ -12598,7 +12598,7 @@ impl CodeEditor {
                                     } => {
                                         self.draw_text.draw_abs(
                                             cx,
-                                            DVec2 {
+                                            Vec2d {
                                                 x: line.column_to_x(column),
                                                 y,
                                             } * self.cell_size
@@ -12656,7 +12656,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &CodeSession, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &CodeSession, point: Vec2d) -> Option<(Point, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -12903,9 +12903,9 @@ impl<'a> DrawSelections<'a> {
         self.code_editor.draw_selection.draw(
             cx,
             Rect {
-                pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
+                pos: Vec2d { x: start_x, y } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: line.column_to_x(column) - start_x,
                     y: line.scale(),
                 } * self.code_editor.cell_size,
@@ -12917,12 +12917,12 @@ impl<'a> DrawSelections<'a> {
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
-                pos: DVec2 {
+                pos: Vec2d {
                     x: line.column_to_x(column),
                     y,
                 } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: 2.0,
                     y: line.scale() * self.code_editor.cell_size.y,
                 },
@@ -12939,21 +12939,21 @@ struct ActiveSelection {
 #[derive(Live, LiveHook)]
 struct TokenColors {
     #[live]
-    unknown: Vec4,
+    unknown: Vec4f,
     #[live]
-    branch_keyword: Vec4,
+    branch_keyword: Vec4f,
     #[live]
-    identifier: Vec4,
+    identifier: Vec4f,
     #[live]
-    loop_keyword: Vec4,
+    loop_keyword: Vec4f,
     #[live]
-    number: Vec4,
+    number: Vec4f,
     #[live]
-    other_keyword: Vec4,
+    other_keyword: Vec4f,
     #[live]
-    punctuator: Vec4,
+    punctuator: Vec4f,
     #[live]
-    whitespace: Vec4,
+    whitespace: Vec4f,
 }
 
 #[derive(Live, LiveHook)]
@@ -16317,7 +16317,7 @@ pub struct CodeEditor {
     #[rust]
     viewport_rect: Rect,
     #[rust]
-    cell_size: DVec2,
+    cell_size: Vec2d,
     #[rust]
     start: usize,
     #[rust]
@@ -16599,7 +16599,7 @@ impl CodeEditor {
                                             };
                                             self.draw_text.draw_abs(
                                                 cx,
-                                                DVec2 {
+                                                Vec2d {
                                                     x: line.column_to_x(column),
                                                     y,
                                                 } * self.cell_size
@@ -16616,7 +16616,7 @@ impl CodeEditor {
                                     } => {
                                         self.draw_text.draw_abs(
                                             cx,
-                                            DVec2 {
+                                            Vec2d {
                                                 x: line.column_to_x(column),
                                                 y,
                                             } * self.cell_size
@@ -16674,7 +16674,7 @@ impl CodeEditor {
         .draw_selections(cx, session)
     }
 
-    fn pick(&self, session: &CodeSession, point: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, session: &CodeSession, point: Vec2d) -> Option<(Point, Affinity)> {
         let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
@@ -16921,9 +16921,9 @@ impl<'a> DrawSelections<'a> {
         self.code_editor.draw_selection.draw(
             cx,
             Rect {
-                pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
+                pos: Vec2d { x: start_x, y } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: line.column_to_x(column) - start_x,
                     y: line.scale(),
                 } * self.code_editor.cell_size,
@@ -16935,12 +16935,12 @@ impl<'a> DrawSelections<'a> {
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
-                pos: DVec2 {
+                pos: Vec2d {
                     x: line.column_to_x(column),
                     y,
                 } * self.code_editor.cell_size
                     + self.code_editor.viewport_rect.pos,
-                size: DVec2 {
+                size: Vec2d {
                     x: 2.0,
                     y: line.scale() * self.code_editor.cell_size.y,
                 },
@@ -16957,21 +16957,21 @@ struct ActiveSelection {
 #[derive(Live, LiveHook)]
 struct TokenColors {
     #[live]
-    unknown: Vec4,
+    unknown: Vec4f,
     #[live]
-    branch_keyword: Vec4,
+    branch_keyword: Vec4f,
     #[live]
-    identifier: Vec4,
+    identifier: Vec4f,
     #[live]
-    loop_keyword: Vec4,
+    loop_keyword: Vec4f,
     #[live]
-    number: Vec4,
+    number: Vec4f,
     #[live]
-    other_keyword: Vec4,
+    other_keyword: Vec4f,
     #[live]
-    punctuator: Vec4,
+    punctuator: Vec4f,
     #[live]
-    whitespace: Vec4,
+    whitespace: Vec4f,
 }
 
 #[derive(Live, LiveHook)]

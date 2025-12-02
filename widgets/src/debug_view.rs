@@ -28,7 +28,7 @@ live_design!{
 #[repr(C)]
 pub struct DrawRect {
     #[deref] draw_super: DrawQuad,
-    #[live] color: Vec4,
+    #[live] color: Vec4f,
 }
 
 

@@ -433,7 +433,7 @@ impl PortalList2 {
     /// TODO: FIXME: this may not properly handle bottom-up lists
     ///              or lists that go from right to left.
     pub fn position_of_item(&self, cx: &Cx, entry_id: usize) -> Option<f64> {
-        const ZEROED: Rect = Rect { pos: DVec2 { x: 0.0, y: 0.0 }, size: DVec2 { x: 0.0, y: 0.0 } };
+        const ZEROED: Rect = Rect { pos: Vec2d { x: 0.0, y: 0.0 }, size: Vec2d { x: 0.0, y: 0.0 } };
         
         if let Some(item) = self.items.get(&entry_id) {
             let item_rect = item.widget.area().rect(cx);

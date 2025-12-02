@@ -1,5 +1,5 @@
 use std::{cell::{Cell, RefCell}, fs::File, io::Read, os::{fd::{AsFd, AsRawFd, FromRawFd}, unix::fs::FileExt}, rc::Rc};
-use crate::{libc_sys::{self, munmap}, makepad_math::{dvec2, DVec2}, wayland::{wayland_type, xkb_sys}, Area, KeyEvent, KeyModifiers, MouseDownEvent, MouseMoveEvent, MouseUpEvent, TextInputEvent, WindowClosedEvent};
+use crate::{libc_sys::{self, munmap}, makepad_math::{dvec2, Vec2d}, wayland::{wayland_type, xkb_sys}, Area, KeyEvent, KeyModifiers, MouseDownEvent, MouseMoveEvent, MouseUpEvent, TextInputEvent, WindowClosedEvent};
 
 use wayland_client::{delegate_noop, protocol::{wl_buffer, wl_compositor, wl_keyboard, wl_output, wl_pointer::{self, ButtonState}, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface}, Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::{wp::{cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1::{self, WpCursorShapeManagerV1}}, fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1}, text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3}, viewporter::client::{wp_viewport, wp_viewporter}}, xdg::{self, decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1}, shell::client::{xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base}}};
@@ -15,7 +15,7 @@ pub(crate) struct WaylandState {
     pub(crate) cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub(crate) cursor_shape: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     pub(crate) pointer: Option<wl_pointer::WlPointer>,
-    pub(crate) last_mouse_pos: DVec2,
+    pub(crate) last_mouse_pos: Vec2d,
     pub(crate) pointer_serial: Option<u32>,
     pub(crate) decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     pub(crate) windows: Vec<WaylandWindow>,
