@@ -182,7 +182,7 @@ impl<'a> ShaderParser<'a> {
     #[inline]
     fn expect_specific_ident(&mut self, specific_id: LiveId) -> Result<(), LiveError> {
         match self.peek_token() {
-            LiveToken::Ident(id) if id == id => {
+            LiveToken::Ident(id) if id == specific_id => {
                 self.skip_token();
                 Ok(())
             }
