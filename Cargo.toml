@@ -7,6 +7,7 @@ workspace.members = [
     "examples/fractal_zoom",
     "examples/layout",
     "examples/simple",
+    "examples/math_test",
     "examples/ui_zoo",
     "examples/news_feed",
     "examples/web_cam",

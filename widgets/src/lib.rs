@@ -49,6 +49,7 @@ pub mod tooltip;
 pub mod popup_notification;
 pub mod loading_spinner;
 pub mod web_view;
+pub mod math;
 
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
@@ -137,6 +138,7 @@ pub use crate::{
     window::*,
     multi_window::*,
     web_view::*,
+    math::*,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},
@@ -249,6 +251,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::command_text_input::live_design(cx);
     crate::loading_spinner::live_design(cx);
     crate::web_view::live_design(cx);
+    crate::math::live_design(cx);
         
     crate::designer_theme::live_design(cx);
     crate::designer::live_design(cx);
