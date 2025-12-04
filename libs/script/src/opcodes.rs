@@ -501,7 +501,7 @@ impl ScriptThread{
                 else{
                     let scope = heap.new_with_proto(fnobj);
                     heap.clear_object_deep(scope);
-                    self.mes.push(ScriptMe::Call{args:scope, this:None});
+                    self.mes.push(ScriptMe::Call{args:scope, sself:None});
                 }
                 self.trap.goto_next();
             }
@@ -510,8 +510,8 @@ impl ScriptThread{
                 // ok so now we have all our args on 'mes'
                 let me = self.mes.pop().unwrap();
                 
-                let (args, this) = match me{
-                    ScriptMe::Call{args, this}=>(args,this),
+                let (args, sself) = match me{
+                    ScriptMe::Call{args, sself}=>(args,sself),
                     ScriptMe::Pod{pod,offset}=>{
                         // alright finalize the pod
                         heap.pod_check_arg_total(pod, offset, &self.trap);
@@ -525,8 +525,8 @@ impl ScriptThread{
                     _=>panic!()
                 };
                 
-                if let Some(this) = this{
-                    heap.force_value_in_map(args, id!(this).into(), this);
+                if let Some(sself) = sself{
+                    heap.force_value_in_map(args, id!(self).into(), sself);
                 }
                 // set the scope back to 'deep' so values can be written again
                 heap.set_object_deep(args);
@@ -544,7 +544,7 @@ impl ScriptThread{
                                 code
                             }, args);
                             
-                            // if we trapped on 'pause' we need to reexecute this function
+                            // if we trapped on 'pause' we need to reexecute sself function
                             if self.is_paused{
                                 self.mes.push(me);
                                 return
@@ -565,7 +565,7 @@ impl ScriptThread{
                             self.scopes.push(args);
                             self.calls.push(call);
                             self.trap.ip = sip;
-                            if opargs.is_pop_to_me(){ // skip this
+                            if opargs.is_pop_to_me(){ // skip sself
                                 return
                             }
                         }
@@ -581,11 +581,11 @@ impl ScriptThread{
             Opcode::METHOD_CALL_ARGS=>{
                 
                 let method =  self.pop_stack_value();
-                let this = self.pop_stack_resolved(heap);
-                let fnobj = if let Some(obj) = this.as_object(){
+                let sself = self.pop_stack_resolved(heap);
+                let fnobj = if let Some(obj) = sself.as_object(){
                     heap.object_method(obj, method, &mut Default::default())
                 }
-                else if let Some(pod) = this.as_pod(){ // we're calling a method on some other thing
+                else if let Some(pod) = sself.as_pod(){ // we're calling a method on some other thing
                     heap.pod_method(pod, method, &mut Default::default())
                 }
                 else{
@@ -594,7 +594,7 @@ impl ScriptThread{
                                 
                 let args = if fnobj.is_err() || fnobj == NIL{
                     let method = method.as_id().unwrap_or(id!());
-                    let type_index = this.value_type().to_redux();
+                    let type_index = sself.value_type().to_redux();
                     let type_entry = &code.native.borrow().type_table[type_index.to_index()];
                     if let Some(method_ptr) = type_entry.get(&method){
                         let args = heap.new_with_proto((*method_ptr).into());
@@ -618,7 +618,7 @@ impl ScriptThread{
                 // set the args object to not write into the prototype
                 heap.clear_object_deep(args);
                 
-                self.mes.push(ScriptMe::Call{args, this:Some(this)});
+                self.mes.push(ScriptMe::Call{args, sself:Some(sself)});
                 self.trap.goto_next();
             }
 // Fn def
@@ -1198,7 +1198,7 @@ impl ScriptThread{
                 
     pub fn begin_for_loop(&mut self, heap:&mut ScriptHeap, code:&ScriptCode, jump:u32, source:ScriptValue, value_id:LiveId, index_id:Option<LiveId>, key_id:Option<LiveId>){
         let v0 = ScriptValue::from_f64(0.0);
-        if let Some(s) = source.as_f64(){
+        if let Some(s) = source.as_number(){
             if s >= 1.0{
                 self.begin_for_loop_inner(heap, jump, source, value_id, key_id, index_id, v0, 0.0, v0);
                 return
@@ -1237,7 +1237,7 @@ impl ScriptThread{
         // alright lets take a look at our top loop thing
         let lf = self.loops.last_mut().unwrap();
         if let Some(values) = &mut lf.values{
-            if let Some(end) = values.source.as_f64(){
+            if let Some(end) = values.source.as_number(){
                 values.index += 1.0;
                 if values.index >= end{ // terminate
                     self.break_for_loop(heap);

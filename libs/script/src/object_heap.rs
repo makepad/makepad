@@ -163,9 +163,9 @@ impl ScriptHeap{
     // Writing object values 
             
         
-    pub(crate) fn force_value_in_map(&mut self, ptr:ScriptObject, key: ScriptValue, this:ScriptValue){
+    pub(crate) fn force_value_in_map(&mut self, ptr:ScriptObject, key: ScriptValue, sself:ScriptValue){
         let object = &mut self.objects[ptr.index as usize];
-        object.map_insert(key, this);
+        object.map_insert(key, sself);
     }            
             
     fn set_value_index(&mut self, ptr: ScriptObject, index:ScriptValue, value: ScriptValue, trap:&ScriptTrap)->ScriptValue{
@@ -438,7 +438,7 @@ impl ScriptHeap{
     }
         
     pub fn def_scope_value(&mut self, ptr:ScriptObject, key:LiveId, value:ScriptValue)->Option<ScriptObject>{
-        // if we already have this value we have to shadow the scope
+        // if we already have sself value we have to shadow the scope
         let object = &mut self.objects[ptr.index as usize];
         if let Some(_) = object.map.get(&key.into()){
             let new_scope = self.new_with_proto(ptr.into());

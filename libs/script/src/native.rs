@@ -211,20 +211,20 @@ impl ScriptNative{
                         
         for (ty,_) in types {
             self.add_type_method(heap, ty, id!(to_json), &[], |vm, args|{
-                let this = script_value!(vm, args.this);vm.heap.to_json(this)
+                let sself = script_value!(vm, args.self);vm.heap.to_json(sself)
             });
             self.add_type_method(heap, ty, id!(to_number), &[], |vm, args|{
-                let this = script_value!(vm, args.this);
-                vm.heap.cast_to_f64(this, vm.thread.trap.ip).into()
+                let sself = script_value!(vm, args.self);
+                vm.heap.cast_to_f64(sself, vm.thread.trap.ip).into()
             });
             if ty != ScriptValueType::REDUX_ARRAY{
                 self.add_type_method(heap, ty, id!(to_string), &[], |vm, args|{
-                    let this = script_value!(vm, args.this);
-                    if this.is_string_like(){
-                        return this
+                    let sself = script_value!(vm, args.self);
+                    if sself.is_string_like(){
+                        return sself
                     }
                     vm.heap.new_string_with(|heap, out|{
-                        heap.cast_to_string(this, out);
+                        heap.cast_to_string(sself, out);
                     })
                 });
             }

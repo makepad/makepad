@@ -413,6 +413,7 @@ impl fmt::Display for ScriptValueType {
         match *self{
             Self::F64=>write!(f,"f64"),
             Self::F32=>write!(f,"f32"),
+            Self::U40=>write!(f,"u40"),
             Self::U32=>write!(f,"u32"),
             Self::I32=>write!(f,"i32"),
             Self::F16=>write!(f,"f16"),
@@ -890,6 +891,21 @@ impl ScriptValue{
         
     pub const fn as_index(&self)->usize{
         if let Some(f) = self.as_f64(){
+            return f as usize
+        }
+        if let Some(f) = self.as_u40(){
+            return f as usize
+        }
+        if let Some(f) = self.as_u32(){
+            return f as usize
+        }
+        if let Some(f) = self.as_i32(){
+            return f as usize
+        }
+        if let Some(f) = self.as_f32(){
+            return f as usize
+        }
+        if let Some(f) = self.as_f16(){
             return f as usize
         }
         if let Some(b) = self.as_bool(){

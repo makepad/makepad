@@ -11,8 +11,8 @@ let MyApp = App{
     $body: +{
         TextInput{
             on_enter: ||{
-                let stream = ai(this.text)
-                this.clear()
+                let stream = ai(sself.text)
+                sself.clear()
                 $body += Label{
                     text <=> stream.text
                 }

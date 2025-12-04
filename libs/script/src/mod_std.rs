@@ -26,11 +26,11 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     heap.set_value_def(std, id!(Range).into(), range.into());
             
     native.add_method(heap, range, id!(step), script_args!(x= 0.0), |vm, args|{
-        if let Some(this) = script_value!(vm, args.this).as_object(){
+        if let Some(sself) = script_value!(vm, args.self).as_object(){
             if let Some(x) = script_value!(vm, args.x).as_f64(){
-                script_set_value!(vm, this.step = x);
+                script_set_value!(vm, sself.step = x);
             }
-            return this.into()
+            return sself.into()
         }
         NIL
     });
