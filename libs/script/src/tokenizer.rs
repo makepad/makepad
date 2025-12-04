@@ -658,7 +658,7 @@ impl ScriptTokenizer{
                     if c == '{'{
                         self.state = State::UnicodeCurlyInString(double);
                     }
-                    else{ // its kinda unknown how long we need to keep pushing this
+                    else{ // its kinda unknown how long we need to keep pushing sself
                         self.temp.push(c);
                         if self.temp.len() == 4{
                             if let Ok(v) = i64::from_str_radix(&self.temp, 16){

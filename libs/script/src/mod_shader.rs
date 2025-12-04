@@ -30,21 +30,21 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(compile_draw), script_args!(io_this=NIL), |vm, args|{
+    native.add_method(heap, shader, id!(compile_draw), script_args!(io_self=NIL), |vm, args|{
         // lets fetch the code
-        let io_this = script_value!(vm, args.io_this);
+        let io_self = script_value!(vm, args.io_self);
         
         // ok we're going to take a function, and then call it to generate/typetrace it out
         // for every function we make a 'shadercompiler'
-        if let Some(io_this) = io_this.as_object(){
-            if let Some(fnobj) = vm.heap.object_method(io_this, id!(pixel).into(), &vm.thread.trap).as_object(){
+        if let Some(io_self) = io_self.as_object(){
+            if let Some(fnobj) = vm.heap.object_method(io_self, id!(pixel).into(), &vm.thread.trap).as_object(){
                 if let Some(fnptr) = vm.heap.as_fn(fnobj){
                     if let ScriptFnPtr::Script(fnip) = fnptr{
                         let mut compiler = ShaderFnCompiler::new(fnobj);
                         // compiling the entrypoint pixelshader
                         let mut output = ShaderOutput::default();
                         output.backend = ShaderBackend::Metal;
-                        compiler.shader_scope.define_this_io(io_this);
+                        compiler.shader_scope.define_io_self(io_self);
                         compiler.compile_fn(vm, &mut output, fnip);
                         output.functions.push(ShaderFn{
                             overload: 0,
@@ -60,7 +60,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                         output.create_struct_defs(vm, &mut out);
                         println!("Structs:\n{}", out);
                         for fns in output.functions{
-                            println!("{}\n{}\n",fns.call_sig, fns.out);
+                            println!("{}{{\n{}}}\n",fns.call_sig, fns.out);
                         }
                         return NIL
                     }

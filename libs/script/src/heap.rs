@@ -244,6 +244,12 @@ impl ScriptHeap{
         if a == b{
             return true
         }
+        if let Some(a) = a.as_number(){
+            if let Some(b) = b.as_number(){
+                return a == b
+            }
+            return false
+        }
         if a.is_object(){
             let mut aw = a;
             let mut bw = b;
@@ -327,8 +333,37 @@ impl ScriptHeap{
         }
         else if let Some(arr1) = a.as_array(){
             if let Some(arr2) = b.as_array(){
-                if self.arrays[arr1.index as usize].storage == self.arrays[arr2.index as usize].storage{
-                    return true
+                match &self.arrays[arr1.index as usize].storage{
+                    ScriptArrayStorage::ScriptValue(arr1)=>match &self.arrays[arr2.index as usize].storage{
+                        ScriptArrayStorage::ScriptValue(arr2)=>{
+                            if arr1.len() != arr2.len(){
+                                return false
+                            }
+                            for (a,b) in arr1.iter().zip(arr2.iter()){
+                                if !self.deep_eq(*a, *b){
+                                    return false
+                                }
+                            }
+                            return true
+                        }
+                        _=>{return false}
+                    }
+                    ScriptArrayStorage::F32(arr1)=>match &self.arrays[arr2.index as usize].storage{
+                        ScriptArrayStorage::F32(arr2)=>{return arr1 == arr2},
+                        _=>{return false}
+                    }
+                    ScriptArrayStorage::U32(arr1)=>match &self.arrays[arr2.index as usize].storage{
+                        ScriptArrayStorage::U32(arr2)=>{return arr1 == arr2},
+                        _=>{return false}
+                    }
+                    ScriptArrayStorage::U16(arr1)=>match &self.arrays[arr2.index as usize].storage{
+                        ScriptArrayStorage::U16(arr2)=>{return arr1 == arr2},
+                        _=>{return false}
+                    }
+                    ScriptArrayStorage::U8(arr1)=>match &self.arrays[arr2.index as usize].storage{
+                        ScriptArrayStorage::U8(arr2)=>{return arr1 == arr2},
+                        _=>{return false}
+                    }
                 }
             }
             return false
@@ -505,7 +540,7 @@ impl ScriptHeap{
                 }
             });
             out.push('"');
-            // alright. this is json eh. so.
+            // alright. sself is json eh. so.
         }
         else if let Some(s) = value.as_string(){
             let s = if let Some(s) = &self.strings[s.index as usize]{&s.string.0}else{""};
@@ -522,7 +557,7 @@ impl ScriptHeap{
             if v{out.push_str("true")}
             else{out.push_str("false")}
         }
-        else if let Some(v) = value.as_f64(){
+        else if let Some(v) = value.as_number(){
             write!(out, "{}", v).ok();
         }
         else if let Some(v) = value.as_handle(){

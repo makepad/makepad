@@ -270,7 +270,7 @@ impl ScriptArrayData{
         
     pub fn add_type_methods(native: &mut ScriptNative, heap: &mut ScriptHeap){
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(to_string), &[], |vm, args|{
-            if let Some(arr) = script_value!(vm, args.this).as_array(){
+            if let Some(arr) = script_value!(vm, args.self).as_array(){
                 return vm.heap.new_string_with(|heap, s|{
                     heap.array_storage(arr).to_string(heap, s);
                 }).into();
@@ -279,7 +279,7 @@ impl ScriptArrayData{
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(parse_json), &[], |vm, args|{
-            if let Some(array) = script_value!(vm, args.this).as_array(){
+            if let Some(array) = script_value!(vm, args.self).as_array(){
                 return vm.heap.array_mut_self_with(array, |heap, storage|{
                     match storage{
                         ScriptArrayStorage::U8(bytes)=>{
@@ -296,7 +296,7 @@ impl ScriptArrayData{
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(parse_json), &[], |vm, args|{
-            if let Some(arr) = script_value!(vm, args.this).as_array(){
+            if let Some(arr) = script_value!(vm, args.self).as_array(){
                 return vm.heap.temp_string_with(|heap, temp|{
                     let storage = heap.array_storage(arr);
                     storage.to_string(heap, temp);
@@ -307,55 +307,55 @@ impl ScriptArrayData{
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(push), &[], |vm, args|{
-            if let Some(this) = script_value!(vm, args.this).as_array(){
-                vm.heap.array_push_vec(this, args, &vm.thread.trap);
+            if let Some(sself) = script_value!(vm, args.self).as_array(){
+                vm.heap.array_push_vec(sself, args, &vm.thread.trap);
                 return NIL
             }
             vm.thread.trap.err_unexpected()
         });
                         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(pop), &[], |vm, args|{
-            if let Some(this) = script_value!(vm, args.this).as_array(){
-                return vm.heap.array_pop(this, &vm.thread.trap)
+            if let Some(sself) = script_value!(vm, args.self).as_array(){
+                return vm.heap.array_pop(sself, &vm.thread.trap)
             }
             vm.thread.trap.err_unexpected()
         });
         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(clear), &[], |vm, args|{
-            if let Some(this) = script_value!(vm, args.this).as_array(){
-                vm.heap.array_clear(this, &vm.thread.trap);
+            if let Some(sself) = script_value!(vm, args.self).as_array(){
+                vm.heap.array_clear(sself, &vm.thread.trap);
                 return NIL
             }
             vm.thread.trap.err_unexpected()
         });
                         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(len), &[], |vm, args|{
-            if let Some(this) = script_value!(vm, args.this).as_array(){
-                return vm.heap.array_len(this).into()
+            if let Some(sself) = script_value!(vm, args.self).as_array(){
+                return vm.heap.array_len(sself).into()
             }
             vm.thread.trap.err_unexpected()
         });
                 
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(freeze), &[], |vm, args|{
-            if let Some(this) = script_value!(vm, args.this).as_array(){
-                vm.heap.freeze_array(this);
-                return this.into()
+            if let Some(sself) = script_value!(vm, args.self).as_array(){
+                vm.heap.freeze_array(sself);
+                return sself.into()
             }
             vm.thread.trap.err_unexpected()
         });
                         
         native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(retain), script_args!(cb=NIL), |vm, args|{
-            if let Some(this) = script_value!(vm, args.this).as_array(){
+            if let Some(sself) = script_value!(vm, args.self).as_array(){
                 let fnptr = script_value!(vm, args.cb);
                 let mut i = 0;
-                while i < vm.heap.array_len(this){
-                    let value = script_array_index!(vm, this[i]);
+                while i < vm.heap.array_len(sself){
+                    let value = script_array_index!(vm, sself[i]);
                     let ret = vm.call(fnptr, &[value]);
                     if ret.is_err(){
                         return ret;
                     }
                     if !vm.heap.cast_to_bool(ret){
-                        vm.heap.array_remove(this, i, &mut vm.thread.trap);
+                        vm.heap.array_remove(sself, i, &mut vm.thread.trap);
                     }
                     else{
                         i += 1

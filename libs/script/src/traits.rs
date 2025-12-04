@@ -8,7 +8,7 @@ pub trait ScriptDeriveMarker{}
 
 pub type ScriptTypeId = std::any::TypeId;
 
-// this we implement
+// sself we implement
 pub trait ScriptHook{
     fn on_new(&mut self, _vm:&mut ScriptVm){}
     fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){}
@@ -142,7 +142,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     }
 }
 
-// this as well
+// sself as well
 pub trait ScriptApply{
     fn script_type_id(&self)->ScriptTypeId where Self:'static { ScriptTypeId::of::<Self>()}
     fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){}

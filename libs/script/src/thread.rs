@@ -53,7 +53,7 @@ pub struct CallFrame{
 #[derive(Debug)]
 pub enum ScriptMe{
     Object(ScriptObject),
-    Call{this:Option<ScriptValue>, args:ScriptObject},
+    Call{sself:Option<ScriptValue>, args:ScriptObject},
     Pod{pod:ScriptPod, offset:ScriptPodOffset},
     Array(ScriptArray),
 }

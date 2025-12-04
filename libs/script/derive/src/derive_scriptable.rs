@@ -614,7 +614,7 @@ impl ScriptNew for EnumTest{
             tuple.into()
         });
                     
-        // we can make a type index prop check for this thing
+        // we can make a type index prop check for sself thing
         let def = Self::Named{named_field: 1.0};
         let named = vm.heap.new_with_proto(id_lut!(Named).into());
         let mut props = ScriptTypeProps::default();
