@@ -371,6 +371,7 @@ impl Cx {
                         }
                     },
                     PassClearColor::ClearWith(color) => {
+                        println!("{:?}", color);
                         unsafe {
                             let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                             let () = msg_send![color_attachment, setClearColor: MTLClearColor {

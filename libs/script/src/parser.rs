@@ -1579,6 +1579,6 @@ impl ScriptParser{
             self.index += step;
         }
         
-        println!("{:?}", self.opcodes)
+        //println!("{:?}", self.opcodes)
     }
 }

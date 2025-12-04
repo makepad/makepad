@@ -35,6 +35,12 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         NIL
     });
     
+    native.add_method(heap, std, id!(log), script_args_def!(what=NIL), |vm, args|{
+        let what = script_value!(vm, args.what);
+        vm.thread.log(vm.heap, vm.code, what);
+        NIL
+    });
+    
     native.add_method(heap, std, id!(print), script_args_def!(what=NIL), |vm, args|{
         let what = script_value!(vm, args.what);
         if vm.heap.string_with(what, |_heap, str|{

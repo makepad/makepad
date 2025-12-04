@@ -43,6 +43,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                         let mut compiler = ShaderFnCompiler::new(fnobj);
                         // compiling the entrypoint pixelshader
                         let mut output = ShaderOutput::default();
+                        output.backend = ShaderBackend::Metal;
                         compiler.shader_scope.define_this_io(io_this);
                         compiler.compile_fn(vm, &mut output, fnip);
                         output.functions.push(ShaderFn{

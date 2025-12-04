@@ -956,32 +956,8 @@ impl ScriptThread{
             }
 // Log            
             Opcode::LOG=>{
-                if let Some(loc) = code.ip_to_loc(self.trap.ip){
-                    let value = self.peek_stack_resolved(heap);
-                    if value != NIL{
-                        if let Some(err) = value.as_err(){
-                            if let Some(loc2) = code.ip_to_loc(err.ip){
-                                log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} {}", value, loc2), LogLevel::Log);
-                            }
-                        }
-                        if let Some(nanip) = value.as_f64_traced_nan(){
-                            if let Some(loc2) = code.ip_to_loc(nanip){
-                                log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} NaN Traced to {}", value, loc2), LogLevel::Log);
-                            }
-                        }
-                        else{
-                            let mut out = String::new();
-                            let mut recur = Vec::new();
-                            heap.to_debug_string(value, &mut recur, &mut out);
-                            log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{:?}:{out}", value.value_type()), LogLevel::Log);
-                            //heap.print(value);
-                            //println!("");
-                        }
-                    }
-                    else{
-                        log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("nil"), LogLevel::Log);
-                    }
-                }
+                let value = self.peek_stack_resolved(heap);
+                self.log(heap, code, value);
                 self.trap.goto_next();
             }
 // Me/Scope
@@ -1145,6 +1121,34 @@ impl ScriptThread{
         }
         if opargs.is_pop_to_me(){
             self.pop_to_me(heap, code);
+        }
+    }
+    
+    pub fn log(&self, heap:&ScriptHeap, code:&ScriptCode, value:ScriptValue){
+        if let Some(loc) = code.ip_to_loc(self.trap.ip){
+            if value != NIL{
+                if let Some(err) = value.as_err(){
+                    if let Some(loc2) = code.ip_to_loc(err.ip){
+                        log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} {}", value, loc2), LogLevel::Log);
+                    }
+                }
+                if let Some(nanip) = value.as_f64_traced_nan(){
+                    if let Some(loc2) = code.ip_to_loc(nanip){
+                        log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{} NaN Traced to {}", value, loc2), LogLevel::Log);
+                    }
+                }
+                else{
+                    let mut out = String::new();
+                    let mut recur = Vec::new();
+                    heap.to_debug_string(value, &mut recur, &mut out);
+                    log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{:?}:{out}", value.value_type()), LogLevel::Log);
+                    //heap.print(value);
+                    //println!("");
+                }
+            }
+            else{
+                log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("nil"), LogLevel::Log);
+            }
         }
     }
     
