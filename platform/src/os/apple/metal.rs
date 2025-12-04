@@ -618,7 +618,8 @@ impl Cx {
                 );
                 
                 if cx_shader.mapping.flags.debug {
-                    crate::log!("{}", gen.mtlsl);
+                    //crate::log!("{}", gen.mtlsl);
+                    println!("{}", gen.mtlsl);
                 }
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {

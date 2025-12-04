@@ -78,6 +78,7 @@ impl Cx {
                         if let Some(texture) = &current_image.image {
                             let window = &mut self.windows[window_id];
                             let pass = &mut self.passes[window.main_pass_id.unwrap()];
+                            println!("{:?}", pass.clear_color);
                             pass.color_textures = vec![CxPassColorTexture {
                                 clear_color: PassClearColor::ClearWith(pass.clear_color),
                                 texture: texture.clone(),

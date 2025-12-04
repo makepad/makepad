@@ -58,6 +58,7 @@ pub use crate::{
 };
 
 pub fn script_run(vm:&mut ScriptVm)->ScriptValue{
+    vm.heap.new_module(id!(shaders));
     crate::shader::draw_quad::script_run(vm);
     NIL
 }

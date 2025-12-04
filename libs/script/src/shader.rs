@@ -6,6 +6,7 @@ use crate::function::*;
 use crate::vm::*;
 use crate::opcode::*;
 use crate::pod::*;
+use crate::heap::*;
 use crate::mod_pod::*;
 use crate::shader_tables::*;
 use crate::shader_builtins::*;
@@ -145,7 +146,279 @@ pub struct ShaderIo{
 }
 
 #[derive(Default, Debug)]
+pub enum ShaderBackend{
+    #[default]
+    Metal,
+    Wgsl,
+    Hlsl,
+    Glsl
+}
+
+impl ShaderBackend{
+    pub fn register_ids(&self){
+        match self{
+            Self::Metal | Self::Hlsl=>{
+                id_lut!(float);
+                id_lut!(half);
+                id_lut!(uint);
+                id_lut!(int);
+                id_lut!(float2);
+                id_lut!(float3);
+                id_lut!(float4);
+                id_lut!(half2);
+                id_lut!(half3);
+                id_lut!(half4);
+                id_lut!(uint2);
+                id_lut!(uint3);
+                id_lut!(uint4);
+                id_lut!(int2);
+                id_lut!(int3);
+                id_lut!(int4);
+                id_lut!(bool2);
+                id_lut!(bool3);
+                id_lut!(bool4);
+                id_lut!(float2x2);
+                id_lut!(float2x3);
+                id_lut!(float2x4);
+                id_lut!(float3x2);
+                id_lut!(float3x3);
+                id_lut!(float3x4);
+                id_lut!(float4x2);
+                id_lut!(float4x3);
+                id_lut!(float4x4);
+                id_lut!(atomic_uint);
+                id_lut!(atomic_int);
+            }
+            Self::Glsl=>{
+                id_lut!(float);
+                id_lut!(uint);
+                id_lut!(int);
+                id_lut!(vec2);
+                id_lut!(vec3);
+                id_lut!(vec4);
+                id_lut!(uvec2);
+                id_lut!(uvec3);
+                id_lut!(uvec4);
+                id_lut!(ivec2);
+                id_lut!(ivec3);
+                id_lut!(ivec4);
+                id_lut!(bvec2);
+                id_lut!(bvec3);
+                id_lut!(bvec4);
+                id_lut!(mat2);
+                id_lut!(mat3);
+                id_lut!(mat4);
+            }
+            Self::Wgsl=>{}
+        }
+    }
+    
+    pub fn map_pod_name(&self, name_in:LiveId)->LiveId{
+        match self{
+            Self::Metal | Self::Hlsl=>{
+                match name_in{
+                    id!(f32)=>id!(float),
+                    id!(f16)=>id!(half),
+                    id!(u32)=>id!(uint),
+                    id!(i32)=>id!(int),
+                    id!(vec2f)=>id!(float2),
+                    id!(vec3f)=>id!(float3),
+                    id!(vec4f)=>id!(float4),
+                    id!(vec2h)=>id!(half2),
+                    id!(vec3h)=>id!(half3),
+                    id!(vec4h)=>id!(half4),
+                    id!(vec2u)=>id!(uint2),
+                    id!(vec3u)=>id!(uint3),
+                    id!(vec4u)=>id!(uint4),
+                    id!(vec2i)=>id!(int2),
+                    id!(vec3i)=>id!(int3),
+                    id!(vec4i)=>id!(int4),
+                    id!(vec2b)=>id!(bool2),
+                    id!(vec3b)=>id!(bool3),
+                    id!(vec4b)=>id!(bool4),
+                    id!(mat2x2f)=>id!(float2x2),
+                    id!(mat2x3f)=>id!(float2x3),
+                    id!(mat2x4f)=>id!(float2x4),
+                    id!(mat3x2f)=>id!(float3x2),
+                    id!(mat3x3f)=>id!(float3x3),
+                    id!(mat3x4f)=>id!(float3x4),
+                    id!(mat4x2f)=>id!(float4x2),
+                    id!(mat4x3f)=>id!(float4x3),
+                    id!(mat4x4f)=>id!(float4x4),
+                    id!(atomic_u32)=>id!(atomic_uint),
+                    id!(atomic_i32)=>id!(atomic_int),
+                    x=>x
+                }
+            }
+            Self::Glsl=>{
+                match name_in{
+                    id!(f32)=>id!(float),
+                    id!(f16)=>id!(float), // no half in standard GLSL 300 es, could use mediump float
+                    id!(u32)=>id!(uint),
+                    id!(i32)=>id!(int),
+                    id!(vec2f)=>id!(vec2),
+                    id!(vec3f)=>id!(vec3),
+                    id!(vec4f)=>id!(vec4),
+                    id!(vec2h)=>id!(vec2),
+                    id!(vec3h)=>id!(vec3),
+                    id!(vec4h)=>id!(vec4),
+                    id!(vec2u)=>id!(uvec2),
+                    id!(vec3u)=>id!(uvec3),
+                    id!(vec4u)=>id!(uvec4),
+                    id!(vec2i)=>id!(ivec2),
+                    id!(vec3i)=>id!(ivec3),
+                    id!(vec4i)=>id!(ivec4),
+                    id!(vec2b)=>id!(bvec2),
+                    id!(vec3b)=>id!(bvec3),
+                    id!(vec4b)=>id!(bvec4),
+                    id!(mat2x2f)=>id!(mat2),
+                    id!(mat3x3f)=>id!(mat3),
+                    id!(mat4x4f)=>id!(mat4),
+                    // TODO more matrices
+                    x=>x
+                }
+            }
+            Self::Wgsl=>name_in
+        }
+    }
+        
+    pub fn pod_struct_defs(&self, heap:&ScriptHeap, root_structs: &BTreeSet<ScriptPodType>, out: &mut String){
+        let mut visited = BTreeSet::new();
+        let mut worklist: Vec<_> = root_structs.iter().cloned().collect();
+                                
+        let mut referenced = BTreeSet::new();
+        while let Some(ty) = worklist.pop() {
+            if visited.contains(&ty) { continue; }
+            visited.insert(ty);
+                                     
+            let pod_type = heap.pod_type_ref(ty);
+            referenced.clear();
+            match &pod_type.ty {
+                ScriptPodTy::Struct{..} => {
+                    self.pod_type_def(heap, ty, &mut referenced, out);
+                }
+                ScriptPodTy::FixedArray{ty: inner, ..} | ScriptPodTy::VariableArray{ty: inner, ..} => {
+                    let mut dummy = String::new();
+                    self.pod_type_name_referenced(inner, &mut referenced, &mut dummy);
+                }
+                _ => {}
+            }
+            for ref_ty in &referenced {
+                if !visited.contains(&ref_ty) {
+                    worklist.push(*ref_ty);
+                }
+            }
+        }
+    }
+    
+    pub fn pod_type_def(&self, heap:&ScriptHeap, pod_ty: ScriptPodType, referenced:&mut BTreeSet<ScriptPodType>, out:&mut String){
+        let pod_type = heap.pod_type_ref(pod_ty);
+        if let ScriptPodTy::Struct{fields, ..} = &pod_type.ty {
+            let name = pod_type.name.unwrap();
+            let name = self.map_pod_name(name);
+            writeln!(out, "struct {} {{", name).ok();
+            for field in fields {
+                match self{
+                    Self::Metal | Self::Hlsl | Self::Glsl =>{
+                        write!(out, "    ").ok();
+                        if let ScriptPodTy::FixedArray{..} = &field.ty.data.ty {
+                            self.pod_type_def_metal_array(&field.ty, &field.name, referenced, out);
+                        } else {
+                            self.pod_type_name_referenced(&field.ty, referenced, out);
+                            writeln!(out, " {};", field.name).ok();
+                        }
+                    }
+                    Self::Wgsl=>{
+                        write!(out, "    {}: ", field.name).ok();
+                        self.pod_type_name_referenced(&field.ty, referenced, out);
+                        writeln!(out, ",").ok();
+                    }
+                }
+            }
+            match self{
+                Self::Metal | Self::Hlsl | Self::Glsl =>{
+                    writeln!(out, "}};").ok();
+                }
+                Self::Wgsl=>{
+                    writeln!(out, "}}").ok();
+                }
+            }
+        }
+    }
+    
+    fn pod_type_def_metal_array(&self, ty: &ScriptPodTypeInline, name: &LiveId, referenced:&mut BTreeSet<ScriptPodType>, out:&mut String) {
+         let mut dims = String::new();
+         let mut curr = ty;
+         loop {
+             match &curr.data.ty {
+                 ScriptPodTy::FixedArray{ty: inner, len, ..} => {
+                     write!(dims, "[{}]", len).ok();
+                     curr = inner;
+                 }
+                 _ => break
+             }
+         }
+         self.pod_type_name_referenced(curr, referenced, out);
+         writeln!(out, " {}{};", name, dims).ok();
+    }
+        
+    fn pod_type_name_referenced(&self, ty: &ScriptPodTypeInline, referenced:&mut BTreeSet<ScriptPodType>, out:&mut String) {
+        match &ty.data.ty {
+            ScriptPodTy::Struct{..} => {
+                referenced.insert(ty.self_ref);
+                let name = ty.data.name.unwrap();
+                let name = self.map_pod_name(name);
+                write!(out, "{}", name).ok();
+            }
+            ScriptPodTy::FixedArray{ty: inner, len, ..} => {
+                out.push_str("array<");
+                self.pod_type_name_referenced(inner, referenced, out);
+                write!(out, ", {}>", len).ok();
+            }
+            ScriptPodTy::VariableArray{ty: inner, ..} => {
+                out.push_str("array<");
+                self.pod_type_name_referenced(inner, referenced, out);
+                out.push_str(">");
+            }
+            _=> self.pod_type_name(ty, out)
+        }
+    }
+        
+    fn pod_type_name(&self, ty: &ScriptPodTypeInline, out:&mut String) {
+        match &ty.data.ty {
+            ScriptPodTy::F32 => write!(out, "{}", self.map_pod_name(id!(f32))).ok().unwrap_or(()),
+            ScriptPodTy::F16 => write!(out, "{}", self.map_pod_name(id!(f16))).ok().unwrap_or(()),
+            ScriptPodTy::U32 => write!(out, "{}", self.map_pod_name(id!(u32))).ok().unwrap_or(()),
+            ScriptPodTy::I32 => write!(out, "{}", self.map_pod_name(id!(i32))).ok().unwrap_or(()),
+            ScriptPodTy::Bool => write!(out, "{}", self.map_pod_name(id!(bool))).ok().unwrap_or(()),
+            ScriptPodTy::AtomicU32 => write!(out, "atomic<{}>", self.map_pod_name(id!(u32))).ok().unwrap_or(()),
+            ScriptPodTy::AtomicI32 => write!(out, "atomic<{}>", self.map_pod_name(id!(i32))).ok().unwrap_or(()),
+            ScriptPodTy::Vec(v) => write!(out, "{}", self.map_pod_name(v.name())).ok().unwrap_or(()),
+            ScriptPodTy::Mat(m) => write!(out, "{}", self.map_pod_name(m.name())).ok().unwrap_or(()),
+            ScriptPodTy::Struct{..} => {
+                let name = ty.data.name.unwrap();
+                let name = self.map_pod_name(name);
+                write!(out, "{}", name).ok().unwrap_or(());
+            }
+            ScriptPodTy::FixedArray{ty: inner, len, ..} => {
+                out.push_str("array<");
+                self.pod_type_name(inner, out);
+                write!(out, ", {}>", len).ok();
+            }
+            ScriptPodTy::VariableArray{ty: inner, ..} => {
+                out.push_str("array<");
+                self.pod_type_name(inner, out);
+                out.push_str(">");
+            }
+            _ => out.push_str("unknown")
+        }
+    }
+}
+
+
+#[derive(Default, Debug)]
 pub struct ShaderOutput{
+    pub backend: ShaderBackend,
     pub io: Vec<ShaderIo>,
     pub recur_block: Vec<ScriptObject>,
     pub structs: BTreeSet<ScriptPodType>,
@@ -154,7 +427,7 @@ pub struct ShaderOutput{
 
 impl ShaderOutput{
     pub fn create_struct_defs(&self, vm:&ScriptVm, out:&mut String){
-        vm.heap.pod_type_wgsl_struct_defs(&self.structs, out);
+        self.backend.pod_struct_defs(vm.heap, &self.structs, out);
     }
 }
 
@@ -310,6 +583,9 @@ impl ShaderFnCompiler{
     }
     
     pub fn compile_fn(&mut self, vm:&mut ScriptVm, output:&mut ShaderOutput, fnip:ScriptIp)->ScriptPodType{
+        //output.backend = ShaderBackend::Wgsl;
+        output.backend.register_ids();
+        
         self.mes.push(ShaderMe::FnBody{
             ret:None
         });
@@ -323,12 +599,12 @@ impl ShaderFnCompiler{
             if let Some((opcode, args)) = opcode.as_opcode(){
                 self.opcode(vm, output, opcode, args);
                 self.trap.goto_next();
-                self.handle_if_else_phi(vm);
+                self.handle_if_else_phi(vm, output);
             }
             else{ // id or immediate value
                 self.push_immediate(opcode, &vm.code.builtins.pod);
                 self.trap.goto_next();
-                self.handle_if_else_phi(vm);
+                self.handle_if_else_phi(vm, output);
             }
             // alright lets see if we have a trap, ifso we can log it
             if let Some(err) = self.trap.err.take(){
@@ -621,7 +897,7 @@ impl ShaderFnCompiler{
         self.stack.free_string(instance_s);
     }
     
-    fn handle_if_else_phi(&mut self, vm:&ScriptVm){
+    fn handle_if_else_phi(&mut self, vm:&ScriptVm, output: &ShaderOutput){
         if let Some(ShaderMe::IfBody{target_ip, phi, start_pos, stack_depth, phi_type}) = self.mes.last(){
             if self.trap.ip.index >= *target_ip{
                 if self.stack.types.len() > *stack_depth{
@@ -633,7 +909,7 @@ impl ShaderFnCompiler{
                             let ty = type_table_if_else(phi_type, &ty, &self.trap, &vm.code.builtins.pod);
                             let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
                             let ty_name = if let Some(name) = vm.heap.pod_type_name(ty){
-                                name
+                                output.backend.map_pod_name(name)
                             }
                             else{
                                 id!(unknown)
@@ -770,21 +1046,53 @@ impl ShaderFnCompiler{
         let mut out = self.stack.new_string();
         
         if let Some(name) = vm.heap.pod_type_name(elem_ty) {
-             write!(out, "array<{}, {}>", name, count).ok();
              if matches!(vm.heap.pod_types[elem_ty.index as usize].ty, ScriptPodTy::Struct{..}) {
                  output.structs.insert(elem_ty);
+             }
+             match output.backend{
+                 ShaderBackend::Wgsl=>{
+                     let name = output.backend.map_pod_name(name);
+                     write!(out, "array<{}, {}>", name, count).ok();
+                     write!(out, "(").ok();
+                 }
+                 ShaderBackend::Metal | ShaderBackend::Hlsl =>{
+                     write!(out, "{{").ok();
+                 }
+                 ShaderBackend::Glsl=>{
+                      let name = output.backend.map_pod_name(name);
+                      write!(out, "{}[{}]", name, count).ok(); // array constructor
+                      write!(out, "(").ok();
+                 }
              }
         }
         else {
             self.trap.err_no_matching_shader_type();
+            match output.backend{
+                 ShaderBackend::Wgsl=>{
+                     write!(out, "(").ok();
+                 }
+                 ShaderBackend::Metal | ShaderBackend::Hlsl =>{
+                     write!(out, "{{").ok();
+                 }
+                 ShaderBackend::Glsl=>{
+                     write!(out, "(").ok(); // Should not happen if type not found
+                 }
+             }
         }
         
-        write!(out, "(").ok();
         for (i, s) in args.iter().enumerate() {
             if i > 0 { out.push_str(", "); }
             out.push_str(s);
         }
-        out.push_str(")");
+        
+        match output.backend{
+             ShaderBackend::Wgsl | ShaderBackend::Glsl =>{
+                 out.push_str(")");
+             }
+             ShaderBackend::Metal | ShaderBackend::Hlsl =>{
+                 out.push_str("}");
+             }
+        }
         
         for s in args {
             self.stack.free_string(s);
@@ -793,18 +1101,33 @@ impl ShaderFnCompiler{
         self.stack.push(&self.trap, ShaderType::Pod(array_ty), out);
     }
 
-    fn handle_pod_construct(&mut self, vm: &mut ScriptVm, pod_ty: ScriptPodType, args: Vec<ShaderPodArg>) {
+    fn handle_pod_construct(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, pod_ty: ScriptPodType, args: Vec<ShaderPodArg>) {
          let mut offset = ScriptPodOffset::default();
-         
+         let pod_ty_data = &vm.heap.pod_types[pod_ty.index as usize];
+
          let mut out = self.stack.new_string();
          if let Some(name) = vm.heap.pod_type_name(pod_ty) {
-             write!(out, "{}(", name).ok();
+             let name = output.backend.map_pod_name(name);
+             match output.backend{
+                 ShaderBackend::Wgsl=>{
+                    write!(out, "{}(", name).ok();
+                 }
+                 ShaderBackend::Metal | ShaderBackend::Hlsl =>{
+                    if let ScriptPodTy::Struct{..} = &pod_ty_data.ty{
+                        write!(out, "{{").ok();
+                    }
+                    else{
+                        write!(out, "{}(", name).ok();
+                    }
+                 }
+                 ShaderBackend::Glsl =>{
+                    write!(out, "{}(", name).ok();
+                 }
+             }
          }
          else {
              self.trap.err_no_matching_shader_type();
          }
-         
-         let pod_ty_data = &vm.heap.pod_types[pod_ty.index as usize];
          
          if let Some(first) = args.first(){
              if first.name.is_some(){ // Named args
@@ -889,7 +1212,22 @@ impl ShaderFnCompiler{
               vm.heap.pod_check_constructor_arg_count(pod_ty, &offset, &self.trap);
          }
          
-         out.push_str(")");
+         match output.backend{
+             ShaderBackend::Wgsl=>{
+                out.push_str(")");
+             }
+             ShaderBackend::Metal | ShaderBackend::Hlsl =>{
+                if let ScriptPodTy::Struct{..} = &pod_ty_data.ty{
+                    out.push_str("}");
+                }
+                else{
+                    out.push_str(")");
+                }
+             }
+             ShaderBackend::Glsl =>{
+                 out.push_str(")");
+             }
+         }
          
          for arg in args {
              self.stack.free_string(arg.s);
@@ -941,25 +1279,54 @@ impl ShaderFnCompiler{
                 let mut compiler = ShaderFnCompiler::new(fnobj);
                 // we need to pass in a vec of types to the function
                 let mut call_sig = String::new();
+                
+                // We construct the signature in parts to handle different backends
+                let mut fn_name = String::new();
+                let mut fn_args = String::new();
+                
                 if overload != 0 {
                     let mut n = self.stack.new_string();
                     write!(n, "_f{}", overload).ok();
                     out.insert_str(0, &n);
                     self.stack.free_string(n);
-                    write!(call_sig, "fn _f{}{}{}(", overload, method_name_prefix, name).ok();
+                    write!(fn_name, "_f{}{}{}", overload, method_name_prefix, name).ok();
                 } else {
-                    write!(call_sig, "fn {}{}(", method_name_prefix, name).ok();
+                    write!(fn_name, "{}{}", method_name_prefix, name).ok();
                 }
                 out.insert_str(0, &method_name_prefix);
 
+                let mut has_this = false;
                 if let ShaderType::Pod(ty) = this {
-                    write!(call_sig, "this:ptr<function, ").ok();
-                    if let Some(name) = vm.heap.pod_type_name(ty) {
-                        write!(call_sig, "{}", name).ok();
+                    has_this = true;
+                    match output.backend {
+                        ShaderBackend::Wgsl => {
+                            write!(fn_args, "this:ptr<function, ").ok();
+                            if let Some(name) = vm.heap.pod_type_name(ty) {
+                                let name = output.backend.map_pod_name(name);
+                                write!(fn_args, "{}", name).ok();
+                            }
+                            write!(fn_args, ">").ok();
+                        }
+                        ShaderBackend::Metal => {
+                             if let Some(name) = vm.heap.pod_type_name(ty) {
+                                let name = output.backend.map_pod_name(name);
+                                write!(fn_args, "thread {}& this", name).ok();
+                            }
+                        }
+                        ShaderBackend::Hlsl => {
+                             if let Some(name) = vm.heap.pod_type_name(ty) {
+                                let name = output.backend.map_pod_name(name);
+                                write!(fn_args, "inout {} this", name).ok();
+                            }
+                        }
+                        ShaderBackend::Glsl => {
+                             if let Some(name) = vm.heap.pod_type_name(ty) {
+                                let name = output.backend.map_pod_name(name);
+                                write!(fn_args, "inout {} this", name).ok();
+                            }
+                        }
                     }
-                    write!(call_sig, ">").ok();
                     compiler.shader_scope.define_let(id!(this), ty);
-                    if argc > 0 { call_sig.push_str(", "); }
                 }
                 else if let ShaderType::PodType(ty) = this{
                     compiler.shader_scope.define_pod_type(id!(this), ty);
@@ -968,23 +1335,36 @@ impl ShaderFnCompiler{
                     compiler.shader_scope.define_this_io(obj);
                 }
                 
-                
                 for i in 0..argc {
                     // put in argument types
                     let kv = vm.heap.vec_key_value(fnobj, i, &self.trap);
                     if let Some(id) = kv.key.as_id() {
-                        if i != 0 { call_sig.push_str(", "); }
+                        if i != 0 || has_this { fn_args.push_str(", "); }
                         let arg_ty = args[i];
-                        write!(call_sig, "{}:", id).ok();
-                        if let Some(name) = vm.heap.pod_type_name(arg_ty) {
-                            write!(call_sig, "{}", name).ok();
-                        } else {
-                            todo!()
+                        
+                        match output.backend {
+                            ShaderBackend::Wgsl => {
+                                write!(fn_args, "{}:", id).ok();
+                                if let Some(name) = vm.heap.pod_type_name(arg_ty) {
+                                    let name = output.backend.map_pod_name(name);
+                                    write!(fn_args, "{}", name).ok();
+                                } else {
+                                    todo!()
+                                }
+                            }
+                            ShaderBackend::Metal | ShaderBackend::Hlsl | ShaderBackend::Glsl => {
+                                if let Some(name) = vm.heap.pod_type_name(arg_ty) {
+                                    let name = output.backend.map_pod_name(name);
+                                    write!(fn_args, "{} {}", name, id).ok();
+                                } else {
+                                    todo!()
+                                }
+                            }
                         }
                         compiler.shader_scope.define_let(id, arg_ty);
                     }
                 }
-                write!(call_sig, ")").ok();
+                
                 if let Some(fnptr) = vm.heap.as_fn(fnobj) {
                     if let ScriptFnPtr::Script(fnip) = fnptr {
                         if output.recur_block.iter().any(|v| *v == fnobj) {
@@ -994,11 +1374,26 @@ impl ShaderFnCompiler{
                             output.recur_block.push(fnobj);
                             let ret = compiler.compile_fn(vm, output, fnip);
                             output.recur_block.pop();
-                            if let Some(name) = vm.heap.pod_type_name(ret) {
-                                if name != id!(void){
-                                    write!(call_sig, "->{}", name).ok();
+                            
+                            match output.backend {
+                                ShaderBackend::Wgsl => {
+                                    write!(call_sig, "fn {}({})", fn_name, fn_args).ok();
+                                    if let Some(name) = vm.heap.pod_type_name(ret) {
+                                        if name != id!(void){
+                                            let name = output.backend.map_pod_name(name);
+                                            write!(call_sig, "->{}", name).ok();
+                                        }
+                                    } 
                                 }
-                            } 
+                                ShaderBackend::Metal | ShaderBackend::Hlsl | ShaderBackend::Glsl => {
+                                    let ret_name = if let Some(name) = vm.heap.pod_type_name(ret) {
+                                        output.backend.map_pod_name(name)
+                                    } else {
+                                        id!(void)
+                                    };
+                                    write!(call_sig, "{} {}({})", ret_name, fn_name, fn_args).ok();
+                                }
+                            }
                             
                             output.functions.push(ShaderFn {
                                 overload,
@@ -1027,7 +1422,7 @@ impl ShaderFnCompiler{
                     self.handle_array_construct(vm, output, args, elem_ty);
                 }
                 ShaderMe::Pod { pod_ty, args } => {
-                    self.handle_pod_construct(vm, pod_ty, args);
+                    self.handle_pod_construct(vm, output, pod_ty, args);
                 }
                 ShaderMe::ScriptCall { out, name, fnobj, this, args } => {
                     self.handle_script_call(vm, output, out, name, fnobj, this, args);
@@ -1090,7 +1485,17 @@ impl ShaderFnCompiler{
                             match fnptr {
                                 ScriptFnPtr::Script(_fnptr) => {
                                     let mut out = self.stack.new_string();
-                                    write!(out, "{}(&{}", method_id, this_s).ok();
+                                    match output.backend {
+                                        ShaderBackend::Wgsl => {
+                                            write!(out, "{}(&{}", method_id, this_s).ok();
+                                        }
+                                        ShaderBackend::Metal => {
+                                            write!(out, "{}(&{}", method_id, this_s).ok();
+                                        }
+                                        ShaderBackend::Hlsl | ShaderBackend::Glsl => {
+                                            write!(out, "{}({}", method_id, this_s).ok();
+                                        }
+                                    }
                                     self.mes.push(ShaderMe::ScriptCall {
                                         name: method_id,
                                         out,
@@ -1451,7 +1856,7 @@ impl ShaderFnCompiler{
         self.stack.free_string(instance_s);
     }
 
-    fn handle_let_dyn(&mut self, vm: &mut ScriptVm, opargs: OpcodeArgs) {
+    fn handle_let_dyn(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs) {
         if opargs.is_nil() {
             self.trap.err_have_to_initialise_variable();
             self.stack.pop(&self.trap);
@@ -1462,11 +1867,26 @@ impl ShaderFnCompiler{
                 // lets define our let type
                 if let Some(ty) = ty_value.make_concrete(&vm.code.builtins.pod) {
                     let shadow = self.shader_scope.define_let(id, ty);
-                    if shadow > 0 {
-                         write!(self.out, "let _s{}{} = {};\n", shadow, id, value).ok();
-                    }
-                    else{
-                         write!(self.out, "let {} = {};\n", id, value).ok();
+                    match output.backend {
+                        ShaderBackend::Wgsl => {
+                            if shadow > 0 {
+                                write!(self.out, "let _s{}{} = {};\n", shadow, id, value).ok();
+                            } else {
+                                write!(self.out, "let {} = {};\n", id, value).ok();
+                            }
+                        }
+                        ShaderBackend::Metal | ShaderBackend::Hlsl | ShaderBackend::Glsl => {
+                            let type_name = if let Some(name) = vm.heap.pod_type_name(ty) {
+                                output.backend.map_pod_name(name)
+                            } else {
+                                id!(unknown)
+                            };
+                            if shadow > 0 {
+                                write!(self.out, "{} _s{}{} = {};\n", type_name, shadow, id, value).ok();
+                            } else {
+                                write!(self.out, "{} {} = {};\n", type_name, id, value).ok();
+                            }
+                        }
                     }
                 } else {
                     self.trap.err_no_matching_shader_type();
@@ -1477,7 +1897,7 @@ impl ShaderFnCompiler{
         }
     }
 
-    fn handle_var_dyn(&mut self, vm: &mut ScriptVm, opargs: OpcodeArgs) {
+    fn handle_var_dyn(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs) {
         if opargs.is_nil() {
             self.trap.err_have_to_initialise_variable();
             self.stack.pop(&self.trap);
@@ -1488,11 +1908,26 @@ impl ShaderFnCompiler{
                 // lets define our let type
                 if let Some(ty) = ty_value.make_concrete(&vm.code.builtins.pod) {
                     let shadow = self.shader_scope.define_var(id, ty);
-                    if shadow > 0 {
-                        write!(self.out, "var _s{}{} = {};\n", shadow, id, value).ok();
-                    }
-                    else{
-                        write!(self.out, "var {} = {};\n", id, value).ok();
+                    match output.backend {
+                        ShaderBackend::Wgsl => {
+                            if shadow > 0 {
+                                write!(self.out, "var _s{}{} = {};\n", shadow, id, value).ok();
+                            } else {
+                                write!(self.out, "var {} = {};\n", id, value).ok();
+                            }
+                        }
+                        ShaderBackend::Metal | ShaderBackend::Hlsl | ShaderBackend::Glsl => {
+                            let type_name = if let Some(name) = vm.heap.pod_type_name(ty) {
+                                output.backend.map_pod_name(name)
+                            } else {
+                                id!(unknown)
+                            };
+                            if shadow > 0 {
+                                write!(self.out, "{} _s{}{} = {};\n", type_name, shadow, id, value).ok();
+                            } else {
+                                write!(self.out, "{} {} = {};\n", type_name, id, value).ok();
+                            }
+                        }
                     }
                 } else {
                     self.trap.err_no_matching_shader_type();
@@ -1676,9 +2111,9 @@ impl ShaderFnCompiler{
 // Array index            
             Opcode::ARRAY_INDEX=>{self.trap.err_not_impl();},
 // Let                   
-            Opcode::LET_DYN=>self.handle_let_dyn(vm, opargs),
+            Opcode::LET_DYN=>self.handle_let_dyn(vm, output, opargs),
             Opcode::LET_TYPED=>{self.trap.err_not_impl();},
-            Opcode::VAR_DYN=>self.handle_var_dyn(vm, opargs),
+            Opcode::VAR_DYN=>self.handle_var_dyn(vm, output, opargs),
             Opcode::VAR_TYPED=>{self.trap.err_not_impl();},
 // Tree search            
             Opcode::SEARCH_TREE=>{self.trap.err_opcode_not_supported_in_shader();},
@@ -1771,9 +2206,10 @@ impl ShaderFnCompiler{
                     }
                     args.push(s);
                 }
-                ShaderMe::ScriptCall{out, args, ..}=>{
+                ShaderMe::ScriptCall{out, args, this, ..}=>{
                     let (ty, s) = self.stack.pop(&self.trap);
-                    if args.len() > 0 {
+                    let has_this = if let ShaderType::Pod(_) = this{true} else {false};
+                    if args.len() > 0 || has_this {
                         out.push_str(", ");
                     }
                     if let ShaderType::Id(id) = ty{

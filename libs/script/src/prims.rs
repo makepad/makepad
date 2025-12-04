@@ -6,13 +6,13 @@ use crate::traits::*;
 use crate::object::*;
 use makepad_live_id::*;
 use crate::function::*;
+use crate::pod::*;
 
 #[macro_export]
 macro_rules!script_primitive {
     ( $ ty: ty, $new: item, $ type_check: item, $ apply: item, $ to_value: item) => {
         impl ScriptHook for $ty{}
         impl ScriptNew for $ty{
-            fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}
             $ new
             $ type_check
             fn script_default(vm:&mut ScriptVm)->ScriptValue{Self::script_new(vm).script_to_value(vm)}
@@ -27,6 +27,16 @@ macro_rules!script_primitive {
         }
     }
 }
+
+script_primitive!(
+    f32, 
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_number()},
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        *self = vm.cast_to_f64(value) as _;
+    },
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{ScriptValue::from_f64(*self as _)}
+); 
 
 script_primitive!(
     f64, 
@@ -96,15 +106,6 @@ script_primitive!(
     }
 );
 
-script_primitive!(
-    makepad_math::Vec2d, 
-    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
-    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{value.is_number()},
-    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){
-        todo!()
-    },
-    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{todo!()}
-);
 
 script_primitive!(
     u32, 
@@ -211,6 +212,314 @@ script_primitive!(
     },
     fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{*self}
 );
+
+
+script_primitive!(
+    makepad_math::Vec2d, 
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
+    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
+        if value.is_number(){return true}
+        if let Some(pod) = value.as_pod(){
+            let pod_data = &heap.pods[pod.index as usize];
+            let pod_type = &heap.pod_types[pod_data.ty.index as usize];
+            if let ScriptPodTy::Vec(v) = &pod_type.ty{
+                 return v.dims() == 2
+            }
+        }
+        false
+    },
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        if let Some(v) = value.as_f64(){
+             self.x = v;
+             self.y = v;
+             return
+        }
+        if let Some(pod) = value.as_pod(){
+             let pod_data = &vm.heap.pods[pod.index as usize];
+             let pod_type = &vm.heap.pod_types[pod_data.ty.index as usize];
+             if let ScriptPodTy::Vec(v) = &pod_type.ty{
+                 if v.dims() == 2 {
+                     match v {
+                        ScriptPodVec::Vec2f => {
+                            self.x = f32::from_bits(pod_data.data[0]) as f64;
+                            self.y = f32::from_bits(pod_data.data[1]) as f64;
+                        },
+                        ScriptPodVec::Vec2i => {
+                            self.x = pod_data.data[0] as i32 as f64;
+                            self.y = pod_data.data[1] as i32 as f64;
+                        },
+                        ScriptPodVec::Vec2u => {
+                            self.x = pod_data.data[0] as f64;
+                            self.y = pod_data.data[1] as f64;
+                        },
+                        ScriptPodVec::Vec2b => {
+                            self.x = if pod_data.data[0]!=0 {1.0} else {0.0};
+                            self.y = if pod_data.data[1]!=0 {1.0} else {0.0};
+                        },
+                        ScriptPodVec::Vec2h => {
+                             self.x = crate::pod_heap::f16_to_f32(pod_data.data[0] as u16) as f64;
+                             self.y = crate::pod_heap::f16_to_f32((pod_data.data[0] >> 16) as u16) as f64;
+                        },
+                        _ => ()
+                     }
+                     return
+                 }
+             }
+        }
+        let val = vm.cast_to_f64(value);
+        if !val.is_nan(){
+            self.x = val;
+            self.y = val;
+        }
+    },
+    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
+        let pod = vm.heap.new_pod(vm.code.builtins.pod.pod_vec2f);
+        let pod_data = &mut vm.heap.pods[pod.index as usize];
+        pod_data.data[0] = (self.x as f32).to_bits();
+        pod_data.data[1] = (self.y as f32).to_bits();
+        pod.into()
+    }
+);
+
+script_primitive!(
+    makepad_math::Vec2f, 
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
+    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
+        if value.is_number(){return true}
+        if let Some(pod) = value.as_pod(){
+            let pod_data = &heap.pods[pod.index as usize];
+            let pod_type = &heap.pod_types[pod_data.ty.index as usize];
+            if let ScriptPodTy::Vec(v) = &pod_type.ty{
+                 return v.dims() == 2
+            }
+        }
+        false
+    },
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        if let Some(v) = value.as_f32(){
+             self.x = v;
+             self.y = v;
+             return
+        }
+        if let Some(pod) = value.as_pod(){
+             let pod_data = &vm.heap.pods[pod.index as usize];
+             let pod_type = &vm.heap.pod_types[pod_data.ty.index as usize];
+             if let ScriptPodTy::Vec(v) = &pod_type.ty{
+                 if v.dims() == 2 {
+                     match v {
+                        ScriptPodVec::Vec2f => {
+                            self.x = f32::from_bits(pod_data.data[0]);
+                            self.y = f32::from_bits(pod_data.data[1]);
+                        },
+                        ScriptPodVec::Vec2i => {
+                            self.x = pod_data.data[0] as i32 as f32;
+                            self.y = pod_data.data[1] as i32 as f32;
+                        },
+                        ScriptPodVec::Vec2u => {
+                            self.x = pod_data.data[0] as f32;
+                            self.y = pod_data.data[1] as f32;
+                        },
+                        ScriptPodVec::Vec2b => {
+                            self.x = if pod_data.data[0]!=0 {1.0} else {0.0};
+                            self.y = if pod_data.data[1]!=0 {1.0} else {0.0};
+                        },
+                        ScriptPodVec::Vec2h => {
+                             self.x = crate::pod_heap::f16_to_f32(pod_data.data[0] as u16);
+                             self.y = crate::pod_heap::f16_to_f32((pod_data.data[0] >> 16) as u16);
+                        },
+                        _ => ()
+                     }
+                     return
+                 }
+             }
+        }
+        let val = vm.cast_to_f64(value) as f32;
+        if !val.is_nan(){
+            self.x = val;
+            self.y = val;
+        }
+    },
+    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
+        let pod = vm.heap.new_pod(vm.code.builtins.pod.pod_vec2f);
+        let pod_data = &mut vm.heap.pods[pod.index as usize];
+        pod_data.data[0] = (self.x).to_bits();
+        pod_data.data[1] = (self.y).to_bits();
+        pod.into()
+    }
+);
+
+script_primitive!(
+    makepad_math::Vec3f, 
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
+    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
+        if value.is_number(){return true}
+        if value.is_color(){return true}
+        if let Some(pod) = value.as_pod(){
+            let pod_data = &heap.pods[pod.index as usize];
+            let pod_type = &heap.pod_types[pod_data.ty.index as usize];
+            if let ScriptPodTy::Vec(v) = &pod_type.ty{
+                 return v.dims() == 3
+            }
+        }
+        false
+    },
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        if let Some(v) = value.as_f32(){
+             self.x = v;
+             self.y = v;
+             self.z = v;
+             return
+        }
+        if let Some(c) = value.as_color(){
+            let v = makepad_math::Vec4f::from_u32(c);
+            self.x = v.x;
+            self.y = v.y;
+            self.z = v.z;
+            return
+        }
+        if let Some(pod) = value.as_pod(){
+             let pod_data = &vm.heap.pods[pod.index as usize];
+             let pod_type = &vm.heap.pod_types[pod_data.ty.index as usize];
+             if let ScriptPodTy::Vec(v) = &pod_type.ty{
+                 if v.dims() == 3 {
+                     match v {
+                        ScriptPodVec::Vec3f => {
+                            self.x = f32::from_bits(pod_data.data[0]);
+                            self.y = f32::from_bits(pod_data.data[1]);
+                            self.z = f32::from_bits(pod_data.data[2]);
+                        },
+                        ScriptPodVec::Vec3i => {
+                            self.x = pod_data.data[0] as i32 as f32;
+                            self.y = pod_data.data[1] as i32 as f32;
+                            self.z = pod_data.data[2] as i32 as f32;
+                        },
+                        ScriptPodVec::Vec3u => {
+                            self.x = pod_data.data[0] as f32;
+                            self.y = pod_data.data[1] as f32;
+                            self.z = pod_data.data[2] as f32;
+                        },
+                        ScriptPodVec::Vec3b => {
+                            self.x = if pod_data.data[0]!=0 {1.0} else {0.0};
+                            self.y = if pod_data.data[1]!=0 {1.0} else {0.0};
+                            self.z = if pod_data.data[2]!=0 {1.0} else {0.0};
+                        },
+                        ScriptPodVec::Vec3h => {
+                             self.x = crate::pod_heap::f16_to_f32(pod_data.data[0] as u16);
+                             self.y = crate::pod_heap::f16_to_f32((pod_data.data[0] >> 16) as u16);
+                             self.z = crate::pod_heap::f16_to_f32(pod_data.data[1] as u16);
+                        },
+                        _ => ()
+                     }
+                     return
+                 }
+             }
+        }
+        let val = vm.cast_to_f64(value) as f32;
+        if !val.is_nan(){
+            self.x = val;
+            self.y = val;
+            self.z = val;
+        }
+    },
+    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
+        let pod = vm.heap.new_pod(vm.code.builtins.pod.pod_vec3f);
+        let pod_data = &mut vm.heap.pods[pod.index as usize];
+        pod_data.data[0] = (self.x).to_bits();
+        pod_data.data[1] = (self.y).to_bits();
+        pod_data.data[2] = (self.z).to_bits();
+        pod.into()
+    }
+);
+
+script_primitive!(
+    makepad_math::Vec4f, 
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
+    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
+        if value.is_number(){return true}
+        if value.is_color(){return true}
+        if let Some(pod) = value.as_pod(){
+            let pod_data = &heap.pods[pod.index as usize];
+            let pod_type = &heap.pod_types[pod_data.ty.index as usize];
+            if let ScriptPodTy::Vec(v) = &pod_type.ty{
+                 return v.dims() == 4
+            }
+        }
+        false
+    },
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        if let Some(v) = value.as_f32(){
+             self.x = v;
+             self.y = v;
+             self.z = v;
+             self.w = v;
+             return
+        }
+        if let Some(c) = value.as_color(){
+            let v = makepad_math::Vec4f::from_u32(c);
+            *self = v;
+            return
+        }
+        if let Some(pod) = value.as_pod(){
+             let pod_data = &vm.heap.pods[pod.index as usize];
+             let pod_type = &vm.heap.pod_types[pod_data.ty.index as usize];
+             if let ScriptPodTy::Vec(v) = &pod_type.ty{
+                 if v.dims() == 4 {
+                     match v {
+                        ScriptPodVec::Vec4f => {
+                            self.x = f32::from_bits(pod_data.data[0]);
+                            self.y = f32::from_bits(pod_data.data[1]);
+                            self.z = f32::from_bits(pod_data.data[2]);
+                            self.w = f32::from_bits(pod_data.data[3]);
+                        },
+                        ScriptPodVec::Vec4i => {
+                            self.x = pod_data.data[0] as i32 as f32;
+                            self.y = pod_data.data[1] as i32 as f32;
+                            self.z = pod_data.data[2] as i32 as f32;
+                            self.w = pod_data.data[3] as i32 as f32;
+                        },
+                        ScriptPodVec::Vec4u => {
+                            self.x = pod_data.data[0] as f32;
+                            self.y = pod_data.data[1] as f32;
+                            self.z = pod_data.data[2] as f32;
+                            self.w = pod_data.data[3] as f32;
+                        },
+                        ScriptPodVec::Vec4b => {
+                            self.x = if pod_data.data[0]!=0 {1.0} else {0.0};
+                            self.y = if pod_data.data[1]!=0 {1.0} else {0.0};
+                            self.z = if pod_data.data[2]!=0 {1.0} else {0.0};
+                            self.w = if pod_data.data[3]!=0 {1.0} else {0.0};
+                        },
+                        ScriptPodVec::Vec4h => {
+                             self.x = crate::pod_heap::f16_to_f32(pod_data.data[0] as u16);
+                             self.y = crate::pod_heap::f16_to_f32((pod_data.data[0] >> 16) as u16);
+                             self.z = crate::pod_heap::f16_to_f32(pod_data.data[1] as u16);
+                             self.w = crate::pod_heap::f16_to_f32((pod_data.data[1] >> 16) as u16);
+                        },
+                        _ => ()
+                     }
+                     return
+                 }
+             }
+        }
+        let val = vm.cast_to_f64(value) as f32;
+        if !val.is_nan(){
+            self.x = val;
+            self.y = val;
+            self.z = val;
+            self.w = val;
+        }
+    },
+    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
+        let pod = vm.heap.new_pod(vm.code.builtins.pod.pod_vec4f);
+        let pod_data = &mut vm.heap.pods[pod.index as usize];
+        pod_data.data[0] = (self.x).to_bits();
+        pod_data.data[1] = (self.y).to_bits();
+        pod_data.data[2] = (self.z).to_bits();
+        pod_data.data[3] = (self.w).to_bits();
+        pod.into()
+    }
+);
+
 // Option
 
 

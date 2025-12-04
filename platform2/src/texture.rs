@@ -1,5 +1,7 @@
 use {
     crate::{
+        makepad_script::*,
+        script::vm::*,
         id_pool::*,
         cx::Cx,
         makepad_math::*,
@@ -526,6 +528,14 @@ impl TextureFormat{
 impl Default for TextureFormat {
     fn default() -> Self {
         TextureFormat::Unknown
+    }
+}
+
+impl ScriptHook for Texture {}
+impl ScriptApply for Texture {}
+impl ScriptNew for Texture {
+    fn script_new(vm:&mut ScriptVm)->Self{
+        Self::new(vm.cx_mut())
     }
 }
 

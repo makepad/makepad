@@ -126,13 +126,19 @@ pub struct DrawList2d { // draw info per UI element
     pub (crate) dirty_check_rect: Rect,
 }
 
+impl ScriptHook for DrawList2d {}
+impl ScriptApply for DrawList2d {}
+impl ScriptNew for DrawList2d {
+    fn script_new(vm:&mut ScriptVm)->Self{
+        Self::new(vm.cx_mut())
+    }
+}
+
 impl Deref for DrawList2d{type Target = DrawList; fn deref(&self) -> &Self::Target {&self.draw_list}}
 impl DerefMut for DrawList2d{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.draw_list}}
 
-/*
-impl LiveHook for DrawList2d {}
-impl LiveNew for DrawList2d {
-    fn new(cx: &mut Cx) -> Self {
+impl DrawList2d {
+    pub fn new(cx: &mut Cx) -> Self {
         let draw_list = cx.draw_lists.alloc();
         Self {
             dirty_check_rect: Default::default(),
@@ -140,45 +146,6 @@ impl LiveNew for DrawList2d {
         }
     }
     
-    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
-        LiveTypeInfo {
-            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: LiveType::of::<Self>(),
-            live_ignore: true,
-            fields: Vec::new(),
-            type_name: id_lut!(View)
-        }
-    }
-}
-impl LiveApply for DrawList2d {
-    //fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
-    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, start_index: usize, nodes: &[LiveNode]) -> usize {
-        
-        if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, live_id!(View));
-            return nodes.skip_node(start_index);
-        }
-        cx.draw_lists[self.draw_list.id()].debug_id = nodes[start_index].id;
-        let mut index = start_index + 1;
-        loop {
-            if nodes[index].value.is_close() {
-                index += 1;
-                break;
-            }
-            match nodes[index].id {
-                live_id!(debug_id) => cx.draw_lists[self.draw_list.id()].debug_id = LiveNew::new_apply_mut_index(cx, apply, &mut index, nodes),
-                _ => {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                    index = nodes.skip_node(index);
-                }
-            }
-        }
-        return index;
-    }
-}
-*/
-
-impl DrawList2d {
     pub fn begin_overlay_last(&mut self, cx: &mut Cx2d) {
         self.begin_overlay_inner(cx, true)
     }

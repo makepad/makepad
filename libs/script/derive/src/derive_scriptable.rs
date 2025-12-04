@@ -125,11 +125,15 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         tb.add("        let proto = Self::script_proto(vm).into();");
         tb.add("        let obj = vm.heap.new_with_proto(proto);");
-                        
+        tb.add("        self.script_to_value_props(vm, obj);");
+        tb.add("        obj.into()");
+        tb.add("     }");
+                                        
+        tb.add("    fn script_to_value_props(&self, vm: &mut ScriptVm, obj:ScriptObject) {");
+        
         for field in &fields {
-                                    
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
-                tb.add("self.").ident(&field.name).add(".script_to_value_props(vm, obj)");
+                tb.add("self.").ident(&field.name).add(".script_to_value_props(vm, obj);");
             }
             if let Some(_) = field.attrs.iter().find(|a| a.name == "live"){
                 tb.add("let value:ScriptValue = <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_to_value( &self.").ident(&field.name).add(", vm); ");
@@ -138,7 +142,6 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             }
         }
                 
-        tb.add("         obj.into()");
         tb.add("    }");
         tb.add("}");
                 
@@ -186,9 +189,9 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         for field in &fields {
             
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
-                tb.add("self.").ident(&field.name).add(".script_proto_props(vm, obj, props)");
+                tb.add("self.").ident(&field.name).add(".script_proto_props(vm, obj, props);");
             }
-            if let Some(attr) = field.attrs.iter().find(|a| a.name == "script" || a.name == "live"){
+            if let Some(attr) = field.attrs.iter().find(|a| a.name == "live"){
                 // lets make sure the type is defined
                 tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto(vm);");
                 

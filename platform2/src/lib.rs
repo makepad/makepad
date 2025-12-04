@@ -97,6 +97,9 @@ pub use {
         cx_api::{CxOsApi,OpenUrlInPlace, CxOsOp},
         media_api::CxMediaApi,
         scope::*,
+        script::{
+            vm::*,
+        },
         draw_list::{
             CxDrawItem,
             CxRectArea,
