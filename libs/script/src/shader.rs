@@ -284,31 +284,46 @@ impl ShaderBackend{
         
     pub fn pod_struct_defs(&self, heap:&ScriptHeap, root_structs: &BTreeSet<ScriptPodType>, out: &mut String){
         let mut visited = BTreeSet::new();
-        let mut worklist: Vec<_> = root_structs.iter().cloned().collect();
-                                
-        let mut referenced = BTreeSet::new();
-        while let Some(ty) = worklist.pop() {
-            if visited.contains(&ty) { continue; }
-            visited.insert(ty);
-                                     
+        let mut order = Vec::new();
+        
+        for root in root_structs {
+             self.pod_struct_visit(heap, *root, &mut visited, &mut order);
+        }
+        
+        for ty in order {
             let pod_type = heap.pod_type_ref(ty);
-            referenced.clear();
-            match &pod_type.ty {
-                ScriptPodTy::Struct{..} => {
-                    self.pod_type_def(heap, ty, &mut referenced, out);
-                }
-                ScriptPodTy::FixedArray{ty: inner, ..} | ScriptPodTy::VariableArray{ty: inner, ..} => {
-                    let mut dummy = String::new();
-                    self.pod_type_name_referenced(inner, &mut referenced, &mut dummy);
-                }
-                _ => {}
-            }
-            for ref_ty in &referenced {
-                if !visited.contains(&ref_ty) {
-                    worklist.push(*ref_ty);
-                }
+            if let ScriptPodTy::Struct{..} = &pod_type.ty {
+                 let mut referenced = BTreeSet::new();
+                 self.pod_type_def(heap, ty, &mut referenced, out);
             }
         }
+    }
+
+    fn pod_struct_visit(&self, heap:&ScriptHeap, ty: ScriptPodType, visited: &mut BTreeSet<ScriptPodType>, order: &mut Vec<ScriptPodType>) {
+        if visited.contains(&ty) { return; }
+        visited.insert(ty);
+        
+        let pod_type = heap.pod_type_ref(ty);
+        let mut referenced = BTreeSet::new();
+        let mut dummy = String::new();
+        
+        match &pod_type.ty {
+            ScriptPodTy::Struct{fields, ..} => {
+                for field in fields {
+                    self.pod_type_name_referenced(&field.ty, &mut referenced, &mut dummy);
+                }
+            }
+            ScriptPodTy::FixedArray{ty: inner, ..} | ScriptPodTy::VariableArray{ty: inner, ..} => {
+                self.pod_type_name_referenced(inner, &mut referenced, &mut dummy);
+            }
+            _ => {}
+        }
+        
+        for ref_ty in referenced {
+            self.pod_struct_visit(heap, ref_ty, visited, order);
+        }
+        
+        order.push(ty);
     }
     
     pub fn pod_type_def(&self, heap:&ScriptHeap, pod_ty: ScriptPodType, referenced:&mut BTreeSet<ScriptPodType>, out:&mut String){
@@ -602,7 +617,7 @@ impl ShaderFnCompiler{
                 self.handle_if_else_phi(vm, output);
             }
             else{ // id or immediate value
-                self.push_immediate(opcode, &vm.code.builtins.pod);
+                self.push_immediate(opcode, &vm.code.builtins.pod, &output.backend);
                 self.trap.goto_next();
                 self.handle_if_else_phi(vm, output);
             }
@@ -661,7 +676,7 @@ impl ShaderFnCompiler{
     }
     
     
-    fn push_immediate(&mut self, value:ScriptValue, builtins:&ScriptPodBuiltins){
+    fn push_immediate(&mut self, value:ScriptValue, builtins:&ScriptPodBuiltins, backend:&ShaderBackend){
         if let Some(v) = value.as_f64(){ // abstract int or float
             return push_fmt!(self, ShaderType::AbstractFloat, "{}", v);
         }
@@ -688,7 +703,8 @@ impl ShaderFnCompiler{
         }
         if let Some(v) = value.as_color(){
             let v = Vec4f::from_u32(v);
-            return push_fmt!(self, ShaderType::Pod(builtins.pod_vec4f), "vec4f({},{},{},{})", v.x, v.y, v.z, v.w);
+            let name = backend.map_pod_name(id!(vec4f));
+            return push_fmt!(self, ShaderType::Pod(builtins.pod_vec4f), "{}({},{},{},{})", name, v.x, v.y, v.z, v.w);
         }
         self.trap.err_no_matching_shader_type();
     }
