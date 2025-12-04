@@ -2,14 +2,27 @@
 use {
     crate::{
         makepad_platform::*,
-        //draw_list_2d::ManyInstances,
+        draw_list_2d::ManyInstances,
         //cx_2d::Cx2d,
         //turtle::{Walk, Layout}
     },
 };
 
 script_run!{
-    
+    let DrawQuad = #(DrawQuad::script_api(vm)){
+    }
+}
+
+#[derive(Script, ScriptHook, ScriptShader)]
+#[repr(C)]
+pub struct DrawQuad {
+    #[rust] pub many_instances: Option<ManyInstances>,
+    #[deref] pub draw_vars: DrawVars,
+    #[rust] pub rect_pos: Vec2f,
+    #[rust] pub rect_size: Vec2f,
+    #[rust] pub draw_clip: Vec4f,
+    #[live(1.0)] pub depth_clip: f32,
+    #[live(1.0)] pub draw_depth: f32,
 }
 /*
 live_design!{

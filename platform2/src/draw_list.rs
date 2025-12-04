@@ -1,5 +1,7 @@
 use {
     crate::{
+        makepad_script::*,
+        script::vm::*,
         makepad_live_id::{
             LiveId,
         },
@@ -35,6 +37,14 @@ pub struct DrawList(PoolId);
 impl DrawList{
     pub fn new(cx:&mut Cx)->Self{
         cx.draw_lists.alloc()
+    }
+}
+
+impl ScriptHook for DrawList {}
+impl ScriptApply for DrawList {}
+impl ScriptNew for DrawList {
+    fn script_new(vm:&mut ScriptVm)->Self{
+        Self::new(vm.cx_mut())
     }
 }
 

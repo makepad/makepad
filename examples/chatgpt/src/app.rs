@@ -79,20 +79,7 @@ pub struct App {
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
-        let code = script!{
-            use mod.std
-            
-            let t = std.task() do |t|{
-                for i in 10 t.emit(i)
-            }
-            std.start_interval(0.5) do |v| t.emit(v)
-            loop{
-                ~"Received"+t.next()
-            }
-            
-
-        };
-        cx.eval(code);
+        
         
     }
 }

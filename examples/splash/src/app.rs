@@ -2,10 +2,8 @@ use makepad_draw2::*;
 
 app_main!(App); 
 script_run!{
-    use mod.std;
-    std.log("Script started!");
+    use mod.std.*;
     #(App::script_api(vm)){
-        // lets set some properties
         
     }
 }
@@ -13,7 +11,8 @@ script_run!{
 impl App{
     fn run(vm:&mut ScriptVm)->Self{
         crate::makepad_draw2::script_run(vm);
-        App::script_run(vm, script_run)
+        let r = App::script_run(vm, script_run);
+        r
     }
 }
 
@@ -22,6 +21,7 @@ pub struct App {
     #[script] window: WindowHandle,
     #[script] pass: Pass,
     #[script] depth_texture: Texture,
+    #[script] draw_quad: DrawQuad,
     #[script] main_draw_list: DrawList2d,
 }
  
@@ -33,12 +33,12 @@ impl MatchEvent for App{
             initial: true,
         });
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
-        self.pass.set_window_clear_color(cx, vec4(0.0, 0.0, 0.0, 1.0));
+        self.pass.set_window_clear_color(cx, vec4(0.0, 0.0, 1.0, 0.0));
     }
 
     fn handle_draw_2d(&mut self, cx: &mut Cx2d){
-        if self.main_draw_list.begin(cx, Walk::default()).is_not_redrawing() {
-            return;
+        if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
+            return
         }
 
         cx.begin_pass(&self.pass, None);
