@@ -58,14 +58,14 @@ pub fn test(){
             field: f32,
             p: vec4f,
             arr: array{f32 4},
-            set_field: |v| this.field += v 
-            new: || this(
+            set_field: |v| self.field += v 
+            new: || self(
                 arr:array(1f,2f,3f,4f)
                 p: vec4f(0)
                 field:1.0
             )
         }
-        // alright. lets figure out the shader this
+        // alright. lets figure out the shader sself
         let test_shader = {
             x: shader.instance(1.0)
             
@@ -75,8 +75,8 @@ pub fn test(){
                 x.set_field(1f)
                 x.p.y = 1f;
                 x.arr[3] = 1f
-                this.otherfn(1f)
-                mix(#f00,#0f0, this.x)
+                self.otherfn(1f)
+                mix(#f00,#0f0, self.x)
                 //1
             }
         }
@@ -90,7 +90,7 @@ pub fn test(){
         use mod.std.assert
         use mod.std.println
         use mod.pod
-                
+        
         // array operations
         let x = 1+2 assert(x == 3)
         let iv = [1 2 3 4] let ov = []
@@ -123,7 +123,6 @@ pub fn test(){
         let t = 0 t = 2 t += 1 assert(t==3)
         let x = {f:2} x.f+=2 assert(x.f == 4)
         let x = [1,2] x[1]+=2 assert(x == [1 4])
-                
         // test loops
         let c = 0 for x in 4{ if c == 3 break; c += 1} assert(c==3)
         let c = 0 for x in 5{ if c == 4{break;}c += 1} assert(c==4);
@@ -222,7 +221,7 @@ pub fn test(){
         let x = {x:1 y:[1 2 3]};
         let y = x.to_json();
         let z = y.parse_json();
-                
+        
         // test string-like property acceseses 
         assert(z == x)
         assert(z["x"] == z.x)
@@ -271,7 +270,7 @@ pub fn test(){
             b: pod.f32
             c: pod.f32
             d: pod.array{pod.f32 2}
-            method: || this.c
+            method: || self.c
         }
         let x = struct_3(1,2,3,pod.array(4f 5f));
         assert(x.c == 3f);

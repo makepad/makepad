@@ -74,10 +74,8 @@ impl JsonParser{
                          self.root = v;
                          self.state.push(State::RootMaybeObject);
                      }
-                     ScriptToken::F64(v)=>{
-                         self.root = v.into();
-                         self.state.push(State::RootMaybeObject);
-                     }
+                     ScriptToken::U40(v)=>{self.root = (v as f64).into();self.state.push(State::RootMaybeObject);},
+                     ScriptToken::F64(v)=>{self.root = v.into();self.state.push(State::RootMaybeObject);}
                      ScriptToken::Color(v)=>{
                          self.root = v.into();
                          self.state.push(State::RootMaybeObject);
@@ -181,6 +179,9 @@ impl JsonParser{
                      ScriptToken::String(v)=>{
                          heap.set_value_def(obj, key, v);
                      }
+                     ScriptToken::U40(v)=>{
+                         heap.set_value_def(obj, key, (v as f64).into());
+                     }
                      ScriptToken::F64(v)=>{
                          heap.set_value_def(obj, key, v.into());
                      }
@@ -230,6 +231,9 @@ impl JsonParser{
                     }
                     ScriptToken::String(v)=>{
                         heap.array_push_unchecked(arr, v);
+                    }
+                    ScriptToken::U40(v)=>{
+                        heap.array_push_unchecked(arr, (v as f64).into());
                     }
                     ScriptToken::F64(v)=>{
                         heap.array_push_unchecked(arr, v.into());
