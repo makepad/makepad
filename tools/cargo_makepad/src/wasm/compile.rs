@@ -38,7 +38,7 @@ pub fn generate_html(wasm:&str, config: &WasmConfig)->String{
             let wasm = await init({{module_or_path: module}}, env);
             set_wasm(wasm);
 
-            wasm._has_thread_support = true;
+            wasm._has_thread_support = wasm.exports.memory.buffer instanceof SharedArrayBuffer;
             wasm._memory = wasm.exports.memory;
             wasm._module = module;
             import {{WasmWebGL}} from './makepad_platform/web_gl.js'
