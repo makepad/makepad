@@ -78,8 +78,14 @@ impl Math {
         let header = r#"
             #set page(width: auto, height: auto, margin: 0pt, fill: none)
             #set text(fill: white)
+            #let mitexsqrt = math.sqrt
+            #let frac(x, y) = $ (#x)/(#y) $
         "#;
-        let full_text = format!("{}{}", header, self.text);
+        let typst_text = mitex::convert_math(&self.text, None).unwrap_or_else(|e| {
+             log!("Mitex error: {:?}", e);
+             format!("$ \"Error: {}\" $", e)
+        });
+        let full_text = format!("{}{}", header, format!("$ {} $", typst_text));
         self.world.set_text(&full_text);
         self.old_text = self.text.clone();
 
