@@ -13,15 +13,15 @@ live_design!{
                     flow: Down,
                     align: {x: 0.5, y: 0.5},
                     <View> {
-                        width: 400.0,
-                        height: 100.0,
+                        width: 200.0,
+                        height: 150.0,
                         align: {
                             x: 0.5,
                             y: 0.5,
                         }
                         show_bg: true,
                         draw_bg: {
-                            color: #f00
+                            color: #000
                         },
                         <Math> {
                             width: Fit,
@@ -45,6 +45,7 @@ pub struct App {
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         makepad_widgets::live_design(cx);
+        crate::math::live_design(cx);
     }
 }
 
