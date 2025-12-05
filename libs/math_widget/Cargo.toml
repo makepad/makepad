@@ -7,3 +7,5 @@ edition = "2024"
 makepad-widgets = { path = "../../widgets" }
 typst = "0.13.1"
 typst-render = "0.13.1"
+mitex = "0.2.4"
+
