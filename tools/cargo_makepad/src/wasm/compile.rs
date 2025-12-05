@@ -232,6 +232,7 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
             .replace("imports['env'] = __wbg_star0;", "")
             .replace("return wasm;\n}", "return instance;\n}")
             .replace("__wbg_init(module_or_path, memory) {", "__wbg_init(module_or_path, env) {let memory;")
+            .replace("__wbg_init(module_or_path) {", "__wbg_init(module_or_path, env) {let memory;")
             .replace("imports = __wbg_get_imports();", "imports = __wbg_get_imports(); imports.env = env;");
         std::fs::OpenOptions::new().write(true).truncate(true).open(&jsfile).unwrap().write(patched.as_bytes()).unwrap();
         cp_brotli(&jsfile, &app_dir.join("bindgen.js"), false, config.brotli)?;
