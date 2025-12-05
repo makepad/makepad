@@ -1,9 +1,5 @@
 use {
-    crate::{
-        makepad_derive_widget::*,
-        makepad_draw::*,
-        widget::*
-    },
+    makepad_widgets::*,
     typst::{
         diag::{FileError, FileResult},
         foundations::{Bytes, Datetime},
@@ -52,7 +48,7 @@ pub struct Math {
 
     #[rust]
     old_text: String,
-    #[rust(MathWorld::new(cx))]
+    #[rust]
     world: MathWorld,
     #[rust]
     texture: Option<Texture>,
@@ -93,10 +89,10 @@ impl Math {
                     let pixmap = typst_render::render(page, 2.0);
                     let width = pixmap.width() as usize;
                     let height = pixmap.height() as usize;
-                    let data = pixmap.data();
+                    let rgba_data = pixmap.data();
                     
                     let mut bgra_data = Vec::with_capacity(width * height);
-                    for chunk in data.chunks(4) {
+                    for chunk in rgba_data.chunks(4) {
                         let r = chunk[0] as u32;
                         let g = chunk[1] as u32;
                         let b = chunk[2] as u32;
@@ -143,8 +139,8 @@ pub struct MathWorld {
 }
 
 impl MathWorld {
-    fn new(cx: &mut Cx) -> Self {
-        let font_data = include_bytes!("fonts/NewCMMath-Regular.otf");
+    fn new() -> Self {
+        let font_data = include_bytes!("NewCMMath-Regular.otf");
         let font = Font::new(Bytes::new(font_data.as_slice()), 0).expect("Failed to load font");
         let fonts = vec![font];
         let book = FontBook::from_fonts(&fonts);
@@ -159,6 +155,12 @@ impl MathWorld {
 
     fn set_text(&mut self, text: &str) {
         self.source.replace(text);
+    }
+}
+
+impl Default for MathWorld {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
