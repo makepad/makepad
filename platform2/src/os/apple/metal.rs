@@ -236,7 +236,6 @@ impl Cx {
                 }
                 self.os.draw_calls_done += 1;
                 if let Some(inner) = geometry.os.index_buffer.get().cpu_read().inner.as_ref() {
-                    
                     let () = unsafe {msg_send![
                         encoder,
                         drawIndexedPrimitives: MTLPrimitiveType::Triangle

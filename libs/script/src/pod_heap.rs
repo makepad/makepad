@@ -69,6 +69,13 @@ impl ScriptHeap{
         let ty = &mut self.pod_types[ty.index as usize];
         ty.name = Some(name);
     }
+    
+    pub fn pod_type_name_if_not_set(&mut self, ty:ScriptPodType, name:LiveId){
+        let ty = &mut self.pod_types[ty.index as usize];
+        if ty.name.is_none(){
+            ty.name = Some(name);
+        }
+    }
         
     fn pod_type_inline(&self, val:ScriptValue, builtins:&ScriptPodBuiltins)->Option<ScriptPodTypeInline>{
         if let Some(obj) = val.as_object(){
@@ -280,13 +287,16 @@ impl ScriptHeap{
         pt
     }
         
-    pub fn pod_def_vec(&mut self, pod_module:ScriptObject, name:LiveId, builtin: ScriptPodVec)->ScriptPodType{
+    pub fn pod_def_vec(&mut self, pod_module:ScriptObject, name:LiveId, alias:Option<LiveId>, builtin: ScriptPodVec)->ScriptPodType{
         let pod_obj = self.new_with_proto(name.into());
         let vec_ty = self.new_pod_type(pod_obj, Some(name), ScriptPodTy::Vec(builtin), NIL);
         self.set_object_pod_type(pod_obj, vec_ty);
         self.set_notproto(pod_obj);
         self.freeze(pod_obj);
         self.set_value_def(pod_module, name.into(), pod_obj.into());
+        if let Some(alias) = alias{
+            self.set_value_def(pod_module, alias.into(), pod_obj.into());
+        }
         return vec_ty
     }
     

@@ -4,7 +4,6 @@ app_main!(App);
 script_run!{
     use mod.std.*;
     #(App::script_api(vm)){
-        
     }
 }
 

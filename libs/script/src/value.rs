@@ -124,6 +124,13 @@ impl From<ScriptHandle> for ScriptValue{
     }
 }
 
+
+impl From<ScriptPodType> for ScriptValue{
+    fn from(v:ScriptPodType) -> Self{
+        ScriptValue::from_pod_type(v)
+    }
+}
+
 impl From<ScriptValue> for ScriptHandle{
     fn from(v:ScriptValue) -> Self{
         if let Some(obj) = v.as_handle(){
@@ -348,7 +355,8 @@ impl ScriptValueType{
     pub const ERR_NOT_AN_ARRAY: Self = Self(Self::ERR_FIRST.0 + 51);
     pub const ERR_INDEX_OUT_OF_BOUNDS: Self = Self(Self::ERR_FIRST.0 + 52);
     pub const ERR_USE_ONLY_NAMED_OR_ORDERED_POD_FIELDS: Self = Self(Self::ERR_FIRST.0 + 53);
-    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 54);
+    pub const ERR_ASSIGN_NOT_ALLOWED: Self = Self(Self::ERR_FIRST.0 + 54);
+    pub const ERR_LAST: Self = Self(Self::ERR_FIRST.0 + 55);
     
     pub const HANDLE_FIRST: Self = Self(0x50);
     pub const HANDLE_LAST: Self = Self(0x7F);
@@ -424,7 +432,6 @@ impl fmt::Display for ScriptValueType {
             Self::STRING=>write!(f,"string"),
             Self::OBJECT=>write!(f,"object"),
             Self::ARRAY=>write!(f,"array"),
-            Self::POD_TYPE=>write!(f,"pod_type"),
             Self::POD=>write!(f,"pod"),
             Self::OPCODE=>write!(f,"opcode"),
             Self::INLINE_STRING_0=>write!(f,"string0"),
@@ -487,6 +494,7 @@ impl fmt::Display for ScriptValueType {
             Self::ERR_NOT_AN_ARRAY=>write!(f,"NotAnArray"),
             Self::ERR_INDEX_OUT_OF_BOUNDS=>write!(f,"IndexOutOfBounds"),
             Self::ERR_USE_ONLY_NAMED_OR_ORDERED_POD_FIELDS=>write!(f,"UseOnlyNamedOrOrderedPodFields"),
+            Self::ERR_ASSIGN_NOT_ALLOWED=>write!(f,"AssignNotAllowed"),
             x if x.0 >= Self::ID.0=>write!(f,"id"),
             x if x.0 >= Self::HANDLE_FIRST.0=>write!(f, "handle({})", x.0 - Self::HANDLE_FIRST.0),
             _=>write!(f,"ScriptValueType?")
@@ -627,6 +635,7 @@ impl ScriptValue{
     err_fn!(err_not_an_array, ERR_NOT_AN_ARRAY);
     err_fn!(err_index_out_of_bounds, ERR_INDEX_OUT_OF_BOUNDS);
     err_fn!(err_use_only_named_or_ordered_pod_fields, ERR_USE_ONLY_NAMED_OR_ORDERED_POD_FIELDS);
+    err_fn!(err_assign_not_allowed, ERR_ASSIGN_NOT_ALLOWED);
 
     pub const fn raw(&self)->u64{self.0}
     
@@ -945,7 +954,29 @@ impl ScriptValue{
         }
         None
     }
-        
+            
+            
+            
+    // PodType
+            
+            
+            
+    pub const fn from_pod_type(ptr: ScriptPodType)->Self{
+        Self(ptr.index as u64 | Self::TYPE_POD_TYPE)
+    }
+            
+    pub const fn is_pod_type(&self)->bool{
+        (self.0 & Self::TYPE_MASK) == Self::TYPE_POD_TYPE
+    }
+            
+    pub const fn as_pod_type(&self)->Option<ScriptPodType>{
+        if self.is_pod_type(){
+            return Some(ScriptPodType{
+                index: (self.0 & 0xffff_ffff) as u32
+            })
+        }
+        None
+    }
         
         
     // Pod
