@@ -61,26 +61,39 @@ pub fn test(){
             set_field: |v| self.field += v 
             new: || self(
                 arr:array(1f,2f,3f,4f)
-                p: vec4f(0)
+                p: vec4(0)
                 field:1.0
             )
         }
+        
+        let draw_uniforms = struct{
+            field: f32
+        }
+        
         // alright. lets figure out the shader sself
         let test_shader = {
+            draw: shader.uniform_buffer(draw_uniforms)
             x: shader.instance(1.0)
-            
-            otherfn: |x| x+1
-            pixel: fn(){
+            vy: shader.varying(1.0)
+            vertex_pos: shader.vertex_position(vec4f),
+            pixel: shader.fragment_output(0),
+            otherfn: |x| x + 1
+            vertex: fn(){
+                self.vy = 1.0
+                self.vertex_pos = vec4(0.0)
+            }
+            fragment: fn(){
+                let v = self.vy
+                let t = self.draw.field
                 let x = sdf.new()
                 x.set_field(1f)
                 x.p.y = 1f;
                 x.arr[3] = 1f
                 self.otherfn(1f)
-                mix(#f00,#0f0, self.x)
-                //1
+                self.pixel = mix(#f00,#0f0, self.x)
             }
         }
-        let x = sdf(0,vec4f(0),array(1f,2f,3f,4f))
+        let x = sdf(0,vec4(0),array(1f,2f,3f,4f))
         ~shader.compile_draw(test_shader)
     };
     
