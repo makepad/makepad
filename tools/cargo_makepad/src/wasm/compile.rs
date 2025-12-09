@@ -132,7 +132,7 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
     }
     
     shell_env(&[
-        ("RUSTFLAGS", "-C codegen-units=1 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer -C opt-level=z"),
+        ("RUSTFLAGS", "-C codegen-units=1 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z"),
         ("MAKEPAD", "lines"),
     ], &cwd, "rustup", &args_out) ?;
     
