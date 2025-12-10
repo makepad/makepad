@@ -25,6 +25,4 @@ makepad-fonts-chinese-regular = {path = "./fonts/chinese_regular", version = "1.
 makepad-fonts-chinese-regular-2 = {path = "./fonts/chinese_regular_2", version = "1.0.1"}
 makepad-fonts-chinese-bold = {path = "./fonts/chinese_bold", version = "1.0.1"}
 makepad-fonts-chinese-bold-2 = {path = "./fonts/chinese_bold_2", version = "1.0.1"}
-typst = "0.13.1"
-typst-render = "0.13.1"
 

@@ -20,7 +20,7 @@ pub struct App {
     #[script] window: WindowHandle,
     #[script] pass: Pass,
     #[script] depth_texture: Texture,
-    #[script] draw_quad: DrawQuad,
+    //#[script] draw_quad: DrawQuad,
     #[script] main_draw_list: DrawList2d,
 }
  
