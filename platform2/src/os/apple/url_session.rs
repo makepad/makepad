@@ -179,6 +179,8 @@ pub fn define_url_session_data_delegate() -> *const Class {
 // this allows for locally signed SSL certificates to pass
 // TODO make this configurable
 pub fn define_url_session_delegate() -> *const Class {
+    
+    
     extern "C" fn did_receive_challenge(_this: &Object, _: Sel, _session: ObjcId, challenge: ObjcId, completion: ObjcId) {
         unsafe{
             let pspace: ObjcId = msg_send![challenge, protectionSpace];

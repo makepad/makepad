@@ -65,6 +65,9 @@ impl ScriptPodBuiltins{
         if val.is_f32(){
             return Some(self.pod_f32)
         }
+        if val.is_u40(){
+            return Some(self.pod_u32)
+        }
         if val.is_u32(){
             return Some(self.pod_u32)
         }

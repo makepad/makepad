@@ -14,15 +14,16 @@ pub const SHADER_IO_RUST_INSTANCE: ShaderIoType = ShaderIoType(0);
 pub const SHADER_IO_DYN_INSTANCE: ShaderIoType = ShaderIoType(1);
 pub const SHADER_IO_DYN_UNIFORM: ShaderIoType = ShaderIoType(2);
 pub const SHADER_IO_UNIFORM_BUFFER: ShaderIoType = ShaderIoType(3);
-pub const SHADER_IO_VARYING: ShaderIoType = ShaderIoType(4);
-pub const SHADER_IO_VERTEX_POSITION: ShaderIoType = ShaderIoType(5);
-pub const SHADER_IO_FRAGMENT_OUTPUT0: ShaderIoType = ShaderIoType(6);
-pub const SHADER_IO_FRAGMENT_OUTPUT1: ShaderIoType = ShaderIoType(7);
-pub const SHADER_IO_FRAGMENT_OUTPUT2: ShaderIoType = ShaderIoType(8);
-pub const SHADER_IO_FRAGMENT_OUTPUT3: ShaderIoType = ShaderIoType(9);
-pub const SHADER_IO_FRAGMENT_OUTPUT4: ShaderIoType = ShaderIoType(10);
-pub const SHADER_IO_FRAGMENT_OUTPUT5: ShaderIoType = ShaderIoType(11);
-pub const SHADER_IO_FRAGMENT_OUTPUT7: ShaderIoType = ShaderIoType(12);
+pub const SHADER_IO_VERTEX_BUFFER: ShaderIoType = ShaderIoType(4);
+pub const SHADER_IO_VARYING: ShaderIoType = ShaderIoType(5);
+pub const SHADER_IO_VERTEX_POSITION: ShaderIoType = ShaderIoType(6);
+pub const SHADER_IO_TEXTURE: ShaderIoType = ShaderIoType(7);
+pub const SHADER_IO_SAMPLER: ShaderIoType = ShaderIoType(8);
+pub const SHADER_IO_BUFFER_R: ShaderIoType = ShaderIoType(9);
+pub const SHADER_IO_BUFFER_W: ShaderIoType = ShaderIoType(10);
+pub const SHADER_IO_BUFFER_RW: ShaderIoType = ShaderIoType(11);
+pub const SHADER_IO_FRAGMENT_OUTPUT_0: ShaderIoType = ShaderIoType(12);
+pub const SHADER_IO_FRAGMENT_OUTPUT_MAX: ShaderIoType = ShaderIoType(SHADER_IO_FRAGMENT_OUTPUT_0.0 + 7);
 
 pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     let shader = heap.new_module(id!(shader));
@@ -48,6 +49,13 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         obj.into()
     });
     
+    native.add_method(heap, shader, id!(vertex_buffer), script_args!(value=NIL), |vm, args|{
+        let value = script_value!(vm, args.value);
+        let obj = vm.heap.new_with_proto(value);
+        vm.heap.set_shader_io(obj, SHADER_IO_VERTEX_BUFFER);
+        obj.into()
+    });
+    
     native.add_method(heap, shader, id!(varying), script_args!(value=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
         let obj = vm.heap.new_with_proto(value);
@@ -62,14 +70,14 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(fragment_output), script_args!(value=NIL), |vm, args|{
-        let value = script_value!(vm, args.value);
-        let obj = vm.heap.new_with_proto(vm.code.builtins.pod.pod_vec4f.into());
-        let index = value.as_index().min(7) as u32;
-        vm.heap.set_shader_io(obj, ShaderIoType(SHADER_IO_FRAGMENT_OUTPUT0.0 + index));
+    native.add_method(heap, shader, id!(fragment_output), script_args!(index=NIL, ty=NIL), |vm, args|{
+        let index = script_value!(vm, args.index);
+        let ty = script_value!(vm, args.ty);
+        let obj = vm.heap.new_with_proto(ty);
+        let index = index.as_index().min(7) as u32;
+        vm.heap.set_shader_io(obj, ShaderIoType(SHADER_IO_FRAGMENT_OUTPUT_0.0 + index));
         obj.into()
     });
-        
         
     native.add_method(heap, shader, id!(compile_draw), script_args!(io_self=NIL), |vm, args|{
         // lets fetch the code
@@ -103,7 +111,10 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                 );
             }
             // alright on metal we now need to generate the structs
-            
+            // we need to generate the Varying struct
+            // the vertex Varying vertex_main
+            // the fragment_main
+            // the Io struct, IoF struct, IoV struct
             
             // alright we should have output now
             let mut out = String::new();

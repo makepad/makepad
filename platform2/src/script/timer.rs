@@ -87,15 +87,14 @@ pub fn extend_std_module_with_timer(vm:&mut ScriptVm){
     vm.add_method(std, id_lut!(start_timeout), script_args_def!(delay=NIL, callback=NIL), |vm, args|{
         let delay = script_value!(vm, args.delay);
         let callback = script_value!(vm, args.callback);
-        
         if !delay.is_number() || !vm.heap.is_fn(callback.into()){
             return vm.thread.trap.err_invalid_arg_type()
         }
         let callback = ScriptFnRef::script_from_value(vm, callback);
         
         let cx = vm.cx_mut();
-        let timer = cx.start_timeout(delay.as_f64().unwrap_or(1.0));
-        
+        let timer = cx.start_timeout(delay.as_number().unwrap_or(1.0));
+                
         let id = LiveId::unique();
         cx.script_data.timers.timers.push(CxScriptTimer{
             repeat: false,
@@ -116,8 +115,8 @@ pub fn extend_std_module_with_timer(vm:&mut ScriptVm){
         let callback = ScriptFnRef::script_from_value(vm, callback);
                 
         let cx = vm.cx_mut();
-                
-        let timer = cx.start_interval(delay.as_f64().unwrap_or(1.0));
+        
+        let timer = cx.start_interval(delay.as_number().unwrap_or(1.0));
                         
         let id = LiveId::unique();
         cx.script_data.timers.timers.push(CxScriptTimer{
