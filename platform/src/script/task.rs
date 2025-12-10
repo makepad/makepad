@@ -87,7 +87,7 @@ pub fn extend_std_module_with_task(vm:&mut ScriptVm){
     
     for fn_id in [id_lut!(emit), id_lut!(end)]{
         vm.add_handle_method(task_type, fn_id, script_args_def!(), move |vm, args|{
-            if let Some(handle) = script_value!(vm, args.this).as_handle(){
+            if let Some(handle) = script_value!(vm, args.self).as_handle(){
                 let cx = vm.host.cx_mut();
                 if let Some(chan) = cx.script_data.tasks.tasks.borrow_mut().iter_mut().find(|v| v.handle == handle){
                     let array_len = vm.heap.array_len(chan.queue.as_array());
@@ -124,7 +124,7 @@ pub fn extend_std_module_with_task(vm:&mut ScriptVm){
     for fn_id in [id_lut!(next), id_lut!(last)]{
         vm.add_handle_method(task_type, fn_id, script_args_def!(), move |vm, args|{
             // lets find the channel
-            if let Some(handle) = script_value!(vm, args.this).as_handle(){
+            if let Some(handle) = script_value!(vm, args.self).as_handle(){
                 let cx = vm.host.cx_mut();
                 if let Some(task) = cx.script_data.tasks.tasks.borrow_mut().iter_mut().find(|v| v.handle == handle){
                     if let Some(value) = vm.heap.array_pop_front_option(task.queue.as_array()){

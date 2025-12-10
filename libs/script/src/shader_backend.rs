@@ -28,7 +28,7 @@ impl ShaderBackend{
                         SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::DynUniform,"_io.u_"),
                         SHADER_IO_VARYING=>(ShaderIoKind::Varying,"_iov.v."),
                         SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::Varying,"_iov.v.pos_"),
-                        SHADER_IO_FRAGMENT_OUTPUT0=>(ShaderIoKind::Varying,""),
+                        SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::Varying,""),
                         _=>panic!()
                     }
                     ShaderMode::Fragment=>match io_type{
@@ -37,7 +37,7 @@ impl ShaderBackend{
                         SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::DynUniform,"_io.u_"),
                         SHADER_IO_VARYING=>(ShaderIoKind::Varying,"_iof.v."),
                         SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition,"_iof.v.pos_"),
-                        SHADER_IO_FRAGMENT_OUTPUT0=>(ShaderIoKind::FragmentOutput,"_iof.o0_"),
+                        SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::FragmentOutput,"_iof.fb0_"),
                         _=>panic!()
                     }
                     _=>panic!()
@@ -48,6 +48,9 @@ impl ShaderBackend{
                      SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance,"dyninst_"),
                      SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::DynUniform,"dynuni_"),
                      SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::DynUniform,"unibuf_"),
+                     SHADER_IO_VARYING=>(ShaderIoKind::Varying,"var_"),
+                     SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition,"vtx_pos"),
+                     SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::FragmentOutput,"frag_fb0"),
                      _=>panic!()
                  }
              }

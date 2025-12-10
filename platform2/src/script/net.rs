@@ -91,7 +91,6 @@ impl Cx{
     }    
     
     pub(crate) fn handle_script_network_events(&mut self, items: &[NetworkResponseItem]){
-
         for item in items{
             match &item.response {
                 NetworkResponse::HttpStreamResponse(res)=>{

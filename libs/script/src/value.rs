@@ -586,7 +586,11 @@ impl ScriptValue{
     err_fn!(err_stack_overflow, ERR_STACK_OVERFLOW);
     err_fn!(err_invalid_args, ERR_INVALID_ARGS);
     err_fn!(err_not_assignable, ERR_NOT_ASSIGNABLE);
-    err_fn!(err_unexpected, ERR_UNEXPECTED);
+    pub const fn err_unexpected(ip:ScriptIp)->Self{
+        //panic!();
+        Self(ScriptValueType::ERR_UNEXPECTED.to_u64() | ip.to_u40())
+    }
+    //err_fn!(err_unexpected, ERR_UNEXPECTED);
     err_fn!(err_assert_fail, ERR_ASSERT_FAIL);
     err_fn!(err_not_impl, ERR_NOT_IMPL);
     err_fn!(err_frozen, ERR_FROZEN);

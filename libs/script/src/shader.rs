@@ -1001,7 +1001,7 @@ impl ShaderFnCompiler{
             } 
         }
         else if let ShaderType::IoSelf(_) = sself {
-            write!(method_name_prefix, "shader_").ok();
+            write!(method_name_prefix, "io_").ok();
         }
         
         // lets see if we already have fnobj with our argstypes
@@ -1403,7 +1403,7 @@ impl ShaderFnCompiler{
                         let allowed = match io_type {
                             SHADER_IO_VARYING => output.mode == ShaderMode::Vertex,
                             SHADER_IO_VERTEX_POSITION => output.mode == ShaderMode::Vertex,
-                            io_type if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT0.0 && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT7.0 => output.mode == ShaderMode::Fragment,
+                            io_type if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 => output.mode == ShaderMode::Fragment,
                             _ => false
                         };
                         

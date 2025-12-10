@@ -192,7 +192,6 @@ impl Cx {
     pub (crate) fn handle_networking_events(&mut self) {
         let mut out = Vec::new();
         while let Ok(item) = self.os.network_response.receiver.try_recv() {
-            // remove the request object on error or end
             self.os.http_requests.handle_response_item(&item);
             out.push(item);
         }
@@ -727,7 +726,7 @@ impl CxOsApi for Cx {
         //self.live_expand();
         #[cfg(debug_assertions)]
         if !Self::has_studio_web_socket() {
-            self.start_disk_live_file_watcher(100);
+            //self.start_disk_live_file_watcher(100);
         }
         //self.live_scan_dependencies();
 
