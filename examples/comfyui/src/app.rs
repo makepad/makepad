@@ -36,9 +36,9 @@ impl MatchEvent for App{
             let openai_base = "http://127.0.0.1:8080";
             let Display = {mac:"" ip:"" landscape:false}.freeze_api()
             let displays = [
-                Display{mac:"00-00-5E-00-53-11" ip:"192.0.2.56", landscape:false}
-                Display{mac:"00-00-5e-00-53-12" ip:"192.0.2.55", landscape:true},
-                Display{mac:"00-00-5E-00-53-13" ip:"192.0.2.57", landscape:true},
+                Display{mac:"00-00-5E-00-53-11" ip:"192.0.2.58", landscape:false}
+                Display{mac:"00-00-5e-00-53-12" ip:"192.0.2.44", landscape:true},
+                Display{mac:"00-00-5E-00-53-13" ip:"192.0.2.61", landscape:true},
             ]
                 
             fn openai_completion(messages){
