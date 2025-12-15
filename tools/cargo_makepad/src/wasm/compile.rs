@@ -160,7 +160,6 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
         
     }
     let resources = get_crate_dep_dirs(build_crate, &build_dir, "wasm32-unknown-unknown");
-    println!("@@@ resources: {:?}", resources);
     for (name, dep_dir) in resources.iter() {
         // alright we need special handling for makepad-wasm-bridge
         // and makepad-platform
@@ -202,7 +201,6 @@ pub fn build(config:WasmConfig, args: &[String]) -> Result<WasmBuildResult, Stri
             rename.insert("NotoColorEmoji.ttf".into(), "IBMPlexSans-Text.ttf".into());
         }
         
-        println!("@@@ Checking resource path: {:?}", resources_path);
         if resources_path.is_dir(){
             // alright so.. the easiest thing is to rename a bunch of resources
             
