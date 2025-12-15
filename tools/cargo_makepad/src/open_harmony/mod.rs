@@ -53,11 +53,6 @@ pub fn handle_open_harmony(mut args: &[String]) -> Result<(), String> {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))] let host_os = HostOs::WindowsX64;
     #[cfg(all(target_os = "macos"))] let host_os = HostOs::MacOS;
     #[cfg(all(target_os = "linux"))] let host_os = HostOs::Linux;
-    #[cfg(not(any(
-        all(target_os = "windows", target_arch = "x86_64"),
-        all(target_os = "macos"),
-        all(target_os = "linux")
-    )))] let host_os = HostOs::Unsupported;
     let mut targets = Vec::new();
     let mut deveco_home = None;
     let mut hdc_remote = None;
