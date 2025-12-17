@@ -131,12 +131,12 @@ pub enum ShaderIoKind{
     Sampler(ShaderSamplerOptions),
     Texture,
     Varying,
+    VertexBuffer,
     VertexPosition,
     FragmentOutput,
     RustInstance,
-    RustUniform,
+    Uniform,
     DynInstance,
-    DynUniform,
 }
 
 #[allow(unused)]
@@ -175,6 +175,255 @@ impl ShaderOutput{
             }
         }
         self.backend.pod_struct_defs(vm.heap, &self.structs, out);
+    }
+
+    pub fn metal_create_io_struct(&self, vm: &ScriptVm, out: &mut String) {
+        writeln!(out, "struct Io {{").ok();
+        writeln!(out, "    IoUniform u;").ok();
+        writeln!(out, "    device IoInstance *i;").ok();
+        for io in &self.io {
+            match &io.kind {
+                ShaderIoKind::Texture => {
+                    writeln!(out, "    texture2d<float> {};", io.name).ok();
+                }
+                ShaderIoKind::Sampler(_) => {
+                    writeln!(out, "    sampler {};", io.name).ok();
+                }
+                ShaderIoKind::UniformBuffer => {
+                    write!(out, "    device ").ok();
+                    self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                    writeln!(out, " *u_{};", io.name).ok();
+                }
+                _=>()
+            }
+        }
+        
+        let mut have_vb = false;
+        for io in &self.io {
+            if let ShaderIoKind::VertexBuffer = io.kind {
+                if !have_vb{
+                    writeln!(out, "    device IoVertexBuffer *vb;").ok();
+                    have_vb = true;
+                }
+            }
+        }
+        writeln!(out, "}};").ok();
+    }
+
+    pub fn metal_create_instance_struct(&self, vm: &ScriptVm, out: &mut String) {
+        writeln!(out, "struct IoInstance {{").ok();
+        for io in &self.io {
+            match &io.kind {
+                ShaderIoKind::DynInstance => {
+                    write!(out, "    ").ok();
+                    self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                    writeln!(out, " {};", io.name).ok();
+                }
+                _=>()
+            }
+        }
+        for io in &self.io {
+            match &io.kind {
+                ShaderIoKind::RustInstance => {
+                    write!(out, "    ").ok();
+                    self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                    writeln!(out, " {};", io.name).ok();
+                }
+                _=>()
+            }
+        }
+        writeln!(out, "}};").ok();
+    }
+
+    pub fn metal_create_uniform_struct(&self, vm: &ScriptVm, out: &mut String) {
+        writeln!(out, "struct IoUniform {{").ok();
+        for io in &self.io {
+            match &io.kind {
+                ShaderIoKind::Uniform => {
+                    write!(out, "    ").ok();
+                    self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                    writeln!(out, " {};", io.name).ok();
+                }
+                _=>()
+            }
+        }
+        writeln!(out, "}};").ok();
+    }
+
+    pub fn metal_create_varying_struct(&self, vm: &ScriptVm, out: &mut String) {
+        writeln!(out, "struct IoVarying {{").ok();
+        for io in &self.io {
+            match io.kind {
+                ShaderIoKind::Varying => {
+                    write!(out, "    ").ok();
+                    self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                    writeln!(out, " {};", io.name).ok();
+                }
+                ShaderIoKind::VertexPosition => {
+                    writeln!(out, "    float4 {} [[position]];", io.name).ok();
+                }
+                _=>()
+            }
+        }
+        writeln!(out, "    uint _iid [[flat]];").ok();
+        writeln!(out, "}};").ok();
+    }
+
+    pub fn metal_create_vertex_buffer_struct(&self, vm: &ScriptVm, out: &mut String) {
+        writeln!(out, "struct IoVertexBuffer {{").ok();
+        for io in &self.io {
+            if let ShaderIoKind::VertexBuffer = io.kind {
+                write!(out, "    ").ok();
+                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                writeln!(out, " {};", io.name).ok();
+            }
+        }
+        writeln!(out, "}};").ok();
+    }
+
+    pub fn metal_create_io_vertex_struct(&self, _vm: &ScriptVm, out: &mut String) {
+        writeln!(out, "struct IoV {{").ok();
+        writeln!(out, "    IoVarying v;").ok();
+        writeln!(out, "    uint vid;").ok();
+        writeln!(out, "    uint iid;").ok();
+        writeln!(out, "}};").ok();
+    }
+
+    pub fn metal_create_vertex_fn(&self, vm: &ScriptVm, out: &mut String) {
+        writeln!(out, "vertex IoVarying vertex_main(").ok();
+        
+        writeln!(out, "    device IoVertexBuffer *vb [[buffer(0)]],").ok();
+        writeln!(out, "    device IoInstance *i [[buffer(1)]],").ok();
+        writeln!(out, "    constant IoUniform &u [[buffer(2)]],").ok();
+        
+        let mut buf_idx = 3;
+        for io in &self.io {
+            if let ShaderIoKind::UniformBuffer = io.kind {
+                write!(out, "    device ").ok();
+                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                writeln!(out, " *u_{} [[buffer({})]],", io.name, buf_idx).ok();
+                buf_idx += 1;
+            }
+        }
+        
+        let mut tex_idx = 0;
+        let mut samp_idx = 0;
+        for io in &self.io {
+            match io.kind {
+                ShaderIoKind::Texture => {
+                    writeln!(out, "    texture2d<float> {} [[texture({})]],", io.name, tex_idx).ok();
+                    tex_idx += 1;
+                }
+                ShaderIoKind::Sampler(_) => {
+                    writeln!(out, "    sampler {} [[sampler({})]],", io.name, samp_idx).ok();
+                    samp_idx += 1;
+                }
+                _=>()
+            }
+        }
+        
+        writeln!(out, "    uint vid [[vertex_id]],").ok();
+        writeln!(out, "    uint iid [[instance_id]]").ok();
+        writeln!(out, ") {{").ok();
+        
+        writeln!(out, "    Io _io;").ok();
+        writeln!(out, "    _io.vb = vb;").ok();
+        writeln!(out, "    _io.i = i;").ok();
+        writeln!(out, "    _io.u = u;").ok();
+        
+        for io in &self.io {
+            match io.kind {
+                ShaderIoKind::UniformBuffer => {
+                    writeln!(out, "    _io.u_{} = u_{};", io.name, io.name).ok();
+                }
+                ShaderIoKind::Texture => {
+                    writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
+                }
+                ShaderIoKind::Sampler(_) => {
+                    writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
+                }
+                _=>()
+            }
+        }
+        
+        writeln!(out, "    IoV _iov;").ok();
+        writeln!(out, "    _iov.vid = vid;").ok();
+        writeln!(out, "    _iov.iid = iid;").ok();
+        writeln!(out, "    io_vertex(_io, _iov);").ok();
+        writeln!(out, "    return _iov.v;").ok();
+        writeln!(out, "}}").ok();
+    }
+
+    pub fn metal_create_fragment_main_fn(&self, vm: &ScriptVm, out: &mut String) {
+        writeln!(out, "fragment IoF fragment_main(").ok();
+        writeln!(out, "    IoVarying v [[stage_in]],").ok();
+        writeln!(out, "    device IoVertexBuffer *vb [[buffer(0)]],").ok();
+        writeln!(out, "    device IoInstance *i [[buffer(1)]],").ok();
+        write!(out, "    constant IoUniform &u [[buffer(2)]]").ok();
+        
+        let mut buf_idx = 3;
+        for io in &self.io {
+            if let ShaderIoKind::UniformBuffer = io.kind {
+                writeln!(out, ",").ok();
+                write!(out, "    device ").ok();
+                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                write!(out, " *u_{} [[buffer({})]]", io.name, buf_idx).ok();
+                buf_idx += 1;
+            }
+        }
+        
+        let mut tex_idx = 0;
+        let mut samp_idx = 0;
+        for io in &self.io {
+            match io.kind {
+                ShaderIoKind::Texture => {
+                    writeln!(out, ",").ok();
+                    write!(out, "    texture2d<float> {} [[texture({})]]", io.name, tex_idx).ok();
+                    tex_idx += 1;
+                }
+                ShaderIoKind::Sampler(_) => {
+                    writeln!(out, ",").ok();
+                    write!(out, "    sampler {} [[sampler({})]]", io.name, samp_idx).ok();
+                    samp_idx += 1;
+                }
+                _=>()
+            }
+        }
+        
+        writeln!(out, ") {{").ok();
+        
+        writeln!(out, "    Io _io;").ok();
+        writeln!(out, "    _io.vb = vb;").ok();
+        writeln!(out, "    _io.i = i;").ok();
+        writeln!(out, "    _io.u = u;").ok();
+        
+        for io in &self.io {
+            match io.kind {
+                ShaderIoKind::UniformBuffer => {
+                    writeln!(out, "    _io.u_{} = u_{};", io.name, io.name).ok();
+                }
+                ShaderIoKind::Texture => {
+                    writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
+                }
+                ShaderIoKind::Sampler(_) => {
+                    writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
+                }
+                _=>()
+            }
+        }
+        
+        writeln!(out, "    IoF _iof;").ok();
+        writeln!(out, "    _iof.v = v;").ok();
+        writeln!(out, "    io_fragment(_io, _iof);").ok();
+        writeln!(out, "    return _iof;").ok();
+        writeln!(out, "}}").ok();
+    }
+
+    pub fn metal_create_io_fragment_struct(&self, _vm: &ScriptVm, out: &mut String) {
+        writeln!(out, "struct IoF {{").ok();
+        writeln!(out, "    IoVarying v [[stage_in]];").ok();
+        writeln!(out, "    float4 fb0 [[color(0)]];").ok();
+        writeln!(out, "}};").ok();
     }
 }
 
@@ -1144,7 +1393,7 @@ impl ShaderFnCompiler{
                                     let name = output.backend.map_pod_name(name);
                                     write!(call_sig, "->{}", name).ok();
                                 }
-                            } 
+                            }
                         }
                         ShaderBackend::Metal | ShaderBackend::Hlsl | ShaderBackend::Glsl => {
                             let ret_name = if let Some(name) = vm.heap.pod_type_name(ret) {
@@ -1441,7 +1690,10 @@ impl ShaderFnCompiler{
                                  });
                              }
                              let mut s = self.stack.new_string();
-                             write!(s, "{}{} = {}", prefix, field_id, value_s).ok();
+                             match prefix {
+                                 ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{} = {}", prefix, field_id, value_s).ok(),
+                                 ShaderIoPrefix::Full(full) => write!(s, "{} = {}", full, value_s).ok(),
+                             };
                              self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), s);
                              self.stack.free_string(field_s);
                              self.stack.free_string(instance_s);
@@ -1675,7 +1927,10 @@ impl ShaderFnCompiler{
                                 });
                             }
                             let mut s = self.stack.new_string();
-                            write!(s, "{}{}", prefix, field_id).ok();
+                            match prefix {
+                                ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, field_id).ok(),
+                                ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+                            };
                             self.stack.push(&self.trap, ShaderType::Pod(pod_ty), s);
                             self.stack.free_string(field_s);
                             self.stack.free_string(instance_s);
