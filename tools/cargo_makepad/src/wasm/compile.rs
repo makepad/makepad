@@ -54,15 +54,15 @@ pub fn generate_html(wasm:&str, config: &WasmConfig)->String{
 
     format!("
     <!DOCTYPE html>
-	    <html>
-	    <head>
-	        <meta charset='utf-8'>
-	        <meta name='viewport' content='width=device-width, initial-scale=1.0, user-scalable=no'>
-	        <base href='/' />
-	        <title>{wasm}</title>
-	        <script type='module'>
-	            {init}
-	            class MyWasmApp {{
+    <html>
+    <head>
+        <meta charset='utf-8'>
+        <meta name='viewport' content='width=device-width, initial-scale=1.0, user-scalable=no'>
+        <base href='/' />
+        <title>{wasm}</title>
+        <script type='module'>
+            {init}
+            class MyWasmApp {{
                 constructor(wasm) {{
                     let canvas = document.getElementsByClassName('full_canvas')[0];
                     this.webgl = new WasmWebGL (wasm, this, canvas);
