@@ -43,9 +43,11 @@ pub trait CxOsApi {
 
     /// On web (wasm32), updates the browser URL without reloading the page.
     /// `state_index` is stored in the history state for back/forward syncing.
+    /// On non-web platforms, the default implementation is a no-op.
     fn set_browser_url(&mut self, _url: &str, _replace: bool, _state_index: f64) {}
 
     /// On web (wasm32), calls `history.go(delta)`.
+    /// On non-web platforms, the default implementation is a no-op.
     fn browser_history_go(&mut self, _delta: i32) {}
 
     fn seconds_since_app_start(&self)->f64;
