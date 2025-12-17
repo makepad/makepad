@@ -332,7 +332,7 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
                         continue
                     }
 
-                    if path.contains("..") || path.contains('\\') {
+                    if !is_safe_url_path(path) {
                         let header = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n".to_string();
                         let _ = response_sender.send(HttpServerResponse {header, body: vec![]});
                         continue;
@@ -351,12 +351,6 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
                     else if path.ends_with(".md") {"text/markdown"}
                     else {
                         // SPA deep-link support: serve index.html for routes like `/admin/dashboard`.
-                        // If it looks like a file request (has an extension), return 404.
-                        if path.rsplit('/').next().unwrap_or("").contains('.') {
-                            let header = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_string();
-                            let _ = response_sender.send(HttpServerResponse {header, body: vec![]});
-                            continue;
-                        }
                         fs_path = "index.html".to_string();
                         "text/html"
                     };
@@ -389,4 +383,12 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
             }
         }
     }).join().unwrap();
+}
+
+fn is_safe_url_path(path: &str) -> bool {
+    if path.contains('\\') || path.contains('\0') {
+        return false;
+    }
+    // Reject directory traversal by segment (avoid false positives like "foo..bar").
+    !path.split('/').any(|seg| seg == "..")
 }
