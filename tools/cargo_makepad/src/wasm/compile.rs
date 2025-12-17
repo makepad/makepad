@@ -54,14 +54,15 @@ pub fn generate_html(wasm:&str, config: &WasmConfig)->String{
 
     format!("
     <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset='utf-8'>
-        <meta name='viewport' content='width=device-width, initial-scale=1.0, user-scalable=no'>
-        <title>{wasm}</title>
-        <script type='module'>
-            {init}
-            class MyWasmApp {{
+	    <html>
+	    <head>
+	        <meta charset='utf-8'>
+	        <meta name='viewport' content='width=device-width, initial-scale=1.0, user-scalable=no'>
+	        <base href='/' />
+	        <title>{wasm}</title>
+	        <script type='module'>
+	            {init}
+	            class MyWasmApp {{
                 constructor(wasm) {{
                     let canvas = document.getElementsByClassName('full_canvas')[0];
                     this.webgl = new WasmWebGL (wasm, this, canvas);
@@ -330,7 +331,14 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
                         let _ = response_sender.send(HttpServerResponse {header, body: vec![]});
                         continue
                     }
-                                            
+
+                    if path.contains("..") || path.contains('\\') {
+                        let header = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n".to_string();
+                        let _ = response_sender.send(HttpServerResponse {header, body: vec![]});
+                        continue;
+                    }
+
+                    let mut fs_path = path.strip_prefix("/").unwrap_or(path).to_string();
                     let mime_type = if path.ends_with(".html") {"text/html"}
                     else if path.ends_with(".wasm") {"application/wasm"}
                     else if path.ends_with(".css") {"text/css"}
@@ -341,16 +349,20 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
                     else if path.ends_with(".jpg") {"image/jpg"}
                     else if path.ends_with(".svg") {"image/svg+xml"}
                     else if path.ends_with(".md") {"text/markdown"}
-                    else {continue};
-                                            
-                    if path.contains("..") || path.contains('\\') {
-                        continue
-                    }
-                    let path = path.strip_prefix("/").unwrap();
-                                         
-                    let path = root.join(&path);
-                    //println!("OPENING {:?}", path);
-                    if let Ok(mut file_handle) = File::open(path) {
+                    else {
+                        // SPA deep-link support: serve index.html for routes like `/admin/dashboard`.
+                        // If it looks like a file request (has an extension), return 404.
+                        if path.rsplit('/').next().unwrap_or("").contains('.') {
+                            let header = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_string();
+                            let _ = response_sender.send(HttpServerResponse {header, body: vec![]});
+                            continue;
+                        }
+                        fs_path = "index.html".to_string();
+                        "text/html"
+                    };
+
+                    let file_path = root.join(&fs_path);
+                    if let Ok(mut file_handle) = File::open(file_path) {
                         let mut body = Vec::<u8>::new();
                         if file_handle.read_to_end(&mut body).is_ok() {
                             let header = format!(
@@ -367,6 +379,9 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
                             );
                             let _ = response_sender.send(HttpServerResponse {header, body});
                         }
+                    } else {
+                        let header = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_string();
+                        let _ = response_sender.send(HttpServerResponse {header, body: vec![]});
                     }
                 }
                 HttpServerRequest::Post {..} => { //headers, body, response}=>{

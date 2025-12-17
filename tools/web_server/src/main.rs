@@ -71,6 +71,13 @@ fn main() {
                     continue
                 }
                 
+                if path.contains("..") || path.contains('\\'){
+                    let header = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n".to_string();
+                    let _ = response_sender.send(HttpServerResponse{header, body:vec![]});
+                    continue;
+                }
+
+                let mut fs_path = path.clone();
                 let mime_type = if path.ends_with(".html") {"text/html"}
                 else if path.ends_with(".wasm") {"application/wasm"}
                 else if path.ends_with(".css") {"text/css"}
@@ -82,11 +89,16 @@ fn main() {
                 else if path.ends_with(".jpg") {"image/jpg"}
                 else if path.ends_with(".svg") {"image/svg+xml"}
                 else if path.ends_with(".md") {"text/markdown"}
-                else {continue};
-
-                if path.contains("..") || path.contains('\\'){
-                    continue
-                }
+                else {
+                    // SPA deep-link support: serve index.html for routes like `/admin/dashboard`.
+                    if path.rsplit('/').next().unwrap_or("").contains('.') {
+                        let header = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_string();
+                        let _ = response_sender.send(HttpServerResponse{header, body:vec![]});
+                        continue;
+                    }
+                    fs_path = "/index.html".to_string();
+                    "text/html"
+                };
                 let coep = if path == "/" || path == "/index.html"{
                     ""
                 }
@@ -99,9 +111,9 @@ fn main() {
                 //        break;
                 //    }
                 // }
-                let base = format!("{}{}", root_path, path);
+                let base = format!("{}{}", root_path, fs_path);
                 // check if we have a .br file
-                let base_br = format!("{}{}.br", root_path, path);
+                let base_br = format!("{}{}.br", root_path, fs_path);
                 if let Ok(mut file_handle) = File::open(base_br) {
                     let mut body = Vec::<u8>::new();
                     if file_handle.read_to_end(&mut body).is_ok() {
@@ -134,6 +146,10 @@ fn main() {
                         );
                         let _ = response_sender.send(HttpServerResponse{header, body});
                     }
+                }
+                else{
+                    let header = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_string();
+                    let _ = response_sender.send(HttpServerResponse{header, body:vec![]});
                 }
             }
             HttpServerRequest::Post{..}=>{//headers, body, response}=>{
