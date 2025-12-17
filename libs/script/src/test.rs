@@ -8,7 +8,6 @@ pub fn test(){
     let mut vmbase = ScriptVmBase::new();
     let vm = &mut vmbase.as_ref();
     
-    
     #[derive(Script)]
     pub struct StructTest{
         #[live(1.0)] field:f64,
@@ -62,7 +61,7 @@ pub fn test(){
             new: || self(
                 arr: array(1f,2f,3f,4f)
                 p: vec4(0)
-                field:1.0
+                field: 1.0
             )
         }
         
@@ -71,12 +70,13 @@ pub fn test(){
         }
         
         let vertices = struct{
-            pos: vec2,
+            pos: vec4,
         }
         
         // alright. lets figure out the shader sself
         let test_shader = {
-            vtx: shader.vertex_buffer(vertices);
+            vtx: shader.vertex_buffer(vertices)
+            unitest: shader.uniform(1.0)
             draw: shader.uniform_buffer(draw_uniforms)
             x: shader.instance(1.0)
             vy: shader.varying(1.0)
@@ -85,14 +85,14 @@ pub fn test(){
             otherfn: |x| x + 1
             vertex: fn(){
                 self.vy = 1.0
-                self.vertex_pos = vec4(0.0)
+                self.vertex_pos = self.vtx.pos
             }
             fragment: fn(){
-                let v = self.vy
+                let v = self.vy + self.unitest
                 let t = self.draw.field
                 let x = sdf.new()
                 x.set_field(1f)
-                x.p.y = 1f;
+                x.p.y = 1f
                 x.arr[3] = 1f
                 self.otherfn(1f)
                 self.pixel = mix(#f00, #0f0, self.x)
