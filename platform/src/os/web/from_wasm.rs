@@ -106,6 +106,18 @@ pub struct FromWasmOpenUrl {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmSetBrowserUrl {
+    pub url: String,
+    pub replace: bool,
+    pub state_index: f64,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmBrowserHistoryGo {
+    pub delta: f64,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmShowTextIME {
     pub x: f64,
     pub y: f64
@@ -336,7 +348,6 @@ pub struct FromWasmStartAudioOutput {
 #[derive(FromWasm)]
 pub struct FromWasmStopAudioOutput {
 }
-
 
 
 

@@ -41,6 +41,13 @@ pub trait CxOsApi {
 
     fn open_url(&mut self, url:&str, in_place:OpenUrlInPlace);
 
+    /// On web (wasm32), updates the browser URL without reloading the page.
+    /// `state_index` is stored in the history state for back/forward syncing.
+    fn set_browser_url(&mut self, _url: &str, _replace: bool, _state_index: f64) {}
+
+    /// On web (wasm32), calls `history.go(delta)`.
+    fn browser_history_go(&mut self, _delta: f64) {}
+
     fn seconds_since_app_start(&self)->f64;
 
     fn default_window_size(&self)->Vec2d{dvec2(800.,600.)}

@@ -86,6 +86,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.bind_mouse_and_touch();
         this.bind_keyboard();
         this.bind_screen_resize();
+        this.bind_browser_history();
         this.focus_keyboard_input();
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
@@ -106,6 +107,59 @@ export class WasmWebBrowser extends WasmBridge {
             link.target = "_blank";
             link.click();
         }
+    }
+
+    FromWasmSetBrowserUrl(args){
+        try{
+            let state = {makepad_router_index: args.state_index};
+            if(args.replace){
+                history.replaceState(state, "", args.url);
+            }
+            else{
+                history.pushState(state, "", args.url);
+            }
+        }
+        catch(e){
+            console.error("FromWasmSetBrowserUrl failed", e);
+        }
+    }
+
+    FromWasmBrowserHistoryGo(args){
+        try{
+            history.go(args.delta);
+        }
+        catch(e){
+            console.error("FromWasmBrowserHistoryGo failed", e);
+        }
+    }
+
+    bind_browser_history(){
+        if(this._browser_history_bound){
+            return;
+        }
+        this._browser_history_bound = true;
+        let send = (state_index)=>{
+            if(this.wasm == null){
+                return;
+            }
+            let url = location.pathname + "" + location.search + "" + location.hash + "";
+            this.to_wasm.ToWasmBrowserUrlChanged({url, state_index});
+            this.do_wasm_pump();
+        };
+        window.addEventListener("popstate", (e)=>{
+            let idx = -1;
+            if(e && e.state && e.state.makepad_router_index !== undefined){
+                idx = e.state.makepad_router_index;
+            }
+            send(idx);
+        });
+        window.addEventListener("hashchange", (e)=>{
+            let idx = -1;
+            if(history.state && history.state.makepad_router_index !== undefined){
+                idx = history.state.makepad_router_index;
+            }
+            send(idx);
+        });
     }
     
     FromWasmLoadDeps(args) {

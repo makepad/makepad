@@ -562,6 +562,7 @@ impl CxOsApi for Cx {
         
         self.os.append_to_wasm_js(&[
             ToWasmGetDeps::to_js_code(),
+            ToWasmBrowserUrlChanged::to_js_code(),
             ToWasmInit::to_js_code(),
             ToWasmResizeWindow::to_js_code(),
             ToWasmAnimationFrame::to_js_code(),
@@ -631,6 +632,8 @@ impl CxOsApi for Cx {
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
             FromWasmDrawCall::to_js_code(),
             FromWasmOpenUrl::to_js_code(),
+            FromWasmSetBrowserUrl::to_js_code(),
+            FromWasmBrowserHistoryGo::to_js_code(),
             FromWasmUseMidiInputs::to_js_code(),
             FromWasmSendMidiOutput::to_js_code(),
             FromWasmQueryAudioDevices::to_js_code(),
@@ -655,6 +658,18 @@ impl CxOsApi for Cx {
             url:url.to_string(),
             in_place: if let OpenUrlInPlace::Yes = in_place{true}else{false}
         });
+    }
+
+    fn set_browser_url(&mut self, url: &str, replace: bool, state_index: f64) {
+        self.os.from_wasm(FromWasmSetBrowserUrl {
+            url: url.to_string(),
+            replace,
+            state_index,
+        });
+    }
+
+    fn browser_history_go(&mut self, delta: f64) {
+        self.os.from_wasm(FromWasmBrowserHistoryGo { delta });
     }
     fn default_window_size(&self)->Vec2d{self.os.window_geom.inner_size}
     
@@ -808,4 +823,3 @@ pub unsafe extern "C" fn init_panic_hook() {
 
 #[no_mangle]
 pub static mut BASE_ADDR: usize = 10;
-

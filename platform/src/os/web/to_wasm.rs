@@ -66,6 +66,12 @@ pub struct ToWasmGetDeps {
 }
 
 #[derive(ToWasm)]
+pub struct ToWasmBrowserUrlChanged {
+    pub url: String,
+    pub state_index: f64,
+}
+
+#[derive(ToWasm)]
 pub struct WDepLoaded {
     pub path: String,
     pub data: WasmDataU8
