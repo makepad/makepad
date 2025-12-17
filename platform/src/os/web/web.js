@@ -1,8 +1,8 @@
-import {WasmBridge} from "../makepad_wasm_bridge/wasm_bridge.js"
+import { WasmBridge } from "../makepad_wasm_bridge/wasm_bridge.js"
 
 export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
-        super (wasm, dispatch);
+        super(wasm, dispatch);
         if (wasm === undefined) {
             return
         }
@@ -13,11 +13,11 @@ export class WasmWebBrowser extends WasmBridge {
                 worker.terminate();
             }
         }*/
-        
+
         this.wasm_app = this.wasm_create_app();
-        
+
         this.create_js_message_bridge(this.wasm_app);
-        
+
         this.dispatch = dispatch;
         this.canvas = canvas;
         this.handlers = {};
@@ -39,13 +39,13 @@ export class WasmWebBrowser extends WasmBridge {
 
         this.dispatch_first_msg();
     }
-    
+
     async load_deps() {
-        
+
         this.to_wasm = this.new_to_wasm();
-        
+
         await this.query_xr_capabilities();
-        
+
         this.to_wasm.ToWasmGetDeps({
             gpu_info: this.gpu_info,
             cpu_cores: navigator.hardwareConcurrency,
@@ -60,7 +60,7 @@ export class WasmWebBrowser extends WasmBridge {
                 has_threading_support: this.wasm._has_threading_support
             }
         });
-        
+
         this.do_wasm_pump();
         let results = await this.load_deps_promise;
         let deps = [];
@@ -73,13 +73,13 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }
         this.update_window_info();
-        
+
         this.to_wasm.ToWasmInit({
             xr_capabilities: this.xr_capabilities,
             window_info: this.window_info,
             deps: deps
         });
-        
+
         this.do_wasm_pump();
         // only bind the event handlers now
         // to stop them firing into wasm early
@@ -92,16 +92,16 @@ export class WasmWebBrowser extends WasmBridge {
         this.start_signal_poll();
         this.do_wasm_pump();
         var loaders = document.getElementsByClassName('canvas_loader');
-        for (var i = 0; i < loaders.length; i ++) {
+        for (var i = 0; i < loaders.length; i++) {
             loaders[i].parentNode.removeChild(loaders[i])
         }
     }
-    
-    FromWasmOpenUrl(args){
-        if(args.in_place){
+
+    FromWasmOpenUrl(args) {
+        if (args.in_place) {
             window.location.href = args.url;
         }
-        else{
+        else {
             var link = document.createElement("a");
             link.href = args.url;
             link.target = "_blank";
@@ -109,59 +109,67 @@ export class WasmWebBrowser extends WasmBridge {
         }
     }
 
-    FromWasmSetBrowserUrl(args){
-        try{
-            let state = {makepad_router_index: args.state_index};
-            if(args.replace){
+    FromWasmSetBrowserUrl(args) {
+        try {
+            let state = { makepad_router_index: args.state_index };
+            if (args.replace) {
                 history.replaceState(state, "", args.url);
             }
-            else{
+            else {
                 history.pushState(state, "", args.url);
             }
         }
-        catch(e){
+        catch (e) {
             console.error("FromWasmSetBrowserUrl failed", e);
         }
     }
 
-    FromWasmBrowserHistoryGo(args){
-        try{
+    FromWasmBrowserHistoryGo(args) {
+        try {
             history.go(args.delta);
         }
-        catch(e){
+        catch (e) {
             console.error("FromWasmBrowserHistoryGo failed", e);
         }
     }
 
-    bind_browser_history(){
-        if(this._browser_history_bound){
+    bind_browser_history() {
+        if (this._browser_history_bound) {
             return;
         }
         this._browser_history_bound = true;
-        let send = (state_index)=>{
-            if(this.wasm == null){
+        let lastSentUrl = null;
+        let lastSentIndex = null;
+        let send = (state_index) => {
+            if (this.wasm == null) {
                 return;
             }
             let url = location.pathname + location.search + location.hash;
-            this.to_wasm.ToWasmBrowserUrlChanged({url, state_index});
+            // Avoid duplicate notifications when both popstate and hashchange fire
+            if (url === lastSentUrl && state_index === lastSentIndex) {
+                return;
+            }
+            lastSentUrl = url;
+            lastSentIndex = state_index;
+            this.to_wasm.ToWasmBrowserUrlChanged({ url, state_index });
             this.do_wasm_pump();
         };
-        window.addEventListener("popstate", (e)=>{
+        window.addEventListener("popstate", (e) => {
             let idx = -1;
-            if(e && e.state && e.state.makepad_router_index !== undefined){
+            if (e && e.state && e.state.makepad_router_index !== undefined) {
                 idx = e.state.makepad_router_index;
             }
             send(idx);
         });
-        window.addEventListener("hashchange", (e)=>{
+        window.addEventListener("hashchange", (e) => {
             let idx = -1;
-            if(history.state && history.state.makepad_router_index !== undefined){
+            if (history.state && history.state.makepad_router_index !== undefined) {
                 idx = history.state.makepad_router_index;
             }
             send(idx);
         });
     }
-    
+
     FromWasmLoadDeps(args) {
         let promises = [];
         for (let path of args.deps) {
@@ -169,42 +177,42 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.load_deps_promise = Promise.all(promises);
     }
-    
+
     FromWasmStartTimer(args) {
         let timer_id = args.timer_id;
-        
-        for (let i = 0; i < this.timers.length; i ++) {
+
+        for (let i = 0; i < this.timers.length; i++) {
             if (this.timers[i].timer_id == timer_id) {
                 console.error("Timer ID collision!")
                 return
             }
         }
-        var timer = {timer_id, repeats: args.repeats};
+        var timer = { timer_id, repeats: args.repeats };
         if (args.repeats === true) {
-            
+
             timer.sys_id = window.setInterval(e => {
-                this.to_wasm.ToWasmTimerFired({timer_id});
+                this.to_wasm.ToWasmTimerFired({ timer_id });
                 this.do_wasm_pump();
             }, args.interval * 1000.0);
         }
         else {
             timer.sys_id = window.setTimeout(e => {
-                for (let i = 0; i < this.timers.length; i ++) {
+                for (let i = 0; i < this.timers.length; i++) {
                     let timer = this.timers[i];
                     if (timer.timer_id == timer_id) {
                         this.timers.splice(i, 1);
                         break;
                     }
                 }
-                this.to_wasm.ToWasmTimerFired({timer_id});
+                this.to_wasm.ToWasmTimerFired({ timer_id });
                 this.do_wasm_pump();
             }, args.interval * 1000.0);
         }
         this.timers.push(timer)
     }
-    
+
     FromWasmStopTimer(args) {
-        for (let i = 0; i < this.timers.length; i ++) {
+        for (let i = 0; i < this.timers.length; i++) {
             let timer = this.timers[i];
             if (timer.timer_id == args.timer_id) {
                 if (timer.repeats) {
@@ -218,7 +226,7 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }
     }
-    
+
     FromWasmFullScreen() {
         if (document.body.requestFullscreen) {
             document.body.requestFullscreen();
@@ -233,7 +241,7 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
     }
-    
+
     FromWasmNormalScreen() {
         if (this.canvas.exitFullscreen) {
             this.canvas.exitFullscreen();
@@ -248,7 +256,7 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
     }
-    
+
     FromWasmRequestAnimationFrame() {
         if (this.xr !== undefined || this.req_anim_frame_id) {
             return;
@@ -262,32 +270,32 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.xr !== undefined) {
                 return
             }
-            this.to_wasm.ToWasmAnimationFrame({time: time / 1000.0});
+            this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0 });
             this.in_animation_frame = true;
             this.do_wasm_pump();
             this.in_animation_frame = false;
         })
     }
-    
+
     FromWasmSetDocumentTitle(args) {
         // document.title = args.title
     }
-    
+
     FromWasmSetMouseCursor(args) {
         //console.log(args);
         document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
     }
-    
+
     FromWasmTextCopyResponse(args) {
         this.text_copy_response = args.response
     }
-    
+
     FromWasmShowTextIME(args) {
         this.update_text_area_pos(args);
     }
-    
+
     FromWasmHideTextIME() {
-        this.update_text_area_pos({x: -3000, y: -3000});
+        this.update_text_area_pos({ x: -3000, y: -3000 });
     }
     /*
     FromWasmWebSocketOpen(args) {
@@ -333,7 +341,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
         web_socket._queue = []
     }*/
-    
+
     FromWasmWebSocketSend(args) {
         let web_socket = this.web_sockets[args.web_socket_id];
         if (web_socket.readyState == 0) {
@@ -344,7 +352,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.free_data_u8(args.data);
     }
-    
+
     FromWasmStopAudioOutput(args) {
         if (!this.audio_context) {
             return
@@ -352,42 +360,42 @@ export class WasmWebBrowser extends WasmBridge {
         this.audio_context.close();
         this.audio_context = null;
     }
-    
+
     FromWasmStartAudioOutput(args) {
         if (this.audio_context) {
             return
         }
         const start_worklet = async () => {
 
-            await this.audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", {credentials: 'omit'});
-            
+            await this.audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' });
+
             const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
                 numberOfOutputs: 1,
                 outputChannelCount: [2],
-                processorOptions: {thread_info: this.alloc_thread_stack(args.context_ptr)}
+                processorOptions: { thread_info: this.alloc_thread_stack(args.context_ptr) }
             });
-            
+
             audio_worklet.port.onmessage = (e) => {
                 let data = e.data;
                 switch (data.message_type) {
                     case "console_log":
-                    console.log(data.value);
-                    break;
-                    
+                        console.log(data.value);
+                        break;
+
                     case "console_error":
-                    console.error(data.value);
-                    break;
+                        console.error(data.value);
+                        break;
                 }
             };
             audio_worklet.onprocessorerror = (err) => {
                 console.error(err);
             }
             audio_worklet.connect(this.audio_context.destination);
-            
+
             return audio_worklet;
         };
-        
+
         let user_interact_hook = (arg) => {
             if (this.audio_context.state === "suspended") {
                 this.audio_context.resume();
@@ -401,7 +409,7 @@ export class WasmWebBrowser extends WasmBridge {
         window.addEventListener('mousedown', user_interact_hook)
         window.addEventListener('touchstart', user_interact_hook)
     }
-    
+
     FromWasmQueryAudioDevices(args) {
         navigator.mediaDevices?.enumerateDevices().then((devices_enum) => {
             let devices = []
@@ -417,14 +425,14 @@ export class WasmWebBrowser extends WasmBridge {
             // safari doesnt report any outputs
             devices.push({
                 web_device_id: "",
-                label: "" ,
+                label: "",
                 is_output: true
             });
-            this.to_wasm.ToWasmAudioDeviceList({devices});
+            this.to_wasm.ToWasmAudioDeviceList({ devices });
             this.do_wasm_pump();
         })
     }
-    
+
     FromWasmUseMidiInputs(args) {
         outer:
         for (let input of this.midi_inputs) {
@@ -444,17 +452,17 @@ export class WasmWebBrowser extends WasmBridge {
             input.onmidimessage = undefined
         }
     }
-    
-    FromWasmSendMidiOutput(args){
+
+    FromWasmSendMidiOutput(args) {
         for (let output of this.midi_outputs) {
-            if(output.uid == args.uid){
-                output.port.send([(data>>16)&0xff,(data>>8)&0xff,(data>>0)&0xff]);
+            if (output.uid == args.uid) {
+                output.port.send([(data >> 16) & 0xff, (data >> 8) & 0xff, (data >> 0) & 0xff]);
             }
         }
     }
-    
+
     FromWasmQueryMidiPorts() {
-        if(this.reload_midi_ports){
+        if (this.reload_midi_ports) {
             return this.reload_midi_ports();
         }
         if (navigator.requestMIDIAccess) {
@@ -487,7 +495,7 @@ export class WasmWebBrowser extends WasmBridge {
                             is_output: true
                         });
                     }
-                    this.to_wasm.ToWasmMidiPortList({ports});
+                    this.to_wasm.ToWasmMidiPortList({ ports });
                     this.do_wasm_pump();
                 }
                 midi.onstatechange = (e) => {
@@ -499,11 +507,11 @@ export class WasmWebBrowser extends WasmBridge {
             });
         }
     }
-    
+
     FromWasmStartPresentingXR() {
-        
+
     }
-    
+
     alloc_thread_stack(context_ptr, timer) {
         var ret = {
             timer,
@@ -525,7 +533,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
         return ret;
     }
-    
+
     // thanks to JP Posma with Zaplib for figuring out how to do the stack_pointer export without wasm bindgen
     // https://github.com/Zaplib/zaplib/blob/650305c856ea64d9c2324cbd4b8751ffbb971ac3/zaplib/cargo-zaplib/src/build.rs#L48
     // https://github.com/Zaplib/zaplib/blob/7cb3bead16f963e60c840aa2be3bf28a47ac533e/zaplib/web/common.ts#L313
@@ -533,12 +541,12 @@ export class WasmWebBrowser extends WasmBridge {
     // example build command:
     // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
     FromWasmCreateThread(args) {
-        
+
         let worker = new Worker(
             './makepad_platform/web_worker.js',
-            {type: 'module'}
+            { type: 'module' }
         );
-        
+
         if (!this.wasm._has_thread_support) {
             console.error("FromWasmCreateThread not available, wasm file not compiled with threading support");
             return
@@ -548,15 +556,15 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
         worker.postMessage(this.alloc_thread_stack(args.context_ptr, args.timer));
-        
+
         this.workers.push(worker);
     }
-    
+
     start_signal_poll() {
         this.poll_timer = window.setInterval(e => {
             let flags = this.exports.wasm_check_signal();
             if (flags != 0) {
-                this.to_wasm.ToWasmSignal({flags});
+                this.to_wasm.ToWasmSignal({ flags });
                 this.do_wasm_pump();
             }
         }, 0.016 * 1000.0);
@@ -652,7 +660,7 @@ export class WasmWebBrowser extends WasmBridge {
                 });
                 this.do_wasm_pump();
             }
-          });
+        });
 
         req.send(body);
         this.free_data_u8(args.body);
@@ -733,7 +741,7 @@ export class WasmWebBrowser extends WasmBridge {
                     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                     // Successfully got permission, close the stream immediately
                     stream.getTracks().forEach(track => track.stop());
-                    
+
                     this.to_wasm.ToWasmPermissionResult({
                         permission: args.permission,
                         request_id: args.request_id,
@@ -742,7 +750,7 @@ export class WasmWebBrowser extends WasmBridge {
                 } catch (error) {
                     // Permission was denied or error occurred
                     let status = 3; // DeniedPermanent (default)
-                    
+
                     if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
                         // User explicitly denied permission
                         status = 3; // DeniedPermanent (browsers don't re-prompt)
@@ -753,7 +761,7 @@ export class WasmWebBrowser extends WasmBridge {
                         // Device is in use or hardware error
                         status = 2; // DeniedCanRetry
                     }
-                    
+
                     this.to_wasm.ToWasmPermissionResult({
                         permission: args.permission,
                         request_id: args.request_id,
@@ -778,20 +786,20 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.do_wasm_pump();
     }
-    
+
     // calling into wasm
-    
-    
+
+
     wasm_terminate_thread_pools() {
         this.exports.wasm_terminate_thread_pools(this.wasm_app);
     }
-    
+
     wasm_create_app() {
         let new_ptr = this.exports.wasm_create_app();
         this.update_array_buffer_refs();
         return new_ptr
     }
-    
+
 
     wasm_return_first_msg() {
         let ret_ptr = this.exports.wasm_return_first_msg(this.wasm_app)
@@ -799,12 +807,12 @@ export class WasmWebBrowser extends WasmBridge {
         return this.new_from_wasm(ret_ptr);
     }
 
-    dispatch_first_msg(){
+    dispatch_first_msg() {
         let from_wasm = this.wasm_return_first_msg();
         from_wasm.dispatch_on_app();
         from_wasm.free();
     }
-    
+
     do_wasm_pump() {
         let to_wasm = this.to_wasm;
         this.to_wasm = this.new_to_wasm();
@@ -812,27 +820,27 @@ export class WasmWebBrowser extends WasmBridge {
         from_wasm.dispatch_on_app();
         from_wasm.free();
     }
-    
+
 
     wasm_process_msg(to_wasm) {
-        if(this.debug_sum_ptr !== undefined){
+        if (this.debug_sum_ptr !== undefined) {
             console.log("CECKING IN PROCESS MSG");
             let ptr = this.debug_sum_ptr;
             this.debug_sum_ptr = undefined;
             var u8_out = new Uint8Array(this.memory.buffer, ptr.ptr, ptr.len);
             let sum = 0
-            for(let i = 0; i<ptr.len;i++){
+            for (let i = 0; i < ptr.len; i++) {
                 sum += u8_out[i];
             }
-            console.log("Got sum"+sum);
+            console.log("Got sum" + sum);
         }
-        
-        
+
+
         let ret_ptr = this.exports.wasm_process_msg(to_wasm.release_ownership(), this.wasm_app)
         this.update_array_buffer_refs();
         return this.new_from_wasm(ret_ptr);
     }
-    
+
     do_wasm_pump() {
         let to_wasm = this.to_wasm;
         this.to_wasm = this.new_to_wasm();
@@ -840,11 +848,11 @@ export class WasmWebBrowser extends WasmBridge {
         from_wasm.dispatch_on_app();
         from_wasm.free();
     }
-    
-    
+
+
     // init and setup
-    
-    
+
+
     init_detection() {
         this.detect = {
             user_agent: window.navigator.userAgent,
@@ -853,17 +861,17 @@ export class WasmWebBrowser extends WasmBridge {
             is_firefox: navigator.userAgent.toLowerCase().indexOf('firefox') > -1,
             use_touch_scroll_overlay: window.ontouchstart === null,
         };
-        
+
         this.detect.is_android = this.detect.user_agent.match(/Android/i)
         this.detect.is_add_to_homescreen_safari = this.is_mobile_safari && navigator.standalone
     }
-    
+
     update_window_info() {
         var dpi_factor = window.devicePixelRatio;
         var w;
         var h;
         var canvas = this.canvas;
-        
+
         if (canvas.getAttribute("fullpage")) {
             if (this.detect.is_add_to_homescreen_safari) { // extremely ugly. but whatever.
                 if (window.orientation == 90 || window.orientation == -90) {
@@ -886,16 +894,16 @@ export class WasmWebBrowser extends WasmBridge {
         }
         var sw = canvas.width = w * dpi_factor;
         var sh = canvas.height = h * dpi_factor;
-        
+
         this.gl.viewport(0, 0, sw, sh);
-        
+
         this.window_info.dpi_factor = dpi_factor;
         this.window_info.inner_width = canvas.offsetWidth;
         this.window_info.inner_height = canvas.offsetHeight;
         this.window_info.is_fullscreen = is_fullscreen();
         this.window_info.can_fullscreen = can_fullscreen();
     }
-    
+
     query_xr_capabilities() {
         let promises = [];
         if (navigator.xr !== undefined) {
@@ -912,33 +920,33 @@ export class WasmWebBrowser extends WasmBridge {
         }
         return Promise.all(promises);
     }
-    
+
     bind_screen_resize() {
         this.handlers.on_screen_resize = () => {
             this.update_window_info();
             if (this.to_wasm !== undefined) {
-                this.to_wasm.ToWasmResizeWindow({window_info: this.window_info});
+                this.to_wasm.ToWasmResizeWindow({ window_info: this.window_info });
                 this.FromWasmRequestAnimationFrame();
             }
         }
-        
+
         // TODO! BIND THESE SOMEWHERE USEFUL
         this.handlers.on_app_got_focus = () => {
             this.to_wasm.ToWasmWindowGotFocus();
             this.do_wasm_pump();
         }
-        
+
         this.handlers.on_app_lost_focus = () => {
             this.to_wasm.ToWasmWindowLostFocus();
             this.do_wasm_pump();
         }
-        
+
         window.addEventListener('resize', _ => this.handlers.on_screen_resize())
         window.addEventListener('orientationchange', _ => this.handlers.on_screen_resize())
     }
-    
+
     bind_mouse_and_touch() {
-        
+
         var canvas = this.canvas
         /*
         TODO fix/test this
@@ -1012,7 +1020,7 @@ export class WasmWebBrowser extends WasmBridge {
           
             ts.addEventListener('scroll', e => this.handlers.on_overlay_scroll(e))
         }*/
-        
+
         /*
         var mouse_fingers = [];
         function mouse_to_finger(e) {
@@ -1025,7 +1033,7 @@ export class WasmWebBrowser extends WasmBridge {
             mf.touch = false;
             return mf
         }*/
-        
+
         function mouse_to_wasm_wmouse(e) {
             return {
                 x: e.pageX,
@@ -1041,44 +1049,44 @@ export class WasmWebBrowser extends WasmBridge {
             this.focus_keyboard_input();
             //if (current_mouse_down === null || current_mouse_down === e.button){
             //    current_mouse_down = e.button;
-            this.to_wasm.ToWasmMouseDown({mouse: mouse_to_wasm_wmouse(e)});
+            this.to_wasm.ToWasmMouseDown({ mouse: mouse_to_wasm_wmouse(e) });
             this.do_wasm_pump();
             //}
         }
-        
+
         this.handlers.on_mouse_up = e => {
             e.preventDefault();
             //if (current_mouse_down == e.button){
             //    current_mouse_down = null;
-            this.to_wasm.ToWasmMouseUp({mouse: mouse_to_wasm_wmouse(e)});
+            this.to_wasm.ToWasmMouseUp({ mouse: mouse_to_wasm_wmouse(e) });
             this.do_wasm_pump();
             //}
         }
-        
+
         this.handlers.on_mouse_move = e => {
             document.body.scrollTop = 0;
             document.body.scrollLeft = 0;
-            this.to_wasm.ToWasmMouseMove({was_out: false, mouse: mouse_to_wasm_wmouse(e)});
+            this.to_wasm.ToWasmMouseMove({ was_out: false, mouse: mouse_to_wasm_wmouse(e) });
             this.do_wasm_pump();
         }
-        
+
         this.handlers.on_mouse_out = e => {
-            this.to_wasm.ToWasmMouseMove({was_out: true, mouse: mouse_to_wasm_wmouse(e)});
+            this.to_wasm.ToWasmMouseMove({ was_out: true, mouse: mouse_to_wasm_wmouse(e) });
             this.do_wasm_pump();
         }
-        
+
         canvas.addEventListener('mousedown', e => this.handlers.on_mouse_down(e))
         window.addEventListener('mouseup', e => this.handlers.on_mouse_up(e))
         window.addEventListener('mousemove', e => this.handlers.on_mouse_move(e));
         window.addEventListener('mouseout', e => this.handlers.on_mouse_out(e));
-        
+
         this.handlers.on_contextmenu = e => {
             e.preventDefault()
             return false
         }
-        
+
         canvas.addEventListener('contextmenu', e => this.handlers.on_contextmenu(e))
-        
+
         function touch_to_wasm_wtouch(t, state) {
             return {
                 state,
@@ -1088,21 +1096,21 @@ export class WasmWebBrowser extends WasmBridge {
                 radius_y: t.radiusY,
                 rotation_angle: t.rotationAngle,
                 force: t.force,
-                uid: t.identifier === undefined? i: t.identifier,
+                uid: t.identifier === undefined ? i : t.identifier,
             }
         }
-        
+
         function touches_to_wasm_wtouches(e, state) {
             let f = [];
-            
-            for (let i = 0; i < e.changedTouches.length; i ++) {
+
+            for (let i = 0; i < e.changedTouches.length; i++) {
                 f.push(touch_to_wasm_wtouch(e.changedTouches[i], state));
             }
-            
+
             touch_loop:
-            for (let i = 0; i < e.touches.length; i ++) {
+            for (let i = 0; i < e.touches.length; i++) {
                 let t = e.touches[i];
-                for (let j = 0; j < e.changedTouches.length; j ++) {
+                for (let j = 0; j < e.changedTouches.length; j++) {
                     if (e.changedTouches[j].identifier == t.identifier) {
                         continue touch_loop;
                     }
@@ -1118,7 +1126,7 @@ export class WasmWebBrowser extends WasmBridge {
             console.log(dump);*/
             return f
         }
-        
+
         this.handlers.on_touchstart = e => {
             e.preventDefault()
             this.to_wasm.ToWasmTouchUpdate({
@@ -1129,7 +1137,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
             return false
         }
-        
+
         this.handlers.on_touchmove = e => {
             e.preventDefault();
             this.to_wasm.ToWasmTouchUpdate({
@@ -1140,7 +1148,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
             return false
         }
-        
+
         this.handlers.on_touch_end_cancel_leave = e => {
             e.preventDefault();
             this.to_wasm.ToWasmTouchUpdate({
@@ -1151,13 +1159,13 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
             return false
         }
-        
+
         canvas.addEventListener('touchstart', e => this.handlers.on_touchstart(e))
-        canvas.addEventListener('touchmove', e => this.handlers.on_touchmove(e), {passive: false})
+        canvas.addEventListener('touchmove', e => this.handlers.on_touchmove(e), { passive: false })
         canvas.addEventListener('touchend', e => this.handlers.on_touch_end_cancel_leave(e));
         canvas.addEventListener('touchcancel', e => this.handlers.on_touch_end_cancel_leave(e));
         canvas.addEventListener('touchleave', e => this.handlers.on_touch_end_cancel_leave(e));
-        
+
         var last_wheel_time;
         var last_was_wheel;
         this.handlers.on_mouse_wheel = e => {
@@ -1182,7 +1190,7 @@ export class WasmWebBrowser extends WasmBridge {
             var fac = 1
             if (e.deltaMode === 1) fac = 40
             else if (e.deltaMode === 2) fac = window.offsetHeight
-            
+
             this.to_wasm.ToWasmScroll({
                 x: e.pageX,
                 y: e.pageY,
@@ -1196,12 +1204,12 @@ export class WasmWebBrowser extends WasmBridge {
         };
         canvas.addEventListener('wheel', e => this.handlers.on_mouse_wheel(e))
     }
-    
+
     bind_keyboard() {
         if (this.detect.is_mobile_safari || this.detect.is_android) { // mobile keyboards are unusable on a UI like this. Not happening.
             return
         }
-        
+
         var ta = this.text_area = document.createElement('textarea')
         ta.className = "cx_webgl_textinput"
         ta.setAttribute('autocomplete', 'off')
@@ -1209,7 +1217,7 @@ export class WasmWebBrowser extends WasmBridge {
         ta.setAttribute('autocapitalize', 'off')
         ta.setAttribute('spellcheck', 'false')
         var style = document.createElement('style')
-        
+
         style.innerHTML = "\n"
             + "textarea.cx_webgl_textinput {\n"
             + "z-index: 1000;\n"
@@ -1239,46 +1247,46 @@ export class WasmWebBrowser extends WasmBridge {
             + "outline: 0px !important;\n"
             + "-webkit-appearance: none;\n"
             + "}"
-        
+
         document.body.appendChild(style)
         ta.style.left = -100 + 'px'
         ta.style.top = -100 + 'px'
         ta.style.height = 1 + 'px'
         ta.style.width = 1 + 'px'
-        
+
         //document.addEventListener('focusout', this.onFocusOut.bind(this))
         var was_paste = false;
         this.neutralize_ime = false;
         var last_len = 0;
-        
+
         this.handlers.on_cut = e => {
             setTimeout(_ => {
                 ta.value = "";
                 last_len = 0;
             }, 0)
         }
-        
+
         ta.addEventListener('cut', e => this.handlers.on_cut(e));
-        
+
         this.handlers.on_copy = e => {
             setTimeout(_ => {
                 ta.value = "";
                 last_len = 0;
             }, 0)
         }
-        
+
         ta.addEventListener('copy', e => this.handlers.on_copy(e));
-        
+
         this.handlers.on_paste = e => {
             was_paste = true;
         }
-        
+
         ta.addEventListener('paste', e => this.handlers.on_paste(e));
-        
-        this.handlers.on_select = e => {}
-        
+
+        this.handlers.on_select = e => { }
+
         ta.addEventListener('select', e => this.handlers.on_select(e))
-        
+
         this.handlers.on_input = e => {
             // if IME composition is in progress, do not handle the normal input event
             if (is_composing) {
@@ -1288,7 +1296,7 @@ export class WasmWebBrowser extends WasmBridge {
             if (ta.value.length > 0) {
                 if (was_paste) {
                     was_paste = false;
-                    
+
                     this.to_wasm.ToWasmTextInput({
                         was_paste: true,
                         input: ta.value.substring(last_len),
@@ -1320,23 +1328,23 @@ export class WasmWebBrowser extends WasmBridge {
             last_len = ta.value.length;
         };
         ta.addEventListener('input', e => this.handlers.on_input(e));
-        
+
         // add composition events handling, this is the standard way to handle IME input
         var is_composing = false;
         var composition_data = "";
-        
+
         ta.addEventListener('compositionstart', e => {
             is_composing = true;
             composition_data = "";
         });
-        
+
         ta.addEventListener('compositionupdate', e => {
             composition_data = e.data || "";
         });
-        
+
         ta.addEventListener('compositionend', e => {
             is_composing = false;
-            
+
             // send final IME input result
             if (e.data && e.data !== '\n') {
                 this.to_wasm.ToWasmTextInput({
@@ -1346,28 +1354,28 @@ export class WasmWebBrowser extends WasmBridge {
                 });
                 this.do_wasm_pump();
             }
-            
+
             composition_data = "";
             // clear textarea
             ta.value = "";
             last_len = 0;
         });
-        
+
         ta.addEventListener('mousedown', e => this.handlers.on_mouse_down(e));
         ta.addEventListener('mouseup', e => this.handlers.on_mouse_up(e));
         ta.addEventListener('wheel', e => this.handlers.on_mouse_wheel(e));
-        
+
         ta.addEventListener('contextmenu', e => this.handlers.on_contextmenu(e));
-        
+
         ta.addEventListener('blur', e => {
             this.focus_keyboard_input();
         })
-        
+
         var ugly_ime_hack = false;
-        
+
         this.handlers.on_keydown = e => {
             let code = e.keyCode;
-            
+
             //if (code == 91) {firefox_logo_key = true; e.preventDefault();}
             if (code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
             if (code === 8 || code === 9) e.preventDefault() // backspace/tab
@@ -1392,30 +1400,32 @@ export class WasmWebBrowser extends WasmBridge {
             }
             // if we are using arrow keys, home or end
             let key_code = e.keyCode;
-            
+
             if (key_code >= 33 && key_code <= 40) {
                 ta.value = "";
                 last_len = ta.value.length;
             }
             //if(key_code
-            this.to_wasm.ToWasmKeyDown({key: {
-                key_code: key_code,
-                char_code: e.charCode,
-                is_repeat: e.repeat,
-                time: e.timeStamp / 1000.0,
-                modifiers: pack_key_modifier(e)
-            }})
-            
+            this.to_wasm.ToWasmKeyDown({
+                key: {
+                    key_code: key_code,
+                    char_code: e.charCode,
+                    is_repeat: e.repeat,
+                    time: e.timeStamp / 1000.0,
+                    modifiers: pack_key_modifier(e)
+                }
+            })
+
             this.do_wasm_pump();
         };
-        
+
         ta.addEventListener('keydown', e => this.handlers.on_keydown(e));
-        
+
         this.handlers.on_keyup = e => {
             let code = e.keyCode;
-            
+
             if (code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
-            if (code == 91) {e.preventDefault();}
+            if (code == 91) { e.preventDefault(); }
             var ta = this.text_area;
             if (ugly_ime_hack) {
                 ugly_ime_hack = false;
@@ -1423,24 +1433,26 @@ export class WasmWebBrowser extends WasmBridge {
                 this.bind_keyboard();
                 this.update_text_area_pos();
             }
-            this.to_wasm.ToWasmKeyUp({key: {
-                key_code: e.keyCode,
-                char_code: e.charCode,
-                is_repeat: e.repeat,
-                time: e.timeStamp / 1000.0,
-                modifiers: pack_key_modifier(e)
-            }})
+            this.to_wasm.ToWasmKeyUp({
+                key: {
+                    key_code: e.keyCode,
+                    char_code: e.charCode,
+                    is_repeat: e.repeat,
+                    time: e.timeStamp / 1000.0,
+                    modifiers: pack_key_modifier(e)
+                }
+            })
             this.do_wasm_pump();
         };
         ta.addEventListener('keyup', e => this.handlers.on_keyup(e));
         document.body.appendChild(ta);
         ta.focus();
     }
-    
-    
+
+
     // internal helper api
-    
-    
+
+
     update_text_area_pos(pos) {
         if (this.text_area && pos) {
             //this.text_area.style.left = (Math.round(pos.x) -2) + "px";
@@ -1449,31 +1461,31 @@ export class WasmWebBrowser extends WasmBridge {
             this.text_area.style.top = (Math.round(pos.y) + 4) + "px"
         }
     }
-    
+
     focus_keyboard_input() {
-        if (!this.text_area)return;
+        if (!this.text_area) return;
         this.text_area.focus();
     }
 }
 
 function can_fullscreen() {
-    return (document.fullscreenEnabled || document.webkitFullscreenEnabled || document.mozFullscreenEnabled)? true: false
+    return (document.fullscreenEnabled || document.webkitFullscreenEnabled || document.mozFullscreenEnabled) ? true : false
 }
 
 function is_fullscreen() {
-    return (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullscreenElement)? true: false
+    return (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullscreenElement) ? true : false
 }
 
 function fetch_path(base, path) {
-    
-    
-    return new Promise(function(resolve, reject) {
+
+
+    return new Promise(function (resolve, reject) {
         var req = new XMLHttpRequest()
-        req.addEventListener("error", function() {
+        req.addEventListener("error", function () {
             reject(resource)
         })
         req.responseType = 'arraybuffer'
-        req.addEventListener("load", function() {
+        req.addEventListener("load", function () {
             if (req.status !== 200) {
                 return reject(req.status)
             }
@@ -1519,5 +1531,5 @@ let web_cursor_map = [
 
 //var firefox_logo_key = false;
 function pack_key_modifier(e) {
-    return (e.shiftKey? 1: 0) | (e.ctrlKey? 2: 0) | (e.altKey? 4: 0) | (e.metaKey? 8: 0)
+    return (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0)
 }
