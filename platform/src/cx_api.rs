@@ -46,7 +46,7 @@ pub trait CxOsApi {
     fn set_browser_url(&mut self, _url: &str, _replace: bool, _state_index: f64) {}
 
     /// On web (wasm32), calls `history.go(delta)`.
-    fn browser_history_go(&mut self, _delta: f64) {}
+    fn browser_history_go(&mut self, _delta: i32) {}
 
     fn seconds_since_app_start(&self)->f64;
 
