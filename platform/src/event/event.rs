@@ -224,6 +224,11 @@ pub enum Event {
     /// Permission check or request result
     PermissionResult(PermissionResult),
     
+    /// The browser URL changed (web platform only).
+    /// 
+    /// This event is fired when browser navigation occurs (e.g., back/forward buttons).
+    BrowserUrlChanged(BrowserUrlChangedEvent),
+    
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
     
@@ -299,6 +304,7 @@ impl Event{
             50=>"Actions",
             51=>"BackPressed",
             52=>"PermissionResult",
+            53=>"BrowserUrlChanged",
 
             #[cfg(target_arch = "wasm32")]
             55=>"ToWasmMsg",
@@ -373,6 +379,7 @@ impl Event{
             Self::Actions(_)=>50,
             Self::BackPressed{..}=>51,
             Self::PermissionResult(_)=>52,
+            Self::BrowserUrlChanged(_)=>53,
             
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_)=>55,

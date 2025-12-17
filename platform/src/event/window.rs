@@ -66,3 +66,15 @@ pub struct WindowDragQueryEvent {
     pub abs: Vec2d,
     pub response: Rc<Cell<WindowDragQueryResponse>>,
 }
+
+/// Event fired when the browser URL changes (web platform only).
+/// 
+/// This event is triggered by browser navigation events (popstate, hashchange)
+/// such as when the user clicks the browser's back/forward buttons.
+#[derive(Clone, Debug)]
+pub struct BrowserUrlChangedEvent {
+    /// The new URL (pathname + search + hash).
+    pub url: String,
+    /// The state index stored in history.state, or -1 if not available.
+    pub state_index: i32,
+}

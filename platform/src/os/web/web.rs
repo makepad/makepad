@@ -31,7 +31,8 @@ use {
             TouchUpdateEvent,
             ScrollEvent,
             WindowGeom,
-            WindowGeomChangeEvent
+            WindowGeomChangeEvent,
+            BrowserUrlChangedEvent,
         },
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
@@ -209,6 +210,14 @@ impl Cx {
                 live_id!(ToWasmWindowLostFocus) => {
                     let window_id = CxWindowPool::id_zero();
                     self.call_event_handler(&Event::WindowLostFocus(window_id));
+                }
+                
+                live_id!(ToWasmBrowserUrlChanged) => {
+                    let tw = ToWasmBrowserUrlChanged::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&Event::BrowserUrlChanged(BrowserUrlChangedEvent {
+                        url: tw.url,
+                        state_index: tw.state_index as i32,
+                    }));
                 }
                 
                 live_id!(ToWasmRedrawAll) => {
