@@ -142,7 +142,7 @@ export class WasmWebBrowser extends WasmBridge {
             if(this.wasm == null){
                 return;
             }
-            let url = location.pathname + "" + location.search + "" + location.hash + "";
+            let url = location.pathname + location.search + location.hash;
             this.to_wasm.ToWasmBrowserUrlChanged({url, state_index});
             this.do_wasm_pump();
         };
