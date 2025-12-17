@@ -668,8 +668,8 @@ impl CxOsApi for Cx {
         });
     }
 
-    fn browser_history_go(&mut self, delta: f64) {
-        self.os.from_wasm(FromWasmBrowserHistoryGo { delta });
+    fn browser_history_go(&mut self, delta: i32) {
+        self.os.from_wasm(FromWasmBrowserHistoryGo { delta: delta as f64 });
     }
     fn default_window_size(&self)->Vec2d{self.os.window_geom.inner_size}
     
