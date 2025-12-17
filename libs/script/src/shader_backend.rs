@@ -5,6 +5,7 @@ use crate::pod::*;
 use crate::heap::*;
 use crate::shader::ShaderIoKind;
 use crate::shader::ShaderMode;
+use crate::shader::ShaderSamplerOptions;
 use crate::mod_shader::*;
 use crate::value::*;
 
@@ -17,27 +18,40 @@ pub enum ShaderBackend{
     Glsl
 }
 
+
+#[derive(Debug, Clone, Copy)]
+pub enum ShaderIoPrefix{
+    Prefix(&'static str),
+    Full(&'static str)
+}
+
 impl ShaderBackend{
-    pub fn get_shader_io_kind_and_prefix(&self, mode: ShaderMode, io_type: ShaderIoType) -> (ShaderIoKind, &'static str) {
+    pub fn get_shader_io_kind_and_prefix(&self, mode: ShaderMode, io_type: ShaderIoType) -> (ShaderIoKind, ShaderIoPrefix) {
          match self{
              Self::Metal  =>{
                 match mode{
                     ShaderMode::Vertex=>match io_type{
-                        SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance,"_io.i[_io_vtx.iid]."),
-                        SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::DynUniform,"_io.u."),
-                        SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::DynUniform,"_io.u_"),
-                        SHADER_IO_VARYING=>(ShaderIoKind::Varying,"_iov.v."),
-                        SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::Varying,"_iov.v.pos_"),
-                        SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::Varying,""),
+                        SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i[_iov.iid].")),
+                        SHADER_IO_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u.")),
+                        SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
+                        SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iov.v.")),
+                        SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v.vertex_pos")),
+                        SHADER_IO_VERTEX_BUFFER=>(ShaderIoKind::VertexBuffer, ShaderIoPrefix::Prefix("_io.vb[_iov.vid].")),
+                        SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("")),
+                        SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("_io.")),
+                        
                         _=>panic!()
                     }
                     ShaderMode::Fragment=>match io_type{
-                        SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance,"_io.i[_iof.var._iid]."),
-                        SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::DynUniform,"_io.u."),
-                        SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::DynUniform,"_io.u_"),
-                        SHADER_IO_VARYING=>(ShaderIoKind::Varying,"_iof.v."),
-                        SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition,"_iof.v.pos_"),
-                        SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::FragmentOutput,"_iof.fb0_"),
+                        SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i[_iof.v._iid].")),
+                        SHADER_IO_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u.")),
+                        SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
+                        SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iof.v.")),
+                        SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iof.v.vertex_pos")),
+                        SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::FragmentOutput, ShaderIoPrefix::Full("_iof.fb0")),
+                        SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("_io.")),
                         _=>panic!()
                     }
                     _=>panic!()
@@ -45,12 +59,12 @@ impl ShaderBackend{
             }
              Self::Hlsl | Self::Glsl | Self::Wgsl =>{
                  match io_type{
-                     SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance,"dyninst_"),
-                     SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::DynUniform,"dynuni_"),
-                     SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::DynUniform,"unibuf_"),
-                     SHADER_IO_VARYING=>(ShaderIoKind::Varying,"var_"),
-                     SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition,"vtx_pos"),
-                     SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::FragmentOutput,"frag_fb0"),
+                     SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("dyninst_")),
+                     SHADER_IO_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("uni_")),
+                     SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("unibuf_")),
+                     SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("var_")),
+                     SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Prefix("vtx_pos")),
+                     SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::FragmentOutput, ShaderIoPrefix::Prefix("frag_fb0")),
                      _=>panic!()
                  }
              }
@@ -341,7 +355,16 @@ impl ShaderBackend{
         }
     }
         
-    fn pod_type_name(&self, ty: &ScriptPodTypeInline, out:&mut String) {
+    pub fn pod_type_name_from_ty(&self, heap: &ScriptHeap, ty: ScriptPodType, out: &mut String) {
+        let pod_ty = heap.pod_type_ref(ty);
+        let inline = ScriptPodTypeInline{
+            self_ref: ty,
+            data: pod_ty.clone()
+        };
+        self.pod_type_name(&inline, out);
+    }
+
+    pub fn pod_type_name(&self, ty: &ScriptPodTypeInline, out:&mut String) {
         match &ty.data.ty {
             ScriptPodTy::F32 => write!(out, "{}", self.map_pod_name(id!(f32))).ok().unwrap_or(()),
             ScriptPodTy::F16 => write!(out, "{}", self.map_pod_name(id!(f16))).ok().unwrap_or(()),
