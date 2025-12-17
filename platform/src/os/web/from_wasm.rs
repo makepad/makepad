@@ -114,7 +114,7 @@ pub struct FromWasmSetBrowserUrl {
 
 #[derive(FromWasm)]
 pub struct FromWasmBrowserHistoryGo {
-    pub delta: i32,
+    pub delta: f64,
 }
 
 #[derive(FromWasm)]
@@ -348,6 +348,5 @@ pub struct FromWasmStartAudioOutput {
 #[derive(FromWasm)]
 pub struct FromWasmStopAudioOutput {
 }
-
 
 
