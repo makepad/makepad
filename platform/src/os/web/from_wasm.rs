@@ -114,7 +114,7 @@ pub struct FromWasmSetBrowserUrl {
 
 #[derive(FromWasm)]
 pub struct FromWasmBrowserHistoryGo {
-    pub delta: f64,
+    pub delta: i32,
 }
 
 #[derive(FromWasm)]
