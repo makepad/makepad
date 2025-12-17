@@ -510,6 +510,7 @@ impl ShaderRegistry {
         draw_shader_def.add_uniform(id_lut!(view_transform), id_lut!(draw_list), Ty::Mat4f, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(view_clip), id_lut!(draw_list), Ty::Vec4f, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(view_shift), id_lut!(draw_list), Ty::Vec2f, TokenSpan::default());
+        draw_shader_def.add_uniform(id_lut!(view_opacity), id_lut!(draw_list), Ty::Float, TokenSpan::default());
         draw_shader_def.add_uniform(id_lut!(draw_zbias), id_lut!(draw_call), Ty::Float, TokenSpan::default());
         
         

@@ -329,10 +329,18 @@ impl<'a> DrawShaderGenerator<'a> {
         let pixel_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(fragment))).unwrap();
         write!(self.string, "\n").unwrap();
         if self.options.use_inout{
-            writeln!(self.string, "    fragColor = {}();", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
+            if self.options.use_uniform_buffers {
+                writeln!(self.string, "    fragColor = {}() * draw_list.ds_view_opacity;", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
+            } else {
+                writeln!(self.string, "    fragColor = {}() * ds_view_opacity;", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
+            }
         }
         else{
-            writeln!(self.string, "    gl_FragColor = {}();", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
+            if self.options.use_uniform_buffers {
+                writeln!(self.string, "    gl_FragColor = {}() * draw_list.ds_view_opacity;", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
+            } else {
+                writeln!(self.string, "    gl_FragColor = {}() * ds_view_opacity;", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
+            }
         }
         writeln!(self.string, "}}").unwrap();
     }

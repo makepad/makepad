@@ -216,8 +216,10 @@ pub struct CxDrawListUniforms {
     pub view_transform: Mat4f,
     pub view_clip: Vec4f,
     pub view_shift: Vec2f,
+    /// Global opacity multiplier for everything rendered in this draw list.
+    pub view_opacity: f32,
     pub pad1: f32,
-    pub pad2: f32       
+    pub pad2: f32
 }
 
 impl Default for CxDrawListUniforms{
@@ -226,6 +228,7 @@ impl Default for CxDrawListUniforms{
             view_transform: Mat4f::identity(),
             view_clip: vec4(-100000.0, -100000.0, 100000.0, 100000.0),
             view_shift: vec2(0.0,0.0),
+            view_opacity: 1.0,
             pad1: 0.0,
             pad2: 0.0,
         }
