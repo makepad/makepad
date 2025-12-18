@@ -116,6 +116,7 @@ pub struct DrawSplitter {
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook, SerRon, DeRon)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[live_ignore]
 pub enum SplitterAxis {
     #[pick] Horizontal,
@@ -130,6 +131,7 @@ impl Default for SplitterAxis {
 
 
 #[derive(Clone, Copy, Debug, Live, LiveHook, SerRon, DeRon)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[live_ignore]
 pub enum SplitterAlign {
     #[live(50.0)] FromA(f64),

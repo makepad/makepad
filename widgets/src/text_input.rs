@@ -1919,6 +1919,7 @@ impl TextInputRef {
 
 /// The saved (checkpointed) state of a text input widget.
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TextInputState {
     text: String,
     password_text: String,
@@ -1938,6 +1939,7 @@ pub enum TextInputAction {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct History {
     current_edit_kind: Option<EditKind>,
     undo_stack: EditStack,
@@ -2009,6 +2011,7 @@ impl History {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 enum EditKind {
     Insert,
     Backspace,
@@ -2027,6 +2030,7 @@ impl EditKind {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct EditStack {
     edit_groups: Vec<EditGroup>,
     edits: Vec<Edit>,
@@ -2061,12 +2065,14 @@ impl EditStack {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct EditGroup {
     selection: Selection,
     edit_start: usize
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Edit {
     start: usize,
     end: usize,

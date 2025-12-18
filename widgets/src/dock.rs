@@ -311,6 +311,7 @@ pub enum DropPart {
 }
 
 #[derive(Clone, Debug, Live, LiveHook, SerRon, DeRon)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[live_ignore]
 pub enum DockItem {
     #[live {axis: SplitterAxis::Vertical, align: SplitterAlign::Weighted(0.5), a: LiveId(0), b: LiveId(0)}]
