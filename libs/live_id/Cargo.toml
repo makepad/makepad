@@ -12,3 +12,10 @@ metadata.makepad-auto-version = "Fjf_rJTOgvZXwyU7Yb-CZMF6Hmo="
 [dependencies]
 makepad-live-id-macros = { path = "id_macros", version = "1.0.0" }
 #makepad-error-log = { path = "../error_log", version = "0.4.0" }
+
+serde = { version = "1.0", optional = true, features = ["derive"] }
+
+[features]
+default = []
+## Enables certain public-facing types to derive serde serialization traits.
+serde = ["dep:serde"]

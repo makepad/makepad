@@ -1,4 +1,5 @@
 #[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Selection {
     pub cursor: Cursor,
     pub anchor: Cursor,
@@ -22,12 +23,14 @@ impl Selection {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cursor {
     pub index: usize,
     pub prefer_next_row: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CursorPosition {
     pub row_index: usize,
     pub x_in_lpxs: f32,
