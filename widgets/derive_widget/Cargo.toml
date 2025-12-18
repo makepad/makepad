@@ -19,3 +19,5 @@ makepad-live-id = { path = "../../libs/live_id", version = "1.0.0" }
 [features]
 default = ["nightly"]
 nightly = []
+## Enables deriving serde (de)serialization traits for the LiveId type.
+serde = ["makepad-live-id/serde"]

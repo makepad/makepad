@@ -26,3 +26,9 @@ makepad-fonts-chinese-regular-2 = {path = "./fonts/chinese_regular_2", version =
 makepad-fonts-chinese-bold = {path = "./fonts/chinese_bold", version = "1.0.1"}
 makepad-fonts-chinese-bold-2 = {path = "./fonts/chinese_bold_2", version = "1.0.1"}
 
+serde = { version = "1.0", optional = true, features = ["derive"] }
+
+[features]
+default = []
+## Enables certain public-facing types to derive serde serialization traits.
+serde = ["dep:serde", "makepad-draw/serde", "makepad-derive-widget/serde"]
