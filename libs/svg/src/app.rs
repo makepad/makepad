@@ -13,16 +13,22 @@ live_design!{
                     flow: Down,
                     align: {x: 0.5, y: 0.5},
                     <View> {
-                        width: 200.0,
-                        height: 150.0,
-                        show_bg: true,
+                        width: 200,
+                        height: 200,
+                        show_bg: true
                         draw_bg: {
                             color: #000
                         },
-                        <Math> {
+                        <Svg> {
                             width: Fit,
                             height: Fit,
-                            text: "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}"
+                            text: r#"
+                                <svg width='200' height='200' xmlns='http://www.w3.org/2000/svg'>
+                                    <circle cx='100' cy='100' r='100' fill='#ff0000' />
+                                    <rect x='50' y='50' width='100' height='100' fill='#0000ff'/>
+                                    <text x='100' y='100' font-size='32' text-anchor='middle' dominant-baseline='middle' fill='#ffffff'>Hello, world!</text>
+                                </svg>
+                            "#
                         }
                     }
                 }
@@ -41,7 +47,7 @@ pub struct App {
 impl LiveRegister for App {
     fn live_register(cx: &mut Cx) {
         makepad_widgets::live_design(cx);
-        crate::math::live_design(cx);
+        crate::svg::live_design(cx);
     }
 }
 
