@@ -19,6 +19,7 @@ workspace.members = [
     "examples/xr_net",
     "examples/comfyui",
     "libs/math_widget",
+    "libs/svg",
     "libs/script/test",
     "studio",
     "tools/cargo_makepad",

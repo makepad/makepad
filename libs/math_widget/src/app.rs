@@ -15,10 +15,6 @@ live_design!{
                     <View> {
                         width: 200.0,
                         height: 150.0,
-                        align: {
-                            x: 0.5,
-                            y: 0.5,
-                        }
                         show_bg: true,
                         draw_bg: {
                             color: #000
