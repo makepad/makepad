@@ -32,11 +32,12 @@ impl MatchEvent for App{
             use mod.std
             use mod.run
                             
-            let comfy_ip = "10.0.0.123:8000"
+            let comfy_ip = "10.0.0.134:8000"
             let openai_base = "http://127.0.0.1:8080";
             let Display = {mac:"" ip:"" landscape:false}.freeze_api()
             let displays = [
                 Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.122", landscape:false}
+                Display{mac:"28-07-08-2c-d9-42" ip:"10.0.0.102", landscape:true},
                 Display{mac:"28-07-08-2c-d9-42" ip:"10.0.0.105", landscape:true},
                 Display{mac:"B0-f2-f6-60-f6-e1" ip:"10.0.0.124", landscape:true},
             ]
@@ -126,7 +127,7 @@ impl MatchEvent for App{
                 
             fn connect_comfy_websocket(model){
                 let task = std.task()
-                net.web_socket("ws://"+comfy_ip+"/ws?clientId=1234") do net.WebSocketEvents{
+                net.web_socket("ws://"+comfy_ip+"/ws?clientId=8a327a3e4961419ea7386c542f0ea491") do net.WebSocketEvents{
                     on_string:fn(str){
                         let str = str.parse_json()
                         if ok{str.data.nodes[model.sampler].state == "running"}
@@ -136,13 +137,16 @@ impl MatchEvent for App{
                             task.emit(@done, prompt_id)
                         }
                     }
+                    on_error:fn(e){
+                        std.println(e)
+                    }
                 };
                 task
             }
                                     
             fn comfy_render(prompt, display, model){
                 let task = std.task()
-                std.log("Rendering AI: ");
+                std.println("Rendering AI: ");
                 let flow = fs.read(model.file).parse_json()
                         
                 flow[model.prompt].inputs.clip_l = prompt.style_and_keywords
@@ -157,7 +161,7 @@ impl MatchEvent for App{
                 let req = net.HttpRequest{
                     url: "http://" + comfy_ip + "/prompt"
                     method: net.HttpMethod.POST
-                    body:{prompt:flow client_id:1234}.to_json()
+                    body:{prompt:flow client_id:"8a327a3e4961419ea7386c542f0ea491"}.to_json()
                 }
                 net.http_request(req) do net.HttpEvents{
                     on_response: |res| task.end(ok{res.body.parse_json().prompt_id})
@@ -167,18 +171,20 @@ impl MatchEvent for App{
                                     
             fn eink_upload_image(display, path){
                 let task = std.task()
+                std.println("Uploading image: "+display.mac+" "+display.ip+" "+path)
                 run.child(run.ChildCmd{
                     cmd: "node"
                     args: [
                         "/usr/local/lib/node_modules/@weejewel/samsung-emdx/bin/index.mjs" "show-image"
                         "--mac" display.mac
                         "--host" display.ip
+                        "--local-ip" "10.0.0.129"
                         "--pin" "123456"
                         "--image" path
                     ]
                 }) do run.ChildEvents{
                     on_stdout: |s| {}
-                    on_stderr: |s| ~s
+                    on_stderr: |s| std.println(s)
                     on_term: || task.end()
                 }
                 task
@@ -229,7 +235,7 @@ impl MatchEvent for App{
                 
                 let image_prompt = image_prompt.strip_prefix("```json").strip_suffix("```").parse_json();
                         
-                std.log("Rendering prompt: "+image_prompt.visual_description+" keywords: "+image_prompt.style_and_keywords)
+                std.println("Rendering prompt: "+image_prompt.visual_description+" keywords: "+image_prompt.style_and_keywords)
                         
                 let prompt_id = comfy_render(image_prompt display model).last()
                 // this loop needs some more features like match or a for loop with array destructuring'
@@ -240,16 +246,16 @@ impl MatchEvent for App{
                         prompt_id = d[1];break
                     }
                 }
-                std.log("Fetching last image from comfy");
+                std.println("Fetching last image from comfy");
                 let image = comfy_last_image(prompt_id, model).last()
                 // fetch the image from comfy
                 let data = comfy_image_download(image).last()
                 let path = "/Users/admin/makepad/makepad/local/eink.png"
                 fs.write(path data)
                         
-                std.log("Uploading to "+display.ip)
+                std.println("Uploading to "+display.ip)
                 eink_upload_image(display path).last()
-                std.log("DONE!")
+                std.println("DONE!")
             }
                             
             std.start_interval(60) do fn{
