@@ -32,7 +32,7 @@ fn get_deveco_sdk_home(deveco_home: &Path, _host_os: &HostOs) -> Result<PathBuf,
 
 fn get_node_home(deveco_home: &Path, host_os: &HostOs) -> Result<PathBuf, String> {
     match host_os {
-        HostOs::LinuxX64 => {
+        HostOs::Linux => {
             let node = deveco_home.join("tool/node");
             if node.is_dir() {
                 return Ok(node);
@@ -52,7 +52,7 @@ fn get_node_home(deveco_home: &Path, host_os: &HostOs) -> Result<PathBuf, String
 
 fn get_node_path(deveco_home: &Path, host_os: &HostOs) -> Result<PathBuf, String> {
     match host_os {
-        HostOs::LinuxX64 => {
+        HostOs::Linux => {
             let node = deveco_home.join("tool/node/bin/node");
             if node.is_file() {
                 return Ok(node);
@@ -79,7 +79,7 @@ fn get_node_path(deveco_home: &Path, host_os: &HostOs) -> Result<PathBuf, String
 
 fn get_hvigor_path(deveco_home: &Path, host_os: &HostOs) -> Result<PathBuf, String> {
     match host_os {
-        HostOs::LinuxX64 => {
+        HostOs::Linux => {
             let hvigor = deveco_home.join("hvigor/bin/hvigorw.js");
             if hvigor.is_file() {
                 return Ok(hvigor);
@@ -106,7 +106,7 @@ fn get_hvigor_path(deveco_home: &Path, host_os: &HostOs) -> Result<PathBuf, Stri
 
 fn get_hdc_path(deveco_home: &Path, host_os: &HostOs) -> Result<PathBuf, String> {
     match host_os {
-        HostOs::LinuxX64 | HostOs::MacOS => {
+        HostOs::Linux | HostOs::MacOS => {
             let hdc_path = deveco_home.join(format!("sdk/default/openharmony/toolchains/hdc"));
             if hdc_path.is_file() {
                     return Ok(hdc_path);
@@ -218,7 +218,7 @@ pub fn rust_build(deveco_home: &Option<String>, host_os: &HostOs, args: &[String
     let sdk_path = get_sdk_home(deveco_home, &host_os)?;
 
     let bin_path = |file_name: &str, extension:& str| match host_os {
-        HostOs::LinuxX64 => String::from(file_name),
+        HostOs::Linux => String::from(file_name),
         HostOs::WindowsX64 => format!("{file_name}.{extension}"),
         HostOs::MacOS => String::from(file_name),
         _ => panic!()
