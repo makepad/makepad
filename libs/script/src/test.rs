@@ -25,6 +25,11 @@ pub fn test(){
         #[live{named_field:1.0}] 
         Named{named_field:f64}
     }
+    
+    //#[derive(ScriptShader)]
+    #[repr(C)]
+    pub struct ShaderTest{
+    }
         
     use crate::vm::*;
     use crate::value::*;

@@ -232,6 +232,13 @@ pub enum Event {
     ToWasmMsg(ToWasmMsgEvent),
     
     DesignerPick(DesignerPickEvent),
+    
+    /// A gamepad/game controller was connected or first interacted with.
+    /// 
+    /// Following the Web Gamepad API pattern, this event is sent when:
+    /// - A new gamepad is physically connected
+    /// - A button is first pressed on an already-connected gamepad
+    GamepadConnected(GamepadConnectedEvent),
 }
 
 impl Event{
@@ -309,6 +316,7 @@ impl Event{
             
             56=>"DesignerPick",
             57=>"XrLocal",
+            58=>"GamepadConnected",
             _=>panic!()
         }
     }
@@ -383,7 +391,8 @@ impl Event{
             Self::ToWasmMsg(_)=>55,
             
             Self::DesignerPick(_) =>56,
-            Self::XrLocal(_)=>57
+            Self::XrLocal(_)=>57,
+            Self::GamepadConnected(_)=>58
         }
     }
 
