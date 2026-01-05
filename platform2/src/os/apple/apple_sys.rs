@@ -1319,4 +1319,19 @@ extern "C" {
 }
 
 
+// Game Controller Framework (GCController)
+
+#[link(name = "GameController", kind = "framework")]
+extern "C" {
+    /// Notification name for when a controller connects
+    pub static GCControllerDidConnectNotification: ObjcId;
+    /// Notification name for when a controller disconnects  
+    pub static GCControllerDidDisconnectNotification: ObjcId;
+    /// Notification name for when a controller becomes the current controller
+    pub static GCControllerDidBecomeCurrentNotification: ObjcId;
+    /// Notification name for when a controller stops being the current controller
+    pub static GCControllerDidStopBeingCurrentNotification: ObjcId;
+}
+
+
 
