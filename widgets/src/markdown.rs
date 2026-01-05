@@ -316,6 +316,7 @@ pub struct Markdown{
     #[live(false)] use_code_block_widget:bool,
     #[rust] in_code_block: bool,
     #[rust] code_block_string: String,
+    #[live(false)] use_math_widget: bool,
     #[rust] auto_id: u64,
     #[live] heading_base_scale: f64,
 }
@@ -352,7 +353,7 @@ impl Markdown {
         let mut list_stack: Vec<ListState> = Vec::new();
         let mut is_first_block = true;
 
-        let parser = Parser::new_ext(self.body.as_ref(), Options::ENABLE_TABLES);        
+        let parser = Parser::new_ext(self.body.as_ref(), Options::ENABLE_TABLES | Options::ENABLE_MATH);        
         
         for event in parser.into_iter() {
             match event {
@@ -517,6 +518,48 @@ impl Markdown {
                     tf.font_sizes.pop();
                     tf.fixed.pop();
                     tf.inline_code.pop();
+                }
+                // Inline math ($...$)
+                MdEvent::InlineMath(text) => {
+                    if self.use_math_widget {
+                        let entry_id = tf.new_counted_id();
+                        tf.item_with(cx, entry_id, live_id!(inline_math), |cx, item, _tf| {
+                            item.set_text(cx, &text);
+                            item.draw_all_unscoped(cx);
+                        });
+                    } else {
+                        // Fallback: render as inline code style
+                        const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
+                        tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
+                        tf.fixed.push();
+                        tf.inline_code.push();
+                        tf.draw_text(cx, &text);
+                        tf.font_sizes.pop();
+                        tf.fixed.pop();
+                        tf.inline_code.pop();
+                    }
+                }
+                // Display math ($$...$$)
+                MdEvent::DisplayMath(text) => {
+                    if !is_first_block {
+                        cx.turtle_new_line_with_spacing(self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+
+                    if self.use_math_widget {
+                        let entry_id = tf.new_counted_id();
+                        tf.item_with(cx, entry_id, live_id!(display_math), |cx, item, _tf| {
+                            item.set_text(cx, &text);
+                            item.draw_all_unscoped(cx);
+                        });
+                    } else {
+                        // Fallback: render as code block style
+                        tf.begin_code(cx);
+                        tf.fixed.push();
+                        tf.draw_text(cx, &text);
+                        tf.fixed.pop();
+                        tf.end_code(cx);
+                    }
                 }
                 MdEvent::Text(text) => {
                     if self.in_code_block {
