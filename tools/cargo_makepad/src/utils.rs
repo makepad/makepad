@@ -51,7 +51,7 @@ pub fn get_crate_dep_dirs(build_crate: &str, build_dir:&Path, target:&str) -> Ha
     let mut dependencies = HashMap::new();
     let cwd = std::env::current_dir().unwrap();
     let target = format!("--target={target}");
-    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "-p", build_crate, &target]) {
+    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree", "--color", "never", "-p", build_crate, &target]) {
         for line in cargo_tree_output.lines().skip(1) {
             if let Some((name, path)) = extract_dependency_paths(line) {
                 if let Some(path) = path{
