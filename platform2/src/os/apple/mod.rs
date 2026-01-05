@@ -25,7 +25,6 @@ pub mod core_midi;
 pub mod apple_media;
 pub mod apple_gamepad;
 pub mod av_capture;
-pub mod apple_gamepad;
 
 pub(crate) use self::metal::*;
 #[cfg(target_os = "macos")]

@@ -1312,8 +1312,6 @@ extern "C" {
 
 #[link(name = "GameController", kind = "framework")]
 extern "C" {
-    pub static GCControllerDidConnectNotification: ObjcId;
-    pub static GCControllerDidDisconnectNotification: ObjcId;
     pub static GCController: ObjcId;
     pub static GCExtendedGamepad: ObjcId;
 }
