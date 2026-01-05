@@ -1,6 +1,8 @@
 use {
     std::{
-        cell::{Cell,RefCell},
+        cell::{Cell, RefCell},
+        ffi::c_void,
+        rc::Rc,
         time::Instant,
     },
     crate::{
@@ -66,6 +68,7 @@ pub struct IosClasses {
     pub gesture_recognizer_handler: *const Class,
     pub textfield_delegate: *const Class,
     pub timer_delegate: *const Class,
+    pub edit_menu_delegate: *const Class,
 }
 impl IosClasses {
     pub fn new() -> Self {
@@ -75,7 +78,8 @@ impl IosClasses {
             mtk_view_delegate: define_mtk_view_delegate(),
             gesture_recognizer_handler: define_gesture_recognizer_handler(),
             textfield_delegate: define_textfield_delegate(),
-            timer_delegate: define_ios_timer_delegate()
+            timer_delegate: define_ios_timer_delegate(),
+            edit_menu_delegate: define_edit_menu_interaction_delegate(),
         }
     }
 }
@@ -93,13 +97,15 @@ pub struct IosApp {
     pub textfield: Option<ObjcId>,
     event_callback: Option<Box<dyn FnMut(IosEvent) -> EventFlow >>,
     event_flow: EventFlow,
-    pasteboard: ObjcId
+    pasteboard: ObjcId,
+    edit_menu_delegate_instance: ObjcId,
+    edit_menu_interaction: Option<ObjcId>,
 }
 
 impl IosApp {
     pub fn new(metal_device: ObjcId, event_callback: Box<dyn FnMut(IosEvent) -> EventFlow>) -> IosApp {
         unsafe {
-            
+
             // Construct the bits that are shared between windows
             //let ns_app: ObjcId = msg_send![class!(UIApplication), sharedApplication];
             //let app_delegate_instance: ObjcId = msg_send![get_ios_class_global().app_delegate, new];
@@ -107,8 +113,9 @@ impl IosApp {
             //   panic!();
             //}
             //let () = msg_send![ns_app, setDelegate: app_delegate_instance];
-            
+
             let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
+            let edit_menu_delegate_instance: ObjcId = msg_send![get_ios_class_global().edit_menu_delegate, new];
             IosApp {
                 virtual_keyboard_event: None,
                 touches: Vec::new(),
@@ -123,6 +130,8 @@ impl IosApp {
                 event_flow: EventFlow::Poll,
                 event_callback: Some(event_callback),
                 pasteboard,
+                edit_menu_delegate_instance,
+                edit_menu_interaction: None,
             }
         }
     }
@@ -199,9 +208,21 @@ impl IosApp {
             //let () = msg_send![view_ctrl_obj, endAppearanceTransition];
             
             let () = msg_send![window_obj, makeKeyAndVisible];
-            
+
+            // Initialize UIEditMenuInteraction for clipboard actions
+            // Store MTKView reference in the delegate for accessing menu rect
+            (*self.edit_menu_delegate_instance).set_ivar("mtk_view", mtk_view_obj as *mut c_void);
+
+            // Create UIEditMenuInteraction with our delegate
+            let edit_menu_interaction: ObjcId = msg_send![class!(UIEditMenuInteraction), alloc];
+            let edit_menu_interaction: ObjcId = msg_send![edit_menu_interaction, initWithDelegate: self.edit_menu_delegate_instance];
+
+            // Add the interaction to the MTKView
+            let () = msg_send![mtk_view_obj, addInteraction: edit_menu_interaction];
+
             self.textfield = Some(textfield);
             self.mtk_view = Some(mtk_view_obj);
+            self.edit_menu_interaction = Some(edit_menu_interaction);
         }
     }
     
@@ -473,25 +494,113 @@ impl IosApp {
         }
     }
 
-    pub fn show_clipboard_actions(&self, _has_selection: bool) {
-        // Note: Full UIMenuController implementation requires:
-        // 1. A custom UIView that can become first responder
-        // 2. Implementation of canPerformAction:withSender:
-        // 3. Action methods (copy:, paste:, cut:, selectAll:)
-        // 4. Proper positioning of the menu
-        //
-        // This is a placeholder that logs the intent.
-        // The hidden textfield approach currently used for IME doesn't
-        // easily support UIMenuController as it's designed for keyboard input only.
-        //
-        // For full implementation, we need to either:
-        // A) Add a custom responder view to the view hierarchy, OR
-        // B) Make the MTKView conform to the required protocols
+    pub fn show_clipboard_actions(&self, has_selection: bool, rect: Rect, _keyboard_shift: f64) {
+        unsafe {
+            let mtk_view = match self.mtk_view {
+                Some(view) => view,
+                None => return,
+            };
 
-        crate::log!("iOS: showClipboardActions called - UIMenuController not yet implemented");
+            let edit_menu_interaction = match self.edit_menu_interaction {
+                Some(interaction) => interaction,
+                None => return,
+            };
 
-        // TODO: Implement UIMenuController properly
-        // Reference implementation needed similar to Android's ActionMode
+            // Store selection state in the view for canPerformAction filtering
+            let has_sel: BOOL = if has_selection { YES } else { NO };
+            (*mtk_view).set_ivar::<BOOL>("has_selection", has_sel);
+
+            // Store the menu rect in the view for the delegate's targetRectForConfiguration
+            (*mtk_view).set_ivar::<f64>("menu_rect_x", rect.pos.x);
+            (*mtk_view).set_ivar::<f64>("menu_rect_y", rect.pos.y);
+            (*mtk_view).set_ivar::<f64>("menu_rect_width", rect.size.x.max(1.0));
+            (*mtk_view).set_ivar::<f64>("menu_rect_height", rect.size.y.max(1.0));
+
+            // Note: We do NOT call becomeFirstResponder here because:
+            // 1. UIEditMenuInteraction doesn't require the view to be first responder
+            // 2. Calling becomeFirstResponder triggers keyboard notifications which causes
+            //    re-entrant with_ios_app calls and crashes
+
+            // Create configuration with source point at center of the rect
+            let source_point = NSPoint {
+                x: rect.pos.x + rect.size.x / 2.0,
+                y: rect.pos.y + rect.size.y / 2.0,
+            };
+            let config: ObjcId = msg_send![
+                class!(UIEditMenuConfiguration),
+                configurationWithIdentifier: nil
+                sourcePoint: source_point
+            ];
+
+            // Present the edit menu
+            let () = msg_send![edit_menu_interaction, presentEditMenuWithConfiguration: config];
+        }
+    }
+
+    pub fn hide_clipboard_actions(&self) {
+        unsafe {
+            if let Some(edit_menu_interaction) = self.edit_menu_interaction {
+                let () = msg_send![edit_menu_interaction, dismissMenu];
+            }
+        }
+    }
+
+    // Action dispatch methods called from MakepadView's action handlers
+    pub fn send_clipboard_action(action: &str) {
+        match action {
+            "copy" => {
+                let response = Rc::new(RefCell::new(None));
+                IosApp::do_callback(IosEvent::TextCopy(TextClipboardEvent {
+                    response: response.clone()
+                }));
+                // After the event handler fills in the response, copy to clipboard
+                let text_to_copy = response.borrow().clone();
+                if let Some(text) = text_to_copy {
+                    with_ios_app(|app| app.copy_to_clipboard(&text));
+                }
+            },
+            "cut" => {
+                let response = Rc::new(RefCell::new(None));
+                IosApp::do_callback(IosEvent::TextCut(TextClipboardEvent {
+                    response: response.clone()
+                }));
+                // After the event handler fills in the response, copy to clipboard
+                let text_to_copy = response.borrow().clone();
+                if let Some(text) = text_to_copy {
+                    with_ios_app(|app| app.copy_to_clipboard(&text));
+                }
+            },
+            "select_all" => {
+                // Send Cmd+A keypress to trigger select all in widgets
+                // On Apple platforms, is_primary() checks for logo (Command)
+                let time = with_ios_app(|app| app.time_now());
+                IosApp::do_callback(IosEvent::KeyDown(KeyEvent {
+                    key_code: KeyCode::KeyA,
+                    is_repeat: false,
+                    modifiers: KeyModifiers {
+                        shift: false,
+                        control: false,
+                        alt: false,
+                        logo: true,
+                    },
+                    time,
+                }));
+            },
+            _ => {
+                crate::log!("iOS: Unknown clipboard action: {}", action);
+            }
+        }
+    }
+
+    pub fn send_clipboard_paste() {
+        let content = with_ios_app(|app| app.paste_from_clipboard());
+        if !content.is_empty() {
+            IosApp::do_callback(IosEvent::TextInput(TextInputEvent {
+                input: content,
+                replace_last: false,
+                was_paste: true,
+            }));
+        }
     }
 
     pub fn get_ios_directory_paths() -> String {

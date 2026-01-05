@@ -40,10 +40,73 @@ pub fn define_ios_app_delegate() -> *const Class {
 
 pub fn define_mtk_view() -> *const Class {
     let mut decl = ClassDecl::new("MakepadView", class!(MTKView)).unwrap();
+
+    // Add instance variables for clipboard menu state
+    decl.add_ivar::<BOOL>("has_selection");
+    decl.add_ivar::<f64>("menu_rect_x");
+    decl.add_ivar::<f64>("menu_rect_y");
+    decl.add_ivar::<f64>("menu_rect_width");
+    decl.add_ivar::<f64>("menu_rect_height");
+    decl.add_ivar::<*mut c_void>("edit_menu_interaction");
+
     extern "C" fn yes(_: &Object, _: Sel) -> BOOL {
         YES
     }
-    
+
+    // Required for UIEditMenuInteraction to work - view must be able to become first responder
+    extern "C" fn can_become_first_responder(_: &Object, _: Sel) -> BOOL {
+        YES
+    }
+
+    // Return nil to prevent keyboard from showing when MakepadView becomes first responder
+    // (The hidden UITextField handles keyboard input separately)
+    extern "C" fn input_view(_: &Object, _: Sel) -> ObjcId {
+        nil
+    }
+
+    // Filter which clipboard actions are available based on selection state
+    extern "C" fn can_perform_action(this: &Object, _: Sel, action: Sel, _sender: ObjcId) -> BOOL {
+        unsafe {
+            let has_selection: BOOL = *this.get_ivar("has_selection");
+
+            // Copy and Cut require a selection
+            if action == sel!(copy:) || action == sel!(cut:) {
+                return has_selection;
+            }
+
+            // Paste requires clipboard to have text content
+            if action == sel!(paste:) {
+                let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
+                let has_strings: BOOL = msg_send![pasteboard, hasStrings];
+                return has_strings;
+            }
+
+            // Select All is always available
+            if action == sel!(selectAll:) {
+                return YES;
+            }
+
+            NO
+        }
+    }
+
+    // Action handlers for clipboard operations
+    extern "C" fn copy_action(_this: &Object, _: Sel, _sender: ObjcId) {
+        IosApp::send_clipboard_action("copy");
+    }
+
+    extern "C" fn cut_action(_this: &Object, _: Sel, _sender: ObjcId) {
+        IosApp::send_clipboard_action("cut");
+    }
+
+    extern "C" fn paste_action(_this: &Object, _: Sel, _sender: ObjcId) {
+        IosApp::send_clipboard_paste();
+    }
+
+    extern "C" fn select_all_action(_this: &Object, _: Sel, _sender: ObjcId) {
+        IosApp::send_clipboard_action("select_all");
+    }
+
     fn on_touch(this: &Object, event: ObjcId, state: TouchState) {
         unsafe {
             let enumerator: ObjcId = msg_send![event, allTouches];
@@ -115,8 +178,41 @@ pub fn define_mtk_view() -> *const Class {
             sel!(touchesCanceled: withEvent:),
             touches_canceled as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
+
+        // First responder support for clipboard menu
+        decl.add_method(
+            sel!(canBecomeFirstResponder),
+            can_become_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        // Return nil to prevent keyboard from appearing when view becomes first responder
+        decl.add_method(
+            sel!(inputView),
+            input_view as extern "C" fn(&Object, Sel) -> ObjcId,
+        );
+        decl.add_method(
+            sel!(canPerformAction:withSender:),
+            can_perform_action as extern "C" fn(&Object, Sel, Sel, ObjcId) -> BOOL,
+        );
+
+        // Clipboard action handlers
+        decl.add_method(
+            sel!(copy:),
+            copy_action as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(cut:),
+            cut_action as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(paste:),
+            paste_action as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(selectAll:),
+            select_all_action as extern "C" fn(&Object, Sel, ObjcId),
+        );
     }
-    
+
     return decl.register();
 }
 
@@ -325,5 +421,52 @@ pub fn define_textfield_delegate() -> *const Class {
         );
     }
     decl.add_ivar::<*mut c_void>("display_ptr");
+    return decl.register();
+}
+
+/// Defines a delegate class for UIEditMenuInteraction
+/// This delegate provides the target rect for menu positioning.
+pub fn define_edit_menu_interaction_delegate() -> *const Class {
+    let mut decl = ClassDecl::new("MakepadEditMenuDelegate", class!(NSObject)).unwrap();
+
+    // Store a reference to the MTKView for accessing menu rect
+    decl.add_ivar::<*mut c_void>("mtk_view");
+
+    // editMenuInteraction:targetRectForConfiguration:
+    // Returns the rect where the menu should point to (selection rect)
+    extern "C" fn target_rect_for_configuration(
+        this: &Object,
+        _: Sel,
+        _interaction: ObjcId,
+        _configuration: ObjcId,
+    ) -> NSRect {
+        unsafe {
+            let mtk_view: *mut c_void = *this.get_ivar("mtk_view");
+            if mtk_view.is_null() {
+                return NSRect {
+                    origin: NSPoint { x: 0.0, y: 0.0 },
+                    size: NSSize { width: 1.0, height: 1.0 },
+                };
+            }
+            let view = mtk_view as ObjcId;
+            let x: f64 = *(*view).get_ivar("menu_rect_x");
+            let y: f64 = *(*view).get_ivar("menu_rect_y");
+            let width: f64 = *(*view).get_ivar("menu_rect_width");
+            let height: f64 = *(*view).get_ivar("menu_rect_height");
+            NSRect {
+                origin: NSPoint { x, y },
+                size: NSSize { width, height },
+            }
+        }
+    }
+
+    unsafe {
+        // UIEditMenuInteractionDelegate method: editMenuInteraction:targetRectForConfiguration:
+        decl.add_method(
+            sel!(editMenuInteraction:targetRectForConfiguration:),
+            target_rect_for_configuration as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> NSRect,
+        );
+    }
+
     return decl.register();
 }
