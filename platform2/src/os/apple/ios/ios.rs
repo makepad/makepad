@@ -268,6 +268,9 @@ impl Cx {
             IosEvent::PermissionResult(result) => {
                 self.call_event_handler(&Event::PermissionResult(result))
             }
+            IosEvent::GamepadConnected(e) => {
+                self.call_event_handler(&Event::GamepadConnected(e))
+            }
         }
 
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty|| self.demo_time_repaint{

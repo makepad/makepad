@@ -1,5 +1,6 @@
 use {
     std::{
+        rc::Rc,
         cell::{RefCell},
         time::Instant,
     },
@@ -11,6 +12,7 @@ use {
                 tvos_delegates::*,
                 tvos_event::*,
             },
+            apple::apple_gamepad::AppleGamepad,
             cx_native::EventFlow,
         },
         //area::Area,
@@ -94,6 +96,7 @@ pub struct TvosApp {
    // pub textfield: Option<ObjcId>,
     event_callback: Option<Box<dyn FnMut(TvosEvent) -> EventFlow >>,
     event_flow: EventFlow,
+    pub apple_gamepad: Rc<RefCell<AppleGamepad>>,
 }
 
 impl TvosApp {
@@ -101,6 +104,11 @@ impl TvosApp {
         unsafe {
             
             // Construct the bits that are shared between windows
+            
+            let apple_gamepad = AppleGamepad::init(|event| {
+                TvosApp::do_callback(TvosEvent::GamepadConnected(event));
+            });
+
             TvosApp {
                 //touches: Vec::new(),
                 last_window_geom: WindowGeom::default(),
@@ -112,6 +120,7 @@ impl TvosApp {
                 timers: Vec::new(),
                 event_flow: EventFlow::Poll,
                 event_callback: Some(event_callback),
+                apple_gamepad,
             }
         }
     }

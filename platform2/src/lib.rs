@@ -11,6 +11,7 @@ mod cx;
 mod cx_api;
 
 pub mod action;
+pub mod gamepad;
 
 pub mod thread;
 pub mod audio;
@@ -118,6 +119,7 @@ pub use {
             RectArea,
             InstanceArea
         },
+        gamepad::*,
         midi::*,
         audio::*,
         thread::*,
