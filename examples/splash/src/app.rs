@@ -25,6 +25,12 @@ pub struct App {
 }
  
 impl MatchEvent for App{
+    fn handle_timer(&mut self, cx:&mut Cx, _ev: &TimerEvent){
+        if let Some(gp) = cx.gamepad_state(0){
+            println!("{:?}", gp);
+        }
+    }
+    
     fn handle_startup(&mut self, cx:&mut Cx){
         self.window.set_pass(cx, &self.pass);
         self.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32{
@@ -33,6 +39,7 @@ impl MatchEvent for App{
         });
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
         self.pass.set_window_clear_color(cx, vec4(0.0, 0.0, 1.0, 0.0));
+        cx.start_interval(0.01);
     }
 
     fn handle_draw_2d(&mut self, cx: &mut Cx2d){
@@ -51,6 +58,7 @@ impl MatchEvent for App{
         cx.end_pass_sized_turtle();
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass);
+        
     }
         
     fn handle_actions(&mut self, _cx: &mut Cx, _actions:&Actions){
@@ -59,6 +67,9 @@ impl MatchEvent for App{
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::GamepadConnected(ev) = event{
+            println!("{:?}", ev);
+        }
         let _ = self.match_event_with_draw_2d(cx, event);
     }
 }

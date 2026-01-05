@@ -22,7 +22,7 @@ use {
             apple_sys::*,
             metal_xpc::{
                 xpc_service_proxy,
-                //xpc_service_proxy_poll_run_loop,
+                xpc_service_proxy_poll_run_loop,
                 fetch_xpc_service_texture,
             },
             metal::{MetalCx, DrawPassMode},
@@ -292,8 +292,12 @@ impl Cx {
                     }*/
                     
                     self.handle_networking_events();
+                    self.handle_gamepad_events();
                     self.stdin_handle_platform_ops(metal_cx, &mut stdin_windows);
                     // alright a tick.
+                    
+                    // we should poll our runloop
+                    xpc_service_proxy_poll_run_loop();
                     // we should now run all the stuff.
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(self.os.stdin_timers.time_now());

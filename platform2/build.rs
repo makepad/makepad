@@ -52,6 +52,7 @@ fn main() {
 
             println!("cargo:rustc-link-search=native={}", out_dir);
             println!("cargo:rustc-link-lib=static=metal_xpc");
+            println!("cargo:rustc-link-lib=framework=GameController");
             println!("cargo:rerun-if-changed=src/os/apple/metal_xpc.m");
         }
         "ios"=>{
@@ -60,6 +61,7 @@ fn main() {
                 //println!("cargo:rustc-cfg=apple_bundle");
             }
             println!("cargo:rustc-link-lib=framework=MetalKit");
+            println!("cargo:rustc-link-lib=framework=GameController");
         }
         "tvos"=>{
             if target == "aarch64-apple-tvos-sim"{
@@ -67,6 +69,7 @@ fn main() {
                 //println!("cargo:rustc-cfg=apple_bundle");
             }
             println!("cargo:rustc-link-lib=framework=MetalKit");
+            println!("cargo:rustc-link-lib=framework=GameController");
         }
         "linux"=>{
             println!("cargo:rustc-link-lib=xkbcommon");

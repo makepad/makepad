@@ -31,17 +31,17 @@ impl MatchEvent for App{
             use mod.fs
             use mod.std
             use mod.run
-                            
-            let comfy_ip = "192.0.2.72:8000"
+            let self_ip = "192.0.2.48"
+            let comfy_ip = "192.0.2.76:8000"
             let openai_base = "http://127.0.0.1:8080";
             let Display = {mac:"" ip:"" landscape:false}.freeze_api()
             let displays = [
-                Display{mac:"00-00-5E-00-53-11" ip:"192.0.2.58", landscape:false}
-                Display{mac:"00-00-5e-00-53-12" ip:"192.0.2.40", landscape:true},
-                Display{mac:"00-00-5e-00-53-12" ip:"192.0.2.44", landscape:true},
-                Display{mac:"00-00-5E-00-53-13" ip:"192.0.2.61", landscape:true},
+                Display{mac:"00-00-5E-00-53-11" ip:"192.0.2.81" landscape:false} // left
+                Display{mac:"00:00:5E:00:53:12" ip:"192.0.2.84" landscape:true} // table
+                Display{mac:"00-00-5E-00-53-13" ip:"192.0.2.88" landscape:true} // door
+                Display{mac:"00:00:5E:00:53:10" ip:"192.0.2.61" landscape:true} // side
             ]
-                
+            
             fn openai_completion(messages){
                 let task = std.task()
                 let req = net.HttpRequest{
@@ -157,7 +157,7 @@ impl MatchEvent for App{
                 if display.landscape model.width else model.height
                 flow[model.image].inputs.height = 
                 if display.landscape model.height else model.width
-                            
+                
                 let req = net.HttpRequest{
                     url: "http://" + comfy_ip + "/prompt"
                     method: net.HttpMethod.POST
@@ -178,7 +178,7 @@ impl MatchEvent for App{
                         "/usr/local/lib/node_modules/@weejewel/samsung-emdx/bin/index.mjs" "show-image"
                         "--mac" display.mac
                         "--host" display.ip
-                        "--local-ip" "192.0.2.67"
+                        "--local-ip" self_ip
                         "--pin" "123456"
                         "--image" path
                     ]
