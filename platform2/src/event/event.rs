@@ -232,13 +232,6 @@ pub enum Event {
     ToWasmMsg(ToWasmMsgEvent),
     
     DesignerPick(DesignerPickEvent),
-    
-    /// A gamepad/game controller was connected or first interacted with.
-    /// 
-    /// Following the Web Gamepad API pattern, this event is sent when:
-    /// - A new gamepad is physically connected
-    /// - A button is first pressed on an already-connected gamepad
-    GamepadConnected(GamepadConnectedEvent),
 }
 
 impl Event{
@@ -261,62 +254,62 @@ impl Event{
             8=>"LiveEdit",
             9=>"WindowGotFocus",
             10=>"WindowLostFocus",
-            11=>"NextFrame",
-            12=>"XRUpdate",
+            11=>"GamepadConnected",
+            12=>"NextFrame",
+            13=>"XRUpdate",
 
-            13=>"WindowDragQuery",
-            14=>"WindowCloseRequested",
-            15=>"WindowClosed",
-            16=>"WindowGeomChange",
-            17=>"VirtualKeyboard",
-            18=>"ClearAtlasses",
+            14=>"WindowDragQuery",
+            15=>"WindowCloseRequested",
+            16=>"WindowClosed",
+            17=>"WindowGeomChange",
+            18=>"VirtualKeyboard",
+            19=>"ClearAtlasses",
 
-            19=>"MouseDown",
-            20=>"MouseMove",
-            21=>"MouseUp",
-            22=>"TouchUpdate",
-            23=>"LongPress",
-            24=>"Scroll",
+            20=>"MouseDown",
+            21=>"MouseMove",
+            22=>"MouseUp",
+            23=>"TouchUpdate",
+            24=>"LongPress",
+            25=>"Scroll",
 
-            25=>"Timer",
+            26=>"Timer",
 
-            26=>"Signal",
-            27=>"Trigger",
-            28=>"MacosMenuCommand",
-            29=>"KeyFocus",
-            30=>"KeyFocusLost",
-            31=>"KeyDown",
-            32=>"KeyUp",
-            33=>"TextInput",
-            34=>"TextCopy",
-            35=>"TextCut",
+            27=>"Signal",
+            28=>"Trigger",
+            29=>"MacosMenuCommand",
+            30=>"KeyFocus",
+            31=>"KeyFocusLost",
+            32=>"KeyDown",
+            33=>"KeyUp",
+            34=>"TextInput",
+            35=>"TextCopy",
+            36=>"TextCut",
 
-            36=>"Drag",
-            37=>"Drop",
-            38=>"DragEnd",
+            37=>"Drag",
+            38=>"Drop",
+            39=>"DragEnd",
 
-            39=>"AudioDevices",
-            40=>"MidiPorts",
-            41=>"VideoInputs",
-            42=>"NetworkResponses",
+            40=>"AudioDevices",
+            41=>"MidiPorts",
+            42=>"VideoInputs",
+            43=>"NetworkResponses",
 
-            43=>"VideoPlaybackPrepared",
-            44=>"VideoTextureUpdated",
-            45=>"VideoPlaybackCompleted",
-            46=>"VideoDecodingError",
-            47=>"VideoPlaybackResourcesReleased",
-            48=>"TextureHandleReady",
-            49=>"MouseLeave",
-            50=>"Actions",
-            51=>"BackPressed",
-            52=>"PermissionResult",
+            44=>"VideoPlaybackPrepared",
+            45=>"VideoTextureUpdated",
+            46=>"VideoPlaybackCompleted",
+            47=>"VideoDecodingError",
+            48=>"VideoPlaybackResourcesReleased",
+            49=>"TextureHandleReady",
+            50=>"MouseLeave",
+            51=>"Actions",
+            52=>"BackPressed",
+            53=>"PermissionResult",
 
             #[cfg(target_arch = "wasm32")]
-            55=>"ToWasmMsg",
+            54=>"ToWasmMsg",
             
-            56=>"DesignerPick",
-            57=>"XrLocal",
-            58=>"GamepadConnected",
+            55=>"DesignerPick",
+            56=>"XrLocal",
             _=>panic!()
         }
     }
@@ -388,11 +381,10 @@ impl Event{
             Self::PermissionResult(_)=>53,
             
             #[cfg(target_arch = "wasm32")]
-            Self::ToWasmMsg(_)=>55,
+            Self::ToWasmMsg(_)=>54,
             
-            Self::DesignerPick(_) =>56,
-            Self::XrLocal(_)=>57,
-            Self::GamepadConnected(_)=>58
+            Self::DesignerPick(_) =>55,
+            Self::XrLocal(_)=>56,
         }
     }
 
