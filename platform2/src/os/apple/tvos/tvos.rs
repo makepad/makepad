@@ -142,6 +142,8 @@ impl Cx {
         match event {
            TvosEvent::Init=>{
                 get_tvos_app_global().start_timer(0, 0.008, true);
+                // Start gamepad monitoring - especially important for tvOS
+                crate::os::apple::apple_gamepad::start_gamepad_monitoring();
                 self.start_studio_websocket_delayed();
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();

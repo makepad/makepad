@@ -142,6 +142,9 @@ impl Cx {
             }
         }));
 
+        // Start gamepad monitoring before the event loop
+        crate::os::apple::apple_gamepad::start_gamepad_monitoring();
+        
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
         // Start timer if there's initial work after startup
