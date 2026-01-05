@@ -14,6 +14,7 @@ use {
             LongPressEvent,
             TouchUpdateEvent,
             VirtualKeyboardEvent,
+            GamepadConnectedEvent
         },
         permission::PermissionResult,
     }
@@ -42,4 +43,5 @@ pub enum IosEvent {
     TextCut(TextClipboardEvent),
     Timer(TimerEvent),
     PermissionResult(PermissionResult),
+    GamepadConnected(GamepadConnectedEvent),
 }

@@ -176,6 +176,9 @@ impl Cx {
                 self.handle_script_timer(&e);
                 self.call_event_handler(&Event::Timer(e))
             }
+            TvosEvent::GamepadConnected(e) => {
+                self.call_event_handler(&Event::GamepadConnected(e))
+            }
         }
         
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {

@@ -2,6 +2,7 @@ use {
     std::{
         cell::{Cell,RefCell},
         time::Instant,
+        rc::Rc,
     },
     crate::{
         event::*,
@@ -9,6 +10,7 @@ use {
             apple::{
                 apple_sys::*,
                 apple_util::*,
+                apple_gamepad::AppleGamepad,
             },
             cx_native::EventFlow,
             ios::{
@@ -93,7 +95,8 @@ pub struct IosApp {
     pub textfield: Option<ObjcId>,
     event_callback: Option<Box<dyn FnMut(IosEvent) -> EventFlow >>,
     event_flow: EventFlow,
-    pasteboard: ObjcId
+    pasteboard: ObjcId,
+    pub apple_gamepad: Rc<RefCell<AppleGamepad>>,
 }
 
 impl IosApp {
@@ -109,6 +112,10 @@ impl IosApp {
             //let () = msg_send![ns_app, setDelegate: app_delegate_instance];
             
             let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
+            let apple_gamepad = AppleGamepad::init(|event| {
+                IosApp::do_callback(IosEvent::GamepadConnected(event));
+            });
+            
             IosApp {
                 virtual_keyboard_event: None,
                 touches: Vec::new(),
@@ -123,6 +130,7 @@ impl IosApp {
                 event_flow: EventFlow::Poll,
                 event_callback: Some(event_callback),
                 pasteboard,
+                apple_gamepad,
             }
         }
     }

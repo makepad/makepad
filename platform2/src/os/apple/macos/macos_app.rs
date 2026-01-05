@@ -144,7 +144,6 @@ impl MacosApp {
             let () = msg_send![ns_app, setDelegate: app_delegate_instance];
             let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
             
-            
             // Construct the bits that are shared between windows
             MacosApp {
                 startup_focus_hack_ran: false,

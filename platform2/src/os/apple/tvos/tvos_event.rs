@@ -4,6 +4,7 @@ use {
         event::{
             WindowGeomChangeEvent,
             TimerEvent,
+            GamepadConnectedEvent
         },
     }
 };
@@ -16,4 +17,5 @@ pub enum TvosEvent {
     WindowGeomChange(WindowGeomChangeEvent),
     Paint,
     Timer(TimerEvent),
+    GamepadConnected(GamepadConnectedEvent),
 }
