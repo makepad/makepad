@@ -1307,7 +1307,106 @@ extern "C" {
         inListener: AudioObjectPropertyListenerProc,
         inClientData: *mut ()
     ) -> OSStatus;
-    
+
+}
+
+// C Audio Unit API for VoiceProcessingIO on macOS
+
+pub type AURenderCallback = unsafe extern "C" fn(
+    inRefCon: *mut c_void,
+    ioActionFlags: *mut u32,
+    inTimeStamp: *const AudioTimeStamp,
+    inBusNumber: u32,
+    inNumberFrames: u32,
+    ioData: *mut AudioBufferList,
+) -> OSStatus;
+
+#[repr(C)]
+pub struct AURenderCallbackStruct {
+    pub inputProc: AURenderCallback,
+    pub inputProcRefCon: *mut c_void,
+}
+
+// Audio Unit property IDs
+pub const kAudioOutputUnitProperty_EnableIO: u32 = 2003;
+pub const kAudioOutputUnitProperty_SetInputCallback: u32 = 2005;
+pub const kAudioUnitProperty_StreamFormat: u32 = 8;
+pub const kAudioUnitProperty_ShouldAllocateBuffer: u32 = 23;
+
+// VoiceProcessingIO specific properties
+pub const kAUVoiceIOProperty_VoiceProcessingEnableAGC: u32 = 2100;
+pub const kAUVoiceIOProperty_BypassVoiceProcessing: u32 = 2101;
+
+// Render callback property (for output)
+pub const kAudioUnitProperty_SetRenderCallback: u32 = 23;
+
+// Audio Unit scopes
+pub const kAudioUnitScope_Global: u32 = 0;
+pub const kAudioUnitScope_Input: u32 = 1;
+pub const kAudioUnitScope_Output: u32 = 2;
+
+// Audio Unit elements (buses) for VPIO
+pub const kInputBus: u32 = 1;  // Microphone input
+pub const kOutputBus: u32 = 0; // Speaker output
+
+#[link(name = "AudioToolbox", kind = "framework")]
+extern "C" {
+    pub fn AudioComponentFindNext(
+        inComponent: CAudioComponent,
+        inDesc: *const AudioComponentDescription,
+    ) -> CAudioComponent;
+
+    pub fn AudioComponentInstanceNew(
+        inComponent: CAudioComponent,
+        outInstance: *mut CAudioUnit,
+    ) -> OSStatus;
+
+    pub fn AudioComponentInstanceDispose(
+        inInstance: CAudioUnit,
+    ) -> OSStatus;
+
+    pub fn AudioUnitInitialize(
+        inUnit: CAudioUnit,
+    ) -> OSStatus;
+
+    pub fn AudioUnitUninitialize(
+        inUnit: CAudioUnit,
+    ) -> OSStatus;
+
+    pub fn AudioOutputUnitStart(
+        ci: CAudioUnit,
+    ) -> OSStatus;
+
+    pub fn AudioOutputUnitStop(
+        ci: CAudioUnit,
+    ) -> OSStatus;
+
+    pub fn AudioUnitSetProperty(
+        inUnit: CAudioUnit,
+        inID: u32,
+        inScope: u32,
+        inElement: u32,
+        inData: *const c_void,
+        inDataSize: u32,
+    ) -> OSStatus;
+
+    pub fn AudioUnitGetProperty(
+        inUnit: CAudioUnit,
+        inID: u32,
+        inScope: u32,
+        inElement: u32,
+        outData: *mut c_void,
+        ioDataSize: *mut u32,
+    ) -> OSStatus;
+
+    pub fn AudioUnitRender(
+        inUnit: CAudioUnit,
+        ioActionFlags: *mut u32,
+        inTimeStamp: *const AudioTimeStamp,
+        inOutputBusNumber: u32,
+        inNumberFrames: u32,
+        ioData: *mut AudioBufferList,
+    ) -> OSStatus;
 }
 
 
