@@ -306,8 +306,11 @@ impl Cx {
                 CxOsOp::CancelHttpRequest {request_id} => {
                     self.os.http_requests.cancel_http_request(request_id);
                 },
-                CxOsOp::ShowClipboardActions { has_selection, .. } => {
-                    with_ios_app(|app| app.show_clipboard_actions(has_selection));
+                CxOsOp::ShowClipboardActions { has_selection, rect, keyboard_shift } => {
+                    with_ios_app(|app| app.show_clipboard_actions(has_selection, rect, keyboard_shift));
+                }
+                CxOsOp::HideClipboardActions => {
+                    with_ios_app(|app| app.hide_clipboard_actions());
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     with_ios_app(|app| app.copy_to_clipboard(&content));
