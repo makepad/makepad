@@ -197,7 +197,7 @@ pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPac
 #[cfg(any(target_os = "macos", target_os = "ios", target_os="tvos"))]
 pub const _DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
 #[cfg(any(target_os = "windows"))]
-pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
+pub const _DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
 
 impl DrawShaderInputs {
     pub fn new(packing_method: DrawShaderInputPacking) -> Self {

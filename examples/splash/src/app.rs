@@ -27,7 +27,14 @@ pub struct App {
 impl MatchEvent for App{
     fn handle_timer(&mut self, cx:&mut Cx, _ev: &TimerEvent){
         if let Some(gp) = cx.gamepad_state(0){
-            println!("{:?}", gp);
+            let right_stick_x: f32 = gp.right_stick.x;
+            let combined_triggers: f32 = (gp.left_trigger * -1.0) + gp.right_trigger;
+            if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                let mut data = [0u8; 8];
+                data[0..4].copy_from_slice(&right_stick_x.to_le_bytes());
+                data[4..8].copy_from_slice(&combined_triggers.to_le_bytes());
+                let _ = socket.send_to(&data, "10.0.0.197:5001");
+            }
         }
     }
     

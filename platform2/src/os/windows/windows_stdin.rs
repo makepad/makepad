@@ -229,10 +229,10 @@ impl Cx {
                         self.handle_action_receiver();
                     }
                                         
-                    if self.handle_live_edit() {
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }
+                    //if self.handle_live_edit() {
+                    //    self.call_event_handler(&Event::LiveEdit);
+                    //    self.redraw_all();
+                    //}
                     self.handle_networking_events();
                     // we should poll our runloop
                     self.stdin_handle_platform_ops(&mut stdin_windows);

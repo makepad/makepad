@@ -91,6 +91,7 @@ features = [
     "Win32_System_DataExchange",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_XboxController",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Dxgi",

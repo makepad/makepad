@@ -8,7 +8,7 @@ use {
         makepad_live_id::*,
         cx::*,
         event::*,
-        permission::{PermissionResult, PermissionStatus},
+        //permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
         os::{
             windows::{
@@ -17,10 +17,15 @@ use {
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
                 win32_window::Win32Window,
+                windows_gamepad::WindowsGamepad,
             },
             cx_native::EventFlow,
         },
         makepad_math::*,
+        event::{
+            gamepad::*,
+        },
+        gamepad::*,
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         window::CxWindowPool,
@@ -242,10 +247,10 @@ impl Cx {
                     self.handle_action_receiver();
                 }
 
-                if self.handle_live_edit() {
-                    self.call_event_handler(&Event::LiveEdit);
-                    self.redraw_all();
-                }
+                //if self.handle_live_edit() {
+                //    self.call_event_handler(&Event::LiveEdit);
+                //    self.redraw_all();
+                //}
                 self.handle_networking_events();
                 
                 self.win32_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows);
@@ -254,6 +259,8 @@ impl Cx {
             }
         }
         
+        self.handle_gamepad_events();
+
         return EventFlow::Poll;
         /*
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
@@ -300,6 +307,27 @@ impl Cx {
             self.handle_script_network_events(&out);
             self.call_event_handler(& Event::NetworkResponses(out))
         }
+    }
+    
+    pub (crate) fn handle_gamepad_events(&mut self) {
+        while let Ok(event) = self.os.gamepad_events.receiver.try_recv() {
+             self.call_event_handler(&Event::GamepadConnected(event));
+        }
+        
+        // Poll for new events and state updates
+        let mut events = Vec::new();
+        if let Some(gamepad) = &mut self.os.windows_gamepad {
+            gamepad.poll(|event| {
+                events.push(event);
+            });
+        }
+        
+        for event in events {
+            self.os.gamepad_events.sender.send(event).unwrap();
+        }
+        // Force a repaint if any gamepad buttons are pressed?
+        // Or just let the signal loop handle it.
+        // For now, we rely on the standard event loop polling.
     }
     
     fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx) -> EventFlow {
@@ -438,19 +466,32 @@ impl Cx {
     }
 }
 
+impl CxGamepadApi for Cx {
+    fn gamepad_state(&mut self, index: usize) -> Option<&GamepadState> {
+         if let Some(gamepad) = &self.os.windows_gamepad {
+             if index < gamepad.states.len() {
+                 return Some(&gamepad.states[index]);
+             }
+         }
+         None
+    }
+}
+
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
-        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR"){
-            self.live_registry.borrow_mut().package_root = Some(item.to_string());
+        if let Some(_item) = std::option_env!("MAKEPAD_PACKAGE_DIR"){
+        //    self.live_registry.borrow_mut().package_root = Some(item.to_string());
         }
         
-        self.live_expand();
-        if std::env::args().find( | v | v == "--stdin-loop").is_none() {
-            self.start_disk_live_file_watcher(100);
-        }
-        self.live_scan_dependencies();
+        //self.live_expand();
+        //if std::env::args().find( | v | v == "--stdin-loop").is_none() {
+        //    self.start_disk_live_file_watcher(100);
+        //}
+        //self.live_scan_dependencies();
         self.native_load_dependencies();
+        
+        self.os.windows_gamepad = Some(WindowsGamepad::init());
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
@@ -472,5 +513,7 @@ pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
     pub (crate) d3d11_device: Option<ID3D11Device>,
     pub (crate) network_response: NetworkResponseChannel,
+    pub (crate) gamepad_events: GamepadEventChannel,
+    pub (crate) windows_gamepad: Option<WindowsGamepad>,
     //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }
