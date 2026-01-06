@@ -98,7 +98,6 @@ impl Cx {
             out.push(item);
         }
         if out.len()>0{
-            self.handle_script_network_events(&out);
             self.call_event_handler(&Event::NetworkResponses(out))
         }
     }
@@ -119,7 +118,6 @@ impl Cx {
                 if te.timer_id == 0 {
                    if SignalToUI::check_and_clear_ui_signal(){
                         self.handle_media_signals();
-                        self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                     if SignalToUI::check_and_clear_action_signal() {
@@ -173,7 +171,6 @@ impl Cx {
                 self.handle_repaint(metal_cx);
             }
             TvosEvent::Timer(e) => if e.timer_id != 0 {
-                self.handle_script_timer(&e);
                 self.call_event_handler(&Event::Timer(e))
             }
         }
