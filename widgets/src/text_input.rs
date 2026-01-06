@@ -1423,7 +1423,17 @@ impl Widget for TextInput {
                 key_code: KeyCode::KeyA,
                 modifiers,
                 ..
-            }) if modifiers.is_primary() => self.select_all(cx),
+            }) if modifiers.is_primary() => {
+                self.select_all(cx);
+                // On touch platforms, show clipboard actions after select all
+                // This handles the case where select_all is triggered from the clipboard menu
+                #[cfg(any(target_os = "ios", target_os = "android"))]
+                {
+                    let has_selection = !self.selected_text().is_empty();
+                    let selection_rect = self.get_selection_rect(cx);
+                    cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
+                }
+            }
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 tap_count,
