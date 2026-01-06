@@ -1,5 +1,5 @@
 use crate::{
-    makepad_shader_compiler::generate_hlsl,
+    //makepad_shader_compiler::generate_hlsl,
     makepad_math::*,
     os::{
         windows::win32_app::{TRUE, FALSE,},
@@ -456,7 +456,8 @@ impl Cx {
         );
     }
     
-    pub (crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
+    pub (crate) fn hlsl_compile_shaders(&mut self, _d3d11_cx: &D3d11Cx) {
+        /*
         for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
@@ -484,8 +485,8 @@ impl Cx {
                     }
                 }
             }
-        }
-        self.draw_shaders.compile_set.clear();
+        }*/
+        //self.draw_shaders.compile_set.clear();
     }
 
     pub fn share_texture_for_presentable_image(
@@ -1101,7 +1102,7 @@ pub struct CxOsDrawShader {
 
 impl CxOsDrawShader {
     
-    fn new(d3d11_cx: &D3d11Cx, hlsl: String, mapping: &CxDrawShaderMapping) -> Option<Self> {
+    fn _new(d3d11_cx: &D3d11Cx, hlsl: String, mapping: &CxDrawShaderMapping) -> Option<Self> {
         
         fn compile_shader(target: &str, entry: &str, shader: &str) -> Result<ID3DBlob, String> {
             unsafe {
@@ -1188,11 +1189,11 @@ impl CxOsDrawShader {
         ).unwrap()};
         
         let mut layout_desc = Vec::new();
-        let mut strings = Vec::new();
+        let strings:Vec<String> = Vec::new();
         
-        for (index, geom) in mapping.geometries.inputs.iter().enumerate() {
+        for (_index, geom) in mapping.geometries.inputs.iter().enumerate() {
             
-            strings.push(format!("GEOM{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+            //strings.push(format!("GEOM{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
             
             layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: PCSTR(strings.last().unwrap().as_ptr()),
@@ -1205,11 +1206,11 @@ impl CxOsDrawShader {
             })
         }
         
-        let mut index = 0;
+        //let mut index = 0;
         for inst in &mapping.instances.inputs {
             if inst.slots == 16 {
                 for i in 0..4 {
-                    strings.push(format!("INST{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+                    //strings.push(format!("INST{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
                     layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
                         SemanticName: PCSTR(strings.last().unwrap().as_ptr()),
                         SemanticIndex: 0,
@@ -1219,12 +1220,12 @@ impl CxOsDrawShader {
                         InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
                         InstanceDataStepRate: 1
                     });
-                    index += 1;
+                    //index += 1;
                 }
             }
             else if inst.slots == 9 {
                 for i in 0..3 {
-                    strings.push(format!("INST{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+                    //strings.push(format!("INST{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
                     layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
                         SemanticName: PCSTR(strings.last().unwrap().as_ptr()),
                         SemanticIndex: 0,
@@ -1234,11 +1235,11 @@ impl CxOsDrawShader {
                         InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
                         InstanceDataStepRate: 1
                     });
-                    index += 1;
+                    //index += 1;
                 }
             }
             else {
-                strings.push(format!("INST{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+                //strings.push(format!("INST{}\0", generate_hlsl::index_to_char(index))); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
                 layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
                     SemanticName: PCSTR(strings.last().unwrap().as_ptr()),
                     SemanticIndex: 0,
@@ -1248,7 +1249,7 @@ impl CxOsDrawShader {
                     InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
                     InstanceDataStepRate: 1
                 });
-                index += 1;
+                //index += 1;
             }
         }
         
@@ -1264,8 +1265,8 @@ impl CxOsDrawShader {
         let mut live_uniforms = D3d11Buffer::default();
         live_uniforms.update_with_f32_constant_data(d3d11_cx, mapping.live_uniforms_buf.as_ref());
         
-        let mut const_table_uniforms = D3d11Buffer::default();
-        const_table_uniforms.update_with_f32_constant_data(d3d11_cx, mapping.const_table.table.as_ref());
+        let const_table_uniforms = D3d11Buffer::default();
+        //const_table_uniforms.update_with_f32_constant_data(d3d11_cx, mapping.const_table.table.as_ref());
         
         Some(Self {
             hlsl,
