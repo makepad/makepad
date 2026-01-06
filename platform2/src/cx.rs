@@ -126,6 +126,7 @@ pub struct Cx {
     pub(crate) studio_http: String,
     
     pub performance_stats: PerformanceStats,
+    #[allow(unused)]
     pub(crate) screenshot_requests: Vec<StudioScreenshotRequest>,
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches

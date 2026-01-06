@@ -100,7 +100,6 @@ impl AppleGamepad {
         self.gamepads.push(info.clone());
         self.controllers.push(ptr);
         self.states.push(GamepadState::default());
-        crate::log!("Gamepad connected: {}", info.name);
     }
 
     pub fn on_disconnected(&mut self, info: &GamepadInfo) {
@@ -108,7 +107,6 @@ impl AppleGamepad {
             self.gamepads.remove(index);
             self.controllers.remove(index);
             self.states.remove(index);
-            crate::log!("Gamepad disconnected: {}", info.name);
         }
     }
 
