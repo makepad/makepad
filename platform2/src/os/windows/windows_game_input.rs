@@ -12,9 +12,71 @@ use {
     std::mem::size_of,
 };
 
-extern "C" {
-    pub static c_dfDIJoystick2: DIDATAFORMAT;
+
+// Basic exact match for c_dfDIJoystick2 (DIJOYSTATE2)
+// This avoids linking against dinput8.lib/dxguid.lib data exports which might be missing.
+
+const DIDFT_OPTIONAL: u32 = 0x80000000;
+
+
+
+// Global storage for the format to ensure it lives forever
+static mut DF_JOYSTICK2_FORMAT: Option<(DIDATAFORMAT, Vec<DIOBJECTDATAFORMAT>)> = None;
+static DF_INIT: std::sync::Once = std::sync::Once::new();
+
+fn ensure_data_format_initialized() {
+    unsafe {
+        DF_INIT.call_once(|| {
+             let mut rgodf = Vec::new();
+             // Axes
+             let axes = [
+                (&GUID_XAxis, 0), (&GUID_YAxis, 4), (&GUID_ZAxis, 8),
+                (&GUID_RxAxis, 12), (&GUID_RyAxis, 16), (&GUID_RzAxis, 20),
+                (&GUID_Slider, 24), (&GUID_Slider, 28)
+            ];
+            for (guid, offset) in axes {
+                rgodf.push(DIOBJECTDATAFORMAT {
+                    pguid: guid,
+                    dwOfs: offset,
+                    dwType: DIDFT_AXIS | DIDFT_OPTIONAL | DIDFT_ANYINSTANCE,
+                    dwFlags: 0,
+                });
+            }
+             // POVs
+            for i in 0..4 {
+                 rgodf.push(DIOBJECTDATAFORMAT {
+                    pguid: &GUID_POV,
+                    dwOfs: 32 + (i * 4),
+                    dwType: DIDFT_POV | DIDFT_OPTIONAL | DIDFT_ANYINSTANCE,
+                    dwFlags: 0,
+                });
+            }
+            // Buttons (128)
+            for i in 0..128 {
+                 rgodf.push(DIOBJECTDATAFORMAT {
+                    pguid: std::ptr::null(), 
+                    dwOfs: 48 + i, 
+                    dwType: DIDFT_BUTTON | DIDFT_OPTIONAL | DIDFT_ANYINSTANCE,
+                    dwFlags: 0,
+                });
+            }
+            // Need to map the rest? Vector/Accel/Force are rarely used inputs. 
+            // If they are not mapped, they will just be garbage/zero in the struct.
+            
+            let format = DIDATAFORMAT {
+                dwSize: size_of::<DIDATAFORMAT>() as u32,
+                dwObjSize: size_of::<DIOBJECTDATAFORMAT>() as u32,
+                dwFlags: DIDF_ABSAXIS,
+                dwDataSize: size_of::<DIJOYSTATE2>() as u32,
+                dwNumObjs: rgodf.len() as u32,
+                rgodf: rgodf.as_mut_ptr(),
+            };
+            
+            DF_JOYSTICK2_FORMAT = Some((format, rgodf));
+        });
+    }
 }
+
 
 
 pub struct WindowsGameInput {
@@ -235,7 +297,10 @@ impl WindowsGameInput {
                         if di.CreateDevice(&guid, &mut device_out as *mut _ as *mut _, None).is_ok() {
                             if let Some(device) = device_out {
                                 // Set data format
-                                if device.SetDataFormat(&c_dfDIJoystick2 as *const _ as *mut _).is_ok() {
+                                ensure_data_format_initialized();
+                                #[allow(static_mut_refs)]
+                                let data_format = &mut DF_JOYSTICK2_FORMAT.as_mut().unwrap().0;
+                                if device.SetDataFormat(data_format).is_ok() {
                                     // Set cooperative level (Background | NonExclusive)
                                     // We use 0 as hwnd for background
                                     if device.SetCooperativeLevel(HWND(0), DISCL_BACKGROUND | DISCL_NONEXCLUSIVE).is_ok() {
