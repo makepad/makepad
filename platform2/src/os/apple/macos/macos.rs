@@ -1,14 +1,14 @@
 use {
     crate::{
         cx::{Cx, OsType}, cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace}, cx_stdin::PollTimers, event::{
-            Event, MouseButton, MouseUpEvent, NetworkResponseChannel, WindowGeom, GamepadEventChannel
+            Event, MouseButton, MouseUpEvent, NetworkResponseChannel, WindowGeom, GameInputEventChannel
         }, makepad_live_id::*, makepad_math::*, os::{
             apple::{
                 apple_classes::init_apple_classes_global, apple_sys::*, macos::{
                     macos_app::{
                         init_macos_app_global, with_macos_app, MacosApp
                     }, macos_event::MacosEvent, macos_window::MacosWindow
-                }, url_session::AppleHttpRequests, apple_gamepad::AppleGamepad
+                }, url_session::AppleHttpRequests, apple_game_input::AppleGameInput,
             }, apple_media::CxAppleMedia, cx_native::EventFlow, metal::{DrawPassMode, MetalCx}, metal_xpc::start_xpc_service
         }, pass::CxPassParent, permission::{Permission}, thread::SignalToUI, window::{CxWindowPool, WindowId}
     }, makepad_objc_sys::{
@@ -202,18 +202,18 @@ impl Cx {
     }
 
     pub (crate) fn handle_gamepad_events(&mut self) {
-        while let Ok(event) = self.os.gamepad_events.receiver.try_recv() {
-            if let Some(gamepad) = &mut self.os.apple_gamepad {
+        while let Ok(event) = self.os.game_input_events.receiver.try_recv() {
+            if let Some(game_input) = &mut self.os.apple_game_input{
                 match &event {
-                    crate::event::gamepad::GamepadConnectedEvent::Connected(info) => gamepad.on_connected(info),
-                    crate::event::gamepad::GamepadConnectedEvent::Disconnected(info) => gamepad.on_disconnected(info),
+                    crate::event::game_input::GameInputConnectedEvent::Connected(info) => game_input.on_connected(info),
+                    crate::event::game_input::GameInputConnectedEvent::Disconnected(info) => game_input.on_disconnected(info),
                 }
             }
-            self.call_event_handler(&Event::GamepadConnected(event));
+            self.call_event_handler(&Event::GameInputConnected(event));
         }
                 
-        if let Some(gamepad) = &mut self.os.apple_gamepad {
-            gamepad.poll();
+        if let Some(game_input) = &mut self.os.apple_game_input {
+            game_input.poll();
         }
     }
 
@@ -460,8 +460,8 @@ impl Cx {
             MacosEvent::PermissionResult(result) => {
                 self.call_event_handler(&Event::PermissionResult(result))
             }
-            MacosEvent::GamepadConnected(e) => {
-                self.call_event_handler(&Event::GamepadConnected(e))
+            MacosEvent::GameInputConnected(e) => {
+                self.call_event_handler(&Event::GameInputConnected(e))
             }
         }
 
@@ -755,8 +755,8 @@ impl CxOsApi for Cx {
         #[cfg(not(apple_bundle))]
         self.native_load_dependencies();
 
-        let sender = self.os.gamepad_events.sender.clone();
-        self.os.apple_gamepad = Some(AppleGamepad::init(move | event | {
+        let sender = self.os.game_input_events.sender.clone();
+        self.os.apple_game_input = Some(AppleGameInput::init(move | event | {
             let _ = sender.send(event);
             SignalToUI::set_ui_signal();
         }));
@@ -804,6 +804,6 @@ pub struct CxOs {
     pub (crate) start_time: Option<Instant>,
     pub (crate) http_requests: AppleHttpRequests,
     pub metal_device: Option<ObjcId>,
-    pub (crate) gamepad_events: GamepadEventChannel,
-    pub (crate) apple_gamepad: Option<AppleGamepad>,
+    pub (crate) game_input_events: GameInputEventChannel,
+    pub (crate) apple_game_input: Option<AppleGameInput>,
 }

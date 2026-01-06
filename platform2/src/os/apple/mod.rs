@@ -23,7 +23,7 @@ pub mod apple_classes;
 pub mod audio_unit;
 pub mod core_midi;
 pub mod apple_media;
-pub mod apple_gamepad;
+pub mod apple_game_input;
 pub mod av_capture;
 
 pub(crate) use self::metal::*;
