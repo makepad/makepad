@@ -1,3 +1,22 @@
+/// Math widget for rendering LaTeX equations using Typst.
+///
+/// DSL Usage:
+/// ```
+/// <Math> {
+///     width: Fit,
+///     height: Fit,
+///     color: #fff,
+///     font_size: 11.0,
+///     text: "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}"
+/// }
+/// ```
+///
+/// Properties:
+/// - `text` - LaTeX math expression to render
+/// - `color` - Text color (default: #fff)
+/// - `font_size` - Font size in points (default: 11.0)
+/// - `baseline_offset` - Vertical offset for baseline alignment (default: -2.0)
+
 use {
     makepad_widgets::*,
     typst::{
