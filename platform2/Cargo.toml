@@ -111,7 +111,7 @@ features = [
     "Win32_System_Variant",
     "Win32_System_SystemServices",
     "Win32_System_WinRT",
-    "Gaming_Input",
+    "Win32_Devices_HumanInterfaceDevice",
     "Devices_Enumeration",
     "Devices_Midi",
     "Foundation_Collections",

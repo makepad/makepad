@@ -1,28 +1,56 @@
 use {
     crate::{
-        event::{
-            game_input::*,
-        },
+        event::game_input::*,
         makepad_live_id::*,
         makepad_math::Vec2,
         windows::Win32::UI::Input::XboxController::*,
-        windows::Gaming::Input::{RacingWheel},
-    }
+        windows::Win32::Devices::HumanInterfaceDevice::*,
+        windows::Win32::Foundation::*,
+        windows::Win32::System::LibraryLoader::GetModuleHandleW,
+        windows::core::*,
+    },
+    std::mem::size_of,
 };
+
+extern "C" {
+    pub static c_dfDIJoystick2: DIDATAFORMAT;
+}
+
 
 pub struct WindowsGameInput {
     pub gamepads: Vec<GameInputInfo>,
     pub states: Vec<GameInputState>,
-    pub racing_wheels: Vec<(LiveId, RacingWheel)>,
+    pub direct_input: Option<IDirectInput8W>,
+    pub di_devices: Vec<(LiveId, IDirectInputDevice8W, GUID)>,
     pub next_wheel_id: u64,
 }
 
 impl WindowsGameInput {
     pub fn new() -> Self {
+        let direct_input = unsafe {
+            let hinstance = GetModuleHandleW(None).unwrap();
+            let mut di_out: Option<IDirectInput8W> = None;
+            // DIRECTINPUT_VERSION is 0x0800
+             match DirectInput8Create(
+                hinstance,
+                0x0800,
+                &IDirectInput8W::IID,
+                &mut di_out as *mut _ as *mut _,
+                None,
+            ) {
+                Ok(_) => di_out,
+                Err(_) => {
+                    // Log error or just continue without DirectInput
+                    None
+                }
+            }
+        };
+
         Self {
             gamepads: Vec::new(),
             states: Vec::new(),
-            racing_wheels: Vec::new(),
+            direct_input,
+            di_devices: Vec::new(),
             next_wheel_id: 128,
         }
     }
@@ -35,6 +63,7 @@ impl WindowsGameInput {
     where
         F: FnMut(GameInputConnectedEvent),
     {
+        // 1. Poll XInput (Xbox Controllers)
         for i in 0..4 {
             let mut state = XINPUT_STATE::default();
             let result = unsafe { XInputGetState(i, &mut state) };
@@ -118,74 +147,183 @@ impl WindowsGameInput {
             }
         }
         
-        // Racing Wheel Polling
-        if let Ok(wheels) = RacingWheel::RacingWheels() {
-            if let Ok(count) = wheels.Size() {
-                let mut active_wheel_ids = Vec::new();
-                for i in 0..count {
-                     if let Ok(wheel) = wheels.GetAt(i) {
-                         // Find if we have this wheel
-                         let mut existing_id = None;
-                         for (id, w) in &self.racing_wheels {
-                             if w == &wheel {
-                                 existing_id = Some(*id);
-                                 break;
-                             }
-                         }
-                         
-                         let id = if let Some(id) = existing_id {
-                             id
-                         } else {
-                             // New wheel
-                             let id_val = self.next_wheel_id;
-                             self.next_wheel_id += 1;
-                             let new_id = LiveId(id_val);
-                             
-                             self.racing_wheels.push((new_id, wheel.clone()));
-                             
-                             let info = GameInputInfo {
-                                 id: new_id,
-                                 name: "Racing Wheel".to_string(), 
-                             };
-                             self.gamepads.push(info.clone());
-                             self.states.push(GameInputState::Wheel(WheelState::default()));
-                             callback(GameInputConnectedEvent::Connected(info));
-                             
-                             new_id
-                         };
-                         
-                         active_wheel_ids.push(id);
-                         
-                         if let Ok(reading) = wheel.GetCurrentReading() {
-                             if let Some(index) = self.gamepads.iter().position(|g| g.id == id) {
-                                  if let GameInputState::Wheel(wh_state) = &mut self.states[index] {
-                                      wh_state.steering = reading.Wheel as f32;
-                                      wh_state.throttle = reading.Throttle as f32;
-                                      wh_state.brake = reading.Brake as f32;
-                                      wh_state.clutch = reading.Clutch as f32; 
-                                  }
-                             }
-                         }
-                     }
+        // 2. Poll DirectInput (Racing Wheels)
+        if let Some(di) = &self.direct_input {
+            unsafe {
+                // Enumeration context
+                struct EnumContext<'a> {
+                   found_devices: Vec<(GUID, String)>,
+                   _marker: std::marker::PhantomData<&'a ()>,
                 }
                 
-                // Cleanup disconnected wheels
+                let mut ctx = EnumContext {
+                    found_devices: Vec::new(),
+                    _marker: std::marker::PhantomData,
+                };
+                
+                // Callback function for EnumDevices
+                unsafe extern "system" fn enum_callback(lpddi: *mut DIDEVICEINSTANCEW, pvref: *mut std::ffi::c_void) -> BOOL {
+                    let ctx = &mut *(pvref as *mut EnumContext);
+                    let instance = &*lpddi;
+                    
+                    // Filter for Driving devices if needed, but we used DI8DEVCLASS_GAMECTRL in EnumDevices call to broaden search,
+                    // or we check dwDevType here.
+                    // Let's accept things that look like driving controls.
+                    let dev_type = instance.dwDevType & 0xFF;
+                    if dev_type == DI8DEVTYPE_DRIVING || dev_type == DI8DEVTYPE_JOYSTICK || dev_type == DI8DEVTYPE_GAMEPAD {
+                         // Read name
+                         let name = String::from_utf16_lossy(&instance.tszInstanceName);
+                         // Clean up null terminators
+                         let name = name.trim_matches('\0').to_string();
+                         ctx.found_devices.push((instance.guidInstance, name));
+                    }
+                    
+                    BOOL(1) // DIENUM_CONTINUE
+                }
+
+                // Enumerate attached devices
+                // DI8DEVCLASS_GAMECTRL includes joysticks, gamepads, wheels
+                let _ = di.EnumDevices(
+                    DI8DEVCLASS_GAMECTRL,
+                    Some(enum_callback),
+                    &mut ctx as *mut _ as *mut _,
+                    DIEDFL_ATTACHEDONLY
+                );
+                
+                let mut active_di_indices = Vec::new();
+                
+                for (guid, name) in ctx.found_devices {
+                    // Check if we already have this device open
+                    // Note: We need a way to persistently identify devices. GUID is good for session.
+                    // For now, we linear search our open devices.
+                    
+                    // Currently we store (LiveId, IDirectInputDevice8W) in self.di_devices
+                    // We need to know which device corresponds to which GUID.
+                    // Since IDirectInputDevice8W doesn't easily expose GUID back, 
+                    // we might want to change `di_devices` to store GUID too.
+                    // But accessing device info is slow. 
+                    // Simplest approach: We don't have easy stable ID across runs without more logic,
+                    // but within session GUID is stable. 
+                    // For the sake of this prompt, let's just assume we can't easily match existing open devices by GUID 
+                    // completely efficiently without changing the struct, so I'll trust the order or add GUID to struct.
+                    
+                    // Let's match by comparing device objects? No.
+                    // Let's upgrade `di_devices` to store GUID.
+                    // Wait, I can't change the struct definition inside this method.
+                    // I need to change the struct in the file first.
+                    // I will assume `di_devices` stores `(LiveId, IDirectInputDevice8W, GUID)`.
+                    // Ah, I defined the struct above without GUID. I should add it.
+                    // But since I am overwriting the whole file, I CAN change the struct! :)
+                    
+                    // See below for corrected struct definition in the same file.
+                     
+                    let mut existing_index = None;
+                    for (idx, (_, _, existing_guid)) in self.di_devices.iter().enumerate() {
+                        if *existing_guid == guid {
+                            existing_index = Some(idx);
+                            break;
+                        }
+                    }
+                    
+                    if let Some(idx) = existing_index {
+                        active_di_indices.push(idx);
+                        // Device is already open
+                        // We will poll it below
+                    } else {
+                        // Open new device
+                        let mut device_out: Option<IDirectInputDevice8W> = None;
+                        if di.CreateDevice(&guid, &mut device_out as *mut _ as *mut _, None).is_ok() {
+                            if let Some(device) = device_out {
+                                // Set data format
+                                if device.SetDataFormat(&c_dfDIJoystick2 as *const _ as *mut _).is_ok() {
+                                    // Set cooperative level (Background | NonExclusive)
+                                    // We use 0 as hwnd for background
+                                    if device.SetCooperativeLevel(HWND(0), DISCL_BACKGROUND | DISCL_NONEXCLUSIVE).is_ok() {
+                                        // Acquire
+                                        let _ = device.Acquire();
+                                        
+                                        // Register
+                                        let id_val = self.next_wheel_id;
+                                        self.next_wheel_id += 1;
+                                        let new_id = LiveId(id_val);
+                                        
+                                        self.di_devices.push((new_id, device.clone(), guid));
+                                        active_di_indices.push(self.di_devices.len() - 1);
+                                        
+                                        let info = GameInputInfo {
+                                            id: new_id,
+                                            name: name.clone(), 
+                                        };
+                                        self.gamepads.push(info.clone());
+                                        // Use WheelState for DI devices (assuming they are wheels mainly for now)
+                                        // We could differentiate based on type, but prompt asked for Wheel support.
+                                        self.states.push(GameInputState::Wheel(WheelState::default()));
+                                        callback(GameInputConnectedEvent::Connected(info));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Cleanup disconnected DI devices
                 let mut i = 0;
-                while i < self.racing_wheels.len() {
-                    let (id, _) = self.racing_wheels[i];
-                    if !active_wheel_ids.contains(&id) {
-                         self.racing_wheels.remove(i);
-                         if let Some(index) = self.gamepads.iter().position(|g| g.id == id) {
-                             let info = self.gamepads[index].clone();
-                             self.gamepads.remove(index);
-                             self.states.remove(index);
-                             callback(GameInputConnectedEvent::Disconnected(info));
-                         }
+                while i < self.di_devices.len() {
+                    if !active_di_indices.contains(&i) {
+                        let (id, _, _) = self.di_devices[i];
+                        self.di_devices.remove(i);
+                        if let Some(index) = self.gamepads.iter().position(|g| g.id == id) {
+                            let info = self.gamepads[index].clone();
+                            self.gamepads.remove(index);
+                            self.states.remove(index);
+                            callback(GameInputConnectedEvent::Disconnected(info));
+                        }
+                        // Don't increment i, as we removed current element
                     } else {
                         i += 1;
+                    }
+                }
+                
+                // Poll active DI devices
+                for (id, device, _) in &self.di_devices {
+                    // Poll() usually needed before GetDeviceState
+                    let _ = device.Poll();
+                    
+                    let mut state = DIJOYSTATE2::default();
+                    if device.GetDeviceState(size_of::<DIJOYSTATE2>() as u32, &mut state as *mut _ as *mut _).is_ok() {
+                        if let Some(index) = self.gamepads.iter().position(|g| g.id == *id) {
+                            if let GameInputState::Wheel(wh_state) = &mut self.states[index] {
+                                // Map DirectInput axes to WheelState
+                                // This mapping is generic; specific wheels might differ.
+                                // Usually:
+                                // lX -> Steering
+                                // lY -> Accelerator (often inverted)
+                                // lRz -> Brake
+                                // etc.
+                                
+                                // Normalize 0..65535 to -1.0..1.0 or 0.0..1.0
+                                fn norm_axis(val: i32) -> f32 {
+                                    (val as f32 - 32768.0) / 32768.0
+                                }
+                                fn norm_trig(val: i32) -> f32 {
+                                    // 0..65535 -> 0..1
+                                    val as f32 / 65535.0
+                                }
+
+                                wh_state.steering = norm_axis(state.lX); 
+                                // Throttle/Brake mapping varies wildly. 
+                                // Logitech G29 example: lY is throttle (inv), lRz is brake (inv), lYz is clutch.
+                                // Generic fallback:
+                                wh_state.throttle = norm_trig(65535 - state.lY); // Often Y axis inverted
+                                wh_state.brake = norm_trig(65535 - state.lRz); 
+                                wh_state.clutch = norm_trig(65535 - state.rglSlider[0]);
+                            }
+                        }
                     }
                 }
             }
         }
     }
 }
+
+
