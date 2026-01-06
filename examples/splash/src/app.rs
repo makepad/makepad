@@ -30,17 +30,25 @@ impl MatchEvent for App{
         for state in cx.game_input_states(){
             match state{
                 GameInputState::Gamepad(gp)=>{
-                    let right_stick_x: f32 = gp.right_stick.x;
-                    let combined_triggers: f32 = (gp.left_trigger * -1.0) + gp.right_trigger;
+                    let steer: f32 = gp.right_stick.x;
+                    let throttle: f32 = (gp.left_trigger * -1.0) + gp.right_trigger;
                     if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
                         let mut data = [0u8; 8];
-                        data[0..4].copy_from_slice(&right_stick_x.to_le_bytes());
-                        data[4..8].copy_from_slice(&combined_triggers.to_le_bytes());
+                        data[0..4].copy_from_slice(&steer.to_le_bytes());
+                        data[4..8].copy_from_slice(&throttle.to_le_bytes());
                         let _ = socket.send_to(&data, "10.0.0.197:5001");
                     }
                 }
                 GameInputState::Wheel(w)=>{
-                    println!("{:?}", w);
+                    let steer: f32 = (w.steering / 0.15).max(-1.0).min(1.0);
+                    let throttle: f32 = (w.brake * -1.0) + w.throttle;
+                    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                        let mut data = [0u8; 8];
+                        data[0..4].copy_from_slice(&steer.to_le_bytes());
+                        data[4..8].copy_from_slice(&throttle.to_le_bytes());
+                        let _ = socket.send_to(&data, "10.0.0.197:5001");
+                    }
+                    break;
                 }
             }
         }
