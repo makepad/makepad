@@ -17,15 +17,15 @@ use {
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
                 win32_window::Win32Window,
-                windows_gamepad::WindowsGamepad,
+                windows_game_input::WindowsGameInput,
             },
             cx_native::EventFlow,
         },
         makepad_math::*,
         event::{
-            gamepad::*,
+            game_input::*,
         },
-        gamepad::*,
+        game_input::*,
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         window::CxWindowPool,
@@ -259,7 +259,7 @@ impl Cx {
             }
         }
         
-        self.handle_gamepad_events();
+        self.handle_game_input_events();
 
         return EventFlow::Poll;
         /*
@@ -309,21 +309,21 @@ impl Cx {
         }
     }
     
-    pub (crate) fn handle_gamepad_events(&mut self) {
-        while let Ok(event) = self.os.gamepad_events.receiver.try_recv() {
-             self.call_event_handler(&Event::GamepadConnected(event));
+    pub (crate) fn handle_game_input_events(&mut self) {
+        while let Ok(event) = self.os.game_input_events.receiver.try_recv() {
+             self.call_event_handler(&Event::GameInputConnected(event));
         }
         
         // Poll for new events and state updates
         let mut events = Vec::new();
-        if let Some(gamepad) = &mut self.os.windows_gamepad {
-            gamepad.poll(|event| {
+        if let Some(game_input) = &mut self.os.windows_game_input {
+            game_input.poll(|event| {
                 events.push(event);
             });
         }
         
         for event in events {
-            self.os.gamepad_events.sender.send(event).unwrap();
+            self.os.game_input_events.sender.send(event).unwrap();
         }
         // Force a repaint if any gamepad buttons are pressed?
         // Or just let the signal loop handle it.
@@ -466,14 +466,21 @@ impl Cx {
     }
 }
 
-impl CxGamepadApi for Cx {
-    fn gamepad_state(&mut self, index: usize) -> Option<&GamepadState> {
-         if let Some(gamepad) = &self.os.windows_gamepad {
-             if index < gamepad.states.len() {
-                 return Some(&gamepad.states[index]);
+impl CxGameInputApi for Cx {
+    fn game_input_state(&mut self, index: usize) -> Option<&GameInputState> {
+         if let Some(game_input) = &self.os.windows_game_input {
+             if index < game_input.states.len() {
+                 return Some(&game_input.states[index]);
              }
          }
          None
+    }
+    
+    fn game_input_states(&mut self) -> &[GameInputState] {
+        if let Some(game_input) = &self.os.windows_game_input {
+            return &game_input.states;
+        }
+        &[]
     }
 }
 
@@ -491,7 +498,7 @@ impl CxOsApi for Cx {
         //self.live_scan_dependencies();
         self.native_load_dependencies();
         
-        self.os.windows_gamepad = Some(WindowsGamepad::init());
+        self.os.windows_game_input = Some(WindowsGameInput::init());
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
@@ -513,7 +520,7 @@ pub struct CxOs {
     pub (crate) media: CxWindowsMedia,
     pub (crate) d3d11_device: Option<ID3D11Device>,
     pub (crate) network_response: NetworkResponseChannel,
-    pub (crate) gamepad_events: GamepadEventChannel,
-    pub (crate) windows_gamepad: Option<WindowsGamepad>,
+    pub (crate) game_input_events: GameInputEventChannel,
+    pub (crate) windows_game_input: Option<WindowsGameInput>,
     //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
 }

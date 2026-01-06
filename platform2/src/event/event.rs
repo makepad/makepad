@@ -23,7 +23,7 @@ use {
             designer::*,
             network::*,
             video_playback::*,
-            gamepad::*,
+            game_input::*,
         },
         action::ActionsBuf,
         audio::AudioDevicesEvent,
@@ -135,7 +135,7 @@ pub enum Event {
     WindowGotFocus(WindowId),
     /// A window has lost focus and is no longer the active window receiving user input.
     WindowLostFocus(WindowId),
-    GamepadConnected(GamepadConnectedEvent),
+    GameInputConnected(GameInputConnectedEvent),
     NextFrame(NextFrameEvent),
     XrUpdate(XrUpdateEvent),
     XrLocal(XrLocalEvent),
@@ -254,7 +254,7 @@ impl Event{
             8=>"LiveEdit",
             9=>"WindowGotFocus",
             10=>"WindowLostFocus",
-            11=>"GamepadConnected",
+            11=>"GameInputConnected",
             12=>"NextFrame",
             13=>"XRUpdate",
 
@@ -329,7 +329,7 @@ impl Event{
             Self::LiveEdit=>8,
             Self::WindowGotFocus(_)=>9,
             Self::WindowLostFocus(_)=>10,
-            Self::GamepadConnected(_)=>11,
+            Self::GameInputConnected(_)=>11,
             Self::NextFrame(_)=>12,
             Self::XrUpdate(_)=>13,
 

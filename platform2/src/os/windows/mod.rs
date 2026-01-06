@@ -19,7 +19,7 @@ pub mod http;
 pub mod d3d11;
 pub mod windows;
 pub mod windows_stdin;
-pub mod windows_gamepad;
+pub mod windows_game_input;
 mod web_socket;
 
 pub(crate) use crate::os::windows::d3d11::*; 

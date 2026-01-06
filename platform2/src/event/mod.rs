@@ -7,9 +7,10 @@ pub mod drag_drop;
 pub mod designer;
 pub mod network;
 pub mod video_playback;
-pub mod gamepad;
+pub mod game_input;
 
 pub use event::*;
+pub use game_input::*;
 pub use finger::*;
 pub use designer::*;
 pub use keyboard::*;
@@ -18,4 +19,3 @@ pub use xr::*;
 pub use drag_drop::*;
 pub use network::*;
 pub use video_playback::*;
-pub use gamepad::*;
