@@ -85,6 +85,7 @@ pub struct WindowsGameInput {
     pub direct_input: Option<IDirectInput8W>,
     pub di_devices: Vec<(LiveId, IDirectInputDevice8W, GUID)>,
     pub next_wheel_id: u64,
+    pub enum_timer: u64,
 }
 
 impl WindowsGameInput {
@@ -114,6 +115,7 @@ impl WindowsGameInput {
             direct_input,
             di_devices: Vec::new(),
             next_wheel_id: 128,
+            enum_timer: 0,
         }
     }
 
@@ -232,7 +234,7 @@ impl WindowsGameInput {
                     // or we check dwDevType here.
                     // Let's accept things that look like driving controls.
                     let dev_type = instance.dwDevType & 0xFF;
-                    if dev_type == DI8DEVTYPE_DRIVING || dev_type == DI8DEVTYPE_JOYSTICK || dev_type == DI8DEVTYPE_GAMEPAD {
+                    if dev_type == DI8DEVTYPE_DRIVING {
                          // Read name
                          let name = String::from_utf16_lossy(&instance.tszInstanceName);
                          // Clean up null terminators
@@ -243,14 +245,16 @@ impl WindowsGameInput {
                     BOOL(1) // DIENUM_CONTINUE
                 }
 
-                // Enumerate attached devices
-                // DI8DEVCLASS_GAMECTRL includes joysticks, gamepads, wheels
-                let _ = di.EnumDevices(
-                    DI8DEVCLASS_GAMECTRL,
-                    Some(enum_callback),
-                    &mut ctx as *mut _ as *mut _,
-                    DIEDFL_ATTACHEDONLY
-                );
+                // Enumerate attached devices (Throttle this to every 200 polls ~ 3 seconds at 60fps)
+                if self.enum_timer % 200 == 0 {
+                    let _ = di.EnumDevices(
+                        DI8DEVCLASS_GAMECTRL,
+                        Some(enum_callback),
+                        &mut ctx as *mut _ as *mut _,
+                        DIEDFL_ATTACHEDONLY
+                    );
+
+                self.enum_timer += 1;
                 
                 let mut active_di_indices = Vec::new();
                 
@@ -348,6 +352,7 @@ impl WindowsGameInput {
                         i += 1;
                     }
                 }
+            }
                 
                 // Poll active DI devices
                 for (id, device, _) in &self.di_devices {
