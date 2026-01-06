@@ -26,14 +26,22 @@ pub struct App {
  
 impl MatchEvent for App{
     fn handle_timer(&mut self, cx:&mut Cx, _ev: &TimerEvent){
-        if let Some(gp) = cx.gamepad_state(0){
-            let right_stick_x: f32 = gp.right_stick.x;
-            let combined_triggers: f32 = (gp.left_trigger * -1.0) + gp.right_trigger;
-            if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-                let mut data = [0u8; 8];
-                data[0..4].copy_from_slice(&right_stick_x.to_le_bytes());
-                data[4..8].copy_from_slice(&combined_triggers.to_le_bytes());
-                let _ = socket.send_to(&data, "10.0.0.197:5001");
+        
+        for state in cx.game_input_states(){
+            match state{
+                GameInputState::Gamepad(gp)=>{
+                    let right_stick_x: f32 = gp.right_stick.x;
+                    let combined_triggers: f32 = (gp.left_trigger * -1.0) + gp.right_trigger;
+                    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                        let mut data = [0u8; 8];
+                        data[0..4].copy_from_slice(&right_stick_x.to_le_bytes());
+                        data[4..8].copy_from_slice(&combined_triggers.to_le_bytes());
+                        let _ = socket.send_to(&data, "10.0.0.197:5001");
+                    }
+                }
+                GameInputState::Wheel(w)=>{
+                    println!("{:?}", w);
+                }
             }
         }
     }
@@ -74,7 +82,7 @@ impl MatchEvent for App{
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::GamepadConnected(ev) = event{
+        if let Event::GameInputConnected(ev) = event{
             println!("{:?}", ev);
         }
         let _ = self.match_event_with_draw_2d(cx, event);

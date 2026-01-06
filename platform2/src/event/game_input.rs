@@ -3,15 +3,21 @@ use std::sync::mpsc::{channel, Sender, Receiver};
 use crate::makepad_math::Vec2;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum GamepadConnectedEvent {
-    Connected(GamepadInfo),
-    Disconnected(GamepadInfo)
+pub enum GameInputConnectedEvent {
+    Connected(GameInputInfo),
+    Disconnected(GameInputInfo)
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct GamepadInfo{
+pub struct GameInputInfo{
     pub id: LiveId,
     pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GameInputState {
+    Gamepad(GamepadState),
+    Wheel(WheelState)
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -40,12 +46,21 @@ pub struct GamepadState {
     pub right_stick: Vec2,
 }
 
-pub struct GamepadEventChannel {
-    pub sender: Sender<GamepadConnectedEvent>,
-    pub receiver: Receiver<GamepadConnectedEvent>,
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WheelState {
+    pub steering: f32,
+    pub throttle: f32,
+    pub brake: f32,
+    pub clutch: f32,
+    // Add other common wheel inputs like gear shifter buttons if needed, keeping it simple for now
 }
 
-impl Default for GamepadEventChannel {
+pub struct GameInputEventChannel {
+    pub sender: Sender<GameInputConnectedEvent>,
+    pub receiver: Receiver<GameInputConnectedEvent>,
+}
+
+impl Default for GameInputEventChannel {
     fn default() -> Self {
         let (sender, receiver) = channel();
         Self {
