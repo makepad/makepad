@@ -87,14 +87,12 @@ impl Cx {
         // Timers
         let events = self.os.timers.get_dispatch();
         for event in events{
-            self.handle_script_timer(&event);
             self.call_event_handler(&Event::Timer(event));
-        }        
+        }
 
         // Signals
         if SignalToUI::check_and_clear_ui_signal() {
             self.handle_media_signals();
-            self.handle_script_signals();
             self.call_event_handler(&Event::Signal);
         }
 
