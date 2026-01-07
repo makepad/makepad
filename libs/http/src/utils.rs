@@ -46,8 +46,13 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     let end_of_name = end_of_name.unwrap();
     let mut search = None;
     let end_of_name = if let Some(q) = url.find('?') {
-        search = Some(url[q..].to_string());
-        end_of_name.min(q)
+        if q < end_of_name {
+            search = Some(url[(q+1)..end_of_name].to_string());
+            q
+        }
+        else {
+            end_of_name
+        }
     }else {end_of_name};
     
     let mut url = url[0..end_of_name].to_string();
@@ -70,12 +75,13 @@ pub struct HttpServerHeaders {
     #[live] pub accept_encoding: Option<String>,
     #[live] pub sec_websocket_key: Option<String>,
     #[live] pub lines: Vec<String>,
-    #[rust(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), 8080))] pub addr: SocketAddr,
+    #[live] pub addr: String,
+    #[rust(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), 8080))] pub socket_addr: SocketAddr,
 }
 
 impl HttpServerHeaders {
     pub fn from_tcp_stream(tcp_stream: &mut TcpStream) -> Option<HttpServerHeaders> {
-        let addr = tcp_stream.peer_addr().unwrap();
+        let socket_addr = tcp_stream.peer_addr().unwrap();
         let mut reader = BufReader::new(tcp_stream);
         
         let mut lines = Vec::new();
@@ -133,7 +139,8 @@ impl HttpServerHeaders {
         let path = path.unwrap();
         
         Some(HttpServerHeaders {
-            addr,
+            addr:format!("{}", socket_addr),
+            socket_addr,
             verb: verb.to_string(),
             path_no_slash: path.0[1..].to_string(),
             path: path.0,
