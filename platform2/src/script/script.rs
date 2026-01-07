@@ -11,4 +11,5 @@ pub struct CxScriptData{
     pub child_processes: Vec<CxScriptChildProcess>,
     pub web_sockets: Vec<CxScriptWebSocket>,
     pub http_requests: Vec<CxScriptHttp>,
+    pub http_servers: Vec<CxScriptHttpServer>,
 }
