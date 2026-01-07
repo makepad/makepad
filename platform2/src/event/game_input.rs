@@ -52,6 +52,7 @@ pub struct WheelState {
     pub throttle: f32,
     pub brake: f32,
     pub clutch: f32,
+    pub steer_force: f32,
     // Add other common wheel inputs like gear shifter buttons if needed, keeping it simple for now
 }
 
