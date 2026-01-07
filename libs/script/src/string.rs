@@ -66,6 +66,18 @@ impl ScriptStringData{
             vm.heap.string_to_chars_array(sself).into()
         });
         
+        native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(to_f64), &[], |vm, args|{
+            let sself = script_value!(vm, args.self);
+            if let Some(r) = vm.heap.string_mut_self_with(sself, |_heap,s|{
+                ScriptValue::from_f64(s.parse().unwrap_or(f64::NAN))
+            }){
+                r
+            }
+            else{
+                ScriptValue::from_f64_traced_nan(f64::NAN, vm.thread.trap.ip)
+            }
+        });
+        
         native.add_type_method(heap, ScriptValueType::REDUX_STRING, id!(parse_json), &[], |vm, args|{
             let sself = script_value!(vm, args.self);
             
