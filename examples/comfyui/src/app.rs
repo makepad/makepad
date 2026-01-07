@@ -200,7 +200,18 @@ impl MatchEvent for App{
                             
             let display_iter = 0
             let messages = []
-                
+            
+            let http_server = net.http_server(net.HttpServerOptions{
+                listen:"0.0.0.0:8080"
+            }, net.HttpServerEvents{
+                on_get: |req|{
+                    net.HttpServerResponse{
+                        body: "OK"
+                    }
+                }
+            })
+            
+                        
             fn post(){ 
                 // handle AI prompt messages
                         

@@ -6,3 +6,6 @@ edition = "2021"
 description = "Makepad http utils"
 license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "haeudU1-iRQksGwh105SrBxTSzM="
+
+[dependencies]
+makepad-script = { path = "../script", version = "1.0.0" }

@@ -6,6 +6,7 @@ use std::sync::{mpsc, mpsc::{RecvTimeoutError}};
 use std::time::Duration;
 pub use crate::websocket::{SERVER_WEB_SOCKET_PONG_MESSAGE, ServerWebSocket, ServerWebSocketMessage, ServerWebSocketMessageFormat, ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PING_MESSAGE};
 use crate::utils::*;
+use makepad_script::*;
 
 #[derive(Clone)]
 pub struct HttpServer {
@@ -14,9 +15,10 @@ pub struct HttpServer {
     pub post_max_size: u64
 }
 
+#[derive(Clone, Script, ScriptHook)]
 pub struct HttpServerResponse {
-    pub header: String,
-    pub body: Vec<u8>
+    #[live] pub header: String,
+    #[live] pub body: Vec<u8>
 }
 
 pub enum HttpServerRequest {
@@ -32,6 +34,11 @@ pub enum HttpServerRequest {
         web_socket_id: u64,
         response_sender: mpsc::Sender<Vec<u8 >>,
         data: Vec<u8>
+    },
+    TextMessage {
+        web_socket_id: u64,
+        response_sender: mpsc::Sender<Vec<u8 >>,
+        string: String
     },
     Get {
         headers: HttpServerHeaders,
@@ -188,7 +195,16 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                         },
                         Ok(ServerWebSocketMessage::Pong(_)) => {
                         },
-                        Ok(ServerWebSocketMessage::Text(_text)) => {
+                        Ok(ServerWebSocketMessage::Text(text)) => {
+                            if http_server.request.send(HttpServerRequest::TextMessage {
+                                web_socket_id,
+                                response_sender: tx_socket.clone(),
+                                string: text.into(),
+                            }).is_err() {
+                                eprintln!("Websocket message deserialize error");
+                                let _ = tcp_stream.shutdown(Shutdown::Both);
+                                let _ = tx_socket.send(Vec::new());
+                            };
                         }
                         Ok(ServerWebSocketMessage::Binary(data)) => {
                             if http_server.request.send(HttpServerRequest::BinaryMessage {
