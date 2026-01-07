@@ -27,7 +27,7 @@ pub struct App {
 impl MatchEvent for App{
     fn handle_timer(&mut self, cx:&mut Cx, _ev: &TimerEvent){
         
-        for state in cx.game_input_states(){
+        for state in cx.game_input_states_mut(){
             match state{
                 GameInputState::Gamepad(gp)=>{
                     let steer: f32 = gp.right_stick.x;
@@ -40,7 +40,8 @@ impl MatchEvent for App{
                     }
                 }
                 GameInputState::Wheel(w)=>{
-                    let steer: f32 = (w.steering / 0.15).max(-1.0).min(1.0);
+                    let steer: f32 = (w.steering / 0.12).max(-1.0).min(1.0);
+                    w.steer_force = steer;
                     let throttle: f32 = (w.brake * -1.0) + w.throttle;
                     if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
                         let mut data = [0u8; 8];
@@ -81,7 +82,6 @@ impl MatchEvent for App{
         cx.end_pass_sized_turtle();
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass);
-        
     }
         
     fn handle_actions(&mut self, _cx: &mut Cx, _actions:&Actions){

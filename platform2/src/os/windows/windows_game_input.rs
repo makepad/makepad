@@ -12,6 +12,10 @@ use {
     std::mem::size_of,
 };
 
+// GUID_ConstantForce: {13541C20-8E33-11D0-9AD0-00A0C9A06E35}
+#[allow(non_upper_case_globals)]
+const GUID_ConstantForce: GUID = GUID::from_u128(0x13541C20_8E33_11D0_9AD0_00A0C9A06E35);
+
 
 // Basic exact match for c_dfDIJoystick2 (DIJOYSTATE2)
 // This avoids linking against dinput8.lib/dxguid.lib data exports which might be missing.
@@ -83,7 +87,7 @@ pub struct WindowsGameInput {
     pub gamepads: Vec<GameInputInfo>,
     pub states: Vec<GameInputState>,
     pub direct_input: Option<IDirectInput8W>,
-    pub di_devices: Vec<(LiveId, IDirectInputDevice8W, GUID)>,
+    pub di_devices: Vec<(LiveId, IDirectInputDevice8W, GUID, Option<IDirectInputEffect>)>,
     pub next_wheel_id: u64,
     pub enum_timer: u64,
 }
@@ -284,7 +288,7 @@ impl WindowsGameInput {
                     // See below for corrected struct definition in the same file.
                      
                     let mut existing_index = None;
-                    for (idx, (_, _, existing_guid)) in self.di_devices.iter().enumerate() {
+                    for (idx, (_, _, existing_guid, _)) in self.di_devices.iter().enumerate() {
                         if *existing_guid == guid {
                             existing_index = Some(idx);
                             break;
@@ -305,18 +309,62 @@ impl WindowsGameInput {
                                 #[allow(static_mut_refs)]
                                 let data_format = &mut DF_JOYSTICK2_FORMAT.as_mut().unwrap().0;
                                 if device.SetDataFormat(data_format).is_ok() {
-                                    // Set cooperative level (Background | NonExclusive)
-                                    // We use 0 as hwnd for background
-                                    if device.SetCooperativeLevel(HWND(0), DISCL_BACKGROUND | DISCL_NONEXCLUSIVE).is_ok() {
+                                    // Set cooperative level (Background | Exclusive)
+                                    // FORCE FEEDBACK REQUIRES EXCLUSIVE ACCESS
+                                    let hwnd =  windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+                                    
+                                    if device.SetCooperativeLevel(hwnd, DISCL_BACKGROUND | DISCL_EXCLUSIVE).is_ok() {
                                         // Acquire
                                         let _ = device.Acquire();
+
+                                        // Try to create Constant Force Effect
+                                        let mut effect: Option<IDirectInputEffect> = None;
+                                        
+                                        // Only try if we have a valid window handle, otherwise FFB creation might fail or be invalid
+                                        if hwnd.0 != 0 {
+                                            let mut axes: [u32; 1] = [0]; // Offset 0 is X axis
+                                            let mut directions: [i32; 1] = [0];
+                                            let mut cf_params = DICONSTANTFORCE {
+                                                lMagnitude: 0,
+                                            };
+                                            
+                                            // DIEFFECT structure
+                                            // Note: windows crate might expect specific structure layout. 
+                                            // We assume DIEFFECT is available.
+                                            
+                                            let mut eff = DIEFFECT {
+                                                dwSize: size_of::<DIEFFECT>() as u32,
+                                                dwFlags: DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS,
+                                                dwDuration: u32::MAX, // Infinite
+                                                dwSamplePeriod: 0,
+                                                dwGain: 10000, // Max gain
+                                                dwTriggerButton: DIEB_NOTRIGGER,
+                                                dwTriggerRepeatInterval: 0,
+                                                cAxes: 1,
+                                                rgdwAxes: axes.as_mut_ptr(),
+                                                rglDirection: directions.as_mut_ptr(),
+                                                lpEnvelope: std::ptr::null_mut(),
+                                                cbTypeSpecificParams: size_of::<DICONSTANTFORCE>() as u32,
+                                                lpvTypeSpecificParams: &mut cf_params as *mut _ as *mut _,
+                                                dwStartDelay: 0,
+                                            };
+                                            
+                                            let mut effect_out: Option<IDirectInputEffect> = None;
+                                            // We ignore error here, if it fails, we just don't have FFB
+                                            if device.CreateEffect(&GUID_ConstantForce, &mut eff, &mut effect_out as *mut _ as *mut _, None).is_ok() {
+                                                effect = effect_out;
+                                                if let Some(e) = &effect {
+                                                   let _ = e.Start(1, 0);
+                                                }
+                                            }
+                                        }
                                         
                                         // Register
                                         let id_val = self.next_wheel_id;
                                         self.next_wheel_id += 1;
                                         let new_id = LiveId(id_val);
                                         
-                                        self.di_devices.push((new_id, device.clone(), guid));
+                                        self.di_devices.push((new_id, device.clone(), guid, effect));
                                         active_di_indices.push(self.di_devices.len() - 1);
                                         
                                         let info = GameInputInfo {
@@ -339,7 +387,7 @@ impl WindowsGameInput {
                 let mut i = 0;
                 while i < self.di_devices.len() {
                     if !active_di_indices.contains(&i) {
-                        let (id, _, _) = self.di_devices[i];
+                        let (id, _, _, _) = self.di_devices[i];
                         self.di_devices.remove(i);
                         if let Some(index) = self.gamepads.iter().position(|g| g.id == id) {
                             let info = self.gamepads[index].clone();
@@ -355,7 +403,7 @@ impl WindowsGameInput {
             }
                 
                 // Poll active DI devices
-                for (id, device, _) in &self.di_devices {
+                for (id, device, _, effect) in &self.di_devices {
                     // Poll() usually needed before GetDeviceState
                     let _ = device.Poll();
                     
@@ -387,6 +435,42 @@ impl WindowsGameInput {
                                 wh_state.throttle = norm_trig(65535 - state.lY); // Often Y axis inverted
                                 wh_state.brake = norm_trig(65535 - state.lRz); 
                                 wh_state.clutch = norm_trig(65535 - state.rglSlider[0]);
+                                
+                                // Force Feedback Update
+                                if let Some(eff) = effect {
+                                    // Map steer_force (-1.0 to 1.0) to -10000 to 10000
+                                    let steer_force = wh_state.steer_force.clamp(-1.0, 1.0);
+                                    let mag = (steer_force * 10000.0) as i32;
+                                    
+                                    // To update parameters, we need to pass a DIEFFECT structure again?
+                                    // Or just TypeSpecificParams?
+                                    // IDirectInputEffect::SetParameters takes flags.
+                                    // If we only update magnitude, we can update TypeSpecificParams.
+                                    
+                                    let mut cf_params = DICONSTANTFORCE {
+                                        lMagnitude: mag,
+                                    };
+                                    
+                                    // We need to construct a DIEFFECT that points to this
+                                    let mut eff_struct = DIEFFECT {
+                                        dwSize: size_of::<DIEFFECT>() as u32,
+                                        dwFlags: 0, // Not used when we only update typespecific?
+                                        dwDuration: 0,
+                                        dwSamplePeriod: 0,
+                                        dwGain: 0,
+                                        dwTriggerButton: 0,
+                                        dwTriggerRepeatInterval: 0,
+                                        cAxes: 0,
+                                        rgdwAxes: std::ptr::null_mut(),
+                                        rglDirection: std::ptr::null_mut(),
+                                        lpEnvelope: std::ptr::null_mut(),
+                                        cbTypeSpecificParams: size_of::<DICONSTANTFORCE>() as u32,
+                                        lpvTypeSpecificParams: &mut cf_params as *mut _ as *mut _,
+                                        dwStartDelay: 0,
+                                    };
+                                    
+                                    let _ = eff.SetParameters(&mut eff_struct, DIEP_TYPESPECIFICPARAMS | DIEP_START);
+                                }
                             }
                         }
                     }

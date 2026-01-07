@@ -482,6 +482,22 @@ impl CxGameInputApi for Cx {
         }
         &[]
     }
+
+    fn game_input_state_mut(&mut self, index: usize) -> Option<&mut GameInputState> {
+         if let Some(game_input) = &mut self.os.windows_game_input {
+             if index < game_input.states.len() {
+                 return Some(&mut game_input.states[index]);
+             }
+         }
+         None
+    }
+    
+    fn game_input_states_mut(&mut self) -> &mut [GameInputState] {
+        if let Some(game_input) = &mut self.os.windows_game_input {
+            return &mut game_input.states;
+        }
+        &mut []
+    }
 }
 
 impl CxOsApi for Cx {
