@@ -34,7 +34,7 @@ impl MatchEvent for App{
             let self_ip = "10.0.0.112"
             let comfy_ip = "10.0.0.165:8000"
             let openai_base = "http://127.0.0.1:8080";
-            let Display = {mac:"" ip:"" landscape:false}.freeze_api()
+            let Display = {mac:"" ip:"" landscape:false prompt:"empty"}.freeze_api()
             let displays = [
                 Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.182" landscape:false} // left
                 Display{mac:"28:07:08:2C:D9:42" ip:"10.0.0.198" landscape:true} // table
@@ -201,13 +201,36 @@ impl MatchEvent for App{
             let display_iter = 0
             let messages = []
             
+            let http_body = "
+            <body onclick='document.documentElement.requestFullscreen()' ondblclick='location.reload()' style='margin:0;padding:20;background:#fff;color:#000;display:flex;height:100vh;overflow:hidden'>
+            <b id='d' style='font:5vw sans-serif'></b>
+            <script>
+            u = location.origin + location.pathname + '?' + location.pathname.slice(1);
+            f = () => {
+                fetch(u)
+                .then(r => r.ok ? r.text() : null)
+                .then(t => { if (t !== null) d.innerText = t })
+                .catch(e => 0)
+                .finally(() => setTimeout(f, 1000));
+            };
+            f();
+            </script>
+            </body>
+            "
+            
             let http_server = net.http_server(net.HttpServerOptions{
-                listen:"0.0.0.0:8080"
+                listen:"0.0.0.0:8081"
             }, net.HttpServerEvents{
-                on_get: |req|{
+                on_get: |headers|{
+                    let idx = headers.search.to_f64()
                     net.HttpServerResponse{
-                        body: "OK"
+                        header:"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                        body: if idx.is_number()
+                            displays[idx].prompt
+                        else
+                            http_body
                     }
+                    
                 }
             })
             
@@ -266,7 +289,10 @@ impl MatchEvent for App{
                         
                 std.println("Uploading to "+display.ip)
                 eink_upload_image(display path).last()
+                let set_prompt = image_prompt.visual_description + " - " + image_prompt.style_and_keywords
+                let set_display = display
                 std.println("DONE!")
+                std.start_timeout(17, || set_display.prompt = set_prompt)
             }
                             
             std.start_interval(60) do fn{
