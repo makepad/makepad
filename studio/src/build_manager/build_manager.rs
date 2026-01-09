@@ -818,6 +818,7 @@ impl BuildManager {
                             .borrow_mut()
                             .sockets.retain(|v| v.web_socket_id != web_socket_id);
                     }
+                    HttpServerRequest::TextMessage {..}=>(),
                     HttpServerRequest::BinaryMessage {
                         web_socket_id,
                         response_sender: _,
