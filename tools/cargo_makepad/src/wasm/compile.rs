@@ -317,9 +317,10 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
         while let Ok(message) = rx_request.recv() {
             // only store last change, fix later
             match message {
-                HttpServerRequest::ConnectWebSocket {..} => {},
-                HttpServerRequest::DisconnectWebSocket {..} => {},
+                HttpServerRequest::ConnectWebSocket {..} => {}
+                HttpServerRequest::DisconnectWebSocket {..} => {}
                 HttpServerRequest::BinaryMessage {..} => {}
+                HttpServerRequest::TextMessage {..}=>{}
                 HttpServerRequest::Get {headers, response_sender} => {
                     let path = &headers.path;
                     
