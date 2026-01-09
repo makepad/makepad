@@ -29,7 +29,10 @@ use {
         window::CxWindowPool,
         event::{
             Event,
-            NetworkResponseChannel
+            NetworkResponseChannel,
+            TextInputEvent,
+            TextRangeReplaceEvent,
+            KeyEvent,
         },
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         cx::{Cx, OsType, IosParams},
@@ -148,6 +151,41 @@ impl Cx {
                     let vk = with_ios_app(|app| app.virtual_keyboard_event.take());
                     if let Some(vk) = vk{
                         self.call_event_handler(&Event::VirtualKeyboard(vk));
+                    }
+                    // Process queued text input from UITextInput callbacks
+                    let queued_text = with_ios_app(|app| app.queued_text_input.take());
+                    if let Some((input, replace_last)) = queued_text {
+                        self.call_event_handler(&Event::TextInput(TextInputEvent {
+                            input,
+                            was_paste: false,
+                            replace_last,
+                        }));
+                    }
+                    // Process queued text range replacement (iOS autocorrect)
+                    let queued_range_replace = with_ios_app(|app| app.queued_text_range_replace.take());
+                    if let Some((start, end, text)) = queued_range_replace {
+                        self.call_event_handler(&Event::TextRangeReplace(TextRangeReplaceEvent {
+                            start,
+                            end,
+                            text,
+                        }));
+                    }
+                    // Process queued key events from UITextInput callbacks
+                    let queued_key = with_ios_app(|app| app.queued_key_event.take());
+                    if let Some(key_code) = queued_key {
+                        let time = with_ios_app(|app| app.time_now());
+                        self.call_event_handler(&Event::KeyDown(KeyEvent {
+                            key_code,
+                            is_repeat: false,
+                            modifiers: Default::default(),
+                            time,
+                        }));
+                        self.call_event_handler(&Event::KeyUp(KeyEvent {
+                            key_code,
+                            is_repeat: false,
+                            modifiers: Default::default(),
+                            time,
+                        }));
                     }
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal(){
@@ -282,11 +320,15 @@ impl Cx {
                     window.window_geom = with_ios_app(|app| app.last_window_geom.clone());
                     window.is_created = true;
                 },
-                CxOsOp::ShowTextIME(_area, _pos) => {
+                CxOsOp::ShowTextIME(_area, pos) => {
+                    IosApp::set_ime_position(pos);
                     IosApp::show_keyboard();
                 },
                 CxOsOp::HideTextIME => {
                     IosApp::hide_keyboard();
+                },
+                CxOsOp::SetIMEText(text, cursor_pos) => {
+                    IosApp::set_ime_text(text, cursor_pos);
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
                     with_ios_app(|app| app.start_timer(timer_id, interval, repeats));
@@ -307,10 +349,10 @@ impl Cx {
                     self.os.http_requests.cancel_http_request(request_id);
                 },
                 CxOsOp::ShowClipboardActions { has_selection, rect, keyboard_shift } => {
-                    with_ios_app(|app| app.show_clipboard_actions(has_selection, rect, keyboard_shift));
+                    IosApp::show_clipboard_actions(has_selection, rect, keyboard_shift);
                 }
                 CxOsOp::HideClipboardActions => {
-                    with_ios_app(|app| app.hide_clipboard_actions());
+                    IosApp::hide_clipboard_actions();
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     with_ios_app(|app| app.copy_to_clipboard(&content));
