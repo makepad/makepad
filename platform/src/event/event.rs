@@ -190,6 +190,7 @@ pub enum Event {
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
+    TextRangeReplace(TextRangeReplaceEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
 
@@ -277,6 +278,7 @@ impl Event{
             31=>"KeyDown",
             32=>"KeyUp",
             33=>"TextInput",
+            58=>"TextRangeReplace",
             34=>"TextCopy",
             35=>"TextCut",
 
@@ -351,6 +353,7 @@ impl Event{
             Self::KeyDown(_)=>31,
             Self::KeyUp(_)=>32,
             Self::TextInput(_)=>33,
+            Self::TextRangeReplace(_)=>58,
             Self::TextCopy(_)=>34,
             Self::TextCut(_)=>35,
 
@@ -406,6 +409,7 @@ pub enum Hit{
     KeyUp(KeyEvent),
     Trigger(TriggerHitEvent),
     TextInput(TextInputEvent),
+    TextRangeReplace(TextRangeReplaceEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
 

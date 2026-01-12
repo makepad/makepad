@@ -613,7 +613,11 @@ pub struct TextInput {
     #[rust] blink_timer: Timer,
     #[rust] preserved_selection_cursor: Option<Cursor>,
     /// Skip finger move after long press to prevent selection changes
-    #[rust] ignore_next_move: bool, 
+    #[rust] ignore_next_move: bool,
+    /// IME composition tracking - byte index where composition starts
+    #[rust] composition_start: usize,
+    /// IME composition tracking - byte length of current composition
+    #[rust] composition_length: usize,
 }
 
  impl LiveHook for TextInput{
@@ -1348,6 +1352,8 @@ impl Widget for TextInput {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
+                // Sync text to iOS for autocorrect context
+                cx.set_ime_text(&self.text, self.selection.cursor.index);
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
             Hit::KeyFocusLost(_) => {
@@ -1698,23 +1704,116 @@ impl Widget for TextInput {
             }) if !self.is_read_only => {
                 let input = self.filter_input(&input, false);
                 if input.is_empty() {
+                    // Empty input with replace_last means composition was cancelled
+                    if replace_last && self.composition_length > 0 {
+                        // Remove the composition text
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start: self.composition_start,
+                                end: self.composition_start + self.composition_length,
+                                replace_with: String::new()
+                            }
+                        );
+                        self.composition_length = 0;
+                        self.draw_bg.redraw(cx);
+                        cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                    }
                     return;
                 }
-                self.create_or_extend_edit_group(
-                    if replace_last || was_paste {
-                        EditKind::Other
+
+                if replace_last {
+                    // IME composition update
+                    if self.composition_length > 0 {
+                        // Replace previous composition text
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start: self.composition_start,
+                                end: self.composition_start + self.composition_length,
+                                replace_with: input.clone()
+                            }
+                        );
+                        self.composition_length = input.len();
                     } else {
-                        EditKind::Insert
+                        // First composition character - record start position
+                        self.composition_start = self.selection.start().index;
+                        self.composition_length = input.len();
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start: self.selection.start().index,
+                                end: self.selection.end().index,
+                                replace_with: input
+                            }
+                        );
                     }
-                );
+                } else {
+                    // Final commit or regular text input
+                    if self.composition_length > 0 {
+                        // Replace composition with final committed text
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start: self.composition_start,
+                                end: self.composition_start + self.composition_length,
+                                replace_with: input
+                            }
+                        );
+                        self.composition_length = 0;
+                    } else {
+                        // Normal text input (no active composition)
+                        self.create_or_extend_edit_group(
+                            if was_paste {
+                                EditKind::Other
+                            } else {
+                                EditKind::Insert
+                            }
+                        );
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start: self.selection.start().index,
+                                end: self.selection.end().index,
+                                replace_with: input
+                            }
+                        );
+                    }
+                }
+                self.animator_play(cx, ids!(empty.off));
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+            }
+            Hit::TextRangeReplace(event) if !self.is_read_only => {
+                // iOS autocorrect sends range replacement events
+                // Convert character indices to byte indices
+                let byte_start = self.text.char_indices()
+                    .nth(event.start)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.text.len());
+                let byte_end = self.text.char_indices()
+                    .nth(event.end)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.text.len());
+
+                // Clear any active composition
+                self.composition_length = 0;
+
+                // Perform the replacement
+                self.create_or_extend_edit_group(EditKind::Other);
                 self.apply_edit(
                     cx,
                     Edit {
-                        start: self.selection.start().index,
-                        end: self.selection.end().index,
-                        replace_with: input
+                        start: byte_start,
+                        end: byte_end,
+                        replace_with: event.text.clone()
                     }
                 );
+
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
