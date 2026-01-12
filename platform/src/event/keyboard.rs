@@ -137,6 +137,17 @@ pub struct TextClipboardEvent {
     pub response: Rc<RefCell<Option<String>>>
 }
 
+/// Event for replacing a specific range of text
+#[derive(Clone, Debug)]
+pub struct TextRangeReplaceEvent {
+    /// Start index (in characters, not bytes) of range to replace
+    pub start: usize,
+    /// End index (in characters, not bytes) of range to replace
+    pub end: usize,
+    /// Text to insert at the range
+    pub text: String,
+}
+
 impl Default for KeyCode {
     fn default() -> Self {KeyCode::Unknown}
 }

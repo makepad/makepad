@@ -74,6 +74,9 @@ pub enum CxOsOp {
 
     ShowTextIME(Area, Vec2d),
     HideTextIME,
+    /// Sets the text and cursor position to the IME for autocorrect context
+    /// (text, cursor_position)
+    SetIMEText(String, usize),
     SetCursor(MouseCursor),
     StartTimer {
         timer_id: u64,
@@ -158,6 +161,7 @@ impl std::fmt::Debug for CxOsOp {
 
             Self::ShowTextIME(..)=>write!(f, "ShowTextIME"),
             Self::HideTextIME=>write!(f, "HideTextIME"),
+            Self::SetIMEText(..)=>write!(f, "SetIMEText"),
             Self::SetCursor(..)=>write!(f, "SetCursor"),
             Self::StartTimer{..}=>write!(f, "StartTimer"),
             Self::StopTimer(..)=>write!(f, "StopTimer"),
@@ -316,6 +320,11 @@ impl Cx {
     pub fn hide_text_ime(&mut self) {
         self.keyboard.reset_text_ime_dismissed();
         self.platform_ops.push(CxOsOp::HideTextIME);
+    }
+
+    /// Syncs text content to IME for autocorrect context
+    pub fn set_ime_text(&mut self, text: &str, cursor_pos: usize) {
+        self.platform_ops.push(CxOsOp::SetIMEText(text.to_string(), cursor_pos));
     }
 
     pub fn text_ime_was_dismissed(&mut self) {
