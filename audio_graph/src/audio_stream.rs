@@ -60,6 +60,14 @@ impl AudioStreamReceiver {
         let iself = self.0.lock().unwrap();
         iself.routes[route_num].id
     }
+    
+    /// Returns the channel count of pending buffers for a route, or None if no buffers
+    pub fn channel_count(&self, route_num: usize) -> Option<usize> {
+        let iself = self.0.lock().unwrap();
+        iself.routes.get(route_num)
+            .and_then(|route| route.buffers.first())
+            .map(|buf| buf.channel_count())
+    }
 
     pub fn try_recv_stream(&mut self) {
         let mut iself = self.0.lock().unwrap();
