@@ -82,10 +82,10 @@ macro_rules! script_set_value{
 }
 
 #[macro_export]
-macro_rules! script_proto{
+macro_rules! script_api{
     ($vm:ident, $obj:ident, $id: ident)=>{
         {
-            let v = $id::script_proto($vm);
+            let v = $id::script_api($vm);
             $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v, &$vm.thread.trap);
         }
     };

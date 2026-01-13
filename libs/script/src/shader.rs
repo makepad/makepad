@@ -1907,6 +1907,7 @@ impl ShaderFnCompiler{
                 let value = vm.heap.value(obj, field_id.into(), &self.trap);
                 if let Some(value_obj) = value.as_object(){
                     if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
+                        // This is an explicitly marked shader IO type (uniform, varying, etc.)
                         let proto = vm.heap.proto(value.as_object().unwrap());
                         let ty = Self::type_from_value(vm, proto);
                         let concrete_ty = match ty {
@@ -1937,6 +1938,36 @@ impl ShaderFnCompiler{
                             return
                         }
                     }
+                }
+                // Check if this is a Rust struct field (not shader IO marked, but a valid POD type)
+                // These come from Rust structs via script_shader(vm) and should be treated as RustInstance
+                let ty = Self::type_from_value(vm, value);
+                let concrete_ty = match ty {
+                    ShaderType::Pod(pt) => Some(pt),
+                    ShaderType::PodType(pt) => Some(pt),
+                    _ => None
+                };
+                
+                if let Some(pod_ty) = concrete_ty {
+                    // This is a Rust struct field - treat it as RustInstance
+                    let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, SHADER_IO_RUST_INSTANCE);
+                    vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
+                    if !output.io.iter().any(|io| io.name == field_id) {
+                        output.io.push(ShaderIo {
+                            kind,
+                            name: field_id,
+                            ty: pod_ty
+                        });
+                    }
+                    let mut s = self.stack.new_string();
+                    match prefix {
+                        ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, field_id).ok(),
+                        ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+                    };
+                    self.stack.push(&self.trap, ShaderType::Pod(pod_ty), s);
+                    self.stack.free_string(field_s);
+                    self.stack.free_string(instance_s);
+                    return
                 }
             }
         }
