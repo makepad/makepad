@@ -29,7 +29,8 @@ pub fn test(){
     #[derive(Script, ScriptHook)]
     #[repr(C)]
     pub struct ShaderTest{
-        #[live] struct_field: f32
+        #[live] struct_field: f32, 
+        #[live] unused_field: f32
     }
         
     use crate::vm::*;
@@ -73,7 +74,7 @@ pub fn test(){
         }
         
         let draw_uniforms = struct{
-            field: f32
+            field: f32,
         }
         
         let vertices = struct{
@@ -87,6 +88,7 @@ pub fn test(){
             draw: shader.uniform_buffer(draw_uniforms)
             y: shader.instance(1.0)
             x: shader.instance(1.0)
+            z_unused: shader.instance(1.0)
             vy: shader.varying(1.0)
             vertex_pos: shader.vertex_position(vec4f)
             pixel: shader.fragment_output(0, vec4f)

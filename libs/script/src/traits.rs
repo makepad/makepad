@@ -24,9 +24,28 @@ pub trait ScriptHookDeref {
     fn on_deref_after_apply(&mut self,_vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){}
 }
 
+#[derive(Clone, Copy)]
+pub struct ScriptTypeProp {
+    pub order: u32,
+    pub ty: ScriptTypeId,
+}
+
 #[derive(Default)]
 pub struct ScriptTypeProps{
-    pub props: LiveIdMap<LiveId, ScriptTypeId>
+    pub props: LiveIdMap<LiveId, ScriptTypeProp>
+}
+
+impl ScriptTypeProps {
+    pub fn insert(&mut self, id: LiveId, ty: ScriptTypeId) {
+        let order = self.props.len() as u32;
+        self.props.insert(id, ScriptTypeProp { order, ty });
+    }
+    
+    pub fn iter_ordered(&self) -> impl Iterator<Item = (LiveId, ScriptTypeId)> + '_ {
+        let mut ordered: Vec<_> = self.props.iter().map(|(k, v)| (*k, *v)).collect();
+        ordered.sort_by_key(|(_, prop)| prop.order);
+        ordered.into_iter().map(|(id, prop)| (id, prop.ty))
+    }
 }
 
 pub struct ScriptTypeObject{

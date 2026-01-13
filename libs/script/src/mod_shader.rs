@@ -87,8 +87,9 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         // for every function we make a 'shadercompiler'
         if let Some(io_self) = io_self.as_object(){
             let mut output = ShaderOutput::default();
+            output.backend = ShaderBackend::Metal;
+            
             if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), &vm.thread.trap).as_object(){
-                output.backend = ShaderBackend::Metal;
                 output.mode = ShaderMode::Vertex;
                 ShaderFnCompiler::compile_shader_def(
                     vm, 
@@ -112,6 +113,11 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
             }
             
             
+            
+            // After compilation, pre-collect ALL Rust instance fields in correct order
+            // Dyn fields were already collected during compilation as encountered
+            // Rust fields must ALL be emitted to match Repr(C) layout
+            output.pre_collect_rust_instance_io(vm, io_self);
             
             // alright on metal we now need to generate the structs
             // we need to generate the Varying struct
