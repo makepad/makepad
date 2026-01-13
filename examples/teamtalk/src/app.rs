@@ -15,7 +15,7 @@ use std::net::UdpSocket;
 use std::time::Duration;
 
 // Network standard sample rate - all audio is transmitted at this rate
-const NETWORK_SAMPLE_RATE: f64 = 48000.0;
+const NETWORK_SAMPLE_RATE: f64 = 32000.0;
 
 /// Simple linear interpolation resampler
 fn resample(input: &AudioBuffer, from_rate: f64, to_rate: f64) -> AudioBuffer {
@@ -141,6 +141,9 @@ impl App {
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
             let mut output_buffer = AudioBuffer::new_with_size(640, 1);
+            let mut was_silent = true;
+            let fade_in_samples = 200; // ~4ms at 48kHz
+            
             loop {
                 // fill the mic stream recv side buffers, and block if nothing
                 mic_recv.recv_stream();
@@ -149,16 +152,53 @@ impl App {
                     if mic_recv.read_buffer(0, &mut output_buffer) == 0 {
                         break;
                     }
-                    let buf = output_buffer.channel(0);
+                    let buf = output_buffer.channel_mut(0);
                     // do a quick volume check so we can send 1 byte packets if silent
                     let mut sum = 0.0;
-                    for v in buf {
+                    for v in buf.iter() {
                         sum += v.abs();
                     }
                     let peak = sum / buf.len() as f32;
                     
-                    let min_volume = 0.0001f32; // threshold for silence detection
-                    let wire_packet = if peak > min_volume {
+                    let min_volume = 0.001f32; // threshold for silence detection
+                    let is_active = peak > min_volume;
+                    
+                    let wire_packet = if is_active {
+                        // Apply logarithmic fade-in if transitioning from silence
+                        if was_silent {
+                            let ramp_len = fade_in_samples.min(buf.len());
+                            let k = 3.0_f32; // curve steepness
+                            let norm = k.exp() - 1.0;
+                            for i in 0..ramp_len {
+                                let t = i as f32 / ramp_len as f32;
+                                let gain = ((k * t).exp() - 1.0) / norm;
+                                buf[i] *= gain;
+                            }
+                        }
+                        was_silent = false;
+                        
+                        TeamTalkWire::Audio {
+                            client_uid: my_client_uid,
+                            channel_count: 1,
+                            data: output_buffer.to_i16()
+                        }
+                    } else if !was_silent {
+                        // Transitioning to silence - apply fade-out then send as audio
+                        let ramp_len = fade_in_samples.min(buf.len());
+                        let k = 3.0_f32;
+                        let norm = k.exp() - 1.0;
+                        for i in 0..ramp_len {
+                            let t = i as f32 / ramp_len as f32;
+                            // Inverse of fade-in: start at 1, end at 0
+                            let gain = 1.0 - ((k * t).exp() - 1.0) / norm;
+                            buf[i] *= gain;
+                        }
+                        // Zero remainder after fade
+                        for i in ramp_len..buf.len() {
+                            buf[i] = 0.0;
+                        }
+                        was_silent = true;
+                        
                         TeamTalkWire::Audio {
                             client_uid: my_client_uid,
                             channel_count: 1,
