@@ -441,7 +441,8 @@ impl WasapiOutput {
                     let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
                     let mut audio_buffer = self.base.audio_buffer.take().unwrap();
                     let channel_count = self.base.channel_count;
-                    let frame_count = (req_size / channel_count as u32) as usize;
+                    // req_size is already in frames (not samples), don't divide by channel_count
+                    let frame_count = req_size as usize;
                     audio_buffer.clear_final_size();
                     audio_buffer.resize(frame_count, channel_count);
                     audio_buffer.set_final_size();
