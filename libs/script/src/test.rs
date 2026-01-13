@@ -26,9 +26,10 @@ pub fn test(){
         Named{named_field:f64}
     }
     
-    //#[derive(ScriptShader)]
+    #[derive(Script, ScriptHook)]
     #[repr(C)]
     pub struct ShaderTest{
+        #[live] struct_field: f32
     }
         
     use crate::vm::*;
@@ -51,6 +52,7 @@ pub fn test(){
             });
         }
     }
+    
     
     let code = script!{
         use mod.std.*
@@ -79,10 +81,11 @@ pub fn test(){
         }
         
         // alright. lets figure out the shader sself
-        let test_shader = {
+        let test_shader = #(ShaderTest::script_shader(vm)){
             vtx: shader.vertex_buffer(vertices)
             unitest: shader.uniform(1.0)
             draw: shader.uniform_buffer(draw_uniforms)
+            y: shader.instance(1.0)
             x: shader.instance(1.0)
             vy: shader.varying(1.0)
             vertex_pos: shader.vertex_position(vec4f)
@@ -94,15 +97,16 @@ pub fn test(){
             }
             fragment: fn(){
                 let v = self.vy + self.unitest
-                let t = self.draw.field
+                let t = self.draw.field + self.struct_field
                 let x = sdf.new()
                 x.set_field(1f)
                 x.p.y = 1f
                 x.arr[3] = 1f
                 self.otherfn(1f)
-                self.pixel = mix(#f00, #0f0, self.x)
+                self.pixel = mix(#f00, #0f0, self.x + self.y)
             }
         }
+        //~test_shader
         let x = sdf(0,vec4(0),array(1f,2f,3f,4f))
         ~shader.compile_draw(test_shader)
     };

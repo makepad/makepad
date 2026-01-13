@@ -107,7 +107,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         };
         let ty_index = vm.heap.register_type(Some(type_id), ty_check);
         if let Some(obj) = proto.as_object(){
-            vm.heap.freeze_with_type(obj, ty_index);
+            vm.heap.set_type(obj, ty_index);
         }
         proto
     }
@@ -132,6 +132,12 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     fn script_component(vm:&mut ScriptVm)->ScriptValue{
         let val = Self::script_proto(vm);
         vm.heap.freeze_component(val.into());
+        val
+    }
+    
+    fn script_shader(vm:&mut ScriptVm)->ScriptValue{
+        let val = Self::script_proto(vm);
+        vm.heap.freeze_shader(val.into());
         val
     }
     

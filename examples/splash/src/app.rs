@@ -39,7 +39,7 @@ impl MatchEvent for App{
                         let mut data = [0u8; 8];
                         data[0..4].copy_from_slice(&steer.to_le_bytes());
                         data[4..8].copy_from_slice(&throttle.to_le_bytes());
-                        let _ = socket.send_to(&data, "10.0.0.197:5001");
+                        let _ = socket.send_to(&data, "10.0.0.134:5001");
                     }
                 }
                 GameInputState::Wheel(w)=>{
@@ -50,7 +50,7 @@ impl MatchEvent for App{
                         let mut data = [0u8; 8];
                         data[0..4].copy_from_slice(&steer.to_le_bytes());
                         data[4..8].copy_from_slice(&throttle.to_le_bytes());
-                        let _ = socket.send_to(&data, "10.0.0.197:5001");
+                        let _ = socket.send_to(&data, "10.0.0.134:5001");
                     }
                     break;
                 }

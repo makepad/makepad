@@ -101,8 +101,8 @@ impl Cx{
 pub fn define_run_module(vm:&mut ScriptVm){
     let run = vm.new_module(id_lut!(run));
     
-    script_proto!(vm, run, ChildEvents);
-    script_proto!(vm, run, ChildCmd);
+    script_api!(vm, run, ChildEvents);
+    script_api!(vm, run, ChildCmd);
     
     vm.add_method(run, id_lut!(child), script_args_def!(cmd=NIL, events=NIL), move |vm, args|{
         
