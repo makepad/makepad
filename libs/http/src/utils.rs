@@ -1,6 +1,7 @@
-use std::net::{TcpStream, Shutdown, SocketAddr};
+use std::net::{TcpStream, Shutdown, SocketAddr, IpAddr, Ipv4Addr};
 use std::io::BufReader;
 use std::io::prelude::*;
+use makepad_script::*;
 
 pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
     let bytes_total = bytes.len();
@@ -58,17 +59,18 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     Some((url, search))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Script, ScriptHook)]
 pub struct HttpServerHeaders {
-    pub addr: SocketAddr,
-    pub lines: Vec<String>,
-    pub verb: String,
-    pub path: String,
-    pub path_no_slash: String,
-    pub search: Option<String>,
-    pub content_length: Option<u64>,
-    pub accept_encoding: Option<String>,
-    pub sec_websocket_key: Option<String>
+    #[rust(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080))] pub addr: SocketAddr,
+    #[live] pub addr_text: String,
+    #[live] pub lines: Vec<String>,
+    #[live] pub verb: String,
+    #[live] pub path: String,
+    #[live] pub path_no_slash: String,
+    #[live] pub search: Option<String>,
+    #[live] pub content_length: Option<u64>,
+    #[live] pub accept_encoding: Option<String>,
+    #[live] pub sec_websocket_key: Option<String>
 }
 
 impl HttpServerHeaders {
@@ -132,6 +134,7 @@ impl HttpServerHeaders {
         
         Some(HttpServerHeaders {
             addr,
+            addr_text: format!("{}", addr),
             verb: verb.to_string(),
             path_no_slash: path.0[1..].to_string(),
             path: path.0,
