@@ -310,11 +310,11 @@ impl App {
         });
 
         cx.audio_input(0, move |info, input_buffer| {
-            let mut input_buffer = input_buffer.clone();
-            // Inputs send mono to save network bandwidth
-            input_buffer.make_single_channel();
+            // Keep the input's natural channel count:
+            // - Microphones are typically mono (1 channel)
+            // - Loopback captures stereo (2 channels)
             // Resample to network rate before sending
-            let resampled = resample(&input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
+            let resampled = resample(input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
             let _ = mic_send.send(0, resampled);
         });
 
