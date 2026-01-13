@@ -15,7 +15,10 @@ use std::net::UdpSocket;
 use std::time::Duration;
 
 // Network standard sample rate - all audio is transmitted at this rate
-const NETWORK_SAMPLE_RATE: f64 = 32000.0;
+const NETWORK_SAMPLE_RATE: f64 = 44100.0;
+// Maximum samples in a wire packet (640 i16 values = 1280 bytes)
+// For mono: 640 frames, for stereo: 320 frames
+const MAX_WIRE_SAMPLES: usize = 640;
 
 /// Simple linear interpolation resampler
 fn resample(input: &AudioBuffer, from_rate: f64, to_rate: f64) -> AudioBuffer {
@@ -42,6 +45,58 @@ fn resample(input: &AudioBuffer, from_rate: f64, to_rate: f64) -> AudioBuffer {
     }
     
     output
+}
+
+/// Smooth limiter with fast attack, slow release
+fn apply_limiter(buf: &mut [f32], limiter_gain: &mut f32) {
+    const MAX_VOLUME: f32 = 0.6;
+    const TARGET_GAIN: f32 = 0.1;
+    const ATTACK_COEF: f32 = 0.3;
+    const RELEASE_COEF: f32 = 0.001;
+    
+    for v in buf.iter_mut() {
+        let desired = if v.abs() > MAX_VOLUME { TARGET_GAIN } else { 1.0 };
+        if desired < *limiter_gain {
+            *limiter_gain += (desired - *limiter_gain) * ATTACK_COEF;
+        } else {
+            *limiter_gain += (desired - *limiter_gain) * RELEASE_COEF;
+        }
+        *v *= *limiter_gain;
+    }
+}
+
+/// Calculate average peak level
+fn calculate_peak(buf: &[f32]) -> f32 {
+    let sum: f32 = buf.iter().map(|v| v.abs()).sum();
+    sum / buf.len() as f32
+}
+
+/// Logarithmic fade-in
+fn apply_fade_in(buf: &mut [f32], fade_samples: usize) {
+    let ramp_len = fade_samples.min(buf.len());
+    let k = 3.0_f32;
+    let norm = k.exp() - 1.0;
+    for i in 0..ramp_len {
+        let t = i as f32 / ramp_len as f32;
+        let gain = ((k * t).exp() - 1.0) / norm;
+        buf[i] *= gain;
+    }
+}
+
+/// Logarithmic fade-out
+fn apply_fade_out(buf: &mut [f32], fade_samples: usize) {
+    let ramp_len = fade_samples.min(buf.len());
+    let k = 3.0_f32;
+    let norm = k.exp() - 1.0;
+    for i in 0..ramp_len {
+        let t = i as f32 / ramp_len as f32;
+        let gain = 1.0 - ((k * t).exp() - 1.0) / norm;
+        buf[i] *= gain;
+    }
+    // Zero remainder after fade
+    for i in ramp_len..buf.len() {
+        buf[i] = 0.0;
+    }
 }
 
 app_main!(App);
@@ -138,104 +193,86 @@ impl App {
         let read_audio = write_audio.try_clone().unwrap();
         
         // our microphone broadcast network thread
+        // Buffer adapts to input channel count: mono=640 frames, stereo=320 frames
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
-            let mut output_buffer = AudioBuffer::new_with_size(640, 1);
+            let mut output_buffer = AudioBuffer::default();
             let mut was_silent = true;
-            let fade_in_samples = 200; // ~4ms at 48kHz
+            let fade_in_samples = 280; // ~6ms at 44100Hz
             let mut limiter_gain = 1.0_f32;
             
             loop {
-                // fill the mic stream recv side buffers, and block if nothing
                 mic_recv.recv_stream();
                 loop {
-                    // platform2's read_buffer doesn't take min_buf/max_buf (set at creation)
+                    // Resize buffer based on channel count from input
+                    // MAX_WIRE_SAMPLES total samples: mono=640 frames, stereo=320 frames
+                    let channel_count = output_buffer.channel_count().max(1);
+                    let frame_count = MAX_WIRE_SAMPLES / channel_count;
+                    output_buffer.resize(frame_count, channel_count);
+                    
                     if mic_recv.read_buffer(0, &mut output_buffer) == 0 {
                         break;
                     }
-                    let buf = output_buffer.channel_mut(0);
                     
-                    // Smooth limiter: fast attack, slow release
-                    let max_volume = 0.6_f32;
-                    let target_gain = 0.1_f32;
-                    let attack_coef = 0.3_f32;   // fast attack (per-sample, approaches target quickly)
-                    let release_coef = 0.001_f32; // slow release (gradually restore)
+                    let channel_count = output_buffer.channel_count();
+                    let frame_count = output_buffer.frame_count();
                     
-                    for v in buf.iter_mut() {
-                        let desired = if v.abs() > max_volume { target_gain } else { 1.0 };
-                        if desired < limiter_gain {
-                            // Attack: move quickly toward lower gain
-                            limiter_gain += (desired - limiter_gain) * attack_coef;
-                        } else {
-                            // Release: move slowly toward higher gain
-                            limiter_gain += (desired - limiter_gain) * release_coef;
-                        }
-                        *v *= limiter_gain;
+                    // Process all channels: limiter, silence detection, fades
+                    let mut peak = 0.0_f32;
+                    for ch in 0..channel_count {
+                        let buf = output_buffer.channel_mut(ch);
+                        apply_limiter(buf, &mut limiter_gain);
+                        peak = peak.max(calculate_peak(buf));
                     }
                     
-                    // do a quick volume check so we can send 1 byte packets if silent
-                    let mut sum = 0.0;
-                    for v in buf.iter() {
-                        sum += v.abs();
-                    }
-                    let peak = sum / buf.len() as f32;
-                    
-                    let min_volume = 0.001f32; // threshold for silence detection
-                    let is_active = peak > min_volume;
-                    
-                    let wire_packet = if is_active {
-                        // Apply logarithmic fade-in if transitioning from silence
-                        if was_silent {
-                            let ramp_len = fade_in_samples.min(buf.len());
-                            let k = 3.0_f32; // curve steepness
-                            let norm = k.exp() - 1.0;
-                            for i in 0..ramp_len {
-                                let t = i as f32 / ramp_len as f32;
-                                let gain = ((k * t).exp() - 1.0) / norm;
-                                buf[i] *= gain;
+                    let is_active = peak > 0.001;
+                    let wire_packet = match (is_active, was_silent) {
+                        (true, true) => {
+                            // Fade in from silence
+                            for ch in 0..channel_count {
+                                apply_fade_in(output_buffer.channel_mut(ch), fade_in_samples);
+                            }
+                            was_silent = false;
+                            TeamTalkWire::Audio {
+                                client_uid: my_client_uid,
+                                channel_count: channel_count as u32,
+                                data: output_buffer.to_i16()
                             }
                         }
-                        was_silent = false;
-                        
-                        TeamTalkWire::Audio {
-                            client_uid: my_client_uid,
-                            channel_count: 1,
-                            data: output_buffer.to_i16()
+                        (true, false) => {
+                            // Active, no transition
+                            was_silent = false;
+                            TeamTalkWire::Audio {
+                                client_uid: my_client_uid,
+                                channel_count: channel_count as u32,
+                                data: output_buffer.to_i16()
+                            }
                         }
-                    } else if !was_silent {
-                        // Transitioning to silence - apply fade-out then send as audio
-                        let ramp_len = fade_in_samples.min(buf.len());
-                        let k = 3.0_f32;
-                        let norm = k.exp() - 1.0;
-                        for i in 0..ramp_len {
-                            let t = i as f32 / ramp_len as f32;
-                            // Inverse of fade-in: start at 1, end at 0
-                            let gain = 1.0 - ((k * t).exp() - 1.0) / norm;
-                            buf[i] *= gain;
+                        (false, false) => {
+                            // Fade out to silence
+                            for ch in 0..channel_count {
+                                apply_fade_out(output_buffer.channel_mut(ch), fade_in_samples);
+                            }
+                            was_silent = true;
+                            TeamTalkWire::Audio {
+                                client_uid: my_client_uid,
+                                channel_count: channel_count as u32,
+                                data: output_buffer.to_i16()
+                            }
                         }
-                        // Zero remainder after fade
-                        for i in ramp_len..buf.len() {
-                            buf[i] = 0.0;
-                        }
-                        was_silent = true;
-                        
-                        TeamTalkWire::Audio {
-                            client_uid: my_client_uid,
-                            channel_count: 1,
-                            data: output_buffer.to_i16()
-                        }
-                    } else {
-                        TeamTalkWire::Silence {
-                            client_uid: my_client_uid,
-                            frame_count: output_buffer.frame_count() as u32
+                        (false, true) => {
+                            // Still silent
+                            TeamTalkWire::Silence {
+                                client_uid: my_client_uid,
+                                frame_count: frame_count as u32
+                            }
                         }
                     };
-                    // serialise the packet enum for sending over the wire
+                    
                     wire_data.clear();
                     wire_packet.ser_bin(&mut wire_data);
-                    // send to all peers
                     let _ = write_audio.send_to(&wire_data, "10.0.0.255:41531");
-                };
+                }
             }
         });
         
@@ -252,11 +289,14 @@ impl App {
                 };
 
                 // create an audiobuffer from the data
+                // Received data keeps its original channel count (mono or stereo)
                 let (client_uid, buffer) = match packet {
                     TeamTalkWire::Audio { client_uid, channel_count, data } => {
-                        (client_uid, AudioBuffer::from_i16(&data, channel_count as usize))
+                        let buffer = AudioBuffer::from_i16(&data, channel_count as usize);
+                        (client_uid, buffer)
                     }
                     TeamTalkWire::Silence { client_uid, frame_count } => {
+                        // Silence packets are mono (1 channel)
                         (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1))
                     }
                 };
@@ -270,6 +310,7 @@ impl App {
 
         cx.audio_input(0, move |info, input_buffer| {
             let mut input_buffer = input_buffer.clone();
+            // Inputs send mono to save network bandwidth
             input_buffer.make_single_channel();
             // Resample to network rate before sending
             let resampled = resample(&input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
@@ -281,18 +322,32 @@ impl App {
             output_buffer.zero();
             mix_recv.try_recv_stream();
             
+            let out_channels = output_buffer.channel_count();
+            let out_frames = output_buffer.frame_count();
+            
             // Calculate how many frames we need at network rate to fill output buffer
             let ratio = NETWORK_SAMPLE_RATE / info.sample_rate;
-            let network_frames = (output_buffer.frame_count() as f64 * ratio).ceil() as usize;
-            let mut network_buf = AudioBuffer::new_with_size(network_frames, output_buffer.channel_count());
+            let network_frames = (out_frames as f64 * ratio).ceil() as usize;
+            
+            // We read into a mono buffer since network data may be mono
+            // (saves bandwidth - inputs only send mono)
+            let mut network_buf = AudioBuffer::new_with_size(network_frames, 1);
             
             for i in 0..mix_recv.num_routes() {
                 if mix_recv.read_buffer(i, &mut network_buf) != 0 {
                     // Resample from network rate to device rate
                     let resampled = resample(&network_buf, NETWORK_SAMPLE_RATE, info.sample_rate);
-                    let copy_len = resampled.data.len().min(output_buffer.data.len());
-                    for j in 0..copy_len {
-                        output_buffer.data[j] += resampled.data[j] * volume;
+                    let src_channels = resampled.channel_count();
+                    let copy_frames = resampled.frame_count().min(out_frames);
+                    
+                    // Mix into output, upmixing mono to stereo if needed
+                    for frame in 0..copy_frames {
+                        for out_ch in 0..out_channels {
+                            // If source is mono, use channel 0 for all output channels
+                            let src_ch = if src_channels == 1 { 0 } else { out_ch.min(src_channels - 1) };
+                            let src_sample = resampled.channel(src_ch)[frame];
+                            output_buffer.channel_mut(out_ch)[frame] += src_sample * volume;
+                        }
                     }
                 }
             }
