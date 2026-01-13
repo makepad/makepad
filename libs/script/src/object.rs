@@ -476,17 +476,37 @@ impl fmt::Display for ScriptObjectTag {
 pub struct ScriptMapTag(u64);
 
 impl ScriptMapTag{
-    const DIRTY:u64 = 1;
-    fn dirty()->Self{
-        Self(1)
+    // Lower 32 bits store insertion order
+    const ORDER_MASK: u64 = 0xFFFF_FFFF;
+    // Bit 33 (index 32) stores the dirty flag
+    const DIRTY: u64 = 1 << 32;
+    
+    #[allow(dead_code)]
+    fn dirty() -> Self {
+        Self(Self::DIRTY)
     }
-    fn get_and_clear_dirty(&mut self)->bool{
+    
+    fn dirty_with_order(order: u32) -> Self {
+        Self(Self::DIRTY | (order as u64))
+    }
+    
+    fn get_and_clear_dirty(&mut self) -> bool {
         let ret = self.0 & Self::DIRTY != 0;
         self.0 &= !Self::DIRTY;
         ret
     }
-    fn set_dirty(&mut self){
+    
+    fn set_dirty(&mut self) {
         self.0 |= Self::DIRTY;
+    }
+    
+    pub fn order(&self) -> u32 {
+        (self.0 & Self::ORDER_MASK) as u32
+    }
+    
+    #[allow(dead_code)]
+    fn set_order(&mut self, order: u32) {
+        self.0 = (self.0 & !Self::ORDER_MASK) | (order as u64);
     }
 }
 
@@ -612,6 +632,7 @@ impl ScriptObjectData{
     
     pub fn map_insert(&mut self, key:ScriptValue, value:ScriptValue){
         if self.tag.is_tracked(){
+            let order = self.map.len() as u32;
             match self.map.entry(key) {
                 Entry::Occupied(mut occ) => {
                     let old = occ.get_mut();
@@ -625,16 +646,17 @@ impl ScriptObjectData{
                 Entry::Vacant(vac) => {
                     vac.insert(ScriptMapValue{
                         value,
-                        tag: ScriptMapTag::dirty()
+                        tag: ScriptMapTag::dirty_with_order(order)
                     });
                     return
                 }   
             }
         }
         else{
+            let order = self.map.len() as u32;
             self.map.insert(key, ScriptMapValue{
                 value,
-                tag: ScriptMapTag::dirty()
+                tag: ScriptMapTag::dirty_with_order(order)
             });
         }
     }
@@ -705,6 +727,14 @@ impl ScriptObjectData{
     pub fn map_iter<F:FnMut(ScriptValue,ScriptValue)>(&self, mut f:F){
         for (key,val) in self.map.iter(){
             f(*key,val.value);
+        }
+    }
+    
+    pub fn map_iter_ordered<F:FnMut(ScriptValue,ScriptValue)>(&self, mut f:F){
+        let mut ordered: Vec<_> = self.map.iter().collect();
+        ordered.sort_by_key(|(_, val)| val.tag.order());
+        for (key, val) in ordered {
+            f(*key, val.value);
         }
     }
     

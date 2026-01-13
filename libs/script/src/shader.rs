@@ -145,6 +145,8 @@ pub struct ShaderIo{
     kind: ShaderIoKind,
     name: LiveId,
     ty: ScriptPodType,
+    /// Order for stable struct layout: (prototype_depth << 16) | insertion_order
+    order: u32,
 }
 
 
@@ -167,6 +169,78 @@ pub struct ShaderOutput{
 } 
 
 impl ShaderOutput{
+    /// Pre-collect ALL Rust instance fields in the correct order for struct layout.
+    /// Walks from deepest prototype to io_self, collecting ALL rust type properties.
+    /// Dyn instance fields are NOT pre-collected - they are added during compilation
+    /// as encountered, and their order doesn't matter.
+    /// 
+    /// IoInstance struct layout: Dyn fields first (any order), Rust fields last (must match Repr(C))
+    pub fn pre_collect_rust_instance_io(&mut self, vm: &mut ScriptVm, io_self: ScriptObject) {
+        // First, collect all prototypes in order (deepest first)
+        let mut proto_chain = Vec::new();
+        let mut current = io_self;
+        proto_chain.push(current);
+        while let Some(proto_obj) = vm.heap.proto(current).as_object() {
+            proto_chain.push(proto_obj);
+            current = proto_obj;
+        }
+        // Reverse so deepest (root) prototype comes first
+        proto_chain.reverse();
+        
+        let mut rust_order: u32 = 0;
+        
+        // Walk from deepest prototype to io_self
+        // Only collect Rust type properties - dyn properties are added during compilation
+        for proto_obj in proto_chain {
+            let obj_data = vm.heap.object_data(proto_obj);
+            let ty_index = obj_data.tag.as_type_index();
+            
+            if let Some(ty_index) = ty_index {
+                // Collect the ordered props first
+                let type_check = vm.heap.type_check(ty_index);
+                let ordered_props: Vec<_> = type_check.props.iter_ordered().collect();
+                
+                for (field_id, _type_id) in ordered_props {
+                    // Get the value and its pod type - we emit ALL rust fields
+                    let value = vm.heap.value(proto_obj, field_id.into(), &vm.thread.trap);
+                    if let Some(pod_ty) = Self::get_pod_type_from_value(vm, value) {
+                        if !self.io.iter().any(|io| io.name == field_id) {
+                            vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
+                            self.io.push(ShaderIo {
+                                kind: ShaderIoKind::RustInstance,
+                                name: field_id,
+                                ty: pod_ty,
+                                order: rust_order,
+                            });
+                            rust_order += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    fn get_pod_type_from_value(vm: &ScriptVm, value: ScriptValue) -> Option<ScriptPodType> {
+        // Check if it's a primitive type (f32, f64, bool, etc.)
+        if let Some(pod_ty) = vm.code.builtins.pod.value_to_exact_type(value) {
+            return Some(pod_ty);
+        }
+        // Check if it's a pod type object
+        if let Some(pod_ty) = vm.heap.pod_type(value) {
+            return Some(pod_ty);
+        }
+        // Check if it's a pod instance
+        if let Some(pod) = value.as_pod() {
+            let pod = &vm.heap.pods[pod.index as usize];
+            return Some(pod.ty);
+        }
+        // Check if it's a pod type reference
+        if let Some(pod_ty) = value.as_pod_type() {
+            return Some(pod_ty);
+        }
+        None
+    }
+    
     pub fn create_struct_defs(&mut self, vm:&ScriptVm, out:&mut String){
         for io in &self.io{
             let ty = io.ty;
@@ -212,26 +286,28 @@ impl ShaderOutput{
 
     pub fn metal_create_instance_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct IoInstance {{").ok();
+        
+        // 1. Output Dyn instance fields first (order doesn't matter, just output as encountered)
         for io in &self.io {
-            match &io.kind {
-                ShaderIoKind::DynInstance => {
-                    write!(out, "    ").ok();
-                    self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
-                    writeln!(out, " {};", io.name).ok();
-                }
-                _=>()
+            if let ShaderIoKind::DynInstance = io.kind {
+                write!(out, "    ").ok();
+                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                writeln!(out, " {};", io.name).ok();
             }
         }
-        for io in &self.io {
-            match &io.kind {
-                ShaderIoKind::RustInstance => {
-                    write!(out, "    ").ok();
-                    self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
-                    writeln!(out, " {};", io.name).ok();
-                }
-                _=>()
-            }
+        
+        // 2. Output Rust instance fields last, sorted by order (must match Repr(C) layout)
+        let mut rust_fields: Vec<_> = self.io.iter()
+            .filter(|io| matches!(io.kind, ShaderIoKind::RustInstance))
+            .collect();
+        rust_fields.sort_by_key(|io| io.order);
+        
+        for io in rust_fields {
+            write!(out, "    ").ok();
+            self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+            writeln!(out, " {};", io.name).ok();
         }
+        
         writeln!(out, "}};").ok();
     }
 
@@ -1683,10 +1759,12 @@ impl ShaderFnCompiler{
                              let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, io_type);
                              
                              if !output.io.iter().any(|io| io.name == field_id) {
+                                 let order = output.io.len() as u32;
                                  output.io.push(ShaderIo {
                                      kind,
                                      name: field_id,
-                                     ty: pod_ty
+                                     ty: pod_ty,
+                                     order,
                                  });
                              }
                              let mut s = self.stack.new_string();
@@ -1921,10 +1999,12 @@ impl ShaderFnCompiler{
                             // lets see if our podtype has a name. ifnot use pod_ty
                             vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
                             if !output.io.iter().any(|io| io.name == field_id) {
+                                let order = output.io.len() as u32;
                                 output.io.push(ShaderIo {
                                     kind,
                                     name: field_id,
-                                    ty: pod_ty
+                                    ty: pod_ty,
+                                    order,
                                 });
                             }
                             let mut s = self.stack.new_string();
@@ -1953,10 +2033,12 @@ impl ShaderFnCompiler{
                     let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, SHADER_IO_RUST_INSTANCE);
                     vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
                     if !output.io.iter().any(|io| io.name == field_id) {
+                        let order = output.io.len() as u32;
                         output.io.push(ShaderIo {
                             kind,
                             name: field_id,
-                            ty: pod_ty
+                            ty: pod_ty,
+                            order,
                         });
                     }
                     let mut s = self.stack.new_string();
