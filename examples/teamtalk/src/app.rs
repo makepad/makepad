@@ -302,9 +302,14 @@ impl App {
                 direct_recv.try_recv_stream();
                 let mut direct_buf = AudioBuffer::new_with_size(output_buffer.frame_count(), 1);
                 if direct_recv.num_routes() > 0 && direct_recv.read_buffer(0, &mut direct_buf) != 0 {
-                    let copy_len = direct_buf.data.len().min(output_buffer.data.len());
-                    for j in 0..copy_len {
-                        output_buffer.data[j] += direct_buf.data[j] * volume;
+                    // Copy mono input to all output channels
+                    let frame_count = direct_buf.frame_count().min(output_buffer.frame_count());
+                    for chan in 0..output_buffer.channel_count() {
+                        let out = output_buffer.channel_mut(chan);
+                        let inp = direct_buf.channel(0);
+                        for j in 0..frame_count {
+                            out[j] += inp[j] * volume;
+                        }
                     }
                 }
             }
