@@ -130,11 +130,11 @@ impl App {
         // AudioStream is an mpsc channel that buffers at the recv side
         // and allows arbitrary chunksized reads. Little utility struct.
         // platform2's create_pair takes (min_buf, max_buf) at creation time
-        let (mic_send, mut mic_recv) = AudioStreamSender::create_pair(1, 256);
-        let (mix_send, mut mix_recv) = AudioStreamSender::create_pair(1, 256);
+        let (mic_send, mut mic_recv) = AudioStreamSender::create_pair(1, 4);
+        let (mix_send, mut mix_recv) = AudioStreamSender::create_pair(1, 4);
         
-        // Clone for direct monitoring (mic -> local output)
-        let direct_send = mix_send.clone();
+        // Separate low-latency stream for direct monitoring (min_buf=0 for minimal latency)
+        let (direct_send, mut direct_recv) = AudioStreamSender::create_pair(0, 4);
 
         // the UDP broadcast socket
         let write_audio = UdpSocket::bind("0.0.0.0:41531").unwrap();
@@ -277,30 +277,42 @@ impl App {
         cx.audio_input(0, move |info, input_buffer| {
             let mut input_buffer = input_buffer.clone();
             input_buffer.make_single_channel();
-            // Resample to network rate before sending
-            let resampled = resample(&input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
-            let _ = mic_send.send(0, resampled.clone());
             
-            // Direct monitoring: send to local mixer (route 0 = direct monitor)
+            // Direct monitoring: pass through raw audio (no resampling, lowest latency)
             if DIRECT_MONITOR {
-                let _ = direct_send.send(0, resampled);
+                let _ = direct_send.send(0, input_buffer.clone());
             }
+            
+            // Resample to network rate before sending to network
+            let resampled = resample(&input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
+            let _ = mic_send.send(0, resampled);
         });
 
         let volume = 7.0f32; // output volume multiplier
         cx.audio_output(0, move |info, output_buffer| {
             output_buffer.zero();
-            // fill our read buffers on the audiostream without blocking
-            mix_recv.try_recv_stream();
             
             // Calculate how many frames we need at network rate to fill output buffer
             let ratio = NETWORK_SAMPLE_RATE / info.sample_rate;
             let network_frames = (output_buffer.frame_count() as f64 * ratio).ceil() as usize;
             let mut network_buf = AudioBuffer::new_with_size(network_frames, output_buffer.channel_count());
             
+            // Direct monitor path (1:1 pass-through, no resampling, lowest latency)
+            if DIRECT_MONITOR {
+                direct_recv.try_recv_stream();
+                let mut direct_buf = AudioBuffer::new_with_size(output_buffer.frame_count(), 1);
+                if direct_recv.num_routes() > 0 && direct_recv.read_buffer(0, &mut direct_buf) != 0 {
+                    let copy_len = direct_buf.data.len().min(output_buffer.data.len());
+                    for j in 0..copy_len {
+                        output_buffer.data[j] += direct_buf.data[j] * volume;
+                    }
+                }
+            }
+            
+            // Network audio path (higher latency buffer for network jitter)
+            mix_recv.try_recv_stream();
             for i in 0..mix_recv.num_routes() {
                 if mix_recv.read_buffer(i, &mut network_buf) != 0 {
-                    // Resample from network rate (48kHz) to device rate
                     let resampled = resample(&network_buf, NETWORK_SAMPLE_RATE, info.sample_rate);
                     let copy_len = resampled.data.len().min(output_buffer.data.len());
                     for j in 0..copy_len {
