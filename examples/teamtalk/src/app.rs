@@ -7,11 +7,42 @@ This example shows using networking and audio IO
 
 use makepad_draw2::*;
 use makepad_draw2::makepad_platform::{
+    audio::AudioBuffer,
     audio_stream::AudioStreamSender,
     makepad_micro_serde::*,
 };
 use std::net::UdpSocket;
 use std::time::Duration;
+
+// Network standard sample rate - all audio is transmitted at this rate
+const NETWORK_SAMPLE_RATE: f64 = 48000.0;
+
+/// Simple linear interpolation resampler
+fn resample(input: &AudioBuffer, from_rate: f64, to_rate: f64) -> AudioBuffer {
+    if (from_rate - to_rate).abs() < 1.0 {
+        return input.clone();
+    }
+    
+    let ratio = to_rate / from_rate;
+    let new_frame_count = ((input.frame_count() as f64 * ratio).round() as usize).max(1);
+    let mut output = AudioBuffer::new_with_size(new_frame_count, input.channel_count());
+    
+    for chan in 0..input.channel_count() {
+        let inp = input.channel(chan);
+        let out = output.channel_mut(chan);
+        for i in 0..new_frame_count {
+            let src_pos = i as f64 / ratio;
+            let src_idx = src_pos as usize;
+            let frac = (src_pos - src_idx as f64) as f32;
+            
+            let sample0 = inp.get(src_idx).copied().unwrap_or(0.0);
+            let sample1 = inp.get(src_idx + 1).copied().unwrap_or(sample0);
+            out[i] = sample0 + (sample1 - sample0) * frac;
+        }
+    }
+    
+    output
+}
 
 app_main!(App);
 
@@ -73,6 +104,10 @@ impl MatchEvent for App {
         }
         cx.use_audio_inputs(&devices.default_input());
         cx.use_audio_outputs(&devices.default_output());
+    }
+    
+    fn handle_signal(&mut self, _cx: &mut Cx) {
+        // Placeholder for signal handling
     }
 
     fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
@@ -173,24 +208,32 @@ impl App {
             }
         });
 
-        cx.audio_input(0, move |_info, input_buffer| {
+        cx.audio_input(0, move |info, input_buffer| {
             let mut input_buffer = input_buffer.clone();
             input_buffer.make_single_channel();
-            // platform2 uses send() instead of write_buffer()
-            let _ = mic_send.send(0, input_buffer);
+            // Resample to network rate (48kHz) before sending
+            let resampled = resample(&input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
+            let _ = mic_send.send(0, resampled);
         });
 
         let volume = 7.0f32; // output volume multiplier
-        cx.audio_output(0, move |_info, output_buffer| {
+        cx.audio_output(0, move |info, output_buffer| {
             output_buffer.zero();
             // fill our read buffers on the audiostream without blocking
             mix_recv.try_recv_stream();
-            let mut chan = AudioBuffer::new_like(output_buffer);
+            
+            // Calculate how many frames we need at network rate to fill output buffer
+            let ratio = NETWORK_SAMPLE_RATE / info.sample_rate;
+            let network_frames = (output_buffer.frame_count() as f64 * ratio).ceil() as usize;
+            let mut network_buf = AudioBuffer::new_with_size(network_frames, output_buffer.channel_count());
+            
             for i in 0..mix_recv.num_routes() {
-                // platform2's read_buffer doesn't take min_buf/max_buf
-                if mix_recv.read_buffer(i, &mut chan) != 0 {
-                    for j in 0..chan.data.len() {
-                        output_buffer.data[j] += chan.data[j] * volume;
+                if mix_recv.read_buffer(i, &mut network_buf) != 0 {
+                    // Resample from network rate (48kHz) to device rate
+                    let resampled = resample(&network_buf, NETWORK_SAMPLE_RATE, info.sample_rate);
+                    let copy_len = resampled.data.len().min(output_buffer.data.len());
+                    for j in 0..copy_len {
+                        output_buffer.data[j] += resampled.data[j] * volume;
                     }
                 }
             }
