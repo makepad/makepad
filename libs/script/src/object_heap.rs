@@ -245,8 +245,8 @@ impl ScriptHeap{
         }
         if let Some(ty) = object.tag.as_type_index(){
             let check = &self.type_check[ty.0 as usize];
-            if let Some(ty_id) = check.props.props.get(&key_id){
-                if let Some(ty_index) = self.type_index.get(ty_id){
+            if let Some(type_prop) = check.props.props.get(&key_id){
+                if let Some(ty_index) = self.type_index.get(&type_prop.ty){
                     let check_prop = &self.type_check[ty_index.0 as usize];
                     if let Some(object) = &check_prop.object{
                         if !(*object.check)(self, value){

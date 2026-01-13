@@ -205,7 +205,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 }  
                 tb.add("vm.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
                     .ident(&field.name).add(")), value,&vm.thread.trap);");
-                tb.add("props.props.insert(id!(").ident(&field.name).add("),<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
+                tb.add("props.insert(id!(").ident(&field.name).add("),<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
             }
         }
         
@@ -379,7 +379,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("} = def{");
                     for (i, field) in fields.iter().enumerate(){
                         tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
-                        tb.add("props.props.insert(id_lut!(").ident(&field.name).add("), <").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
+                        tb.add("props.insert(id_lut!(").ident(&field.name).add("), <").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
                         tb.add(" vm.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, &vm.thread.trap);");
                     }
                     tb.add("}");
@@ -622,7 +622,7 @@ impl ScriptNew for EnumTest{
         if let Self::Named{named_field:v0} = def{
                             
             let value = v0.script_to_value(vm);
-            props.props.insert(id_lut!(named_field), f64::script_type_id_static());
+            props.insert(id_lut!(named_field), f64::script_type_id_static());
             vm.heap.set_value(named, id!(named_field).into(), value, &vm.thread.trap);
                             
         }

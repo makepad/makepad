@@ -147,6 +147,14 @@ impl ScriptHeap{
             } 
         }
     }
+    
+    pub fn object_data(&self, ptr:ScriptObject)->&ScriptObjectData{
+        &self.objects[ptr.index as usize]
+    }
+    
+    pub fn type_check(&self, index: ScriptTypeIndex)->&ScriptTypeCheck{
+        &self.type_check[index.0 as usize]
+    }
                 
         
     pub fn cast_to_f64(&self, v:ScriptValue, ip:ScriptIp)->f64{
