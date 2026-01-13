@@ -26,7 +26,6 @@ pub fn http_error_out(mut tcp_stream: TcpStream, code: usize) {
     let _ = tcp_stream.shutdown(Shutdown::Both);
 }
 
-
 pub fn split_header_line<'a>(inp: &'a str, what: &str) -> Option<&'a str> {
     let mut what_lc = what.to_string();
     what_lc.make_ascii_lowercase();

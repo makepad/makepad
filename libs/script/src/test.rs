@@ -32,7 +32,7 @@ pub fn test(){
         #[live] struct_field: f32, 
         #[live] unused_field: f32
     }
-        
+    
     use crate::vm::*;
     use crate::value::*;
         

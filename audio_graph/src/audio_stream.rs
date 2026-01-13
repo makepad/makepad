@@ -116,10 +116,14 @@ impl AudioStreamReceiver {
             return 0
         }
          
-        // flush down the buffer
-        while total > output.frame_count() * max_buf{
+        // flush down the buffer if we have too much
+        // Use conservative condition: only flush if removing first buffer still leaves enough
+        while !route.buffers.is_empty() 
+            && total - route.buffers.first().unwrap().frame_count() > output.frame_count() * max_buf 
+        {
             let buf = route.buffers.remove(0);
             total -= buf.frame_count();
+            route.start_offset = 0; // Critical: reset offset when flushing
         }
         
         // ok so we need to eat from the start of the buffer vec until output is filled

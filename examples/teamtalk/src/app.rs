@@ -5,161 +5,103 @@ helicopter-headset experience, silent disco, and so on.
 This example shows using networking and audio IO
 */
 
-use { 
-    crate::{
-        makepad_micro_serde::*,
-        makepad_audio_graph::audio_stream::{AudioStreamSender},
-        makepad_widgets::*,
-        makepad_platform::live_atomic::*,
-    },
-    std::sync::Arc,
-    std::net::UdpSocket,
-    std::time::{Duration},
+use makepad_draw2::*;
+use makepad_draw2::makepad_platform::{
+    audio_stream::AudioStreamSender,
+    makepad_micro_serde::*,
 };
-
-// We dont have a UI yet 
-
-live_design!{
-    use link::theme::*;
-    use link::shaders::*;
-    use link::widgets::*;
-    App = {{App}} {
-        ui: <Window>{
-            show_bg: true
-            width: Fill,
-            height: Fill,
-            window: {inner_size: vec2(400, 300)},
-            draw_bg: {
-                fn pixel(self) -> vec4 {
-                    return mix(#7, #3, self.pos.y);
-                }
-            }
-            
-            body = <View>{
-                padding:20
-                flow:Down
-                global_volume = <Slider> {
-                    padding: 0
-                    height: Fit,
-                    width: 125,
-                    min: 0.0,
-                    max: 20.0,
-                    margin: {top: 1, left: 2}
-                    text: "Out Volume"
-                }
-                min_volume = <Slider> {
-                    padding: 0
-                    height: Fit,
-                    width: 125,
-                    min: 0.0,
-                    max: 1.0,
-                    margin: {top: 1, left: 2}
-                    text: "Min Volume"
-                }
-            }
-        }
-    }
-}
+use std::net::UdpSocket;
+use std::time::Duration;
 
 app_main!(App);
 
-#[derive(Live, LiveAtomic, LiveHook, LiveRead, LiveRegister)]
-#[live_ignore]
-pub struct Store{
-    #[live(11.0f64)] global_volume: f64a,
-    #[live(0.000f64)] min_volume: f64a,
+script_run!{
+    use mod.std.*;
+    #(App::script_api(vm)){
+    }
 }
 
-#[derive(Live, LiveHook)]
+impl App {
+    fn run(vm: &mut ScriptVm) -> Self {
+        crate::makepad_draw2::script_run(vm);
+        App::script_run(vm, script_run)
+    }
+}
+
+#[derive(Script, ScriptHook)]
 pub struct App {
-    #[live] ui: WidgetRef,
-    #[live] store: Arc<Store>,
-    #[rust] volume_changed_by_ui: SignalFromUI,
-    #[rust] volume_changed_by_network: SignalToUI,
+    #[script] window: WindowHandle,
+    #[script] pass: Pass,
+    #[script] main_draw_list: DrawList2d,
 }
 
-impl LiveRegister for App {
-    fn live_register(cx: &mut Cx) {
-        makepad_widgets::live_design(cx);
-        makepad_audio_graph::live_design(cx);
-    }
+// this is the protocol enum with 'micro-serde' binary serialise/deserialise macro on it.
+#[derive(SerBin, DeBin, Debug)]
+enum TeamTalkWire {
+    Silence { client_uid: u64, frame_count: u32 },
+    Audio { client_uid: u64, channel_count: u32, data: Vec<i16> },
 }
 
-impl App{
-    pub fn store_to_widgets(&self, cx:&mut Cx){
-        let db = DataBindingStore::from_nodes(self.store.live_read());
-        Self::data_bind_map(db.data_to_widgets(cx, &self.ui));
-    }
-    
-    pub fn data_bind_map(mut db: DataBindingMap) {
-        db.bind(ids!(global_volume), ids!(global_volume));
-        db.bind(ids!(min_volume), ids!(min_volume));
-    }
-}
-
-impl MatchEvent for App{
-
-    fn handle_actions(&mut self, cx: &mut Cx, actions:&Actions){
-        let mut db = DataBindingStore::new();
-        db.data_bind(cx, actions, &self.ui, Self::data_bind_map);
-        self.store.apply_over(cx, &db.nodes);
-        if db.contains(ids!(global_volume)){
-            self.volume_changed_by_ui.set();
-        }
-    }
-    
-    fn handle_startup(&mut self,  cx: &mut Cx){
+impl MatchEvent for App {
+    fn handle_startup(&mut self, cx: &mut Cx) {
+        self.window.set_pass(cx, &self.pass);
+        self.pass.set_window_clear_color(cx, vec4(0.2, 0.2, 0.3, 1.0));
         self.start_network_stack(cx);
-        self.store_to_widgets(cx);
     }
-    
-    fn handle_signal(&mut self, cx: &mut Cx){
-        if self.volume_changed_by_network.check_and_clear(){
-            self.store_to_widgets(cx);
+
+    fn handle_draw_2d(&mut self, cx: &mut Cx2d) {
+        if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
+            return
         }
+
+        cx.begin_pass(&self.pass, None);
+        self.main_draw_list.begin_always(cx);
+
+        let size = cx.current_pass_size();
+        cx.begin_root_turtle(size, Layout::flow_down());
+
+        // No UI - just audio streaming
+
+        cx.end_pass_sized_turtle();
+        self.main_draw_list.end(cx);
+        cx.end_pass(&self.pass);
     }
-    
-    fn handle_audio_devices(&mut self, cx:& mut Cx, devices:&AudioDevicesEvent){
-        for desc in &devices.descs{
+
+    fn handle_audio_devices(&mut self, cx: &mut Cx, devices: &AudioDevicesEvent) {
+        for desc in &devices.descs {
             println!("{}", desc)
         }
         cx.use_audio_inputs(&devices.default_input());
         cx.use_audio_outputs(&devices.default_output());
     }
+
+    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
 }
+
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        let _ = self.match_event_with_draw_2d(cx, event);
     }
-} 
-
-// this is the protocol enum with 'micro-serde' binary serialise/deserialise macro on it.
-#[derive(SerBin, DeBin, Debug)]
-enum TeamTalkWire {
-    //Volume{client_uid: u64, volume: f64},
-    Silence {client_uid: u64, frame_count: u32},
-    Audio {client_uid: u64, channel_count: u32, data: Vec<i16>},
 }
 
 impl App {
     pub fn start_network_stack(&mut self, cx: &mut Cx) {
-        // not a very good uid, but it'l do.
+        // not a very good uid, but it'll do.
         let my_client_uid = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0;
-        // Audiostream is an mpsc channel that buffers at the recv side
-        // and allows arbitrary chunksized reads. Little utility struct
-        let (mic_send, mut mic_recv) = AudioStreamSender::create_pair();
-        let (mix_send, mut mix_recv) = AudioStreamSender::create_pair();
         
+        // AudioStream is an mpsc channel that buffers at the recv side
+        // and allows arbitrary chunksized reads. Little utility struct.
+        // platform2's create_pair takes (min_buf, max_buf) at creation time
+        let (mic_send, mut mic_recv) = AudioStreamSender::create_pair(1, 255);
+        let (mix_send, mut mix_recv) = AudioStreamSender::create_pair(1, 4);
+
         // the UDP broadcast socket
         let write_audio = UdpSocket::bind("0.0.0.0:41531").unwrap();
         write_audio.set_read_timeout(Some(Duration::new(5, 0))).unwrap();
         write_audio.set_broadcast(true).unwrap();
 
         let read_audio = write_audio.try_clone().unwrap();
-        /*let volume_changed_by_ui = self.volume_changed_by_ui.clone();
-        */
-        let store = self.store.clone();
+        
         // our microphone broadcast network thread
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
@@ -168,7 +110,8 @@ impl App {
                 // fill the mic stream recv side buffers, and block if nothing
                 mic_recv.recv_stream();
                 loop {
-                    if mic_recv.read_buffer(0, &mut output_buffer, 1, 255) == 0 {
+                    // platform2's read_buffer doesn't take min_buf/max_buf (set at creation)
+                    if mic_recv.read_buffer(0, &mut output_buffer) == 0 {
                         break;
                     }
                     let buf = output_buffer.channel(0);
@@ -178,81 +121,79 @@ impl App {
                         sum += v.abs();
                     }
                     let peak = sum / buf.len() as f32;
-                    //println!("{}", peak);
-                    /*if volume_changed_by_ui.check_and_clear(){
-                        /*wire_data.clear();*/
-                        /*TeamTalkWire::Volume{client_uid:my_client_uid, volume: store.global_volume.get()}.ser_bin(&mut wire_data);
-                        write_audio.send_to(&wire_data, "255.255.255.255:41531").unwrap();*/
-                    }*/
-                    let wire_packet = if peak > store.min_volume.get() as f32 *0.01 {
-                        TeamTalkWire::Audio {client_uid:my_client_uid, channel_count: 1, data: output_buffer.to_i16()}
-                    }
-                    else {
-                        TeamTalkWire::Silence {client_uid:my_client_uid, frame_count: output_buffer.frame_count() as u32}
+                    
+                    let min_volume = 0.0001f32; // threshold for silence detection
+                    let wire_packet = if peak > min_volume {
+                        TeamTalkWire::Audio {
+                            client_uid: my_client_uid,
+                            channel_count: 1,
+                            data: output_buffer.to_i16()
+                        }
+                    } else {
+                        TeamTalkWire::Silence {
+                            client_uid: my_client_uid,
+                            frame_count: output_buffer.frame_count() as u32
+                        }
                     };
                     // serialise the packet enum for sending over the wire
                     wire_data.clear();
                     wire_packet.ser_bin(&mut wire_data);
                     // send to all peers
-                    write_audio.send_to(&wire_data, "10.0.0.255:41531").unwrap();
+                    let _ = write_audio.send_to(&wire_data, "10.0.0.255:41531");
                 };
-            }
-        });
-        //let volume_changed_by_network = self.volume_changed_by_network.clone();
-        /*let store = self.store.clone();*/
-        // the network audio receiving thread
-        std::thread::spawn(move || {
-            let mut read_buf = [0u8; 4096];
-            
-            while let Ok((len, _addr)) = read_audio.recv_from(&mut read_buf) {
-                let read_buf = &read_buf[0..len];
-                
-                let packet = TeamTalkWire::deserialize_bin(&read_buf).unwrap();
-                
-                // create an audiobuffer from the data
-                let (client_uid, buffer, _silence) = match packet {
-                    TeamTalkWire::Audio {client_uid, channel_count, data} => {
-                        (client_uid, AudioBuffer::from_i16(&data, channel_count as usize), false)
-                    }
-                    TeamTalkWire::Silence {client_uid, frame_count} => {
-                        (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1), true)
-                    }
-                    /*TeamTalkWire::Volume{client_uid, volume}=>{
-                        if client_uid != my_client_uid{
-                            store.global_volume.set(volume);
-                            volume_changed_by_network.set();
-                        }
-                        continue
-                    }*/
-                };
-                
-                if client_uid != my_client_uid{
-                    mix_send.write_buffer(client_uid, buffer).unwrap();
-                }
             }
         });
         
-        cx.audio_input(0, move | _info, input_buffer | {
+        // the network audio receiving thread
+        std::thread::spawn(move || {
+            let mut read_buf = [0u8; 4096];
+
+            while let Ok((len, _addr)) = read_audio.recv_from(&mut read_buf) {
+                let read_buf = &read_buf[0..len];
+
+                let packet = match TeamTalkWire::deserialize_bin(read_buf) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                // create an audiobuffer from the data
+                let (client_uid, buffer) = match packet {
+                    TeamTalkWire::Audio { client_uid, channel_count, data } => {
+                        (client_uid, AudioBuffer::from_i16(&data, channel_count as usize))
+                    }
+                    TeamTalkWire::Silence { client_uid, frame_count } => {
+                        (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1))
+                    }
+                };
+
+                if client_uid != my_client_uid {
+                    // platform2 uses send() instead of write_buffer()
+                    let _ = mix_send.send(client_uid, buffer);
+                }
+            }
+        });
+
+        cx.audio_input(0, move |_info, input_buffer| {
             let mut input_buffer = input_buffer.clone();
             input_buffer.make_single_channel();
-            mic_send.write_buffer(0, input_buffer).unwrap();
+            // platform2 uses send() instead of write_buffer()
+            let _ = mic_send.send(0, input_buffer);
         });
-        let store = self.store.clone();
-        cx.audio_output(0, move | _info, output_buffer | {
-            //println!("buffer {:?}",_time);
+
+        let volume = 7.0f32; // output volume multiplier
+        cx.audio_output(0, move |_info, output_buffer| {
             output_buffer.zero();
             // fill our read buffers on the audiostream without blocking
             mix_recv.try_recv_stream();
-            let volume = store.global_volume.get() as f32;
             let mut chan = AudioBuffer::new_like(output_buffer);
             for i in 0..mix_recv.num_routes() {
-                if mix_recv.read_buffer(i, &mut chan, 1,4) != 0 {
-                    for i in 0..chan.data.len() {
-                        output_buffer.data[i] += chan.data[i]*volume;
+                // platform2's read_buffer doesn't take min_buf/max_buf
+                if mix_recv.read_buffer(i, &mut chan) != 0 {
+                    for j in 0..chan.data.len() {
+                        output_buffer.data[j] += chan.data[j] * volume;
                     }
                 }
             }
         });
     }
-    
 }
