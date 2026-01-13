@@ -374,9 +374,6 @@ pub fn start_wasm_server(root:PathBuf, lan:bool, port: u16) {
                 HttpServerRequest::Post {..} => { //headers, body, response}=>{
                     // TODO
                 }
-                HttpServerRequest::TextMessage { .. } => {
-                    // TODO
-                }
             }
         }
     }).join().unwrap();
