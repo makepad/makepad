@@ -13,12 +13,53 @@ use makepad_draw2::makepad_platform::{
 };
 use std::net::UdpSocket;
 use std::time::Duration;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 // Network standard sample rate - all audio is transmitted at this rate
 const NETWORK_SAMPLE_RATE: f64 = 44100.0;
 // Maximum samples in a wire packet (640 i16 values = 1280 bytes)
 // For mono: 640 frames, for stereo: 320 frames
 const MAX_WIRE_SAMPLES: usize = 640;
+
+/// Command line arguments for TeamTalk
+struct Args {
+    device: Option<String>,
+    vol: f32,
+}
+
+impl Args {
+    fn parse() -> Self {
+        let mut device = None;
+        let mut vol = 1.0_f32;
+        
+        for arg in std::env::args().skip(1) {
+            if let Some(d) = arg.strip_prefix("--device=") {
+                device = Some(d.to_string());
+            } else if let Some(v) = arg.strip_prefix("--vol=") {
+                if let Ok(parsed) = v.parse::<f32>() {
+                    vol = parsed.clamp(0.0, 1.0);
+                }
+            }
+        }
+        
+        Self { device, vol }
+    }
+}
+
+/// Convert linear volume (0.0-1.0) to logarithmic gain
+/// At vol=1.0, gain=1.0; at vol=0.5, gain≈0.1; at vol=0.0, gain=0.0
+fn linear_to_log_gain(linear: f32) -> f32 {
+    if linear <= 0.0 {
+        return 0.0;
+    }
+    if linear >= 1.0 {
+        return 1.0;
+    }
+    // Use a power curve: linear^3 gives a nice logarithmic feel
+    // This maps 0.5 -> 0.125, 0.7 -> 0.343, etc.
+    linear * linear * linear
+}
 
 /// Simple linear interpolation resampler
 fn resample(input: &AudioBuffer, from_rate: f64, to_rate: f64) -> AudioBuffer {
@@ -154,10 +195,27 @@ impl MatchEvent for App {
     }
 
     fn handle_audio_devices(&mut self, cx: &mut Cx, devices: &AudioDevicesEvent) {
+        let args = Args::parse();
+        
         for desc in &devices.descs {
             println!("{}", desc)
         }
-        //cx.use_audio_inputs(&devices.default_input());
+        
+        // Select input device based on --device= argument or use default
+        let inputs = if let Some(ref device_name) = args.device {
+            let matched = devices.match_inputs(&[device_name.as_str()]);
+            if matched.is_empty() {
+                println!("Warning: No input device matching '{}', using default", device_name);
+                devices.default_input()
+            } else {
+                println!("Using input device matching: {}", device_name);
+                matched
+            }
+        } else {
+            devices.default_input()
+        };
+        
+        cx.use_audio_inputs(&inputs);
         cx.use_audio_outputs(&devices.default_output());
     }
     
@@ -176,6 +234,14 @@ impl AppMain for App {
 
 impl App {
     pub fn start_network_stack(&mut self, cx: &mut Cx) {
+        let args = Args::parse();
+        let mic_gain = linear_to_log_gain(args.vol);
+        println!("Mic volume: {:.2} (linear) -> {:.4} (gain)", args.vol, mic_gain);
+        
+        // Store gain as atomic for the audio callback
+        let mic_gain_bits = Arc::new(AtomicU32::new(mic_gain.to_bits()));
+        let mic_gain_bits_clone = mic_gain_bits.clone();
+        
         // not a very good uid, but it'll do.
         let my_client_uid = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0;
         
@@ -314,7 +380,16 @@ impl App {
             // - Microphones are typically mono (1 channel)
             // - Loopback captures stereo (2 channels)
             // Resample to network rate before sending
-            let resampled = resample(input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
+            let mut resampled = resample(input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
+            
+            // Apply mic volume (logarithmic scaling)
+            let gain = f32::from_bits(mic_gain_bits_clone.load(Ordering::Relaxed));
+            if gain < 1.0 {
+                for sample in resampled.data.iter_mut() {
+                    *sample *= gain;
+                }
+            }
+            
             let _ = mic_send.send(0, resampled);
         });
 
@@ -330,11 +405,13 @@ impl App {
             let ratio = NETWORK_SAMPLE_RATE / info.sample_rate;
             let network_frames = (out_frames as f64 * ratio).ceil() as usize;
             
-            // We read into a mono buffer since network data may be mono
-            // (saves bandwidth - inputs only send mono)
-            let mut network_buf = AudioBuffer::new_with_size(network_frames, 1);
+            let mut network_buf = AudioBuffer::default();
             
             for i in 0..mix_recv.num_routes() {
+                // Get the actual channel count for this route's pending buffers
+                let route_channels = mix_recv.channel_count(i).unwrap_or(2);
+                network_buf.resize(network_frames, route_channels);
+                
                 if mix_recv.read_buffer(i, &mut network_buf) != 0 {
                     // Resample from network rate to device rate
                     let resampled = resample(&network_buf, NETWORK_SAMPLE_RATE, info.sample_rate);
