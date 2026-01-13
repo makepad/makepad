@@ -37,11 +37,10 @@ impl std::fmt::Display for AudioDeviceDesc {
         else{
             write!(f, "[")?;
         }
-        if self.device_type.is_input(){
-            write!(f, "Input]")?;
-        }
-        else{
-            write!(f, "Output]")?;
+        match self.device_type {
+            AudioDeviceType::Input => write!(f, "Input]")?,
+            AudioDeviceType::Output => write!(f, "Output]")?,
+            AudioDeviceType::Loopback => write!(f, "Loopback]")?,
         }
         write!(f, " {}", self.name)?;
         Ok(())
@@ -131,18 +130,26 @@ impl std::fmt::Display for AudioDevicesEvent {
 pub enum AudioDeviceType {
     Input,
     Output,
+    Loopback, // Output device opened as input for capturing system audio
 }
 
 impl AudioDeviceType{
     pub fn is_input(&self)->bool{
         match self{
             AudioDeviceType::Input=>true,
+            AudioDeviceType::Loopback=>true, // Loopback acts as input
             _=>false
         }
     }
     pub fn is_output(&self)->bool{
         match self{
             AudioDeviceType::Output=>true,
+            _=>false
+        }
+    }
+    pub fn is_loopback(&self)->bool{
+        match self{
+            AudioDeviceType::Loopback=>true,
             _=>false
         }
     }
