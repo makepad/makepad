@@ -17,6 +17,9 @@ use std::time::Duration;
 // Network standard sample rate - all audio is transmitted at this rate
 const NETWORK_SAMPLE_RATE: f64 = 32000.0;
 
+// Direct monitoring: send mic audio directly to local output (hear yourself)
+const DIRECT_MONITOR: bool = true;
+
 /// Simple linear interpolation resampler
 fn resample(input: &AudioBuffer, from_rate: f64, to_rate: f64) -> AudioBuffer {
     if (from_rate - to_rate).abs() < 1.0 {
@@ -129,6 +132,9 @@ impl App {
         // platform2's create_pair takes (min_buf, max_buf) at creation time
         let (mic_send, mut mic_recv) = AudioStreamSender::create_pair(1, 256);
         let (mix_send, mut mix_recv) = AudioStreamSender::create_pair(1, 256);
+        
+        // Clone for direct monitoring (mic -> local output)
+        let direct_send = mix_send.clone();
 
         // the UDP broadcast socket
         let write_audio = UdpSocket::bind("0.0.0.0:41531").unwrap();
@@ -271,9 +277,14 @@ impl App {
         cx.audio_input(0, move |info, input_buffer| {
             let mut input_buffer = input_buffer.clone();
             input_buffer.make_single_channel();
-            // Resample to network rate (48kHz) before sending
+            // Resample to network rate before sending
             let resampled = resample(&input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
-            let _ = mic_send.send(0, resampled);
+            let _ = mic_send.send(0, resampled.clone());
+            
+            // Direct monitoring: send to local mixer (route 0 = direct monitor)
+            if DIRECT_MONITOR {
+                let _ = direct_send.send(0, resampled);
+            }
         });
 
         let volume = 7.0f32; // output volume multiplier
