@@ -442,9 +442,8 @@ impl WasapiOutput {
                     let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
                     let mut audio_buffer = self.base.audio_buffer.take().unwrap();
                     let channel_count = self.base.channel_count;
-                    // req_size from WASAPI - need to determine if this is frames or samples
-                    // Original code divided by channel_count, which worked for loopback
-                    let frame_count = (req_size as usize) / channel_count;
+                    // req_size is in frames (not samples) - use it directly
+                    let frame_count = req_size as usize;
                     println!("WASAPI output: using frame_count={} for {} channels", frame_count, channel_count);
                     audio_buffer.clear_final_size();
                     audio_buffer.resize(frame_count, channel_count);
