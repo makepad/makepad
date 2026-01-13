@@ -157,7 +157,7 @@ impl MatchEvent for App {
         for desc in &devices.descs {
             println!("{}", desc)
         }
-        cx.use_audio_inputs(&devices.default_input());
+        //cx.use_audio_inputs(&devices.default_input());
         cx.use_audio_outputs(&devices.default_output());
     }
     
@@ -204,9 +204,10 @@ impl App {
             loop {
                 mic_recv.recv_stream();
                 loop {
-                    // Resize buffer based on channel count from input
-                    // MAX_WIRE_SAMPLES total samples: mono=640 frames, stereo=320 frames
-                    let channel_count = output_buffer.channel_count().max(1);
+                    // Get actual channel count from pending input buffers
+                    let channel_count = mic_recv.channel_count(0).unwrap_or(1);
+                    // Resize buffer: MAX_WIRE_SAMPLES total samples
+                    // mono=640 frames, stereo=320 frames
                     let frame_count = MAX_WIRE_SAMPLES / channel_count;
                     output_buffer.resize(frame_count, channel_count);
                     
