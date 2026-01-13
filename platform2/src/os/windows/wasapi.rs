@@ -438,11 +438,14 @@ impl WasapiOutput {
                 let buffer_size = self.base.client.GetBufferSize().unwrap();
                 let req_size = buffer_size - padding;
                 if req_size > 0 {
+                    println!("WASAPI GetBuffer requesting: req_size={} (buffer_size={}, padding={})", req_size, buffer_size, padding);
                     let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
                     let mut audio_buffer = self.base.audio_buffer.take().unwrap();
                     let channel_count = self.base.channel_count;
-                    // req_size is already in frames (not samples), don't divide by channel_count
-                    let frame_count = req_size as usize;
+                    // req_size from WASAPI - need to determine if this is frames or samples
+                    // Original code divided by channel_count, which worked for loopback
+                    let frame_count = (req_size as usize) / channel_count;
+                    println!("WASAPI output: using frame_count={} for {} channels", frame_count, channel_count);
                     audio_buffer.clear_final_size();
                     audio_buffer.resize(frame_count, channel_count);
                     audio_buffer.set_final_size();
@@ -461,6 +464,7 @@ impl WasapiOutput {
         unsafe {
             let device_buffer = std::slice::from_raw_parts_mut(output.device_buffer, output.frame_count * output.channel_count);
             output.audio_buffer.copy_to_interleaved(device_buffer);
+            println!("WASAPI release: frame_count={}, samples={}", output.frame_count, output.frame_count * output.channel_count);
             self.render_client.ReleaseBuffer(output.frame_count as u32, 0).unwrap();
             self.base.audio_buffer = Some(output.audio_buffer);
         }
@@ -505,6 +509,7 @@ impl WasapiInput {
                     continue;
                 }
                 
+                println!("WASAPI input: frame_count={}, channel_count={}", frame_count, self.base.channel_count);
                 let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count as usize * self.base.channel_count);
                 let mut audio_buffer = self.base.audio_buffer.take().unwrap();
                 audio_buffer.copy_from_interleaved(self.base.channel_count, device_buffer);
