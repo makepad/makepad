@@ -143,6 +143,7 @@ impl App {
             let mut output_buffer = AudioBuffer::new_with_size(640, 1);
             let mut was_silent = true;
             let fade_in_samples = 200; // ~4ms at 48kHz
+            let mut limiter_gain = 1.0_f32;
             
             loop {
                 // fill the mic stream recv side buffers, and block if nothing
@@ -153,6 +154,25 @@ impl App {
                         break;
                     }
                     let buf = output_buffer.channel_mut(0);
+                    
+                    // Smooth limiter: fast attack, slow release
+                    let max_volume = 0.6_f32;
+                    let target_gain = 0.1_f32;
+                    let attack_coef = 0.3_f32;   // fast attack (per-sample, approaches target quickly)
+                    let release_coef = 0.001_f32; // slow release (gradually restore)
+                    
+                    for v in buf.iter_mut() {
+                        let desired = if v.abs() > max_volume { target_gain } else { 1.0 };
+                        if desired < limiter_gain {
+                            // Attack: move quickly toward lower gain
+                            limiter_gain += (desired - limiter_gain) * attack_coef;
+                        } else {
+                            // Release: move slowly toward higher gain
+                            limiter_gain += (desired - limiter_gain) * release_coef;
+                        }
+                        *v *= limiter_gain;
+                    }
+                    
                     // do a quick volume check so we can send 1 byte packets if silent
                     let mut sum = 0.0;
                     for v in buf.iter() {
