@@ -367,7 +367,6 @@ impl ShaderOutput{
 
     pub fn metal_create_vertex_fn(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "vertex IoVarying vertex_main(").ok();
-        
         writeln!(out, "    device IoVertexBuffer *vb [[buffer(0)]],").ok();
         writeln!(out, "    device IoInstance *i [[buffer(1)]],").ok();
         writeln!(out, "    constant IoUniform &u [[buffer(2)]],").ok();

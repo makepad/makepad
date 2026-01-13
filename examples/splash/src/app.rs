@@ -21,7 +21,6 @@ pub struct App {
     #[script] pass: Pass,
     #[script] depth_texture: Texture,
     #[rust] smooth_throttle: f32,
-    //#[script] draw_quad: DrawQuad,
     #[script] main_draw_list: DrawList2d,
 }
  
