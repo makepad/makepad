@@ -33,7 +33,7 @@ impl MatchEvent for App{
             use mod.run
             let self_ip = "10.0.0.112"
             let comfy_ip = "10.0.0.165:8000"
-            let openai_base = "http://127.0.0.1:8080";
+            let openai_base = "http://127.0.0.1:8080"
             let Display = {mac:"" ip:"" landscape:false prompt:"empty"}.freeze_api()
             let displays = [
                 Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.182" landscape:false} // left
