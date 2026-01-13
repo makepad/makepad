@@ -1140,6 +1140,7 @@ impl ScriptParser{
             State::BeginExpr{required}=>{
                 if let Some(index) = tok.as_rust_value(){
                     self.push_code(values[index as usize], self.index);
+                    self.state.push(State::EndExpr);
                     return 1
                 }
                 if tok.is_open_curly(){

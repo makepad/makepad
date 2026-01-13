@@ -31,6 +31,7 @@ impl ShaderBackend{
              Self::Metal  =>{
                 match mode{
                     ShaderMode::Vertex=>match io_type{
+                        SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("_io.i[_iov.iid].")),
                         SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i[_iov.iid].")),
                         SHADER_IO_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u.")),
                         SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
@@ -44,6 +45,7 @@ impl ShaderBackend{
                         _=>panic!()
                     }
                     ShaderMode::Fragment=>match io_type{
+                        SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("_io.i[_iof.v._iid].")),
                         SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i[_iof.v._iid].")),
                         SHADER_IO_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u.")),
                         SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
@@ -59,6 +61,7 @@ impl ShaderBackend{
             }
              Self::Hlsl | Self::Glsl | Self::Wgsl =>{
                  match io_type{
+                     SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("rustinst_")),
                      SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("dyninst_")),
                      SHADER_IO_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("uni_")),
                      SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("unibuf_")),

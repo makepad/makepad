@@ -133,16 +133,17 @@ impl ScriptHeap{
     pub fn freeze_component(&mut self, ptr: ScriptObject){
         self.objects[ptr.index as usize].tag.freeze_component()
     }
-                
+    
+    pub fn freeze_shader(&mut self, ptr: ScriptObject){
+        self.objects[ptr.index as usize].tag.freeze_shader()
+    }
+                    
     pub fn freeze_api(&mut self, ptr: ScriptObject){
         self.objects[ptr.index as usize].tag.freeze_api()
     }
         
-    pub fn freeze_with_type(&mut self, obj: ScriptObject, ty:ScriptTypeIndex){
-        let object = &mut  self.objects[obj.index as usize];
-        object.tag.set_tracked();
-        object.tag.set_type_index(ty);
-        object.tag.freeze_component();
+    pub fn set_type(&mut self, obj: ScriptObject, ty:ScriptTypeIndex){
+        self.objects[obj.index as usize].tag.set_type_index(ty);
     }
         
     pub fn set_string_keys(&mut self, obj: ScriptObject){
@@ -243,7 +244,6 @@ impl ScriptHeap{
             return trap.err_frozen()
         }
         if let Some(ty) = object.tag.as_type_index(){
-                        
             let check = &self.type_check[ty.0 as usize];
             if let Some(ty_id) = check.props.props.get(&key_id){
                 if let Some(ty_index) = self.type_index.get(ty_id){
@@ -259,7 +259,7 @@ impl ScriptHeap{
                     return trap.err_type_not_registered()
                 }
             }
-            else{
+            else if !object.tag.is_map_add(){
                 return trap.err_invalid_prop_name()
             }
             let object = &mut self.objects[top_ptr.index as usize];
@@ -290,7 +290,7 @@ impl ScriptHeap{
                 if let Some(next_ptr) = object.proto.as_object(){
                     ptr = next_ptr
                 }
-                else{ // not found
+                else if !object.tag.is_map_add(){ // not found
                     return trap.err_invalid_prop_name()
                 } 
             }

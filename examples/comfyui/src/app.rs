@@ -287,7 +287,7 @@ impl MatchEvent for App{
                 let path = "/Users/admin/makepad/makepad/local/eink.png"
                 fs.write(path data)
                         
-                std.println("Uploading to "+display.ip)
+                std.println("Uploading to " + display.ip)
                 eink_upload_image(display path).last()
                 let set_prompt = image_prompt.visual_description + " - " + image_prompt.style_and_keywords
                 let set_display = display

@@ -385,7 +385,8 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("}");
                     tb.add("let ty_check = ScriptTypeCheck{props, object: None};");
                     tb.add("let ty_index = vm.heap.register_type(None, ty_check);");
-                    tb.add("vm.heap.freeze_with_type(named, ty_index);");
+                    tb.add("vm.heap.set_type(named, ty_index);");
+                    tb.add("vm.heap.freeze_component(named);");
                     tb.add("vm.heap.set_value(enum_object, id!(").ident(&item.name).add(").into(), named.into(), &vm.thread.trap);");
                     // uh oh crap. we need to get the default value out of the unparsed defaults
                 }
