@@ -113,7 +113,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 tb.add("}");
             }
             if field.attrs.iter().any( | a | a.name =="deref" || a.name == "splat" || a.name =="walk" || a.name=="layout"){
-                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(", apply, value);");
+                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(", vm, apply, value);");
             }
         }
         tb.add("        if let Some(o) = value.as_object(){vm.heap.set_first_applied_and_clean(o);}");
@@ -189,7 +189,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         for field in &fields {
             
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
-                tb.add("self.").ident(&field.name).add(".script_proto_props(vm, obj, props);");
+                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto_props(vm, obj, props);");
             }
             if let Some(attr) = field.attrs.iter().find(|a| a.name == "live"){
                 // lets make sure the type is defined

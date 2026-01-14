@@ -43,8 +43,6 @@ pub struct AudioRoute {
     // After an underrun, we enter "buffering" mode and wait for min_buf before resuming
     is_buffering: bool,
     // Adaptive max_buf tracking
-    chunks_since_flush: usize,      // Chunks since last overflow flush
-    recent_flush_count: usize,      // Number of flushes in recent window
     max_buf_multiplier: usize,      // Current multiplier (1 = normal, 2 = doubled, etc)
     stable_chunks: usize,           // Consecutive stable chunks (no underrun/overflow)
 }
@@ -58,8 +56,6 @@ impl AudioRoute {
             buffers,
             start_offset: 0,
             is_buffering: true,
-            chunks_since_flush: 0,
-            recent_flush_count: 0,
             max_buf_multiplier: 1,
             stable_chunks: 0,
         }
