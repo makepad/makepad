@@ -10,6 +10,7 @@ use {
         thread::SignalToUI,
         windows::{
             core::implement,
+            core::Interface,
             core::PCWSTR,
             Win32::Foundation::{
                 WAIT_OBJECT_0,
@@ -53,6 +54,7 @@ use {
                 eConsole,
                 eAll,
                 IAudioClient,
+                IAudioClient3,
                 //IMMDevice,
                 IAudioCaptureClient,
                 IAudioRenderClient,
@@ -458,7 +460,7 @@ struct WasapiBase {
     device_id: AudioDeviceId,
     device: IMMDevice,
     event: HANDLE,
-    client: IAudioClient,
+    client: IAudioClient3,
     channel_count: usize,
     audio_buffer: Option<AudioBuffer>
 }
@@ -486,30 +488,33 @@ impl WasapiBase {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
             
             let device = WasapiAccess::find_device_by_id(device_id).unwrap();
-            let client: IAudioClient = if let Ok(client) = device.Activate(CLSCTX_ALL, None){
+            let client: IAudioClient3 = if let Ok(client) = device.Activate(CLSCTX_ALL, None){
                 client
             }
             else{
                 return Err(())
             };
             
-            let mut def_period = 0i64;
-            let mut min_period = 0i64;
-            client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
-            
-            // Force at least 20ms buffer (200,000 x 100ns) for stability against jitter
-            // 10ms (default often) is too tight for some systems
-            if def_period < 200_000 {
-                def_period = 200_000;
-            }
-
             let wave_format = WasapiAccess::new_float_waveformatextensible(48000, channel_count);
             
-            if client.Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
+            let mut default_period_frames = 0u32;
+            let mut fundamental_period_frames = 0u32;
+            let mut min_period_frames = 0u32;
+            let mut max_period_frames = 0u32;
+            
+            if client.GetSharedModeEnginePeriod(
+                &wave_format as *const _ as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX,
+                &mut default_period_frames,
+                &mut fundamental_period_frames,
+                &mut min_period_frames,
+                &mut max_period_frames
+            ).is_err() {
+                 return Err(());
+            }
+
+            if client.InitializeSharedAudioStream(
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                def_period,
-                0, // hnsPeriodicity must be 0 for shared mode
+                default_period_frames,
                 &wave_format as *const _ as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX,
                 None
             ).is_err(){
@@ -777,9 +782,11 @@ impl IMMNotificationClient_Impl for WasapiChangeListener {
         Ok(())
     }
     fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
+        self.change_signal.set();
         Ok(())
     }
     fn OnDeviceRemoved(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
+        self.change_signal.set();
         Ok(())
     }
     fn OnDefaultDeviceChanged(&self, _flow: EDataFlow, _role: ERole, _pwstrdefaultdeviceid: &crate::windows::core::PCWSTR) -> crate::windows::core::Result<()> {

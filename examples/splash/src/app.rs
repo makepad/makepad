@@ -78,9 +78,7 @@ impl MatchEvent for App{
 
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
-
-        // draw things here
-
+        
         cx.end_pass_sized_turtle();
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass);
