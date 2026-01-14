@@ -1310,6 +1310,16 @@ extern "C" {
     
 }
 
+// ScreenCaptureKit framework (macOS 12.3+) for audio loopback capture
+#[cfg(target_os = "macos")]
+#[link(name = "ScreenCaptureKit", kind = "framework")]
+extern "C" {
+    pub static SCShareableContent: ObjcId;
+    pub static SCContentFilter: ObjcId;
+    pub static SCStreamConfiguration: ObjcId;
+    pub static SCStream: ObjcId;
+}
+
 #[link(name = "GameController", kind = "framework")]
 extern "C" {
     pub static GCController: ObjcId;
