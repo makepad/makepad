@@ -1,7 +1,8 @@
 // Audio stream with smart buffering:
 // - Normally outputs with minimal latency (no forced minimum buffer)
 // - On underrun: buffers back up to min_buf before resuming
-// - On overflow (max_buf reached): drops half to resync
+// - On overflow (max_buf reached): drops to min_buf to resync
+// - Adaptive max_buf: temporarily increases during network bursts
 
 use {
     crate::{
@@ -40,6 +41,26 @@ pub struct AudioRoute {
     buffers: Vec<AudioBuffer>,
     // After an underrun, we enter "buffering" mode and wait for min_buf before resuming
     is_buffering: bool,
+    // Adaptive max_buf tracking
+    chunks_since_flush: usize,      // Chunks since last overflow flush
+    recent_flush_count: usize,      // Number of flushes in recent window
+    max_buf_multiplier: usize,      // Current multiplier (1 = normal, 2 = doubled, etc)
+    stable_chunks: usize,           // Consecutive stable chunks (no underrun/overflow)
+}
+
+impl AudioRoute {
+    fn new(id: u64, buf: AudioBuffer) -> Self {
+        Self {
+            id,
+            buffers: vec![buf],
+            start_offset: 0,
+            is_buffering: true,
+            chunks_since_flush: 0,
+            recent_flush_count: 0,
+            max_buf_multiplier: 1,
+            stable_chunks: 0,
+        }
+    }
 }
 
 impl AudioStreamSender {
@@ -86,12 +107,7 @@ impl AudioStreamReceiver {
                 route.buffers.push(buf);
             }
             else {
-                iself.routes.push(AudioRoute {
-                    id: route_id,
-                    buffers: vec![buf],
-                    start_offset: 0,
-                    is_buffering: true, // Start in buffering mode for new routes
-                });
+                iself.routes.push(AudioRoute::new(route_id, buf));
             }
         }
     }
@@ -104,189 +120,12 @@ impl AudioStreamReceiver {
                     route.buffers.push(buf);
                 }
                 else {
-                    iself.routes.push(AudioRoute {
-                        id: route_id,
-                        buffers: vec![buf],
-                        start_offset: 0,
-                        is_buffering: true, // Start in buffering mode for new routes
-                    });
+                    iself.routes.push(AudioRoute::new(route_id, buf));
                 }
             }
         }
         self.try_recv_stream();
     }
-    
-    pub fn read_buffer2(&mut self, route_num: usize, output: &mut AudioBuffer) -> usize {
-        let mut iself = self.0.lock().unwrap();
-        let min_buf = iself.min_buf;
-        let max_buf = iself.max_buf;
-        let route = if let Some(route) = iself.routes.get_mut(route_num) {
-            route
-        }
-        else {
-            return 0;
-        };
-
-        // Calculate total available frames
-        let mut total = 0;
-        for buf in route.buffers.iter() { 
-            total += buf.frame_count();
-        }
-        let available = total.saturating_sub(route.start_offset);
-        let chunk_size = output.frame_count();
-        
-        // If we're in buffering mode, wait until we have min_buf worth of data
-        if route.is_buffering {
-            if available < chunk_size * min_buf {
-                // Still buffering, not ready yet
-                println!("Buffering {}", available);
-                return 0;
-            }
-            // We have enough, exit buffering mode
-            route.is_buffering = false;
-        }
-        
-        // Check if we have enough for even one chunk
-        if available < chunk_size {
-            println!("Start Buffering {}", available);
-            // UNDERRUN: Enter buffering mode
-            route.is_buffering = true;
-            return 0;
-        }
-        
-        // Check for overflow - if we have too much, drop half to resync
-        if available > chunk_size * max_buf {
-            let target = chunk_size * min_buf; // Target middle ground
-            while !route.buffers.is_empty() && total - route.start_offset > target {
-                println!("Throwing chunck {}", total);
-                let buf = route.buffers.remove(0);
-                total -= buf.frame_count();
-                route.start_offset = 0;
-            }
-        }
-        
-        // Read frames from buffers into output
-        let mut frames_read = 0;
-        let out_channel_count = output.channel_count();
-        let out_frame_count = output.frame_count();
-        
-        while let Some(input) = route.buffers.first() {
-            let mut start_offset = None;
-            let start_frames_read = frames_read;
-            
-            for chan in 0..out_channel_count {
-                frames_read = start_frames_read;
-                let inp = input.channel(chan.min(input.channel_count() - 1));
-                let out = output.channel_mut(chan);
-                
-                for i in route.start_offset..inp.len() {
-                    if frames_read >= out_frame_count {
-                        start_offset = Some(i);
-                        break;
-                    }
-                    out[frames_read] = inp[i];
-                    frames_read += 1;
-                }
-            }
-            
-            if let Some(start_offset) = start_offset {
-                route.start_offset = start_offset;
-                break;
-            }
-            else {
-                route.start_offset = 0;
-                route.buffers.remove(0);
-            }
-        }
-        
-        frames_read
-    }
-    
-        
-    pub fn read_buffer3(&mut self, route_num: usize, output: &mut AudioBuffer) -> usize {
-        let mut iself = self.0.lock().unwrap();
-        let min_buf = iself.min_buf;
-        let max_buf = iself.max_buf;
-        let route = if let Some(route) = iself.routes.get_mut(route_num) {
-            route
-        }
-        else {
-            return 0;
-        };
-        
-        // Calculate total available frames
-        let mut total = 0;
-        for buf in route.buffers.iter() { 
-            total += buf.frame_count();
-        }
-        let available = total.saturating_sub(route.start_offset);
-        let chunk_size = output.frame_count();
-                
-        // If we're in buffering mode, wait until we have min_buf worth of data
-        if route.is_buffering {
-            if available < chunk_size * min_buf {
-                // Still buffering, not ready yet
-                return 0;
-            }
-            // We have enough, exit buffering mode
-            route.is_buffering = false;
-        }
-                
-        // Check if we have enough for even one chunk
-        if available < chunk_size {
-            // UNDERRUN: Enter buffering mode
-            route.is_buffering = true;
-            return 0;
-        }
-                
-        // Check for overflow - if we have too much, drop half to resync
-        if available > chunk_size * max_buf {
-            let target = chunk_size * (min_buf + max_buf) / 2; // Target middle ground
-            while !route.buffers.is_empty() && total - route.start_offset > target {
-                println!("Throwing chunck {}", total);
-                let buf = route.buffers.remove(0);
-                total -= buf.frame_count();
-                route.start_offset = 0;
-            }
-        }
-                
-        // Read frames from buffers into output
-        let mut frames_read = 0;
-        let out_channel_count = output.channel_count();
-        let out_frame_count = output.frame_count();
-                
-        while let Some(input) = route.buffers.first() {
-            let mut start_offset = None;
-            let start_frames_read = frames_read;
-                        
-            for chan in 0..out_channel_count {
-                frames_read = start_frames_read;
-                let inp = input.channel(chan.min(input.channel_count() - 1));
-                let out = output.channel_mut(chan);
-                                
-                for i in route.start_offset..inp.len() {
-                    if frames_read >= out_frame_count {
-                        start_offset = Some(i);
-                        break;
-                    }
-                    out[frames_read] = inp[i];
-                    frames_read += 1;
-                }
-            }
-                        
-            if let Some(start_offset) = start_offset {
-                route.start_offset = start_offset;
-                break;
-            }
-            else {
-                route.start_offset = 0;
-                route.buffers.remove(0);
-            }
-        }
-                
-        frames_read
-    }
-        
     
     pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer) -> usize {
         let mut iself = self.0.lock().unwrap();
@@ -306,7 +145,13 @@ impl AudioStreamReceiver {
         }
         let available = total.saturating_sub(route.start_offset);
         let chunk_size = output.frame_count();
-                
+        
+        // Effective max_buf with adaptive multiplier
+        let effective_max_buf = max_buf * route.max_buf_multiplier;
+        
+        // Track chunks for adaptive logic
+        route.chunks_since_flush += 1;
+        
         // If we're in buffering mode, wait until we have min_buf worth of data
         if route.is_buffering {
             if available < chunk_size * min_buf {
@@ -316,38 +161,66 @@ impl AudioStreamReceiver {
             // We have enough, exit buffering mode
             route.is_buffering = false;
         }
-                
+        
         // Check if we have enough for even one chunk
         if available < chunk_size {
             // UNDERRUN: Enter buffering mode
             route.is_buffering = true;
+            route.stable_chunks = 0; // Reset stability counter
             return 0;
         }
-                
-        // Check for overflow - if we have too much, drop half to resync
-        if available > chunk_size * max_buf {
-            let target = chunk_size * (min_buf + max_buf) / 2; // Target middle ground
+        
+        // Check for overflow - if we have too much, drop to min_buf to resync
+        if available > chunk_size * effective_max_buf {
+            // Track flush frequency for adaptive max_buf
+            if route.chunks_since_flush <= 10 {
+                // Flush happened within 10 chunks of previous - this is a burst
+                route.recent_flush_count += 1;
+                if route.recent_flush_count >= 2 {
+                    // Two flushes close together - double max_buf temporarily
+                    route.max_buf_multiplier = (route.max_buf_multiplier * 2).min(4); // Cap at 4x
+                    route.recent_flush_count = 0;
+                }
+            } else {
+                // Flush after stable period - reset recent count
+                route.recent_flush_count = 1;
+            }
+            route.chunks_since_flush = 0;
+            route.stable_chunks = 0;
+            
+            // Drop down to min_buf
+            let target = chunk_size * min_buf;
             while !route.buffers.is_empty() && total - route.start_offset > target {
                 let buf = route.buffers.remove(0);
                 total -= buf.frame_count();
                 route.start_offset = 0;
             }
+        } else {
+            // Normal operation - count stable chunks
+            route.stable_chunks += 1;
+            
+            // After 100 stable chunks, try reducing max_buf_multiplier
+            if route.stable_chunks >= 100 && route.max_buf_multiplier > 1 {
+                route.max_buf_multiplier = (route.max_buf_multiplier / 2).max(1);
+                route.stable_chunks = 0;
+                route.recent_flush_count = 0;
+            }
         }
-                
+        
         // Read frames from buffers into output
         let mut frames_read = 0;
         let out_channel_count = output.channel_count();
         let out_frame_count = output.frame_count();
-                
+        
         while let Some(input) = route.buffers.first() {
             let mut start_offset = None;
             let start_frames_read = frames_read;
-                        
+            
             for chan in 0..out_channel_count {
                 frames_read = start_frames_read;
                 let inp = input.channel(chan.min(input.channel_count() - 1));
                 let out = output.channel_mut(chan);
-                                
+                
                 for i in route.start_offset..inp.len() {
                     if frames_read >= out_frame_count {
                         start_offset = Some(i);
@@ -357,7 +230,7 @@ impl AudioStreamReceiver {
                     frames_read += 1;
                 }
             }
-                        
+            
             if let Some(start_offset) = start_offset {
                 route.start_offset = start_offset;
                 break;
@@ -367,7 +240,7 @@ impl AudioStreamReceiver {
                 route.buffers.remove(0);
             }
         }
-                
+        
         frames_read
     }
 }
