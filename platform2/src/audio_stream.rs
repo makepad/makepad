@@ -42,8 +42,7 @@ pub struct AudioRoute {
     // After an underrun, we enter "buffering" mode and wait for min_buf before resuming
     is_buffering: bool,
     // Adaptive max_buf tracking
-    chunks_since_flush: usize,      // Chunks since last overflow flush
-    recent_flush_count: usize,      // Number of flushes in recent window
+    min_buf_multiplier: usize,      // Current multiplier (1 = normal, 2 = doubled, etc)
     max_buf_multiplier: usize,      // Current multiplier (1 = normal, 2 = doubled, etc)
     stable_chunks: usize,           // Consecutive stable chunks (no underrun/overflow)
 }
@@ -55,8 +54,7 @@ impl AudioRoute {
             buffers: vec![buf],
             start_offset: 0,
             is_buffering: true,
-            chunks_since_flush: 0,
-            recent_flush_count: 0,
+            min_buf_multiplier: 1,
             max_buf_multiplier: 1,
             stable_chunks: 0,
         }
@@ -137,7 +135,7 @@ impl AudioStreamReceiver {
         else {
             return 0;
         };
-                
+                        
         // Calculate total available frames
         let mut total = 0;
         for buf in route.buffers.iter() { 
@@ -145,15 +143,15 @@ impl AudioStreamReceiver {
         }
         let available = total.saturating_sub(route.start_offset);
         let chunk_size = output.frame_count();
-                
+                        
         // Effective max_buf with adaptive multiplier
         let effective_max_buf = max_buf * route.max_buf_multiplier;
-                
+                        
         // If we're in buffering mode, wait until we have min_buf worth of data
         if route.is_buffering {
-            if available < chunk_size * min_buf {
+            if available < chunk_size * min_buf  * route.min_buf_multiplier {
                 if !underrun_ok{
-                    println!("Still buffering");
+                    println!("STILL BUFFERING");
                 }
                 // Still buffering, not ready yet
                 return 0;
@@ -161,15 +159,23 @@ impl AudioStreamReceiver {
             // We have enough, exit buffering mode
             route.is_buffering = false;
         }
-                
+                        
         // Check if we have enough for even one chunk
         if available < chunk_size {
+            if !underrun_ok{
+                if route.stable_chunks <= 500 && route.min_buf_multiplier < 16 {
+                    route.min_buf_multiplier = (route.min_buf_multiplier*2).min(16); // Cap at 4x
+                    println!("INCREASING INBUF MULTIPLIER {}",route.min_buf_multiplier);
+                }
+                println!("START BUFFERING");
+            }
             // UNDERRUN: Enter buffering mode
             route.is_buffering = true;
             route.stable_chunks = 0; // Reset stability counter
+                       
             return 0;
         }
-                
+                        
         // Check for overflow - if we have too much, drop to min_buf to resync
         if available > chunk_size * effective_max_buf {
             println!("OVERFLOW {}", route.stable_chunks);
@@ -178,7 +184,7 @@ impl AudioStreamReceiver {
                 route.max_buf_multiplier = (route.max_buf_multiplier*2).min(16); // Cap at 4x
                 println!("INCREASING MAXBUF MULTIPLIER {}",route.max_buf_multiplier);
             } else {
-                println!("FLUSHING");
+                println!("OVERFLOW FLUSHING");
                 let target = chunk_size * min_buf * route.max_buf_multiplier;
                 while !route.buffers.is_empty() && total - route.start_offset > target {
                     let buf = route.buffers.remove(0);
@@ -190,28 +196,34 @@ impl AudioStreamReceiver {
         } else {
             // Normal operation - count stable chunks
             route.stable_chunks += 1;
-                        
+                                    
             // After 100 stable chunks, try reducing max_buf_multiplier
-            if route.stable_chunks > 500 && route.max_buf_multiplier > 1 {
-                route.max_buf_multiplier = (route.max_buf_multiplier/2).max(1);
-                println!("DECREASING MAXBUF MULTIPLIER {}",route.max_buf_multiplier);
+            if route.stable_chunks > 500{
+                if route.max_buf_multiplier > 1 {
+                    route.max_buf_multiplier = (route.max_buf_multiplier/2).max(1);
+                    println!("DECREASING MAXBUF MULTIPLIER {}",route.max_buf_multiplier);
+                }
+                if route.min_buf_multiplier > 1 {
+                    route.min_buf_multiplier = (route.min_buf_multiplier/2).max(1);
+                    println!("DECREASING MINBUF MULTIPLIER {}",route.min_buf_multiplier);
+                }
             }
         }
-                
+                        
         // Read frames from buffers into output
         let mut frames_read = 0;
         let out_channel_count = output.channel_count();
         let out_frame_count = output.frame_count();
-                
+                        
         while let Some(input) = route.buffers.first() {
             let mut start_offset = None;
             let start_frames_read = frames_read;
-                        
+                                    
             for chan in 0..out_channel_count {
                 frames_read = start_frames_read;
                 let inp = input.channel(chan.min(input.channel_count() - 1));
                 let out = output.channel_mut(chan);
-                                
+                                                
                 for i in route.start_offset..inp.len() {
                     if frames_read >= out_frame_count {
                         start_offset = Some(i);
@@ -221,7 +233,7 @@ impl AudioStreamReceiver {
                     frames_read += 1;
                 }
             }
-                        
+                                    
             if let Some(start_offset) = start_offset {
                 route.start_offset = start_offset;
                 break;
@@ -231,7 +243,7 @@ impl AudioStreamReceiver {
                 route.buffers.remove(0);
             }
         }
-                
+                        
         frames_read
     }
 }
