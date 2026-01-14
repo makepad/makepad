@@ -14,6 +14,9 @@ use {
     },
 };
 
+#[cfg(target_os = "macos")]
+use crate::os::apple::audio_tap::AudioTapAccess;
+
 
 pub struct KeyValueObserver {
     _callback: Box<Box<dyn Fn() >>,
@@ -91,7 +94,6 @@ pub fn define_key_value_observing_delegate() -> *const Class {
 }
 
 
-#[derive(Default)]
 pub struct AudioUnitAccess {
     pub change_signal: SignalToUI,
     pub device_descs: Vec<CoreAudioDeviceDesc>,
@@ -100,6 +102,24 @@ pub struct AudioUnitAccess {
     pub audio_inputs: Arc<Mutex<Vec<RunningAudioUnit >> >,
     pub audio_outputs: Arc<Mutex<Vec<RunningAudioUnit >> >,
     failed_devices: Arc<Mutex<HashSet<AudioDeviceId>>>,
+    #[cfg(target_os = "macos")]
+    audio_tap: Option<Arc<Mutex<AudioTapAccess>>>,
+}
+
+impl Default for AudioUnitAccess {
+    fn default() -> Self {
+        Self {
+            change_signal: Default::default(),
+            device_descs: Default::default(),
+            audio_input_cb: Default::default(),
+            audio_output_cb: Default::default(),
+            audio_inputs: Default::default(),
+            audio_outputs: Default::default(),
+            failed_devices: Default::default(),
+            #[cfg(target_os = "macos")]
+            audio_tap: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -127,6 +147,9 @@ impl AudioUnitAccess {
         
         #[cfg(target_os = "tvos")]
         Self::init_tvos_access();
+        
+        #[cfg(target_os = "macos")]
+        let audio_tap = Some(AudioTapAccess::new(change_signal.clone()));
                 
         Arc::new(Mutex::new(Self{
             failed_devices: Default::default(),
@@ -136,6 +159,8 @@ impl AudioUnitAccess {
             audio_output_cb:Default::default(),
             audio_inputs:Default::default(),
             audio_outputs:Default::default(),
+            #[cfg(target_os = "macos")]
+            audio_tap,
         }))
     }
     
@@ -144,6 +169,11 @@ impl AudioUnitAccess {
         let mut out = Vec::new();
         for dev in &self.device_descs {
             out.push(dev.desc.clone());
+        }
+        // Add loopback device on macOS
+        #[cfg(target_os = "macos")]
+        {
+            out.push(AudioTapAccess::get_loopback_desc());
         }
         out
     }
@@ -226,6 +256,37 @@ impl AudioUnitAccess {
     }
             
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
+        // Handle loopback device separately on macOS
+        #[cfg(target_os = "macos")]
+        {
+            let has_loopback = devices.iter().any(|d| AudioTapAccess::is_loopback_device(*d));
+            if let Some(ref audio_tap) = self.audio_tap {
+                let mut tap = audio_tap.lock().unwrap();
+                if has_loopback && !tap.is_running() {
+                    // Find the index for loopback in the devices array
+                    if let Some((index, _)) = devices.iter().enumerate().find(|(_, d)| AudioTapAccess::is_loopback_device(**d)) {
+                        let audio_input_cb = self.audio_input_cb[index].clone();
+                        tap.start_capture(Box::new(move |info, buffer| {
+                            if let Some(cb) = &mut *audio_input_cb.lock().unwrap() {
+                                cb(info, buffer);
+                            }
+                        }));
+                    }
+                } else if !has_loopback && tap.is_running() {
+                    tap.stop_capture();
+                }
+            }
+        }
+        
+        // Filter out loopback device for regular audio unit handling
+        #[cfg(target_os = "macos")]
+        let devices: Vec<AudioDeviceId> = devices.iter()
+            .filter(|d| !AudioTapAccess::is_loopback_device(**d))
+            .copied()
+            .collect();
+        #[cfg(not(target_os = "macos"))]
+        let devices = devices;
+        
         let new = {
             let mut audio_inputs = self.audio_inputs.lock().unwrap();
             // lets shut down the ones we dont use
