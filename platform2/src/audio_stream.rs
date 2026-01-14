@@ -202,6 +202,92 @@ impl AudioStreamReceiver {
         frames_read
     }
     
+        
+    pub fn read_buffer3(&mut self, route_num: usize, output: &mut AudioBuffer) -> usize {
+        let mut iself = self.0.lock().unwrap();
+        let min_buf = iself.min_buf;
+        let max_buf = iself.max_buf;
+        let route = if let Some(route) = iself.routes.get_mut(route_num) {
+            route
+        }
+        else {
+            return 0;
+        };
+        
+        // Calculate total available frames
+        let mut total = 0;
+        for buf in route.buffers.iter() { 
+            total += buf.frame_count();
+        }
+        let available = total.saturating_sub(route.start_offset);
+        let chunk_size = output.frame_count();
+                
+        // If we're in buffering mode, wait until we have min_buf worth of data
+        if route.is_buffering {
+            if available < chunk_size * min_buf {
+                // Still buffering, not ready yet
+                return 0;
+            }
+            // We have enough, exit buffering mode
+            route.is_buffering = false;
+        }
+                
+        // Check if we have enough for even one chunk
+        if available < chunk_size {
+            // UNDERRUN: Enter buffering mode
+            route.is_buffering = true;
+            return 0;
+        }
+                
+        // Check for overflow - if we have too much, drop half to resync
+        if available > chunk_size * max_buf {
+            let target = chunk_size * (min_buf + max_buf) / 2; // Target middle ground
+            while !route.buffers.is_empty() && total - route.start_offset > target {
+                println!("Throwing chunck {}", total);
+                let buf = route.buffers.remove(0);
+                total -= buf.frame_count();
+                route.start_offset = 0;
+            }
+        }
+                
+        // Read frames from buffers into output
+        let mut frames_read = 0;
+        let out_channel_count = output.channel_count();
+        let out_frame_count = output.frame_count();
+                
+        while let Some(input) = route.buffers.first() {
+            let mut start_offset = None;
+            let start_frames_read = frames_read;
+                        
+            for chan in 0..out_channel_count {
+                frames_read = start_frames_read;
+                let inp = input.channel(chan.min(input.channel_count() - 1));
+                let out = output.channel_mut(chan);
+                                
+                for i in route.start_offset..inp.len() {
+                    if frames_read >= out_frame_count {
+                        start_offset = Some(i);
+                        break;
+                    }
+                    out[frames_read] = inp[i];
+                    frames_read += 1;
+                }
+            }
+                        
+            if let Some(start_offset) = start_offset {
+                route.start_offset = start_offset;
+                break;
+            }
+            else {
+                route.start_offset = 0;
+                route.buffers.remove(0);
+            }
+        }
+                
+        frames_read
+    }
+        
+    
     pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer) -> usize {
         let mut iself = self.0.lock().unwrap();
         let min_buf = iself.min_buf;
