@@ -156,7 +156,7 @@ impl AudioStreamReceiver {
         
         // Check for overflow - if we have too much, drop half to resync
         if available > chunk_size * max_buf {
-            let target = chunk_size * (min_buf + max_buf) / 2; // Target middle ground
+            let target = chunk_size * min_buf; // Target middle ground
             while !route.buffers.is_empty() && total - route.start_offset > target {
                 println!("Throwing chunck {}", total);
                 let buf = route.buffers.remove(0);
