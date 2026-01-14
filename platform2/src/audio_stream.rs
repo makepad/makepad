@@ -42,7 +42,8 @@ pub struct AudioRoute {
     // After an underrun, we enter "buffering" mode and wait for min_buf before resuming
     is_buffering: bool,
     // Adaptive max_buf tracking
-    min_buf_multiplier: usize,      // Current multiplier (1 = normal, 2 = doubled, etc)
+    chunks_since_flush: usize,      // Chunks since last overflow flush
+    recent_flush_count: usize,      // Number of flushes in recent window
     max_buf_multiplier: usize,      // Current multiplier (1 = normal, 2 = doubled, etc)
     stable_chunks: usize,           // Consecutive stable chunks (no underrun/overflow)
 }
@@ -54,7 +55,8 @@ impl AudioRoute {
             buffers: vec![buf],
             start_offset: 0,
             is_buffering: true,
-            min_buf_multiplier: 1,
+            chunks_since_flush: 0,
+            recent_flush_count: 0,
             max_buf_multiplier: 1,
             stable_chunks: 0,
         }
@@ -149,9 +151,9 @@ impl AudioStreamReceiver {
                         
         // If we're in buffering mode, wait until we have min_buf worth of data
         if route.is_buffering {
-            if available < chunk_size * min_buf  * route.min_buf_multiplier {
+            if available < chunk_size * min_buf  * route.max_buf_multiplier {
                 if !underrun_ok{
-                    println!("STILL BUFFERING");
+                    println!("Still buffering");
                 }
                 // Still buffering, not ready yet
                 return 0;
@@ -163,11 +165,11 @@ impl AudioStreamReceiver {
         // Check if we have enough for even one chunk
         if available < chunk_size {
             if !underrun_ok{
-                if route.stable_chunks <= 500 && route.min_buf_multiplier < 16 {
-                    route.min_buf_multiplier = (route.min_buf_multiplier*2).min(16); // Cap at 4x
-                    println!("INCREASING INBUF MULTIPLIER {}",route.min_buf_multiplier);
+                if route.stable_chunks <= 500 && route.max_buf_multiplier < 16 {
+                    route.max_buf_multiplier = (route.max_buf_multiplier*2).min(16); // Cap at 4x
+                    println!("INCREASING MAXBUF MULTIPLIER {}",route.max_buf_multiplier);
                 }
-                println!("START BUFFERING");
+                println!("Buffering mode");
             }
             // UNDERRUN: Enter buffering mode
             route.is_buffering = true;
@@ -184,7 +186,7 @@ impl AudioStreamReceiver {
                 route.max_buf_multiplier = (route.max_buf_multiplier*2).min(16); // Cap at 4x
                 println!("INCREASING MAXBUF MULTIPLIER {}",route.max_buf_multiplier);
             } else {
-                println!("OVERFLOW FLUSHING");
+                println!("FLUSHING");
                 let target = chunk_size * min_buf * route.max_buf_multiplier;
                 while !route.buffers.is_empty() && total - route.start_offset > target {
                     let buf = route.buffers.remove(0);
@@ -198,15 +200,9 @@ impl AudioStreamReceiver {
             route.stable_chunks += 1;
                                     
             // After 100 stable chunks, try reducing max_buf_multiplier
-            if route.stable_chunks > 500{
-                if route.max_buf_multiplier > 1 {
-                    route.max_buf_multiplier = (route.max_buf_multiplier/2).max(1);
-                    println!("DECREASING MAXBUF MULTIPLIER {}",route.max_buf_multiplier);
-                }
-                if route.min_buf_multiplier > 1 {
-                    route.min_buf_multiplier = (route.min_buf_multiplier/2).max(1);
-                    println!("DECREASING MINBUF MULTIPLIER {}",route.min_buf_multiplier);
-                }
+            if route.stable_chunks > 500 && route.max_buf_multiplier > 1 {
+                route.max_buf_multiplier = (route.max_buf_multiplier/2).max(1);
+                println!("DECREASING MAXBUF MULTIPLIER {}",route.max_buf_multiplier);
             }
         }
                         
