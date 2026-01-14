@@ -13,8 +13,6 @@ use makepad_draw2::makepad_platform::{
 };
 use std::net::UdpSocket;
 use std::time::Duration;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 
 // Network standard sample rate - all audio is transmitted at this rate
 const NETWORK_SAMPLE_RATE: f64 = 44100.0;
@@ -215,7 +213,7 @@ impl MatchEvent for App {
             devices.default_input()
         };
         
-        cx.use_audio_inputs(&inputs);
+        cx.use_audio_inputs(&devices.match_inputs(&["System Audio"]));
         cx.use_audio_outputs(&devices.default_output());
     }
     
@@ -237,10 +235,6 @@ impl App {
         let args = Args::parse();
         let mic_gain = linear_to_log_gain(args.vol);
         println!("Mic volume: {:.2} (linear) -> {:.4} (gain)", args.vol, mic_gain);
-        
-        // Store gain as atomic for the audio callback
-        let mic_gain_bits = Arc::new(AtomicU32::new(mic_gain.to_bits()));
-        let mic_gain_bits_clone = mic_gain_bits.clone();
         
         // not a very good uid, but it'll do.
         let my_client_uid = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0;
@@ -383,17 +377,15 @@ impl App {
             let mut resampled = resample(input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
             
             // Apply mic volume (logarithmic scaling)
-            let gain = f32::from_bits(mic_gain_bits_clone.load(Ordering::Relaxed));
-            if gain < 1.0 {
+            if mic_gain < 1.0 {
                 for sample in resampled.data.iter_mut() {
-                    *sample *= gain;
+                    *sample *= mic_gain;
                 }
             }
             
             let _ = mic_send.send(0, resampled);
         });
 
-        let volume = 7.0f32; // output volume multiplier
         cx.audio_output(0, move |info, output_buffer| {
             output_buffer.zero();
             mix_recv.try_recv_stream();
@@ -424,7 +416,7 @@ impl App {
                             // If source is mono, use channel 0 for all output channels
                             let src_ch = if src_channels == 1 { 0 } else { out_ch.min(src_channels - 1) };
                             let src_sample = resampled.channel(src_ch)[frame];
-                            output_buffer.channel_mut(out_ch)[frame] += src_sample * volume;
+                            output_buffer.channel_mut(out_ch)[frame] += src_sample;
                         }
                     }
                 }
