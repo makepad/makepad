@@ -172,13 +172,15 @@ impl AudioStreamReceiver {
         
         // Check for overflow - if we have too much, drop to min_buf to resync
         if available > chunk_size * effective_max_buf {
+            println!("OVERFLOW");
             // Track flush frequency for adaptive max_buf
             if route.chunks_since_flush <= 10 {
                 // Flush happened within 10 chunks of previous - this is a burst
                 route.recent_flush_count += 1;
                 if route.recent_flush_count >= 2 {
                     // Two flushes close together - double max_buf temporarily
-                    route.max_buf_multiplier = (route.max_buf_multiplier * 2).min(4); // Cap at 4x
+                    println!("INCREASING MAXBUF MULTIPLIER");
+                    route.max_buf_multiplier = (route.max_buf_multiplier+1).min(4); // Cap at 4x
                     route.recent_flush_count = 0;
                 }
             } else {
@@ -201,7 +203,8 @@ impl AudioStreamReceiver {
             
             // After 100 stable chunks, try reducing max_buf_multiplier
             if route.stable_chunks >= 100 && route.max_buf_multiplier > 1 {
-                route.max_buf_multiplier = (route.max_buf_multiplier / 2).max(1);
+                println!("DECREASING MAXBUF MULTIPLIER");
+                route.max_buf_multiplier = (route.max_buf_multiplier-1).max(1);
                 route.stable_chunks = 0;
                 route.recent_flush_count = 0;
             }
