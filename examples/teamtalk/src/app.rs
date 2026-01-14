@@ -431,8 +431,8 @@ impl App {
                 
                 let deviation = (elapsed_us - *expected).abs() / *expected;
                 if deviation > 0.10 {
-                    println!("AUDIO TIMING: expected {:.0}us, got {:.0}us ({:+.1}%)", 
-                        *expected, elapsed_us, (elapsed_us / *expected - 1.0) * 100.0);
+                   // println!("AUDIO TIMING: expected {:.0}us, got {:.0}us ({:+.1}%)", 
+                    //    *expected, elapsed_us, (elapsed_us / *expected - 1.0) * 100.0);
                 }
             }
             last_callback_time = Some(now);
@@ -469,6 +469,9 @@ impl App {
                             output_buffer.channel_mut(out_ch)[frame] += src_sample;
                         }
                     }
+                }
+                else{
+                    println!("DIDNT GET BUFFER");
                 }
             }
         });
