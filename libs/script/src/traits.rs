@@ -24,13 +24,13 @@ pub trait ScriptHookDeref {
     fn on_deref_after_apply(&mut self,_vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){}
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ScriptTypeProp {
     pub order: u32,
     pub ty: ScriptTypeId,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ScriptTypeProps{
     pub props: LiveIdMap<LiveId, ScriptTypeProp>
 }
@@ -156,6 +156,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_shader(vm:&mut ScriptVm)->ScriptValue{
         let val = Self::script_proto(vm);
+        
         vm.heap.freeze_shader(val.into());
         val
     }

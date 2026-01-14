@@ -20,17 +20,25 @@ pub fn test(){
     pub enum EnumTest{
         #[pick]
         Bare,
-        #[live(1.0)] 
+        #[live(1.0)]
         Tuple(f64),
-        #[live{named_field:1.0}] 
+        #[live{named_field:1.0}]
         Named{named_field:f64}
     }
     
     #[derive(Script, ScriptHook)]
     #[repr(C)]
     pub struct ShaderTest{
-        #[live] struct_field: f32, 
-        #[live] unused_field: f32
+        #[live] parent_field: f32, 
+        #[live] unused_field1: f32
+    }
+    
+    #[derive(Script, ScriptHook)]
+    #[repr(C)]
+    pub struct ShaderTest2{
+        #[deref] parent: ShaderTest,
+        #[live] child_field: f32, 
+        #[live] unused_field2: f32
     }
     
     use crate::vm::*;
@@ -82,7 +90,7 @@ pub fn test(){
         }
         
         // alright. lets figure out the shader sself
-        let test_shader = #(ShaderTest::script_shader(vm)){
+        let test_shader = #(ShaderTest2::script_shader(vm)){
             vtx: shader.vertex_buffer(vertices)
             unitest: shader.uniform(1.0)
             draw: shader.uniform_buffer(draw_uniforms)
@@ -99,7 +107,7 @@ pub fn test(){
             }
             fragment: fn(){
                 let v = self.vy + self.unitest
-                let t = self.draw.field + self.struct_field
+                let t = self.draw.field + self.parent_field + self.child_field
                 let x = sdf.new()
                 x.set_field(1f)
                 x.p.y = 1f
