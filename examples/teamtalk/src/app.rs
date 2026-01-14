@@ -404,7 +404,7 @@ impl App {
                 let route_channels = mix_recv.channel_count(i).unwrap_or(2);
                 network_buf.resize(network_frames, route_channels);
                 
-                if mix_recv.read_buffer(i, &mut network_buf) != 0 {
+                if mix_recv.read_buffer2(i, &mut network_buf) != 0 {
                     // Resample from network rate to device rate
                     let resampled = resample(&network_buf, NETWORK_SAMPLE_RATE, info.sample_rate);
                     let src_channels = resampled.channel_count();
