@@ -8,6 +8,7 @@ use {
     crate::{
         audio::*,
     },
+    std::collections::VecDeque,
     std::sync::{Arc, Mutex},
     std::sync::mpsc::{
         channel,
@@ -38,7 +39,7 @@ unsafe impl Send for AudioStreamReceiver {}
 pub struct AudioRoute {
     id: u64,
     start_offset: usize,
-    buffers: Vec<AudioBuffer>,
+    buffers: VecDeque<AudioBuffer>,
     // After an underrun, we enter "buffering" mode and wait for min_buf before resuming
     is_buffering: bool,
     // Adaptive max_buf tracking
@@ -50,9 +51,11 @@ pub struct AudioRoute {
 
 impl AudioRoute {
     fn new(id: u64, buf: AudioBuffer) -> Self {
+        let mut buffers = VecDeque::new();
+        buffers.push_back(buf);
         Self {
             id,
-            buffers: vec![buf],
+            buffers,
             start_offset: 0,
             is_buffering: true,
             chunks_since_flush: 0,
@@ -96,18 +99,26 @@ impl AudioStreamReceiver {
     pub fn channel_count(&self, route_num: usize) -> Option<usize> {
         let iself = self.0.lock().unwrap();
         iself.routes.get(route_num)
-            .and_then(|route| route.buffers.first())
+            .and_then(|route| route.buffers.front())
             .map(|buf| buf.channel_count())
     }
 
     pub fn try_recv_stream(&mut self) {
         let mut iself = self.0.lock().unwrap();
-        while let Ok((route_id, buf)) = iself.stream_recv.try_recv() {
-            if let Some(route) = iself.routes.iter_mut().find( | v | v.id == route_id) {
-                route.buffers.push(buf);
+        let mut count = 0;
+        // Limit to 20 packets per call to avoid stalling the audio thread during network bursts
+        while count < 20 {
+            if let Ok((route_id, buf)) = iself.stream_recv.try_recv() {
+                if let Some(route) = iself.routes.iter_mut().find( | v | v.id == route_id) {
+                    route.buffers.push_back(buf);
+                }
+                else {
+                    iself.routes.push(AudioRoute::new(route_id, buf));
+                }
+                count += 1;
             }
             else {
-                iself.routes.push(AudioRoute::new(route_id, buf));
+                break;
             }
         }
     }
@@ -117,7 +128,7 @@ impl AudioStreamReceiver {
             let mut iself = self.0.lock().unwrap();
             if let Ok((route_id, buf)) = iself.stream_recv.recv() {
                 if let Some(route) = iself.routes.iter_mut().find( | v | v.id == route_id) {
-                    route.buffers.push(buf);
+                    route.buffers.push_back(buf);
                 }
                 else {
                     iself.routes.push(AudioRoute::new(route_id, buf));
@@ -189,7 +200,7 @@ impl AudioStreamReceiver {
                 println!("FLUSHING");
                 let target = chunk_size * min_buf * route.max_buf_multiplier;
                 while !route.buffers.is_empty() && total - route.start_offset > target {
-                    let buf = route.buffers.remove(0);
+                    let buf = route.buffers.pop_front().unwrap();
                     total -= buf.frame_count();
                     route.start_offset = 0;
                 }
@@ -211,7 +222,7 @@ impl AudioStreamReceiver {
         let out_channel_count = output.channel_count();
         let out_frame_count = output.frame_count();
                         
-        while let Some(input) = route.buffers.first() {
+        while let Some(input) = route.buffers.front() {
             let mut start_offset = None;
             let start_frames_read = frames_read;
                                     
@@ -236,7 +247,7 @@ impl AudioStreamReceiver {
             }
             else {
                 route.start_offset = 0;
-                route.buffers.remove(0);
+                route.buffers.pop_front();
             }
         }
                         
