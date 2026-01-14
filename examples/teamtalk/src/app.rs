@@ -415,7 +415,28 @@ impl App {
             let _ = mic_send.send(0, resampled);
         });
 
+        let mut last_callback_time: Option<std::time::Instant> = None;
+        let mut expected_interval_us: Option<f64> = None;
+        
         cx.audio_output(0, move |info, output_buffer| {
+            // Timing check: detect if callback interval varies by more than 10%
+            let now = std::time::Instant::now();
+            if let Some(last_time) = last_callback_time {
+                let elapsed_us = last_time.elapsed().as_micros() as f64;
+                
+                // Calculate expected interval from buffer size and sample rate
+                let expected = expected_interval_us.get_or_insert_with(|| {
+                    (output_buffer.frame_count() as f64 / info.sample_rate) * 1_000_000.0
+                });
+                
+                let deviation = (elapsed_us - *expected).abs() / *expected;
+                if deviation > 0.10 {
+                    println!("AUDIO TIMING: expected {:.0}us, got {:.0}us ({:+.1}%)", 
+                        *expected, elapsed_us, (elapsed_us / *expected - 1.0) * 100.0);
+                }
+            }
+            last_callback_time = Some(now);
+            
             output_buffer.zero();
             mix_recv.try_recv_stream();
             
