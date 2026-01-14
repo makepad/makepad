@@ -172,23 +172,26 @@ impl WasapiAccess {
                     if let Ok(mut wasapi) = WasapiLoopback::new(device_id, 2) {
                         audio_inputs.lock().unwrap().push(wasapi.get_ref());
                         while let Ok(buffer) = wasapi.wait_for_buffer() {
-                            if audio_inputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
-                                break;
+                            // Use try_lock to avoid blocking the audio thread
+                            if let Ok(inputs) = audio_inputs.try_lock() {
+                                if inputs.iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
+                                    break;
+                                }
                             }
-                            if let Some(fbox) = &mut *audio_input_cb.lock().unwrap() {
-                                fbox(
-                                    AudioInfo {
-                                        device_id,
-                                        time: None,
-                                        sample_rate: 48000.0,
-                                    },
-                                    &buffer
-                                );
-                                wasapi.release_buffer(buffer);
+                            // Use try_lock - if we can't get the lock, skip this buffer
+                            if let Ok(mut cb_guard) = audio_input_cb.try_lock() {
+                                if let Some(fbox) = &mut *cb_guard {
+                                    fbox(
+                                        AudioInfo {
+                                            device_id,
+                                            time: None,
+                                            sample_rate: 48000.0,
+                                        },
+                                        &buffer
+                                    );
+                                }
                             }
-                            else {
-                                wasapi.release_buffer(buffer);
-                            }
+                            wasapi.release_buffer(buffer);
                         }
                         let mut audio_inputs = audio_inputs.lock().unwrap();
                         audio_inputs.retain( | v | v.device_id != device_id);
@@ -206,23 +209,26 @@ impl WasapiAccess {
                     if let Ok(mut wasapi) = WasapiInput::new(device_id, 2){
                         audio_inputs.lock().unwrap().push(wasapi.base.get_ref());
                         while let Ok(buffer) = wasapi.wait_for_buffer() {
-                            if audio_inputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
-                                break;
+                            // Use try_lock to avoid blocking the audio thread
+                            if let Ok(inputs) = audio_inputs.try_lock() {
+                                if inputs.iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
+                                    break;
+                                }
                             }
-                            if let Some(fbox) = &mut *audio_input_cb.lock().unwrap() {
-                                fbox(
-                                    AudioInfo {
-                                        device_id,
-                                        time: None,
-                                        sample_rate: 48000.0,
-                                    },
-                                    &buffer
-                                );
-                                wasapi.release_buffer(buffer);
+                            // Use try_lock - if we can't get the lock, skip this buffer
+                            if let Ok(mut cb_guard) = audio_input_cb.try_lock() {
+                                if let Some(fbox) = &mut *cb_guard {
+                                    fbox(
+                                        AudioInfo {
+                                            device_id,
+                                            time: None,
+                                            sample_rate: 48000.0,
+                                        },
+                                        &buffer
+                                    );
+                                }
                             }
-                            else {
-                                wasapi.release_buffer(buffer);
-                            }
+                            wasapi.release_buffer(buffer);
                         }
                         let mut audio_inputs = audio_inputs.lock().unwrap();
                         audio_inputs.retain( | v | v.device_id != device_id);
@@ -267,23 +273,26 @@ impl WasapiAccess {
                 if let Ok(mut wasapi) = WasapiOutput::new(device_id, 2){
                     audio_outputs.lock().unwrap().push(wasapi.base.get_ref());
                     while let Ok(mut buffer) = wasapi.wait_for_buffer() {
-                        if audio_outputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
-                            break;
+                        // Use try_lock to avoid blocking the audio thread
+                        if let Ok(outputs) = audio_outputs.try_lock() {
+                            if outputs.iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
+                                break;
+                            }
                         }
-                        if let Some(fbox) = &mut *audio_output_cb.lock().unwrap() {
-                            fbox(
-                                AudioInfo {
-                                    device_id,
-                                    time: None,
-                                    sample_rate: 48000.0,
-                                },
-                                &mut buffer.audio_buffer
-                            );
-                            wasapi.release_buffer(buffer);
+                        // Use try_lock - if we can't get the lock, output silence this frame
+                        if let Ok(mut cb_guard) = audio_output_cb.try_lock() {
+                            if let Some(fbox) = &mut *cb_guard {
+                                fbox(
+                                    AudioInfo {
+                                        device_id,
+                                        time: None,
+                                        sample_rate: 48000.0,
+                                    },
+                                    &mut buffer.audio_buffer
+                                );
+                            }
                         }
-                        else {
-                            wasapi.release_buffer(buffer);
-                        }
+                        wasapi.release_buffer(buffer);
                     }
                     let mut audio_outputs = audio_outputs.lock().unwrap();
                     audio_outputs.retain( | v | v.device_id != device_id);
