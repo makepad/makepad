@@ -496,13 +496,20 @@ impl WasapiBase {
             let mut def_period = 0i64;
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
+            
+            // Force at least 20ms buffer (200,000 x 100ns) for stability against jitter
+            // 10ms (default often) is too tight for some systems
+            if def_period < 200_000 {
+                def_period = 200_000;
+            }
+
             let wave_format = WasapiAccess::new_float_waveformatextensible(48000, channel_count);
             
             if client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 def_period,
-                def_period,
+                0, // hnsPeriodicity must be 0 for shared mode
                 &wave_format as *const _ as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX,
                 None
             ).is_err(){
@@ -667,6 +674,12 @@ impl WasapiLoopback {
             let mut def_period = 0i64;
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
+            
+            // Force at least 20ms buffer for loopback too
+            if def_period < 200_000 {
+                def_period = 200_000;
+            }
+            
             let wave_format = WasapiAccess::new_float_waveformatextensible(48000, channel_count);
             
             // Use AUDCLNT_STREAMFLAGS_LOOPBACK to capture from the output device
@@ -674,7 +687,7 @@ impl WasapiLoopback {
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 def_period,
-                def_period,
+                0, // hnsPeriodicity must be 0 for shared mode
                 &wave_format as *const _ as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX,
                 None
             ).is_err() {
