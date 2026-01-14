@@ -11,6 +11,7 @@ use makepad_draw2::makepad_platform::{
     audio_stream::AudioStreamSender,
     makepad_micro_serde::*,
 };
+use std::collections::HashMap;
 use std::net::UdpSocket;
 use std::time::Duration;
 
@@ -163,8 +164,8 @@ pub struct App {
 // this is the protocol enum with 'micro-serde' binary serialise/deserialise macro on it.
 #[derive(SerBin, DeBin, Debug)]
 enum TeamTalkWire {
-    Silence { client_uid: u64, frame_count: u32 },
-    Audio { client_uid: u64, channel_count: u32, data: Vec<i16> },
+    Silence { client_uid: u64, sequence: u32, frame_count: u32 },
+    Audio { client_uid: u64, sequence: u32, channel_count: u32, data: Vec<i16> },
 }
 
 impl MatchEvent for App {
@@ -260,6 +261,7 @@ impl App {
             let mut was_silent = true;
             let fade_in_samples = 280; // ~6ms at 44100Hz
             let mut limiter_gain = 1.0_f32;
+            let mut sequence: u32 = 0;
             
             loop {
                 mic_recv.recv_stream();
@@ -296,6 +298,7 @@ impl App {
                             was_silent = false;
                             TeamTalkWire::Audio {
                                 client_uid: my_client_uid,
+                                sequence,
                                 channel_count: channel_count as u32,
                                 data: output_buffer.to_i16()
                             }
@@ -305,6 +308,7 @@ impl App {
                             was_silent = false;
                             TeamTalkWire::Audio {
                                 client_uid: my_client_uid,
+                                sequence,
                                 channel_count: channel_count as u32,
                                 data: output_buffer.to_i16()
                             }
@@ -317,6 +321,7 @@ impl App {
                             was_silent = true;
                             TeamTalkWire::Audio {
                                 client_uid: my_client_uid,
+                                sequence,
                                 channel_count: channel_count as u32,
                                 data: output_buffer.to_i16()
                             }
@@ -325,11 +330,13 @@ impl App {
                             // Still silent
                             TeamTalkWire::Silence {
                                 client_uid: my_client_uid,
+                                sequence,
                                 frame_count: frame_count as u32
                             }
                         }
                     };
                     
+                    sequence = sequence.wrapping_add(1);
                     wire_data.clear();
                     wire_packet.ser_bin(&mut wire_data);
                     let _ = write_audio.send_to(&wire_data, "10.0.0.255:41531");
@@ -340,6 +347,8 @@ impl App {
         // the network audio receiving thread
         std::thread::spawn(move || {
             let mut read_buf = [0u8; 4096];
+            // Track expected sequence number per client
+            let mut client_sequences: HashMap<u64, u32> = HashMap::new();
             
             loop{
                 if let Ok((len, _addr)) = read_audio.recv_from(&mut read_buf) {
@@ -352,18 +361,36 @@ impl App {
     
                     // create an audiobuffer from the data
                     // Received data keeps its original channel count (mono or stereo)
-                    let (client_uid, buffer) = match packet {
-                        TeamTalkWire::Audio { client_uid, channel_count, data } => {
+                    let (client_uid, sequence, buffer) = match packet {
+                        TeamTalkWire::Audio { client_uid, sequence, channel_count, data } => {
                             let buffer = AudioBuffer::from_i16(&data, channel_count as usize);
-                            (client_uid, buffer)
+                            (client_uid, sequence, buffer)
                         }
-                        TeamTalkWire::Silence { client_uid, frame_count } => {
+                        TeamTalkWire::Silence { client_uid, sequence, frame_count } => {
                             // Silence packets are mono (1 channel)
-                            (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1))
+                            (client_uid, sequence, AudioBuffer::new_with_size(frame_count as usize, 1))
                         }
                     };
     
                     if client_uid != my_client_uid {
+                        // Check sequence number for gaps or out-of-order
+                        let expected = client_sequences.entry(client_uid).or_insert(sequence);
+                        if sequence != *expected {
+                            let diff = sequence.wrapping_sub(*expected) as i32;
+                            if diff > 0 && diff < 1000 {
+                                println!("SEQ GAP: client {:016x} expected {} got {} (missed {})", 
+                                    client_uid, *expected, sequence, diff);
+                            } else if diff < 0 && diff > -1000 {
+                                println!("SEQ OUT-OF-ORDER: client {:016x} expected {} got {} ({})", 
+                                    client_uid, *expected, sequence, diff);
+                            } else {
+                                // Large jump - probably reconnect or wrap
+                                println!("SEQ RESET: client {:016x} {} -> {}", 
+                                    client_uid, *expected, sequence);
+                            }
+                        }
+                        *expected = sequence.wrapping_add(1);
+                        
                         // platform2 uses send() instead of write_buffer()
                         let _ = mix_send.send(client_uid, buffer);
                     }
