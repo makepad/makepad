@@ -1,4 +1,7 @@
-// Audio stream is strictly a utility class to combine multiple input streams
+// Audio stream with smart buffering:
+// - Normally outputs with minimal latency (no forced minimum buffer)
+// - On underrun: buffers back up to min_buf before resuming
+// - On overflow (max_buf reached): drops half to resync
 
 use {
     crate::{
@@ -34,11 +37,13 @@ unsafe impl Send for AudioStreamReceiver {}
 pub struct AudioRoute {
     id: u64,
     start_offset: usize,
-    buffers: Vec<AudioBuffer>
+    buffers: Vec<AudioBuffer>,
+    // After an underrun, we enter "buffering" mode and wait for min_buf before resuming
+    is_buffering: bool,
 }
 
 impl AudioStreamSender {
-    pub fn create_pair(min_buf:usize, max_buf: usize) -> (AudioStreamSender, AudioStreamReceiver) {
+    pub fn create_pair(min_buf: usize, max_buf: usize) -> (AudioStreamSender, AudioStreamReceiver) {
         let (stream_send, stream_recv) = channel::<(u64, AudioBuffer)>();
         (AudioStreamSender {
             stream_send,
@@ -84,7 +89,8 @@ impl AudioStreamReceiver {
                 iself.routes.push(AudioRoute {
                     id: route_id,
                     buffers: vec![buf],
-                    start_offset: 0
+                    start_offset: 0,
+                    is_buffering: true, // Start in buffering mode for new routes
                 });
             }
         }
@@ -101,7 +107,8 @@ impl AudioStreamReceiver {
                     iself.routes.push(AudioRoute {
                         id: route_id,
                         buffers: vec![buf],
-                        start_offset: 0
+                        start_offset: 0,
+                        is_buffering: true, // Start in buffering mode for new routes
                     });
                 }
             }
@@ -120,37 +127,55 @@ impl AudioStreamReceiver {
             return 0;
         };
 
-        // ok if we dont have enough data in our stack for output, just output nothing
+        // Calculate total available frames
         let mut total = 0;
         for buf in route.buffers.iter() { 
             total += buf.frame_count();
         }
-
-        // check if we have enough buffer
-        if total - route.start_offset < output.frame_count() * min_buf {
-            return 0
-        }
-         
-        // what if we have too much buffer.. we should take the 'end' of the buffers
-        while total - route.buffers.first().unwrap().frame_count() > output.frame_count() * max_buf{
-            let buf = route.buffers.remove(0);
-            total -= buf.frame_count();
-            route.start_offset = 0;
+        let available = total.saturating_sub(route.start_offset);
+        let chunk_size = output.frame_count();
+        
+        // If we're in buffering mode, wait until we have min_buf worth of data
+        if route.is_buffering {
+            if available < chunk_size * min_buf {
+                // Still buffering, not ready yet
+                return 0;
+            }
+            // We have enough, exit buffering mode
+            route.is_buffering = false;
         }
         
-        // ok so we need to eat from the start of the buffer vec until output is filled
+        // Check if we have enough for even one chunk
+        if available < chunk_size {
+            // UNDERRUN: Enter buffering mode
+            route.is_buffering = true;
+            return 0;
+        }
+        
+        // Check for overflow - if we have too much, drop half to resync
+        if available > chunk_size * max_buf {
+            let target = chunk_size * (min_buf + max_buf) / 2; // Target middle ground
+            while !route.buffers.is_empty() && total - route.start_offset > target {
+                let buf = route.buffers.remove(0);
+                total -= buf.frame_count();
+                route.start_offset = 0;
+            }
+        }
+        
+        // Read frames from buffers into output
         let mut frames_read = 0;
         let out_channel_count = output.channel_count();
         let out_frame_count = output.frame_count();
+        
         while let Some(input) = route.buffers.first() {
-            // ok so. we can copy buffer from start_offset
             let mut start_offset = None;
             let start_frames_read = frames_read;
+            
             for chan in 0..out_channel_count {
                 frames_read = start_frames_read;
                 let inp = input.channel(chan.min(input.channel_count() - 1));
                 let out = output.channel_mut(chan);
-                // alright so we write into the output buffer
+                
                 for i in route.start_offset..inp.len() {
                     if frames_read >= out_frame_count {
                         start_offset = Some(i);
@@ -160,12 +185,12 @@ impl AudioStreamReceiver {
                     frames_read += 1;
                 }
             }
-            // only consumed a part of the buffer
+            
             if let Some(start_offset) = start_offset {
                 route.start_offset = start_offset;
-                break
+                break;
             }
-            else { // consumed entire buffer
+            else {
                 route.start_offset = 0;
                 route.buffers.remove(0);
             }
