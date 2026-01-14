@@ -242,7 +242,7 @@ impl App {
         // AudioStream is an mpsc channel that buffers at the recv side
         // and allows arbitrary chunksized reads. Little utility struct.
         // platform2's create_pair takes (min_buf, max_buf) at creation time
-        let (mic_send, mut mic_recv) = AudioStreamSender::create_pair(1, 4);
+        let (mic_send, mut mic_recv) = AudioStreamSender::create_pair(1, 12);
         let (mix_send, mut mix_recv) = AudioStreamSender::create_pair(1, 4);
 
         // the UDP broadcast socket
