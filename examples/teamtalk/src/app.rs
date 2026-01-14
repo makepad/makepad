@@ -448,7 +448,7 @@ impl App {
             let network_frames = (out_frames as f64 * ratio).ceil() as usize;
             
             let mut network_buf = AudioBuffer::default();
-            
+            let mut wrote_data = 0;
             for i in 0..mix_recv.num_routes() {
                 // Get the actual channel count for this route's pending buffers
                 let route_channels = mix_recv.channel_count(i).unwrap_or(2);
@@ -467,6 +467,7 @@ impl App {
                             let src_ch = if src_channels == 1 { 0 } else { out_ch.min(src_channels - 1) };
                             let src_sample = resampled.channel(src_ch)[frame];
                             output_buffer.channel_mut(out_ch)[frame] += src_sample;
+                            wrote_data += 1
                         }
                     }
                 }
@@ -474,6 +475,7 @@ impl App {
                     println!("DIDNT GET BUFFER");
                 }
             }
+            println!("{}", wrote_data);
             
             // Check callback processing time doesn't exceed 50% of expected interval
             if let Some(expected) = expected_interval_us {
