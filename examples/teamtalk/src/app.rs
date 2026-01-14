@@ -271,7 +271,7 @@ impl App {
                     let frame_count = MAX_WIRE_SAMPLES / channel_count;
                     output_buffer.resize(frame_count, channel_count);
                     
-                    if mic_recv.read_buffer(0, &mut output_buffer) == 0 {
+                    if mic_recv.read_buffer3(0, &mut output_buffer) == 0 {
                         break;
                     }
                     
@@ -340,31 +340,33 @@ impl App {
         // the network audio receiving thread
         std::thread::spawn(move || {
             let mut read_buf = [0u8; 4096];
-
-            while let Ok((len, _addr)) = read_audio.recv_from(&mut read_buf) {
-                let read_buf = &read_buf[0..len];
-
-                let packet = match TeamTalkWire::deserialize_bin(read_buf) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-
-                // create an audiobuffer from the data
-                // Received data keeps its original channel count (mono or stereo)
-                let (client_uid, buffer) = match packet {
-                    TeamTalkWire::Audio { client_uid, channel_count, data } => {
-                        let buffer = AudioBuffer::from_i16(&data, channel_count as usize);
-                        (client_uid, buffer)
+            
+            loop{
+                if let Ok((len, _addr)) = read_audio.recv_from(&mut read_buf) {
+                    let read_buf = &read_buf[0..len];
+    
+                    let packet = match TeamTalkWire::deserialize_bin(read_buf) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+    
+                    // create an audiobuffer from the data
+                    // Received data keeps its original channel count (mono or stereo)
+                    let (client_uid, buffer) = match packet {
+                        TeamTalkWire::Audio { client_uid, channel_count, data } => {
+                            let buffer = AudioBuffer::from_i16(&data, channel_count as usize);
+                            (client_uid, buffer)
+                        }
+                        TeamTalkWire::Silence { client_uid, frame_count } => {
+                            // Silence packets are mono (1 channel)
+                            (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1))
+                        }
+                    };
+    
+                    if client_uid != my_client_uid {
+                        // platform2 uses send() instead of write_buffer()
+                        let _ = mix_send.send(client_uid, buffer);
                     }
-                    TeamTalkWire::Silence { client_uid, frame_count } => {
-                        // Silence packets are mono (1 channel)
-                        (client_uid, AudioBuffer::new_with_size(frame_count as usize, 1))
-                    }
-                };
-
-                if client_uid != my_client_uid {
-                    // platform2 uses send() instead of write_buffer()
-                    let _ = mix_send.send(client_uid, buffer);
                 }
             }
         });
