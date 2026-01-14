@@ -61,6 +61,7 @@ use {
                 SetEvent,
                 WaitForSingleObject,
                 CreateEventA,
+                AvSetMmThreadCharacteristicsW,
             },
             Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
             
@@ -68,6 +69,25 @@ use {
     }
 };
 
+/// Elevate the current thread to Pro Audio priority using Windows MMCSS
+/// Returns the task handle for later cleanup, or None if failed
+fn elevate_audio_thread_priority() -> Option<HANDLE> {
+    unsafe {
+        let mut task_index: u32 = 0;
+        // "Pro Audio" gives the highest priority for audio processing
+        let task_name: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
+        let handle = AvSetMmThreadCharacteristicsW(
+            PCWSTR(task_name.as_ptr()),
+            &mut task_index
+        );
+        if handle.is_err(){
+            println!("Warning: Failed to elevate audio thread priority");
+            None
+        } else {
+            Some(handle.unwrap())
+        }
+    }
+}
 
 pub struct WasapiAccess {
     change_signal: SignalToUI,
@@ -148,6 +168,7 @@ impl WasapiAccess {
             if is_loopback {
                 // Use loopback capture for output devices
                 std::thread::spawn(move || {
+                    let _mmcss_handle = elevate_audio_thread_priority();
                     if let Ok(mut wasapi) = WasapiLoopback::new(device_id, 2) {
                         audio_inputs.lock().unwrap().push(wasapi.get_ref());
                         while let Ok(buffer) = wasapi.wait_for_buffer() {
@@ -181,6 +202,7 @@ impl WasapiAccess {
             } else {
                 // Use regular input capture
                 std::thread::spawn(move || {
+                    let _mmcss_handle = elevate_audio_thread_priority();
                     if let Ok(mut wasapi) = WasapiInput::new(device_id, 2){
                         audio_inputs.lock().unwrap().push(wasapi.base.get_ref());
                         while let Ok(buffer) = wasapi.wait_for_buffer() {
@@ -241,6 +263,7 @@ impl WasapiAccess {
             let change_signal = self.change_signal.clone();
             
             std::thread::spawn(move || {
+                let _mmcss_handle = elevate_audio_thread_priority();
                 if let Ok(mut wasapi) = WasapiOutput::new(device_id, 2){
                     audio_outputs.lock().unwrap().push(wasapi.base.get_ref());
                     while let Ok(mut buffer) = wasapi.wait_for_buffer() {
