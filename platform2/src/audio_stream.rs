@@ -127,7 +127,7 @@ impl AudioStreamReceiver {
         self.try_recv_stream();
     }
     
-    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer) -> usize {
+    pub fn read_buffer(&mut self, underrun_ok: bool, route_num: usize, output: &mut AudioBuffer) -> usize {
         let mut iself = self.0.lock().unwrap();
         let min_buf = iself.min_buf;
         let max_buf = iself.max_buf;
@@ -155,6 +155,9 @@ impl AudioStreamReceiver {
         // If we're in buffering mode, wait until we have min_buf worth of data
         if route.is_buffering {
             if available < chunk_size * min_buf {
+                if !underrun_ok{
+                    println!("Still buffering");
+                }
                 // Still buffering, not ready yet
                 return 0;
             }
@@ -164,6 +167,7 @@ impl AudioStreamReceiver {
         
         // Check if we have enough for even one chunk
         if available < chunk_size {
+            println!("Start buffering");
             // UNDERRUN: Enter buffering mode
             route.is_buffering = true;
             route.stable_chunks = 0; // Reset stability counter
