@@ -128,6 +128,14 @@ pub enum FromJavaMessage {
     ClipboardPaste {
         content: String,
     },
+    // IME unified text state notification (Java→Rust)
+    ImeTextStateChanged {
+        full_text: String,
+        selection_start: i32,
+        selection_end: i32,
+        composing_start: i32,
+        composing_end: i32,
+    },
 }
 unsafe impl Send for FromJavaMessage {}
 
@@ -752,6 +760,29 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onClipboardPaste
     });
 }
 
+// IME unified text state notification (Java→Rust)
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeTextStateChanged(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    full_text: jni_sys::jstring,
+    selection_start: jni_sys::jint,
+    selection_end: jni_sys::jint,
+    composing_start: jni_sys::jint,
+    composing_end: jni_sys::jint,
+) {
+    let text = jstring_to_string(env, full_text);
+    crate::log!("IME: onImeTextStateChanged text='{}' sel=[{},{}] comp=[{},{}]",
+        text, selection_start, selection_end, composing_start, composing_end);
+    send_from_java_message(FromJavaMessage::ImeTextStateChanged {
+        full_text: text,
+        selection_start: selection_start as i32,
+        selection_end: selection_end as i32,
+        composing_start: composing_start as i32,
+        composing_end: composing_end as i32,
+    });
+}
+
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
     let chars = (**env).GetStringUTFChars.unwrap()(env, java_string, std::ptr::null_mut());
     let rust_string = std::ffi::CStr::from_ptr(chars).to_str().unwrap().to_string();
@@ -857,6 +888,27 @@ pub unsafe fn to_java_show_clipboard_actions(has_selection: bool, rect: crate::m
 pub unsafe fn to_java_dismiss_clipboard_actions() {
     let env = attach_jni_env();
     ndk_utils::call_void_method!(env, get_activity(), "dismissClipboardActions", "()V");
+}
+
+/// Update IME text state for programmatic changes (Rust→Java)
+/// Only call this when Rust changes text outside of IME flow (e.g., clear button)
+/// Normal IME input flows Java→Rust via onImeTextStateChanged
+pub unsafe fn to_java_update_ime_text_state(full_text: &str, selection_start: i32, selection_end: i32) {
+    let env = attach_jni_env();
+    let text_cstr = CString::new(full_text).unwrap();
+    let text_jstr = ((**env).NewStringUTF.unwrap())(env, text_cstr.as_ptr());
+
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "updateImeTextState",
+        "(Ljava/lang/String;II)V",
+        text_jstr,
+        selection_start as jni_sys::jint,
+        selection_end as jni_sys::jint
+    );
+
+    (**env).DeleteLocalRef.unwrap()(env, text_jstr);
 }
 
 pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {

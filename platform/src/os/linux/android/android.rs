@@ -47,6 +47,7 @@ use {
             WindowGeomChangeEvent,
             //TimerEvent,
             TextInputEvent,
+            ImeTextStateEvent,
             TextClipboardEvent,
             KeyEvent,
             KeyModifiers,
@@ -115,6 +116,9 @@ impl Cx {
                 },
                 Ok(message) => {
                     self.handle_message(message);
+                    // Process queued platform ops immediately (critical for IME shadow buffer sync)
+                    // Without this, Gboard queries stale data before the next frame
+                    self.handle_platform_ops();
                 },
                 Err(e) => {
                     crate::error!("Error receiving message: {:?}", e);
@@ -550,6 +554,36 @@ impl Cx {
                 });
                 self.call_event_handler(&e);
             }
+            // IME unified text state notification (Java→Rust)
+            // Java's InputConnection is now the source of truth for IME operations
+            FromJavaMessage::ImeTextStateChanged {
+                full_text,
+                selection_start,
+                selection_end,
+                composing_start,
+                composing_end,
+            } => {
+                // Convert composing region from Java's -1 convention to Option
+                let composing_start_opt = if composing_start >= 0 {
+                    Some(composing_start as usize)
+                } else {
+                    None
+                };
+                let composing_end_opt = if composing_end >= 0 {
+                    Some(composing_end as usize)
+                } else {
+                    None
+                };
+
+                let e = Event::ImeTextState(ImeTextStateEvent {
+                    text: full_text,
+                    selection_start: selection_start as usize,
+                    selection_end: selection_end as usize,
+                    composing_start: composing_start_opt,
+                    composing_end: composing_end_opt,
+                });
+                self.call_event_handler(&e);
+            }
             FromJavaMessage::Init(_) => {
             }
         }
@@ -970,6 +1004,9 @@ impl Cx {
                 CxOsOp::HideTextIME => {
                     //self.os.keyboard_visible = false;
                     unsafe {android_jni::to_java_show_keyboard(false);}
+                },
+                CxOsOp::UpdateImeTextState { full_text, selection_start, selection_end } => {
+                    unsafe {android_jni::to_java_update_ime_text_state(&full_text, selection_start as i32, selection_end as i32);}
                 },
                 CxOsOp::CopyToClipboard(content) => {
                     unsafe {android_jni::to_java_copy_to_clipboard(content);}

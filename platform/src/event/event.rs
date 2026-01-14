@@ -191,6 +191,8 @@ pub enum Event {
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     TextRangeReplace(TextRangeReplaceEvent),
+    TextComposingRegion(TextComposingRegionEvent),
+    ImeTextState(ImeTextStateEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
 
@@ -279,6 +281,7 @@ impl Event{
             32=>"KeyUp",
             33=>"TextInput",
             58=>"TextRangeReplace",
+            59=>"TextComposingRegion",
             34=>"TextCopy",
             35=>"TextCut",
 
@@ -354,6 +357,8 @@ impl Event{
             Self::KeyUp(_)=>32,
             Self::TextInput(_)=>33,
             Self::TextRangeReplace(_)=>58,
+            Self::TextComposingRegion(_)=>59,
+            Self::ImeTextState(_)=>60,
             Self::TextCopy(_)=>34,
             Self::TextCut(_)=>35,
 
@@ -410,6 +415,8 @@ pub enum Hit{
     Trigger(TriggerHitEvent),
     TextInput(TextInputEvent),
     TextRangeReplace(TextRangeReplaceEvent),
+    TextComposingRegion(TextComposingRegionEvent),
+    ImeTextState(ImeTextStateEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
 

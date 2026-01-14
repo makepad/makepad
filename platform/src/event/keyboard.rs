@@ -148,6 +148,31 @@ pub struct TextRangeReplaceEvent {
     pub text: String,
 }
 
+/// Event for setting the composing region (IME marks existing text for replacement)
+#[derive(Clone, Debug)]
+pub struct TextComposingRegionEvent {
+    /// Start index (in characters, not bytes) of composing region
+    pub start: usize,
+    /// End index (in characters, not bytes) of composing region
+    pub end: usize,
+}
+
+/// Event for full text state update from IME
+/// This is the authoritative text state from the platform's InputConnection
+#[derive(Clone, Debug)]
+pub struct ImeTextStateEvent {
+    /// Full text content
+    pub text: String,
+    /// Selection start index (in characters)
+    pub selection_start: usize,
+    /// Selection end index (in characters)
+    pub selection_end: usize,
+    /// Composing region start (-1 from platform means no composition)
+    pub composing_start: Option<usize>,
+    /// Composing region end
+    pub composing_end: Option<usize>,
+}
+
 impl Default for KeyCode {
     fn default() -> Self {KeyCode::Unknown}
 }

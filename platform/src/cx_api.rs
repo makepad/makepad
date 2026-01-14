@@ -77,6 +77,13 @@ pub enum CxOsOp {
     /// Sets the text and cursor position to the IME for autocorrect context
     /// (text, cursor_position)
     SetIMEText(String, usize),
+    /// Updates IME text state for programmatic changes (Android)
+    /// Only used when Rust changes text outside IME flow (e.g., clear button)
+    UpdateImeTextState {
+        full_text: String,
+        selection_start: usize,
+        selection_end: usize,
+    },
     SetCursor(MouseCursor),
     StartTimer {
         timer_id: u64,
@@ -162,6 +169,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::ShowTextIME(..)=>write!(f, "ShowTextIME"),
             Self::HideTextIME=>write!(f, "HideTextIME"),
             Self::SetIMEText(..)=>write!(f, "SetIMEText"),
+            Self::UpdateImeTextState{..}=>write!(f, "UpdateImeTextState"),
             Self::SetCursor(..)=>write!(f, "SetCursor"),
             Self::StartTimer{..}=>write!(f, "StartTimer"),
             Self::StopTimer(..)=>write!(f, "StopTimer"),
@@ -325,6 +333,17 @@ impl Cx {
     /// Syncs text content to IME for autocorrect context
     pub fn set_ime_text(&mut self, text: &str, cursor_pos: usize) {
         self.platform_ops.push(CxOsOp::SetIMEText(text.to_string(), cursor_pos));
+    }
+
+    /// Updates IME text state for programmatic changes (Android)
+    /// Only call this when Rust changes text outside of IME input flow (e.g., clear button)
+    /// Normal IME input flows Java→Rust, so this should NOT be called during IME events
+    pub fn update_ime_text_state(&mut self, full_text: String, selection_start: usize, selection_end: usize) {
+        self.platform_ops.push(CxOsOp::UpdateImeTextState {
+            full_text,
+            selection_start,
+            selection_end,
+        });
     }
 
     pub fn text_ime_was_dismissed(&mut self) {

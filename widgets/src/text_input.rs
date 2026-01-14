@@ -618,6 +618,8 @@ pub struct TextInput {
     #[rust] composition_start: usize,
     /// IME composition tracking - byte length of current composition
     #[rust] composition_length: usize,
+    /// Set to true after receiving IME input; prevents race condition in update_ime_context
+    #[rust] ime_just_updated: bool,
 }
 
  impl LiveHook for TextInput{
@@ -721,6 +723,15 @@ impl TextInput {
     
     pub fn selected_text(&self) -> &str {
         &self.text[self.selection.start().index..self.selection.end().index]
+    }
+
+    /// Updates the IME text context for Android autocomplete/predictions
+    fn update_ime_context(&self, cx: &mut Cx) {
+        // Convert byte indices to character indices for the platform
+        let sel_start_chars = self.text[..self.selection.start().index].chars().count();
+        let sel_end_chars = self.text[..self.selection.end().index].chars().count();
+
+        cx.update_ime_text_state(self.text.clone(), sel_start_chars, sel_end_chars);
     }
 
     pub fn reset_blink_timer(&mut self, cx: &mut Cx) {
@@ -1283,8 +1294,16 @@ impl Widget for TextInput {
         self.scroll_to_cursor(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
+            // Skip update_ime_context if we just received IME input
+            // This prevents race condition where we send old state back to Java
+            // before the IME event is fully processed
+            if !self.ime_just_updated {
+                self.update_ime_context(cx);
+            }
+            self.ime_just_updated = false; // Reset for next frame
+
             cx.show_text_ime(
-                self.draw_bg.area(), 
+                self.draw_bg.area(),
                 cursor_pos - self.scroll_y,
             );
         }
@@ -1704,7 +1723,7 @@ impl Widget for TextInput {
             }) if !self.is_read_only => {
                 let input = self.filter_input(&input, false);
                 if input.is_empty() {
-                    // Empty input with replace_last means composition was cancelled
+                    // Empty input with replace_last means composition was cancelled - delete text
                     if replace_last && self.composition_length > 0 {
                         // Remove the composition text
                         self.create_or_extend_edit_group(EditKind::Other);
@@ -1716,10 +1735,11 @@ impl Widget for TextInput {
                                 replace_with: String::new()
                             }
                         );
-                        self.composition_length = 0;
                         self.draw_bg.redraw(cx);
                         cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
                     }
+                    // Always clear composition state on empty input (finish or cancel)
+                    self.composition_length = 0;
                     return;
                 }
 
@@ -1787,6 +1807,8 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                // Immediately update IME shadow buffer so Gboard gets correct cursor position
+                self.update_ime_context(cx);
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
                 // iOS autocorrect sends range replacement events
@@ -1815,6 +1837,79 @@ impl Widget for TextInput {
                 );
 
                 self.animator_play(cx, ids!(empty.off));
+                self.draw_bg.redraw(cx);
+                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                // Immediately update IME shadow buffer so Gboard gets correct cursor position
+                self.update_ime_context(cx);
+            }
+            Hit::TextComposingRegion(event) if !self.is_read_only => {
+                // IME marks existing text as composing region (e.g., for autocorrect)
+                // Convert character indices to byte indices
+                let byte_start = self.text.char_indices()
+                    .nth(event.start)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.text.len());
+                let byte_end = self.text.char_indices()
+                    .nth(event.end)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.text.len());
+
+                // Pre-set composition region for next setComposingText
+                self.composition_start = byte_start;
+                self.composition_length = byte_end - byte_start;
+                // Update IME context so Gboard knows the current text state
+                self.update_ime_context(cx);
+            }
+            Hit::ImeTextState(event) if !self.is_read_only => {
+                // Full text state from platform IME (Android's InputConnection)
+                // Java side is the source of truth - just apply the state directly
+
+                // Convert character indices to byte indices for selection
+                let byte_sel_start = event.text.char_indices()
+                    .nth(event.selection_start)
+                    .map(|(i, _)| i)
+                    .unwrap_or(event.text.len());
+                let byte_sel_end = event.text.char_indices()
+                    .nth(event.selection_end)
+                    .map(|(i, _)| i)
+                    .unwrap_or(event.text.len());
+
+                // Apply text change if different
+                if self.text != event.text {
+                    self.history.create_or_extend_edit_group(EditKind::Other, self.selection);
+                    self.text = event.text.clone();
+                    // Invalidate laidout text - will be recalculated on next draw
+                    self.laidout_text = None;
+                }
+
+                // Update cursor/selection
+                self.selection = Selection {
+                    anchor: Cursor { index: byte_sel_start, prefer_next_row: false },
+                    cursor: Cursor { index: byte_sel_end, prefer_next_row: false },
+                };
+
+                // Update composition region
+                if let (Some(comp_start), Some(comp_end)) = (event.composing_start, event.composing_end) {
+                    let byte_comp_start = event.text.char_indices()
+                        .nth(comp_start)
+                        .map(|(i, _)| i)
+                        .unwrap_or(event.text.len());
+                    let byte_comp_end = event.text.char_indices()
+                        .nth(comp_end)
+                        .map(|(i, _)| i)
+                        .unwrap_or(event.text.len());
+                    self.composition_start = byte_comp_start;
+                    self.composition_length = byte_comp_end - byte_comp_start;
+                } else {
+                    // No active composition
+                    self.composition_start = 0;
+                    self.composition_length = 0;
+                }
+
+                // Mark that IME just updated - skip next update_ime_context to prevent race
+                // where we send old state back to Java before this event is processed
+                self.ime_just_updated = true;
+
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
             }

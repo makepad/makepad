@@ -42,9 +42,17 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
+import android.view.inputmethod.BaseInputConnection;
+import android.view.inputmethod.CursorAnchorInfo;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.ExtractedText;
+import android.view.inputmethod.ExtractedTextRequest;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+import android.text.Editable;
+import android.text.InputType;
+import android.text.Selection;
+import android.text.SpannableStringBuilder;
 import android.widget.LinearLayout;
 
 import java.io.BufferedReader;
@@ -71,6 +79,261 @@ class MakepadSurface
         ViewTreeObserver.OnGlobalLayoutListener,
         SurfaceHolder.Callback
 {
+    // IME InputConnection for handling composition text
+    private MakepadInputConnection mInputConnection;
+
+    // Shared Editable buffer for IME - this is the source of truth for Java side
+    private SpannableStringBuilder mEditable = new SpannableStringBuilder();
+
+    // Inner class for IME support - uses Editable and delegates to BaseInputConnection
+    private class MakepadInputConnection extends BaseInputConnection {
+        // Batch edit nesting count
+        private int mBatchEditNestCount = 0;
+        // For getExtractedText monitoring
+        private ExtractedTextRequest mExtractedTextRequest = null;
+        private int mExtractedTextToken = 0;
+        // For cursor updates
+        private int mCursorUpdateMode = 0;
+
+        public MakepadInputConnection(View view, boolean fullEditor) {
+            super(view, fullEditor);
+        }
+
+        // Return our shared Editable - this is the key change!
+        // BaseInputConnection methods operate on this Editable automatically
+        @Override
+        public Editable getEditable() {
+            return mEditable;
+        }
+
+        @Override
+        public boolean beginBatchEdit() {
+            mBatchEditNestCount++;
+            return true;
+        }
+
+        @Override
+        public boolean endBatchEdit() {
+            if (mBatchEditNestCount > 0) {
+                mBatchEditNestCount--;
+            }
+            // Notify Rust when batch edit completes
+            if (mBatchEditNestCount == 0) {
+                notifyRustOfTextState();
+            }
+            return mBatchEditNestCount > 0;
+        }
+
+        @Override
+        public ExtractedText getExtractedText(ExtractedTextRequest request, int flags) {
+            if (request == null) return null;
+
+            // Remember request if monitoring
+            if ((flags & InputConnection.GET_EXTRACTED_TEXT_MONITOR) != 0) {
+                mExtractedTextRequest = request;
+                mExtractedTextToken = request.token;
+            }
+
+            ExtractedText et = new ExtractedText();
+            et.text = mEditable.toString();
+            et.startOffset = 0;
+            et.selectionStart = Selection.getSelectionStart(mEditable);
+            et.selectionEnd = Selection.getSelectionEnd(mEditable);
+
+            return et;
+        }
+
+        @Override
+        public boolean setComposingRegion(int start, int end) {
+            // Let BaseInputConnection handle span management on mEditable
+            boolean result = super.setComposingRegion(start, end);
+            // Don't notify Rust here - wait for actual text change
+            return result;
+        }
+
+        @Override
+        public boolean requestCursorUpdates(int cursorUpdateMode) {
+            mCursorUpdateMode = cursorUpdateMode;
+
+            if ((cursorUpdateMode & InputConnection.CURSOR_UPDATE_IMMEDIATE) != 0) {
+                sendCursorUpdate();
+            }
+            return true;
+        }
+
+        private void sendCursorUpdate() {
+            if (mCursorUpdateMode == 0) return;
+
+            InputMethodManager imm = (InputMethodManager)
+                getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm == null) return;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                CursorAnchorInfo.Builder builder = new CursorAnchorInfo.Builder();
+                int cursorStart = Selection.getSelectionStart(mEditable);
+                int cursorEnd = Selection.getSelectionEnd(mEditable);
+                builder.setSelectionRange(cursorStart, cursorEnd);
+                builder.setMatrix(new android.graphics.Matrix());
+                imm.updateCursorAnchorInfo(MakepadSurface.this, builder.build());
+            }
+        }
+
+        // Notify IME of current cursor and composition state
+        private void notifyImeOfSelectionUpdate() {
+            InputMethodManager imm = (InputMethodManager)
+                getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm == null) return;
+
+            int selStart = Selection.getSelectionStart(mEditable);
+            int selEnd = Selection.getSelectionEnd(mEditable);
+            int compStart = BaseInputConnection.getComposingSpanStart(mEditable);
+            int compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
+            imm.updateSelection(MakepadSurface.this, selStart, selEnd, compStart, compEnd);
+        }
+
+        // Notify Rust of current text state
+        private void notifyRustOfTextState() {
+            String fullText = mEditable.toString();
+            int selStart = Selection.getSelectionStart(mEditable);
+            int selEnd = Selection.getSelectionEnd(mEditable);
+            int compStart = BaseInputConnection.getComposingSpanStart(mEditable);
+            int compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
+
+            Log.e("MakepadIME", "notifyRustOfTextState: text='" + fullText + "' sel=[" + selStart + "," + selEnd + "] comp=[" + compStart + "," + compEnd + "]");
+            MakepadNative.onImeTextStateChanged(fullText, selStart, selEnd, compStart, compEnd);
+        }
+
+        // Called from Rust when text changes programmatically (not from IME)
+        public void updateFromRust(String fullText, int selStart, int selEnd) {
+            // Clear any existing composing spans
+            BaseInputConnection.removeComposingSpans(mEditable);
+
+            // Update editable content
+            mEditable.replace(0, mEditable.length(), fullText);
+
+            // Clamp selection to valid range
+            int textLen = mEditable.length();
+            selStart = Math.max(0, Math.min(selStart, textLen));
+            selEnd = Math.max(selStart, Math.min(selEnd, textLen));
+            Selection.setSelection(mEditable, selStart, selEnd);
+
+            // Force IME to re-query state - CRITICAL for keeping IME in sync
+            InputMethodManager imm = (InputMethodManager)
+                getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.restartInput(MakepadSurface.this);
+            }
+        }
+
+        @Override
+        public CharSequence getTextBeforeCursor(int n, int flags) {
+            // Delegate to super which uses getEditable()
+            return super.getTextBeforeCursor(n, flags);
+        }
+
+        @Override
+        public CharSequence getTextAfterCursor(int n, int flags) {
+            // Delegate to super which uses getEditable()
+            return super.getTextAfterCursor(n, flags);
+        }
+
+        @Override
+        public CharSequence getSelectedText(int flags) {
+            // Delegate to super which uses getEditable()
+            return super.getSelectedText(flags);
+        }
+
+        @Override
+        public boolean setComposingText(CharSequence text, int newCursorPosition) {
+            Log.e("MakepadIME", "setComposingText: '" + text + "' cursorPos=" + newCursorPosition);
+            // Let BaseInputConnection handle the Editable manipulation
+            boolean result = super.setComposingText(text, newCursorPosition);
+            Log.e("MakepadIME", "setComposingText result=" + result + " editable='" + mEditable + "'");
+
+            // Notify IME of state change
+            notifyImeOfSelectionUpdate();
+
+            // Notify Rust (unless in batch edit)
+            if (mBatchEditNestCount == 0) {
+                notifyRustOfTextState();
+            }
+
+            return result;
+        }
+
+        @Override
+        public boolean commitText(CharSequence text, int newCursorPosition) {
+            Log.e("MakepadIME", "commitText: '" + text + "' cursorPos=" + newCursorPosition);
+            // Let BaseInputConnection handle the Editable manipulation
+            boolean result = super.commitText(text, newCursorPosition);
+            Log.e("MakepadIME", "commitText result=" + result + " editable='" + mEditable + "'");
+
+            // Notify IME of state change
+            notifyImeOfSelectionUpdate();
+
+            // Notify Rust (unless in batch edit)
+            if (mBatchEditNestCount == 0) {
+                notifyRustOfTextState();
+            }
+
+            return result;
+        }
+
+        @Override
+        public boolean finishComposingText() {
+            boolean hadComposition = BaseInputConnection.getComposingSpanStart(mEditable) >= 0;
+
+            // Let BaseInputConnection clear the composing spans
+            boolean result = super.finishComposingText();
+
+            // Notify IME
+            notifyImeOfSelectionUpdate();
+
+            // Notify Rust if there was a composition
+            if (hadComposition && mBatchEditNestCount == 0) {
+                notifyRustOfTextState();
+            }
+
+            return result;
+        }
+
+        @Override
+        public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+            // Let BaseInputConnection handle the Editable manipulation
+            boolean result = super.deleteSurroundingText(beforeLength, afterLength);
+
+            // Notify IME of state change
+            notifyImeOfSelectionUpdate();
+
+            // Notify Rust (unless in batch edit)
+            if (mBatchEditNestCount == 0) {
+                notifyRustOfTextState();
+            }
+
+            return result;
+        }
+
+        @Override
+        public boolean setSelection(int start, int end) {
+            // Let BaseInputConnection handle selection on Editable
+            boolean result = super.setSelection(start, end);
+
+            // Notify IME
+            notifyImeOfSelectionUpdate();
+
+            // Notify Rust
+            if (mBatchEditNestCount == 0) {
+                notifyRustOfTextState();
+            }
+
+            return result;
+        }
+
+        @Override
+        public void closeConnection() {
+            super.closeConnection();
+        }
+    }
 
     // The X,Y coordinates and pointer ID of the most recent ACTION_DOWN touch.
     private float latestDownTouchX = Float.NaN;
@@ -92,9 +355,14 @@ class MakepadSurface
         requestFocus();
         setOnTouchListener(this);
         setOnKeyListener(this);
-        setOnLongClickListener(this);        
+        setOnLongClickListener(this);
 
         getViewTreeObserver().addOnGlobalLayoutListener(this);
+
+        // Initialize selection spans in the Editable - CRITICAL for BaseInputConnection to work
+        Selection.setSelection(mEditable, 0, 0);
+        Log.e("MakepadIME", "MakepadSurface init: editable='" + mEditable + "' sel=[" +
+            Selection.getSelectionStart(mEditable) + "," + Selection.getSelectionEnd(mEditable) + "]");
     }
 
     @Override
@@ -256,9 +524,62 @@ class MakepadSurface
     // For some reason it only works if placed here and not in the parent layout.
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-        InputConnection connection = super.onCreateInputConnection(outAttrs);
-        outAttrs.imeOptions |= EditorInfo.IME_FLAG_NO_FULLSCREEN;
-        return connection;
+        Log.e("MakepadIME", "onCreateInputConnection called");
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
+        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
+
+        // Set initial selection from our Editable
+        int selStart = Selection.getSelectionStart(mEditable);
+        int selEnd = Selection.getSelectionEnd(mEditable);
+        outAttrs.initialSelStart = Math.max(0, selStart);
+        outAttrs.initialSelEnd = Math.max(0, selEnd);
+        Log.e("MakepadIME", "initialSelection: [" + outAttrs.initialSelStart + "," + outAttrs.initialSelEnd + "] editable='" + mEditable + "'");
+
+        // Create InputConnection with fullEditor=true since we have an Editable
+        mInputConnection = new MakepadInputConnection(this, true);
+
+        return mInputConnection;
+    }
+
+    // Called from Rust to update text state (for programmatic changes, not IME input)
+    public void updateImeTextState(String fullText, int selStart, int selEnd) {
+        String currentText = mEditable.toString();
+        boolean textChanged = !currentText.equals(fullText);
+
+        // Clamp selection
+        int textLen = textChanged ? fullText.length() : mEditable.length();
+        selStart = Math.max(0, Math.min(selStart, textLen));
+        selEnd = Math.max(selStart, Math.min(selEnd, textLen));
+
+        if (textChanged) {
+            // Text content changed - update Editable and restart IME
+            BaseInputConnection.removeComposingSpans(mEditable);
+            mEditable.replace(0, mEditable.length(), fullText);
+            Selection.setSelection(mEditable, selStart, selEnd);
+
+            // Only restart input when text content actually changed
+            if (mInputConnection != null) {
+                InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    imm.restartInput(this);
+                }
+            }
+        } else {
+            // Only selection changed - just update selection, no restart needed
+            int currentSelStart = Selection.getSelectionStart(mEditable);
+            int currentSelEnd = Selection.getSelectionEnd(mEditable);
+            if (currentSelStart != selStart || currentSelEnd != selEnd) {
+                Selection.setSelection(mEditable, selStart, selEnd);
+
+                // Notify IME of selection change without restart
+                InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    int compStart = BaseInputConnection.getComposingSpanStart(mEditable);
+                    int compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
+                    imm.updateSelection(this, selStart, selEnd, compStart, compEnd);
+                }
+            }
+        }
     }
 
     public Surface getNativeSurface() {
@@ -532,6 +853,20 @@ public class MakepadActivity
                 } else {
                     InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
                     imm.hideSoftInputFromWindow(view.getWindowToken(),0);
+                }
+            }
+        });
+    }
+
+    // Update IME text state for programmatic changes - called from Rust
+    // Note: This should only be called for programmatic text changes (e.g., clear button),
+    // NOT during normal IME input (which flows Java→Rust via onImeTextStateChanged)
+    public void updateImeTextState(final String fullText, final int selStart, final int selEnd) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (view != null) {
+                    view.updateImeTextState(fullText, selStart, selEnd);
                 }
             }
         });
