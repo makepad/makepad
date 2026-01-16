@@ -214,8 +214,8 @@ impl MatchEvent for App {
             devices.default_input()
         };
         
-        //cx.use_audio_inputs(&devices.match_inputs(&["System Audio"]));
-        cx.use_audio_inputs(&inputs);
+        cx.use_audio_inputs(&devices.match_inputs(&["System Audio"]));
+        //cx.use_audio_inputs(&inputs);
         cx.use_audio_outputs(&devices.default_output());
     }
     
