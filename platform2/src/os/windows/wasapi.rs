@@ -606,7 +606,7 @@ impl WasapiOutput {
                     audio_buffer.resize(frame_count, channel_count);
                     audio_buffer.set_final_size();
                     if (frame_count as u32) < self.base.frames{
-                        println!("Wasapi glitch detected, resettting device {}<{}", frame_count, self.base.frames);
+                        println!("Wasapi glitch detected, resettting output device {}<{}", frame_count, self.base.frames);
                         return Err(())
                     }
                     return Ok(WasapiAudioOutputBuffer {
@@ -768,11 +768,16 @@ impl WasapiLoopback {
                 if self.capture_client.GetBuffer(&mut pdata, &mut frame_count, &mut dwflags, None, None).is_err() {
                     return Err(())
                 }
-                                
+                
                 if frame_count == 0 {
                     continue;
                 }
-                                
+                
+                if (frame_count as u32) < self.base.frames{
+                    println!("Wasapi glitch detected, resettting input device {}<{}", frame_count, self.base.frames);
+                    return Err(())
+                }
+                                                
                 let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count as usize * self.channel_count);
                 let mut audio_buffer = self.audio_buffer.take().unwrap();
                 audio_buffer.copy_from_interleaved(self.channel_count, device_buffer);
