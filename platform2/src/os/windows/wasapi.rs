@@ -10,7 +10,6 @@ use {
         thread::SignalToUI,
         windows::{
             core::implement,
-            core::Interface,
             core::PCWSTR,
             Win32::Foundation::{
                 WAIT_OBJECT_0,
@@ -156,12 +155,16 @@ impl WasapiAccess {
             for (index, device_id) in devices.iter().enumerate() {
                 if audio_inputs.iter().find( | v | v.device_id == *device_id).is_none() {
                     let is_loopback = self.is_loopback_device(*device_id);
-                    new.push((index, *device_id, is_loopback))
+                    let channel_count = self.descs.iter()
+                        .find(|d| d.device_id == *device_id)
+                        .map(|d| d.channel_count)
+                        .unwrap_or(2);
+                    new.push((index, *device_id, is_loopback, channel_count))
                 }
             }
             new
         };
-        for (index, device_id, is_loopback) in new {
+        for (index, device_id, is_loopback, channel_count) in new {
             let audio_input_cb = self.audio_input_cb[index].clone();
             let audio_inputs = self.audio_inputs.clone();
             let failed_devices = self.failed_devices.clone();
@@ -171,7 +174,7 @@ impl WasapiAccess {
                 // Use loopback capture for output devices
                 std::thread::spawn(move || {
                     let _mmcss_handle = elevate_audio_thread_priority();
-                    if let Ok(mut wasapi) = WasapiLoopback::new(device_id, 2) {
+                    if let Ok(mut wasapi) = WasapiLoopback::new(device_id, channel_count) {
                         audio_inputs.lock().unwrap().push(wasapi.get_ref());
                         while let Ok(buffer) = wasapi.wait_for_buffer() {
                             // Use try_lock to avoid blocking the audio thread
@@ -208,7 +211,7 @@ impl WasapiAccess {
                 // Use regular input capture
                 std::thread::spawn(move || {
                     let _mmcss_handle = elevate_audio_thread_priority();
-                    if let Ok(mut wasapi) = WasapiInput::new(device_id, 2){
+                    if let Ok(mut wasapi) = WasapiInput::new(device_id, channel_count){
                         audio_inputs.lock().unwrap().push(wasapi.base.get_ref());
                         while let Ok(buffer) = wasapi.wait_for_buffer() {
                             // Use try_lock to avoid blocking the audio thread
@@ -258,13 +261,17 @@ impl WasapiAccess {
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
                 if audio_outputs.iter().find( | v | v.device_id == *device_id).is_none() {
-                    new.push((index, *device_id))
+                    let channel_count = self.descs.iter()
+                        .find(|d| d.device_id == *device_id)
+                        .map(|d| d.channel_count)
+                        .unwrap_or(2);
+                    new.push((index, *device_id, channel_count))
                 }
             }
             new
                         
         };
-        for (index, device_id) in new {
+        for (index, device_id, channel_count) in new {
             let audio_output_cb = self.audio_output_cb[index].clone();
             let audio_outputs = self.audio_outputs.clone();
             let failed_devices = self.failed_devices.clone();
@@ -272,7 +279,7 @@ impl WasapiAccess {
                         
             std::thread::spawn(move || {
                 let _mmcss_handle = elevate_audio_thread_priority();
-                if let Ok(mut wasapi) = WasapiOutput::new(device_id, 2){
+                if let Ok(mut wasapi) = WasapiOutput::new(device_id, channel_count){
                     audio_outputs.lock().unwrap().push(wasapi.base.get_ref());
                     while let Ok(mut buffer) = wasapi.wait_for_buffer() {
                         // Use try_lock to avoid blocking the audio thread
@@ -318,6 +325,20 @@ impl WasapiAccess {
         //let dev_name = value.Anonymous.Anonymous.Anonymous.pwszVal;
         (dev_name.to_string(), dev_id.to_string().unwrap())
     }
+    
+    /// Get the native channel count from the device's mix format
+    unsafe fn get_device_channel_count(device: &IMMDevice) -> usize {
+        if let Ok(client) = device.Activate::<IAudioClient>(CLSCTX_ALL, None) {
+            if let Ok(mix_format) = client.GetMixFormat() {
+                let channel_count = (*mix_format).nChannels as usize;
+                // Free the format allocated by WASAPI
+                crate::windows::Win32::System::Com::CoTaskMemFree(Some(mix_format as *const _ as *const _));
+                return channel_count;
+            }
+        }
+        // Default to 2 channels if we can't query
+        2
+    }
         
     // add audio device enumeration for input and output
     unsafe fn enumerate_devices(device_type: AudioDeviceType, enumerator: &IMMDeviceEnumerator, out: &mut Vec<AudioDeviceDesc>) {
@@ -338,12 +359,13 @@ impl WasapiAccess {
             let device = col.Item(i).unwrap();
             let (dev_name, dev_id) = Self::get_device_descs(&device);
             let device_id = AudioDeviceId(LiveId::from_str(&dev_id));
+            let channel_count = Self::get_device_channel_count(&device);
             out.push(AudioDeviceDesc {
                 has_failed: false,
                 device_id,
                 device_type,
                 is_default: def_id == dev_id,
-                channel_count: 2,
+                channel_count,
                 name: dev_name
             });
         }
@@ -365,12 +387,13 @@ impl WasapiAccess {
             // Create a distinct device_id for loopback by appending "_loopback" to the id
             let loopback_id = format!("{}_loopback", dev_id);
             let device_id = AudioDeviceId(LiveId::from_str(&loopback_id));
+            let channel_count = Self::get_device_channel_count(&device);
             out.push(AudioDeviceDesc {
                 has_failed: false,
                 device_id,
                 device_type: AudioDeviceType::Loopback,
                 is_default: def_id == dev_id,
-                channel_count: 2,
+                channel_count,
                 name: format!("{} (Loopback)", dev_name)
             });
         }
@@ -723,7 +746,7 @@ impl WasapiLoopback {
         }
     }
         
-    pub fn get_ref(&self) -> WasapiBaseRef {
+    fn get_ref(&self) -> WasapiBaseRef {
         WasapiBaseRef {
             is_terminated: false,
             device_id: self.device_id,
