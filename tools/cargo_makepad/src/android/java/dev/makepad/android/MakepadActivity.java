@@ -585,8 +585,12 @@ class MakepadSurface
     // For some reason it only works if placed here and not in the parent layout.
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-        Log.e("MakepadIME", "onCreateInputConnection called");
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
+        // TODO: Do these dynamically based on Makepad's TextInput configuration.
+        // E.g. Visible Password: TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        // Default to multi-line text input with auto-correct
+        // and vertical cursor control (SwiftKey space+swipe up/down)
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_AUTO_CORRECT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;        
+        // Set to no fullscreen and no extract UI to prevent the keyboard from covering the screen.
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
 
         // Set initial selection from our Editable
