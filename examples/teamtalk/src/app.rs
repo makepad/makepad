@@ -214,8 +214,8 @@ impl MatchEvent for App {
             devices.default_input()
         };
         
-        cx.use_audio_inputs(&devices.match_inputs(&["System Audio"]));
-        //cx.use_audio_inputs(&inputs);
+        //cx.use_audio_inputs(&devices.match_inputs(&["System Audio"]));
+        cx.use_audio_inputs(&inputs);
         cx.use_audio_outputs(&devices.default_output());
     }
     
@@ -354,7 +354,7 @@ impl App {
             loop{
                 if let Ok((len, _addr)) = read_audio.recv_from(&mut read_buf) {
                     let read_buf = &read_buf[0..len];
-    
+                                        
                     let packet = match TeamTalkWire::deserialize_bin(read_buf) {
                         Ok(p) => p,
                         Err(_) => continue,
