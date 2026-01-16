@@ -45,8 +45,8 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     let end_of_name = end_of_name.unwrap();
     let mut search = None;
     let end_of_name = if let Some(q) = url.find('?') {
-        search = Some(url[q..].to_string());
-        end_of_name.min(q)
+        search = Some(url[q+1..end_of_name].to_string());
+        q
     }else {end_of_name};
     
     let mut url = url[0..end_of_name].to_string();
