@@ -345,6 +345,14 @@ class MakepadSurface
 
         @Override
         public boolean setSelection(int start, int end) {
+            // Short-circuit if already at this selection (prevents Samsung keyboard loop)
+            // Samsung may respond to imm.updateSelection() by calling setSelection() again
+            int currentStart = Selection.getSelectionStart(mEditable);
+            int currentEnd = Selection.getSelectionEnd(mEditable);
+            if (currentStart == start && currentEnd == end) {
+                return true;  // Already there, no notifications needed
+            }
+
             // Let BaseInputConnection handle selection on Editable
             boolean result = super.setSelection(start, end);
 
@@ -362,6 +370,29 @@ class MakepadSurface
         @Override
         public void closeConnection() {
             super.closeConnection();
+        }
+
+        @Override
+        public boolean sendKeyEvent(KeyEvent event) {
+            // Intercept DELETE key events and translate to deleteSurroundingText()
+            // This is needed for Samsung keyboard delete which uses sendKeyEvent() instead of deleteSurroundingText()
+            // sendKeyEvent() dispatches to View asynchronously, which causes sync issues with Samsung
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                int keyCode = event.getKeyCode();
+
+                if (keyCode == KeyEvent.KEYCODE_DEL) {
+                    // Translate backspace to deleteSurroundingText (deletes before cursor)
+                    return deleteSurroundingText(1, 0);
+                }
+
+                if (keyCode == KeyEvent.KEYCODE_FORWARD_DEL) {
+                    // Translate forward delete (deletes after cursor)
+                    return deleteSurroundingText(0, 1);
+                }
+            }
+
+            // For other keys (e.g., ENTER, arrows), use default behavior
+            return super.sendKeyEvent(event);
         }
     }
 
