@@ -470,7 +470,7 @@ impl App {
                     }
                 }
                 else{
-                    println!("DIDNT GET BUFFER");
+                    println!("Didnt get buffer on route {}", i);
                 }
             }
             
