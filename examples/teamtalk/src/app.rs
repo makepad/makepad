@@ -469,9 +469,6 @@ impl App {
                         }
                     }
                 }
-                else{
-                    println!("Didnt get buffer on route {}", i);
-                }
             }
             
             // Check callback processing time doesn't exceed 50% of expected interval
