@@ -140,7 +140,7 @@ pub use {
     },
     crate::{
         os::*,
-        cx_api::{CxOsApi,OpenUrlInPlace, CxOsOp},
+        cx_api::{CxOsApi, OpenUrlInPlace, CxOsOp, KeyboardType, AutoCapitalize, AutoCorrect, ReturnKeyType, TextInputConfig},
         media_api::CxMediaApi,
         scope::*,
         draw_list::{

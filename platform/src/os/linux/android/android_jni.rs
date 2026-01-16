@@ -1,3 +1,5 @@
+use std::ffi::c_uint;
+
 use makepad_jni_sys as jni_sys;
 use crate::module_loader::ModuleLoader;
 
@@ -11,6 +13,7 @@ use {
     crate::{
         area::Area,
         cx::AndroidParams,
+        cx_api::{TextInputConfig, KeyboardType, AutoCapitalize, AutoCorrect, ReturnKeyType},
         event::{HttpRequest, TouchPoint, TouchState, VideoSource},
         makepad_live_id::*,
         makepad_math::*,
@@ -135,6 +138,10 @@ pub enum FromJavaMessage {
         selection_end: i32,
         composing_start: i32,
         composing_end: i32,
+    },
+    // IME editor action (Done, Go, Search, etc.) for single-line inputs
+    ImeEditorAction {
+        action_code: i32,  // Android EditorInfo action codes
     },
 }
 unsafe impl Send for FromJavaMessage {}
@@ -783,6 +790,19 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeTextStateCh
     });
 }
 
+// IME editor action (Done, Go, Search, etc.) for single-line inputs
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeEditorAction(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    action_code: jni_sys::jint,
+) {
+    crate::log!("IME: onImeEditorAction action_code={}", action_code);
+    send_from_java_message(FromJavaMessage::ImeEditorAction {
+        action_code: action_code as i32,
+    });
+}
+
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
     let chars = (**env).GetStringUTFChars.unwrap()(env, java_string, std::ptr::null_mut());
     let rust_string = std::ffi::CStr::from_ptr(chars).to_str().unwrap().to_string();
@@ -856,6 +876,58 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str)->Option<Vec<u8>> {
 pub unsafe fn to_java_show_keyboard(visible: bool) {
     let env = attach_jni_env();
     ndk_utils::call_void_method!(env, get_activity(), "showKeyboard", "(Z)V", visible as i32);
+}
+
+/// Configure keyboard/IME settings before showing the keyboard
+pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
+    let env = attach_jni_env();
+
+    // Convert Makepad enums to Android integer values
+    let keyboard_type = match config.keyboard_type {
+        KeyboardType::Default => 0,
+        KeyboardType::AsciiCapable => 1,
+        KeyboardType::Url => 2,
+        KeyboardType::NumberPad => 3,
+        KeyboardType::PhonePad => 4,
+        KeyboardType::EmailAddress => 5,
+        KeyboardType::DecimalPad => 6,
+        KeyboardType::WebSearch => 7,
+    };
+
+    let autocapitalize = match config.autocapitalize {
+        AutoCapitalize::None => 0,
+        AutoCapitalize::Words => 1,
+        AutoCapitalize::Sentences => 2,
+        AutoCapitalize::AllCharacters => 3,
+    };
+
+    let autocorrect = match config.autocorrect {
+        AutoCorrect::Default => 0,
+        AutoCorrect::Yes => 1,
+        AutoCorrect::No => 2,
+    };
+
+    let return_key_type = match config.return_key_type {
+        ReturnKeyType::Default => 0,
+        ReturnKeyType::Go => 1,
+        ReturnKeyType::Search => 2,
+        ReturnKeyType::Send => 3,
+        ReturnKeyType::Next => 4,
+        ReturnKeyType::Done => 5,
+    };
+
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "configureKeyboard",
+        "(IIIIZZ)V",
+        keyboard_type as jni_sys::jint,
+        autocapitalize as jni_sys::jint,
+        autocorrect as jni_sys::jint,
+        return_key_type as jni_sys::jint,
+        config.is_multiline as jni_sys::jboolean as c_uint,
+        config.is_secure as jni_sys::jboolean as c_uint
+    );
 }
 
 pub unsafe fn to_java_copy_to_clipboard(content: String) {

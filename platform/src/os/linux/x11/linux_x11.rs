@@ -381,7 +381,7 @@ impl X11Cx {
                     CxOsOp::StopTimer(timer_id) => {
                         xlib_app.stop_timer(timer_id);
                     },
-                    CxOsOp::ShowTextIME(area, pos) => {
+                    CxOsOp::ShowTextIME(area, pos, _config) => {
                         let pos = area.clipped_rect(&cx).pos + pos;
                         opengl_windows.iter_mut().for_each(|w| {
                             w.xlib_window.set_ime_spot(pos);

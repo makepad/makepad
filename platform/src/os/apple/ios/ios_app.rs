@@ -6,6 +6,7 @@ use {
         time::Instant,
     },
     crate::{
+        cx_api::TextInputConfig,
         event::*,
         os::{
             apple::{
@@ -119,6 +120,8 @@ pub struct IosApp {
     pasteboard: ObjcId,
     edit_menu_delegate_instance: ObjcId,
     edit_menu_interaction: Option<ObjcId>,
+    /// Cached keyboard config to avoid redundant reloadInputViews calls
+    last_keyboard_config: Option<TextInputConfig>,
 }
 
 impl IosApp {
@@ -155,6 +158,7 @@ impl IosApp {
                 pasteboard,
                 edit_menu_delegate_instance,
                 edit_menu_interaction: None,
+                last_keyboard_config: None,
             }
         }
     }
@@ -219,6 +223,12 @@ impl IosApp {
             (*text_input_view).set_ivar::<ObjcId>("_tokenizer", nil);
             (*text_input_view).set_ivar::<f64>("ime_pos_x", 0.0);
             (*text_input_view).set_ivar::<f64>("ime_pos_y", 0.0);
+            // Initialize keyboard config ivars with defaults
+            (*text_input_view).set_ivar::<i64>("_keyboard_type", 0);           // UIKeyboardTypeDefault
+            (*text_input_view).set_ivar::<i64>("_autocapitalization_type", 2); // UITextAutocapitalizationTypeSentences
+            (*text_input_view).set_ivar::<i64>("_autocorrection_type", -1);    // Use CJK detection logic
+            (*text_input_view).set_ivar::<i64>("_return_key_type", 0);         // UIReturnKeyDefault
+            (*text_input_view).set_ivar::<bool>("_secure_text_entry", false);
 
             let () = msg_send![text_input_view, setUserInteractionEnabled: YES];
             let () = msg_send![mtk_view_obj, addSubview: text_input_view];
@@ -406,14 +416,88 @@ impl IosApp {
         });
     }
 
+    /// Configure keyboard settings (UITextInputTraits)
+    /// Uses caching to avoid calling reloadInputViews every frame
+    pub fn configure_keyboard(config: &TextInputConfig) {
+        use crate::cx_api::{KeyboardType, AutoCapitalize, AutoCorrect, ReturnKeyType};
+
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
+                    // Skip if config hasn't changed (prevents flickering from reloadInputViews every frame)
+                    if app.last_keyboard_config.as_ref() == Some(config) {
+                        return;
+                    }
+
+                    if let Some(text_input_view) = app.text_input_view {
+                        unsafe {
+                            // Map KeyboardType to UIKeyboardType
+                            let kb_type: i64 = match config.keyboard_type {
+                                KeyboardType::Default => 0,      // UIKeyboardTypeDefault
+                                KeyboardType::AsciiCapable => 1, // UIKeyboardTypeASCIICapable
+                                KeyboardType::Url => 3,          // UIKeyboardTypeURL
+                                KeyboardType::NumberPad => 4,    // UIKeyboardTypeNumberPad
+                                KeyboardType::PhonePad => 5,     // UIKeyboardTypePhonePad
+                                KeyboardType::EmailAddress => 7, // UIKeyboardTypeEmailAddress
+                                KeyboardType::DecimalPad => 8,   // UIKeyboardTypeDecimalPad
+                                KeyboardType::WebSearch => 10,   // UIKeyboardTypeWebSearch
+                            };
+
+                            // Map AutoCapitalize to UITextAutocapitalizationType
+                            let autocap_type: i64 = match config.autocapitalize {
+                                AutoCapitalize::None => 0,          // UITextAutocapitalizationTypeNone
+                                AutoCapitalize::Words => 1,         // UITextAutocapitalizationTypeWords
+                                AutoCapitalize::Sentences => 2,     // UITextAutocapitalizationTypeSentences
+                                AutoCapitalize::AllCharacters => 3, // UITextAutocapitalizationTypeAllCharacters
+                            };
+
+                            // Map AutoCorrect to UITextAutocorrectionType
+                            // -1 means "use CJK detection logic" (our Default)
+                            let autocorrect_type: i64 = match config.autocorrect {
+                                AutoCorrect::Default => -1, // Use CJK detection in trait method
+                                AutoCorrect::No => 1,       // UITextAutocorrectionTypeNo
+                                AutoCorrect::Yes => 2,      // UITextAutocorrectionTypeYes
+                            };
+
+                            // Map ReturnKeyType to UIReturnKeyType
+                            let return_type: i64 = match config.return_key_type {
+                                ReturnKeyType::Default => 0, // UIReturnKeyDefault
+                                ReturnKeyType::Go => 1,      // UIReturnKeyGo
+                                ReturnKeyType::Next => 4,    // UIReturnKeyNext
+                                ReturnKeyType::Search => 6,  // UIReturnKeySearch
+                                ReturnKeyType::Send => 7,    // UIReturnKeySend
+                                ReturnKeyType::Done => 9,    // UIReturnKeyDone
+                            };
+
+                            // Set ivars on text_input_view
+                            (*text_input_view).set_ivar::<i64>("_keyboard_type", kb_type);
+                            (*text_input_view).set_ivar::<i64>("_autocapitalization_type", autocap_type);
+                            (*text_input_view).set_ivar::<i64>("_autocorrection_type", autocorrect_type);
+                            (*text_input_view).set_ivar::<i64>("_return_key_type", return_type);
+                            (*text_input_view).set_ivar::<bool>("_secure_text_entry", config.is_secure);
+
+                            // Call reloadInputViews to apply the changes
+                            let () = msg_send![text_input_view, reloadInputViews];
+                        }
+                    }
+
+                    // Update cache
+                    app.last_keyboard_config = Some(*config);
+                }
+            }
+        });
+    }
+
     pub fn hide_keyboard() {
         // Use text_input_view for keyboard
         let _ = IOS_APP.try_with(|app| {
-            if let Ok(app_ref) = app.try_borrow_mut() {
-                if let Some(ref app) = *app_ref {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
                     if let Some(text_input_view) = app.text_input_view {
                         let () = unsafe { msg_send![text_input_view, resignFirstResponder] };
                     }
+                    // Clear the keyboard config cache so it reconfigures when shown again
+                    app.last_keyboard_config = None;
                 }
             }
         });

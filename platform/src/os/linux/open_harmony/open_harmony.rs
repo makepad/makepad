@@ -527,7 +527,7 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.timers.timers.remove(&timer_id);
                 }
-                CxOsOp::ShowTextIME(_area, _pos) => {
+                CxOsOp::ShowTextIME(_area, _pos, _config) => {
                     let _ = self.os.arkts_obj.as_mut().unwrap().call_js_function(
                         "showKeyBoard",
                         0,

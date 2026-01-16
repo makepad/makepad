@@ -193,6 +193,7 @@ pub enum Event {
     TextRangeReplace(TextRangeReplaceEvent),
     TextComposingRegion(TextComposingRegionEvent),
     ImeTextState(ImeTextStateEvent),
+    ImeAction(ImeActionEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
 
@@ -282,6 +283,8 @@ impl Event{
             33=>"TextInput",
             58=>"TextRangeReplace",
             59=>"TextComposingRegion",
+            60=>"ImeTextState",
+            61=>"ImeAction",
             34=>"TextCopy",
             35=>"TextCut",
 
@@ -359,6 +362,7 @@ impl Event{
             Self::TextRangeReplace(_)=>58,
             Self::TextComposingRegion(_)=>59,
             Self::ImeTextState(_)=>60,
+            Self::ImeAction(_)=>61,
             Self::TextCopy(_)=>34,
             Self::TextCut(_)=>35,
 
@@ -417,6 +421,7 @@ pub enum Hit{
     TextRangeReplace(TextRangeReplaceEvent),
     TextComposingRegion(TextComposingRegionEvent),
     ImeTextState(ImeTextStateEvent),
+    ImeAction(ImeActionEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
 

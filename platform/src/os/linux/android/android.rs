@@ -48,6 +48,8 @@ use {
             //TimerEvent,
             TextInputEvent,
             ImeTextStateEvent,
+            ImeAction,
+            ImeActionEvent,
             TextClipboardEvent,
             KeyEvent,
             KeyModifiers,
@@ -584,6 +586,12 @@ impl Cx {
                 });
                 self.call_event_handler(&e);
             }
+            // IME editor action (Done, Go, Search, etc.) for single-line inputs
+            FromJavaMessage::ImeEditorAction { action_code } => {
+                let action = ImeAction::from_android_action_code(action_code);
+                let e = Event::ImeAction(ImeActionEvent { action });
+                self.call_event_handler(&e);
+            }
             FromJavaMessage::Init(_) => {
             }
         }
@@ -997,9 +1005,12 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.timers.timers.remove(&timer_id);
                 },
-                CxOsOp::ShowTextIME(_area, _pos) => {
+                CxOsOp::ShowTextIME(_area, _pos, config) => {
                     //self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
-                    unsafe {android_jni::to_java_show_keyboard(true);}
+                    unsafe {
+                        android_jni::to_java_configure_keyboard(&config);
+                        android_jni::to_java_show_keyboard(true);
+                    }
                 },
                 CxOsOp::HideTextIME => {
                     //self.os.keyboard_visible = false;

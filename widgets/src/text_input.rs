@@ -600,6 +600,12 @@ pub struct TextInput {
     #[live] is_password: bool,
     #[live] is_read_only: bool,
     #[live] is_numeric_only: bool,
+    // IME/keyboard configuration for mobile platforms
+    #[live] keyboard_type: KeyboardType,
+    #[live] autocapitalize: AutoCapitalize,
+    #[live] autocorrect: AutoCorrect,
+    #[live] return_key_type: ReturnKeyType,
+    #[live(true)] is_multiline: bool,
     #[live] scroll_y: f64,
     #[live] empty_text: String,
     #[rust] text: String,
@@ -684,6 +690,23 @@ impl TextInput {
 
     pub fn toggle_is_numeric_only(&mut self, cx: &mut Cx) {
         self.set_is_numeric_only(cx, !self.is_numeric_only);
+    }
+
+    /// Build IME configuration from widget properties for mobile platforms
+    pub fn get_ime_config(&self) -> TextInputConfig {
+        TextInputConfig {
+            // If is_numeric_only is set, override keyboard_type to DecimalPad
+            keyboard_type: if self.is_numeric_only {
+                KeyboardType::DecimalPad
+            } else {
+                self.keyboard_type
+            },
+            autocapitalize: self.autocapitalize,
+            autocorrect: self.autocorrect,
+            return_key_type: self.return_key_type,
+            is_multiline: self.is_multiline,
+            is_secure: self.is_password,
+        }
     }
 
     pub fn empty_text(&self) -> &str {
@@ -1317,9 +1340,10 @@ impl Widget for TextInput {
             }
             self.ime_just_updated = false; // Reset for next frame
 
-            cx.show_text_ime(
+            cx.show_text_ime_with_config(
                 self.draw_bg.area(),
                 cursor_pos - self.scroll_y,
+                self.get_ime_config(),
             );
         }
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
@@ -1388,6 +1412,16 @@ impl Widget for TextInput {
                 self.reset_blink_timer(cx);
                 // Sync text to iOS for autocorrect context
                 cx.set_ime_text(&self.text, self.selection.cursor.index);
+                // Immediately send text state to Android when gaining focus
+                // This ensures Java gets the correct text BEFORE keyboard is shown
+                // Don't rely on draw cycle - send it now to avoid race conditions
+                let sel_start_chars = self.text[..self.selection.start().index].chars().count();
+                let sel_end_chars = self.text[..self.selection.end().index].chars().count();
+                cx.update_ime_text_state(self.text.clone(), sel_start_chars, sel_end_chars);
+                // Update cache to match what we just sent
+                self.last_sent_ime_text = self.text.clone();
+                self.last_sent_ime_sel_start = sel_start_chars;
+                self.last_sent_ime_sel_end = sel_end_chars;
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
             Hit::KeyFocusLost(_) => {
@@ -1620,15 +1654,32 @@ impl Widget for TextInput {
                 },
                 ..
             }) => {
-                cx.hide_text_ime();
-                cx.widget_action(
-                    uid,
-                    &scope.path,
-                    TextInputAction::Returned(
-                        self.text.clone(),
-                        mods,
-                    ),
-                );
+                // For multiline text input, plain Return inserts a newline
+                // For single-line, Return emits the Returned action (submit)
+                if self.is_multiline && !self.is_read_only {
+                    self.reset_blink_timer(cx);
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: self.selection.start().index,
+                            end: self.selection.end().index,
+                            replace_with: "\n".to_string(),
+                        }
+                    );
+                    self.draw_bg.redraw(cx);
+                    cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                } else {
+                    cx.hide_text_ime();
+                    cx.widget_action(
+                        uid,
+                        &scope.path,
+                        TextInputAction::Returned(
+                            self.text.clone(),
+                            mods,
+                        ),
+                    );
+                }
             },
 
             Hit::KeyDown(KeyEvent {
@@ -1637,6 +1688,7 @@ impl Widget for TextInput {
             }) => {
                 cx.widget_action(uid, &scope.path, TextInputAction::Escaped);
             }
+            // Shift+Return always inserts newline (even in single-line mode for backwards compat)
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
                 modifiers: KeyModifiers {
@@ -1941,6 +1993,37 @@ impl Widget for TextInput {
 
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+            }
+            Hit::ImeAction(event) => {
+                // Handle IME editor action (Done, Go, Search, etc.) from mobile keyboard
+                // This is triggered when user presses the action button on single-line inputs
+                use crate::makepad_platform::event::ImeAction;
+                // No modifiers from soft keyboard actions
+                let mods = KeyModifiers::default();
+                match event.action {
+                    // Actions that should hide keyboard and release focus
+                    ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
+                        // Hide keyboard first
+                        cx.hide_text_ime();
+                        // Release key focus so draw loop won't re-show keyboard
+                        cx.revert_key_focus();
+                        // Then emit the action
+                        cx.widget_action(uid, &scope.path, TextInputAction::Returned(self.text.clone(), mods));
+                    }
+                    ImeAction::Next => {
+                        // Next should move focus to next field - keep keyboard open
+                        // Emit Returned to let app handle field navigation
+                        cx.widget_action(uid, &scope.path, TextInputAction::Returned(self.text.clone(), mods));
+                    }
+                    ImeAction::Previous => {
+                        // Previous should move focus to previous field - keep keyboard open
+                        // Emit Returned to let app handle field navigation
+                        cx.widget_action(uid, &scope.path, TextInputAction::Returned(self.text.clone(), mods));
+                    }
+                    ImeAction::Unspecified | ImeAction::None => {
+                        // No action or unspecified - do nothing
+                    }
+                }
             }
             Hit::TextCopy(event) => {
                 *event.response.borrow_mut() = Some(self.selected_text().to_string());

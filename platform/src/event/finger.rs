@@ -934,6 +934,11 @@ impl Event {
                     return Hit::ImeTextState(its.clone())
                 }
             },
+            Event::ImeAction(ia) => {
+                if cx.keyboard.has_key_focus(area) {
+                    return Hit::ImeAction(ia.clone())
+                }
+            },
             Event::TextCopy(tc) => {
                 if cx.keyboard.has_key_focus(area) {
                     return Hit::TextCopy(tc.clone());

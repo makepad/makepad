@@ -173,6 +173,52 @@ pub struct ImeTextStateEvent {
     pub composing_end: Option<usize>,
 }
 
+/// IME editor action type (from mobile soft keyboard action buttons)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImeAction {
+    /// Default action (not specified)
+    Unspecified,
+    /// No action - do nothing
+    None,
+    /// "Go" button - typically for URL bars
+    Go,
+    /// "Search" button - typically for search fields
+    Search,
+    /// "Send" button - typically for messaging
+    Send,
+    /// "Next" button - move to next field
+    Next,
+    /// "Done" button - finish input
+    Done,
+    /// "Previous" button - move to previous field
+    Previous,
+}
+
+impl ImeAction {
+    /// Convert from Android EditorInfo action codes
+    pub fn from_android_action_code(code: i32) -> Self {
+        match code {
+            0 => ImeAction::Unspecified,  // IME_ACTION_UNSPECIFIED
+            1 => ImeAction::None,         // IME_ACTION_NONE
+            2 => ImeAction::Go,           // IME_ACTION_GO
+            3 => ImeAction::Search,       // IME_ACTION_SEARCH
+            4 => ImeAction::Send,         // IME_ACTION_SEND
+            5 => ImeAction::Next,         // IME_ACTION_NEXT
+            6 => ImeAction::Done,         // IME_ACTION_DONE
+            7 => ImeAction::Previous,     // IME_ACTION_PREVIOUS
+            _ => ImeAction::Unspecified,
+        }
+    }
+}
+
+/// Event for IME editor action (Done, Go, Search, etc.)
+/// Triggered when user presses the action button on the soft keyboard
+#[derive(Clone, Debug)]
+pub struct ImeActionEvent {
+    /// The action that was triggered
+    pub action: ImeAction,
+}
+
 impl Default for KeyCode {
     fn default() -> Self {KeyCode::Unknown}
 }

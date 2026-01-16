@@ -10,7 +10,18 @@ use {
         gpu_info::GpuInfo,
         macos_menu::MacosMenu,
         makepad_futures::executor::Spawner,
-        makepad_live_id::*,
+        makepad_derive_live::*,
+        makepad_live_compiler::{
+            LiveValue,
+            LiveTypeInfo,
+            LiveModuleId,
+            LiveType,
+            LiveId,
+            LiveNode,
+            LiveNodeSliceApi,
+        },
+        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
+        live_traits::*,
         event::xr::XrAnchor,
         makepad_math::{Vec2d, Rect},
         pass::{CxPassParent, CxPassRect, PassId},
@@ -56,6 +67,85 @@ pub trait CxOsApi {
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
 }
 
+/// Keyboard type hint for soft keyboards (mobile platforms)
+#[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
+#[live_ignore]
+pub enum KeyboardType {
+    #[pick] Default,
+    /// Optimized for ASCII characters
+    AsciiCapable,
+    /// Optimized for URLs
+    Url,
+    /// Number pad (0-9)
+    NumberPad,
+    /// Phone number pad
+    PhonePad,
+    /// Optimized for email addresses
+    EmailAddress,
+    /// Decimal number pad (0-9 and decimal point)
+    DecimalPad,
+    /// Optimized for web search
+    WebSearch,
+}
+
+/// Autocapitalization behavior for soft keyboards
+#[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
+#[live_ignore]
+pub enum AutoCapitalize {
+    None,
+    Words,
+    #[pick] Sentences,
+    AllCharacters,
+}
+
+/// Autocorrection behavior for soft keyboards
+#[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
+#[live_ignore]
+pub enum AutoCorrect {
+    #[pick] Default,
+    Yes,
+    No,
+}
+
+/// Return key type (visual hint on keyboard)
+#[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
+#[live_ignore]
+pub enum ReturnKeyType {
+    #[pick] Default,
+    Go,
+    Search,
+    Send,
+    Next,
+    Done,
+}
+
+impl Default for KeyboardType {
+    fn default() -> Self { KeyboardType::Default }
+}
+
+impl Default for AutoCapitalize {
+    fn default() -> Self { AutoCapitalize::Sentences }
+}
+
+impl Default for AutoCorrect {
+    fn default() -> Self { AutoCorrect::Default }
+}
+
+impl Default for ReturnKeyType {
+    fn default() -> Self { ReturnKeyType::Default }
+}
+
+/// Combined IME/keyboard configuration for text input
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TextInputConfig {
+    pub keyboard_type: KeyboardType,
+    pub autocapitalize: AutoCapitalize,
+    pub autocorrect: AutoCorrect,
+    pub return_key_type: ReturnKeyType,
+    pub is_multiline: bool,
+    pub is_secure: bool,
+}
+
 #[derive(PartialEq)]
 pub enum CxOsOp {
     CreateWindow(WindowId),
@@ -72,7 +162,7 @@ pub enum CxOsOp {
     SetTopmost(WindowId, bool),
     ShowInDock(bool),
 
-    ShowTextIME(Area, Vec2d),
+    ShowTextIME(Area, Vec2d, TextInputConfig),
     HideTextIME,
     /// Sets the text and cursor position to the IME for autocorrect context
     /// (text, cursor_position)
@@ -319,9 +409,13 @@ impl Cx {
     }
 
     pub fn show_text_ime(&mut self, area: Area, pos: Vec2d) {
+        self.show_text_ime_with_config(area, pos, TextInputConfig::default());
+    }
+
+    pub fn show_text_ime_with_config(&mut self, area: Area, pos: Vec2d, config: TextInputConfig) {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
-            self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
+            self.platform_ops.push(CxOsOp::ShowTextIME(area, pos, config));
         }
     }
 

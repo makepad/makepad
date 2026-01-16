@@ -652,6 +652,13 @@ pub fn define_text_input_view() -> *const Class {
     decl.add_ivar::<f64>("ime_pos_x");
     decl.add_ivar::<f64>("ime_pos_y");
 
+    // Keyboard configuration ivars (UITextInputTraits)
+    decl.add_ivar::<i64>("_keyboard_type");           // UIKeyboardType
+    decl.add_ivar::<i64>("_autocapitalization_type"); // UITextAutocapitalizationType
+    decl.add_ivar::<i64>("_autocorrection_type");     // UITextAutocorrectionType (-1 = use CJK logic)
+    decl.add_ivar::<i64>("_return_key_type");         // UIReturnKeyType
+    decl.add_ivar::<bool>("_secure_text_entry");      // isSecureTextEntry
+
     // ==========================================================================
     // UIResponder methods
     // ==========================================================================
@@ -1326,12 +1333,17 @@ pub fn define_text_input_view() -> *const Class {
     // UITextInputTraits protocol
     // ==========================================================================
 
-    extern "C" fn keyboard_type(_: &Object, _: Sel) -> i64 {
-        0 // UIKeyboardTypeDefault
+    extern "C" fn keyboard_type(this: &Object, _: Sel) -> i64 {
+        unsafe { *this.get_ivar::<i64>("_keyboard_type") }
     }
 
-    extern "C" fn autocorrection_type(_this: &Object, _: Sel) -> i64 {
+    extern "C" fn autocorrection_type(this: &Object, _: Sel) -> i64 {
         unsafe {
+            let stored: i64 = *this.get_ivar::<i64>("_autocorrection_type");
+            // -1 means "use CJK detection logic" (Default behavior)
+            if stored >= 0 {
+                return stored;
+            }
             // Try to get current input mode to check keyboard language
             let input_mode: ObjcId = msg_send![class!(UITextInputMode), currentInputMode];
             if input_mode != nil {
@@ -1351,8 +1363,8 @@ pub fn define_text_input_view() -> *const Class {
         }
     }
 
-    extern "C" fn autocapitalization_type(_: &Object, _: Sel) -> i64 {
-        2 // UITextAutocapitalizationTypeSentences
+    extern "C" fn autocapitalization_type(this: &Object, _: Sel) -> i64 {
+        unsafe { *this.get_ivar::<i64>("_autocapitalization_type") }
     }
 
     extern "C" fn spell_checking_type(_: &Object, _: Sel) -> i64 {
@@ -1375,16 +1387,18 @@ pub fn define_text_input_view() -> *const Class {
         0 // UIKeyboardAppearanceDefault
     }
 
-    extern "C" fn return_key_type(_: &Object, _: Sel) -> i64 {
-        0 // UIReturnKeyDefault
+    extern "C" fn return_key_type(this: &Object, _: Sel) -> i64 {
+        unsafe { *this.get_ivar::<i64>("_return_key_type") }
     }
 
     extern "C" fn enables_return_key_automatically(_: &Object, _: Sel) -> BOOL {
         NO
     }
 
-    extern "C" fn is_secure_text_entry(_: &Object, _: Sel) -> BOOL {
-        NO
+    extern "C" fn is_secure_text_entry(this: &Object, _: Sel) -> BOOL {
+        unsafe {
+            if *this.get_ivar::<bool>("_secure_text_entry") { YES } else { NO }
+        }
     }
 
     extern "C" fn text_content_type(_: &Object, _: Sel) -> ObjcId {

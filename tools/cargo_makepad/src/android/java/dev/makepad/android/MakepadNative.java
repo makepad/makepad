@@ -51,6 +51,10 @@ public class MakepadNative {
         int composingEnd
     );
 
+    // IME editor action (for single-line inputs: Done, Go, Search, etc.)
+    // Called when user presses the action button on the soft keyboard
+    public native static void onImeEditorAction(int actionCode);
+
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);
     

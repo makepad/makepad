@@ -85,6 +85,14 @@ class MakepadSurface
     // Shared Editable buffer for IME - this is the source of truth for Java side
     private SpannableStringBuilder mEditable = new SpannableStringBuilder();
 
+    // Keyboard configuration (set by Rust via configureKeyboard)
+    private int mKeyboardType = 0;      // 0=Default, 1=Ascii, 2=Url, 3=NumberPad, etc.
+    private int mAutocapitalize = 2;    // 0=None, 1=Words, 2=Sentences, 3=All
+    private int mAutocorrect = 0;       // 0=Default, 1=Yes, 2=No
+    private int mReturnKeyType = 0;     // 0=Default, 1=Go, 2=Search, 3=Send, 4=Next, 5=Done
+    private boolean mIsMultiline = true;
+    private boolean mIsSecure = false;
+
     // Inner class for IME support - uses Editable and delegates to BaseInputConnection
     private class MakepadInputConnection extends BaseInputConnection {
         // Batch edit nesting count
@@ -389,10 +397,41 @@ class MakepadSurface
                     // Translate forward delete (deletes after cursor)
                     return deleteSurroundingText(0, 1);
                 }
+
+                if (keyCode == KeyEvent.KEYCODE_ENTER) {
+                    // Handle Enter key from IME
+                    // Some IMEs send sendKeyEvent(ENTER) instead of commitText("\n")
+                    if (mIsMultiline) {
+                        // For multiline: insert newline via commitText
+                        // This ensures proper notification to Rust via ImeTextState
+                        return commitText("\n", 1);
+                    }
+                    // For single-line: block the Enter key event
+                    // The action button (Done/Go/etc) is handled via performEditorAction
+                    return true;
+                }
             }
 
-            // For other keys (e.g., ENTER, arrows), use default behavior
+            // For other keys (e.g., arrows), use default behavior
             return super.sendKeyEvent(event);
+        }
+
+        @Override
+        public boolean performEditorAction(int actionCode) {
+            // Handle editor actions (Done, Go, Search, Send, Next) for single-line inputs
+            // These are triggered when user presses the action button on the soft keyboard
+            Log.e("MakepadIME", "performEditorAction: actionCode=" + actionCode);
+
+            // EditorInfo action codes:
+            // IME_ACTION_UNSPECIFIED = 0, IME_ACTION_NONE = 1, IME_ACTION_GO = 2,
+            // IME_ACTION_SEARCH = 3, IME_ACTION_SEND = 4, IME_ACTION_NEXT = 5,
+            // IME_ACTION_DONE = 6, IME_ACTION_PREVIOUS = 7
+
+            // Notify Rust about the editor action
+            // For single-line inputs, this should trigger TextInputAction::Returned
+            MakepadNative.onImeEditorAction(actionCode);
+
+            return true;  // We handled the action
         }
     }
 
@@ -585,13 +624,108 @@ class MakepadSurface
     // For some reason it only works if placed here and not in the parent layout.
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-        // TODO: Do these dynamically based on Makepad's TextInput configuration.
-        // E.g. Visible Password: TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-        // Default to multi-line text input with auto-correct
-        // and vertical cursor control (SwiftKey space+swipe up/down)
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_AUTO_CORRECT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;        
-        // Set to no fullscreen and no extract UI to prevent the keyboard from covering the screen.
-        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
+        // Build inputType based on configuration
+        int inputType = InputType.TYPE_CLASS_TEXT;
+
+        // Keyboard type
+        switch (mKeyboardType) {
+            case 1: // AsciiCapable
+                inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+                break;
+            case 2: // Url
+                inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;
+                break;
+            case 3: // NumberPad
+                inputType = InputType.TYPE_CLASS_NUMBER;
+                break;
+            case 4: // PhonePad
+                inputType = InputType.TYPE_CLASS_PHONE;
+                break;
+            case 5: // EmailAddress
+                inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS;
+                break;
+            case 6: // DecimalPad
+                inputType = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED;
+                break;
+            case 7: // WebSearch
+                inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT;
+                break;
+            default: // Default (0)
+                inputType = InputType.TYPE_CLASS_TEXT;
+                break;
+        }
+
+        // Only add text flags if we're in text class mode
+        if ((inputType & InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT) {
+            // Autocapitalization
+            switch (mAutocapitalize) {
+                case 0: // None
+                    // No flag needed
+                    break;
+                case 1: // Words
+                    inputType |= InputType.TYPE_TEXT_FLAG_CAP_WORDS;
+                    break;
+                case 2: // Sentences (default)
+                    inputType |= InputType.TYPE_TEXT_FLAG_CAP_SENTENCES;
+                    break;
+                case 3: // AllCharacters
+                    inputType |= InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS;
+                    break;
+            }
+
+            // Autocorrect
+            switch (mAutocorrect) {
+                case 0: // Default - enable auto-correct
+                case 1: // Yes
+                    inputType |= InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
+                    break;
+                case 2: // No
+                    inputType |= InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+                    break;
+            }
+
+            // Multiline - important for SwiftKey vertical cursor control
+            if (mIsMultiline) {
+                inputType |= InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+            }
+
+            // Secure/password
+            if (mIsSecure) {
+                // Clear variation bits and set password variation
+                inputType = (inputType & ~InputType.TYPE_MASK_VARIATION) | InputType.TYPE_TEXT_VARIATION_PASSWORD;
+            }
+        }
+
+        outAttrs.inputType = inputType;
+
+        // Build imeOptions
+        int imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
+
+        // Return key type
+        switch (mReturnKeyType) {
+            case 1: // Go
+                imeOptions |= EditorInfo.IME_ACTION_GO;
+                break;
+            case 2: // Search
+                imeOptions |= EditorInfo.IME_ACTION_SEARCH;
+                break;
+            case 3: // Send
+                imeOptions |= EditorInfo.IME_ACTION_SEND;
+                break;
+            case 4: // Next
+                imeOptions |= EditorInfo.IME_ACTION_NEXT;
+                break;
+            case 5: // Done
+                imeOptions |= EditorInfo.IME_ACTION_DONE;
+                break;
+            default: // Default (0)
+                if (!mIsMultiline) {
+                    imeOptions |= EditorInfo.IME_ACTION_DONE;
+                }
+                break;
+        }
+
+        outAttrs.imeOptions = imeOptions;
 
         // Set initial selection from our Editable
         int selStart = Selection.getSelectionStart(mEditable);
@@ -604,6 +738,29 @@ class MakepadSurface
         mInputConnection = new MakepadInputConnection(this, true);
 
         return mInputConnection;
+    }
+
+    // Configure keyboard settings - called from Rust before showing keyboard
+    public void configureKeyboard(int keyboardType, int autocapitalize, int autocorrect,
+                                  int returnKeyType, boolean isMultiline, boolean isSecure) {
+        boolean changed = (mKeyboardType != keyboardType || mAutocapitalize != autocapitalize ||
+                          mAutocorrect != autocorrect || mReturnKeyType != returnKeyType ||
+                          mIsMultiline != isMultiline || mIsSecure != isSecure);
+
+        mKeyboardType = keyboardType;
+        mAutocapitalize = autocapitalize;
+        mAutocorrect = autocorrect;
+        mReturnKeyType = returnKeyType;
+        mIsMultiline = isMultiline;
+        mIsSecure = isSecure;
+
+        // If config changed and keyboard is already showing, restart input to apply new settings
+        if (changed && mInputConnection != null) {
+            InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.restartInput(this);
+            }
+        }
     }
 
     // Called from Rust to update text state (for programmatic changes, not IME input)
@@ -634,10 +791,11 @@ class MakepadSurface
             mEditable.replace(0, mEditable.length(), fullText);
             Selection.setSelection(mEditable, selStart, selEnd);
 
-            // Clear stale buffer and update tracking since we're applying Rust's state
+            // Clear stale buffer since we're applying Rust's authoritative state
+            // Do NOT call recordSentToRust here - that's only for Java->Rust sends
+            // (in onImeTextStateChanged). Recording here would corrupt echo detection.
             if (mInputConnection != null) {
                 mInputConnection.clearRecentSentBuffer();
-                mInputConnection.recordSentToRust(fullText);
             }
 
             // Only restart input when text content actually changed
@@ -926,6 +1084,21 @@ public class MakepadActivity
         finish();
     }
     
+    // Configure keyboard settings before showing - called from Rust
+    public void configureKeyboard(final int keyboardType, final int autocapitalize,
+                                   final int autocorrect, final int returnKeyType,
+                                   final boolean isMultiline, final boolean isSecure) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (view != null) {
+                    view.configureKeyboard(keyboardType, autocapitalize, autocorrect,
+                                          returnKeyType, isMultiline, isSecure);
+                }
+            }
+        });
+    }
+
     public void showKeyboard(final boolean show) {
         runOnUiThread(new Runnable() {
             @Override

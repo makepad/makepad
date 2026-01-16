@@ -524,7 +524,7 @@ impl Cx {
                         metal_window.cocoa_window.hide();
                     }
                 }
-                CxOsOp::ShowTextIME(area, pos) => {
+                CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(self).pos + pos;
                     metal_windows.iter_mut().for_each( | w | {
                         w.cocoa_window.set_ime_spot(pos);
