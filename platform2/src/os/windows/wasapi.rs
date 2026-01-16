@@ -510,7 +510,7 @@ impl WasapiBase {
         
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self,()> {
         unsafe {
-                        
+            let channel_count = channel_count.min(2);
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
                         
             let device = WasapiAccess::find_device_by_id(device_id).unwrap();
@@ -567,7 +567,7 @@ impl WasapiBase {
     pub fn new_loopback(device_id: AudioDeviceId, channel_count: usize) -> Result<Self, ()> {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
-            
+            let channel_count = channel_count.min(2);
             // Find the output device that corresponds to this loopback device
             let device = WasapiAccess::find_loopback_device_by_id(device_id).ok_or(())?;
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|_| ())?;
