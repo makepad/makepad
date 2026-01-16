@@ -94,9 +94,36 @@ class MakepadSurface
         private int mExtractedTextToken = 0;
         // For cursor updates
         private int mCursorUpdateMode = 0;
+        // Track recent states sent to Rust to detect stale echoes
+        // Using a small circular buffer to handle rapid IME operations
+        private String[] mRecentSentTexts = new String[4];
+        private int mRecentSentIndex = 0;
+        private String mLastSentTextToRust = "";
 
         public MakepadInputConnection(View view, boolean fullEditor) {
             super(view, fullEditor);
+        }
+
+        // Check if text was recently sent to Rust (circular buffer lookup)
+        private boolean wasRecentlySentToRust(String text) {
+            for (String sent : mRecentSentTexts) {
+                if (text.equals(sent)) return true;
+            }
+            return false;
+        }
+
+        // Record text as sent to Rust
+        private void recordSentToRust(String text) {
+            mRecentSentTexts[mRecentSentIndex] = text;
+            mRecentSentIndex = (mRecentSentIndex + 1) % mRecentSentTexts.length;
+            mLastSentTextToRust = text;
+        }
+
+        // Clear recent sent buffer (e.g., after applying genuine Rust update)
+        private void clearRecentSentBuffer() {
+            for (int i = 0; i < mRecentSentTexts.length; i++) {
+                mRecentSentTexts[i] = null;
+            }
         }
 
         // Return our shared Editable - this is the key change!
@@ -198,6 +225,9 @@ class MakepadSurface
             int selEnd = Selection.getSelectionEnd(mEditable);
             int compStart = BaseInputConnection.getComposingSpanStart(mEditable);
             int compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
+
+            // Track what we're sending so we can detect stale echoes from Rust
+            recordSentToRust(fullText);
 
             Log.e("MakepadIME", "notifyRustOfTextState: text='" + fullText + "' sel=[" + selStart + "," + selEnd + "] comp=[" + compStart + "," + compEnd + "]");
             MakepadNative.onImeTextStateChanged(fullText, selStart, selEnd, compStart, compEnd);
@@ -546,6 +576,17 @@ class MakepadSurface
         String currentText = mEditable.toString();
         boolean textChanged = !currentText.equals(fullText);
 
+        // Check for stale echoes - if Rust sends back text we recently sent to it,
+        // it's just echoing old state and should be ignored to prevent rollback
+        if (textChanged && mInputConnection != null) {
+            if (mInputConnection.wasRecentlySentToRust(fullText)) {
+                // Rust is echoing back something we recently sent - it's stale
+                Log.e("MakepadIME", "updateImeTextState: ignoring stale echo '" + fullText +
+                    "' (current: '" + currentText + "')");
+                return;
+            }
+        }
+
         // Clamp selection
         int textLen = textChanged ? fullText.length() : mEditable.length();
         selStart = Math.max(0, Math.min(selStart, textLen));
@@ -553,9 +594,16 @@ class MakepadSurface
 
         if (textChanged) {
             // Text content changed - update Editable and restart IME
+            // This is a genuine Rust-side change (not an echo)
             BaseInputConnection.removeComposingSpans(mEditable);
             mEditable.replace(0, mEditable.length(), fullText);
             Selection.setSelection(mEditable, selStart, selEnd);
+
+            // Clear stale buffer and update tracking since we're applying Rust's state
+            if (mInputConnection != null) {
+                mInputConnection.clearRecentSentBuffer();
+                mInputConnection.recordSentToRust(fullText);
+            }
 
             // Only restart input when text content actually changed
             if (mInputConnection != null) {

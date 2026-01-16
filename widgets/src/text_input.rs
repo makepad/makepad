@@ -620,6 +620,10 @@ pub struct TextInput {
     #[rust] composition_length: usize,
     /// Set to true after receiving IME input; prevents race condition in update_ime_context
     #[rust] ime_just_updated: bool,
+    /// Track last sent IME state to prevent sync loops (Flutter-style state comparison)
+    #[rust] last_sent_ime_text: String,
+    #[rust] last_sent_ime_sel_start: usize,
+    #[rust] last_sent_ime_sel_end: usize,
 }
 
  impl LiveHook for TextInput{
@@ -726,12 +730,23 @@ impl TextInput {
     }
 
     /// Updates the IME text context for Android autocomplete/predictions
-    fn update_ime_context(&self, cx: &mut Cx) {
+    /// Uses state comparison (Flutter-style) to prevent sync loops
+    fn update_ime_context(&mut self, cx: &mut Cx) {
         // Convert byte indices to character indices for the platform
         let sel_start_chars = self.text[..self.selection.start().index].chars().count();
         let sel_end_chars = self.text[..self.selection.end().index].chars().count();
 
-        cx.update_ime_text_state(self.text.clone(), sel_start_chars, sel_end_chars);
+        // Only send if state actually changed from what we last sent
+        // This prevents the sync loop where IME sends state → we echo it back → IME gets confused
+        if self.text != self.last_sent_ime_text
+            || sel_start_chars != self.last_sent_ime_sel_start
+            || sel_end_chars != self.last_sent_ime_sel_end
+        {
+            self.last_sent_ime_text = self.text.clone();
+            self.last_sent_ime_sel_start = sel_start_chars;
+            self.last_sent_ime_sel_end = sel_end_chars;
+            cx.update_ime_text_state(self.text.clone(), sel_start_chars, sel_end_chars);
+        }
     }
 
     pub fn reset_blink_timer(&mut self, cx: &mut Cx) {
@@ -1808,7 +1823,10 @@ impl Widget for TextInput {
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
                 // Immediately update IME shadow buffer so Gboard gets correct cursor position
-                self.update_ime_context(cx);
+                // Guard: skip if we just received IME input (prevents sync loop during rapid input)
+                if !self.ime_just_updated {
+                    self.update_ime_context(cx);
+                }
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
                 // iOS autocorrect sends range replacement events
@@ -1840,7 +1858,10 @@ impl Widget for TextInput {
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
                 // Immediately update IME shadow buffer so Gboard gets correct cursor position
-                self.update_ime_context(cx);
+                // Guard: skip if we just received IME input (prevents sync loop during rapid input)
+                if !self.ime_just_updated {
+                    self.update_ime_context(cx);
+                }
             }
             Hit::TextComposingRegion(event) if !self.is_read_only => {
                 // IME marks existing text as composing region (e.g., for autocorrect)
@@ -1858,7 +1879,10 @@ impl Widget for TextInput {
                 self.composition_start = byte_start;
                 self.composition_length = byte_end - byte_start;
                 // Update IME context so Gboard knows the current text state
-                self.update_ime_context(cx);
+                // Guard: skip if we just received IME input (prevents sync loop during rapid input)
+                if !self.ime_just_updated {
+                    self.update_ime_context(cx);
+                }
             }
             Hit::ImeTextState(event) if !self.is_read_only => {
                 // Full text state from platform IME (Android's InputConnection)
@@ -1906,8 +1930,13 @@ impl Widget for TextInput {
                     self.composition_length = 0;
                 }
 
-                // Mark that IME just updated - skip next update_ime_context to prevent race
-                // where we send old state back to Java before this event is processed
+                // Update tracking to match what we just received from IME
+                // This prevents echoing the same state back to Java (sync loop prevention)
+                self.last_sent_ime_text = self.text.clone();
+                self.last_sent_ime_sel_start = event.selection_start;
+                self.last_sent_ime_sel_end = event.selection_end;
+
+                // Belt-and-suspenders: also set flag to skip one update cycle
                 self.ime_just_updated = true;
 
                 self.draw_bg.redraw(cx);
