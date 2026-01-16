@@ -66,7 +66,7 @@ use {
                 AvSetMmThreadCharacteristicsW,
             },
             Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
-            
+                        
         }
     }
 };
@@ -127,7 +127,7 @@ impl WasapiAccess {
             ))
         }
     }
-    
+        
     pub fn get_updated_descs(&mut self) -> Vec<AudioDeviceDesc> {
         unsafe {
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
@@ -140,8 +140,8 @@ impl WasapiAccess {
         }
         self.descs.clone()
     }
-    
-    
+        
+        
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
         let new = {
             let mut audio_inputs = self.audio_inputs.lock().unwrap();
@@ -166,7 +166,7 @@ impl WasapiAccess {
             let audio_inputs = self.audio_inputs.clone();
             let failed_devices = self.failed_devices.clone();
             let change_signal = self.change_signal.clone();
-            
+                        
             if is_loopback {
                 // Use loopback capture for output devices
                 std::thread::spawn(move || {
@@ -244,7 +244,7 @@ impl WasapiAccess {
             }
         }
     }
-    
+        
     pub fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
         let new = {
             let mut audio_outputs = self.audio_outputs.lock().unwrap();
@@ -262,14 +262,14 @@ impl WasapiAccess {
                 }
             }
             new
-            
+                        
         };
         for (index, device_id) in new {
             let audio_output_cb = self.audio_output_cb[index].clone();
             let audio_outputs = self.audio_outputs.clone();
             let failed_devices = self.failed_devices.clone();
             let change_signal = self.change_signal.clone();
-            
+                        
             std::thread::spawn(move || {
                 let _mmcss_handle = elevate_audio_thread_priority();
                 if let Ok(mut wasapi) = WasapiOutput::new(device_id, 2){
@@ -298,6 +298,7 @@ impl WasapiAccess {
                     }
                     let mut audio_outputs = audio_outputs.lock().unwrap();
                     audio_outputs.retain( | v | v.device_id != device_id);
+                    change_signal.set();
                 }
                 else{
                     println!("Error opening wasapi output device");
@@ -307,7 +308,7 @@ impl WasapiAccess {
             });
         }
     }
-    
+        
     unsafe fn get_device_descs(device: &IMMDevice) -> (String, String) {
         let dev_id = device.GetId().unwrap();
         let props = device.OpenPropertyStore(STGM_READ).unwrap();
@@ -317,7 +318,7 @@ impl WasapiAccess {
         //let dev_name = value.Anonymous.Anonymous.Anonymous.pwszVal;
         (dev_name.to_string(), dev_id.to_string().unwrap())
     }
-    
+        
     // add audio device enumeration for input and output
     unsafe fn enumerate_devices(device_type: AudioDeviceType, enumerator: &IMMDeviceEnumerator, out: &mut Vec<AudioDeviceDesc>) {
         let flow = match device_type {
@@ -347,7 +348,7 @@ impl WasapiAccess {
             });
         }
     }
-    
+        
     // Enumerate output devices as loopback inputs for capturing system audio
     unsafe fn enumerate_loopback_devices(enumerator: &IMMDeviceEnumerator, out: &mut Vec<AudioDeviceDesc>) {
         let def_device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole);
@@ -374,7 +375,7 @@ impl WasapiAccess {
             });
         }
     }
-    
+        
     unsafe fn find_device_by_id(search_device_id: AudioDeviceId) -> Option<IMMDevice> {
         let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
         let col = enumerator.EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE).unwrap();
@@ -389,7 +390,7 @@ impl WasapiAccess {
         }
         None
     }
-    
+        
     // Find the output device for a loopback device id (strips the "_loopback" suffix)
     unsafe fn find_loopback_device_by_id(search_device_id: AudioDeviceId) -> Option<IMMDevice> {
         let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
@@ -407,12 +408,12 @@ impl WasapiAccess {
         }
         None
     }
-    
+        
     // Check if a device_id is a loopback device
     pub fn is_loopback_device(&self, device_id: AudioDeviceId) -> bool {
         self.descs.iter().any(|d| d.device_id == device_id && d.device_type == AudioDeviceType::Loopback)
     }
-    
+        
     fn new_float_waveformatextensible(samplerate: usize, channel_count: usize) -> WAVEFORMATEXTENSIBLE {
         let storebits = 32;
         let validbits = 32;
@@ -431,7 +432,7 @@ impl WasapiAccess {
             wValidBitsPerSample: validbits as u16,
         };
         let subformat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-        
+                
         let mask = match channel_count {
             ch if ch <= 18 => {
                 // setting bit for each channel
@@ -446,7 +447,7 @@ impl WasapiAccess {
             dwChannelMask: mask,
         }
     }
-    
+        
 }
 
 
@@ -459,6 +460,7 @@ struct WasapiBaseRef {
 struct WasapiBase {
     device_id: AudioDeviceId,
     device: IMMDevice,
+    frames: u32,
     event: HANDLE,
     client: IAudioClient3,
     channel_count: usize,
@@ -481,12 +483,12 @@ impl WasapiBase {
             event: self.event
         }
     }
-    
+        
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self,()> {
         unsafe {
-            
+                        
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
-            
+                        
             let device = WasapiAccess::find_device_by_id(device_id).unwrap();
             let client: IAudioClient3 = if let Ok(client) = device.Activate(CLSCTX_ALL, None){
                 client
@@ -494,14 +496,13 @@ impl WasapiBase {
             else{
                 return Err(())
             };
-            
+                        
             let wave_format = WasapiAccess::new_float_waveformatextensible(48000, channel_count);
-            
+                        
             let mut default_period_frames = 0u32;
             let mut fundamental_period_frames = 0u32;
             let mut min_period_frames = 0u32;
             let mut max_period_frames = 0u32;
-            
             if client.GetSharedModeEnginePeriod(
                 &wave_format as *const _ as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX,
                 &mut default_period_frames,
@@ -509,24 +510,24 @@ impl WasapiBase {
                 &mut min_period_frames,
                 &mut max_period_frames
             ).is_err() {
-                 return Err(());
+                return Err(());
             }
-
             if client.InitializeSharedAudioStream(
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                 default_period_frames,
                 &wave_format as *const _ as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX,
                 None
             ).is_err(){
                 return Err(())
             }
-            
+                        
             let event = CreateEventA(None, FALSE, FALSE, None).unwrap();
             client.SetEventHandle(event).unwrap();
             client.Start().unwrap();
-            
+                        
             Ok(Self {
                 device_id,
+                frames: default_period_frames,
                 device,
                 channel_count,
                 audio_buffer: Some(Default::default()),
@@ -550,7 +551,7 @@ pub struct WasapiAudioOutputBuffer {
 }
 
 impl WasapiOutput {
-    
+        
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self,()> {
         let base = WasapiBase::new(device_id, channel_count)?;
         let render_client = unsafe {base.client.GetService().unwrap()};
@@ -559,7 +560,7 @@ impl WasapiOutput {
             base
         })
     }
-    
+        
     pub fn wait_for_buffer(&mut self) -> Result<WasapiAudioOutputBuffer, ()> {
         unsafe {
             loop {
@@ -581,6 +582,10 @@ impl WasapiOutput {
                     audio_buffer.clear_final_size();
                     audio_buffer.resize(frame_count, channel_count);
                     audio_buffer.set_final_size();
+                    if (frame_count as u32) < self.base.frames{
+                        println!("Wasapi glitch detected, resettting device {}<{}", frame_count, self.base.frames);
+                        return Err(())
+                    }
                     return Ok(WasapiAudioOutputBuffer {
                         frame_count,
                         channel_count,
@@ -591,7 +596,7 @@ impl WasapiOutput {
             }
         }
     }
-    
+        
     pub fn release_buffer(&mut self, output: WasapiAudioOutputBuffer) {
         unsafe {
             let device_buffer = std::slice::from_raw_parts_mut(output.device_buffer, output.frame_count * output.channel_count);
@@ -620,7 +625,7 @@ impl WasapiInput {
             base
         })
     }
-    
+        
     pub fn wait_for_buffer(&mut self) -> Result<AudioBuffer, ()> {
         unsafe {
             loop {
@@ -631,26 +636,26 @@ impl WasapiInput {
                 let mut pdata: *mut u8 = 0 as *mut _;
                 let mut frame_count = 0u32;
                 let mut dwflags = 0u32;
-                
+                                
                 if self.capture_client.GetBuffer(&mut pdata, &mut frame_count, &mut dwflags, None, None).is_err() {
                     return Err(())
                 }
-                
+                                
                 if frame_count == 0 {
                     continue;
                 }
-                
+                                
                 let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count as usize * self.base.channel_count);
                 let mut audio_buffer = self.base.audio_buffer.take().unwrap();
                 audio_buffer.copy_from_interleaved(self.base.channel_count, device_buffer);
-                
+                                
                 self.capture_client.ReleaseBuffer(frame_count).unwrap();
-                
+                                
                 return Ok(audio_buffer);
             }
         }
     }
-    
+        
     pub fn release_buffer(&mut self, buffer: AudioBuffer) {
         self.base.audio_buffer = Some(buffer);
     }
@@ -671,22 +676,22 @@ impl WasapiLoopback {
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self, ()> {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
-            
+                        
             // Find the output device that corresponds to this loopback device
             let device = WasapiAccess::find_loopback_device_by_id(device_id).ok_or(())?;
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|_| ())?;
-            
+                        
             let mut def_period = 0i64;
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
-            
+                        
             // Force at least 20ms buffer for loopback too
             if def_period < 200_000 {
                 def_period = 200_000;
             }
-            
+                        
             let wave_format = WasapiAccess::new_float_waveformatextensible(48000, channel_count);
-            
+                        
             // Use AUDCLNT_STREAMFLAGS_LOOPBACK to capture from the output device
             if client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -698,14 +703,14 @@ impl WasapiLoopback {
             ).is_err() {
                 return Err(())
             }
-            
+                        
             let event = CreateEventA(None, FALSE, FALSE, None).unwrap();
             client.SetEventHandle(event).unwrap();
-            
+                        
             let capture_client: IAudioCaptureClient = client.GetService().unwrap();
-            
+                        
             client.Start().unwrap();
-            
+                        
             Ok(Self {
                 device_id,
                 device,
@@ -717,7 +722,7 @@ impl WasapiLoopback {
             })
         }
     }
-    
+        
     pub fn get_ref(&self) -> WasapiBaseRef {
         WasapiBaseRef {
             is_terminated: false,
@@ -725,7 +730,7 @@ impl WasapiLoopback {
             event: self.event
         }
     }
-    
+        
     pub fn wait_for_buffer(&mut self) -> Result<AudioBuffer, ()> {
         unsafe {
             loop {
@@ -736,26 +741,26 @@ impl WasapiLoopback {
                 let mut pdata: *mut u8 = 0 as *mut _;
                 let mut frame_count = 0u32;
                 let mut dwflags = 0u32;
-                
+                                
                 if self.capture_client.GetBuffer(&mut pdata, &mut frame_count, &mut dwflags, None, None).is_err() {
                     return Err(())
                 }
-                
+                                
                 if frame_count == 0 {
                     continue;
                 }
-                
+                                
                 let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count as usize * self.channel_count);
                 let mut audio_buffer = self.audio_buffer.take().unwrap();
                 audio_buffer.copy_from_interleaved(self.channel_count, device_buffer);
-                
+                                
                 self.capture_client.ReleaseBuffer(frame_count).unwrap();
-                
+                                
                 return Ok(audio_buffer);
             }
         }
     }
-    
+        
     pub fn release_buffer(&mut self, buffer: AudioBuffer) {
         self.audio_buffer = Some(buffer);
     }
@@ -796,5 +801,5 @@ impl IMMNotificationClient_Impl for WasapiChangeListener {
     fn OnPropertyValueChanged(&self, _pwstrdeviceid: &PCWSTR, _key: &PROPERTYKEY) -> crate::windows::core::Result<()> {
         Ok(())
     }
-    
+        
 }
