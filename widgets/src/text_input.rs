@@ -866,7 +866,7 @@ impl TextInput {
         text_rect
     }
 
-    fn draw_cursor(&mut self, cx: &mut Cx2d, text_rect: Rect) -> Vec2d {
+    fn draw_cursor(&mut self, cx: &mut Cx2d, text_rect: Rect) -> Rect {
         let CursorPosition {
             row_index,
             x_in_lpxs,
@@ -879,20 +879,14 @@ impl TextInput {
             .as_ref()
             .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
         let row = &laidout_text.rows[row_index];
-        let cursor_pos = dvec2(
+        let cursor_rect = rect(
             (x_in_lpxs - 1.0 * self.draw_text.font_scale) as f64,
             ((row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.draw_text.font_scale) as f64,
+            (2.0 * self.draw_text.font_scale) as f64,
+            ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_text.font_scale) as f64,
         );
-        self.draw_cursor.draw_abs(
-            cx,
-            rect(
-                text_rect.pos.x + cursor_pos.x,
-                text_rect.pos.y + cursor_pos.y,
-                (2.0 * self.draw_text.font_scale) as f64,
-                ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_text.font_scale) as f64,
-            )
-        );
-        cursor_pos
+        self.draw_cursor.draw_abs(cx, cursor_rect.translate(text_rect.pos));
+        cursor_rect
     }
 
     fn draw_selection(&mut self, cx: &mut Cx2d, text_rect: Rect) {
@@ -1278,14 +1272,15 @@ impl Widget for TextInput {
         self.draw_selection.append_to_draw_call(cx);
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
-        let cursor_pos = self.draw_cursor(cx, text_rect);
+        let cursor_rect = self.draw_cursor(cx, text_rect);
         self.draw_selection(cx, text_rect);
         self.scroll_to_cursor(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
+            let cursor_bottom_pos = cursor_rect.pos + cursor_rect.size;
             cx.show_text_ime(
-                self.draw_bg.area(), 
-                cursor_pos - self.scroll_y,
+                self.draw_bg.area(),
+                dvec2(cursor_bottom_pos.x, cursor_bottom_pos.y - self.scroll_y)
             );
         }
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Margin::default());
