@@ -112,6 +112,8 @@ features = [
     "Win32_System_SystemServices",
     "Win32_System_WinRT",
     "Win32_Devices_HumanInterfaceDevice",
+    "Win32_UI_Input_Ime",
+    "Win32_Globalization",
     "Devices_Enumeration",
     "Devices_Midi",
     "Foundation_Collections",
