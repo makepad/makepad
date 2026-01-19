@@ -5,6 +5,7 @@ use {
         makepad_live_id::{
             LiveId,
         },
+        
         makepad_error_log::*,
         makepad_math::*,
         cx::Cx,
@@ -12,7 +13,7 @@ use {
             CxOsDrawCall,
             CxOsDrawList,
         },
-        pass::PassId,
+        draw_pass::DrawPassId,
         id_pool::*,
         draw_shader::{
             CxDrawShaderOptions,
@@ -100,18 +101,17 @@ impl std::ops::IndexMut<DrawListId> for CxDrawListPool {
 }
 
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Script, ScriptHook)]
 #[repr(C)]
-pub struct CxDrawCallUniforms {
-    pub draw_zbias: f32,
-    pub pad1: f32,
-    pub pad2: f32,
-    pub pad3: f32,
+pub struct DrawCallUniforms {
+    #[live] pub zbias: f32,
+    #[live] pub pad1: f32,
+    #[live] pub pad2: f32,
+    #[live] pub pad3: f32,
 }
 
-
-impl CxDrawCallUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<CxDrawCallUniforms>()] {
+impl DrawCallUniforms {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>()] {
         unsafe {std::mem::transmute(self)}
     }
     /*
@@ -120,7 +120,7 @@ impl CxDrawCallUniforms {
     }*/
     
     pub fn set_zbias(&mut self, zbias: f32) {
-        self.draw_zbias = zbias;
+        self.zbias = zbias;
     }
     /*
     pub fn set_clip(&mut self, clip: (Vec2f, Vec2f)) {
@@ -196,9 +196,9 @@ pub struct CxDrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     pub options: CxDrawShaderOptions,
     pub total_instance_slots: usize,
-    pub draw_call_uniforms: CxDrawCallUniforms, // draw uniforms
+    pub draw_call_uniforms: DrawCallUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
-    pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
+    pub dyn_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
@@ -211,8 +211,8 @@ impl CxDrawCall {
             options: draw_vars.options.clone(),
             draw_shader: draw_vars.draw_shader.unwrap(),
             total_instance_slots: mapping.instances.total_slots,
-            draw_call_uniforms: CxDrawCallUniforms::default(),
-            user_uniforms: draw_vars.user_uniforms,
+            draw_call_uniforms: DrawCallUniforms::default(),
+            dyn_uniforms: draw_vars.dyn_uniforms,
             texture_slots: draw_vars.texture_slots.clone(),
             instance_dirty: true,
             uniforms_dirty: true,
@@ -220,17 +220,18 @@ impl CxDrawCall {
     }
 }
 
-#[derive(Clone)]
+
+#[derive(Clone, Script, ScriptHook)]
 #[repr(C)]
-pub struct CxDrawListUniforms {
-    pub view_transform: Mat4f,
-    pub view_clip: Vec4f,
-    pub view_shift: Vec2f,
-    pub pad1: f32,
-    pub pad2: f32       
+pub struct DrawListUniforms {
+    #[live] pub view_transform: Mat4f,
+    #[live] pub view_clip: Vec4f,
+    #[live] pub view_shift: Vec2f,
+    #[live] pub pad1: f32,
+    #[live] pub pad2: f32       
 }
 
-impl Default for CxDrawListUniforms{
+impl Default for DrawListUniforms{
     fn default()->Self{
         Self{
             view_transform: Mat4f::identity(),
@@ -242,8 +243,8 @@ impl Default for CxDrawListUniforms{
     }
 }
 
-impl CxDrawListUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<CxDrawListUniforms>()] {
+impl DrawListUniforms {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>()] {
         unsafe {std::mem::transmute(self)}
     }
 }
@@ -300,11 +301,11 @@ pub struct CxDrawList {
     pub codeflow_parent_id: Option<DrawListId>, // the id of the parent we nest in, codeflow wise
     
     pub redraw_id: u64,
-    pub pass_id: Option<PassId>,
+    pub draw_pass_id: Option<DrawPassId>,
     
     pub draw_items: CxDrawItems,
     
-    pub draw_list_uniforms: CxDrawListUniforms,
+    pub draw_list_uniforms: DrawListUniforms,
     pub draw_list_has_clip: bool,
     
     pub os: CxOsDrawList,
@@ -364,8 +365,8 @@ impl CxDrawList {
                             continue
                         }
                         let mut diff = false;
-                        for i in 0..sh.mapping.user_uniforms.total_slots {
-                            if draw_call.user_uniforms[i] != draw_vars.user_uniforms[i] {
+                        for i in 0..sh.mapping.draw_call_uniforms.total_slots {
+                            if draw_call.dyn_uniforms[i] != draw_vars.dyn_uniforms[i] {
                                 diff = true;
                                 break;
                             }

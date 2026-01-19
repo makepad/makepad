@@ -53,7 +53,7 @@ impl DrawListExt for DrawList{
         let pass_id = cx.pass_stack.last().unwrap().pass_id;
         let redraw_id = cx.cx.redraw_id;
                 
-        cx.draw_lists[self.id()].pass_id = Some(pass_id);
+        cx.draw_lists[self.id()].draw_pass_id = Some(pass_id);
                 
         let codeflow_parent_id = cx.draw_list_stack.last().cloned();
                 
@@ -158,7 +158,7 @@ impl DrawList2d {
         let pass_id = cx.pass_stack.last().unwrap().pass_id;
         let redraw_id = cx.cx.redraw_id;
         
-        cx.draw_lists[self.draw_list.id()].pass_id = Some(pass_id);
+        cx.draw_lists[self.draw_list.id()].draw_pass_id = Some(pass_id);
         
         let codeflow_parent_id = cx.draw_list_stack.last().cloned().unwrap();
         

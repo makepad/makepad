@@ -33,7 +33,7 @@ impl ShaderBackend{
                     ShaderMode::Vertex=>match io_type{
                         SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("_io.i[_iov.iid].")),
                         SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i[_iov.iid].")),
-                        SHADER_IO_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u.")),
+                        SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u.")),
                         SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
                         SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iov.v.")),
                         SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v.vertex_pos")),
@@ -47,7 +47,7 @@ impl ShaderBackend{
                     ShaderMode::Fragment=>match io_type{
                         SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("_io.i[_iof.v._iid].")),
                         SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i[_iof.v._iid].")),
-                        SHADER_IO_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u.")),
+                        SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u.")),
                         SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
                         SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iof.v.")),
                         SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iof.v.vertex_pos")),
@@ -63,7 +63,7 @@ impl ShaderBackend{
                  match io_type{
                      SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("rustinst_")),
                      SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("dyninst_")),
-                     SHADER_IO_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("uni_")),
+                     SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("uni_")),
                      SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("unibuf_")),
                      SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("var_")),
                      SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Prefix("vtx_pos")),

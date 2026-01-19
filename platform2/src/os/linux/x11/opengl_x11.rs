@@ -6,7 +6,7 @@ use {
         gl_sys::{self, LibGl},
     }, x11_sys, xlib_window::XlibWindow
     }, crate::{
-        cx::Cx, event::*, makepad_math::Vec2d, opengl_cx::OpenglCx, pass::{PassClearColor, PassClearDepth, PassId}, texture::{CxTexture, Texture}, window::WindowId, x11::linux_x11::X11Cx
+        cx::Cx, event::*, makepad_math::Vec2d, opengl_cx::OpenglCx, draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId}, texture::{CxTexture, Texture}, window::WindowId, x11::linux_x11::X11Cx
     }, std::{
         ffi::CString, mem, os::{self, fd::{AsRawFd as _, FromRawFd as _, OwnedFd}, raw::{c_long, c_void}}
     }

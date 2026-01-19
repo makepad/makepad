@@ -23,7 +23,7 @@ use {
             apple_media::CxAppleMedia,
             metal::{MetalCx, DrawPassMode},
         },
-        pass::{CxPassParent},
+        draw_pass::{CxDrawPassParent},
         permission::PermissionResult,
         thread::SignalToUI,
         window::CxWindowPool,
@@ -92,19 +92,19 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(with_ios_app(|app| app.time_now() as f32));
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(_window_id) => {
+        for draw_pass_id in &passes_todo {
+            self.passes[*draw_pass_id].set_time(with_ios_app(|app| app.time_now() as f32));
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(_window_id) => {
                     let mtk_view = with_ios_app(|app| app.mtk_view.unwrap());
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
                 }
-                CxPassParent::Pass(_) => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                CxDrawPassParent::DrawPass(_) => {
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 },
-                CxPassParent::None => {
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                CxDrawPassParent::None => {
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
         }

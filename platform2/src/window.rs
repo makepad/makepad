@@ -9,7 +9,7 @@ use {
         event::{
             WindowGeom
         },
-        pass::{Pass, PassId, CxPassParent},
+        draw_pass::{DrawPass, DrawPassId, CxDrawPassParent},
         cx::Cx,
         cx_api::CxOsOp,
     }
@@ -140,9 +140,9 @@ impl ScriptApply for WindowHandle {
 }
 
 impl WindowHandle {
-    pub fn set_pass(&self, cx: &mut Cx, pass: &Pass) {
-        cx.windows[self.window_id()].main_pass_id = Some(pass.pass_id());
-        cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());
+    pub fn set_pass(&self, cx: &mut Cx, pass: &DrawPass) {
+        cx.windows[self.window_id()].main_pass_id = Some(pass.draw_pass_id());
+        cx.passes[pass.draw_pass_id()].parent = CxDrawPassParent::Window(self.window_id());
     }
     pub fn configure_window(&mut self, cx: &mut Cx, inner_size: Vec2d, position: Vec2d, is_fullscreen: bool, title: String) {
         let window = &mut cx.windows[self.window_id()];
@@ -226,7 +226,7 @@ pub struct CxWindow {
     pub os_dpi_factor: Option<f64>,
     pub is_created: bool,
     pub window_geom: WindowGeom,
-    pub main_pass_id: Option<PassId>,
+    pub main_pass_id: Option<DrawPassId>,
     pub is_fullscreen: bool,
 }
 

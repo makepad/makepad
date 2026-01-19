@@ -19,7 +19,7 @@ use {
             d3d11::D3d11Cx,
             cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain},
         },
-        pass::{CxPassParent},
+        draw_pass::{CxDrawPassParent},
         cx_api::CxOsOp,
         cx::Cx,
         windows::Win32::Foundation::HANDLE,
@@ -46,11 +46,11 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         let time_now = time.time_now();
-        for &pass_id in &passes_todo {
-            self.passes[pass_id].set_time(time_now as f32);
-            match self.passes[pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+        for &draw_pass_id in &passes_todo {
+            self.passes[draw_pass_id].set_time(time_now as f32);
+            match self.passes[draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
                     let window = &mut windows[window_id.id()];
                     if let Some(swapchain) = &window.swapchain {
@@ -62,10 +62,10 @@ impl Cx {
                             window.present_index = (window.present_index + 1) % swapchain.presentable_images.len();
                             
                             // render to swapchain
-                            self.draw_pass_to_texture(pass_id, d3d11_cx, Some(current_image.image.texture_id()));
+                            self.draw_pass_to_texture(draw_pass_id, d3d11_cx, Some(current_image.image.texture_id()));
 
-                            let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-                            let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                            let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
+                            let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
                             let future_presentable_draw = PresentableDraw {
                                 window_id: window_id.id(),
                                 target_id: current_image.id,
@@ -81,12 +81,12 @@ impl Cx {
                         }
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(pass_id, d3d11_cx, None);
+                    self.draw_pass_to_texture(draw_pass_id, d3d11_cx, None);
                 },
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(pass_id, d3d11_cx, None);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(draw_pass_id, d3d11_cx, None);
                 }
             }
         }
@@ -305,9 +305,9 @@ impl Cx {
                     // lets set up our render pass target
                    /* let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     if let Some(swapchain) = swapchain {
-                        pass.color_textures = vec![CxPassColorTexture {
-                            clear_color: PassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
-                            //clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        pass.color_textures = vec![CxDrawPassColorTexture {
+                            clear_color: DrawPassClearColor::ClearWith(vec4(1.0, 1.0, 0.0, 1.0)),
+                            //clear_color: DrawPassClearColor::ClearWith(pass.clear_color),
                             texture: swapchain.presentable_images[present_index].image.clone(),
                         }];
                     }*/

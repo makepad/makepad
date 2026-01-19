@@ -1,4 +1,22 @@
 
+use {
+    crate::{
+        makepad_platform::*,
+        makepad_platform::makepad_script::*
+    },
+};
+
+#[derive(Clone, Script, ScriptHook)]
+pub struct QuadVertex{
+    #[rust] pub pos: Vec2f
+}
+
+pub fn script_run(vm:&mut ScriptVm)->ScriptValue{
+    let geom = vm.new_module(id!(geom));
+    script_api!(vm, geom, QuadVertex);
+    NIL
+}
+
 /*
 use {
     crate::{

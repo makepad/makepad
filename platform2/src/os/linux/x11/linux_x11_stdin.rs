@@ -1,6 +1,6 @@
 use {
     crate::{
-        cx::Cx, cx_api::CxOsOp, event::{Event, WindowGeom}, makepad_live_id::*, makepad_math::*, makepad_micro_serde::*, os::cx_stdin::{aux_chan, HostToStdin, PollTimer, PresentableDraw, StdinToHost, Swapchain}, pass::{CxPassColorTexture, CxPassParent, PassClearColor}, texture::{Texture, TextureFormat}, thread::SignalToUI, window::CxWindowPool, CxOsApi,
+        cx::Cx, cx_api::CxOsOp, event::{Event, WindowGeom}, makepad_live_id::*, makepad_math::*, makepad_micro_serde::*, os::cx_stdin::{aux_chan, HostToStdin, PollTimer, PresentableDraw, StdinToHost, Swapchain}, draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor}, texture::{Texture, TextureFormat}, thread::SignalToUI, window::CxWindowPool, CxOsApi,
     }, std::io::{self, prelude::*, BufReader} 
 };
 
@@ -22,11 +22,11 @@ impl Cx {
         self.repaint_id += 1;
         
         let time_now = self.os.stdin_timers.time_now();
-        for &pass_id in &passes_todo {
-            self.passes[pass_id].set_time(time_now as f32);
-            match self.passes[pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+        for &draw_pass_id in &passes_todo {
+            self.passes[draw_pass_id].set_time(time_now as f32);
+            match self.passes[draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
                     let window = &mut windows[window_id.id()];
                     if let Some(swapchain) = &window.swapchain {
@@ -34,13 +34,13 @@ impl Cx {
                         window.present_index = (window.present_index + 1) % swapchain.presentable_images.len();
 
                         // render to swapchain
-                        self.draw_pass_to_texture(pass_id, Some(&current_image.image));
+                        self.draw_pass_to_texture(draw_pass_id, Some(&current_image.image));
 
                         // wait for GPU to finish rendering
                         unsafe { (self.os.gl().glFinish)(); }
 
-                        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-                        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                        let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
+                        let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
                         let presentable_draw = PresentableDraw {
                             window_id: window_id.id(),
                             target_id: current_image.id,
@@ -52,12 +52,12 @@ impl Cx {
                         let _ = io::stdout().write_all(StdinToHost::DrawCompleteAndFlip(presentable_draw).to_json().as_bytes());
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(pass_id, None);
+                    self.draw_pass_to_texture(draw_pass_id, None);
                 },
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(pass_id, None);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(draw_pass_id, None);
                 }
             }
         }
@@ -198,9 +198,9 @@ impl Cx {
                     let window = &mut self.windows[CxWindowPool::from_usize(window_id)];
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     if let Some(swapchain) = &stdin_window.swapchain {
-                        pass.color_textures = vec![CxPassColorTexture {
-                            clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
-                            //clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        pass.color_textures = vec![CxDrawPassColorTexture {
+                            clear_color: DrawPassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
+                            //clear_color: DrawPassClearColor::ClearWith(pass.clear_color),
                             texture: swapchain.presentable_images[stdin_window.present_index].image.clone(),
                         }];
                     }
