@@ -100,6 +100,11 @@ impl Widget for FoldHeader {
             );
             self.draw_state.set(DrawState::DrawBody);
         }
+        if self.opened == 0.0 {
+            self.body.set_visible(cx, false);
+        } else {
+            self.body.set_visible(cx, true);
+        }
         if let Some(DrawState::DrawBody) = self.draw_state.get() {
             let walk = self.body.walk(cx);
             self.body.draw_walk(cx, scope, walk) ?;
