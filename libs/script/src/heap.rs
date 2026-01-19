@@ -405,6 +405,17 @@ impl ScriptHeap{
             // scan up the chain to set the proto value
             write!(out, "{{").ok();
             let mut first = true;
+            
+            // if we have a type index, output type checked base properties first
+            if let Some(ty_index) = object.tag.as_type_index(){
+                let type_check = &self.type_check[ty_index.0 as usize];
+                for (prop_id, _prop_ty) in type_check.props.iter_ordered(){
+                    if !first{write!(out, ", ").ok();}
+                    write!(out, "{}:typed", prop_id).ok();
+                    first = false;
+                }
+            }
+            
             loop{
                 let object = &self.objects[ptr.index as usize];
                 
@@ -468,7 +479,7 @@ impl ScriptHeap{
         else if let Some(pod) = value.as_pod(){
             let pod = &self.pods[pod.index as usize];
             let pod_type = &self.pod_types[pod.ty.index as usize];
-            self.pod_debug_print(pod_type, 0, &pod.data);
+            self.pod_debug(out, pod_type, 0, &pod.data);
         }else{
             write!(out, "{}", value).ok();
         }

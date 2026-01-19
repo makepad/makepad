@@ -611,6 +611,17 @@ impl ShaderStack{
         }
     }
     
+    fn peek(&self, trap:&ScriptTrap)->(&ShaderType, &String){
+        if let Some(ty) = self.types.last(){
+            return (ty, self.strings.last().unwrap())
+        }
+        else{
+            trap.err_stack_underflow();
+            static EMPTY: (ShaderType, String) = (ShaderType::None, String::new());
+            (&EMPTY.0, &EMPTY.1)
+        }
+    }
+    
     fn push(&mut self, trap:&ScriptTrap, ty:ShaderType, s:String){
         if self.types.len() > self.stack_limit{
             trap.err_stack_overflow();
@@ -805,6 +816,50 @@ impl ShaderFnCompiler{
         write!(s, "({} {} {})", s1, op, s2).ok();
         let ty = type_table_logic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
         self.stack.push(&self.trap, ty, s);
+    }
+    
+    fn handle_log(&mut self, vm:&ScriptVm){
+        let (ty, value_str) = self.stack.peek(&self.trap);
+        let type_name = self.shader_type_to_string(vm, ty);
+        if let Some(loc) = vm.code.ip_to_loc(self.trap.ip){
+            log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{}:{}", value_str, type_name), LogLevel::Log);
+        }
+    }
+    
+    fn shader_type_to_string(&self, vm:&ScriptVm, ty:&ShaderType)->String{
+        match ty{
+            ShaderType::None => "none".to_string(),
+            ShaderType::IoSelf(_) => "io".to_string(),
+            ShaderType::PodType(pod_ty) | ShaderType::Pod(pod_ty) => {
+                if let Some(name) = vm.heap.pod_type_name(*pod_ty){
+                    name.to_string()
+                }
+                else{
+                    format!("{:?}", pod_ty)
+                }
+            },
+            ShaderType::Id(id) => {
+                // Try to resolve the id to get its actual type
+                if let Some((sc, _shadow)) = self.shader_scope.find_var(*id){
+                    let pod_ty = sc.ty();
+                    if let Some(name) = vm.heap.pod_type_name(pod_ty){
+                        return name.to_string()
+                    }
+                }
+                format!("id({})", id)
+            },
+            ShaderType::AbstractInt => "abstract_int".to_string(),
+            ShaderType::AbstractFloat => "abstract_float".to_string(),
+            ShaderType::Range{ty, ..} => {
+                if let Some(name) = vm.heap.pod_type_name(*ty){
+                    format!("range<{}>", name)
+                }
+                else{
+                    "range".to_string()
+                }
+            },
+            ShaderType::Error(_) => "error".to_string(),
+        }
     }
 
     fn handle_arithmetic(&mut self, vm:&ScriptVm, opargs:OpcodeArgs, op:&str, is_int: bool){
@@ -2320,7 +2375,7 @@ impl ShaderFnCompiler{
 // Tree search            
             Opcode::SEARCH_TREE=>{self.trap.err_opcode_not_supported_in_shader();},
 // Log            
-            Opcode::LOG=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::LOG=>{self.handle_log(vm);},
 // Me/Scope
             Opcode::ME=>{self.trap.err_opcode_not_supported_in_shader();},
                         

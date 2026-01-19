@@ -85,8 +85,7 @@ pub struct DrawQuad {
 }
 
 impl ScriptHook for DrawQuad{
-    fn on_before_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){
-        // ok so 
+    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){
     }
 }
 
