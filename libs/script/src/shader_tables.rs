@@ -41,6 +41,16 @@ pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:&Scr
             ShaderType::Pod(x) if *x == builtins.pod_vec2h=>ShaderType::Pod(builtins.pod_vec2h),
             ShaderType::Pod(x) if *x == builtins.pod_vec3h=>ShaderType::Pod(builtins.pod_vec3h),
             ShaderType::Pod(x) if *x == builtins.pod_vec4h=>ShaderType::Pod(builtins.pod_vec4h),
+            // abstract float * matrix -> matrix
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x2f=>ShaderType::Pod(builtins.pod_mat2x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x3f=>ShaderType::Pod(builtins.pod_mat2x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x4f=>ShaderType::Pod(builtins.pod_mat2x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x2f=>ShaderType::Pod(builtins.pod_mat3x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x3f=>ShaderType::Pod(builtins.pod_mat3x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x4f=>ShaderType::Pod(builtins.pod_mat3x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x2f=>ShaderType::Pod(builtins.pod_mat4x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x3f=>ShaderType::Pod(builtins.pod_mat4x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x4f=>ShaderType::Pod(builtins.pod_mat4x4f),
             _=>ShaderType::Error(NIL),
         }
         ShaderType::AbstractInt => match rhs{
@@ -60,6 +70,16 @@ pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:&Scr
             ShaderType::Pod(x) if *x == builtins.pod_vec2i=>ShaderType::Pod(builtins.pod_vec2i),
             ShaderType::Pod(x) if *x == builtins.pod_vec3i=>ShaderType::Pod(builtins.pod_vec3i),
             ShaderType::Pod(x) if *x == builtins.pod_vec4i=>ShaderType::Pod(builtins.pod_vec4i),
+            // abstract int * matrix -> matrix
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x2f=>ShaderType::Pod(builtins.pod_mat2x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x3f=>ShaderType::Pod(builtins.pod_mat2x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x4f=>ShaderType::Pod(builtins.pod_mat2x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x2f=>ShaderType::Pod(builtins.pod_mat3x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x3f=>ShaderType::Pod(builtins.pod_mat3x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x4f=>ShaderType::Pod(builtins.pod_mat3x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x2f=>ShaderType::Pod(builtins.pod_mat4x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x3f=>ShaderType::Pod(builtins.pod_mat4x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x4f=>ShaderType::Pod(builtins.pod_mat4x4f),
             _=>ShaderType::Error(NIL),
         }
         ShaderType::Pod(x) if *x == builtins.pod_f32=> match rhs{
@@ -69,6 +89,16 @@ pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:&Scr
             ShaderType::Pod(x) if *x == builtins.pod_vec2f=>ShaderType::Pod(builtins.pod_vec2f),
             ShaderType::Pod(x) if *x == builtins.pod_vec3f=>ShaderType::Pod(builtins.pod_vec3f),
             ShaderType::Pod(x) if *x == builtins.pod_vec4f=>ShaderType::Pod(builtins.pod_vec4f),
+            // scalar * matrix -> matrix
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x2f=>ShaderType::Pod(builtins.pod_mat2x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x3f=>ShaderType::Pod(builtins.pod_mat2x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x4f=>ShaderType::Pod(builtins.pod_mat2x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x2f=>ShaderType::Pod(builtins.pod_mat3x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x3f=>ShaderType::Pod(builtins.pod_mat3x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x4f=>ShaderType::Pod(builtins.pod_mat3x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x2f=>ShaderType::Pod(builtins.pod_mat4x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x3f=>ShaderType::Pod(builtins.pod_mat4x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x4f=>ShaderType::Pod(builtins.pod_mat4x4f),
             _=>ShaderType::Error(NIL),
         }
         ShaderType::Pod(x) if *x == builtins.pod_f16=> match rhs{
@@ -98,25 +128,37 @@ pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:&Scr
             ShaderType::Pod(x) if *x == builtins.pod_vec4i=>ShaderType::Pod(builtins.pod_vec4i),
             _=>ShaderType::Error(NIL),
         }
+        // vec2f * matCx2 -> vecC (vector * matrix multiplication)
         ShaderType::Pod(x) if *x == builtins.pod_vec2f=> match rhs{
             ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_vec2f),
             ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_vec2f),
             ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_vec2f),
             ShaderType::Pod(x) if *x == builtins.pod_vec2f=>ShaderType::Pod(builtins.pod_vec2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x2f=>ShaderType::Pod(builtins.pod_vec2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x2f=>ShaderType::Pod(builtins.pod_vec3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x2f=>ShaderType::Pod(builtins.pod_vec4f),
             _=>ShaderType::Error(NIL),
         }
+        // vec3f * matCx3 -> vecC
         ShaderType::Pod(x) if *x == builtins.pod_vec3f=> match rhs{
             ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_vec3f),
             ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_vec3f),
             ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_vec3f),
             ShaderType::Pod(x) if *x == builtins.pod_vec3f=>ShaderType::Pod(builtins.pod_vec3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x3f=>ShaderType::Pod(builtins.pod_vec2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x3f=>ShaderType::Pod(builtins.pod_vec3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x3f=>ShaderType::Pod(builtins.pod_vec4f),
             _=>ShaderType::Error(NIL),
         }
+        // vec4f * matCx4 -> vecC
         ShaderType::Pod(x) if *x == builtins.pod_vec4f=> match rhs{
             ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_vec4f),
             ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_vec4f),
             ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_vec4f),
             ShaderType::Pod(x) if *x == builtins.pod_vec4f=>ShaderType::Pod(builtins.pod_vec4f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x4f=>ShaderType::Pod(builtins.pod_vec2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x4f=>ShaderType::Pod(builtins.pod_vec3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x4f=>ShaderType::Pod(builtins.pod_vec4f),
             _=>ShaderType::Error(NIL),
         }
         ShaderType::Pod(x) if *x == builtins.pod_vec2h=> match rhs{
@@ -174,6 +216,82 @@ pub fn type_table_float_arithmetic(lhs: &ShaderType, rhs: &ShaderType, trap:&Scr
             ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_vec4i),
             ShaderType::Pod(x) if *x == builtins.pod_i32=>ShaderType::Pod(builtins.pod_vec4i),
             ShaderType::Pod(x) if *x == builtins.pod_vec4i=>ShaderType::Pod(builtins.pod_vec4i),
+            _=>ShaderType::Error(NIL),
+        }
+        // Matrix multiplication: matCxR * vecR -> vecC
+        // mat2x2f * vec2f -> vec2f, mat2x2f * scalar -> mat2x2f
+        ShaderType::Pod(x) if *x == builtins.pod_mat2x2f => match rhs{
+            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_mat2x2f),
+            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_mat2x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_mat2x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_vec2f=>ShaderType::Pod(builtins.pod_vec2f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat2x2f=>ShaderType::Pod(builtins.pod_mat2x2f),
+            _=>ShaderType::Error(NIL),
+        }
+        // mat2x3f * vec3f -> vec2f
+        ShaderType::Pod(x) if *x == builtins.pod_mat2x3f => match rhs{
+            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_mat2x3f),
+            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_mat2x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_mat2x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_vec3f=>ShaderType::Pod(builtins.pod_vec2f),
+            _=>ShaderType::Error(NIL),
+        }
+        // mat2x4f * vec4f -> vec2f
+        ShaderType::Pod(x) if *x == builtins.pod_mat2x4f => match rhs{
+            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_mat2x4f),
+            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_mat2x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_mat2x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_vec4f=>ShaderType::Pod(builtins.pod_vec2f),
+            _=>ShaderType::Error(NIL),
+        }
+        // mat3x2f * vec2f -> vec3f
+        ShaderType::Pod(x) if *x == builtins.pod_mat3x2f => match rhs{
+            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_mat3x2f),
+            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_mat3x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_mat3x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_vec2f=>ShaderType::Pod(builtins.pod_vec3f),
+            _=>ShaderType::Error(NIL),
+        }
+        // mat3x3f * vec3f -> vec3f
+        ShaderType::Pod(x) if *x == builtins.pod_mat3x3f => match rhs{
+            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_mat3x3f),
+            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_mat3x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_mat3x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_vec3f=>ShaderType::Pod(builtins.pod_vec3f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat3x3f=>ShaderType::Pod(builtins.pod_mat3x3f),
+            _=>ShaderType::Error(NIL),
+        }
+        // mat3x4f * vec4f -> vec3f
+        ShaderType::Pod(x) if *x == builtins.pod_mat3x4f => match rhs{
+            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_mat3x4f),
+            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_mat3x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_mat3x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_vec4f=>ShaderType::Pod(builtins.pod_vec3f),
+            _=>ShaderType::Error(NIL),
+        }
+        // mat4x2f * vec2f -> vec4f
+        ShaderType::Pod(x) if *x == builtins.pod_mat4x2f => match rhs{
+            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_mat4x2f),
+            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_mat4x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_mat4x2f),
+            ShaderType::Pod(x) if *x == builtins.pod_vec2f=>ShaderType::Pod(builtins.pod_vec4f),
+            _=>ShaderType::Error(NIL),
+        }
+        // mat4x3f * vec3f -> vec4f
+        ShaderType::Pod(x) if *x == builtins.pod_mat4x3f => match rhs{
+            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_mat4x3f),
+            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_mat4x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_mat4x3f),
+            ShaderType::Pod(x) if *x == builtins.pod_vec3f=>ShaderType::Pod(builtins.pod_vec4f),
+            _=>ShaderType::Error(NIL),
+        }
+        // mat4x4f * vec4f -> vec4f
+        ShaderType::Pod(x) if *x == builtins.pod_mat4x4f => match rhs{
+            ShaderType::AbstractFloat=>ShaderType::Pod(builtins.pod_mat4x4f),
+            ShaderType::AbstractInt=>ShaderType::Pod(builtins.pod_mat4x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_f32=>ShaderType::Pod(builtins.pod_mat4x4f),
+            ShaderType::Pod(x) if *x == builtins.pod_vec4f=>ShaderType::Pod(builtins.pod_vec4f),
+            ShaderType::Pod(x) if *x == builtins.pod_mat4x4f=>ShaderType::Pod(builtins.pod_mat4x4f),
             _=>ShaderType::Error(NIL),
         }
         _=>ShaderType::Error(NIL),

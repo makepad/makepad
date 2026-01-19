@@ -243,6 +243,7 @@ impl ScriptHeap{
         if object.tag.is_frozen(){
             return trap.err_frozen()
         }
+
         if let Some(ty) = object.tag.as_type_index(){
             let check = &self.type_check[ty.0 as usize];
             if let Some(type_prop) = check.props.props.get(&key_id){

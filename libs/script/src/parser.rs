@@ -1580,6 +1580,29 @@ impl ScriptParser{
             self.index += step;
         }
         
+        // Handle the last value as the script's return value, similar to function blocks
+        if self.has_pop_to_me(){
+            self.clear_pop_to_me();
+            self.push_code(Opcode::RETURN.into(), self.index.saturating_sub(1));
+        }
+        else if self.opcodes.len() > 0 {
+            // Check if last opcode already returns or is a statement that doesn't produce a value
+            let needs_nil_return = if let Some(code) = self.code_last(){
+                if let Some((opcode,_)) = code.as_opcode(){
+                    opcode != Opcode::RETURN
+                }
+                else{
+                    true
+                }
+            }
+            else{
+                true
+            };
+            if needs_nil_return{
+                self.push_code(ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL), self.index.saturating_sub(1));
+            }
+        }
+        
         //println!("{:?}", self.opcodes)
     }
 }

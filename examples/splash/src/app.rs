@@ -2,9 +2,9 @@ use makepad_draw2::*;
 
 app_main!(App); 
 script_run!{
-    use mod.std.*;
-    #(App::script_api(vm)){
-        draw_quad:{
+    use mod.std.*
+    #(App::script_component(vm)){
+        draw_quad: mod.shaders.DrawQuad{
         }
     }
 }
@@ -12,19 +12,24 @@ script_run!{
 impl App{
     fn run(vm:&mut ScriptVm)->Self{
         crate::makepad_draw2::script_run(vm);
-        App::script_run(vm, script_run)
+        App::from_script_run(vm, self::script_run)
     }
 }
 
-#[derive(Script, ScriptHook)]
-pub struct App {
-    #[script] window: WindowHandle,
-    #[script] pass: DrawPass,
-    #[script] depth_texture: Texture,
-    #[script] draw_quad: DrawQuad,
-    #[script] main_draw_list: DrawList2d,
+#[derive(Script)]
+pub struct App { 
+    #[live] window: WindowHandle,
+    #[live] pass: DrawPass,
+    #[live] depth_texture: Texture,
+    #[live] draw_quad: DrawQuad,
+    #[live] main_draw_list: DrawList2d,
 }
- 
+
+impl ScriptHook for App{
+    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){
+    }
+}
+
 impl MatchEvent for App{
     
     fn handle_startup(&mut self, cx:&mut Cx){

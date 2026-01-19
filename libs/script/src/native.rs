@@ -91,6 +91,16 @@ macro_rules! script_api{
     };
 }
 
+#[macro_export]
+macro_rules! script_pod{
+    ($vm:ident, $obj:ident, $id: ident)=>{
+        {
+            let v = $id::script_pod($vm).expect("Cant make a pod type");
+            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), &$vm.thread.trap);
+        }
+    };
+}
+
 
 #[macro_export]
 macro_rules! script_args{
