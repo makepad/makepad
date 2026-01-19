@@ -534,6 +534,16 @@ impl IosApp {
                 if let Some(ref mut app) = *app_ref {
                     if let Some(text_input_view) = app.text_input_view {
                         unsafe {
+                            // Get inputDelegate for notifications - this is critical for iOS
+                            // to know the text/cursor has changed (needed for autocorrect positioning)
+                            let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
+
+                            // Notify that text will change
+                            if input_delegate != nil {
+                                let () = msg_send![input_delegate, textWillChange: text_input_view];
+                                let () = msg_send![input_delegate, selectionWillChange: text_input_view];
+                            }
+
                             // Get or create text buffer
                             let buffer: ObjcId = *(*text_input_view).get_ivar("textBuffer");
                             let buffer = if buffer != nil {
@@ -558,6 +568,12 @@ impl IosApp {
 
                             // Set cursor position (in characters, not bytes)
                             (*text_input_view).set_ivar("cursorPosition", cursor_char_pos as i64);
+
+                            // Notify that text and selection did change
+                            if input_delegate != nil {
+                                let () = msg_send![input_delegate, selectionDidChange: text_input_view];
+                                let () = msg_send![input_delegate, textDidChange: text_input_view];
+                            }
                         }
                     }
                 }

@@ -697,8 +697,32 @@ pub fn define_text_input_view() -> *const Class {
 
             // Handle Enter/Return key specially
             if string == "\n" {
+                // Get inputDelegate for notifications
+                let input_delegate: ObjcId = *this.get_ivar("_inputDelegate");
+
+                // Notify that text will change
+                if input_delegate != nil {
+                    let () = msg_send![input_delegate, textWillChange: this as *const _ as ObjcId];
+                    let () = msg_send![input_delegate, selectionWillChange: this as *const _ as ObjcId];
+                }
+
+                // Insert newline at cursor position (not append!)
                 let buffer = get_text_buffer(this);
-                let () = msg_send![buffer, appendString: text];
+                let cursor: i64 = *this.get_ivar("cursorPosition");
+                let buffer_len: u64 = msg_send![buffer, length];
+                let insert_pos = (cursor.max(0) as u64).min(buffer_len);
+                let () = msg_send![buffer, insertString: text atIndex: insert_pos];
+
+                // Update cursor position
+                let new_cursor = cursor + 1; // newline is 1 UTF-16 code unit
+                (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", new_cursor);
+
+                // Notify that text did change
+                if input_delegate != nil {
+                    let () = msg_send![input_delegate, selectionDidChange: this as *const _ as ObjcId];
+                    let () = msg_send![input_delegate, textDidChange: this as *const _ as ObjcId];
+                }
+
                 IosApp::send_return_key();
                 return;
             }

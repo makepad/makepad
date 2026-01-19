@@ -420,7 +420,7 @@ impl Cx {
     }
 
     pub fn hide_text_ime(&mut self) {
-        self.keyboard.reset_text_ime_dismissed();
+        self.keyboard.set_text_ime_dismissed();
         self.platform_ops.push(CxOsOp::HideTextIME);
     }
 
