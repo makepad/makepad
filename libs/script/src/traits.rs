@@ -78,6 +78,54 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         }
     }
     
+    /// Builds a pod struct type from the macro-generated type reflection.
+    /// This iterates through the ScriptTypeProps in order and generates
+    /// a ScriptPodTy::Struct with fields matching the struct's layout.
+    fn script_pod(vm: &mut ScriptVm) -> Option<ScriptPodType> where Self: Sized {
+        use crate::pod::*;
+        
+        // First ensure the proto is built so type reflection is available
+        Self::script_proto(vm);
+        
+        let type_id = Self::script_type_id_static();
+        let type_check = vm.heap.registered_type(type_id)?;
+        
+        // Build pod fields from the type props
+        let mut fields = Vec::new();
+        
+        for (field_name, field_type_id) in type_check.props.iter_ordered() {
+            // Try to get the pod type for this field's type
+            if let Some(pod_type) = vm.heap.type_id_to_pod_type(field_type_id, &vm.code.builtins.pod) {
+                let pod_type_data = vm.heap.pod_type_ref(pod_type);
+                
+                fields.push(ScriptPodField {
+                    name: field_name,
+                    ty: ScriptPodTypeInline {
+                        self_ref: pod_type,
+                        data: pod_type_data.clone(),
+                    },
+                    default: pod_type_data.default,
+                });
+            } else {
+                // Field type doesn't have a corresponding pod type
+                return None;
+            }
+        }
+        
+        // Create the pod type using the centralized layout calculation
+        let pod_obj = vm.heap.new_with_proto(id!(pod_struct).into());
+        vm.heap.set_object_storage_vec2(pod_obj);
+        vm.heap.set_notproto(pod_obj);
+        
+        let pod_ty = ScriptPodTy::new_struct(fields);
+        
+        let pt = vm.heap.new_pod_type(pod_obj, None, pod_ty, NIL);
+        vm.heap.set_object_pod_type(pod_obj, pt);
+        vm.heap.freeze(pod_obj);
+        
+        Some(pt)
+    }
+    
     fn script_from_dirty(vm:&mut ScriptVm, object:ScriptValue, id:LiveId)->Option<Self> where Self:Sized{
         if let Some(value) = vm.heap.value_apply_if_dirty(object, id.into()){
             Some(ScriptNew::script_from_value(vm, value))
@@ -95,7 +143,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     fn script_type_id_static()->ScriptTypeId{ ScriptTypeId::of::<Self>()}
     fn script_new(vm:&mut ScriptVm)->Self;
     
-    fn script_run(vm:&mut ScriptVm, f:fn(&mut ScriptVm)->ScriptValue)->Self where Self:Sized{
+    fn from_script_run(vm:&mut ScriptVm, f:fn(&mut ScriptVm)->ScriptValue)->Self where Self:Sized{
         let value = f(vm);
         Self::script_from_value(vm, value)
     }

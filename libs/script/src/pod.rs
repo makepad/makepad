@@ -326,6 +326,51 @@ impl ScriptPodTy{
             _ => false
         }
     }
+    
+    /// Calculates the struct layout (align_of and size_of) from a slice of fields.
+    /// Returns (align_of, size_of) tuple.
+    /// 
+    /// The alignment is the maximum alignment of all fields.
+    /// The size is calculated by walking through fields with proper alignment,
+    /// then aligning the final size to the struct alignment.
+    pub fn calculate_struct_layout(fields: &[ScriptPodField]) -> (usize, usize) {
+        // Calculate max alignment from all field types
+        let mut align_of = 0usize;
+        for field in fields {
+            align_of = align_of.max(field.ty.data.ty.align_of());
+        }
+        
+        // Calculate size by walking through fields with proper alignment
+        let mut offset_of = 0usize;
+        for field in fields {
+            let field_align = field.ty.data.ty.align_of();
+            let field_size = field.ty.data.ty.size_of();
+            
+            // Align the offset to field alignment
+            let rem = offset_of % field_align;
+            if rem != 0 {
+                offset_of += field_align - rem;
+            }
+            
+            offset_of += field_size;
+        }
+        
+        // Align final size to struct alignment
+        if align_of > 0 {
+            let rem = offset_of % align_of;
+            if rem != 0 {
+                offset_of += align_of - rem;
+            }
+        }
+        
+        (align_of, offset_of)
+    }
+    
+    /// Creates a new Struct variant with layout calculated from fields.
+    pub fn new_struct(fields: Vec<ScriptPodField>) -> Self {
+        let (align_of, size_of) = Self::calculate_struct_layout(&fields);
+        Self::Struct { align_of, size_of, fields }
+    }
 }
 
 #[derive(Debug, Default)]

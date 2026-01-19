@@ -4,6 +4,7 @@ use crate::heap::*;
 use crate::trap::*;
 use crate::mod_pod::*;
 use crate::pod::*;
+use std::fmt::Write;
 
 impl ScriptHeap{
     
@@ -75,6 +76,69 @@ impl ScriptHeap{
         if ty.name.is_none(){
             ty.name = Some(name);
         }
+    }
+    
+    /// Maps a Rust TypeId to its corresponding ScriptPodType.
+    /// This handles primitive types (f32, u32, i32, bool, f64),
+    /// vector types (Vec2f, Vec3f, Vec4f), matrix types (Mat4f),
+    /// and looks up registered struct types that have pod representations.
+    pub fn type_id_to_pod_type(&self, type_id: crate::traits::ScriptTypeId, builtins: &ScriptPodBuiltins) -> Option<ScriptPodType> {
+        use std::any::TypeId;
+        use makepad_math::{Vec2f, Vec3f, Vec4f, Mat4f, Quat};
+        
+        // Check primitive types
+        if type_id == TypeId::of::<f32>() {
+            return Some(builtins.pod_f32);
+        }
+        if type_id == TypeId::of::<f64>() {
+            return Some(builtins.pod_f32); // f64 maps to f32 in pod
+        }
+        if type_id == TypeId::of::<u32>() {
+            return Some(builtins.pod_u32);
+        }
+        if type_id == TypeId::of::<i32>() {
+            return Some(builtins.pod_i32);
+        }
+        if type_id == TypeId::of::<bool>() {
+            return Some(builtins.pod_bool);
+        }
+        
+        // Check vector types (f32)
+        if type_id == TypeId::of::<Vec2f>() {
+            return Some(builtins.pod_vec2f);
+        }
+        if type_id == TypeId::of::<Vec3f>() {
+            return Some(builtins.pod_vec3f);
+        }
+        if type_id == TypeId::of::<Vec4f>() {
+            return Some(builtins.pod_vec4f);
+        }
+        
+        // Check matrix types (f32)
+        if type_id == TypeId::of::<Mat4f>() {
+            return Some(builtins.pod_mat4x4f);
+        }
+        
+        // Quat has same layout as Vec4f (x, y, z, w)
+        if type_id == TypeId::of::<Quat>() {
+            return Some(builtins.pod_vec4f);
+        }
+        
+        // Check if this type has a registered ScriptTypeCheck with a pod type
+        if let Some(type_index) = self.type_index.get(&type_id) {
+            let type_check = &self.type_check[type_index.0 as usize];
+            if let Some(ref object) = type_check.object {
+                // Check if the proto object has a pod type
+                if let Some(proto_obj) = object.proto.as_object() {
+                    let obj_data = &self.objects[proto_obj.index as usize];
+                    if let Some(pod_type) = obj_data.tag.as_pod_type() {
+                        return Some(pod_type);
+                    }
+                }
+            }
+        }
+        
+        None
     }
         
     fn pod_type_inline(&self, val:ScriptValue, builtins:&ScriptPodBuiltins)->Option<ScriptPodTypeInline>{
@@ -216,11 +280,9 @@ impl ScriptHeap{
                     // alright lets build a struct
                     let mut fields = Vec::new();
                     let mut methods = Vec::new();
-                    let mut align_of = 0;
                     for kv in kvs.iter().rev(){
                         if let Some(ty) = self.pod_type_inline(kv.value, builtins){
                             if let Some(name) = kv.key.as_id(){
-                                align_of = align_of.max(ty.data.ty.align_of());
                                 fields.push(ScriptPodField{
                                     name,
                                     ty,
@@ -239,29 +301,9 @@ impl ScriptHeap{
                         
                         trap.err_pod_field_not_pod();
                     }
-                                        
-                    let mut offset_of = 0;
-                    for field in &fields{
-                        let align_bytes = field.ty.data.ty.align_of();
-                        let size_bytes =  field.ty.data.ty.size_of();
-                        let rem = offset_of % align_bytes;
-                        if rem != 0{ // align offset
-                            offset_of += align_bytes - rem
-                        }
-                                                
-                        offset_of += size_bytes;
-                    }
-                    // align final offset
-                    let rem = offset_of % align_of;
-                    if rem != 0{
-                        offset_of += align_of - rem
-                    }
-                                        
-                    let pt = self.new_pod_type(ptr, None, ScriptPodTy::Struct{
-                        align_of,
-                        size_of: offset_of,
-                        fields,
-                    }, NIL);
+                    
+                    // Use centralized layout calculation
+                    let pt = self.new_pod_type(ptr, None, ScriptPodTy::new_struct(fields), NIL);
                     self.set_object_pod_type(ptr, pt);
                     self.set_notproto(ptr);
                     self.freeze(ptr);
@@ -1440,40 +1482,40 @@ impl ScriptHeap{
     
     
     
-    pub fn pod_debug_print(&self, pod_type:&ScriptPodTypeData, offset_of: usize, data:&[u32]){
+    pub fn pod_debug(&self, out:&mut String, pod_type:&ScriptPodTypeData, offset_of: usize, data:&[u32]){
         // alright we have a range of data, and a podtype we should be able to print it
         match &pod_type.ty{
             ScriptPodTy::Void=>{
-                print!("ScriptPodTy::Void");
+                write!(out, "ScriptPodTy::Void").ok();
             }
             ScriptPodTy::ArrayBuilder=>{
-                print!("ScriptPodTy::ArrayBuilder");
+                write!(out, "ScriptPodTy::ArrayBuilder").ok();
             }
             ScriptPodTy::UndefinedStruct =>{
-                print!("ScriptPodTy::UndefinedStruct");
+                write!(out, "ScriptPodTy::UndefinedStruct").ok();
             }
             ScriptPodTy::Bool=>{
-                print!("bool:{}", if data[offset_of>>2]!=0{true}else{false})
+                write!(out, "bool:{}", if data[offset_of>>2]!=0{true}else{false}).ok();
             }
             ScriptPodTy::U32 | ScriptPodTy::AtomicU32=>{
-                print!("u32:{}", data[offset_of>>2])
+                write!(out, "u32:{}", data[offset_of>>2]).ok();
             }
             ScriptPodTy::I32 |ScriptPodTy::AtomicI32=>{
-                print!("i32:{}", data[offset_of>>2] as i32)
+                write!(out, "i32:{}", data[offset_of>>2] as i32).ok();
             }
             ScriptPodTy::F32=>{
-                print!("f32:{}", f32::from_bits(data[offset_of>>2]))
+                write!(out, "f32:{}", f32::from_bits(data[offset_of>>2])).ok();
             }
             ScriptPodTy::F16=>{
                 if offset_of&3>=2{
-                    print!("f16:{}", f16_to_f32((data[offset_of>>2]>>16) as u16))
+                    write!(out, "f16:{}", f16_to_f32((data[offset_of>>2]>>16) as u16)).ok();
                 }
                 else{
-                    print!("f16:{}", f16_to_f32(data[offset_of>>2] as u16))
+                    write!(out, "f16:{}", f16_to_f32(data[offset_of>>2] as u16)).ok();
                 }
             }
             ScriptPodTy::Vec(vt)=>{
-                print!("{}(", vt.name());
+                write!(out, "{}(", vt.name()).ok();
                 let mut offset_of = offset_of;
                 for i in 0..vt.dims(){
                     if i>0{
@@ -1481,41 +1523,41 @@ impl ScriptHeap{
                     }
                     if vt.elem_size() == 2{
                         if offset_of&3>=2{
-                            print!("{}",f16_to_f32((data[offset_of>>2]>>16) as u16));
+                            write!(out, "{}",f16_to_f32((data[offset_of>>2]>>16) as u16)).ok();
                         }
                         else{
-                            print!("{}",f16_to_f32(data[offset_of>>2] as u16));
+                            write!(out, "{}",f16_to_f32(data[offset_of>>2] as u16)).ok();
                         }
                     }
                     else{
-                        print!("{}",f32::from_bits(data[offset_of>>2]));
+                        write!(out, "{}",f32::from_bits(data[offset_of>>2])).ok();
                     }
                     offset_of += vt.elem_size();
                 }
-                print!(")");
+                write!(out, ")").ok();
             }
             ScriptPodTy::Mat(mt)=>{
-                print!("{}(", mt.name());
+               write!(out, "{}(", mt.name()).ok();
                 let (dim_x,dim_y) = mt.dims();
                 let mut offset_of = offset_of;
                 for _y in 0..dim_y{
-                    print!("[");
+                    write!(out, "[").ok();
                     for _x in 0..dim_x{
-                        print!("{} ",f32::from_bits(data[offset_of>>2]));
+                       write!(out, "{} ",f32::from_bits(data[offset_of>>2])).ok();
                         offset_of += mt.elem_size();
                     }
-                    print!("]")
+                    write!(out, "]").ok();
                 }
-                print!(")")
+                write!(out, ")").ok();
             }
             ScriptPodTy::Struct{fields, ..}=>{
-                print!("struct{{");
+               write!(out, "struct{{").ok();
                 // keep a counter
                 let mut offset_of = offset_of;
                 let mut first = true;
                 for field in fields{
                     if !first{
-                        print!(", ")
+                        write!(out, ", ").ok();
                     }
                     first = false;
                     // align the field offset
@@ -1525,22 +1567,22 @@ impl ScriptHeap{
                     if rem != 0{ // align offset
                         offset_of += align_of - rem
                     }
-                    print!("{}:",field.name);
-                    self.pod_debug_print(&field.ty.data, offset_of, data);
+                    write!(out, "{}:",field.name).ok();
+                    self.pod_debug(out, &field.ty.data, offset_of, data);
                     offset_of += size_of;
                 }
-                print!("}}");
+                write!(out, "}}").ok();
             }
             ScriptPodTy::Enum{..}=>{
             }
             ScriptPodTy::FixedArray{len, ty, ..}=>{
-                print!("array(");
+                write!(out, "array(").ok();
                 
                 let mut offset_of = offset_of;
                 let mut first = true;
                 for i in 0..*len{
                     if !first{
-                        print!(", ")
+                        write!(out, ", ").ok();
                     }
                     first = false;
                     // align the field offset
@@ -1550,21 +1592,21 @@ impl ScriptHeap{
                     if rem != 0{ // align offset
                         offset_of += align_of - rem
                     }
-                    print!("{}:",i);
-                    self.pod_debug_print(&ty.data, offset_of, data);
+                    write!(out, "{}:",i).ok();
+                    self.pod_debug(out, &ty.data, offset_of, data);
                     offset_of += size_of;
                 }
-                print!(")");
+               write!(out, ")").ok();
             }
             ScriptPodTy::VariableArray{ty,..}=>{
-                print!("var_array(");
+               write!(out, "var_array(").ok();
                                 
                 let mut offset_of = offset_of;
                 let mut first = true;
                 let start = offset_of;
                 for i in start..data.len()<<2{
                     if !first{
-                        print!(", ")
+                        write!(out, ", ").ok();
                     }
                     first = false;
                     // align the field offset
@@ -1574,11 +1616,11 @@ impl ScriptHeap{
                     if rem != 0{ // align offset
                         offset_of += align_of - rem
                     }
-                    print!("{}:",(i - start)/ty.data.ty.align_of());
-                    self.pod_debug_print(&ty.data, i, data);
+                    write!(out, "{}:",(i - start)/ty.data.ty.align_of()).ok();
+                    self.pod_debug(out, &ty.data, i, data);
                     offset_of += size_of;
                 }
-                print!(")");
+                write!(out, ")").ok();
             }
         }
     }

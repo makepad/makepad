@@ -8,9 +8,9 @@ use crate::draw_pass::DrawPassUniforms;
 
 pub fn define_draw_module(vm:&mut ScriptVm){
     let draw = vm.new_module(id!(draw));
-    script_api!(vm, draw, DrawCallUniforms);
-    script_api!(vm, draw, DrawListUniforms);
-    script_api!(vm, draw, DrawPassUniforms);
+    script_pod!(vm, draw, DrawCallUniforms);
+    script_pod!(vm, draw, DrawListUniforms);
+    script_pod!(vm, draw, DrawPassUniforms);
     // alright so we need a 'struct' for geometry_quad
     
     // alright render. lets put some basics in here
