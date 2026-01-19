@@ -10,7 +10,7 @@ use crate::{
     event::WindowGeom,
     cx::Cx,
     draw_shader::CxDrawShaderMapping,
-    pass::{PassClearColor, PassClearDepth, PassId},
+    draw_pass::{PassClearColor, PassClearDepth, PassId},
     window::WindowId,
     texture::{ 
         TextureFormat,

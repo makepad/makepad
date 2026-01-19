@@ -10,7 +10,7 @@ use {
                     }, macos_event::MacosEvent, macos_window::MacosWindow
                 }, url_session::AppleHttpRequests, apple_game_input::AppleGameInput,
             }, apple_media::CxAppleMedia, cx_native::EventFlow, metal::{DrawPassMode, MetalCx}, metal_xpc::start_xpc_service
-        }, pass::CxPassParent, permission::{Permission}, thread::SignalToUI, window::{CxWindowPool, WindowId}
+        }, draw_pass::CxDrawPassParent, permission::{Permission}, thread::SignalToUI, window::{CxWindowPool, WindowId}
     }, makepad_objc_sys::{
         msg_send, objc_block, sel, sel_impl
     }, std::{
@@ -156,10 +156,10 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         let time_now = with_macos_app(|app| app.time_now() as f32);
-        for pass_id in &passes_todo {
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+        for draw_pass_id in &passes_todo {
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
                         //let dpi_factor = metal_window.window_geom.dpi_factor;
                         metal_window.resize_core_animation_layer(&metal_cx);
@@ -167,23 +167,23 @@ impl Cx {
                         if drawable == nil {
                             return
                         }
-                        self.passes[*pass_id].set_time(time_now);
+                        self.passes[*draw_pass_id].set_time(time_now);
                         if metal_window.is_resizing {
-                            self.draw_pass(*pass_id, metal_cx, DrawPassMode::Resizing(drawable));
+                            self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Resizing(drawable));
                         }
                         else {
-                            self.draw_pass(*pass_id, metal_cx, DrawPassMode::Drawable(drawable));
+                            self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Drawable(drawable));
                         }
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.passes[*pass_id].set_time(with_macos_app(|app| app.time_now() as f32));
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                    self.passes[*draw_pass_id].set_time(with_macos_app(|app| app.time_now() as f32));
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 },
-                CxPassParent::None => {
-                    self.passes[*pass_id].set_time(with_macos_app(|app| app.time_now() as f32));
-                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
+                CxDrawPassParent::None => {
+                    self.passes[*draw_pass_id].set_time(with_macos_app(|app| app.time_now() as f32));
+                    self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
         }

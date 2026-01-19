@@ -11,7 +11,7 @@ use crate::egl_sys::NativeDisplayType;
 use crate::opengl_cx::OpenglCx;
 use crate::wayland::wayland_app::WaylandApp;
 use super::opengl_wayland::WaylandWindow;
-use crate::{egl_sys, Area, Cx, CxOsOp, CxPassParent, Event, KeyModifiers, MouseMoveEvent, SignalToUI, WindowClosedEvent, WindowGeomChangeEvent};
+use crate::{egl_sys, Area, Cx, CxOsOp, CxDrawPassParent, Event, KeyModifiers, MouseMoveEvent, SignalToUI, WindowClosedEvent, WindowGeomChangeEvent};
 use crate::makepad_live_id::*;
 use wayland_client::protocol::{wl_keyboard, wl_pointer};
 use wayland_client::{Connection, Proxy};
@@ -366,31 +366,31 @@ impl WaylandCx {
         let mut passes_todo = Vec::new();
         cx.compute_pass_repaint_order(&mut passes_todo);
         cx.repaint_id += 1;
-        for pass_id in &passes_todo {
+        for draw_pass_id in &passes_todo {
             let now = state.time_now();
             let windows = &mut state.windows;
-            cx.passes[*pass_id].set_time(now as f32);
-            let parent = cx.passes[*pass_id].parent.clone();
+            cx.passes[*draw_pass_id].set_time(now as f32);
+            let parent = cx.passes[*draw_pass_id].parent.clone();
             match parent {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     if let Some(window) = windows.iter_mut().find( | w | w.window_id == window_id) {
                         window.resize_buffers();
                         let pix_width = window.window_geom.inner_size.x * window.window_geom.dpi_factor;
                         let pix_height = window.window_geom.inner_size.y * window.window_geom.dpi_factor;
 
-                        cx.draw_pass_to_window(*pass_id, window.egl_surface, pix_width, pix_height);
+                        cx.draw_pass_to_window(*draw_pass_id, window.egl_surface, pix_width, pix_height);
                         window.wl_egl_surface.resize(pix_width as i32, pix_height as i32, 0, 0);
                         window.viewport.set_source(-1., -1., -1., -1.);
                         window.viewport.set_destination(window.window_geom.inner_size.x as i32, window.window_geom.inner_size.y as i32);
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    cx.draw_pass_to_texture(*pass_id, None);
+                    cx.draw_pass_to_texture(*draw_pass_id, None);
                 },
-                CxPassParent::None => {
-                    cx.draw_pass_to_texture(*pass_id, None);
+                CxDrawPassParent::None => {
+                    cx.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
         }

@@ -23,11 +23,11 @@ use {
             WindowGeom,
         },
         window::CxWindowPool,
-        pass::CxPassParent,
+        draw_pass::CxDrawPassParent,
         cx::{Cx, OsType,},
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
-        pass::{PassClearColor, PassClearDepth, PassId},
+        draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
     }
 };
 
@@ -207,36 +207,36 @@ impl Cx {
     
     pub fn draw_pass_to_fullscreen(
         &mut self,
-        pass_id: PassId,
+        draw_pass_id: DrawPassId,
         direct_app: &mut DirectApp,
     ) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
         
-        self.setup_render_pass(pass_id);
+        self.setup_render_pass(draw_pass_id);
         
         // keep repainting in a loop
-        //self.passes[pass_id].paint_dirty = false;
+        //self.passes[draw_pass_id].paint_dirty = false;
         
         unsafe {
             direct_app.egl.make_current();
             (gl.glViewport)(0, 0, direct_app.drm.width as i32, direct_app.drm.height as i32);
         }
         
-        let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            self.passes[pass_id].clear_color
+        let clear_color = if self.passes[draw_pass_id].color_textures.len() == 0 {
+            self.passes[draw_pass_id].clear_color
         }
         else {
-            match self.passes[pass_id].color_textures[0].clear_color {
-                PassClearColor::InitWith(color) => color,
-                PassClearColor::ClearWith(color) => color
+            match self.passes[draw_pass_id].color_textures[0].clear_color {
+                DrawPassClearColor::InitWith(color) => color,
+                DrawPassClearColor::ClearWith(color) => color
             }
         };
-        let clear_depth = match self.passes[pass_id].clear_depth {
-            PassClearDepth::InitWith(depth) => depth,
-            PassClearDepth::ClearWith(depth) => depth
+        let clear_depth = match self.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::InitWith(depth) => depth,
+            DrawPassClearDepth::ClearWith(depth) => depth
         };
         
-        if !self.passes[pass_id].dont_clear {
+        if !self.passes[draw_pass_id].dont_clear {
             unsafe {
                 (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
                 (gl.glClearDepthf)(clear_depth as f32);
@@ -247,10 +247,10 @@ impl Cx {
         Self::set_default_depth_and_blend_mode();
         
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
         
         self.render_view(
-            pass_id,
+            draw_pass_id,
             draw_list_id,
             &mut zbias,
             zbias_step,
@@ -266,18 +266,18 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(direct_app.timers.time_now() as f32);
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(_window_id) => {
-                    self.draw_pass_to_fullscreen(*pass_id, direct_app);
+        for draw_pass_id in &passes_todo {
+            self.passes[*draw_pass_id].set_time(direct_app.timers.time_now() as f32);
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(_window_id) => {
+                    self.draw_pass_to_fullscreen(*draw_pass_id, direct_app);
                 }
-                CxPassParent::Pass(_) => {
-                    self.draw_pass_to_magic_texture(*pass_id);
+                CxDrawPassParent::DrawPass(_) => {
+                    self.draw_pass_to_magic_texture(*draw_pass_id);
                 },
-                CxPassParent::None => {
-                    self.draw_pass_to_magic_texture(*pass_id);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_magic_texture(*draw_pass_id);
                 }
             }
         }

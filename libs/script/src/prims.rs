@@ -520,6 +520,61 @@ script_primitive!(
     }
 );
 
+script_primitive!(
+    makepad_math::Mat4f, 
+    fn script_new(_vm:&mut ScriptVm)->Self{Default::default()},
+    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{
+        if value.is_number(){return true}
+        if let Some(pod) = value.as_pod(){
+            let pod_data = &heap.pods[pod.index as usize];
+            let pod_type = &heap.pod_types[pod_data.ty.index as usize];
+            if let ScriptPodTy::Mat(m) = &pod_type.ty{
+                 return m.dims() == (4, 4)
+            }
+        }
+        false
+    },
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        if let Some(v) = value.as_f32(){
+             for i in 0..16 {
+                 self.v[i] = v;
+             }
+             return
+        }
+        if let Some(pod) = value.as_pod(){
+             let pod_data = &vm.heap.pods[pod.index as usize];
+             let pod_type = &vm.heap.pod_types[pod_data.ty.index as usize];
+             if let ScriptPodTy::Mat(m) = &pod_type.ty{
+                 if m.dims() == (4, 4) {
+                     match m {
+                        ScriptPodMat::Mat4x4f => {
+                            for i in 0..16 {
+                                self.v[i] = f32::from_bits(pod_data.data[i]);
+                            }
+                        },
+                        _ => ()
+                     }
+                     return
+                 }
+             }
+        }
+        let val = vm.cast_to_f64(value) as f32;
+        if !val.is_nan(){
+            for i in 0..16 {
+                self.v[i] = val;
+            }
+        }
+    },
+    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{
+        let pod = vm.heap.new_pod(vm.code.builtins.pod.pod_mat4x4f);
+        let pod_data = &mut vm.heap.pods[pod.index as usize];
+        for i in 0..16 {
+            pod_data.data[i] = self.v[i].to_bits();
+        }
+        pod.into()
+    }
+);
+
 // Option
 
 

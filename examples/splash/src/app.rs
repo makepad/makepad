@@ -4,58 +4,28 @@ app_main!(App);
 script_run!{
     use mod.std.*;
     #(App::script_api(vm)){
+        draw_quad:{
+        }
     }
 }
 
 impl App{
     fn run(vm:&mut ScriptVm)->Self{
         crate::makepad_draw2::script_run(vm);
-        let r = App::script_run(vm, script_run);
-        r
+        App::script_run(vm, script_run)
     }
 }
 
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[script] window: WindowHandle,
-    #[script] pass: Pass,
+    #[script] pass: DrawPass,
     #[script] depth_texture: Texture,
-    #[rust] smooth_throttle: f32,
+    #[script] draw_quad: DrawQuad,
     #[script] main_draw_list: DrawList2d,
 }
  
 impl MatchEvent for App{
-    fn handle_timer(&mut self, cx:&mut Cx, _ev: &TimerEvent){
-        let limiter: f32 = 0.7;
-        for state in cx.game_input_states_mut(){
-            match state{
-                GameInputState::Gamepad(gp)=>{
-                    let steer: f32 = gp.right_stick.x + gp.left_stick.x;
-                    let throttle: f32 = ((gp.left_trigger * -1.0) + gp.right_trigger) * limiter;
-                    let smooth = 0.95;
-                    self.smooth_throttle = smooth * self.smooth_throttle + (1.0 - smooth) * throttle;
-                    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-                        let mut data = [0u8; 8];
-                        data[0..4].copy_from_slice(&steer.to_le_bytes());
-                        data[4..8].copy_from_slice(&throttle.to_le_bytes());
-                        let _ = socket.send_to(&data, "10.0.0.134:5001");
-                    }
-                }
-                GameInputState::Wheel(w)=>{
-                    let steer: f32 = (w.steering / 0.12).max(-1.0).min(1.0);
-                    w.steer_force = (steer*0.7).powf(3.0).max(-1.0).min(1.0);
-                    let throttle: f32 = ((w.brake * -1.0) + w.throttle) * limiter;
-                    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-                        let mut data = [0u8; 8];
-                        data[0..4].copy_from_slice(&steer.to_le_bytes());
-                        data[4..8].copy_from_slice(&throttle.to_le_bytes());
-                        let _ = socket.send_to(&data, "10.0.0.134:5001");
-                    }
-                    break;
-                }
-            }
-        }
-    }
     
     fn handle_startup(&mut self, cx:&mut Cx){
         self.window.set_pass(cx, &self.pass);
@@ -63,9 +33,8 @@ impl MatchEvent for App{
             size: TextureSize::Auto,
             initial: true,
         });
-        self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
+        self.pass.set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
         self.pass.set_window_clear_color(cx, vec4(0.0, 0.0, 1.0, 0.0));
-        cx.start_interval(0.01);
     }
 
     fn handle_draw_2d(&mut self, cx: &mut Cx2d){
@@ -78,6 +47,8 @@ impl MatchEvent for App{
 
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
+        
+        self.draw_quad.draw_abs(cx, rect(10.,10.,100.,100.));
         
         cx.end_pass_sized_turtle();
         self.main_draw_list.end(cx);

@@ -45,11 +45,11 @@ pub use crate::{
     cx_draw::CxDraw,
     cx_2d::Cx2d,
     cx_3d::Cx3d,
-    //shader::{
+    shader::{
         //draw_shape::{DrawShape, Shape, Fill},
-        //draw_quad::DrawQuad,
+        draw_quad::DrawQuad,
         //draw_text::DrawText,
-    //},
+    },
     /*
     geometry::{
         GeometryGen,
@@ -59,6 +59,7 @@ pub use crate::{
 
 pub fn script_run(vm:&mut ScriptVm)->ScriptValue{
     vm.heap.new_module(id!(shaders));
+    crate::geometry::script_run(vm);
     crate::shader::draw_quad::script_run(vm);
     NIL
 }

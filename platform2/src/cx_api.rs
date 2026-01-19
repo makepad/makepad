@@ -13,7 +13,7 @@ use {
         makepad_live_id::*,
         event::xr::XrAnchor,
         makepad_math::{Vec2d, Rect},
-        pass::{CxPassParent, CxPassRect, PassId},
+        draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
         texture::Texture,
         window::WindowId,
         dvec2,
@@ -451,20 +451,20 @@ impl Cx {
 
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f64 {
         if let Some(draw_list_id) = area.draw_list_id() {
-            let pass_id = self.draw_lists[draw_list_id].pass_id.unwrap();
-            return self.get_delegated_dpi_factor(pass_id);
+            let draw_pass_id = self.draw_lists[draw_list_id].draw_pass_id.unwrap();
+            return self.get_delegated_dpi_factor(draw_pass_id);
         }
         return 1.0;
     }
 
-    pub fn get_pass_window_id(&self, pass_id: PassId) -> Option<WindowId> {
-         let mut pass_id_walk = pass_id;
+    pub fn get_pass_window_id(&self, draw_pass_id: DrawPassId) -> Option<WindowId> {
+         let mut pass_id_walk = draw_pass_id;
          for _ in 0..25 {
              match self.passes[pass_id_walk].parent {
-                 CxPassParent::Window(window_id) => {
+                 CxDrawPassParent::Window(window_id) => {
                      return Some(window_id)
                  }
-                 CxPassParent::Pass(next_pass_id) => {
+                 CxDrawPassParent::DrawPass(next_pass_id) => {
                      pass_id_walk = next_pass_id;
                  }
                  _ => {
@@ -475,17 +475,17 @@ impl Cx {
          None
      }
 
-    pub fn get_delegated_dpi_factor(&mut self, pass_id: PassId) -> f64 {
-        let mut pass_id_walk = pass_id;
+    pub fn get_delegated_dpi_factor(&mut self, draw_pass_id: DrawPassId) -> f64 {
+        let mut pass_id_walk = draw_pass_id;
         for _ in 0..25 {
             match self.passes[pass_id_walk].parent {
-                CxPassParent::Window(window_id) => {
+                CxDrawPassParent::Window(window_id) => {
                     if !self.windows[window_id].is_created {
                         return 1.0;
                     }
                     return self.windows[window_id].window_geom.dpi_factor;
                 }
-                CxPassParent::Pass(next_pass_id) => {
+                CxDrawPassParent::DrawPass(next_pass_id) => {
                     pass_id_walk = next_pass_id;
                 }
                 _ => {
@@ -496,14 +496,14 @@ impl Cx {
         1.0
     }
 
-    pub fn redraw_pass_and_parent_passes(&mut self, pass_id: PassId) {
-        let mut walk_pass_id = pass_id;
+    pub fn redraw_pass_and_parent_passes(&mut self, draw_pass_id: DrawPassId) {
+        let mut walk_pass_id = draw_pass_id;
         loop {
             if let Some(main_list_id) = self.passes[walk_pass_id].main_draw_list_id {
                 self.redraw_list_and_children(main_list_id);
             }
             match self.passes[walk_pass_id].parent.clone() {
-                CxPassParent::Pass(next_pass_id) => {
+                CxDrawPassParent::DrawPass(next_pass_id) => {
                     walk_pass_id = next_pass_id;
                 }
                 _ => {
@@ -513,30 +513,30 @@ impl Cx {
         }
     }
 
-    pub fn get_pass_rect(&self, pass_id: PassId, dpi: f64) -> Option<Rect> {
-        match self.passes[pass_id].pass_rect {
-            Some(CxPassRect::Area(area)) => {
+    pub fn get_pass_rect(&self, draw_pass_id: DrawPassId, dpi: f64) -> Option<Rect> {
+        match self.passes[draw_pass_id].pass_rect {
+            Some(CxDrawPassRect::Area(area)) => {
                 let rect = area.rect(self);
                 Some(Rect {
                     pos: (rect.pos * dpi).floor() / dpi,
                     size: (rect.size * dpi).ceil() / dpi,
                 })
             }
-            Some(CxPassRect::AreaOrigin(area, origin)) => {
+            Some(CxDrawPassRect::AreaOrigin(area, origin)) => {
                 let rect = area.rect(self);
                 Some(Rect {
                     pos: origin,
                     size: (rect.size * dpi).ceil() / dpi,
                 })
             }
-            /*Some(CxPassRect::ScaledArea(area, scale)) => {
+            /*Some(CxDrawPassRect::ScaledArea(area, scale)) => {
                 let rect = area.rect(self);
                 Some(Rect {
                     pos: (rect.pos * dpi).floor() / dpi,
                     size: scale * (rect.size * dpi).ceil() / dpi,
                 })
             }*/
-            Some(CxPassRect::Size(size)) => Some(Rect {
+            Some(CxDrawPassRect::Size(size)) => Some(Rect {
                 pos: Vec2d::default(),
                 size: (size * dpi).ceil() / dpi,
             }),
@@ -544,36 +544,36 @@ impl Cx {
         }
     }
 
-    pub fn get_pass_name(&self, pass_id: PassId) -> &str {
-        &self.passes[pass_id].debug_name
+    pub fn get_pass_name(&self, draw_pass_id: DrawPassId) -> &str {
+        &self.passes[draw_pass_id].debug_name
     }
 
-    pub fn repaint_pass(&mut self, pass_id: PassId) {
-        let cxpass = &mut self.passes[pass_id];
+    pub fn repaint_pass(&mut self, draw_pass_id: DrawPassId) {
+        let cxpass = &mut self.passes[draw_pass_id];
         cxpass.paint_dirty = true;
     }
 
-    pub fn repaint_pass_and_child_passes(&mut self, pass_id: PassId) {
-        let cxpass = &mut self.passes[pass_id];
+    pub fn repaint_pass_and_child_passes(&mut self, draw_pass_id: DrawPassId) {
+        let cxpass = &mut self.passes[draw_pass_id];
         cxpass.paint_dirty = true;
         for sub_pass_id in self.passes.id_iter() {
-            if let CxPassParent::Pass(dep_pass_id) = self.passes[sub_pass_id].parent.clone() {
-                if dep_pass_id == pass_id {
+            if let CxDrawPassParent::DrawPass(dep_pass_id) = self.passes[sub_pass_id].parent.clone() {
+                if dep_pass_id == draw_pass_id {
                     self.repaint_pass_and_child_passes(sub_pass_id);
                 }
             }
         }
     }
 
-    pub fn redraw_pass_and_child_passes(&mut self, pass_id: PassId) {
-        let cxpass = &self.passes[pass_id];
+    pub fn redraw_pass_and_child_passes(&mut self, draw_pass_id: DrawPassId) {
+        let cxpass = &self.passes[draw_pass_id];
         if let Some(main_list_id) = cxpass.main_draw_list_id {
             self.redraw_list_and_children(main_list_id);
         }
         // lets redraw all subpasses as well
         for sub_pass_id in self.passes.id_iter() {
-            if let CxPassParent::Pass(dep_pass_id) = self.passes[sub_pass_id].parent.clone() {
-                if dep_pass_id == pass_id {
+            if let CxDrawPassParent::DrawPass(dep_pass_id) = self.passes[sub_pass_id].parent.clone() {
+                if dep_pass_id == draw_pass_id {
                     self.redraw_pass_and_child_passes(sub_pass_id);
                 }
             }

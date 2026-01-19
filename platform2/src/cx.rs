@@ -37,7 +37,7 @@ use {
         window::CxWindowPool,
         draw_list::CxDrawListPool,
         web_socket::WebSocket,
-        pass::CxPassPool,
+        draw_pass::CxDrawPassPool,
         texture::{CxTexturePool,TextureFormat,Texture,TextureUpdated},
         geometry::{
             Geometry,
@@ -64,7 +64,7 @@ pub struct Cx {
     pub (crate) cpu_cores: usize,
     pub null_texture: Texture,
     pub windows: CxWindowPool,
-    pub passes: CxPassPool,
+    pub passes: CxDrawPassPool,
     pub draw_lists: CxDrawListPool,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,

@@ -21,7 +21,7 @@ use {
         thread::SignalToUI,
         event::*,
         permission::{PermissionResult, PermissionStatus},
-        pass::CxPassParent,
+        draw_pass::CxDrawPassParent,
         cx::{Cx, OsType,LinuxWindowParams}, 
         os::cx_stdin::PollTimers,
         gpu_info::GpuPerformance,
@@ -267,15 +267,15 @@ impl X11Cx {
             cx.compute_pass_repaint_order(&mut passes_todo);
             cx.repaint_id += 1;
         }
-        for pass_id in &passes_todo {
+        for draw_pass_id in &passes_todo {
             let parent = {
                 let mut cx = self.cx.borrow_mut();
-                cx.passes[*pass_id].set_time(get_xlib_app_global().time_now() as f32);
-                cx.passes[*pass_id].parent.clone()
+                cx.passes[*draw_pass_id].set_time(get_xlib_app_global().time_now() as f32);
+                cx.passes[*draw_pass_id].parent.clone()
             };
             match parent {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
                         //let dpi_factor = window.window_geom.dpi_factor;
                         window.resize_buffers();
@@ -285,17 +285,17 @@ impl X11Cx {
                         let pix_width = window.window_geom.inner_size.x * window.window_geom.dpi_factor;
                         let pix_height = window.window_geom.inner_size.y * window.window_geom.dpi_factor;
                         let mut cx = self.cx.borrow_mut();
-                        cx.draw_pass_to_window(*pass_id, egl_surface, pix_width, pix_height);
+                        cx.draw_pass_to_window(*draw_pass_id, egl_surface, pix_width, pix_height);
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                     let mut cx = self.cx.borrow_mut();
-                    cx.draw_pass_to_texture(*pass_id, None);
+                    cx.draw_pass_to_texture(*draw_pass_id, None);
                 },
-                CxPassParent::None => {
+                CxDrawPassParent::None => {
                     let mut cx = self.cx.borrow_mut();
-                    cx.draw_pass_to_texture(*pass_id, None);
+                    cx.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
         }

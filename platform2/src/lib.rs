@@ -5,7 +5,6 @@ pub mod os;
 #[macro_use]
 pub mod log;
 
-
 #[macro_use]
 mod cx;
 mod cx_api;
@@ -24,13 +23,13 @@ mod draw_matrix;
 mod draw_shader; 
 mod draw_list;
 mod draw_vars;
+mod draw_pass;
 
 mod id_pool;
 pub mod event;
 pub mod permission;
 mod area;
 mod window;
-mod pass;
 mod texture;
 mod cursor;
 mod macos_menu;
@@ -84,6 +83,7 @@ pub use {
         object::*,
         vm::*,
         traits::*,
+        makepad_script_derive,
         makepad_script_derive::*,
         makepad_math,
         makepad_error_log,
@@ -199,13 +199,13 @@ pub use {
         macos_menu::MacosMenu,
         draw_matrix::DrawMatrix,
         window::{WindowHandle,CxWindowPool, WindowId},
-        pass::{
-            PassId,
-            CxPassParent,
-            CxPassRect,
-            Pass,
-            PassClearColor,
-            PassClearDepth
+        draw_pass::{
+            DrawPassId,
+            CxDrawPassParent,
+            CxDrawPassRect,
+            DrawPass,
+            DrawPassClearColor,
+            DrawPassClearDepth
         },
         texture::{
             Texture,
@@ -216,7 +216,6 @@ pub use {
             TextureAnimation,
         },
         draw_vars::{
-            shader_enum,
             DrawVars
         },
         geometry::{
