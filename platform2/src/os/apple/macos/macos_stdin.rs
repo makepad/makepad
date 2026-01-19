@@ -28,7 +28,7 @@ use {
             metal::{MetalCx, DrawPassMode},
             cx_stdin::{HostToStdin, PresentableDraw, StdinToHost, Swapchain, PollTimer},
         },
-        pass::{CxPassParent, PassClearColor, CxPassColorTexture},
+        draw_pass::{CxDrawPassParent, DrawPassClearColor, CxDrawPassColorTexture},
         cx_api::CxOsOp,
         cx::Cx,
     }
@@ -67,25 +67,25 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for &pass_id in &passes_todo {
-            self.passes[pass_id].set_time(time as f32);
-            match self.passes[pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+        for &draw_pass_id in &passes_todo {
+            self.passes[draw_pass_id].set_time(time as f32);
+            match self.passes[draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     if let Some(swapchain) = &mut stdin_windows[window_id.id()].swapchain{
                         
                         let [current_image] = &swapchain.presentable_images;
                         if let Some(texture) = &current_image.image {
                             let window = &mut self.windows[window_id];
                             let pass = &mut self.passes[window.main_pass_id.unwrap()];
-                            pass.color_textures = vec![CxPassColorTexture {
-                                clear_color: PassClearColor::ClearWith(pass.clear_color),
+                            pass.color_textures = vec![CxDrawPassColorTexture {
+                                clear_color: DrawPassClearColor::ClearWith(pass.clear_color),
                                 texture: texture.clone(),
                             }];
                                 
                             let kind_id = window.kind_id;
-                            let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
-                            let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+                            let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
+                            let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
                             
                             let future_presentable_draw = PresentableDraw {
                                 target_id: current_image.id,
@@ -94,17 +94,17 @@ impl Cx {
                                 height: (pass_rect.size.y * dpi_factor) as u32,
                             }; 
                             // render to swapchain
-                            self.draw_pass(pass_id, metal_cx, DrawPassMode::StdinMain(future_presentable_draw, kind_id));
+                            self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::StdinMain(future_presentable_draw, kind_id));
                             
                             // and then wait for GPU, which calls stdin_send_draw_complete when its done
                         }
                     }
                 }
-                CxPassParent::Pass(_) => {
-                    self.draw_pass(pass_id, metal_cx, DrawPassMode::Texture);
+                CxDrawPassParent::DrawPass(_) => {
+                    self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::Texture);
                 },
-                CxPassParent::None => {
-                    self.draw_pass(pass_id, metal_cx, DrawPassMode::Texture);
+                CxDrawPassParent::None => {
+                    self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
         }

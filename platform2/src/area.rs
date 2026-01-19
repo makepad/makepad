@@ -383,7 +383,7 @@ impl Area {
                     return None;
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if let Some(input) = sh.mapping.user_uniforms.inputs.iter().find( | input | input.id == id) {
+                if let Some(input) = sh.mapping.draw_call_uniforms.inputs.iter().find( | input | input.id == id) {
                     if input.ty != ty {
                         panic!("get_read_ref wrong uniform type, expected {:?} got: {:?}!", input.ty, ty);
                     }
@@ -391,7 +391,7 @@ impl Area {
                         DrawReadRef {
                             repeat: 1,
                             stride: 0,
-                            buffer: &draw_call.user_uniforms[input.offset..]
+                            buffer: &draw_call.draw_call_uniforms[input.offset..]
                         }
                     )
                 }
@@ -431,19 +431,19 @@ impl Area {
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 
-                if let Some(input) = sh.mapping.user_uniforms.inputs.iter().find( | input | input.id == id) {
+                if let Some(input) = sh.mapping.draw_call_uniforms.inputs.iter().find( | input | input.id == id) {
                     if input.ty != ty {
                         panic!("get_write_ref {} wrong uniform type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
                     
-                    cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     draw_call.uniforms_dirty = true;
                     
                     return Some(
                         DrawWriteRef {
                             repeat: 1,
                             stride: 0,
-                            buffer: &mut draw_call.user_uniforms[input.offset..]
+                            buffer: &mut draw_call.draw_call_uniforms[input.offset..]
                         }
                     )
                 }
@@ -452,7 +452,7 @@ impl Area {
                         panic!("get_write_ref {} wrong instance type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
                     
-                    cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     draw_call.instance_dirty = true;
                     if inst.instance_count == 0 {
                         return None

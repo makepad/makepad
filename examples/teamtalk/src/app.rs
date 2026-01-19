@@ -393,7 +393,7 @@ impl App {
                         *expected = sequence.wrapping_add(1);
                         
                         // platform2 uses send() instead of write_buffer()
-                        let _ = mix_send.send(client_uid, buffer);
+                        //let _ = mix_send.send(client_uid, buffer);
                     }
                 }
             }

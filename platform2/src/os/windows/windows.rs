@@ -26,7 +26,7 @@ use {
             game_input::*,
         },
         game_input::*,
-        pass::CxPassParent,
+        draw_pass::CxDrawPassParent,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         window::CxWindowPool,
         windows::Win32::Graphics::Direct3D11::ID3D11Device,
@@ -276,23 +276,23 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(with_win32_app(|app| app.time_now() as f32));
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(window_id) => {
+        for draw_pass_id in &passes_todo {
+            self.passes[*draw_pass_id].set_time(with_win32_app(|app| app.time_now() as f32));
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(window_id) => {
                     if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
                         //let dpi_factor = window.window_geom.dpi_factor;                        
                         window.resize_buffers(&d3d11_cx);
-                        self.draw_pass_to_window(*pass_id, false, window, d3d11_cx);
+                        self.draw_pass_to_window(*draw_pass_id, false, window, d3d11_cx);
                     }
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx, None);
+                    self.draw_pass_to_texture(*draw_pass_id, d3d11_cx, None);
                 },
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, d3d11_cx, None);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(*draw_pass_id, d3d11_cx, None);
                 }
             }
         }

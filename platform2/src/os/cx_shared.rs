@@ -3,9 +3,9 @@ use {
     crate::{
         cx_api::CxOsApi,
         cx::Cx,
-        pass::{
-            PassId,
-            CxPassParent
+        draw_pass::{
+            DrawPassId,
+            CxDrawPassParent
         },
         event::{
             TimerEvent,
@@ -22,10 +22,10 @@ use {
 impl Cx {
     #[allow(dead_code)]
     pub (crate) fn repaint_windows(&mut self) {
-        for pass_id in self.passes.id_iter() {
-            match self.passes[pass_id].parent {
-                CxPassParent::Window(_) => {
-                    self.passes[pass_id].paint_dirty = true;
+        for draw_pass_id in self.passes.id_iter() {
+            match self.passes[draw_pass_id].parent {
+                CxDrawPassParent::Window(_) => {
+                    self.passes[draw_pass_id].paint_dirty = true;
                 },
                 _ => ()
             }
@@ -34,29 +34,29 @@ impl Cx {
     
     #[allow(unused)]
     pub (crate) fn any_passes_dirty(&self) -> bool {
-        for pass_id in self.passes.id_iter() {
-            if self.passes[pass_id].paint_dirty {
+        for draw_pass_id in self.passes.id_iter() {
+            if self.passes[draw_pass_id].paint_dirty {
                 return true
             }
         }
         false
     }
     
-    pub (crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<PassId>) {
+    pub (crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
         passes_todo.clear();
         
         // we need this because we don't mark the entire deptree of passes dirty every small paint
         loop { // loop untill we don't propagate anymore
             let mut altered = false;
-            for pass_id in self.passes.id_iter(){
+            for draw_pass_id in self.passes.id_iter(){
                 if self.demo_time_repaint {
-                    if self.passes[pass_id].main_draw_list_id.is_some(){
-                        self.passes[pass_id].paint_dirty = true;
+                    if self.passes[draw_pass_id].main_draw_list_id.is_some(){
+                        self.passes[draw_pass_id].paint_dirty = true;
                     }
                 }
-                if self.passes[pass_id].paint_dirty {
-                    let other = match self.passes[pass_id].parent {
-                        CxPassParent::Pass(parent_pass_id) => {
+                if self.passes[draw_pass_id].paint_dirty {
+                    let other = match self.passes[draw_pass_id].parent {
+                        CxDrawPassParent::DrawPass(parent_pass_id) => {
                             Some(parent_pass_id)
                         }
                         _ => None
@@ -74,31 +74,31 @@ impl Cx {
             }
         }
         
-        for pass_id in self.passes.id_iter(){
-            if self.passes[pass_id].paint_dirty {
+        for draw_pass_id in self.passes.id_iter(){
+            if self.passes[draw_pass_id].paint_dirty {
                 let mut inserted = false;
-                match self.passes[pass_id].parent {
-                    CxPassParent::Window(_) | CxPassParent::Xr=> {
+                match self.passes[draw_pass_id].parent {
+                    CxDrawPassParent::Window(_) | CxDrawPassParent::Xr=> {
                     },
-                    CxPassParent::Pass(dep_of_pass_id) => {
-                        if pass_id == dep_of_pass_id {
+                    CxDrawPassParent::DrawPass(dep_of_pass_id) => {
+                        if draw_pass_id == dep_of_pass_id {
                             panic!()
                         }
                         for insert_before in 0..passes_todo.len() {
                             if passes_todo[insert_before] == dep_of_pass_id {
-                                passes_todo.insert(insert_before, pass_id);
+                                passes_todo.insert(insert_before, draw_pass_id);
                                 inserted = true;
                                 break;
                             }
                         }
                     },
-                    CxPassParent::None => { // we need to be first
-                        passes_todo.insert(0, pass_id);
+                    CxDrawPassParent::None => { // we need to be first
+                        passes_todo.insert(0, draw_pass_id);
                         inserted = true;
                     },
                 }
                 if !inserted {
-                    passes_todo.push(pass_id);
+                    passes_todo.push(draw_pass_id);
                 }
             }
         }

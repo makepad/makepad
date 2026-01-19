@@ -33,7 +33,7 @@ use {
             WindowGeom,
             WindowGeomChangeEvent
         },
-        pass::CxPassParent,
+        draw_pass::CxDrawPassParent,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         cx::{Cx},
         permission::{Permission, PermissionStatus, PermissionResult},
@@ -397,20 +397,20 @@ impl Cx {
          
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            self.passes[*pass_id].set_time(time as f32);
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Xr => {}
-                CxPassParent::Window(_) => {
+        for draw_pass_id in &passes_todo {
+            self.passes[*draw_pass_id].set_time(time as f32);
+            match self.passes[*draw_pass_id].parent.clone() {
+                CxDrawPassParent::Xr => {}
+                CxDrawPassParent::Window(_) => {
                     //et dpi_factor = self.os.window_geom.dpi_factor;
-                    self.draw_pass_to_canvas(*pass_id);
+                    self.draw_pass_to_canvas(*draw_pass_id);
                 }
-                CxPassParent::Pass(_) => {
+                CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id);
+                    self.draw_pass_to_texture(*draw_pass_id);
                 },
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id);
+                CxDrawPassParent::None => {
+                    self.draw_pass_to_texture(*draw_pass_id);
                 }
             }
         }    

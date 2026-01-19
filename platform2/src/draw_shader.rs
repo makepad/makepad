@@ -314,9 +314,9 @@ pub struct CxDrawShaderMapping {
     pub var_instances: DrawShaderInputs,
     pub live_instances: DrawShaderInputs,
     pub live_uniforms: DrawShaderInputs,
-    pub user_uniforms: DrawShaderInputs,
-    pub draw_list_uniforms: DrawShaderInputs,
     pub draw_call_uniforms: DrawShaderInputs,
+    pub draw_list_uniforms: DrawShaderInputs,
+    pub dyn_uniforms: DrawShaderInputs,
     pub pass_uniforms: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
     pub uses_time: bool,
@@ -335,7 +335,7 @@ impl CxDrawShaderMapping {
         let mut instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         let mut var_instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         let mut live_instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
-        let mut user_uniforms = DrawShaderInputs::new(uniform_packing);
+        let mut draw_call_uniforms = DrawShaderInputs::new(uniform_packing);
         let mut live_uniforms = DrawShaderInputs::new(uniform_packing);
         let mut draw_list_uniforms = DrawShaderInputs::new(uniform_packing);
         let mut draw_call_uniforms = DrawShaderInputs::new(uniform_packing);
@@ -384,7 +384,7 @@ impl CxDrawShaderMapping {
                             pass_uniforms.push(field.ident.0, ty, None);
                         }
                         live_id!(user) => {
-                            user_uniforms.push(field.ident.0, ty, None);
+                            draw_call_uniforms.push(field.ident.0, ty, None);
                         }
                         _ => ()
                     }
@@ -402,7 +402,7 @@ impl CxDrawShaderMapping {
         geometries.finalize();
         instances.finalize();
         var_instances.finalize();
-        user_uniforms.finalize();
+        draw_call_uniforms.finalize();
         live_uniforms.finalize();
         draw_list_uniforms.finalize();
         draw_call_uniforms.finalize();
@@ -425,7 +425,7 @@ impl CxDrawShaderMapping {
             live_uniforms_buf: {let mut r = Vec::new(); r.resize(live_uniforms.total_slots, 0.0); r},
             var_instances,
             live_instances,
-            user_uniforms,
+            draw_call_uniforms,
             live_uniforms,
             draw_list_uniforms,
             draw_call_uniforms,

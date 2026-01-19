@@ -358,7 +358,7 @@ export class WasmWebGL extends WasmWebBrowser {
         gl.uniform1fv(shader.draw_list_uniform, new Float32Array(this.memory.buffer, args.draw_list_uniforms.ptr, args.draw_list_uniforms.len));
         gl.uniform1fv(shader.draw_call_uniform, new Float32Array(this.memory.buffer, args.draw_call_uniforms.ptr, args.draw_call_uniforms.len));
         
-        if (args.user_uniforms.ptr != 0) gl.uniform1fv(shader.user_uniform, new Float32Array(this.memory.buffer, args.user_uniforms.ptr, args.user_uniforms.len));
+        if (args.draw_call_uniforms.ptr != 0) gl.uniform1fv(shader.user_uniform, new Float32Array(this.memory.buffer, args.draw_call_uniforms.ptr, args.draw_call_uniforms.len));
         if (args.live_uniforms.ptr != 0) gl.uniform1fv(shader.live_uniform, new Float32Array(this.memory.buffer, args.live_uniforms.ptr, args.live_uniforms.len));
         if (args.const_table.ptr != 0) gl.uniform1fv(shader.const_uniform, new Float32Array(this.memory.buffer, args.const_table.ptr, args.const_table.len));
 
@@ -453,7 +453,7 @@ export class WasmWebGL extends WasmWebBrowser {
         }
 
         let gl = this.gl
-        var gl_framebuffer = this.framebuffers[args.pass_id] || (this.framebuffers[args.pass_id] = gl.createFramebuffer());
+        var gl_framebuffer = this.framebuffers[args.draw_pass_id] || (this.framebuffers[args.draw_pass_id] = gl.createFramebuffer());
         gl.bindFramebuffer(gl.FRAMEBUFFER, gl_framebuffer);
         
         let clear_flags = 0;

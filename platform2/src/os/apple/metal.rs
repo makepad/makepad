@@ -7,6 +7,9 @@ use {
     },
     crate::{
         makepad_objc_sys::objc_block,
+        makepad_script::*,
+        makepad_script::shader::*,
+        makepad_script::shader_backend::*,
         //makepad_live_id::*,
         os::{
             apple::apple_sys::*,
@@ -17,8 +20,9 @@ use {
             cx_stdin::PresentableDraw,
         },
         draw_list::DrawListId,
+        draw_vars::DrawVars,
         cx::Cx,
-        pass::{PassClearColor, PassClearDepth, PassId},
+        draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         studio::{AppToStudio, GPUSample, StudioScreenshotResponse},
         texture::{
             CxTexture,
@@ -47,7 +51,7 @@ impl Cx {
     
     fn render_view(
         &mut self,
-        pass_id: PassId,
+        draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
         zbias: &mut f32,
         zbias_step: f32,
@@ -64,7 +68,7 @@ impl Cx {
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].kind.sub_list() {
                 self.render_view(
-                    pass_id,
+                    draw_pass_id,
                     sub_list_id,
                     zbias,
                     zbias_step,
@@ -154,7 +158,7 @@ impl Cx {
                 }
                 else {crate::error!("Drawing error: instance_buffer None")}
                 
-                let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
+                let pass_uniforms = self.passes[draw_pass_id].pass_uniforms.as_slice();
                 let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
                 let draw_call_uniforms = draw_call.draw_call_uniforms.as_slice();
                 
@@ -177,8 +181,8 @@ impl Cx {
                         let () = msg_send![encoder, setFragmentBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
                     }
                     if let Some(id) = shp.user_uniform_buffer_id {
-                        let () = msg_send![encoder, setVertexBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: id];
-                        let () = msg_send![encoder, setFragmentBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setVertexBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setFragmentBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
                     }
                     /*
                     let ct = &sh.mapping.const_table.table;
@@ -257,12 +261,12 @@ impl Cx {
     
     pub fn draw_pass(
         &mut self,
-        pass_id: PassId,
+        draw_pass_id: DrawPassId,
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) {
         self.os.draw_calls_done  = 0;
-        let draw_list_id = if let Some(draw_list_id) = self.passes[pass_id].main_draw_list_id{
+        let draw_list_id = if let Some(draw_list_id) = self.passes[draw_pass_id].main_draw_list_id{
             draw_list_id
         }
         else{
@@ -279,27 +283,27 @@ impl Cx {
             unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]}
         };
         
-        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
+        let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         
-        let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some() {1.0}else {dpi_factor}).unwrap();
+        let pass_rect = self.get_pass_rect(draw_pass_id, if mode.is_drawable().is_some() {1.0}else {dpi_factor}).unwrap();
         
-        self.passes[pass_id].set_ortho_matrix(
+        self.passes[draw_pass_id].set_ortho_matrix(
             pass_rect.pos, 
             pass_rect.size
         );
         
-        self.passes[pass_id].paint_dirty = false;
+        self.passes[draw_pass_id].paint_dirty = false;
 
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
             return
         }
         
-        self.passes[pass_id].set_dpi_factor(dpi_factor);
+        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
         
         if let DrawPassMode::MTKView(_) = mode{
             let color_attachments:ObjcId = unsafe{msg_send![render_pass_descriptor, colorAttachments]};
             let color_attachment:ObjcId = unsafe{msg_send![color_attachments, objectAtIndexedSubscript: 0]};
-            let color = self.passes[pass_id].clear_color;
+            let color = self.passes[draw_pass_id].clear_color;
             unsafe {
                 let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                 let () = msg_send![color_attachment, setClearColor: MTLClearColor {
@@ -319,7 +323,7 @@ impl Cx {
                 color_attachment,
                 setTexture: first_texture
             ]};
-            let color = self.passes[pass_id].clear_color;
+            let color = self.passes[draw_pass_id].clear_color;
             unsafe {
                 let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                 let () = msg_send![color_attachment, setClearColor: MTLClearColor {
@@ -331,7 +335,7 @@ impl Cx {
             }
         }
         else {
-            for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
+            for (index, color_texture) in self.passes[draw_pass_id].color_textures.iter().enumerate() {
                 let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
                 let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: index as u64]};
                 
@@ -353,7 +357,7 @@ impl Cx {
                 
                 unsafe {msg_send![color_attachment, setStoreAction: MTLStoreAction::Store]}
                 match color_texture.clear_color {
-                    PassClearColor::InitWith(color) => {
+                    DrawPassClearColor::InitWith(color) => {
                         if is_initial {
                             unsafe {
                                 let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
@@ -369,7 +373,7 @@ impl Cx {
                             unsafe {let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Load];}
                         }
                     },
-                    PassClearColor::ClearWith(color) => {
+                    DrawPassClearColor::ClearWith(color) => {
                         unsafe {
                             let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                             let () = msg_send![color_attachment, setClearColor: MTLClearColor {
@@ -384,7 +388,7 @@ impl Cx {
             }
         }
         // attach depth texture
-        if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
+        if let Some(depth_texture) = &self.passes[draw_pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture.texture_id()];
             let size = dpi_factor * pass_rect.size;
             cxtexture.update_depth_stencil(metal_cx, size.x as usize, size.y as usize);
@@ -400,8 +404,8 @@ impl Cx {
             }
             let () = unsafe {msg_send![depth_attachment, setStoreAction: MTLStoreAction::Store]};
             
-            match self.passes[pass_id].clear_depth {
-                PassClearDepth::InitWith(depth) => {
+            match self.passes[draw_pass_id].clear_depth {
+                DrawPassClearDepth::InitWith(depth) => {
                     if is_initial {
                         let () = unsafe {msg_send![depth_attachment, setLoadAction: MTLLoadAction::Clear]};
                         let () = unsafe {msg_send![depth_attachment, setClearDepth: depth as f64]};
@@ -410,26 +414,26 @@ impl Cx {
                         let () = unsafe {msg_send![depth_attachment, setLoadAction: MTLLoadAction::Load]};
                     }
                 },
-                PassClearDepth::ClearWith(depth) => {
+                DrawPassClearDepth::ClearWith(depth) => {
                     let () = unsafe {msg_send![depth_attachment, setLoadAction: MTLLoadAction::Clear]};
                     let () = unsafe {msg_send![depth_attachment, setClearDepth: depth as f64]};
                 }
             }
             // create depth state
-            if self.passes[pass_id].os.mtl_depth_state.is_none() {
+            if self.passes[draw_pass_id].os.mtl_depth_state.is_none() {
                 
                 let desc: ObjcId = unsafe {msg_send![class!(MTLDepthStencilDescriptor), new]};
                 let () = unsafe {msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]};
                 let () = unsafe {msg_send![desc, setDepthWriteEnabled: true]};
                 let depth_stencil_state: ObjcId = unsafe {msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc]};
-                self.passes[pass_id].os.mtl_depth_state = Some(depth_stencil_state);
+                self.passes[draw_pass_id].os.mtl_depth_state = Some(depth_stencil_state);
             }
         }
         
         let command_buffer: ObjcId = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
         let encoder: ObjcId = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
         
-        if let Some(depth_state) = self.passes[pass_id].os.mtl_depth_state {
+        if let Some(depth_state) = self.passes[draw_pass_id].os.mtl_depth_state {
             let () = unsafe {msg_send![encoder, setDepthStencilState: depth_state]};
         }
         
@@ -446,11 +450,11 @@ impl Cx {
         }]};
         
         let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
         let mut gpu_read_guards = Vec::new();
         
         self.render_view(
-            pass_id,
+            draw_pass_id,
             draw_list_id,
             &mut zbias,
             zbias_step,
@@ -475,7 +479,7 @@ impl Cx {
                 self.commit_command_buffer(None, None, command_buffer, gpu_read_guards);
             }
             DrawPassMode::StdinMain(stdin_frame, kind_id) => {
-                let main_texture = &self.passes[pass_id].color_textures[0];
+                let main_texture = &self.passes[draw_pass_id].color_textures[0];
                 let tex = &self.textures[main_texture.texture.texture_id()];
                 let screenshot = if let Some(texture) = &tex.os.texture{
                     self.build_screenshot_struct(metal_cx, command_buffer, kind_id, pass_width as usize, pass_height as usize, texture.as_id(), tex.alloc.clone())
@@ -731,6 +735,62 @@ pub struct CxOsDrawShader {
     draw_list_uniform_buffer_id: Option<u64>,
     user_uniform_buffer_id: Option<u64>,
     _mtlsl: String,
+}
+
+// alright lets go process this shader
+impl DrawVars{
+    pub (crate) fn init_shader(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        // alright lets compile a metal shader
+        if let Some(io_self) = value.as_object(){
+            let mut output = ShaderOutput::default();
+            output.backend = ShaderBackend::Metal;
+                                    
+            output.pre_collect_rust_instance_io(vm, io_self);
+                        
+            if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), &vm.thread.trap).as_object(){
+                output.mode = ShaderMode::Vertex;
+                ShaderFnCompiler::compile_shader_def(
+                    vm, 
+                    &mut output, 
+                    id!(vertex), 
+                    fnobj, 
+                    ShaderType::IoSelf(io_self), 
+                    vec![],
+                );
+            }
+            if let Some(fnobj) = vm.heap.object_method(io_self, id!(fragment).into(), &vm.thread.trap).as_object(){
+                output.mode = ShaderMode::Fragment;
+                ShaderFnCompiler::compile_shader_def(
+                    vm, 
+                    &mut output, 
+                    id!(fragment), 
+                    fnobj, 
+                    ShaderType::IoSelf(io_self), 
+                    vec![],
+                );
+            }
+            
+            let mut out = String::new();
+            output.create_struct_defs(vm, &mut out);
+            output.metal_create_instance_struct(vm, &mut out);
+            output.metal_create_uniform_struct(vm, &mut out);
+            output.metal_create_io_struct(vm, &mut out);
+            output.metal_create_varying_struct(vm, &mut out);
+            output.metal_create_vertex_buffer_struct(vm, &mut out);
+            output.metal_create_io_vertex_struct(vm, &mut out);
+            output.metal_create_vertex_fn(vm, &mut out);
+            output.metal_create_io_fragment_struct(vm, &mut out);
+            output.metal_create_fragment_main_fn(vm, &mut out);
+            
+            println!("Structs:\n{}", out);
+            for fns in output.functions{
+                println!("{}{{\n{}}}\n",fns.call_sig, fns.out);
+            }
+            // alright we need to find a CxOsShader
+            // and put this thing on the 'metal' compile list
+            // 
+        }
+    }
 }
 
 impl CxOsDrawShader {
