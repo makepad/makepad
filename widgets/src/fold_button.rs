@@ -25,7 +25,7 @@ live_design!{
         triangle_size: 5.0
 
         draw_bg: {
-            instance active: 0.0
+            instance opened: 0.0
             instance hover: 0.0
             instance triangle_size: 2.5
 
@@ -63,8 +63,8 @@ live_design!{
                 let sz = self.triangle_size;
                 let triangle_x = 5.0 + sz;  // Position from left with padding
                 let c = vec2(triangle_x, self.rect_size.y * 0.5);
-                // Rotate triangle based on active state
-                sdf.rotate(self.active * 0.5 * PI + 0.5 * PI, c.x, c.y);
+                // Rotate triangle based on opened state
+                sdf.rotate(self.opened * 0.5 * PI + 0.5 * PI, c.x, c.y);
                 sdf.move_to(c.x - sz, c.y + sz);
                 sdf.line_to(c.x, c.y - sz);
                 sdf.line_to(c.x + sz, c.y + sz);
@@ -73,7 +73,7 @@ live_design!{
                     mix(
                         mix(self.color, self.color_hover, self.hover),
                             mix(self.color_active, self.color_hover, self.hover),
-                                self.active
+                                self.opened
                     )
                 );
                 return sdf.result * self.fade;
@@ -122,16 +122,16 @@ live_design!{
                 }
             }
 
-            active = {
+            opened = {
                 default: on
                 off = {
                     from: {all: Forward {duration: 0.2}}
                     ease: ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
                     apply: {
-                        active: 0.0,
+                        opened: 0.0,
 
-                        draw_bg: {active: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+                        draw_bg: {opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                     }
                 }
                 on = {
@@ -139,8 +139,8 @@ live_design!{
                     ease: ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
                     apply: {
-                        active: 1.0
-                        draw_bg: {active: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
+                        opened: 1.0
+                        draw_bg: {opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
                     }
                 }
             }
@@ -158,7 +158,7 @@ pub struct FoldButton {
     #[walk] walk: Walk,
     #[layout] layout: Layout,
 
-    #[live] active: f64,
+    #[live] opened: f64,
     #[live] triangle_size: f64,
     #[live] open_text: ArcStringMut,
     #[live] close_text: ArcStringMut,
@@ -180,9 +180,9 @@ impl Widget for FoldButton {
         let res = self.animator_handle_event(cx, event);
 
         if res.is_animating() {
-            if self.animator.is_track_animating(cx, ids!(active)) {
+            if self.animator.is_track_animating(cx, ids!(opened)) {
                 let mut value = [0.0];
-                self.draw_bg.get_instance(cx, ids!(active), &mut value);
+                self.draw_bg.get_instance(cx, ids!(opened), &mut value);
                 cx.widget_action(uid, &scope.path, FoldButtonAction::Animating(value[0] as f64))
             }
             if res.must_redraw() {
@@ -192,11 +192,11 @@ impl Widget for FoldButton {
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
-                if self.animator_in_state(cx, ids!(active.on)) {
-                    self.animator_play(cx, ids!(active.off));
+                if self.animator_in_state(cx, ids!(opened.on)) {
+                    self.animator_play(cx, ids!(opened.off));
                     cx.widget_action(uid, &scope.path, FoldButtonAction::Closing)
                 } else {
-                    self.animator_play(cx, ids!(active.on));
+                    self.animator_play(cx, ids!(opened.on));
                     cx.widget_action(uid, &scope.path, FoldButtonAction::Opening)
                 }
                 self.animator_play(cx, ids!(hover.on));
@@ -226,7 +226,7 @@ impl Widget for FoldButton {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
         let label_walk = walk.with_margin_left(self.triangle_size * 2.0 + 10.0);
-        let text = if self.active > 0.5 {
+        let text = if self.opened > 0.5 {
             self.close_text.as_ref()
         } else {
             self.open_text.as_ref()
@@ -239,7 +239,7 @@ impl Widget for FoldButton {
 
 impl FoldButton {
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
-        self.animator_toggle(cx, is_open, animate, ids!(active.on), ids!(active.off))
+        self.animator_toggle(cx, is_open, animate, ids!(opened.on), ids!(opened.off))
     }
 
     pub fn opening(&self, actions: &Actions) -> bool {
@@ -310,7 +310,7 @@ impl FoldButtonRef {
 
     pub fn open_float(&self) -> f64 {
         if let Some(inner) = self.borrow() {
-            inner.active
+            inner.opened
         } else {
             1.0
         }
