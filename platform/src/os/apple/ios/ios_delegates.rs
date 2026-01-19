@@ -265,7 +265,6 @@ pub fn define_mtk_view_delegate() -> *const Class {
     }
     
     extern "C" fn draw_size_will_change(_this: &Object, _: Sel, _: ObjcId, _: ObjcId) {
-        crate::log!("Draw size will change");
         IosApp::draw_size_will_change();
     }
     unsafe {
@@ -346,9 +345,8 @@ pub fn define_ios_timer_delegate() -> *const Class {
 
 pub fn define_textfield_delegate() -> *const Class {
     let mut decl = ClassDecl::new("NSTextFieldDlg", class!(NSObject)).unwrap();
-    
-    // those 3 callbacks are for resizing the canvas when keyboard is opened
-    // which is not currenlty supported by miniquad
+
+    // Keyboard notification helpers - used for resizing the canvas when keyboard is shown/hidden
     fn get_height_delta(notif: ObjcId) -> f64 {
         unsafe {
             let info: ObjcId = msg_send![notif, userInfo];
@@ -368,12 +366,8 @@ pub fn define_textfield_delegate() -> *const Class {
             let curve: i64 = msg_send![obj, intValue];
             
             let ease = match curve >> 16 {
-                0 => Ease::Bezier { // this is not the right curve.
-                    cp0: 0.25,
-                    cp1: 0.1,
-                    cp2: 0.25,
-                    cp3: 0.1
-                }, //::UIViewAnimationOptionCurveEaseInOut = 0 << 16,
+                // UIViewAnimationOptionCurveEaseInOut - approximated with bezier
+                0 => Ease::Bezier { cp0: 0.25, cp1: 0.1, cp2: 0.25, cp3: 0.1 },
                 1 => Ease::InExp, //UIViewAnimationOptionCurveEaseIn = 1 << 16,
                 2 => Ease::OutExp, //UIViewAnimationOptionCurveEaseOut = 2 << 16,
                 _ => Ease::Linear //UIViewAnimationOptionCurveLinear = 3 << 16,
@@ -382,8 +376,7 @@ pub fn define_textfield_delegate() -> *const Class {
         }
     }
     
-    // Stubs for keyboard frame change notifications - could be used for finer-grained
-    // keyboard tracking in the future (e.g., during interactive keyboard dismissal)
+    // Required stubs for keyboard frame change notifications (registered with notification center)
     extern "C" fn keyboard_did_change_frame(_: &Object, _: Sel, _notif: ObjcId) {}
     extern "C" fn keyboard_will_change_frame(_: &Object, _: Sel, _notif: ObjcId) {}
 

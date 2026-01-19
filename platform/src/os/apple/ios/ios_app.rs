@@ -128,14 +128,6 @@ impl IosApp {
     pub fn new(metal_device: ObjcId, event_callback: Box<dyn FnMut(IosEvent) -> EventFlow>) -> IosApp {
         unsafe {
 
-            // Construct the bits that are shared between windows
-            //let ns_app: ObjcId = msg_send![class!(UIApplication), sharedApplication];
-            //let app_delegate_instance: ObjcId = msg_send![get_ios_class_global().app_delegate, new];
-            //if ns_app == nil{
-            //   panic!();
-            //}
-            //let () = msg_send![ns_app, setDelegate: app_delegate_instance];
-
             let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
             let edit_menu_delegate_instance: ObjcId = msg_send![get_ios_class_global().edit_menu_delegate, new];
             IosApp {
@@ -248,10 +240,6 @@ impl IosApp {
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
             
             let () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
-            
-            //let () = msg_send![view_ctrl_obj, beginAppearanceTransition: true animated: false];
-            //let () = msg_send![view_ctrl_obj, endAppearanceTransition];
-            
             let () = msg_send![window_obj, makeKeyAndVisible];
 
             // Initialize UIEditMenuInteraction for clipboard actions

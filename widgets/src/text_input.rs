@@ -1792,13 +1792,14 @@ impl Widget for TextInput {
                 if input.is_empty() {
                     // Empty input with replace_last means composition was cancelled - delete text
                     if replace_last && self.composition_length > 0 {
-                        // Remove the composition text
+                        // Remove the composition text (clamp end to text length for safety)
+                        let end = (self.composition_start + self.composition_length).min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
                             Edit {
-                                start: self.composition_start,
-                                end: self.composition_start + self.composition_length,
+                                start: self.composition_start.min(self.text.len()),
+                                end,
                                 replace_with: String::new()
                             }
                         );
@@ -1813,13 +1814,15 @@ impl Widget for TextInput {
                 if replace_last {
                     // IME composition update
                     if self.composition_length > 0 {
-                        // Replace previous composition text
+                        // Replace previous composition text (clamp to text length for safety)
+                        let start = self.composition_start.min(self.text.len());
+                        let end = (self.composition_start + self.composition_length).min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
                             Edit {
-                                start: self.composition_start,
-                                end: self.composition_start + self.composition_length,
+                                start,
+                                end,
                                 replace_with: input.clone()
                             }
                         );
@@ -1841,13 +1844,15 @@ impl Widget for TextInput {
                 } else {
                     // Final commit or regular text input
                     if self.composition_length > 0 {
-                        // Replace composition with final committed text
+                        // Replace composition with final committed text (clamp to text length for safety)
+                        let start = self.composition_start.min(self.text.len());
+                        let end = (self.composition_start + self.composition_length).min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
                             Edit {
-                                start: self.composition_start,
-                                end: self.composition_start + self.composition_length,
+                                start,
+                                end,
                                 replace_with: input
                             }
                         );

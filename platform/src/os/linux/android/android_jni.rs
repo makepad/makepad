@@ -337,7 +337,6 @@ unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onBackPressed(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
 ) {
-    // crate::log!("Java_dev_makepad_android_MakepadNative_onBackPressed");
     send_from_java_message(FromJavaMessage::BackPressed);
 }
 

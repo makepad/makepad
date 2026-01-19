@@ -67,28 +67,41 @@ pub trait CxOsApi {
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
 }
 
-/// Keyboard type hint for soft keyboards (mobile platforms)
+/// Keyboard type hint for soft keyboards.
+///
+/// Supported on iOS and Android. On desktop platforms, this has no effect.
+///
+/// Variants:
+/// - `Default`: Default keyboard for the current locale
+/// - `AsciiCapable`: Optimized for ASCII characters (no emoji suggestions)
+/// - `Url`: Optimized for URLs (includes /, .com shortcuts)
+/// - `NumberPad`: Number pad (0-9 only)
+/// - `PhonePad`: Phone number pad (includes *, #)
+/// - `EmailAddress`: Optimized for email addresses (includes @, shortcuts)
+/// - `DecimalPad`: Decimal number pad (0-9 and decimal point)
+/// - `WebSearch`: Optimized for web search queries
 #[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 #[live_ignore]
 pub enum KeyboardType {
     #[pick] Default,
-    /// Optimized for ASCII characters
     AsciiCapable,
-    /// Optimized for URLs
     Url,
-    /// Number pad (0-9)
     NumberPad,
-    /// Phone number pad
     PhonePad,
-    /// Optimized for email addresses
     EmailAddress,
-    /// Decimal number pad (0-9 and decimal point)
     DecimalPad,
-    /// Optimized for web search
     WebSearch,
 }
 
-/// Autocapitalization behavior for soft keyboards
+/// Autocapitalization behavior for soft keyboards.
+///
+/// Supported on iOS and Android. On desktop platforms, this has no effect.
+///
+/// Variants:
+/// - `None`: No automatic capitalization
+/// - `Words`: Capitalize the first letter of each word
+/// - `Sentences`: Capitalize the first letter of each sentence (default)
+/// - `AllCharacters`: Capitalize all characters (shift lock)
 #[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 #[live_ignore]
 pub enum AutoCapitalize {
@@ -98,7 +111,14 @@ pub enum AutoCapitalize {
     AllCharacters,
 }
 
-/// Autocorrection behavior for soft keyboards
+/// Autocorrection behavior for soft keyboards.
+///
+/// Supported on iOS and Android. On desktop platforms, this has no effect.
+///
+/// Variants:
+/// - `Default`: Use system default (typically enabled)
+/// - `Yes`: Enable autocorrection
+/// - `No`: Disable autocorrection (useful for code, usernames, etc.)
 #[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 #[live_ignore]
 pub enum AutoCorrect {
@@ -107,7 +127,18 @@ pub enum AutoCorrect {
     No,
 }
 
-/// Return key type (visual hint on keyboard)
+/// Return key type - controls the visual appearance and action of the return key.
+///
+/// Supported on iOS and Android. On desktop platforms, this has no effect.
+/// The actual action button text depends on the platform and locale.
+///
+/// Variants:
+/// - `Default`: Default return key (newline for multiline, Done for single-line)
+/// - `Go`: "Go" action (typically for URL fields)
+/// - `Search`: "Search" action (for search fields)
+/// - `Send`: "Send" action (for messaging)
+/// - `Next`: "Next" action (move to next field in form)
+/// - `Done`: "Done" action (dismiss keyboard)
 #[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 #[live_ignore]
 pub enum ReturnKeyType {

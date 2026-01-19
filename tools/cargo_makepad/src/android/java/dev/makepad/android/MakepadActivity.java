@@ -237,7 +237,6 @@ class MakepadSurface
             // Track what we're sending so we can detect stale echoes from Rust
             recordSentToRust(fullText);
 
-            Log.e("MakepadIME", "notifyRustOfTextState: text='" + fullText + "' sel=[" + selStart + "," + selEnd + "] comp=[" + compStart + "," + compEnd + "]");
             MakepadNative.onImeTextStateChanged(fullText, selStart, selEnd, compStart, compEnd);
         }
 
@@ -283,10 +282,8 @@ class MakepadSurface
 
         @Override
         public boolean setComposingText(CharSequence text, int newCursorPosition) {
-            Log.e("MakepadIME", "setComposingText: '" + text + "' cursorPos=" + newCursorPosition);
             // Let BaseInputConnection handle the Editable manipulation
             boolean result = super.setComposingText(text, newCursorPosition);
-            Log.e("MakepadIME", "setComposingText result=" + result + " editable='" + mEditable + "'");
 
             // Notify IME of state change
             notifyImeOfSelectionUpdate();
@@ -301,10 +298,8 @@ class MakepadSurface
 
         @Override
         public boolean commitText(CharSequence text, int newCursorPosition) {
-            Log.e("MakepadIME", "commitText: '" + text + "' cursorPos=" + newCursorPosition);
             // Let BaseInputConnection handle the Editable manipulation
             boolean result = super.commitText(text, newCursorPosition);
-            Log.e("MakepadIME", "commitText result=" + result + " editable='" + mEditable + "'");
 
             // Notify IME of state change
             notifyImeOfSelectionUpdate();
@@ -420,7 +415,6 @@ class MakepadSurface
         public boolean performEditorAction(int actionCode) {
             // Handle editor actions (Done, Go, Search, Send, Next) for single-line inputs
             // These are triggered when user presses the action button on the soft keyboard
-            Log.e("MakepadIME", "performEditorAction: actionCode=" + actionCode);
 
             // EditorInfo action codes:
             // IME_ACTION_UNSPECIFIED = 0, IME_ACTION_NONE = 1, IME_ACTION_GO = 2,
@@ -461,8 +455,6 @@ class MakepadSurface
 
         // Initialize selection spans in the Editable - CRITICAL for BaseInputConnection to work
         Selection.setSelection(mEditable, 0, 0);
-        Log.e("MakepadIME", "MakepadSurface init: editable='" + mEditable + "' sel=[" +
-            Selection.getSelectionStart(mEditable) + "," + Selection.getSelectionEnd(mEditable) + "]");
     }
 
     @Override
@@ -732,7 +724,6 @@ class MakepadSurface
         int selEnd = Selection.getSelectionEnd(mEditable);
         outAttrs.initialSelStart = Math.max(0, selStart);
         outAttrs.initialSelEnd = Math.max(0, selEnd);
-        Log.e("MakepadIME", "initialSelection: [" + outAttrs.initialSelStart + "," + outAttrs.initialSelEnd + "] editable='" + mEditable + "'");
 
         // Create InputConnection with fullEditor=true since we have an Editable
         mInputConnection = new MakepadInputConnection(this, true);
@@ -772,9 +763,7 @@ class MakepadSurface
         // it's just echoing old state and should be ignored to prevent rollback
         if (textChanged && mInputConnection != null) {
             if (mInputConnection.wasRecentlySentToRust(fullText)) {
-                // Rust is echoing back something we recently sent - it's stale
-                Log.e("MakepadIME", "updateImeTextState: ignoring stale echo '" + fullText +
-                    "' (current: '" + currentText + "')");
+                // Rust is echoing back something we recently sent - it's stale, ignore
                 return;
             }
         }
@@ -927,22 +916,6 @@ public class MakepadActivity
     @Override
     protected void onStart() {
         super.onStart();
-
-       // this forces a high framerate default 
-           /*
-        Window w = getWindow();
-        WindowManager.LayoutParams p = w.getAttributes();
-        Display.Mode[] modes = getDisplay().getSupportedModes();
-
-        for(Display.Mode mode: modes){    
-            if(mode.getRefreshRate() > 100.0){
-                p.preferredDisplayModeId = mode.getModeId();
-                w.setAttributes(p);
-                Log.w("Makepad", "width"+mode.getRefreshRate()+" id "+mode.getModeId());
-                break;
-            }
-        }
-*/      
         MakepadNative.activityOnStart();
     }
 

@@ -71,12 +71,13 @@ impl CxKeyboard {
             self.next_key_focus = new_area
         }
     }
-    /*
+
+    #[allow(dead_code)]
     pub (crate) fn all_keys_up(&mut self) -> Vec<KeyEvent> {
         let mut keys_down = Vec::new();
         std::mem::swap(&mut keys_down, &mut self.keys_down);
         keys_down
-    }*/
+    }
 
     pub (crate) fn cycle_key_focus_changed(&mut self) -> Option<(Area, Area)> {
         if self.next_key_focus != self.key_focus {
@@ -88,24 +89,19 @@ impl CxKeyboard {
     }
     
     #[allow(dead_code)]
-    pub fn is_key_down(&mut self, key_code: KeyCode)->bool{
-        if let Some(_) = self.keys_down.iter().position( | k | k.key_code == key_code) {
-            return true;
-        }
-        return false
+    pub fn is_key_down(&mut self, key_code: KeyCode) -> bool {
+        self.keys_down.iter().any(|k| k.key_code == key_code)
     }
 
-    #[allow(dead_code)]
     pub (crate) fn process_key_down(&mut self, key_event: KeyEvent) {
-        if let Some(_) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
+        if self.keys_down.iter().any(|k| k.key_code == key_event.key_code) {
             return;
         }
         self.keys_down.push(key_event);
     }
 
-    #[allow(dead_code)]
     pub (crate) fn process_key_up(&mut self, key_event: KeyEvent) {
-        if let Some(pos) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
+        if let Some(pos) = self.keys_down.iter().position(|k| k.key_code == key_event.key_code) {
             self.keys_down.remove(pos);
         }
     }
