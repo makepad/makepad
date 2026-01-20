@@ -8,7 +8,6 @@ use {
         },
         any::{Any, TypeId},
         rc::Rc,
-        rc::Weak,
         cell::RefCell,
     },
     crate::{
@@ -40,9 +39,7 @@ use {
         draw_pass::CxDrawPassPool,
         texture::{CxTexturePool,TextureFormat,Texture,TextureUpdated},
         geometry::{
-            Geometry,
             CxGeometryPool,
-            GeometryFingerprint
         },
     }
 };
@@ -69,7 +66,6 @@ pub struct Cx {
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
     pub (crate) geometries: CxGeometryPool,
-    pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>, 
     
     pub draw_shaders: CxDrawShaders,
     
@@ -300,7 +296,6 @@ impl Cx {
             draw_matrices: Default::default(),
             geometries: Default::default(),
             textures,
-            geometries_refs: Default::default(),
             
             draw_shaders: Default::default(),
             

@@ -171,11 +171,11 @@ impl Area {
                     error!("No instances but everything else valid?");
                     return Rect::default()
                 }
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                if cx.draw_shaders.generation != draw_call.draw_shader_id.generation {
+                    error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader_id.generation);
                     return Rect::default()
                 }
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
@@ -264,11 +264,11 @@ impl Area {
                     error!("No instances but everything else valid?");
                     return Rect::default()
                 }
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                if cx.draw_shaders.generation != draw_call.draw_shader_id.generation {
+                    error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader_id.generation);
                     return Rect::default()
                 }
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
@@ -305,12 +305,12 @@ impl Area {
                 }
                 let draw_item = &draw_list.draw_items[inst.draw_item_id];
                 let draw_call = draw_item.draw_call().unwrap();
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    error!("Generation invalid abs_to_rel {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                if cx.draw_shaders.generation != draw_call.draw_shader_id.generation {
+                    error!("Generation invalid abs_to_rel {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader_id.generation);
                     return abs;
                 }
                 
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     let buf = draw_item.instances.as_ref().unwrap();
@@ -346,10 +346,10 @@ impl Area {
                 let draw_item = &mut cxview.draw_items[inst.draw_item_id];
                 //log!("{:?}", draw_item.kind.sub_list().is_some());
                 let draw_call = draw_item.kind.draw_call().unwrap();
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
+                if cx.draw_shaders.generation != draw_call.draw_shader_id.generation {
                     return;
                 }
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id]; // ok now we have to patch x/y/w/h into it
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index]; // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_mut().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     buf[inst.instance_offset + rect_pos + 0] = rect.pos.x as f32;

@@ -137,6 +137,10 @@ impl <'a> ScriptVm<'a>{
         self.heap.cast_to_f64(v, self.thread.trap.ip)
     }
     
+    pub fn handle_type(&self, id:LiveId)->ScriptHandleType{
+        *self.code.native.borrow().handle_type.get(&id).unwrap()
+    }
+    
     pub fn new_handle_type(&mut self, id:LiveId)->ScriptHandleType{
         self.code.native.borrow_mut().new_handle_type(
             self.heap,

@@ -129,7 +129,7 @@ impl Cx{
                     let cxview = &cx.draw_lists[draw_list_id];
                     let darw_item = &cxview.draw_items[draw_item_id];
                     let draw_call = darw_item.draw_call().unwrap();
-                    let sh = &cx.draw_shaders.shaders[draw_call.draw_shader.draw_shader_id];
+                    let sh = &cx.draw_shaders.shaders[draw_call.draw_shader_id.index];
                     let slots = sh.mapping.instances.total_slots;
                     let instances = darw_item.instances.as_ref().unwrap().len() / slots;
                     writeln!(
@@ -137,7 +137,7 @@ impl Cx{
                         "{}({}) sid:{} inst:{}",
                         indent,
                         draw_call.options.debug_id.unwrap_or(sh.debug_id),
-                        draw_call.draw_shader.draw_shader_id,
+                        draw_call.draw_shader_id.index,
                         instances,
                     ).unwrap();
                     // lets dump the instance geometry

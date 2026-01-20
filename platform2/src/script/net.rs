@@ -301,13 +301,13 @@ impl Cx{
 pub fn define_net_module(vm:&mut ScriptVm){
     let net = vm.new_module(id_lut!(net));
     
-    script_api!(vm, net, HttpRequest);
-    script_api!(vm, net, HttpMethod);
-    script_api!(vm, net, HttpEvents);
-    script_api!(vm, net, HttpServerEvents);
-    script_api!(vm, net, HttpServerOptions);
-    script_api!(vm, net, HttpServerResponse);
-    script_api!(vm, net, HttpServerHeaders);
+    set_script_value_to_api!(vm, net.HttpRequest);
+    set_script_value_to_api!(vm, net.HttpMethod);
+    set_script_value_to_api!(vm, net.HttpEvents);
+    set_script_value_to_api!(vm, net.HttpServerEvents);
+    set_script_value_to_api!(vm, net.HttpServerOptions);
+    set_script_value_to_api!(vm, net.HttpServerResponse);
+    set_script_value_to_api!(vm, net.HttpServerHeaders);
         
     vm.add_method(net, id_lut!(http_server), script_args_def!(options=NIL, events=NIL), move |vm, args|{
         let options = script_value!(vm, args.options);
@@ -370,7 +370,7 @@ pub fn define_net_module(vm:&mut ScriptVm){
         id.escape()
     });
     
-    script_api!(vm, net, WebSocketEvents);
+    set_script_value_to_api!(vm, net.WebSocketEvents);
         
     vm.add_method(net, id_lut!(web_socket), script_args_def!(request=NIL, events=NIL), move |vm, args|{
         let request = script_value!(vm, args.request);

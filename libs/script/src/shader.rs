@@ -6,6 +6,7 @@ use crate::function::*;
 use crate::vm::*;
 use crate::opcode::*;
 use crate::pod::*;
+use crate::heap::*;
 use crate::mod_pod::*;
 use crate::mod_shader::*;
 use crate::shader_tables::*;
@@ -147,6 +148,8 @@ pub struct ShaderIo{
     pub kind: ShaderIoKind,
     pub name: LiveId,
     pub ty: ScriptPodType,
+    /// Buffer index assigned during Metal/backend code generation (for uniform buffers, etc.)
+    pub buffer_index: Option<usize>,
 }
 
 impl ShaderIo {
@@ -160,6 +163,10 @@ impl ShaderIo {
     
     pub fn ty(&self) -> ScriptPodType {
         self.ty
+    }
+    
+    pub fn buffer_index(&self) -> Option<usize> {
+        self.buffer_index
     }
 }
 
@@ -180,6 +187,20 @@ pub struct ShaderOutput{
     pub recur_block: Vec<ScriptObject>,
     pub structs: BTreeSet<ScriptPodType>,
     pub functions: Vec<ShaderFn>,
+}
+
+/// Mapping of uniform buffer type names to their assigned buffer indices
+#[derive(Default, Debug, Clone)]
+pub struct UniformBufferBindings {
+    /// Maps Pod type name (e.g. DrawCallUniforms) to buffer index
+    pub bindings: Vec<(LiveId, usize)>,
+}
+
+impl UniformBufferBindings {
+    /// Look up buffer index by Pod type name
+    pub fn get_by_type_name(&self, type_name: LiveId) -> Option<usize> {
+        self.bindings.iter().find(|(name, _)| *name == type_name).map(|(_, idx)| *idx)
+    }
 } 
 
 impl ShaderOutput{
@@ -223,6 +244,7 @@ impl ShaderOutput{
                                 kind: ShaderIoKind::RustInstance,
                                 name: field_id,
                                 ty: pod_ty,
+                                buffer_index: None,
                             });
                         }
                     }
@@ -262,6 +284,7 @@ impl ShaderOutput{
                                             kind: ShaderIoKind::FragmentOutput(index),
                                             name: key_id,
                                             ty: pod_ty,
+                                            buffer_index: None,
                                         });
                                     }
                                 }
@@ -312,6 +335,71 @@ impl ShaderOutput{
         }
     }
     
+    /// Find the vertex buffer object from io_self by looking for SHADER_IO_VERTEX_BUFFER type
+    pub fn find_vertex_buffer_object(&self, vm: &ScriptVm, io_self: ScriptObject) -> Option<ScriptObject> {
+        // Walk the prototype chain looking for vertex buffer properties
+        let mut current = Some(io_self);
+        while let Some(obj) = current {
+            let obj_data = vm.heap.object_data(obj);
+            
+            // Check map properties
+            if let Some(ret) = obj_data.map_iter_ret(|_key, value| {
+                if let Some(value_obj) = value.as_object() {
+                    if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
+                        if io_type == SHADER_IO_VERTEX_BUFFER {
+                            return Some(value_obj);
+                        }
+                    }
+                }
+                None
+            }) {
+                return Some(ret);
+            }
+            
+            // Move to next prototype
+            current = vm.heap.proto(obj).as_object();
+        }
+        None
+    }
+    
+    /// Assign buffer indices to uniform buffers starting from `start_index`.
+    /// Returns the UniformBufferBindings and the next available buffer index.
+    /// Also sets the buffer_index field on each ShaderIo.
+    pub fn assign_uniform_buffer_indices(&mut self, heap: &ScriptHeap, start_index: usize) -> (UniformBufferBindings, usize) {
+        let mut bindings = UniformBufferBindings::default();
+        let mut buf_idx = start_index;
+        
+        for io in &mut self.io {
+            if let ShaderIoKind::UniformBuffer = io.kind {
+                // Get the Pod type name for this uniform buffer
+                let pod_type = heap.pod_type_ref(io.ty);
+                if let Some(type_name) = pod_type.name {
+                    bindings.bindings.push((type_name, buf_idx));
+                }
+                io.buffer_index = Some(buf_idx);
+                buf_idx += 1;
+            }
+        }
+        
+        (bindings, buf_idx)
+    }
+    
+    /// Get the UniformBufferBindings from the current IO state.
+    /// This should be called after `assign_uniform_buffer_indices` has been called.
+    pub fn get_uniform_buffer_bindings(&self, heap: &ScriptHeap) -> UniformBufferBindings {
+        let mut bindings = UniformBufferBindings::default();
+        for io in &self.io {
+            if let ShaderIoKind::UniformBuffer = io.kind {
+                if let Some(buf_idx) = io.buffer_index {
+                    let pod_type = heap.pod_type_ref(io.ty);
+                    if let Some(type_name) = pod_type.name {
+                        bindings.bindings.push((type_name, buf_idx));
+                    }
+                }
+            }
+        }
+        bindings
+    }
 }
 
 
@@ -1668,6 +1756,7 @@ impl ShaderFnCompiler{
                                      kind,
                                      name: field_id,
                                      ty: pod_ty,
+                                     buffer_index: None,
                                  });
                              }
                              let mut s = self.stack.new_string();
@@ -1920,6 +2009,7 @@ impl ShaderFnCompiler{
                                     kind: kind.clone(),
                                     name: field_id,
                                     ty: pod_ty,
+                                    buffer_index: None,
                                 });
                             }
                             let mut s = self.stack.new_string();
@@ -1959,6 +2049,7 @@ impl ShaderFnCompiler{
                             kind,
                             name: field_id,
                             ty: pod_ty,
+                            buffer_index: None,
                         });
                     }
                     let mut s = self.stack.new_string();

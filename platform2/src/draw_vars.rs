@@ -24,8 +24,8 @@ pub struct DrawVars {
     #[rust] pub dyn_instance_start: usize,
     #[rust] pub dyn_instance_slots: usize,
     #[rust] pub options: CxDrawShaderOptions,
-    #[rust] pub draw_shader: Option<DrawShader>,
-    #[rust] pub  geometry_id: Option<GeometryId>,
+    #[rust] pub draw_shader_id: Option<DrawShaderId>,
+    #[rust] pub geometry_id: Option<GeometryId>,
     #[rust([0f32; DRAW_CALL_USER_UNIFORMS])] pub dyn_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
     #[rust] pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     #[rust([0f32; DRAW_CALL_VAR_INSTANCES])] pub dyn_instances: [f32; DRAW_CALL_VAR_INSTANCES]
@@ -56,7 +56,7 @@ impl DrawVars {
     }
     
     pub fn can_instance(&self) -> bool {
-        self.draw_shader.is_some()
+        self.draw_shader_id.is_some()
     }
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
@@ -323,12 +323,12 @@ impl DrawVars {
     
     
     pub fn update_rect(&mut self, cx: &mut Cx, rect: Rect) {
-        if let Some(draw_shader) = self.draw_shader {
+        if let Some(draw_shader_id) = self.draw_shader_id {
             if let Some(inst) = self.area.valid_instance(cx) {
-                if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
+                if draw_shader_id.generation != cx.draw_shaders.generation {
                     return;
                 }
-                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                 let draw_call = draw_item.kind.draw_call_mut().unwrap();
@@ -358,12 +358,12 @@ impl DrawVars {
     }
     
     pub fn update_instance_area_value(&mut self, cx: &mut Cx,  id: &[LiveId]) {
-        if let Some(draw_shader) = self.draw_shader {
+        if let Some(draw_shader_id) = self.draw_shader_id {
             if let Some(inst) = self.area.valid_instance(cx) {
-                if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
+                if draw_shader_id.generation != cx.draw_shaders.generation {
                     return;
                 }
-                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                 let draw_call = draw_item.kind.draw_call_mut().unwrap();
@@ -430,8 +430,8 @@ impl DrawVars {
     }*/
     
     pub fn get_instance(&self, cx: &mut Cx, inst: LiveId, value: &mut [f32]){
-        if let Some(draw_shader) = self.draw_shader {
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let sh = &cx.draw_shaders[draw_shader_id.index];
             let self_slice = self.as_slice();
             for input in &sh.mapping.instances.inputs {
                 let offset = input.offset;
@@ -446,8 +446,8 @@ impl DrawVars {
     }
     
     pub fn set_dyn_instance(&mut self, cx:&Cx, instance: LiveId, value: &[f32]) {
-        if let Some(draw_shader) = self.draw_shader {
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let sh = &cx.draw_shaders[draw_shader_id.index];
             for input in &sh.mapping.dyn_instances.inputs {
                 let offset = (self.dyn_instances.len() - sh.mapping.dyn_instances.total_slots) + input.offset;
                 let slots = input.slots;
@@ -461,8 +461,8 @@ impl DrawVars {
     }
     
     pub fn get_uniform(&self, cx: &mut Cx, uniform: LiveId, value: &mut [f32]){
-        if let Some(draw_shader) = self.draw_shader {
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let sh = &cx.draw_shaders[draw_shader_id.index];
             for input in &sh.mapping.dyn_uniforms.inputs {
                 let offset = input.offset;
                 let slots = input.slots;
@@ -476,8 +476,8 @@ impl DrawVars {
     }
     
     pub fn set_uniform(&mut self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
-        if let Some(draw_shader) = self.draw_shader { 
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+        if let Some(draw_shader_id) = self.draw_shader_id { 
+            let sh = &cx.draw_shaders[draw_shader_id.index];
             for input in &sh.mapping.dyn_uniforms.inputs {
                 let offset = input.offset;
                 let slots = input.slots;
@@ -495,8 +495,8 @@ impl DrawVars {
         &mut self,
         cx: &mut Cx,
     ) {
-        if let Some(draw_shader) = self.draw_shader {
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+        if let Some(draw_shader_id) = self.draw_shader_id {
+            let sh = &cx.draw_shaders[draw_shader_id.index];
             self.dyn_instance_start = self.dyn_instances.len() - sh.mapping.dyn_instances.total_slots;
             self.dyn_instance_slots = sh.mapping.instances.total_slots;
         }

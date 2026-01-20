@@ -16,7 +16,7 @@ script_run!{
     use mod.geom
     
     mod.shaders.DrawQuad = #(DrawQuad::script_shader(vm)){
-        geom: shader.vertex_buffer(geom.QuadVertex)
+        geom: shader.vertex_buffer(geom.QuadVertex, geom.QuadGeom)
         
         draw_call: shader.uniform_buffer(draw.DrawCallUniforms)
         draw_pass: shader.uniform_buffer(draw.DrawPassUniforms)
@@ -95,7 +95,7 @@ impl ScriptHook for DrawQuad{
 impl DrawQuad {
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
         cx.begin_turtle(walk, layout);
-        if self.draw_vars.draw_shader.is_some() {
+        if self.draw_vars.draw_shader_id.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }

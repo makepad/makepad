@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::fmt;
 
 impl ScriptHeap{
+     
     pub fn new_handle(&mut self, ty:ScriptHandleType, mut hgc:Box<dyn ScriptHandleGc>)->ScriptHandle{
         if let Some(mut handle) = self.handles_free.pop(){
             hgc.set_handle(handle);
@@ -25,6 +26,18 @@ impl ScriptHeap{
             }));
             handle
         }
+    }
+    
+    pub fn handle_ref<T: ScriptHandleGc + 'static>(&self, handle: ScriptHandle) -> Option<&T> {
+        self.handles.get(handle.index as usize)
+            .and_then(|h| h.as_ref())
+            .and_then(|h| h.handle.downcast_ref::<T>())
+    }
+    
+    pub fn handle_mut<T: ScriptHandleGc + 'static>(&mut self, handle: ScriptHandle) -> Option<&mut T> {
+        self.handles.get_mut(handle.index as usize)
+            .and_then(|h| h.as_mut())
+            .and_then(|h| h.handle.downcast_mut::<T>())
     }
 }
 
@@ -60,7 +73,7 @@ impl ScriptHandleData{
 
 pub trait ScriptHandleGc{
     fn gc(&mut self);
-    fn set_handle(&mut self, _handle:ScriptHandle);
+    fn set_handle(&mut self, _handle:ScriptHandle){}
     fn ref_cast_type_id(&self) -> TypeId where Self: 'static {TypeId::of::<Self>()}
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result{
         write!(f, "ScriptHandleGc: No debug format")

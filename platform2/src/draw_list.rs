@@ -19,7 +19,7 @@ use {
             CxDrawShaderOptions,
             CxDrawShaderMapping,
             CxDrawShader,
-            DrawShader,
+            DrawShaderId,
         },
         draw_vars::{
             DrawVars,
@@ -193,7 +193,7 @@ impl CxDrawKind{
 }
 
 pub struct CxDrawCall {
-    pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
+    pub draw_shader_id: DrawShaderId, // if shader_id changed, delete gl vao
     pub options: CxDrawShaderOptions,
     pub total_instance_slots: usize,
     pub draw_call_uniforms: DrawCallUniforms, // draw uniforms
@@ -209,7 +209,7 @@ impl CxDrawCall {
         CxDrawCall {
             geometry_id: draw_vars.geometry_id,
             options: draw_vars.options.clone(),
-            draw_shader: draw_vars.draw_shader.unwrap(),
+            draw_shader_id: draw_vars.draw_shader_id.unwrap(),
             total_instance_slots: mapping.instances.total_slots,
             draw_call_uniforms: DrawCallUniforms::default(),
             dyn_uniforms: draw_vars.dyn_uniforms,
@@ -310,7 +310,7 @@ pub struct CxDrawList {
     
     pub os: CxOsDrawList,
     pub rect_areas: Vec<CxRectArea>,
-    pub find_appendable_draw_shader_id: Vec<u64>
+    pub find_appendable_draw_shader_check: Vec<u64>
 }
 
 pub struct CxRectArea{
@@ -345,18 +345,18 @@ impl CxDrawList {
     
     pub fn find_appendable_drawcall(&mut self, sh: &CxDrawShader, draw_vars: &DrawVars) -> Option<usize> {
         // find our drawcall to append to the current layer
-        if draw_vars.draw_shader.is_none(){
+        if draw_vars.draw_shader_id.is_none(){
             return None
         }
-        let draw_shader_id = draw_vars.draw_shader.as_ref().unwrap().false_compare_id();
+        let draw_shader_check = draw_vars.draw_shader_id.as_ref().unwrap().false_compare_check();
         
         //let mut found = 0;
         for i in (0..self.draw_items.len()).rev() {
-            if self.find_appendable_draw_shader_id[i] == draw_shader_id{
+            if self.find_appendable_draw_shader_check[i] == draw_shader_check{
                 let draw_item = &mut self.draw_items[i];
                 if let Some(draw_call) = &draw_item.draw_call() {
                     // TODO! figure out why this can happen
-                    if draw_call.draw_shader != draw_vars.draw_shader.unwrap(){
+                    if draw_call.draw_shader_id != draw_vars.draw_shader_id.unwrap(){
                         continue
                     }
                     // lets compare uniforms and textures..
@@ -405,11 +405,11 @@ impl CxDrawList {
     
     pub fn append_draw_call(&mut self, redraw_id: u64, sh: &CxDrawShader, draw_vars: &DrawVars) -> &mut CxDrawItem {
         
-        if let Some(ds) = &draw_vars.draw_shader{
-            self.find_appendable_draw_shader_id.push(ds.false_compare_id());
+        if let Some(ds) = &draw_vars.draw_shader_id{
+            self.find_appendable_draw_shader_check.push(ds.false_compare_check());
         }
         else{
-            self.find_appendable_draw_shader_id.push(0);
+            self.find_appendable_draw_shader_check.push(0);
         }
         self.draw_items.push_item(
             redraw_id,
@@ -421,13 +421,13 @@ impl CxDrawList {
         self.redraw_id = redraw_id;
         self.draw_items.clear();
         self.rect_areas.clear();
-        self.find_appendable_draw_shader_id.clear();
+        self.find_appendable_draw_shader_check.clear();
     }
     
     pub fn append_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
         // see if we need to add a new one
         self.draw_items.push_item(redraw_id, CxDrawKind::SubList(sub_list_id));
-        self.find_appendable_draw_shader_id.push(0);
+        self.find_appendable_draw_shader_check.push(0);
     }
     
     pub fn store_sub_list_last(&mut self, redraw_id: u64, sub_list_id: DrawListId) {

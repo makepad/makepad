@@ -6,6 +6,7 @@ use {
         sel_impl,
     },
     crate::{
+        script::vm::*,
         makepad_objc_sys::objc_block,
         makepad_script::*,
         makepad_script::shader::*,
@@ -20,7 +21,8 @@ use {
         },
         draw_list::DrawListId,
         draw_vars::DrawVars,
-        draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderSource, DrawShader},
+        draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderSource, DrawShaderId},
+        geometry::Geometry,
         cx::Cx,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         studio::{AppToStudio, GPUSample, StudioScreenshotResponse},
@@ -88,7 +90,7 @@ impl Cx {
                     continue;
                 };
                 
-                let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() { // shader didnt compile somehow
                     continue;
                 }
@@ -622,6 +624,9 @@ impl Cx {
                 crate::log!("{}", mtlsl);
             }
             
+            // Get the uniform buffer bindings from the mapping
+            let bindings = cx_shader.mapping.uniform_buffer_bindings.clone();
+            
             // Check if we already have an os_shader with the same source
             let mut found_os_shader_id = None;
             for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
@@ -635,7 +640,7 @@ impl Cx {
             if let Some(os_shader_id) = found_os_shader_id {
                 cx_shader.os_shader_id = Some(os_shader_id);
             } else {
-                if let Some(shp) = CxOsDrawShader::new(metal_cx, mtlsl) {
+                if let Some(shp) = CxOsDrawShader::new(metal_cx, mtlsl, &bindings) {
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
@@ -777,6 +782,10 @@ impl DrawVars{
                 );
             }
             
+            // Assign buffer indices to uniform buffers before generating Metal code
+            // Buffer indices start at 3 (0=vertex buffer, 1=instance buffer, 2=uniform struct)
+            output.assign_uniform_buffer_indices(vm.heap, 3);
+            
             let mut out = String::new();
             write!(out, "#include <metal_stdlib>\nusing namespace metal;\n").ok();
             output.create_struct_defs(vm, &mut out);
@@ -801,10 +810,10 @@ impl DrawVars{
             self.dyn_instance_slots = mapping.instances.total_slots;
             
             // Access Cx from the vm host
-            let cx = vm.host.downcast_mut::<Cx>().unwrap();
+            let cx = vm.host.cx_mut();
             
             // Allocate CxDrawShader with os_shader_id set to None
-            let draw_shader_id = cx.draw_shaders.shaders.len();
+            let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
                 debug_id: LiveId(0),
                 os_shader_id: None,
@@ -812,13 +821,25 @@ impl DrawVars{
             });
             
             // Add to compile set for later Metal compilation
-            cx.draw_shaders.compile_set.insert(draw_shader_id);
+            cx.draw_shaders.compile_set.insert(index);
             
             // Set draw_shader on self
-            self.draw_shader = Some(DrawShader {
-                draw_shader_generation: cx.draw_shaders.generation,
-                draw_shader_id,
+            self.draw_shader_id = Some(DrawShaderId {
+                generation: cx.draw_shaders.generation,
+                index,
             });
+            
+            // See if we have a script-set vertex buffer with geometry
+            // Find the vertex buffer object by looking for SHADER_IO_VERTEX_BUFFER type,
+            // then get its buffer property which should be a Handle<Geometry>
+            if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
+                let buffer_value = vm.heap.value(vb_obj, id!(buffer).into(), &vm.thread.trap);
+                if let Some(handle) = buffer_value.as_handle() {
+                    if let Some(geometry) = vm.heap.handle_ref::<Geometry>(handle) {
+                        self.geometry_id = Some(geometry.geometry_id());
+                    }
+                }
+            }
         }
     }
 }
@@ -827,6 +848,7 @@ impl CxOsDrawShader {
     pub (crate) fn new(
         metal_cx: &MetalCx,
         mtlsl: String,
+        bindings: &UniformBufferBindings,
     ) -> Option<Self> {
         let options = RcObjcId::from_owned(unsafe {msg_send![class!(MTLCompileOptions), new]});
         unsafe {
@@ -892,11 +914,12 @@ impl CxOsDrawShader {
             ]
         }).unwrap());
         
-        // Fixed buffer IDs for uniforms
-        let draw_call_uniform_buffer_id = Some(4);
-        let pass_uniform_buffer_id = Some(5);
-        let draw_list_uniform_buffer_id = Some(6);
-        let dyn_uniform_buffer_id = Some(7);
+        // Look up buffer IDs from shader output bindings by Pod type name
+        let draw_call_uniform_buffer_id = bindings.get_by_type_name(id!(DrawCallUniforms)).map(|i| i as u64);
+        let pass_uniform_buffer_id = bindings.get_by_type_name(id!(DrawPassUniforms)).map(|i| i as u64);
+        let draw_list_uniform_buffer_id = bindings.get_by_type_name(id!(DrawListUniforms)).map(|i| i as u64);
+        // dyn_uniform_buffer_id is not in bindings, it uses the IoUniform struct at buffer(2)
+        let dyn_uniform_buffer_id = Some(2);
         
         return Some(Self {
             _library: library,
