@@ -24,6 +24,8 @@ script_run!{
         
         pos: shader.varying(vec2f)
         world: shader.varying(vec4f)
+        vertex_pos: shader.vertex_position(vec4f)
+        fb0: shader.fragment_output(0, vec4f)
         
         clip_and_transform_vertex: fn(rect_pos, rect_size){
             let clipped = clamp(
@@ -63,11 +65,11 @@ script_run!{
         }
                 
         vertex: fn() {
-            return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
         }
                 
         fragment: fn(){
-            return #f00
+            self.fb0 = #f00
         }
     }
 }

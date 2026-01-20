@@ -417,6 +417,15 @@ impl ScriptPodTy{
             Self::VariableArray{..}=>0,
         }
     }
+    
+    /// Returns the number of float32-sized slots this type occupies.
+    /// This is used for shader attribute/uniform layout calculations.
+    pub fn slots(&self)->usize{
+        // Each slot is 4 bytes (size of f32)
+        // For f16, we round up to 1 slot
+        let size = self.size_of();
+        (size + 3) / 4
+    }
 }
 
 #[derive(Default, Debug)]

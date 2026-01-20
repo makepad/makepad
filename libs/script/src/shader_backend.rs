@@ -19,10 +19,11 @@ pub enum ShaderBackend{
 }
 
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ShaderIoPrefix{
     Prefix(&'static str),
-    Full(&'static str)
+    Full(&'static str),
+    FullOwned(String)
 }
 
 impl ShaderBackend{
@@ -33,10 +34,10 @@ impl ShaderBackend{
                     ShaderMode::Vertex=>match io_type{
                         SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("_io.i[_iov.iid].")),
                         SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i[_iov.iid].")),
-                        SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u.")),
+                        SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u->")),
                         SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
                         SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iov.v.")),
-                        SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v.vertex_pos")),
+                        SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v._position")),
                         SHADER_IO_VERTEX_BUFFER=>(ShaderIoKind::VertexBuffer, ShaderIoPrefix::Prefix("_io.vb[_iov.vid].")),
                         SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("")),
                         SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("_io.")),
@@ -44,22 +45,33 @@ impl ShaderBackend{
                         
                         _=>panic!()
                     }
-                    ShaderMode::Fragment=>match io_type{
-                        SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("_io.i[_iof.v._iid].")),
-                        SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i[_iof.v._iid].")),
-                        SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u.")),
-                        SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
-                        SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iof.v.")),
-                        SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iof.v.vertex_pos")),
-                        SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::FragmentOutput, ShaderIoPrefix::Full("_iof.fb0")),
-                        SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("_io.")),
-                        SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("_io.")),
-                        _=>panic!()
+                    ShaderMode::Fragment=>{
+                        // Check for fragment output range first
+                        if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 {
+                            let index = io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0;
+                            return (ShaderIoKind::FragmentOutput(index as u8), ShaderIoPrefix::FullOwned(format!("_iof.fb->fb{}", index)));
+                        }
+                        match io_type{
+                            SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("_io.i[_iof.v->_iid].")),
+                            SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i[_iof.v->_iid].")),
+                            SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u->")),
+                            SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
+                            SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iof.v->")),
+                            SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iof.v->_position")),
+                            SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("_io.")),
+                            _=>panic!()
+                        }
                     }
                     _=>panic!()
                 }
             }
              Self::Hlsl | Self::Glsl | Self::Wgsl =>{
+                 // Check for fragment output range first
+                 if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 {
+                     let index = io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0;
+                     return (ShaderIoKind::FragmentOutput(index as u8), ShaderIoPrefix::FullOwned(format!("frag_fb{}", index)));
+                 }
                  match io_type{
                      SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("rustinst_")),
                      SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("dyninst_")),
@@ -67,7 +79,6 @@ impl ShaderBackend{
                      SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("unibuf_")),
                      SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("var_")),
                      SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Prefix("vtx_pos")),
-                     SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::FragmentOutput, ShaderIoPrefix::Prefix("frag_fb0")),
                      _=>panic!()
                  }
              }
