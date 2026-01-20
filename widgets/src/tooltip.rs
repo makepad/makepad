@@ -87,8 +87,11 @@ impl Widget for Tooltip {
 
         self.content.handle_event(cx, event, scope);
 
-        match event.hits_with_capture_overload(cx, self.content.area(), true) {
-            Hit::FingerUp(fue) if fue.is_over => {
+        // Hide the tooltip if the user taps/clicks, drags, or scrolls anywhere.
+        match event.hits_with_capture_overload(cx, self.draw_bg.area(), true) {
+            Hit::FingerUp(_)
+            | Hit::FingerMove(_)
+            | Hit::FingerScroll(_) => {
                 self.hide(cx);
             }
             _ => { }
