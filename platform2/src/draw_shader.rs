@@ -1,14 +1,12 @@
 use {
     std::{
         ops::{Index, IndexMut},
-        /*collections::{
-            HashMap,
-            HashSet,
-            BTreeSet,
-        },*/
+        collections::BTreeSet,
     },
     crate::{
         makepad_live_id::*,
+        makepad_script::shader::*,
+        makepad_script::heap::ScriptHeap,
         //draw_vars::DrawVars,
         os::CxOsDrawShader,
         cx::Cx
@@ -62,8 +60,8 @@ pub struct CxDrawShaders {
     pub shaders: Vec<CxDrawShader>,
     pub os_shaders: Vec<CxOsDrawShader>,
     pub generation: u64,
+    pub compile_set: BTreeSet<usize>,
     //pub ptr_to_item: HashMap<DrawShaderPtr, CxDrawShaderItem>,
-    //pub compile_set: BTreeSet<DrawShaderPtr>,
     //pub fingerprints: Vec<DrawShaderFingerprint>,
     //pub error_set: HashSet<DrawShaderPtr>,
     // pub error_fingerprints: Vec<Vec<LiveNode >>,
@@ -119,8 +117,7 @@ impl DrawShader{
 }
 
 pub struct CxDrawShader {
-    pub class_prop: LiveId,
-    pub type_name: LiveId,
+    pub debug_id: LiveId,
     pub os_shader_id: Option<usize>,
     pub mapping: CxDrawShaderMapping
 }
@@ -184,20 +181,22 @@ pub struct DrawShaderInput {
    // pub live_ptr: Option<LivePtr>
 }
 
-#[cfg(any(target_arch = "wasm32"))]
-pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSLTight;
-
-
-#[cfg(all(any(target_os = "android", target_os = "linux"),use_gles_3))]
-pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL140;
-#[cfg(all(any(target_os = "android", target_os = "linux"),not(use_gles_3)))]
-pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSLTight;
-
-
-#[cfg(any(target_os = "macos", target_os = "ios", target_os="tvos"))]
-pub const _DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
-#[cfg(any(target_os = "windows"))]
-pub const _DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
+fn uniform_packing() -> DrawShaderInputPacking {
+    #[cfg(any(target_arch = "wasm32"))]
+    { return DrawShaderInputPacking::UniformsGLSLTight; }
+    
+    #[cfg(all(any(target_os = "android", target_os = "linux"), use_gles_3))]
+    { return DrawShaderInputPacking::UniformsGLSL140; }
+    
+    #[cfg(all(any(target_os = "android", target_os = "linux"), not(use_gles_3)))]
+    { return DrawShaderInputPacking::UniformsGLSLTight; }
+    
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    { return DrawShaderInputPacking::UniformsMetal; }
+    
+    #[cfg(target_os = "windows")]
+    { return DrawShaderInputPacking::UniformsHLSL; }
+}
 
 impl DrawShaderInputs {
     pub fn new(packing_method: DrawShaderInputPacking) -> Self {
@@ -208,17 +207,13 @@ impl DrawShaderInputs {
         }
     }
     
-    /*
-    pub fn push(&mut self, id: LiveId, ty: ShaderTy, live_ptr: Option<LivePtr>) {
-        let slots = ty.slots();
+    pub fn push(&mut self, id: LiveId, slots: usize) {
         match self.packing_method {
             DrawShaderInputPacking::Attribute => {
                 self.inputs.push(DrawShaderInput {
                     id,
                     offset: self.total_slots,
                     slots,
-                    ty,
-                    live_ptr
                 });
                 self.total_slots += slots;
             }
@@ -227,8 +222,6 @@ impl DrawShaderInputs {
                     id,
                     offset: self.total_slots,
                     slots,
-                    ty,
-                    live_ptr
                 });
                 self.total_slots += slots;
             }
@@ -240,8 +233,6 @@ impl DrawShaderInputs {
                     id,
                     offset: self.total_slots,
                     slots,
-                    ty,
-                    live_ptr
                 });
                 self.total_slots += slots;
             }
@@ -253,8 +244,6 @@ impl DrawShaderInputs {
                     id,
                     offset: self.total_slots,
                     slots,
-                    ty,
-                    live_ptr
                 });
                 self.total_slots += slots;
             }
@@ -267,13 +256,11 @@ impl DrawShaderInputs {
                     id,
                     offset: self.total_slots,
                     slots,
-                    ty,
-                    live_ptr
                 });
                 self.total_slots += aligned_slots;
             }
         }
-    }*/
+    }
     
     pub fn finalize(&mut self) {
         match self.packing_method {
@@ -305,29 +292,120 @@ pub struct DrawShaderFlags {
 }
 
 #[derive(Clone)]
+pub enum CxDrawShaderSource {
+    Separate{vertex:String, fragment:String},
+    Combined{source:String}
+}    
+
+#[derive(Clone)]
 pub struct CxDrawShaderMapping {
+    pub source: CxDrawShaderSource,
     pub flags: DrawShaderFlags,
-   // pub const_table: DrawShaderConstTable,
-    
-    pub geometries: DrawShaderInputs,
     pub instances: DrawShaderInputs,
-    pub var_instances: DrawShaderInputs,
-    pub live_instances: DrawShaderInputs,
-    pub live_uniforms: DrawShaderInputs,
-    pub draw_call_uniforms: DrawShaderInputs,
-    pub draw_list_uniforms: DrawShaderInputs,
+    pub dyn_instances: DrawShaderInputs,
     pub dyn_uniforms: DrawShaderInputs,
-    pub pass_uniforms: DrawShaderInputs,
+    // pub const_table: DrawShaderConstTable,
+    // pub geometries: DrawShaderInputs,
+    // pub live_instances: DrawShaderInputs,
+    // pub live_uniforms: DrawShaderInputs,
+    // pub draw_call_uniforms: DrawShaderInputs,
+    // pub draw_list_uniforms: DrawShaderInputs,
+    // pub pass_uniforms: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
     pub uses_time: bool,
-    pub instance_enums: Vec<usize>,
+    // pub instance_enums: Vec<usize>,
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
     pub draw_clip: Option<usize>,
-    pub live_uniforms_buf: Vec<f32>,
+    //pub live_uniforms_buf: Vec<f32>,
 }
 
 impl CxDrawShaderMapping {
+    pub fn from_shader_output(source:CxDrawShaderSource, heap: &ScriptHeap, output: &ShaderOutput) -> CxDrawShaderMapping {
+        // Use attribute packing for instances (they're vertex attributes)
+        // instances contains ALL instance fields (dyn first, then rust)
+        let mut instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
+        // dyn_instances tracks just the dynamic portion for offset calculations
+        let mut dyn_instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
+        // Use platform-specific packing for uniforms
+        let mut dyn_uniforms = DrawShaderInputs::new(uniform_packing());
+        let mut textures = Vec::new();
+        
+        let mut rect_pos = None;
+        let mut rect_size = None;
+        let mut draw_clip = None;
+        
+        // Memory layout: DynInstance fields first, then RustInstance fields
+        // This matches metal_create_instance_struct
+        
+        // 1. Process DynInstance fields first (added to both instances and dyn_instances)
+        for io in &output.io {
+            if let ShaderIoKind::DynInstance = io.kind {
+                let pod_ty = heap.pod_type_ref(io.ty);
+                let slots = pod_ty.ty.slots();
+                instances.push(io.name, slots);
+                dyn_instances.push(io.name, slots);
+            }
+        }
+        
+        // 2. Process RustInstance fields after (already in correct order from pre_collect_rust_instance_io)
+        for io in output.io.iter().filter(|io| matches!(io.kind, ShaderIoKind::RustInstance)) {
+            let pod_ty = heap.pod_type_ref(io.ty);
+            let slots = pod_ty.ty.slots();
+            
+            // Track special field offsets
+            if io.name == live_id!(rect_pos) {
+                rect_pos = Some(instances.total_slots);
+            }
+            if io.name == live_id!(rect_size) {
+                rect_size = Some(instances.total_slots);
+            }
+            if io.name == live_id!(draw_clip) {
+                draw_clip = Some(instances.total_slots);
+            }
+            
+            instances.push(io.name, slots);
+        }
+        
+        // Process Uniform fields
+        for io in &output.io {
+            if let ShaderIoKind::Uniform = io.kind {
+                let pod_ty = heap.pod_type_ref(io.ty);
+                let slots = pod_ty.ty.slots();
+                dyn_uniforms.push(io.name, slots);
+            }
+        }
+        
+        // Process Texture and Sampler fields
+        for io in &output.io {
+            match &io.kind {
+                ShaderIoKind::Texture | ShaderIoKind::Sampler(_) => {
+                    textures.push(DrawShaderTextureInput {
+                        id: io.name,
+                    });
+                }
+                _ => ()
+            }
+        }
+        
+        instances.finalize();
+        dyn_instances.finalize();
+        dyn_uniforms.finalize();
+        
+        CxDrawShaderMapping {
+            source,
+            flags: DrawShaderFlags::default(),
+            instances,
+            dyn_instances,
+            dyn_uniforms,
+            textures,
+            uses_time: false, // TODO: detect time usage in shader
+            rect_pos,
+            rect_size,
+            draw_clip,
+        }
+    }
+    
     /*
     pub fn from_draw_shader_def(draw_shader_def: &DrawShaderDef, const_table: DrawShaderConstTable, uniform_packing: DrawShaderInputPacking) -> CxDrawShaderMapping { //}, options: ShaderCompileOptions, metal_uniform_packing:bool) -> Self {
         

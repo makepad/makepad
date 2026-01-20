@@ -134,10 +134,9 @@ impl Cx{
                     let instances = darw_item.instances.as_ref().unwrap().len() / slots;
                     writeln!(
                         s,
-                        "{}{}({}) sid:{} inst:{}",
+                        "{}({}) sid:{} inst:{}",
                         indent,
-                        draw_call.options.debug_id.unwrap_or(sh.class_prop),
-                        sh.type_name,
+                        draw_call.options.debug_id.unwrap_or(sh.debug_id),
                         draw_call.draw_shader.draw_shader_id,
                         instances,
                     ).unwrap();

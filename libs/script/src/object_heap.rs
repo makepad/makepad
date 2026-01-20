@@ -156,8 +156,8 @@ impl ScriptHeap{
         object.tag.set_shader_io(io);
     }
     
-    pub fn as_shader_io(&mut self, obj: ScriptObject)->Option<ShaderIoType>{
-        let object = &mut  self.objects[obj.index as usize];
+    pub fn as_shader_io(&self, obj: ScriptObject)->Option<ShaderIoType>{
+        let object = &self.objects[obj.index as usize];
         object.tag.as_shader_io()
     }
         
