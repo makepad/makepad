@@ -725,10 +725,8 @@ class MakepadSurface
     // For some reason it only works if placed here and not in the parent layout.
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-        // Build inputType based on configuration
         int inputType = InputType.TYPE_CLASS_TEXT;
 
-        // Input mode
         switch (mInputMode) {
             case 1: // Ascii - use visible password variation for ASCII-only keyboard
                 // TYPE_TEXT_VARIATION_VISIBLE_PASSWORD shows ASCII keyboard without masking
@@ -758,7 +756,6 @@ class MakepadSurface
                 break;
         }
 
-        // Only add text flags if we're in text class mode
         if ((inputType & InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT) {
             // Autocapitalization
             switch (mAutocapitalize) {
@@ -801,7 +798,6 @@ class MakepadSurface
 
         outAttrs.inputType = inputType;
 
-        // Build imeOptions
         int imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
 
         // Return key type
@@ -884,9 +880,9 @@ class MakepadSurface
 
         // Check for stale echoes - if Rust sends back text we recently sent to it,
         // it's just echoing old state and should be ignored to prevent rollback
+        // TODO: there might be a better way to avoid this
         if (textChanged && mInputConnection != null) {
             if (mInputConnection.wasRecentlySentToRust(fullText)) {
-                // Rust is echoing back something we recently sent - it's stale, ignore
                 return;
             }
         }
@@ -898,7 +894,6 @@ class MakepadSurface
 
         if (textChanged) {
             // Text content changed - update Editable and restart IME
-            // This is a genuine Rust-side change (not an echo)
             synchronized (mEditableLock) {
                 BaseInputConnection.removeComposingSpans(mEditable);
                 mEditable.replace(0, mEditable.length(), fullText);
@@ -906,7 +901,7 @@ class MakepadSurface
             }
 
             // Clear stale buffer since we're applying Rust's authoritative state
-            // Do NOT call recordSentToRust here - that's only for Java->Rust sends
+            // Do NOT call recordSentToRust here, that's only for Java -> Rust sends
             // (in onImeTextStateChanged). Recording here would corrupt echo detection.
             if (mInputConnection != null) {
                 mInputConnection.clearRecentSentBuffer();
@@ -1385,7 +1380,6 @@ public class MakepadActivity
     }
 
     private boolean onPrepareActionModeInternal(ActionMode mode, Menu menu) {
-        // Enable/disable menu items based on state
         boolean hasSelection = mHasSelection;
         boolean hasClipboard = false;
 

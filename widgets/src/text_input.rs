@@ -1171,10 +1171,8 @@ impl TextInput {
         self.animator_play(cx, ids!(blink.on));
         cx.stop_timer(self.blink_timer);
         cx.hide_text_ime();
-        // Clear composition state to avoid stale composition UI on refocus
         self.composition_start = 0;
         self.composition_length = 0;
-        // Only hide clipboard actions on mobile platforms where they're supported
         match cx.os_type() {
             OsType::Android(_) | OsType::Ios(_) => {
                 cx.hide_clipboard_actions();
@@ -1336,9 +1334,7 @@ impl Widget for TextInput {
         self.scroll_to_cursor(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
-            // Skip update_ime_context if we just received IME input
-            // This prevents race condition where we send old state back to Java
-            // before the IME event is fully processed (skip if same frame as IME update)
+            // Skip if we received IME input this frame (prevents echoing stale state back)
             if self.ime_update_frame != cx.redraw_id() {
                 self.update_ime_context(cx);
             }
@@ -1740,7 +1736,6 @@ impl Widget for TextInput {
                 );
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
-                // Hide clipboard actions popup on text edit
                 cx.hide_clipboard_actions();
             }
             Hit::KeyDown(KeyEvent {
@@ -1764,7 +1759,6 @@ impl Widget for TextInput {
                 );
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
-                // Hide clipboard actions popup on text edit
                 cx.hide_clipboard_actions();
             }
             Hit::KeyDown(KeyEvent {
@@ -1803,9 +1797,8 @@ impl Widget for TextInput {
             }) if !self.is_read_only => {
                 let input = self.filter_input(&input, false);
                 if input.is_empty() {
-                    // Empty input with replace_last means composition was cancelled - delete text
+                    // Composition cancelled, remove preview text
                     if replace_last && self.composition_length > 0 {
-                        // Remove the composition text (clamp end to text length for safety)
                         let end = (self.composition_start + self.composition_length).min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
@@ -1825,9 +1818,9 @@ impl Widget for TextInput {
                 }
 
                 if replace_last {
-                    // IME composition update
+                    // IME composition preview
                     if self.composition_length > 0 {
-                        // Replace previous composition text (clamp to text length for safety)
+                        // Replace previous composition text
                         let start = self.composition_start.min(self.text.len());
                         let end = (self.composition_start + self.composition_length).min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
@@ -1841,7 +1834,7 @@ impl Widget for TextInput {
                         );
                         self.composition_length = input.len();
                     } else {
-                        // First composition character - record start position
+                        // First composition character, record start position
                         self.composition_start = self.selection.start().index;
                         self.composition_length = input.len();
                         self.create_or_extend_edit_group(EditKind::Other);
@@ -1857,7 +1850,7 @@ impl Widget for TextInput {
                 } else {
                     // Final commit or regular text input
                     if self.composition_length > 0 {
-                        // Replace composition with final committed text (clamp to text length for safety)
+                        // Replace composition with final committed text
                         let start = self.composition_start.min(self.text.len());
                         let end = (self.composition_start + self.composition_length).min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
@@ -1892,20 +1885,16 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
-                // Immediately update IME shadow buffer so Gboard gets correct cursor position
-                // Guard: skip if we just received IME input (prevents sync loop during rapid input)
+                // Immediately update IME context so that IME engines get correct cursor position
+                // Skip if we just received IME input (prevents sync loop during rapid input)
                 if self.ime_update_frame != cx.redraw_id() {
                     self.update_ime_context(cx);
                 }
-                // Hide clipboard actions popup on text edit
                 cx.hide_clipboard_actions();
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
-                // iOS autocorrect and paste sends range replacement events
-                // Filter the replacement text based on input_mode
+                // iOS autocorrect/paste, filter based on input_mode
                 let filtered_text = self.filter_input(&event.text, false);
-
-                // If filtered text is empty but original wasn't, skip the replacement
                 if filtered_text.is_empty() && !event.text.is_empty() {
                     return;
                 }
@@ -1920,7 +1909,6 @@ impl Widget for TextInput {
                     .map(|(i, _)| i)
                     .unwrap_or(self.text.len());
 
-                // Clear any active composition
                 self.composition_length = 0;
 
                 // Perform the replacement
@@ -1937,29 +1925,21 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
-                // Immediately update IME shadow buffer so Gboard gets correct cursor position
-                // Guard: skip if we just received IME input (prevents sync loop during rapid input)
                 if self.ime_update_frame != cx.redraw_id() {
                     self.update_ime_context(cx);
                 }
-                // Hide clipboard actions popup on text edit
                 cx.hide_clipboard_actions();
             }
             Hit::ImeTextState(event) if !self.is_read_only => {
-                // Full text state from platform IME (Android's InputConnection)
-                // Java side is the source of truth - just apply the state directly
-
-                // Convert UTF-16 code unit indices (from Java) to byte indices (for Rust String)
-                // Java String uses UTF-16 internally, so emoji (surrogate pairs) count as 2 units
+                // Android IME state, Java is source of truth
+                // Convert UTF-16 indices to byte indices (emoji = 2 UTF-16 units)
                 let byte_sel_start = utf16_index_to_byte_index(&event.text, event.selection_start);
                 let byte_sel_end = utf16_index_to_byte_index(&event.text, event.selection_end);
 
-                // Apply text change if different
                 let text_changed = self.text != event.text;
                 if text_changed {
                     self.history.create_or_extend_edit_group(EditKind::Other, self.selection);
                     self.text = event.text.clone();
-                    // Invalidate laidout text - will be recalculated on next draw
                     self.laidout_text = None;
                 }
 
@@ -1981,13 +1961,10 @@ impl Widget for TextInput {
                     self.composition_length = 0;
                 }
 
-                // Update tracking to match what we just received from IME
-                // This prevents echoing the same state back to Java (sync loop prevention)
+                // Track sent state to prevent sync loops with Java
                 self.last_sent_ime_text = self.text.clone();
                 self.last_sent_ime_sel_start = event.selection_start;
                 self.last_sent_ime_sel_end = event.selection_end;
-
-                // Belt-and-suspenders: also set flag to skip one update cycle
                 self.ime_update_frame = cx.redraw_id();
 
                 self.draw_bg.redraw(cx);
@@ -1997,34 +1974,20 @@ impl Widget for TextInput {
                 }
             }
             Hit::ImeAction(event) => {
-                // Handle IME editor action (Done, Go, Search, etc.) from mobile keyboard
-                // This is triggered when user presses the action button on single-line inputs
+                // Mobile keyboard action button (Done, Go, Search, etc.)
                 use crate::makepad_platform::event::ImeAction;
-                // No modifiers from soft keyboard actions
                 let mods = KeyModifiers::default();
                 match event.action {
                     // Actions that should hide keyboard and release focus
                     ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
-                        // Hide keyboard first
                         cx.hide_text_ime();
-                        // Release key focus so draw loop won't re-show keyboard
                         cx.revert_key_focus();
-                        // Then emit the action
                         cx.widget_action(uid, &scope.path, TextInputAction::Returned(self.text.clone(), mods));
                     }
-                    ImeAction::Next => {
-                        // Next should move focus to next field - keep keyboard open
-                        // Emit Returned to let app handle field navigation
+                    ImeAction::Next | ImeAction::Previous => {
                         cx.widget_action(uid, &scope.path, TextInputAction::Returned(self.text.clone(), mods));
                     }
-                    ImeAction::Previous => {
-                        // Previous should move focus to previous field - keep keyboard open
-                        // Emit Returned to let app handle field navigation
-                        cx.widget_action(uid, &scope.path, TextInputAction::Returned(self.text.clone(), mods));
-                    }
-                    ImeAction::Unspecified | ImeAction::None => {
-                        // No action or unspecified - do nothing
-                    }
+                    ImeAction::Unspecified | ImeAction::None => {}
                 }
             }
             Hit::TextCopy(event) => {

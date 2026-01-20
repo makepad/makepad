@@ -199,18 +199,16 @@ impl IosApp {
             let () = msg_send![mtk_view_obj, setUserInteractionEnabled: YES];
             let () = msg_send![mtk_view_obj, setAutoResizeDrawable: YES];
             let () = msg_send![mtk_view_obj, setMultipleTouchEnabled: YES];
-            
-            // Create UITextInput view for proper IME support
+
             let text_input_view: ObjcId = msg_send![get_ios_class_global().text_input_view, alloc];
             let text_input_view: ObjcId = msg_send![text_input_view, initWithFrame: NSRect {
                 origin: NSPoint { x: 0.0, y: 0.0 },
                 size: NSSize { width: 1.0, height: 1.0 }
             }];
 
-            // Initialize ivars
             let marked_text: ObjcId = msg_send![class!(NSMutableAttributedString), alloc];
             let marked_text: ObjcId = msg_send![marked_text, init];
-            // Retain markedText since we're storing it as an ivar (not owned by ObjC runtime)
+            // Retain markedText since we're storing it as ivar (not owned by ObjC runtime)
             let () = msg_send![marked_text, retain];
             (*text_input_view).set_ivar::<ObjcId>("markedText", marked_text);
             (*text_input_view).set_ivar::<i64>("cursorPosition", 0);
@@ -427,7 +425,7 @@ impl IosApp {
 
                     if let Some(text_input_view) = app.text_input_view {
                         unsafe {
-                            // Map InputMode to UIKeyboardType
+                            // InputMode to UIKeyboardType
                             let kb_type: i64 = match config.input_mode {
                                 InputMode::Text => 0,      // UIKeyboardTypeDefault
                                 InputMode::Ascii => 1,     // UIKeyboardTypeASCIICapable
@@ -439,7 +437,7 @@ impl IosApp {
                                 InputMode::Search => 10,   // UIKeyboardTypeWebSearch
                             };
 
-                            // Map AutoCapitalize to UITextAutocapitalizationType
+                            // AutoCapitalize to UITextAutocapitalizationType
                             let autocap_type: i64 = match config.autocapitalize {
                                 AutoCapitalize::None => 0,          // UITextAutocapitalizationTypeNone
                                 AutoCapitalize::Words => 1,         // UITextAutocapitalizationTypeWords
@@ -447,15 +445,13 @@ impl IosApp {
                                 AutoCapitalize::AllCharacters => 3, // UITextAutocapitalizationTypeAllCharacters
                             };
 
-                            // Map AutoCorrect to UITextAutocorrectionType
-                            // -1 means "use CJK detection logic" (our Default)
                             let autocorrect_type: i64 = match config.autocorrect {
-                                AutoCorrect::Default => -1,  // Use CJK detection in trait method
+                                AutoCorrect::Default => -1, // use CJK detection logic (our default)
                                 AutoCorrect::Disabled => 1,  // UITextAutocorrectionTypeNo
                                 AutoCorrect::Enabled => 2,   // UITextAutocorrectionTypeYes
                             };
 
-                            // Map ReturnKeyType to UIReturnKeyType
+                            // ReturnKeyType to UIReturnKeyType
                             let return_type: i64 = match config.return_key_type {
                                 ReturnKeyType::Default => 0, // UIReturnKeyDefault
                                 ReturnKeyType::Go => 1,      // UIReturnKeyGo
@@ -465,19 +461,16 @@ impl IosApp {
                                 ReturnKeyType::Done => 9,    // UIReturnKeyDone
                             };
 
-                            // Set ivars on text_input_view
                             (*text_input_view).set_ivar::<i64>("_keyboard_type", kb_type);
                             (*text_input_view).set_ivar::<i64>("_autocapitalization_type", autocap_type);
                             (*text_input_view).set_ivar::<i64>("_autocorrection_type", autocorrect_type);
                             (*text_input_view).set_ivar::<i64>("_return_key_type", return_type);
                             (*text_input_view).set_ivar::<bool>("_secure_text_entry", config.is_secure);
 
-                            // Call reloadInputViews to apply the changes
                             let () = msg_send![text_input_view, reloadInputViews];
                         }
                     }
 
-                    // Update cache
                     app.last_keyboard_config = Some(*config);
                 }
             }

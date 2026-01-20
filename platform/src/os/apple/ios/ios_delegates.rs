@@ -677,7 +677,6 @@ pub fn define_text_input_view() -> *const Class {
         if buffer != nil {
             return buffer;
         }
-        // Create new buffer
         let new_buffer: ObjcId = msg_send![class!(NSMutableString), alloc];
         let new_buffer: ObjcId = msg_send![new_buffer, init];
         (*(this as *const _ as *mut Object)).set_ivar("textBuffer", new_buffer);
@@ -706,7 +705,6 @@ pub fn define_text_input_view() -> *const Class {
                 let insert_pos = (cursor.max(0) as u64).min(buffer_len);
                 let () = msg_send![buffer, insertString: text atIndex: insert_pos];
 
-                // Update cursor position
                 let new_cursor = cursor + 1; // newline is 1 UTF-16 code unit
                 (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", new_cursor);
 
@@ -720,7 +718,6 @@ pub fn define_text_input_view() -> *const Class {
                 return;
             }
 
-            // Get inputDelegate for notifications
             let input_delegate: ObjcId = *this.get_ivar("_inputDelegate");
 
             // Notify that text and selection will change
@@ -775,11 +772,9 @@ pub fn define_text_input_view() -> *const Class {
                     let range = NSRange { location: delete_pos, length: 1 };
                     let () = msg_send![buffer, deleteCharactersInRange: range];
                 }
-                // Update cursor position
                 (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", cursor - 1);
             }
         }
-        // Always send backspace - Makepad handles actual text deletion and bounds
         IosApp::send_backspace();
     }
 
@@ -875,7 +870,6 @@ pub fn define_text_input_view() -> *const Class {
             let text_string: ObjcId = msg_send![marked_text, string];
             let string = nsstring_to_string(text_string);
 
-            // Get inputDelegate for notifications
             let input_delegate: ObjcId = *this.get_ivar("_inputDelegate");
 
             // Notify that text will change
@@ -887,7 +881,7 @@ pub fn define_text_input_view() -> *const Class {
             // Commit the marked text to Makepad
             IosApp::send_text_input(string.clone(), false);
 
-            // Update text buffer - insert at cursor position, not append
+            // Update text buffer
             let buffer = get_text_buffer(this);
             let cursor: i64 = *this.get_ivar("cursorPosition");
             let buffer_len: u64 = msg_send![buffer, length];
@@ -1009,7 +1003,6 @@ pub fn define_text_input_view() -> *const Class {
         unsafe {
             let new_string = nsstring_to_string(text);
 
-            // Get inputDelegate for notifications
             let input_delegate: ObjcId = *this.get_ivar("_inputDelegate");
 
             // Notify that text will change
@@ -1085,7 +1078,6 @@ pub fn define_text_input_view() -> *const Class {
             let new_cursor = range_start as i64 + utf16_len(&new_string);
             (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", new_cursor);
 
-            // Notify that text did change
             if input_delegate != nil {
                 let () = msg_send![input_delegate, selectionDidChange: this as *const _ as ObjcId];
                 let () = msg_send![input_delegate, textDidChange: this as *const _ as ObjcId];
@@ -1268,7 +1260,7 @@ pub fn define_text_input_view() -> *const Class {
     }
 
     extern "C" fn selection_rects_for_range(_: &Object, _: Sel, _range: ObjcId) -> ObjcId {
-        // Return empty array
+        // Return an empty array for now, in the future we might want to implement this for selection rects 
         unsafe { msg_send![class!(NSArray), array] }
     }
 
