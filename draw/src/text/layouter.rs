@@ -207,10 +207,15 @@ impl LayoutContext {
         );
         while !fitter.is_empty() {
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
-                Some(text) => self.append_text(&text),
+                Some(text) => {
+                    self.append_text(&text)
+                },
                 None => {
-                    if self.current_row_is_empty() && !self.current_row_is_continuation() {
-                        self.layout_by_grapheme(fitter.pop());
+                    let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
+                    if next_word.chars().all(|char| char.is_whitespace()) {
+                        self.layout_directly(fitter.pop_next_len());
+                    } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
+                        self.layout_by_grapheme(fitter.pop_next_len());
                     } else {
                         self.finish_current_row(false);
                     }
@@ -231,7 +236,7 @@ impl LayoutContext {
                 Some(text) => self.append_text(&text),
                 None => {
                     if self.current_row_is_empty() {
-                        self.layout_directly(fitter.pop());
+                        self.layout_directly(fitter.pop_next_len());
                     } else {
                         self.finish_current_row(false);
                     }
@@ -376,6 +381,10 @@ impl Fitter {
         self.text.is_empty()
     }
 
+    fn next_len(&self) -> usize {
+        self.lens[0]
+    }
+
     fn fit(&mut self, wrap_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
         let mut min_count = 1;
         let mut max_count = self.lens.len() + 1;
@@ -415,7 +424,7 @@ impl Fitter {
         true
     }
 
-    fn pop(&mut self) -> usize {
+    fn pop_next_len(&mut self) -> usize {
         let len = self.lens.remove(0);
         self.widths_in_lpxs.remove(0);
         self.text = self.text.substr(len..);
