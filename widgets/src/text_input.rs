@@ -1955,7 +1955,8 @@ impl Widget for TextInput {
                 let byte_sel_end = utf16_index_to_byte_index(&event.text, event.selection_end);
 
                 // Apply text change if different
-                if self.text != event.text {
+                let text_changed = self.text != event.text;
+                if text_changed {
                     self.history.create_or_extend_edit_group(EditKind::Other, self.selection);
                     self.text = event.text.clone();
                     // Invalidate laidout text - will be recalculated on next draw
@@ -1991,6 +1992,9 @@ impl Widget for TextInput {
 
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                if text_changed {
+                    cx.hide_clipboard_actions();
+                }
             }
             Hit::ImeAction(event) => {
                 // Handle IME editor action (Done, Go, Search, etc.) from mobile keyboard
