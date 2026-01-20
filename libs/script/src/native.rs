@@ -72,7 +72,7 @@ macro_rules! script_array_index{
 }
 
 #[macro_export]
-macro_rules! script_set_value{
+macro_rules! set_script_value{
     ($vm:ident, $obj:ident.$id: ident=$value:expr)=>{
         $vm.heap.set_value($obj, id!($id).into(), ($value).into(), &$vm.thread.trap)
     };
@@ -82,11 +82,37 @@ macro_rules! script_set_value{
 }
 
 #[macro_export]
-macro_rules! script_proto{
-    ($vm:ident, $obj:ident, $id: ident)=>{
+macro_rules! set_script_value_to_api{
+    ($vm:ident, $obj:ident.$id: ident=$val:expr)=>{
         {
-            let v = $id::script_proto($vm);
+            let v = $val::script_api($vm);
             $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v, &$vm.thread.trap);
+        }
+    };
+    ($vm:ident, $obj:ident.$id: ident)=>{
+        {
+            let v = $id::script_api($vm);
+            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v, &$vm.thread.trap);
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! set_script_value_to_pod{
+    ($vm:ident, $obj:ident.$id: ident=$val:expr)=>{
+        {
+            let v = $val::script_pod($vm).expect("Cant make a pod type");
+            // Set the Pod type name to the type name (e.g., DrawCallUniforms)
+            $vm.heap.pod_type_name_set(v, id_lut!($id));
+            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), &$vm.thread.trap);
+        }
+    };
+    ($vm:ident, $obj:ident.$id: ident)=>{
+        {
+            let v = $id::script_pod($vm).expect("Cant make a pod type");
+            // Set the Pod type name to the type name (e.g., DrawCallUniforms)
+            $vm.heap.pod_type_name_set(v, id_lut!($id));
+            $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), &$vm.thread.trap);
         }
     };
 }
@@ -114,6 +140,7 @@ pub type NativeFn = Box<dyn Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'stat
 pub struct ScriptNative{
     pub(crate) functions: Vec<NativeFn>,
     pub(crate) type_table: Vec<LiveIdMap<LiveId, ScriptObject>>,
+    pub(crate) handle_type: LiveIdMap<LiveId,ScriptHandleType>,
     pub(crate) getters: Vec<NativeGetterFn>,
     pub(crate) setters: Vec<NativeSetterFn>,
 }
@@ -157,6 +184,7 @@ impl ScriptNative{
             panic!("Too many handle types (max {})", ScriptValueType::REDUX_HANDLE_MAX);
         }
         let ty = ScriptHandleType(ht as u8);
+        self.handle_type.insert(id, ty);
         self.add_type_method(heap, ty.to_redux(), id!(ty), &[], move |_, _|{id.escape()});
         ty
     }

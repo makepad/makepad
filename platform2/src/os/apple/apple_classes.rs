@@ -19,6 +19,7 @@ use {
             url_session::define_url_session_data_delegate,
             av_capture::define_av_video_callback_delegate,
             audio_unit::define_key_value_observing_delegate,
+            audio_tap::define_sc_stream_output_delegate,
             apple_util::{
                 nsstring_to_string,
                 str_to_nsstring,
@@ -75,6 +76,7 @@ pub struct AppleClasses {
     pub web_socket_delegate: *const Class,
     pub url_session_delegate: *const Class,
     pub url_session_data_delegate: *const Class,
+    pub sc_stream_output_delegate: *const Class,
     pub const_attributes_for_marked_text: ObjcId,
     pub const_empty_string: RcObjcId,
 }
@@ -91,6 +93,7 @@ impl AppleClasses {
             url_session_data_delegate:define_url_session_data_delegate(),
             video_callback_delegate: define_av_video_callback_delegate(),
             key_value_observing_delegate: define_key_value_observing_delegate(),
+            sc_stream_output_delegate: define_sc_stream_output_delegate(),
             const_attributes_for_marked_text: unsafe {msg_send![
                 class!(NSArray),
                 arrayWithObjects: const_attributes.as_ptr()

@@ -72,20 +72,15 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("ScriptHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         tb.add("    fn on_deref_before_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){");
         tb.add("         <Self as ScriptHook>::on_before_apply(self, vm, apply, value);");
-        
-        if let Some(deref_field) = deref_field {
-            tb.add("<").stream(Some(deref_field.ty.clone())).add(" as ScriptHookDeref>::on_deref_before_apply(&mut self.").ident(&deref_field.name).add(", vm, apply, value);");
-        }
+        // Note: Don't recursively call on_deref_before_apply on deref field here - 
+        // the deref field's script_apply will call its own on_deref_before_apply
         tb.add("    }");
         
         tb.add("    fn on_deref_after_apply(&mut self,vm: &mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){");
         
         tb.add("        <Self as ScriptHook>::on_after_apply(self, vm, apply, value);");
-        
-        if let Some(deref_field) = deref_field {
-            tb.add("<").stream(Some(deref_field.ty.clone())).add(" as ScriptHookDeref>::on_deref_after_apply(&mut self.").ident(&deref_field.name).add(", vm, apply, value);");
-        }
-        
+        // Note: Don't recursively call on_deref_after_apply on deref field here -
+        // the deref field's script_apply will call its own on_deref_after_apply
         tb.add("    }");
         tb.add("}");
                 
@@ -113,7 +108,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 tb.add("}");
             }
             if field.attrs.iter().any( | a | a.name =="deref" || a.name == "splat" || a.name =="walk" || a.name=="layout"){
-                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(", apply, value);");
+                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(", vm, apply, value);");
             }
         }
         tb.add("        if let Some(o) = value.as_object(){vm.heap.set_first_applied_and_clean(o);}");
@@ -189,7 +184,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         for field in &fields {
             
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
-                tb.add("self.").ident(&field.name).add(".script_proto_props(vm, obj, props);");
+                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto_props(vm, obj, props);");
             }
             if let Some(attr) = field.attrs.iter().find(|a| a.name == "live"){
                 // lets make sure the type is defined
@@ -205,7 +200,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 }  
                 tb.add("vm.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
                     .ident(&field.name).add(")), value,&vm.thread.trap);");
-                tb.add("props.props.insert(id!(").ident(&field.name).add("),<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
+                tb.add("props.insert(id!(").ident(&field.name).add("),<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
             }
         }
         
@@ -379,13 +374,14 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("} = def{");
                     for (i, field) in fields.iter().enumerate(){
                         tb.add("let value = ").ident(&format!("v{i}")).add(".script_to_value(vm);");
-                        tb.add("props.props.insert(id_lut!(").ident(&field.name).add("), <").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
+                        tb.add("props.insert(id_lut!(").ident(&field.name).add("), <").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
                         tb.add(" vm.heap.set_value(named, id!(").ident(&field.name).add(").into(), value, &vm.thread.trap);");
                     }
                     tb.add("}");
                     tb.add("let ty_check = ScriptTypeCheck{props, object: None};");
                     tb.add("let ty_index = vm.heap.register_type(None, ty_check);");
-                    tb.add("vm.heap.freeze_with_type(named, ty_index);");
+                    tb.add("vm.heap.set_type(named, ty_index);");
+                    tb.add("vm.heap.freeze_component(named);");
                     tb.add("vm.heap.set_value(enum_object, id!(").ident(&item.name).add(").into(), named.into(), &vm.thread.trap);");
                     // uh oh crap. we need to get the default value out of the unparsed defaults
                 }
@@ -621,7 +617,7 @@ impl ScriptNew for EnumTest{
         if let Self::Named{named_field:v0} = def{
                             
             let value = v0.script_to_value(vm);
-            props.props.insert(id_lut!(named_field), f64::script_type_id_static());
+            props.insert(id_lut!(named_field), f64::script_type_id_static());
             vm.heap.set_value(named, id!(named_field).into(), value, &vm.thread.trap);
                             
         }

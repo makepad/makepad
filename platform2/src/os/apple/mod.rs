@@ -21,6 +21,8 @@ mod apple_resources;
 pub mod url_session;
 pub mod apple_classes;
 pub mod audio_unit;
+#[cfg(target_os = "macos")]
+pub mod audio_tap;
 pub mod core_midi;
 pub mod apple_media;
 pub mod apple_game_input;

@@ -12,10 +12,10 @@ use {
             Area,
             DrawListId,
             WindowId,
-            PassId,
-            Pass,
-            CxPassParent,
-            CxPassRect,
+            DrawPassId,
+            DrawPass,
+            CxDrawPassParent,
+            CxDrawPassRect,
             Cx
         },
         nav::CxNavTreeRc,
@@ -26,7 +26,7 @@ use {
 };
 
 pub struct PassStackItem {
-    pub pass_id: PassId,
+    pub pass_id: DrawPassId,
     dpi_factor: f64,
     draw_list_stack_len: usize,
     //turtles_len: usize
@@ -103,24 +103,24 @@ impl<'a> CxDraw<'a>{
         self.pass_stack.len()>0
     }
         
-    pub fn make_child_pass(&mut self, pass: &Pass) {
+    pub fn make_child_pass(&mut self, pass: &DrawPass) {
         let pass_id = self.pass_stack.last().unwrap().pass_id;
-        let cxpass = &mut self.passes[pass.pass_id()];
-        cxpass.parent = CxPassParent::Pass(pass_id);
+        let cxpass = &mut self.passes[pass.draw_pass_id()];
+        cxpass.parent = CxDrawPassParent::DrawPass(pass_id);
     }
         
-    pub fn begin_pass(&mut self, pass: &Pass, dpi_override: Option<f64>) {
-        let cxpass = &mut self.passes[pass.pass_id()];
+    pub fn begin_pass(&mut self, pass: &DrawPass, dpi_override: Option<f64>) {
+        let cxpass = &mut self.passes[pass.draw_pass_id()];
         cxpass.main_draw_list_id = None;
         let dpi_factor = if let Some(dpi_override) = dpi_override {dpi_override}
         else {
             match cxpass.parent {
-                CxPassParent::Window(window_id) => {
-                    self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::Size(self.windows[window_id].get_inner_size()));
-                    self.get_delegated_dpi_factor(pass.pass_id())
+                CxDrawPassParent::Window(window_id) => {
+                    self.passes[pass.draw_pass_id()].pass_rect = Some(CxDrawPassRect::Size(self.windows[window_id].get_inner_size()));
+                    self.get_delegated_dpi_factor(pass.draw_pass_id())
                 }
-                CxPassParent::Pass(pass_id) => {
-                    self.passes[pass.pass_id()].pass_rect = self.passes[pass_id].pass_rect.clone();
+                CxDrawPassParent::DrawPass(pass_id) => {
+                    self.passes[pass.draw_pass_id()].pass_rect = self.passes[pass_id].pass_rect.clone();
                     self.get_delegated_dpi_factor(pass_id)
                 }
                 _ => {
@@ -128,19 +128,19 @@ impl<'a> CxDraw<'a>{
                 }
             }
         };
-        self.passes[pass.pass_id()].dpi_factor = Some(dpi_factor);
+        self.passes[pass.draw_pass_id()].dpi_factor = Some(dpi_factor);
                 
         self.pass_stack.push(PassStackItem {
             dpi_factor,
             draw_list_stack_len: self.draw_list_stack.len(),
             //turtles_len: self.turtles.len(),
-            pass_id: pass.pass_id()
+            pass_id: pass.draw_pass_id()
         });
     }
         
-    pub fn end_pass(&mut self, pass: &Pass) {
+    pub fn end_pass(&mut self, pass: &DrawPass) {
         let stack_item = self.pass_stack.pop().unwrap();
-        if stack_item.pass_id != pass.pass_id() {
+        if stack_item.pass_id != pass.draw_pass_id() {
             panic!();
         }
                 
@@ -152,17 +152,17 @@ impl<'a> CxDraw<'a>{
         //}
     }
         
-    pub fn set_pass_area(&mut self, pass: &Pass, area: Area) {
-        self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::Area(area));
+    pub fn set_pass_area(&mut self, pass: &DrawPass, area: Area) {
+        self.passes[pass.draw_pass_id()].pass_rect = Some(CxDrawPassRect::Area(area));
     }
             
-    pub fn set_pass_area_with_origin(&mut self, pass: &Pass, area: Area, origin:Vec2d) {
-        self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::AreaOrigin(area, origin));
+    pub fn set_pass_area_with_origin(&mut self, pass: &DrawPass, area: Area, origin:Vec2d) {
+        self.passes[pass.draw_pass_id()].pass_rect = Some(CxDrawPassRect::AreaOrigin(area, origin));
     }
             
-    pub fn set_pass_shift_scale(&mut self, pass: &Pass, shift: Vec2d, scale: Vec2d) {
-        self.passes[pass.pass_id()].view_shift = shift;
-        self.passes[pass.pass_id()].view_scale = scale;
+    pub fn set_pass_shift_scale(&mut self, pass: &DrawPass, shift: Vec2d, scale: Vec2d) {
+        self.passes[pass.draw_pass_id()].view_shift = shift;
+        self.passes[pass.draw_pass_id()].view_scale = scale;
     }
         
     /*

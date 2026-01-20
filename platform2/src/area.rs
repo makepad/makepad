@@ -171,11 +171,11 @@ impl Area {
                     error!("No instances but everything else valid?");
                     return Rect::default()
                 }
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                if cx.draw_shaders.generation != draw_call.draw_shader_id.generation {
+                    error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader_id.generation);
                     return Rect::default()
                 }
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
@@ -264,11 +264,11 @@ impl Area {
                     error!("No instances but everything else valid?");
                     return Rect::default()
                 }
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                if cx.draw_shaders.generation != draw_call.draw_shader_id.generation {
+                    error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader_id.generation);
                     return Rect::default()
                 }
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
@@ -305,12 +305,12 @@ impl Area {
                 }
                 let draw_item = &draw_list.draw_items[inst.draw_item_id];
                 let draw_call = draw_item.draw_call().unwrap();
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    error!("Generation invalid abs_to_rel {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                if cx.draw_shaders.generation != draw_call.draw_shader_id.generation {
+                    error!("Generation invalid abs_to_rel {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader_id.generation);
                     return abs;
                 }
                 
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     let buf = draw_item.instances.as_ref().unwrap();
@@ -346,10 +346,10 @@ impl Area {
                 let draw_item = &mut cxview.draw_items[inst.draw_item_id];
                 //log!("{:?}", draw_item.kind.sub_list().is_some());
                 let draw_call = draw_item.kind.draw_call().unwrap();
-                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
+                if cx.draw_shaders.generation != draw_call.draw_shader_id.generation {
                     return;
                 }
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id]; // ok now we have to patch x/y/w/h into it
+                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index]; // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_mut().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     buf[inst.instance_offset + rect_pos + 0] = rect.pos.x as f32;
@@ -383,7 +383,7 @@ impl Area {
                     return None;
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if let Some(input) = sh.mapping.user_uniforms.inputs.iter().find( | input | input.id == id) {
+                if let Some(input) = sh.mapping.draw_call_uniforms.inputs.iter().find( | input | input.id == id) {
                     if input.ty != ty {
                         panic!("get_read_ref wrong uniform type, expected {:?} got: {:?}!", input.ty, ty);
                     }
@@ -391,7 +391,7 @@ impl Area {
                         DrawReadRef {
                             repeat: 1,
                             stride: 0,
-                            buffer: &draw_call.user_uniforms[input.offset..]
+                            buffer: &draw_call.draw_call_uniforms[input.offset..]
                         }
                     )
                 }
@@ -431,19 +431,19 @@ impl Area {
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 
-                if let Some(input) = sh.mapping.user_uniforms.inputs.iter().find( | input | input.id == id) {
+                if let Some(input) = sh.mapping.draw_call_uniforms.inputs.iter().find( | input | input.id == id) {
                     if input.ty != ty {
                         panic!("get_write_ref {} wrong uniform type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
                     
-                    cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     draw_call.uniforms_dirty = true;
                     
                     return Some(
                         DrawWriteRef {
                             repeat: 1,
                             stride: 0,
-                            buffer: &mut draw_call.user_uniforms[input.offset..]
+                            buffer: &mut draw_call.draw_call_uniforms[input.offset..]
                         }
                     )
                 }
@@ -452,7 +452,7 @@ impl Area {
                         panic!("get_write_ref {} wrong instance type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
                     
-                    cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+                    cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     draw_call.instance_dirty = true;
                     if inst.instance_count == 0 {
                         return None

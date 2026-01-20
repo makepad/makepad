@@ -60,6 +60,14 @@ impl AudioStreamReceiver {
         let iself = self.0.lock().unwrap();
         iself.routes[route_num].id
     }
+    
+    /// Returns the channel count of pending buffers for a route, or None if no buffers
+    pub fn channel_count(&self, route_num: usize) -> Option<usize> {
+        let iself = self.0.lock().unwrap();
+        iself.routes.get(route_num)
+            .and_then(|route| route.buffers.first())
+            .map(|buf| buf.channel_count())
+    }
 
     pub fn try_recv_stream(&mut self) {
         let mut iself = self.0.lock().unwrap();
@@ -116,10 +124,13 @@ impl AudioStreamReceiver {
             return 0
         }
          
-        // flush down the buffer
-        while total > output.frame_count() * max_buf{
+        // flush down the buffer if we have too much
+        while !route.buffers.is_empty() 
+            && total - route.buffers.first().unwrap().frame_count() > output.frame_count() * max_buf 
+        {
             let buf = route.buffers.remove(0);
             total -= buf.frame_count();
+            route.start_offset = 0;
         }
         
         // ok so we need to eat from the start of the buffer vec until output is filled
