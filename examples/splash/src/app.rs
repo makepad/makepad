@@ -18,11 +18,11 @@ impl App{
 
 #[derive(Script)]
 pub struct App { 
-    #[live] window: WindowHandle,
-    #[live] pass: DrawPass,
-    #[live] depth_texture: Texture,
+    #[script] window: WindowHandle,
+    #[script] pass: DrawPass,
+    #[script] depth_texture: Texture,
     #[live] draw_quad: DrawQuad,
-    #[live] main_draw_list: DrawList2d,
+    #[script] main_draw_list: DrawList2d,
 }
 
 impl ScriptHook for App{

@@ -365,7 +365,7 @@ impl CxDrawList {
                             continue
                         }
                         let mut diff = false;
-                        for i in 0..sh.mapping.draw_call_uniforms.total_slots {
+                        for i in 0..sh.mapping.dyn_uniforms.total_slots {
                             if draw_call.dyn_uniforms[i] != draw_vars.dyn_uniforms[i] {
                                 diff = true;
                                 break;

@@ -72,20 +72,15 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("ScriptHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         tb.add("    fn on_deref_before_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){");
         tb.add("         <Self as ScriptHook>::on_before_apply(self, vm, apply, value);");
-        
-        if let Some(deref_field) = deref_field {
-            tb.add("<").stream(Some(deref_field.ty.clone())).add(" as ScriptHookDeref>::on_deref_before_apply(&mut self.").ident(&deref_field.name).add(", vm, apply, value);");
-        }
+        // Note: Don't recursively call on_deref_before_apply on deref field here - 
+        // the deref field's script_apply will call its own on_deref_before_apply
         tb.add("    }");
         
         tb.add("    fn on_deref_after_apply(&mut self,vm: &mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){");
         
         tb.add("        <Self as ScriptHook>::on_after_apply(self, vm, apply, value);");
-        
-        if let Some(deref_field) = deref_field {
-            tb.add("<").stream(Some(deref_field.ty.clone())).add(" as ScriptHookDeref>::on_deref_after_apply(&mut self.").ident(&deref_field.name).add(", vm, apply, value);");
-        }
-        
+        // Note: Don't recursively call on_deref_after_apply on deref field here -
+        // the deref field's script_apply will call its own on_deref_after_apply
         tb.add("    }");
         tb.add("}");
                 
