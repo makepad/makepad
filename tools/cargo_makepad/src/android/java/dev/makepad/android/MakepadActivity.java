@@ -170,7 +170,7 @@ class MakepadSurface
                         char c = text.charAt(i);
                         if (Character.isDigit(c) || c == '-' || c == '+') {
                             decimal.append(c);
-                        } else if ((c == '.' || c == ',') && !hasDot) {
+                        } else if (c == '.' && !hasDot) {
                             decimal.append(c);
                             hasDot = true;
                         }

@@ -560,9 +560,10 @@ impl Cx {
                 CxOsOp::CancelHttpRequest {request_id} => {
                     self.os.http_requests.cancel_http_request(request_id);
                 },
-                CxOsOp::ShowClipboardActions { .. } => {
-                    crate::log!("Show clipboard actions not supported yet");
-                },
+                CxOsOp::ShowClipboardActions { .. } => {},
+                CxOsOp::HideClipboardActions => {},
+                CxOsOp::SetIMEText(..) => {},
+                CxOsOp::UpdateImeTextState { .. } => {},
                 CxOsOp::CopyToClipboard(content) => {
                     with_macos_app(|app| app.copy_to_clipboard(&content));
                 },

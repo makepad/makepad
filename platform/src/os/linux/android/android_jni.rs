@@ -778,8 +778,6 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeTextStateCh
     composing_end: jni_sys::jint,
 ) {
     let text = jstring_to_string(env, full_text);
-    crate::log!("IME: onImeTextStateChanged text='{}' sel=[{},{}] comp=[{},{}]",
-        text, selection_start, selection_end, composing_start, composing_end);
     send_from_java_message(FromJavaMessage::ImeTextStateChanged {
         full_text: text,
         selection_start: selection_start as i32,
@@ -796,7 +794,6 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeEditorActio
     _: jni_sys::jclass,
     action_code: jni_sys::jint,
 ) {
-    crate::log!("IME: onImeEditorAction action_code={}", action_code);
     send_from_java_message(FromJavaMessage::ImeEditorAction {
         action_code: action_code as i32,
     });

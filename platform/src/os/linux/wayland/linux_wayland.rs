@@ -319,8 +319,10 @@ impl WaylandCx {
                 },
                 CxOsOp::RepositionWindow(window_id, size) => {
                 },
-                CxOsOp::ShowClipboardActions { .. } =>{
-                },
+                CxOsOp::ShowClipboardActions { .. } => {},
+                CxOsOp::HideClipboardActions => {},
+                CxOsOp::SetIMEText(..) => {},
+                CxOsOp::UpdateImeTextState { .. } => {},
                 CxOsOp::CopyToClipboard(content) => {
                 }
                 CxOsOp::SetCursor(cursor) => {

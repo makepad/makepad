@@ -363,8 +363,10 @@ impl X11Cx {
                             window.xlib_window.set_position(size);
                         }
                     },
-                    CxOsOp::ShowClipboardActions { .. } =>{
-                    },
+                    CxOsOp::ShowClipboardActions { .. } => {},
+                    CxOsOp::HideClipboardActions => {},
+                    CxOsOp::SetIMEText(..) => {},
+                    CxOsOp::UpdateImeTextState { .. } => {},
                     CxOsOp::CopyToClipboard(content) => {
                         if let Some(window) = opengl_windows.get(0) {
                             unsafe {
