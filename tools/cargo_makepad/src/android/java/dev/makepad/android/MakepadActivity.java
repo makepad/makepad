@@ -144,6 +144,53 @@ class MakepadSurface
             }
         }
 
+        // Filter input based on mInputMode to prevent invalid characters (e.g., emojis in numeric fields)
+        private CharSequence filterInput(CharSequence text) {
+            if (text == null || text.length() == 0) return text;
+
+            switch (mInputMode) {
+                case 1: // Ascii - only ASCII characters (code point < 128)
+                    StringBuilder ascii = new StringBuilder();
+                    for (int i = 0; i < text.length(); i++) {
+                        char c = text.charAt(i);
+                        if (c < 128) ascii.append(c);
+                    }
+                    return ascii;
+                case 3: // Numeric - digits only
+                    StringBuilder numeric = new StringBuilder();
+                    for (int i = 0; i < text.length(); i++) {
+                        char c = text.charAt(i);
+                        if (Character.isDigit(c)) numeric.append(c);
+                    }
+                    return numeric;
+                case 6: // Decimal - digits, decimal point, and sign
+                    StringBuilder decimal = new StringBuilder();
+                    boolean hasDot = mEditable.toString().contains(".");
+                    for (int i = 0; i < text.length(); i++) {
+                        char c = text.charAt(i);
+                        if (Character.isDigit(c) || c == '-' || c == '+') {
+                            decimal.append(c);
+                        } else if ((c == '.' || c == ',') && !hasDot) {
+                            decimal.append(c);
+                            hasDot = true;
+                        }
+                    }
+                    return decimal;
+                case 4: // Tel - digits and phone characters
+                    StringBuilder tel = new StringBuilder();
+                    for (int i = 0; i < text.length(); i++) {
+                        char c = text.charAt(i);
+                        if (Character.isDigit(c) || c == '+' || c == '-' || c == ' '
+                            || c == '(' || c == ')' || c == '*' || c == '#') {
+                            tel.append(c);
+                        }
+                    }
+                    return tel;
+                default: // Text (0), Url (2), Email (5), Search (7) - allow all
+                    return text;
+            }
+        }
+
         // Return our shared Editable - this is the key change!
         // BaseInputConnection methods operate on this Editable automatically
         @Override
@@ -316,8 +363,15 @@ class MakepadSurface
 
         @Override
         public boolean commitText(CharSequence text, int newCursorPosition) {
+            // Filter input based on input mode (e.g., prevent emojis in numeric fields)
+            CharSequence filtered = filterInput(text);
+            if (filtered.length() == 0 && text.length() > 0) {
+                // All characters were filtered out - consume but don't insert
+                return true;
+            }
+
             // Let BaseInputConnection handle the Editable manipulation
-            boolean result = super.commitText(text, newCursorPosition);
+            boolean result = super.commitText(filtered, newCursorPosition);
 
             // Notify IME of state change
             notifyImeOfSelectionUpdate();
@@ -422,13 +476,27 @@ class MakepadSurface
                 int keyCode = event.getKeyCode();
 
                 if (keyCode == KeyEvent.KEYCODE_DEL) {
-                    // Translate backspace to delete 1 code point before cursor
+                    // Check if there's a selection to delete
+                    int selStart = Selection.getSelectionStart(mEditable);
+                    int selEnd = Selection.getSelectionEnd(mEditable);
+                    if (selStart != selEnd) {
+                        // Selection exists - delete it by replacing with empty text
+                        return commitText("", 1);
+                    }
+                    // No selection - delete one code point before cursor
                     // deleteSurroundingTextInCodePoints handles surrogate pairs properly
                     return deleteSurroundingTextInCodePoints(1, 0);
                 }
 
                 if (keyCode == KeyEvent.KEYCODE_FORWARD_DEL) {
-                    // Translate forward delete (deletes 1 code point after cursor)
+                    // Check if there's a selection to delete
+                    int selStart = Selection.getSelectionStart(mEditable);
+                    int selEnd = Selection.getSelectionEnd(mEditable);
+                    if (selStart != selEnd) {
+                        // Selection exists - delete it by replacing with empty text
+                        return commitText("", 1);
+                    }
+                    // No selection - delete one code point after cursor
                     return deleteSurroundingTextInCodePoints(0, 1);
                 }
 
@@ -878,6 +946,19 @@ class MakepadSurface
 
     public Surface getNativeSurface() {
         return getHolder().getSurface();
+    }
+
+    // Select all text in the InputConnection's Editable and notify IME
+    // Used by ActionMode's Select All to sync Java-side selection with Rust
+    public void selectAllInEditable() {
+        synchronized (mEditableLock) {
+            int len = mEditable.length();
+            Selection.setSelection(mEditable, 0, len);
+        }
+        // Notify IME of the selection change
+        if (mInputConnection != null) {
+            mInputConnection.notifyImeOfSelectionUpdate();
+        }
     }
 }
 
@@ -1342,21 +1423,11 @@ public class MakepadActivity
             return true;
         } else if (id == android.R.id.selectAll) {
             MakepadNative.onClipboardAction("select_all");
-
-            // After select all, re-show the menu with Copy/Cut options
-            // Post delayed to give Rust time to update selection
-            final ActionMode currentMode = mode;
-            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    if (currentMode != null) {
-                        mHasSelection = true;
-                        currentMode.invalidate();
-                    }
-                }
-            }, 50); // 50ms delay
-
-            return true; // Don't finish mode - let it update
+            // Sync Java-side selection with Rust so backspace/delete will work
+            // This updates mEditable's selection and notifies the IME
+            view.selectAllInEditable();
+            mode.finish();
+            return true;
         }
         return false;
     }

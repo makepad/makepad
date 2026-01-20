@@ -1567,7 +1567,12 @@ impl Widget for TextInput {
                             cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
                         }
                     }
-                    _ => {}
+                    _ => {
+                        // Single tap - hide clipboard actions popup if shown
+                        if device.is_touch() {
+                            cx.hide_clipboard_actions();
+                        }
+                    }
                 }
 
                 self.animator_play(cx, ids!(hover.down));
@@ -1740,6 +1745,8 @@ impl Widget for TextInput {
                 );
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                // Hide clipboard actions popup on text edit
+                cx.hide_clipboard_actions();
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
@@ -1762,6 +1769,8 @@ impl Widget for TextInput {
                 );
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                // Hide clipboard actions popup on text edit
+                cx.hide_clipboard_actions();
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -1893,9 +1902,19 @@ impl Widget for TextInput {
                 if self.ime_update_frame != cx.redraw_id() {
                     self.update_ime_context(cx);
                 }
+                // Hide clipboard actions popup on text edit
+                cx.hide_clipboard_actions();
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
-                // iOS autocorrect sends range replacement events
+                // iOS autocorrect and paste sends range replacement events
+                // Filter the replacement text based on input_mode
+                let filtered_text = self.filter_input(&event.text, false);
+
+                // If filtered text is empty but original wasn't, skip the replacement
+                if filtered_text.is_empty() && !event.text.is_empty() {
+                    return;
+                }
+
                 // Convert character indices to byte indices
                 let byte_start = self.text.char_indices()
                     .nth(event.start)
@@ -1916,7 +1935,7 @@ impl Widget for TextInput {
                     Edit {
                         start: byte_start,
                         end: byte_end,
-                        replace_with: event.text.clone()
+                        replace_with: filtered_text
                     }
                 );
 
@@ -1928,6 +1947,8 @@ impl Widget for TextInput {
                 if self.ime_update_frame != cx.redraw_id() {
                     self.update_ime_context(cx);
                 }
+                // Hide clipboard actions popup on text edit
+                cx.hide_clipboard_actions();
             }
             Hit::TextComposingRegion(event) if !self.is_read_only => {
                 // IME marks existing text as composing region (e.g., for autocorrect)

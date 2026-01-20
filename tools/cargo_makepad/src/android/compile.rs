@@ -309,7 +309,6 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) -> 
             (compiled_java_classes_dir.join("MakepadActivity$5$1.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$5$2.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$6.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("MakepadActivity$7.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadSurface$MakepadInputConnection.class").to_str().unwrap()),
             (build_paths.java_class.to_str().unwrap()),
             (build_paths.xr_class.to_str().unwrap()),
