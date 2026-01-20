@@ -28,7 +28,7 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
     native.add_method(heap, range, id!(step), script_args!(x= 0.0), |vm, args|{
         if let Some(sself) = script_value!(vm, args.self).as_object(){
             if let Some(x) = script_value!(vm, args.x).as_f64(){
-                script_set_value!(vm, sself.step = x);
+                set_script_value!(vm, sself.step = x);
             }
             return sself.into()
         }

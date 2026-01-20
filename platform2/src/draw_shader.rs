@@ -13,6 +13,9 @@ use {
     }
 };
 
+// Re-export UniformBufferBindings for use in other modules
+pub use makepad_script::shader::UniformBufferBindings;
+
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
@@ -104,15 +107,15 @@ impl IndexMut<usize> for CxDrawShaders {
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct DrawShader {
-    pub draw_shader_generation: u64,
-    pub draw_shader_id: usize,
+pub struct DrawShaderId {
+    pub generation: u64,
+    pub index: usize,
     //pub draw_shader_ptr: DrawShaderPtr
 }
 
-impl DrawShader{
-    pub fn false_compare_id(&self)->u64{
-        (self.draw_shader_id as u64)<<32 //| self.draw_shader_ptr.0.index as u64
+impl DrawShaderId{
+    pub fn false_compare_check(&self)->u64{
+        (self.index as u64)<<32 //| self.draw_shader_ptr.0.index as u64
     }
 }
 
@@ -318,6 +321,8 @@ pub struct CxDrawShaderMapping {
     pub rect_size: Option<usize>,
     pub draw_clip: Option<usize>,
     //pub live_uniforms_buf: Vec<f32>,
+    /// Mapping from uniform buffer type names to Metal buffer indices
+    pub uniform_buffer_bindings: UniformBufferBindings,
 }
 
 impl CxDrawShaderMapping {
@@ -392,6 +397,10 @@ impl CxDrawShaderMapping {
         dyn_instances.finalize();
         dyn_uniforms.finalize();
         
+        // Get uniform buffer bindings from the shader output
+        // (must call assign_uniform_buffer_indices before from_shader_output)
+        let uniform_buffer_bindings = output.get_uniform_buffer_bindings(heap);
+        
         CxDrawShaderMapping {
             source,
             flags: DrawShaderFlags::default(),
@@ -403,6 +412,7 @@ impl CxDrawShaderMapping {
             rect_pos,
             rect_size,
             draw_clip,
+            uniform_buffer_bindings,
         }
     }
     
