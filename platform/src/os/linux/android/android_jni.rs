@@ -911,7 +911,7 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
         ReturnKeyType::Go => 1,
         ReturnKeyType::Search => 2,
         ReturnKeyType::Send => 3,
-        ReturnKeyType::Next => 4,
+        // ReturnKeyType::Next => 4,
         ReturnKeyType::Done => 5,
     };
 

@@ -451,7 +451,7 @@ impl IosApp {
                             let return_type: i64 = match config.return_key_type {
                                 ReturnKeyType::Default => 0, // UIReturnKeyDefault
                                 ReturnKeyType::Go => 1,      // UIReturnKeyGo
-                                ReturnKeyType::Next => 4,    // UIReturnKeyNext
+                                // ReturnKeyType::Next => 4,    // UIReturnKeyNext
                                 ReturnKeyType::Search => 6,  // UIReturnKeySearch
                                 ReturnKeyType::Send => 7,    // UIReturnKeySend
                                 ReturnKeyType::Done => 9,    // UIReturnKeyDone

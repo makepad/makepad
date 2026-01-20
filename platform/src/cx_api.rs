@@ -131,22 +131,19 @@ pub enum AutoCorrect {
 ///
 /// Supported on iOS and Android. On desktop platforms, this has no effect.
 /// The actual action button text depends on the platform and locale.
-///
-/// Variants:
-/// - `Default`: Default return key (newline for multiline, Done for single-line)
-/// - `Go`: "Go" action (typically for URL fields)
-/// - `Search`: "Search" action (for search fields)
-/// - `Send`: "Send" action (for messaging)
-/// - `Next`: "Next" action (move to next field in form)
-/// - `Done`: "Done" action (dismiss keyboard)
 #[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 #[live_ignore]
 pub enum ReturnKeyType {
     #[pick] Default,
+    /// "Go" action, typically for URL fields, dismisses keyboard.
     Go,
+    /// "Search" action, typically for search fields, dismisses keyboard.
     Search,
+    /// "Send" action, typically for messaging, dismisses keyboard.
     Send,
-    Next,
+    // TODO: Implement Next once we have a way to know which field is next
+    // Next,
+    /// "Done" action, typically for forms, dismisses keyboard.
     Done,
 }
 

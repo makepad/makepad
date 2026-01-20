@@ -70,7 +70,7 @@ live_design!{
                                 keyboard_type: EmailAddress,
                                 autocorrect: No,
                                 autocapitalize: None,
-                                return_key_type: Next,
+                                // return_key_type: Next,
                             }
                         }
 
