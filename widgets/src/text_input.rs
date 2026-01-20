@@ -601,10 +601,14 @@ pub struct TextInput {
     #[live] is_read_only: bool,
     #[live] is_numeric_only: bool,
     // IME/keyboard configuration for mobile platforms
-    #[live] keyboard_type: KeyboardType,
+    #[live] input_mode: InputMode,
+    /// Autocapitalization behavior for soft keyboards.
     #[live] autocapitalize: AutoCapitalize,
+    /// Autocorrection behavior for soft keyboards.
     #[live] autocorrect: AutoCorrect,
+    /// Return key type, controls the visual appearance and action of the return key.
     #[live] return_key_type: ReturnKeyType,
+    /// Whether the text input is multiline.
     #[live(true)] is_multiline: bool,
     #[live] scroll_y: f64,
     #[live] empty_text: String,
@@ -695,11 +699,11 @@ impl TextInput {
     /// Build IME configuration from widget properties for mobile platforms
     pub fn get_ime_config(&self) -> TextInputConfig {
         TextInputConfig {
-            // If is_numeric_only is set, override keyboard_type to DecimalPad
-            keyboard_type: if self.is_numeric_only {
-                KeyboardType::DecimalPad
+            // If is_numeric_only is set, override input_mode to Decimal
+            input_mode: if self.is_numeric_only {
+                InputMode::Decimal
             } else {
-                self.keyboard_type
+                self.input_mode
             },
             autocapitalize: self.autocapitalize,
             autocorrect: self.autocorrect,

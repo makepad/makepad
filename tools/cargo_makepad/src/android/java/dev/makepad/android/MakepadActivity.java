@@ -86,10 +86,10 @@ class MakepadSurface
     private SpannableStringBuilder mEditable = new SpannableStringBuilder();
 
     // Keyboard configuration (set by Rust via configureKeyboard)
-    private int mKeyboardType = 0;      // 0=Default, 1=Ascii, 2=Url, 3=NumberPad, etc.
+    private int mInputMode = 0;         // 0=Text, 1=Ascii, 2=Url, 3=Numeric, 4=Tel, 5=Email, 6=Decimal, 7=Search
     private int mAutocapitalize = 2;    // 0=None, 1=Words, 2=Sentences, 3=All
     private int mAutocorrect = 0;       // 0=Default, 1=Yes, 2=No
-    private int mReturnKeyType = 0;     // 0=Default, 1=Go, 2=Search, 3=Send, 4=Next, 5=Done
+    private int mReturnKeyType = 0;     // 0=Default, 1=Go, 2=Search, 3=Send, 5=Done
     private boolean mIsMultiline = true;
     private boolean mIsSecure = false;
 
@@ -619,30 +619,30 @@ class MakepadSurface
         // Build inputType based on configuration
         int inputType = InputType.TYPE_CLASS_TEXT;
 
-        // Keyboard type
-        switch (mKeyboardType) {
-            case 1: // AsciiCapable
+        // Input mode
+        switch (mInputMode) {
+            case 1: // Ascii
                 inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
                 break;
             case 2: // Url
                 inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;
                 break;
-            case 3: // NumberPad
+            case 3: // Numeric
                 inputType = InputType.TYPE_CLASS_NUMBER;
                 break;
-            case 4: // PhonePad
+            case 4: // Tel
                 inputType = InputType.TYPE_CLASS_PHONE;
                 break;
-            case 5: // EmailAddress
+            case 5: // Email
                 inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS;
                 break;
-            case 6: // DecimalPad
+            case 6: // Decimal
                 inputType = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED;
                 break;
-            case 7: // WebSearch
+            case 7: // Search
                 inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT;
                 break;
-            default: // Default (0)
+            default: // Text (0)
                 inputType = InputType.TYPE_CLASS_TEXT;
                 break;
         }
@@ -732,13 +732,13 @@ class MakepadSurface
     }
 
     // Configure keyboard settings - called from Rust before showing keyboard
-    public void configureKeyboard(int keyboardType, int autocapitalize, int autocorrect,
+    public void configureKeyboard(int inputMode, int autocapitalize, int autocorrect,
                                   int returnKeyType, boolean isMultiline, boolean isSecure) {
-        boolean changed = (mKeyboardType != keyboardType || mAutocapitalize != autocapitalize ||
+        boolean changed = (mInputMode != inputMode || mAutocapitalize != autocapitalize ||
                           mAutocorrect != autocorrect || mReturnKeyType != returnKeyType ||
                           mIsMultiline != isMultiline || mIsSecure != isSecure);
 
-        mKeyboardType = keyboardType;
+        mInputMode = inputMode;
         mAutocapitalize = autocapitalize;
         mAutocorrect = autocorrect;
         mReturnKeyType = returnKeyType;

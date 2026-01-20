@@ -407,7 +407,7 @@ impl IosApp {
     /// Configure keyboard settings (UITextInputTraits)
     /// Uses caching to avoid calling reloadInputViews every frame
     pub fn configure_keyboard(config: &TextInputConfig) {
-        use crate::cx_api::{KeyboardType, AutoCapitalize, AutoCorrect, ReturnKeyType};
+        use crate::cx_api::{InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType};
 
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
@@ -419,16 +419,16 @@ impl IosApp {
 
                     if let Some(text_input_view) = app.text_input_view {
                         unsafe {
-                            // Map KeyboardType to UIKeyboardType
-                            let kb_type: i64 = match config.keyboard_type {
-                                KeyboardType::Default => 0,      // UIKeyboardTypeDefault
-                                KeyboardType::AsciiCapable => 1, // UIKeyboardTypeASCIICapable
-                                KeyboardType::Url => 3,          // UIKeyboardTypeURL
-                                KeyboardType::NumberPad => 4,    // UIKeyboardTypeNumberPad
-                                KeyboardType::PhonePad => 5,     // UIKeyboardTypePhonePad
-                                KeyboardType::EmailAddress => 7, // UIKeyboardTypeEmailAddress
-                                KeyboardType::DecimalPad => 8,   // UIKeyboardTypeDecimalPad
-                                KeyboardType::WebSearch => 10,   // UIKeyboardTypeWebSearch
+                            // Map InputMode to UIKeyboardType
+                            let kb_type: i64 = match config.input_mode {
+                                InputMode::Text => 0,      // UIKeyboardTypeDefault
+                                InputMode::Ascii => 1,     // UIKeyboardTypeASCIICapable
+                                InputMode::Url => 3,       // UIKeyboardTypeURL
+                                InputMode::Numeric => 4,   // UIKeyboardTypeNumberPad
+                                InputMode::Tel => 5,       // UIKeyboardTypePhonePad
+                                InputMode::Email => 7,     // UIKeyboardTypeEmailAddress
+                                InputMode::Decimal => 8,   // UIKeyboardTypeDecimalPad
+                                InputMode::Search => 10,   // UIKeyboardTypeWebSearch
                             };
 
                             // Map AutoCapitalize to UITextAutocapitalizationType

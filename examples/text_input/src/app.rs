@@ -33,7 +33,7 @@ live_design!{
                                 width: Fill,
                                 height: 150,
                                 // All defaults: is_multiline: true, autocorrect: Default,
-                                // autocapitalize: Sentences, keyboard_type: Default
+                                // autocapitalize: Sentences, input_mode: Text
                             }
                         }
 
@@ -60,17 +60,16 @@ live_design!{
                             flow: Down,
                             spacing: 5,
                             <Label> {
-                                text: "3. Email (email keyboard, no autocorrect)"
+                                text: "3. Email"
                             }
                             input_email = <TextInput> {
                                 empty_text: "email@example.com"
                                 width: Fill,
                                 height: 50,
                                 is_multiline: false,
-                                keyboard_type: EmailAddress,
+                                input_mode: Email,
                                 autocorrect: No,
                                 autocapitalize: None,
-                                // return_key_type: Next,
                             }
                         }
 
@@ -87,7 +86,7 @@ live_design!{
                                 width: Fill,
                                 height: 50,
                                 is_multiline: false,
-                                keyboard_type: Url,
+                                input_mode: Url,
                                 autocorrect: No,
                                 autocapitalize: None,
                                 return_key_type: Go,
@@ -107,7 +106,7 @@ live_design!{
                                 width: Fill,
                                 height: 50,
                                 is_multiline: false,
-                                keyboard_type: DecimalPad,
+                                input_mode: Decimal,
                             }
                         }
 
@@ -124,7 +123,7 @@ live_design!{
                                 width: Fill,
                                 height: 50,
                                 is_multiline: false,
-                                keyboard_type: WebSearch,
+                                input_mode: Search,
                                 return_key_type: Search,
                             }
                         }

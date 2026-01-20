@@ -13,7 +13,7 @@ use {
     crate::{
         area::Area,
         cx::AndroidParams,
-        cx_api::{TextInputConfig, KeyboardType, AutoCapitalize, AutoCorrect, ReturnKeyType},
+        cx_api::{TextInputConfig, InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType},
         event::{HttpRequest, TouchPoint, TouchState, VideoSource},
         makepad_live_id::*,
         makepad_math::*,
@@ -882,15 +882,15 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
     let env = attach_jni_env();
 
     // Convert Makepad enums to Android integer values
-    let keyboard_type = match config.keyboard_type {
-        KeyboardType::Default => 0,
-        KeyboardType::AsciiCapable => 1,
-        KeyboardType::Url => 2,
-        KeyboardType::NumberPad => 3,
-        KeyboardType::PhonePad => 4,
-        KeyboardType::EmailAddress => 5,
-        KeyboardType::DecimalPad => 6,
-        KeyboardType::WebSearch => 7,
+    let input_mode = match config.input_mode {
+        InputMode::Text => 0,
+        InputMode::Ascii => 1,
+        InputMode::Url => 2,
+        InputMode::Numeric => 3,
+        InputMode::Tel => 4,
+        InputMode::Email => 5,
+        InputMode::Decimal => 6,
+        InputMode::Search => 7,
     };
 
     let autocapitalize = match config.autocapitalize {
@@ -920,7 +920,7 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
         get_activity(),
         "configureKeyboard",
         "(IIIIZZ)V",
-        keyboard_type as jni_sys::jint,
+        input_mode as jni_sys::jint,
         autocapitalize as jni_sys::jint,
         autocorrect as jni_sys::jint,
         return_key_type as jni_sys::jint,

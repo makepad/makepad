@@ -67,30 +67,30 @@ pub trait CxOsApi {
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
 }
 
-/// Keyboard type hint for soft keyboards.
+/// Input mode hint for soft keyboards (matches web standard `inputmode` attribute).
 ///
 /// Supported on iOS and Android. On desktop platforms, this has no effect.
 ///
 /// Variants:
-/// - `Default`: Default keyboard for the current locale
-/// - `AsciiCapable`: Optimized for ASCII characters (no emoji suggestions)
+/// - `Text`: Default keyboard for the current locale
+/// - `Ascii`: Optimized for ASCII characters (no emoji suggestions)
 /// - `Url`: Optimized for URLs (includes /, .com shortcuts)
-/// - `NumberPad`: Number pad (0-9 only)
-/// - `PhonePad`: Phone number pad (includes *, #)
-/// - `EmailAddress`: Optimized for email addresses (includes @, shortcuts)
-/// - `DecimalPad`: Decimal number pad (0-9 and decimal point)
-/// - `WebSearch`: Optimized for web search queries
+/// - `Numeric`: Number pad (0-9 only)
+/// - `Tel`: Phone number pad (includes *, #)
+/// - `Email`: Optimized for email addresses (includes @, shortcuts)
+/// - `Decimal`: Decimal number pad (0-9 and decimal point)
+/// - `Search`: Optimized for web search queries
 #[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 #[live_ignore]
-pub enum KeyboardType {
-    #[pick] Default,
-    AsciiCapable,
+pub enum InputMode {
+    #[pick] Text,
+    Ascii,
     Url,
-    NumberPad,
-    PhonePad,
-    EmailAddress,
-    DecimalPad,
-    WebSearch,
+    Numeric,
+    Tel,
+    Email,
+    Decimal,
+    Search,
 }
 
 /// Autocapitalization behavior for soft keyboards.
@@ -147,8 +147,8 @@ pub enum ReturnKeyType {
     Done,
 }
 
-impl Default for KeyboardType {
-    fn default() -> Self { KeyboardType::Default }
+impl Default for InputMode {
+    fn default() -> Self { InputMode::Text }
 }
 
 impl Default for AutoCapitalize {
@@ -166,7 +166,7 @@ impl Default for ReturnKeyType {
 /// Combined IME/keyboard configuration for text input
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TextInputConfig {
-    pub keyboard_type: KeyboardType,
+    pub input_mode: InputMode,
     pub autocapitalize: AutoCapitalize,
     pub autocorrect: AutoCorrect,
     pub return_key_type: ReturnKeyType,
