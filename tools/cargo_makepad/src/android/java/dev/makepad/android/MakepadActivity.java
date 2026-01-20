@@ -662,8 +662,10 @@ class MakepadSurface
 
         // Input mode
         switch (mInputMode) {
-            case 1: // Ascii
-                inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            case 1: // Ascii - use visible password variation for ASCII-only keyboard
+                // TYPE_TEXT_VARIATION_VISIBLE_PASSWORD shows ASCII keyboard without masking
+                // This is the closest Android equivalent to iOS's UIKeyboardTypeASCIICapable
+                inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
                 break;
             case 2: // Url
                 inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;

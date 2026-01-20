@@ -250,7 +250,7 @@ live_design!{
             
         text_input: <TextInput> {
             empty_text: "0",
-            is_numeric_only: true,
+            input_mode: Decimal,
             is_read_only: false,
 
             width: Fit,

@@ -39,7 +39,6 @@ live_design! {
         flow: Right { wrap: true },
         is_password: false,
         is_read_only: false,
-        is_numeric_only: false
         empty_text: "Your text here",
         
         draw_bg: {
@@ -599,7 +598,6 @@ pub struct TextInput {
 
     #[live] is_password: bool,
     #[live] is_read_only: bool,
-    #[live] is_numeric_only: bool,
     // IME/keyboard configuration for mobile platforms
     #[live] input_mode: InputMode,
     /// Autocapitalization behavior for soft keyboards.
@@ -683,29 +681,10 @@ impl TextInput {
         self.set_is_read_only(cx, !self.is_read_only);
     }
 
-    pub fn is_numeric_only(&self) -> bool {
-        self.is_numeric_only
-    }
-
-    pub fn set_is_numeric_only(&mut self, cx: &mut Cx, is_numeric_only: bool) {
-        self.is_numeric_only = is_numeric_only;
-        self.laidout_text = None;
-        self.draw_bg.redraw(cx);
-    }
-
-    pub fn toggle_is_numeric_only(&mut self, cx: &mut Cx) {
-        self.set_is_numeric_only(cx, !self.is_numeric_only);
-    }
-
     /// Build IME configuration from widget properties for mobile platforms
     pub fn get_ime_config(&self) -> TextInputConfig {
         TextInputConfig {
-            // If is_numeric_only is set, override input_mode to Decimal
-            input_mode: if self.is_numeric_only {
-                InputMode::Decimal
-            } else {
-                self.input_mode
-            },
+            input_mode: self.input_mode,
             autocapitalize: self.autocapitalize,
             autocorrect: self.autocorrect,
             return_key_type: self.return_key_type,
@@ -1238,25 +1217,47 @@ impl TextInput {
         if input.len() == 1 && input.chars().next().unwrap() <= '\u{1d}'{
             return String::new();
         }
-        if self.is_numeric_only {
-            let mut contains_dot = if is_set_text {
-                false   
-            } else {
-                let before_selection = self.text[..self.selection.start().index].to_string();
-                let after_selection = self.text[self.selection.end().index..].to_string();
-                before_selection.contains('.') || after_selection.contains('.')
-            };
-            input.chars().filter(|char| {
-                match char {
-                    '.' | ',' if !contains_dot => {
-                        contains_dot = true;
-                        true
-                    },
-                    char => char.is_ascii_digit(),
-                }
-            }).collect()
-        } else {
-            input.to_string()
+
+        // Filter based on input_mode
+        match self.input_mode {
+            InputMode::Ascii => {
+                // ASCII only: characters with code point < 128
+                input.chars().filter(|c| c.is_ascii()).collect()
+            }
+            InputMode::Numeric => {
+                // Digits only
+                input.chars().filter(|c| c.is_ascii_digit()).collect()
+            }
+            InputMode::Decimal => {
+                // Digits, decimal point, and sign
+                let mut contains_dot = if is_set_text {
+                    false
+                } else {
+                    let before_selection = self.text[..self.selection.start().index].to_string();
+                    let after_selection = self.text[self.selection.end().index..].to_string();
+                    before_selection.contains('.') || after_selection.contains('.')
+                };
+                input.chars().filter(|c| {
+                    match c {
+                        '.' if !contains_dot => {
+                            contains_dot = true;
+                            true
+                        }
+                        '-' | '+' => true,
+                        c => c.is_ascii_digit(),
+                    }
+                }).collect()
+            }
+            InputMode::Tel => {
+                // Digits and common phone characters
+                input.chars().filter(|c| {
+                    c.is_ascii_digit() || matches!(c, '+' | '-' | ' ' | '(' | ')' | '*' | '#')
+                }).collect()
+            }
+            // Text, Url, Email, Search - allow everything
+            InputMode::Text | InputMode::Url | InputMode::Email | InputMode::Search => {
+                input.to_string()
+            }
         }
     }
 
@@ -2094,27 +2095,6 @@ impl TextInputRef {
     pub fn toggle_is_read_only(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut(){
             inner.toggle_is_read_only(cx);
-        }
-    }
-
-    pub fn is_numeric_only(&self) -> bool {
-        if let Some(inner) = self.borrow(){
-            inner.is_numeric_only()
-        }
-        else{
-            false
-        }
-    }
-
-    pub fn set_is_numeric_only(&self, cx: &mut Cx, is_numeric_only: bool) {
-        if let Some(mut inner) = self.borrow_mut(){
-            inner.set_is_numeric_only(cx, is_numeric_only);
-        }
-    }
-
-    pub fn toggle_is_numeric_only(&self, cx: &mut Cx) {
-        if let Some(mut inner) = self.borrow_mut(){
-            inner.toggle_is_numeric_only(cx);
         }
     }
 

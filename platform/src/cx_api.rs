@@ -473,6 +473,18 @@ impl Cx {
         self.platform_ops.push(CxOsOp::HideTextIME);
     }
 
+    /// Returns true if the text IME was just dismissed (keyboard closed).
+    /// Used to prevent unwanted focus changes when keyboard closes.
+    pub fn keyboard_text_ime_dismissed(&self) -> bool {
+        self.keyboard.text_ime_dismissed
+    }
+
+    /// Clears the text IME dismissed flag.
+    /// Should be called after handling the dismissed state.
+    pub fn clear_keyboard_text_ime_dismissed(&mut self) {
+        self.keyboard.reset_text_ime_dismissed();
+    }
+
     /// Shows the native clipboard actions menu (Copy/Paste/Cut/Select All).
     ///
     /// Displays a platform-specific floating menu with text editing actions. The menu items
