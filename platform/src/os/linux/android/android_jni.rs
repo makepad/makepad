@@ -942,7 +942,10 @@ pub unsafe fn to_java_paste_from_clipboard() -> String {
     if result.is_null() {
         return String::new();
     }
-    jstring_to_string(env, result)
+    let s = jstring_to_string(env, result);
+    // Release the local reference to avoid JNI local ref table overflow
+    (**env).DeleteLocalRef.unwrap()(env, result);
+    s
 }
 
 pub unsafe fn to_java_show_clipboard_actions(has_selection: bool, rect: crate::makepad_math::Rect, keyboard_shift: f64, dpi_factor: f64) {

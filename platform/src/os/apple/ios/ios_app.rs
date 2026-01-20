@@ -122,6 +122,8 @@ pub struct IosApp {
     edit_menu_interaction: Option<ObjcId>,
     /// Cached keyboard config to avoid redundant reloadInputViews calls
     last_keyboard_config: Option<TextInputConfig>,
+    /// Keyboard notification observer delegate - stored for cleanup
+    keyboard_observer_delegate: Option<ObjcId>,
 }
 
 impl IosApp {
@@ -151,6 +153,7 @@ impl IosApp {
                 edit_menu_delegate_instance,
                 edit_menu_interaction: None,
                 last_keyboard_config: None,
+                keyboard_observer_delegate: None,
             }
         }
     }
@@ -207,6 +210,8 @@ impl IosApp {
             // Initialize ivars
             let marked_text: ObjcId = msg_send![class!(NSMutableAttributedString), alloc];
             let marked_text: ObjcId = msg_send![marked_text, init];
+            // Retain markedText since we're storing it as an ivar (not owned by ObjC runtime)
+            let () = msg_send![marked_text, retain];
             (*text_input_view).set_ivar::<ObjcId>("markedText", marked_text);
             (*text_input_view).set_ivar::<i64>("cursorPosition", 0);
             (*text_input_view).set_ivar::<i64>("selectionStart", 0);
@@ -228,7 +233,7 @@ impl IosApp {
             // Set up textfield delegate for keyboard notifications only
             let textfield_dlg: ObjcId = msg_send![get_ios_class_global().textfield_delegate, alloc];
             let textfield_dlg: ObjcId = msg_send![textfield_dlg, init];
-            
+
             let notification_center: ObjcId = msg_send![class!(NSNotificationCenter), defaultCenter];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidChangeFrame:) name: UIKeyboardDidChangeFrameNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillChangeFrame:) name: UIKeyboardWillChangeFrameNotification object: nil];
@@ -236,6 +241,9 @@ impl IosApp {
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillShow:) name: UIKeyboardWillShowNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidHide:) name: UIKeyboardDidHideNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillHide:) name: UIKeyboardWillHideNotification object: nil];
+
+            // Store the delegate for cleanup
+            self.keyboard_observer_delegate = Some(textfield_dlg);
             
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
             

@@ -628,8 +628,9 @@ pub struct TextInput {
     #[rust] composition_start: usize,
     /// IME composition tracking - byte length of current composition
     #[rust] composition_length: usize,
-    /// Set to true after receiving IME input; prevents race condition in update_ime_context
-    #[rust] ime_just_updated: bool,
+    /// Frame ID when IME input was last received; prevents race condition in update_ime_context
+    /// Uses frame counter instead of bool to avoid timing issues between event/draw
+    #[rust] ime_update_frame: u64,
     /// Track last sent IME state to prevent sync loops (Flutter-style state comparison)
     #[rust] last_sent_ime_text: String,
     #[rust] last_sent_ime_sel_start: usize,
@@ -1197,6 +1198,9 @@ impl TextInput {
         self.animator_play(cx, ids!(blink.on));
         cx.stop_timer(self.blink_timer);
         cx.hide_text_ime();
+        // Clear composition state to avoid stale composition UI on refocus
+        self.composition_start = 0;
+        self.composition_length = 0;
         // Only hide clipboard actions on mobile platforms where they're supported
         match cx.os_type() {
             OsType::Android(_) | OsType::Ios(_) => {
@@ -1339,11 +1343,10 @@ impl Widget for TextInput {
         if cx.has_key_focus(self.draw_bg.area()) {
             // Skip update_ime_context if we just received IME input
             // This prevents race condition where we send old state back to Java
-            // before the IME event is fully processed
-            if !self.ime_just_updated {
+            // before the IME event is fully processed (skip if same frame as IME update)
+            if self.ime_update_frame != cx.redraw_id() {
                 self.update_ime_context(cx);
             }
-            self.ime_just_updated = false; // Reset for next frame
 
             cx.show_text_ime_with_config(
                 self.draw_bg.area(),
@@ -1886,7 +1889,7 @@ impl Widget for TextInput {
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
                 // Immediately update IME shadow buffer so Gboard gets correct cursor position
                 // Guard: skip if we just received IME input (prevents sync loop during rapid input)
-                if !self.ime_just_updated {
+                if self.ime_update_frame != cx.redraw_id() {
                     self.update_ime_context(cx);
                 }
             }
@@ -1921,7 +1924,7 @@ impl Widget for TextInput {
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
                 // Immediately update IME shadow buffer so Gboard gets correct cursor position
                 // Guard: skip if we just received IME input (prevents sync loop during rapid input)
-                if !self.ime_just_updated {
+                if self.ime_update_frame != cx.redraw_id() {
                     self.update_ime_context(cx);
                 }
             }
@@ -1942,7 +1945,7 @@ impl Widget for TextInput {
                 self.composition_length = byte_end - byte_start;
                 // Update IME context so Gboard knows the current text state
                 // Guard: skip if we just received IME input (prevents sync loop during rapid input)
-                if !self.ime_just_updated {
+                if self.ime_update_frame != cx.redraw_id() {
                     self.update_ime_context(cx);
                 }
             }
@@ -1988,7 +1991,7 @@ impl Widget for TextInput {
                 self.last_sent_ime_sel_end = event.selection_end;
 
                 // Belt-and-suspenders: also set flag to skip one update cycle
-                self.ime_just_updated = true;
+                self.ime_update_frame = cx.redraw_id();
 
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));

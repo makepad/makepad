@@ -149,6 +149,7 @@ live_design!{
 
                         // 8. All caps input
                         <View> {
+                            height: Fit
                             flow: Down,
                             spacing: 5,
                             <Label> {
@@ -160,6 +161,23 @@ live_design!{
                                 height: 50,
                                 is_multiline: false,
                                 autocapitalize: AllCharacters,
+                            }
+                        }
+
+                        // 9. ASCII input
+                        <View> {
+                            height: Fit
+                            flow: Down,
+                            spacing: 5,
+                            <Label> {
+                                text: "9. ASCII (ASCII keyboard)"
+                            }
+                            input_ascii = <TextInput> {
+                                empty_text: "ASCII INPUT"
+                                width: Fill,
+                                height: 50,
+                                is_multiline: false,
+                                input_mode: Ascii,
                             }
                         }
 
