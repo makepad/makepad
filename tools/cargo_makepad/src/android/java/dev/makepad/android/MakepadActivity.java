@@ -347,6 +347,23 @@ class MakepadSurface
         }
 
         @Override
+        public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
+            // Use code point deletion which properly handles surrogate pairs (emoji, etc.)
+            // This is called by sendKeyEvent for backspace/delete to avoid corrupting strings
+            boolean result = super.deleteSurroundingTextInCodePoints(beforeLength, afterLength);
+
+            // Notify IME of state change
+            notifyImeOfSelectionUpdate();
+
+            // Notify Rust (unless in batch edit)
+            if (mBatchEditNestCount == 0) {
+                notifyRustOfTextState();
+            }
+
+            return result;
+        }
+
+        @Override
         public boolean setSelection(int start, int end) {
             // Short-circuit if already at this selection (prevents Samsung keyboard loop)
             // Samsung may respond to imm.updateSelection() by calling setSelection() again
@@ -377,20 +394,24 @@ class MakepadSurface
 
         @Override
         public boolean sendKeyEvent(KeyEvent event) {
-            // Intercept DELETE key events and translate to deleteSurroundingText()
+            // Intercept DELETE key events and translate to deleteSurroundingTextInCodePoints()
             // This is needed for Samsung keyboard delete which uses sendKeyEvent() instead of deleteSurroundingText()
             // sendKeyEvent() dispatches to View asynchronously, which causes sync issues with Samsung
+            // We use deleteSurroundingTextInCodePoints (API 24+) instead of deleteSurroundingText
+            // because emoji characters are surrogate pairs (2 UTF-16 code units) and we need to
+            // delete the full code point, not just one code unit which would corrupt the string.
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
                 int keyCode = event.getKeyCode();
 
                 if (keyCode == KeyEvent.KEYCODE_DEL) {
-                    // Translate backspace to deleteSurroundingText (deletes before cursor)
-                    return deleteSurroundingText(1, 0);
+                    // Translate backspace to delete 1 code point before cursor
+                    // deleteSurroundingTextInCodePoints handles surrogate pairs properly
+                    return deleteSurroundingTextInCodePoints(1, 0);
                 }
 
                 if (keyCode == KeyEvent.KEYCODE_FORWARD_DEL) {
-                    // Translate forward delete (deletes after cursor)
-                    return deleteSurroundingText(0, 1);
+                    // Translate forward delete (deletes 1 code point after cursor)
+                    return deleteSurroundingTextInCodePoints(0, 1);
                 }
 
                 if (keyCode == KeyEvent.KEYCODE_ENTER) {

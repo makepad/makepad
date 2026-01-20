@@ -759,20 +759,21 @@ impl TextInput {
     /// Updates the IME text context for Android autocomplete/predictions
     /// Uses state comparison (Flutter-style) to prevent sync loops
     fn update_ime_context(&mut self, cx: &mut Cx) {
-        // Convert byte indices to character indices for the platform
-        let sel_start_chars = self.text[..self.selection.start().index].chars().count();
-        let sel_end_chars = self.text[..self.selection.end().index].chars().count();
+        // Convert byte indices to UTF-16 code unit indices for Java/Android
+        // Java String uses UTF-16 internally, so cursor positions must be in UTF-16 units
+        let sel_start_utf16 = byte_index_to_utf16_index(&self.text, self.selection.start().index);
+        let sel_end_utf16 = byte_index_to_utf16_index(&self.text, self.selection.end().index);
 
         // Only send if state actually changed from what we last sent
         // This prevents the sync loop where IME sends state → we echo it back → IME gets confused
         if self.text != self.last_sent_ime_text
-            || sel_start_chars != self.last_sent_ime_sel_start
-            || sel_end_chars != self.last_sent_ime_sel_end
+            || sel_start_utf16 != self.last_sent_ime_sel_start
+            || sel_end_utf16 != self.last_sent_ime_sel_end
         {
             self.last_sent_ime_text = self.text.clone();
-            self.last_sent_ime_sel_start = sel_start_chars;
-            self.last_sent_ime_sel_end = sel_end_chars;
-            cx.update_ime_text_state(self.text.clone(), sel_start_chars, sel_end_chars);
+            self.last_sent_ime_sel_start = sel_start_utf16;
+            self.last_sent_ime_sel_end = sel_end_utf16;
+            cx.update_ime_text_state(self.text.clone(), sel_start_utf16, sel_end_utf16);
         }
     }
 
@@ -1949,15 +1950,10 @@ impl Widget for TextInput {
                 // Full text state from platform IME (Android's InputConnection)
                 // Java side is the source of truth - just apply the state directly
 
-                // Convert character indices to byte indices for selection
-                let byte_sel_start = event.text.char_indices()
-                    .nth(event.selection_start)
-                    .map(|(i, _)| i)
-                    .unwrap_or(event.text.len());
-                let byte_sel_end = event.text.char_indices()
-                    .nth(event.selection_end)
-                    .map(|(i, _)| i)
-                    .unwrap_or(event.text.len());
+                // Convert UTF-16 code unit indices (from Java) to byte indices (for Rust String)
+                // Java String uses UTF-16 internally, so emoji (surrogate pairs) count as 2 units
+                let byte_sel_start = utf16_index_to_byte_index(&event.text, event.selection_start);
+                let byte_sel_end = utf16_index_to_byte_index(&event.text, event.selection_end);
 
                 // Apply text change if different
                 if self.text != event.text {
@@ -1975,14 +1971,8 @@ impl Widget for TextInput {
 
                 // Update composition region
                 if let (Some(comp_start), Some(comp_end)) = (event.composing_start, event.composing_end) {
-                    let byte_comp_start = event.text.char_indices()
-                        .nth(comp_start)
-                        .map(|(i, _)| i)
-                        .unwrap_or(event.text.len());
-                    let byte_comp_end = event.text.char_indices()
-                        .nth(comp_end)
-                        .map(|(i, _)| i)
-                        .unwrap_or(event.text.len());
+                    let byte_comp_start = utf16_index_to_byte_index(&event.text, comp_start);
+                    let byte_comp_end = utf16_index_to_byte_index(&event.text, comp_end);
                     self.composition_start = byte_comp_start;
                     self.composition_length = byte_comp_end - byte_comp_start;
                 } else {
@@ -2426,4 +2416,29 @@ fn prev_grapheme_boundary(text: &str, index: usize) -> usize {
 fn next_grapheme_boundary(text: &str, index: usize) -> usize {
     let mut cursor = GraphemeCursor::new(index, text.len(), true);
     cursor.next_boundary(text, 0).unwrap().unwrap_or(text.len())
+}
+
+/// Convert UTF-16 code unit index to byte index in a UTF-8 string.
+/// Java/Android uses UTF-16 internally, so String.length() and cursor positions
+/// are in UTF-16 code units. Characters outside the BMP (like emoji) take 2 UTF-16
+/// code units (surrogate pairs) but are single Rust chars.
+fn utf16_index_to_byte_index(s: &str, utf16_idx: usize) -> usize {
+    let mut utf16_count = 0;
+    for (byte_idx, c) in s.char_indices() {
+        if utf16_count >= utf16_idx {
+            return byte_idx;
+        }
+        // Each Rust char takes 1 or 2 UTF-16 code units
+        utf16_count += c.len_utf16();
+    }
+    s.len() // Index at or past end of string
+}
+
+/// Convert byte index in a UTF-8 string to UTF-16 code unit count.
+/// Used when sending cursor positions back to Java/Android.
+fn byte_index_to_utf16_index(s: &str, byte_idx: usize) -> usize {
+    s[..byte_idx.min(s.len())]
+        .chars()
+        .map(|c| c.len_utf16())
+        .sum()
 }
