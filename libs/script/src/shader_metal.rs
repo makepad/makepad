@@ -118,13 +118,13 @@ impl ShaderOutput {
         writeln!(out, "    constant IoInstance *i [[buffer(1)]],").ok();
         writeln!(out, "    constant IoUniform *u [[buffer(2)]],").ok();
         
-        let mut buf_idx = 3;
+        // Use pre-assigned buffer indices from assign_uniform_buffer_indices()
         for io in &self.io {
             if let ShaderIoKind::UniformBuffer = io.kind {
+                let buf_idx = io.buffer_index.expect("UniformBuffer must have buffer_index assigned");
                 write!(out, "    constant ").ok();
                 self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
                 writeln!(out, " *u_{} [[buffer({})]],", io.name, buf_idx).ok();
-                buf_idx += 1;
             }
         }
         
@@ -183,14 +183,14 @@ impl ShaderOutput {
         writeln!(out, "    constant IoInstance *i [[buffer(1)]],").ok();
         write!(out, "    constant IoUniform *u [[buffer(2)]]").ok();
         
-        let mut buf_idx = 3;
+        // Use pre-assigned buffer indices from assign_uniform_buffer_indices()
         for io in &self.io {
             if let ShaderIoKind::UniformBuffer = io.kind {
+                let buf_idx = io.buffer_index.expect("UniformBuffer must have buffer_index assigned");
                 writeln!(out, ",").ok();
                 write!(out, "    constant ").ok();
                 self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
                 write!(out, " *u_{} [[buffer({})]]", io.name, buf_idx).ok();
-                buf_idx += 1;
             }
         }
         

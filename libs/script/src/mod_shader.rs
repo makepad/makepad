@@ -49,9 +49,11 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         obj.into()
     });
     
-    native.add_method(heap, shader, id!(vertex_buffer), script_args!(value=NIL), |vm, args|{
+    native.add_method(heap, shader, id!(vertex_buffer), script_args!(value=NIL, buf=NIL), |vm, args|{
         let value = script_value!(vm, args.value);
+        let buffer = script_value!(vm, args.buf);
         let obj = vm.heap.new_with_proto(value);
+        set_script_value!(vm, obj.buffer = buffer);
         vm.heap.set_shader_io(obj, SHADER_IO_VERTEX_BUFFER);
         obj.into()
     });
@@ -115,19 +117,8 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                 );
             }
             
+            output.assign_uniform_buffer_indices(vm.heap, 3);
             
-            
-            // After compilation, pre-collect ALL Rust instance fields in correct order
-            // Dyn fields were already collected during compilation as encountered
-            // Rust fields must ALL be emitted to match Repr(C) layout
-            
-            // alright on metal we now need to generate the structs
-            // we need to generate the Varying struct
-            // the vertex Varying vertex_main
-            // the fragment_main
-            // the Io struct, IoF struct, IoV struct
-            
-            // alright we should have output now
             let mut out = String::new();
             output.create_struct_defs(vm, &mut out);
             output.metal_create_instance_struct(vm, &mut out);

@@ -2051,7 +2051,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                     let draw_list = &mut self.cx.cx.draw_lists[inst.draw_list_id];
                     let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                     let draw_call = draw_item.draw_call().unwrap();
-                    let sh = &self.cx.cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                    let sh = &self.cx.cx.draw_shaders[draw_call.draw_shader_id.index];
                     let inst_buf = draw_item.instances.as_mut().unwrap();
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
@@ -2126,7 +2126,7 @@ impl<'a,'b> Cx2d<'a,'b> {
                     let draw_list = &mut self.cx.cx.draw_lists[inst.draw_list_id];
                     let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                     let draw_call = draw_item.draw_call().unwrap();
-                    let sh = &self.cx.cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                    let sh = &self.cx.cx.draw_shaders[draw_call.draw_shader_id.index];
                     let inst_buf = draw_item.instances.as_mut().unwrap();
                     for i in 0..inst.instance_count {
                         if let Some(draw_clip) = sh.mapping.draw_clip {

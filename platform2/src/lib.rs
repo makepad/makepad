@@ -219,11 +219,7 @@ pub use {
             DrawVars
         },
         geometry::{
-            GeometryFingerprint,
-            GeometryField,
-            GeometryFields,
             GeometryId,
-            GeometryRef,
             Geometry,
         },
         gpu_info::GpuPerformance,     

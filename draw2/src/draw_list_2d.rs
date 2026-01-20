@@ -207,16 +207,16 @@ impl<'a> CxDraw<'a> {
     
     pub fn get_draw_call(&mut self, append: bool, draw_vars: &DrawVars) -> Option<&mut CxDrawItem> {
         
-        if draw_vars.draw_shader.is_none() {
+        if draw_vars.draw_shader_id.is_none() {
             return None
         }
-        let draw_shader = draw_vars.draw_shader.unwrap();
+        let draw_shader = draw_vars.draw_shader_id.unwrap();
         
-        if draw_shader.draw_shader_generation != self.draw_shaders.generation {
+        if draw_shader.generation != self.draw_shaders.generation {
             return None
         }
         
-        let sh = &self.cx.draw_shaders[draw_shader.draw_shader_id];
+        let sh = &self.cx.draw_shaders[draw_shader.index];
         
         let current_draw_list_id = *self.draw_list_stack.last().unwrap();
         let draw_list = &mut self.cx.draw_lists[current_draw_list_id];
