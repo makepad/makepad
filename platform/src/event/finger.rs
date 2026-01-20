@@ -924,11 +924,6 @@ impl Event {
                     return Hit::TextRangeReplace(tr.clone())
                 }
             },
-            Event::TextComposingRegion(tcr) => {
-                if cx.keyboard.has_key_focus(area) {
-                    return Hit::TextComposingRegion(tcr.clone())
-                }
-            },
             Event::ImeTextState(its) => {
                 if cx.keyboard.has_key_focus(area) {
                     return Hit::ImeTextState(its.clone())

@@ -68,7 +68,7 @@ live_design!{
                                 height: 50,
                                 is_multiline: false,
                                 input_mode: Email,
-                                autocorrect: No,
+                                autocorrect: Disabled,
                                 autocapitalize: None,
                             }
                         }
@@ -87,7 +87,7 @@ live_design!{
                                 height: 50,
                                 is_multiline: false,
                                 input_mode: Url,
-                                autocorrect: No,
+                                autocorrect: Disabled,
                                 autocapitalize: None,
                                 return_key_type: Go,
                             }
@@ -142,7 +142,7 @@ live_design!{
                                 height: 50,
                                 is_multiline: false,
                                 is_password: true,
-                                autocorrect: No,
+                                autocorrect: Disabled,
                                 autocapitalize: None,
                             }
                         }
@@ -173,10 +173,11 @@ live_design!{
                                 text: "9. ASCII (ASCII keyboard)"
                             }
                             input_ascii = <TextInput> {
-                                empty_text: "ASCII INPUT"
+                                empty_text: "ASCII input"
                                 width: Fill,
                                 height: 50,
                                 is_multiline: false,
+                                autocorrect: Enabled,
                                 input_mode: Ascii,
                             }
                         }

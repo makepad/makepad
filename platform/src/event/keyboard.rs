@@ -144,15 +144,6 @@ pub struct TextRangeReplaceEvent {
     pub text: String,
 }
 
-/// Event for setting the composing region (IME marks existing text for replacement)
-#[derive(Clone, Debug)]
-pub struct TextComposingRegionEvent {
-    /// Start index (in characters, not bytes) of composing region
-    pub start: usize,
-    /// End index (in characters, not bytes) of composing region
-    pub end: usize,
-}
-
 /// Event for full text state update from IME
 /// This is the authoritative text state from the platform's InputConnection
 #[derive(Clone, Debug)]

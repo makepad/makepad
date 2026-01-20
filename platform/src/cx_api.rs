@@ -67,6 +67,37 @@ pub trait CxOsApi {
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
 }
 
+// =============================================================================
+// IME (Input Method Editor) Architecture
+// =============================================================================
+//
+// Mobile platforms (iOS/Android) use different approaches for IME integration:
+//
+// ## Android
+// - **Source of truth**: Java's `mEditable` (SpannableStringBuilder) in MakepadInputConnection
+// - **Sync direction**: Bidirectional (Java ↔ Rust)
+// - **Events**: `ImeTextStateChanged` sends full text + selection + composing region from Java→Rust
+// - **Echo detection**: Circular buffer prevents sync loops when Rust echoes state back
+// - **Programmatic updates**: Rust→Java via `UpdateImeTextState` (e.g., clear button)
+//
+// ## iOS
+// - **Source of truth**: Rust's text buffer in TextInput widget
+// - **Sync direction**: Unidirectional (iOS → Rust)
+// - **Events**: `TextInput` with `replace_last` flag for composition preview
+// - **Composition**: UITextInput protocol handles marked text inline
+// - **No echo detection needed**: Simpler event model
+//
+// ## Why They Differ
+// Android's InputConnection requires a Java-side shadow buffer that the IME can query
+// synchronously (getTextBeforeCursor, etc.). iOS's UITextInput protocol is more
+// event-driven and doesn't require synchronous state queries.
+//
+// ## Input Filtering
+// Both platforms filter input at the widget layer (TextInput::filter_input).
+// Android additionally filters in Java's commitText() to catch IME bypass cases.
+//
+// =============================================================================
+
 /// Input mode hint for soft keyboards (matches web standard `inputmode` attribute).
 ///
 /// Supported on iOS and Android. On desktop platforms, this has no effect.
@@ -117,14 +148,14 @@ pub enum AutoCapitalize {
 ///
 /// Variants:
 /// - `Default`: Use system default (typically enabled)
-/// - `Yes`: Enable autocorrection
-/// - `No`: Disable autocorrection (useful for code, usernames, etc.)
+/// - `Enabled`: Force enable autocorrection
+/// - `Disabled`: Force disable autocorrection (useful for code, usernames, etc.)
 #[derive(Clone, Copy, Debug, PartialEq, Live, LiveHook)]
 #[live_ignore]
 pub enum AutoCorrect {
     #[pick] Default,
-    Yes,
-    No,
+    Enabled,
+    Disabled,
 }
 
 /// Return key type - controls the visual appearance and action of the return key.

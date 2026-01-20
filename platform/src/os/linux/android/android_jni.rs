@@ -899,8 +899,8 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
 
     let autocorrect = match config.autocorrect {
         AutoCorrect::Default => 0,
-        AutoCorrect::Yes => 1,
-        AutoCorrect::No => 2,
+        AutoCorrect::Enabled => 1,
+        AutoCorrect::Disabled => 2,
     };
 
     let return_key_type = match config.return_key_type {

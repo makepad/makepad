@@ -9,7 +9,7 @@ The standard text input form element.
 - is_multiline (bool) - whether the text input supports multiple lines
 - input_mode (InputMode: Text, Ascii, Url, Numeric, Tel, Email, Decimal, Search) - keyboard type for mobile
 - autocapitalize (AutoCapitalize: None, Words, Sentences, AllCharacters) - autocapitalization behavior
-- autocorrect (AutoCorrect: Default, Yes, No) - autocorrection behavior
+- autocorrect (AutoCorrect: Default, Enabled, Disabled) - autocorrection behavior
 - return_key_type (ReturnKeyType: Default, Go, Search, Send, Done) - return key appearance
 - label_align (Align)
 - text (String)

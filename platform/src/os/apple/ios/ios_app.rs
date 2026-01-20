@@ -450,9 +450,9 @@ impl IosApp {
                             // Map AutoCorrect to UITextAutocorrectionType
                             // -1 means "use CJK detection logic" (our Default)
                             let autocorrect_type: i64 = match config.autocorrect {
-                                AutoCorrect::Default => -1, // Use CJK detection in trait method
-                                AutoCorrect::No => 1,       // UITextAutocorrectionTypeNo
-                                AutoCorrect::Yes => 2,      // UITextAutocorrectionTypeYes
+                                AutoCorrect::Default => -1,  // Use CJK detection in trait method
+                                AutoCorrect::Disabled => 1,  // UITextAutocorrectionTypeNo
+                                AutoCorrect::Enabled => 2,   // UITextAutocorrectionTypeYes
                             };
 
                             // Map ReturnKeyType to UIReturnKeyType

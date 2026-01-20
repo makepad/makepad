@@ -1950,27 +1950,6 @@ impl Widget for TextInput {
                 // Hide clipboard actions popup on text edit
                 cx.hide_clipboard_actions();
             }
-            Hit::TextComposingRegion(event) if !self.is_read_only => {
-                // IME marks existing text as composing region (e.g., for autocorrect)
-                // Convert character indices to byte indices
-                let byte_start = self.text.char_indices()
-                    .nth(event.start)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.text.len());
-                let byte_end = self.text.char_indices()
-                    .nth(event.end)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.text.len());
-
-                // Pre-set composition region for next setComposingText
-                self.composition_start = byte_start;
-                self.composition_length = byte_end - byte_start;
-                // Update IME context so Gboard knows the current text state
-                // Guard: skip if we just received IME input (prevents sync loop during rapid input)
-                if self.ime_update_frame != cx.redraw_id() {
-                    self.update_ime_context(cx);
-                }
-            }
             Hit::ImeTextState(event) if !self.is_read_only => {
                 // Full text state from platform IME (Android's InputConnection)
                 // Java side is the source of truth - just apply the state directly
