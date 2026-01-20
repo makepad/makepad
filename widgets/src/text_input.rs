@@ -874,6 +874,7 @@ impl TextInput {
             .cursor_to_position(self.selection.cursor)
             .ok()
             .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
+        let x_in_lpxs = x_in_lpxs.min(cx.turtle().inner_rect().size.x as f32 - 2.0);
         let laidout_text = self
             .laidout_text
             .as_ref()
