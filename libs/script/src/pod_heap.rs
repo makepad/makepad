@@ -316,7 +316,7 @@ impl ScriptHeap{
         }
     }
         
-    pub fn pod_def_atom(&mut self, pod_module:ScriptObject, name: LiveId, ty: ScriptPodTy, helper_name:LiveId, default:ScriptValue)->ScriptPodType{
+    pub fn pod_def_atom(&mut self, pod_module:ScriptObject, name: LiveId, alias:Option<LiveId>, ty: ScriptPodTy, helper_name:LiveId, default:ScriptValue)->ScriptPodType{
         let pod_obj = self.new_with_proto(helper_name.into());
         if ty != ScriptPodTy::UndefinedStruct && 
         ty != ScriptPodTy::ArrayBuilder{
@@ -326,6 +326,9 @@ impl ScriptHeap{
         self.set_object_storage_vec2(pod_obj);
         self.set_object_pod_type(pod_obj, pt); 
         self.set_value_def(pod_module, name.into(), pod_obj.into());
+        if let Some(alias) = alias{
+            self.set_value_def(pod_module, alias.into(), pod_obj.into());
+        }
         pt
     }
         

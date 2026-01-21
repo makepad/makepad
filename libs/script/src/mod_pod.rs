@@ -88,26 +88,26 @@ pub fn define_pod_module(heap:&mut ScriptHeap, _native:&mut ScriptNative)->Scrip
     
     let pod = heap.new_module(id!(pod));
         
-    let pod_void = heap.pod_def_atom(pod, id_lut!(void), ScriptPodTy::Void, id_lut!(pod_void), ScriptValue::NIL);
+    let pod_void = heap.pod_def_atom(pod, id_lut!(void), None, ScriptPodTy::Void, id_lut!(pod_void), ScriptValue::NIL);
     assert!(pod_void == ScriptPodType::VOID);
     
-    let pod_struct = heap.pod_def_atom(pod, id_lut!(struct), ScriptPodTy::UndefinedStruct, id_lut!(pod_struct), ScriptValue::NIL);
+    let pod_struct = heap.pod_def_atom(pod, id_lut!(struct), None, ScriptPodTy::UndefinedStruct, id_lut!(pod_struct), ScriptValue::NIL);
     
-    let pod_array = heap.pod_def_atom(pod, id_lut!(array), ScriptPodTy::ArrayBuilder, id_lut!(pod_array), ScriptValue::NIL);
+    let pod_array = heap.pod_def_atom(pod, id_lut!(array), None, ScriptPodTy::ArrayBuilder, id_lut!(pod_array), ScriptValue::NIL);
     
-    let pod_bool = heap.pod_def_atom(pod, id_lut!(bool), ScriptPodTy::Bool, id_lut!(pod_bool), ScriptValue::from_bool(false));
+    let pod_bool = heap.pod_def_atom(pod, id_lut!(bool), None, ScriptPodTy::Bool, id_lut!(pod_bool), ScriptValue::from_bool(false));
     
-    let pod_f32 = heap.pod_def_atom(pod, id_lut!(f32), ScriptPodTy::F32, id_lut!(pod_f32), ScriptValue::from_f32(0.0));
+    let pod_f32 = heap.pod_def_atom(pod, id_lut!(f32), Some(id_lut!(float)), ScriptPodTy::F32, id_lut!(pod_f32), ScriptValue::from_f32(0.0));
         
-    let pod_f16 = heap.pod_def_atom(pod, id_lut!(f16), ScriptPodTy::F16, id_lut!(pod_f16), ScriptValue::from_f16(0.0));
+    let pod_f16 = heap.pod_def_atom(pod, id_lut!(f16), None, ScriptPodTy::F16, id_lut!(pod_f16), ScriptValue::from_f16(0.0));
     
-    let pod_u32 = heap.pod_def_atom(pod, id_lut!(u32), ScriptPodTy::U32, id_lut!(pod_u32), ScriptValue::from_u32(0));    
+    let pod_u32 = heap.pod_def_atom(pod, id_lut!(u32), None, ScriptPodTy::U32, id_lut!(pod_u32), ScriptValue::from_u32(0));    
     
-    let pod_i32 = heap.pod_def_atom(pod, id_lut!(i32), ScriptPodTy::I32, id_lut!(pod_i32), ScriptValue::from_i32(0));    
+    let pod_i32 = heap.pod_def_atom(pod, id_lut!(i32), None, ScriptPodTy::I32, id_lut!(pod_i32), ScriptValue::from_i32(0));    
     
-    let pod_atomic_u32 = heap.pod_def_atom(pod, id_lut!(atomic_u32), ScriptPodTy::AtomicU32, id_lut!(pod_atomic_u32), ScriptValue::from_u32(0));    
+    let pod_atomic_u32 = heap.pod_def_atom(pod, id_lut!(atomic_u32), None, ScriptPodTy::AtomicU32, id_lut!(pod_atomic_u32), ScriptValue::from_u32(0));    
     
-    let pod_atomic_i32 = heap.pod_def_atom(pod, id_lut!(pod_atomic_i32), ScriptPodTy::AtomicI32, id_lut!(pod_atomic_i32), ScriptValue::from_i32(0));    
+    let pod_atomic_i32 = heap.pod_def_atom(pod, id_lut!(pod_atomic_i32), None, ScriptPodTy::AtomicI32, id_lut!(pod_atomic_i32), ScriptValue::from_i32(0));    
     
     let pod_vec2f = heap.pod_def_vec(pod, id_lut!(vec2f), Some(id_lut!(vec2)), ScriptPodVec::Vec2f);
     let pod_vec3f = heap.pod_def_vec(pod, id_lut!(vec3f), Some(id_lut!(vec3)), ScriptPodVec::Vec3f);
