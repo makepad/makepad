@@ -412,7 +412,6 @@ impl ShaderOutput{
                 }
             }
         }
-        println!("{:?}", bindings);
         
         bindings
     }

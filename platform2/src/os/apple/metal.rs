@@ -621,7 +621,7 @@ impl Cx {
             };
             
             if cx_shader.mapping.flags.debug {
-                crate::log!("{}", mtlsl);
+                println!("=== Generated Metal Shader ===\n{}\n=== End Metal Shader ===", mtlsl);
             }
             
             // Get the uniform buffer bindings from the mapping
@@ -803,7 +803,13 @@ impl DrawVars{
             
             // Create the shader mapping and allocate CxDrawShader
             let source = CxDrawShaderSource::Combined { source: out };
-            let mapping = CxDrawShaderMapping::from_shader_output(source, &vm.heap, &output);
+            let mut mapping = CxDrawShaderMapping::from_shader_output(source, &vm.heap, &output);
+            
+            // Check for debug: true on the shader object
+            let debug_value = vm.heap.value(io_self, id!(debug).into(), &vm.thread.trap);
+            if let Some(true) = debug_value.as_bool() {
+                mapping.flags.debug = true;
+            }
             
             // Set dyn_instance_start and dyn_instance_slots based on mapping
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
