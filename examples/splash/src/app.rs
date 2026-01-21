@@ -9,9 +9,11 @@ script_mod!{
     #(App::script_component(vm)){
         
         draw_quad: mod.shaders.DrawQuad{
+            test: mod.shader.instance(0.5)
+            debug:true
             pixel: ||{
-                let x = Sdf2d.viewport(self.pos)
-                x.circle(0.25,0.25,.2)
+                return mix(#0f0,#f00, self.test)
+                let x = Sdf2d.viewport(self.pos*self.rect_size)
                 x.fill(#0f0)
                 x.result
             }
@@ -63,7 +65,7 @@ impl MatchEvent for App{
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
         
-        self.draw_quad.draw_abs(cx, rect(10.,10.,100.,100.));
+        self.draw_quad.draw_abs(cx, rect(10.,10.,200.,100.));
         
         cx.end_pass_sized_turtle();
         self.main_draw_list.end(cx);
