@@ -6,6 +6,7 @@ use crate::heap::*;
 use crate::shader::ShaderIoKind;
 use crate::shader::ShaderMode;
 use crate::shader::ShaderSamplerOptions;
+use crate::shader::TextureType;
 use crate::mod_shader::*;
 use crate::value::*;
 
@@ -40,7 +41,16 @@ impl ShaderBackend{
                         SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v->_position")),
                         SHADER_IO_VERTEX_BUFFER=>(ShaderIoKind::VertexBuffer, ShaderIoPrefix::Prefix("_io.vb[_iov.vid].")),
                         SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("")),
-                        SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_TEXTURE_1D=>(ShaderIoKind::Texture(TextureType::Texture1d), ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_TEXTURE_1D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture1dArray), ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_TEXTURE_2D=>(ShaderIoKind::Texture(TextureType::Texture2d), ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_TEXTURE_2D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture2dArray), ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_TEXTURE_3D=>(ShaderIoKind::Texture(TextureType::Texture3d), ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_TEXTURE_3D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture3dArray), ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_TEXTURE_CUBE=>(ShaderIoKind::Texture(TextureType::TextureCube), ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_TEXTURE_CUBE_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureCubeArray), ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_TEXTURE_DEPTH=>(ShaderIoKind::Texture(TextureType::TextureDepth), ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_TEXTURE_DEPTH_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureDepthArray), ShaderIoPrefix::Prefix("_io.")),
                         SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("_io.")),
                         
                         _=>panic!()
@@ -58,7 +68,16 @@ impl ShaderBackend{
                             SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
                             SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iof.v->")),
                             SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iof.v->_position")),
-                            SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_TEXTURE_1D=>(ShaderIoKind::Texture(TextureType::Texture1d), ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_TEXTURE_1D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture1dArray), ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_TEXTURE_2D=>(ShaderIoKind::Texture(TextureType::Texture2d), ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_TEXTURE_2D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture2dArray), ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_TEXTURE_3D=>(ShaderIoKind::Texture(TextureType::Texture3d), ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_TEXTURE_3D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture3dArray), ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_TEXTURE_CUBE=>(ShaderIoKind::Texture(TextureType::TextureCube), ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_TEXTURE_CUBE_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureCubeArray), ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_TEXTURE_DEPTH=>(ShaderIoKind::Texture(TextureType::TextureDepth), ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_TEXTURE_DEPTH_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureDepthArray), ShaderIoPrefix::Prefix("_io.")),
                             SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("_io.")),
                             _=>panic!()
                         }
@@ -82,7 +101,16 @@ impl ShaderBackend{
                             SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iov.v->")),
                             SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v->_position")),
                              SHADER_IO_VERTEX_BUFFER=>(ShaderIoKind::VertexBuffer, ShaderIoPrefix::Prefix("input.vb_")),
-                             SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_1D=>(ShaderIoKind::Texture(TextureType::Texture1d), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_1D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture1dArray), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_2D=>(ShaderIoKind::Texture(TextureType::Texture2d), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_2D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture2dArray), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_3D=>(ShaderIoKind::Texture(TextureType::Texture3d), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_3D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture3dArray), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_CUBE=>(ShaderIoKind::Texture(TextureType::TextureCube), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_CUBE_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureCubeArray), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_DEPTH=>(ShaderIoKind::Texture(TextureType::TextureDepth), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_DEPTH_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureDepthArray), ShaderIoPrefix::Prefix("")),
                              SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("")),
                              _=>panic!()
                          }
@@ -100,7 +128,16 @@ impl ShaderBackend{
                              SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("u_")),
                              SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iof.v.")),
                              SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iof.v._position")),
-                             SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_1D=>(ShaderIoKind::Texture(TextureType::Texture1d), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_1D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture1dArray), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_2D=>(ShaderIoKind::Texture(TextureType::Texture2d), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_2D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture2dArray), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_3D=>(ShaderIoKind::Texture(TextureType::Texture3d), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_3D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture3dArray), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_CUBE=>(ShaderIoKind::Texture(TextureType::TextureCube), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_CUBE_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureCubeArray), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_DEPTH=>(ShaderIoKind::Texture(TextureType::TextureDepth), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_TEXTURE_DEPTH_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureDepthArray), ShaderIoPrefix::Prefix("")),
                              SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("")),
                              _=>panic!()
                          }
@@ -114,18 +151,29 @@ impl ShaderBackend{
                      let index = io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0;
                      return (ShaderIoKind::FragmentOutput(index as u8), ShaderIoPrefix::FullOwned(format!("frag_fb{}", index)));
                  }
-                 match io_type{
-                     SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("rustinst_")),
-                     SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("dyninst_")),
-                     SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("uni_")),
-                     SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("unibuf_")),
-                     SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("var_")),
-                     SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Prefix("vtx_pos")),
-                     _=>panic!()
-                 }
-             }
-         }
-    }
+                match io_type{
+                    SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("rustinst_")),
+                    SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("dyninst_")),
+                    SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("uni_")),
+                    SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("unibuf_")),
+                    SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("var_")),
+                    SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Prefix("vtx_pos")),
+                    SHADER_IO_TEXTURE_1D=>(ShaderIoKind::Texture(TextureType::Texture1d), ShaderIoPrefix::Prefix("tex_")),
+                    SHADER_IO_TEXTURE_1D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture1dArray), ShaderIoPrefix::Prefix("tex_")),
+                    SHADER_IO_TEXTURE_2D=>(ShaderIoKind::Texture(TextureType::Texture2d), ShaderIoPrefix::Prefix("tex_")),
+                    SHADER_IO_TEXTURE_2D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture2dArray), ShaderIoPrefix::Prefix("tex_")),
+                    SHADER_IO_TEXTURE_3D=>(ShaderIoKind::Texture(TextureType::Texture3d), ShaderIoPrefix::Prefix("tex_")),
+                    SHADER_IO_TEXTURE_3D_ARRAY=>(ShaderIoKind::Texture(TextureType::Texture3dArray), ShaderIoPrefix::Prefix("tex_")),
+                    SHADER_IO_TEXTURE_CUBE=>(ShaderIoKind::Texture(TextureType::TextureCube), ShaderIoPrefix::Prefix("tex_")),
+                    SHADER_IO_TEXTURE_CUBE_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureCubeArray), ShaderIoPrefix::Prefix("tex_")),
+                    SHADER_IO_TEXTURE_DEPTH=>(ShaderIoKind::Texture(TextureType::TextureDepth), ShaderIoPrefix::Prefix("tex_")),
+                    SHADER_IO_TEXTURE_DEPTH_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureDepthArray), ShaderIoPrefix::Prefix("tex_")),
+                    SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("sampler_")),
+                    _=>panic!()
+                }
+            }
+        }
+   }
     
     pub fn get_io_all(&self, _mode: ShaderMode) -> &'static str {
         match self{

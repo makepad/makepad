@@ -16,34 +16,33 @@ script_mod!{
     use mod.geom
     
     mod.shaders.DrawQuad = #(DrawQuad::script_shader(vm)){
-        geom: shader.vertex_buffer(geom.QuadVertex, geom.QuadGeom)
-        
+        vertex_pos: shader.vertex_position(vec4f)
+        fb0: shader.fragment_output(0, vec4f)
         draw_call: shader.uniform_buffer(draw.DrawCallUniforms)
         draw_pass: shader.uniform_buffer(draw.DrawPassUniforms)
         draw_list: shader.uniform_buffer(draw.DrawListUniforms)
-        
+        geom: shader.vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+
         pos: shader.varying(vec2f)
         world: shader.varying(vec4f)
-        vertex_pos: shader.vertex_position(vec4f)
-        fb0: shader.fragment_output(0, vec4f)
         
         clip_and_transform_vertex: fn(rect_pos, rect_size){
             let clipped = clamp(
                 clamp(
-                    self.geom.pos * rect_size + rect_pos ,
-                    self.draw_clip.xy,
+                    self.geom.pos * rect_size + rect_pos
+                    self.draw_clip.xy
                     self.draw_clip.zw
                 )
-                + self.draw_list.view_shift,
-                self.draw_list.view_clip.xy,
+                + self.draw_list.view_shift
+                self.draw_list.view_clip.xy
                 self.draw_list.view_clip.zw
-            );
+            )
             //clipped = self.geom_pos * rect_size + rect_pos;
             self.pos = (clipped - rect_pos) / rect_size
             self.world = self.draw_list.view_transform * vec4(
-                clipped.x,
-                clipped.y,
-                self.draw_depth + self.draw_call.zbias,
+                clipped.x
+                clipped.y
+                self.draw_depth + self.draw_call.zbias
                 1.
             );
             // only pass the clipped position forward
@@ -55,11 +54,11 @@ script_mod!{
             self.pos = (clipped - rect_pos) / rect_size
             // only pass the clipped position forward
             self.world = self.draw_list.view_transform * vec4(
-                clipped.x,
-                clipped.y,
-                self.draw_depth + self.draw_call.zbias,
+                clipped.x
+                clipped.y
+                self.draw_depth + self.draw_call.zbias
                 1.
-            );
+            )
             return self.draw_list.camera_projection * (self.draw_list.camera_view * (self.world ))
         }
                 

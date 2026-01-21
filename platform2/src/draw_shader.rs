@@ -384,7 +384,7 @@ impl CxDrawShaderMapping {
         // Process Texture and Sampler fields
         for io in &output.io {
             match &io.kind {
-                ShaderIoKind::Texture | ShaderIoKind::Sampler(_) => {
+                ShaderIoKind::Texture(_) | ShaderIoKind::Sampler(_) => {
                     textures.push(DrawShaderTextureInput {
                         id: io.name,
                     });
