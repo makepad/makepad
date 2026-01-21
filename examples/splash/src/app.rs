@@ -12,8 +12,8 @@ script_mod!{
             test: mod.shader.instance(0.5)
             debug:true
             pixel: ||{
-                return mix(#0f0,#f00, self.test)
                 let x = Sdf2d.viewport(self.pos*self.rect_size)
+                x.circle(30,30,25)
                 x.fill(#0f0)
                 x.result
             }

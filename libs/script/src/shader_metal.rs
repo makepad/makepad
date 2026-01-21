@@ -40,19 +40,21 @@ impl ShaderOutput {
         writeln!(out, "struct IoInstance {{").ok();
         
         // 1. Output Dyn instance fields first (order doesn't matter, just output as encountered)
+        // Use packed types to match CPU-side repr(C) struct alignment
         for io in &self.io {
             if let ShaderIoKind::DynInstance = io.kind {
                 write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                self.backend.pod_type_name_packed_from_ty(vm.heap, io.ty, out);
                 writeln!(out, " {};", io.name).ok();
             }
         }
         
         // 2. Output Rust instance fields last (already in correct order from pre_collect_rust_instance_io)
+        // Use packed types to match CPU-side repr(C) struct alignment
         for io in &self.io {
             if let ShaderIoKind::RustInstance = io.kind {
                 write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                self.backend.pod_type_name_packed_from_ty(vm.heap, io.ty, out);
                 writeln!(out, " {};", io.name).ok();
             }
         }
@@ -77,6 +79,8 @@ impl ShaderOutput {
 
     pub fn metal_create_varying_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct IoVarying {{").ok();
+        // Put _iid first to ensure consistent offset regardless of other varyings
+        writeln!(out, "    uint _iid [[flat]];").ok();
         for io in &self.io {
             match io.kind {
                 ShaderIoKind::Varying => {
@@ -88,16 +92,16 @@ impl ShaderOutput {
             }
         }
         writeln!(out, "    float4 _position [[position]];").ok();
-        writeln!(out, "    uint _iid [[flat]];").ok();
         writeln!(out, "}};").ok();
     }
 
     pub fn metal_create_vertex_buffer_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct IoVertexBuffer {{").ok();
+        // Use packed types to match CPU-side repr(C) struct alignment
         for io in &self.io {
             if let ShaderIoKind::VertexBuffer = io.kind {
                 write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                self.backend.pod_type_name_packed_from_ty(vm.heap, io.ty, out);
                 writeln!(out, " {};", io.name).ok();
             }
         }
@@ -106,7 +110,7 @@ impl ShaderOutput {
 
     pub fn metal_create_io_vertex_struct(&self, _vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct IoV {{").ok();
-        writeln!(out, "    IoVarying v;").ok();
+        writeln!(out, "    thread IoVarying *v;").ok();
         writeln!(out, "    uint vid;").ok();
         writeln!(out, "    uint iid;").ok();
         writeln!(out, "}};").ok();
@@ -168,11 +172,16 @@ impl ShaderOutput {
             }
         }
         
+        writeln!(out, "    IoVarying _v = {{}};").ok();  // Local varying struct, zero-initialized
         writeln!(out, "    IoV _iov;").ok();
+        writeln!(out, "    _iov.v = &_v;").ok();  // Point to local varying (like fragment shader)
         writeln!(out, "    _iov.vid = vid;").ok();
         writeln!(out, "    _iov.iid = iid;").ok();
+        writeln!(out, "    _iov.v->_iid = iid;").ok();  // Set before io_vertex so user can read it
         writeln!(out, "    io_vertex(_io, _iov);").ok();
-        writeln!(out, "    return _iov.v;").ok();
+        // Ensure instance id is set after user code in case they modified it
+        writeln!(out, "    _iov.v->_iid = iid;").ok();
+        writeln!(out, "    return _v;").ok();
         writeln!(out, "}}").ok();
     }
 
