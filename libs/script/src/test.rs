@@ -63,7 +63,7 @@ pub fn test(){
     }
     
     
-    let code = script!{
+    let _code = script!{
         use mod.std.*
         use mod.shader
         use mod.pod.*
@@ -123,7 +123,7 @@ pub fn test(){
     
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let _code = script!{
+    let code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod
@@ -140,10 +140,17 @@ pub fn test(){
         let f = |x| x+1
         assert(f(1) == 2)
         
-        let f2 = fn(self, x:float)->float{x+1}
-        assert(f2("1") == "11")
-                
-                
+        // operator precedence
+        let x = 2*3 + 4*5
+        assert(x == 26)
+        let x = 2*(3+4)*5
+        assert(x == 70)
+        let t = {x:2, y:3, z:4, w:5}
+        let x = t.x*t.y + t.z*t.w
+        assert(x == 26)
+        let x = t.x*(t.y+t.z)*t.w
+        assert(x == 70)
+                                        
         // shallow and deep compare
         let oa = {y:1 z:2}
         let ob = {z:3 y:1}

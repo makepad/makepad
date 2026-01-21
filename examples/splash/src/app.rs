@@ -2,16 +2,18 @@ use makepad_draw2::*;
 
 app_main!(App); 
 script_mod!{
+    use mod.pod.*
     use mod.math.*
     use mod.std.*
     use mod.sdf.*
     #(App::script_component(vm)){
+        
         draw_quad: mod.shaders.DrawQuad{
             pixel: ||{
                 let x = Sdf2d.viewport(self.pos)
-                x.rect(0,0,1,1)
+                x.circle(0.25,0.25,.2)
                 x.fill(#0f0)
-                return mix(x.result,#f00,self.pos.y)
+                x.result
             }
         }
     }

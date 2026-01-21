@@ -533,9 +533,16 @@ impl ScriptTokenizer{
                         self.state = State::Whitespace;
                     }
                     else if c.is_numeric(){
-                        self.emit_operator();
-                        self.state = State::Number;
-                        self.temp.push(c);
+                        // Handle .5 as 0.5 (float literal starting with dot)
+                        if self.temp == "." {
+                            // Keep the dot in temp, transition to Number state
+                            self.temp.push(c);
+                            self.state = State::Number;
+                        } else {
+                            self.emit_operator();
+                            self.state = State::Number;
+                            self.temp.push(c);
+                        }
                     }
                     else if is_separator(c){
                         self.emit_operator();
