@@ -1,13 +1,15 @@
 use {
     crate::{
         makepad_math::*,
-        event::{TouchState, VirtualKeyboardEvent},
+        event::{TouchState, VirtualKeyboardEvent, KeyEvent},
+        event::keyboard::KeyCode,
         animator::Ease,
         os::{
             apple::ios_app::IosApp,
             apple::apple_util::{nsstring_to_string, str_to_nsstring},
             apple::apple_sys::*,
             apple::ios_app::{with_ios_app, get_ios_class_global, IOS_APP},
+            apple::ios::ios_event::IosEvent,
         },
     },
     makepad_objc_sys::runtime::Protocol,
@@ -21,22 +23,6 @@ use {
 /// For emoji and other astral plane characters: 1 char = 2 UTF-16 code units (surrogate pair)
 fn utf16_len(s: &str) -> i64 {
     s.encode_utf16().count() as i64
-}
-
-/// Convert a UTF-16 code unit index to a character index.
-/// This is needed because iOS sends UTF-16 indices but Makepad uses character indices.
-fn utf16_index_to_char_index(s: &str, utf16_index: usize) -> usize {
-    let mut char_index = 0;
-    let mut utf16_pos = 0;
-    for c in s.chars() {
-        let c_len = c.len_utf16();
-        if utf16_pos + c_len > utf16_index {
-            break;
-        }
-        utf16_pos += c_len;
-        char_index += 1;
-    }
-    char_index
 }
 
 // Helper to safely access IosApp without causing re-entrant borrow panics.
@@ -429,25 +415,6 @@ pub fn define_textfield_delegate() -> *const Class {
             }));
         }
     }
-    extern "C" fn should_change_characters_in_range(
-        _this: &Object,
-        _: Sel,
-        _textfield: ObjcId,
-        range: NSRange,
-        string: ObjcId,
-    ) -> BOOL {
-        unsafe {
-            let len: u64 = msg_send![string, length];
-            if len > 0 {
-                let string = nsstring_to_string(string);
-                IosApp::send_text_input(string, range.length != 0);
-            } else {
-                IosApp::send_backspace();
-            }
-        }
-        NO
-    }
-    
     unsafe {
         decl.add_method(sel!(keyboardDidChangeFrame:), keyboard_did_change_frame as extern "C" fn(&Object, Sel, ObjcId),);
         decl.add_method(sel!(keyboardWillChangeFrame:), keyboard_will_change_frame as extern "C" fn(&Object, Sel, ObjcId),);
@@ -455,11 +422,6 @@ pub fn define_textfield_delegate() -> *const Class {
         decl.add_method(sel!(keyboardDidShow:), keyboard_did_show as extern "C" fn(&Object, Sel, ObjcId),);
         decl.add_method(sel!(keyboardWillHide:), keyboard_will_hide as extern "C" fn(&Object, Sel, ObjcId),);
         decl.add_method(sel!(keyboardDidHide:), keyboard_did_hide as extern "C" fn(&Object, Sel, ObjcId),);
-        decl.add_method(
-            sel!(textField: shouldChangeCharactersInRange: replacementString:),
-            should_change_characters_in_range
-            as extern "C" fn(&Object, Sel, ObjcId, NSRange, ObjcId) -> BOOL,
-        );
     }
     decl.add_ivar::<*mut c_void>("display_ptr");
     return decl.register();
@@ -698,6 +660,11 @@ pub fn define_text_input_view() -> *const Class {
                     let () = msg_send![input_delegate, selectionWillChange: this as *const _ as ObjcId];
                 }
 
+                // Send the newline as TextInput to Makepad so buffers stay synchronized
+                // This is critical for multiline editing, without it, iOS's buffer has "\n"
+                // but Makepad's doesn't, causing cursor position desyncs for autocorrect
+                IosApp::send_text_input(string.clone(), false);
+
                 // Insert newline at cursor position (not append!)
                 let buffer = get_text_buffer(this);
                 let cursor: i64 = *this.get_ivar("cursorPosition");
@@ -714,6 +681,7 @@ pub fn define_text_input_view() -> *const Class {
                     let () = msg_send![input_delegate, textDidChange: this as *const _ as ObjcId];
                 }
 
+                // Also send Return key event for widgets that need to know Enter was pressed
                 IosApp::send_return_key();
                 return;
             }
@@ -760,22 +728,49 @@ pub fn define_text_input_view() -> *const Class {
     }
 
     extern "C" fn delete_backward(this: &Object, _: Sel) {
+        use crate::event::keyboard::CharOffset;
+
         unsafe {
-            // Update text buffer - remove character BEFORE cursor position
             let buffer = get_text_buffer(this);
             let cursor: i64 = *this.get_ivar("cursorPosition");
 
             if cursor > 0 {
-                let delete_pos = (cursor - 1) as u64;
-                let buffer_len: u64 = msg_send![buffer, length];
-                if delete_pos < buffer_len {
-                    let range = NSRange { location: delete_pos, length: 1 };
+                // Get buffer string to properly handle multi-code-unit characters (emoji)
+                let buffer_string = nsstring_to_string(buffer);
+
+                // Find character before cursor (handles emoji as single unit)
+                let char_before_cursor = CharOffset::from_utf16_index(&buffer_string, cursor as usize);
+                if char_before_cursor.0 > 0 {
+                    // Get UTF-16 position of previous character
+                    let prev_char_offset = CharOffset(char_before_cursor.0 - 1);
+                    let prev_char_utf16_start = prev_char_offset.to_utf16_index(&buffer_string) as u64;
+                    let delete_len = (cursor as u64) - prev_char_utf16_start;
+
+                    // Delete the entire previous character (1 or 2 UTF-16 code units)
+                    let range = NSRange {
+                        location: prev_char_utf16_start,
+                        length: delete_len
+                    };
                     let () = msg_send![buffer, deleteCharactersInRange: range];
+                    (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", prev_char_utf16_start as i64);
                 }
-                (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", cursor - 1);
             }
         }
-        IosApp::send_backspace();
+
+        // Send backspace event immediately (not queued) for held delete support
+        let time = try_with_ios_app(|app| app.time_now()).unwrap_or(0.0);
+        IosApp::do_callback(IosEvent::KeyDown(KeyEvent {
+            key_code: KeyCode::Backspace,
+            is_repeat: false,
+            modifiers: Default::default(),
+            time,
+        }));
+        IosApp::do_callback(IosEvent::KeyUp(KeyEvent {
+            key_code: KeyCode::Backspace,
+            is_repeat: false,
+            modifiers: Default::default(),
+            time,
+        }));
     }
 
     // ==========================================================================
@@ -1068,8 +1063,9 @@ pub fn define_text_input_view() -> *const Class {
 
             // Convert UTF-16 indices to character indices for Makepad
             // iOS uses UTF-16 code units, but Makepad expects character indices
-            let char_start = utf16_index_to_char_index(&buffer_string, range_start);
-            let char_end = utf16_index_to_char_index(&buffer_string, range_end);
+            use crate::event::keyboard::CharOffset;
+            let char_start = CharOffset::from_utf16_index(&buffer_string, range_start).0;
+            let char_end = CharOffset::from_utf16_index(&buffer_string, range_end).0;
 
             // Send the range replacement event to Makepad
             IosApp::send_text_range_replace(char_start, char_end, new_string.clone());

@@ -8,6 +8,7 @@ use {
     crate::{
         cx_api::TextInputConfig,
         event::*,
+        event::keyboard::CharOffset,
         os::{
             apple::{
                 apple_sys::*,
@@ -93,17 +94,24 @@ impl IosClasses {
     }
 }
 
+/// Text input events from iOS UITextInput, queued to avoid re-entrancy
+#[derive(Debug, Clone)]
+pub enum IosTextInputEvent {
+    /// Regular text input (input, replace_last)
+    TextInput(String, bool),
+    /// Range replacement for autocorrect (start, end, text)
+    RangeReplace(usize, usize, String),
+    /// Key event (e.g., Backspace, Return)
+    KeyEvent(KeyCode),
+}
+
 pub struct IosApp {
     pub time_start: Instant,
     pub virtual_keyboard_event:  Option<VirtualKeyboardEvent>,
-    /// Queued text input from UITextInput
-    /// (input, replace_last)
-    pub queued_text_input: Option<(String, bool)>,
-    /// Queued text range replace from UITextInput
-    /// (start, end, text)
-    pub queued_text_range_replace: Option<(usize, usize, String)>,
-    /// Queued key event from UITextInput
-    pub queued_key_event: Option<KeyCode>,
+    /// Queue of text input events from UITextInput
+    /// Using a Vec allows batching multiple events (e.g., replaceRange + insertText)
+    /// to be processed atomically before SyncImeState can interfere
+    pub queued_text_events: Vec<IosTextInputEvent>,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<IosTimer>,
     touches: Vec<TouchPoint>,
@@ -134,9 +142,7 @@ impl IosApp {
             let edit_menu_delegate_instance: ObjcId = msg_send![get_ios_class_global().edit_menu_delegate, new];
             IosApp {
                 virtual_keyboard_event: None,
-                queued_text_input: None,
-                queued_text_range_replace: None,
-                queued_key_event: None,
+                queued_text_events: Vec::new(),
                 touches: Vec::new(),
                 last_window_geom: WindowGeom::default(),
                 metal_device,
@@ -511,12 +517,9 @@ impl IosApp {
         });
     }
 
-    pub fn set_ime_text(text: String, cursor_byte_pos: usize) {
-        // Convert byte position to UTF-16 code unit position for iOS
-        // cursor_byte_pos is a UTF-8 byte index, iOS NSString uses UTF-16 internally
-        let cursor_char_pos = text[..cursor_byte_pos.min(text.len())]
-            .encode_utf16()
-            .count();
+    pub fn set_ime_text(text: String, cursor: CharOffset) {
+        // Convert CharOffset to UTF-16 index for iOS NSString
+        let cursor_utf16_pos = cursor.to_utf16_index(&text);
 
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
@@ -527,7 +530,7 @@ impl IosApp {
                             // to know the text/cursor has changed (needed for autocorrect positioning)
                             let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
 
-                            // Notify that text will change
+                            // Notify BEFORE changes
                             if input_delegate != nil {
                                 let () = msg_send![input_delegate, textWillChange: text_input_view];
                                 let () = msg_send![input_delegate, selectionWillChange: text_input_view];
@@ -555,10 +558,10 @@ impl IosApp {
                             let ns_text = str_to_nsstring(&text);
                             let () = msg_send![buffer, appendString: ns_text];
 
-                            // Set cursor position (in characters, not bytes)
-                            (*text_input_view).set_ivar("cursorPosition", cursor_char_pos as i64);
+                            // Set cursor position (UTF-16 index)
+                            (*text_input_view).set_ivar("cursorPosition", cursor_utf16_pos as i64);
 
-                            // Notify that text and selection did change
+                            // Notify AFTER changes (CRITICAL for autocorrect positioning)
                             if input_delegate != nil {
                                 let () = msg_send![input_delegate, selectionDidChange: text_input_view];
                                 let () = msg_send![input_delegate, textDidChange: text_input_view];
@@ -630,12 +633,13 @@ impl IosApp {
     }
     
     pub fn send_text_input(input: String, replace_last: bool) {
-        // Always queue - will be processed on next timer tick
-        // This avoids re-entrancy issues from UITextField delegate callbacks
+        // Queue text input - will be processed on next timer tick
+        // Using a Vec queue allows batching multiple events (e.g., autocorrect + space)
+        // This avoids re-entrancy issues from UITextInput delegate callbacks
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_text_input = Some((input, replace_last));
+                    app.queued_text_events.push(IosTextInputEvent::TextInput(input, replace_last));
                 }
             }
         });
@@ -643,23 +647,24 @@ impl IosApp {
 
     pub fn send_text_range_replace(start: usize, end: usize, text: String) {
         // Queue range replacement for iOS autocorrect
+        // Using a Vec queue allows batching with subsequent insertText calls
         // This avoids re-entrancy issues from UITextInput delegate callbacks
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_text_range_replace = Some((start, end, text));
+                    app.queued_text_events.push(IosTextInputEvent::RangeReplace(start, end, text));
                 }
             }
         });
     }
 
     pub fn send_backspace() {
-        // Always queue - will be processed on next timer tick
-        // This avoids re-entrancy issues from UITextField delegate callbacks
+        // Queue backspace key event
+        // This avoids re-entrancy issues from UITextInput delegate callbacks
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_key_event = Some(KeyCode::Backspace);
+                    app.queued_text_events.push(IosTextInputEvent::KeyEvent(KeyCode::Backspace));
                 }
             }
         });
@@ -670,7 +675,7 @@ impl IosApp {
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_key_event = Some(KeyCode::ReturnKey);
+                    app.queued_text_events.push(IosTextInputEvent::KeyEvent(KeyCode::ReturnKey));
                 }
             }
         });
@@ -831,6 +836,7 @@ impl IosApp {
                 input: content,
                 replace_last: false,
                 was_paste: true,
+                ..Default::default()
             }));
         }
     }

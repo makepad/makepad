@@ -736,11 +736,16 @@ impl TextInput {
         &self.text[self.selection.start().index..self.selection.end().index]
     }
 
-    /// Updates the IME text context for Android autocomplete/predictions
+    /// Updates the IME text context for platform IME
     /// Uses state comparison (Flutter-style) to prevent sync loops
     fn update_ime_context(&mut self, cx: &mut Cx) {
-        // Convert byte indices to UTF-16 code unit indices for Java/Android
-        // Java String uses UTF-16 internally, so cursor positions must be in UTF-16 units
+        use crate::makepad_platform::event::keyboard::CharOffset;
+
+        // Convert byte indices to character offsets
+        let sel_start_chars = self.text[..self.selection.start().index].chars().count();
+        let sel_end_chars = self.text[..self.selection.end().index].chars().count();
+
+        // Convert to UTF-16 for comparison (Android uses UTF-16)
         let sel_start_utf16 = byte_index_to_utf16_index(&self.text, self.selection.start().index);
         let sel_end_utf16 = byte_index_to_utf16_index(&self.text, self.selection.end().index);
 
@@ -753,7 +758,13 @@ impl TextInput {
             self.last_sent_ime_text = self.text.clone();
             self.last_sent_ime_sel_start = sel_start_utf16;
             self.last_sent_ime_sel_end = sel_end_utf16;
-            cx.update_ime_text_state(self.text.clone(), sel_start_utf16, sel_end_utf16);
+
+            // Sync via unified operation
+            cx.sync_ime_state(
+                self.text.clone(),
+                CharOffset(sel_start_chars)..CharOffset(sel_end_chars),
+                None // Composition not tracked yet for outgoing sync
+            );
         }
     }
 
@@ -1408,20 +1419,26 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::KeyFocus(_) => {
+                use crate::makepad_platform::event::keyboard::CharOffset;
+
                 self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
-                // Sync text to iOS for autocorrect context
-                cx.set_ime_text(&self.text, self.selection.cursor.index);
-                // Immediately send text state to Android when gaining focus
-                // This ensures Java gets the correct text BEFORE keyboard is shown
-                // Don't rely on draw cycle - send it now to avoid race conditions
+
+                // Immediately sync text state to platform IME when gaining focus
+                // This ensures the platform gets correct text BEFORE keyboard is shown
+                // Works for both Android (UTF-16 conversion in platform layer) and iOS
                 let sel_start_chars = self.text[..self.selection.start().index].chars().count();
                 let sel_end_chars = self.text[..self.selection.end().index].chars().count();
-                cx.update_ime_text_state(self.text.clone(), sel_start_chars, sel_end_chars);
-                // Update cache to match what we just sent
+                cx.sync_ime_state(
+                    self.text.clone(),
+                    CharOffset(sel_start_chars)..CharOffset(sel_end_chars),
+                    None
+                );
+
+                // Update cache to match what we just sent (use UTF-16 for comparison)
                 self.last_sent_ime_text = self.text.clone();
-                self.last_sent_ime_sel_start = sel_start_chars;
-                self.last_sent_ime_sel_end = sel_end_chars;
+                self.last_sent_ime_sel_start = byte_index_to_utf16_index(&self.text, self.selection.start().index);
+                self.last_sent_ime_sel_end = byte_index_to_utf16_index(&self.text, self.selection.end().index);
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
             Hit::KeyFocusLost(_) => {
@@ -1789,16 +1806,89 @@ impl Widget for TextInput {
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
             }
-            Hit::TextInput(TextInputEvent {
-                input,
-                replace_last,
-                was_paste,
-                ..
-            }) if !self.is_read_only => {
-                let input = self.filter_input(&input, false);
+            Hit::TextInput(event) if !self.is_read_only => {
+                // Unified text input handler for all platforms
+                // Handle Android full state sync (authoritative from Java InputConnection)
+                if let Some(full_state) = &event.full_state_sync {
+                    let text_changed = self.text != full_state.text;
+                    if text_changed {
+                        self.history.create_or_extend_edit_group(EditKind::Other, self.selection);
+                        self.text = full_state.text.clone();
+                        self.laidout_text = None;
+                    }
+
+                    // Update selection from platform
+                    let sel_start_byte = full_state.selection.start.to_byte_index(&self.text);
+                    let sel_end_byte = full_state.selection.end.to_byte_index(&self.text);
+                    self.selection = Selection {
+                        anchor: Cursor { index: sel_start_byte, prefer_next_row: false },
+                        cursor: Cursor { index: sel_end_byte, prefer_next_row: false },
+                    };
+
+                    // Update composition from platform
+                    if let Some(comp_range) = &full_state.composition {
+                        let comp_start_byte = comp_range.start.to_byte_index(&self.text);
+                        let comp_end_byte = comp_range.end.to_byte_index(&self.text);
+                        self.composition_start = comp_start_byte;
+                        self.composition_length = comp_end_byte - comp_start_byte;
+                    } else {
+                        self.composition_start = 0;
+                        self.composition_length = 0;
+                    }
+
+                    // Track sent state to prevent sync loops
+                    self.last_sent_ime_text = self.text.clone();
+                    self.last_sent_ime_sel_start = full_state.selection.start.to_utf16_index(&self.text);
+                    self.last_sent_ime_sel_end = full_state.selection.end.to_utf16_index(&self.text);
+                    self.ime_update_frame = cx.redraw_id();
+
+                    self.draw_bg.redraw(cx);
+                    cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                    if text_changed {
+                        cx.hide_clipboard_actions();
+                    }
+                    return;
+                }
+
+                // Handle iOS range replacement (autocorrect/paste)
+                if let Some((start, end)) = event.replace_range {
+                    let filtered_text = self.filter_input(&event.input, false);
+                    if filtered_text.is_empty() && !event.input.is_empty() {
+                        // Re-sync IME state to reject invalid input
+                        self.update_ime_context(cx);
+                        return;
+                    }
+
+                    // Convert character offsets to byte indices
+                    let byte_start = start.to_byte_index(&self.text);
+                    let byte_end = end.to_byte_index(&self.text);
+
+                    self.composition_length = 0;
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: byte_start,
+                            end: byte_end,
+                            replace_with: filtered_text
+                        }
+                    );
+
+                    self.animator_play(cx, ids!(empty.off));
+                    self.draw_bg.redraw(cx);
+                    cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
+                    if self.ime_update_frame != cx.redraw_id() {
+                        self.update_ime_context(cx);
+                    }
+                    cx.hide_clipboard_actions();
+                    return;
+                }
+
+                // Handle regular text input and composition (all platforms)
+                let input = self.filter_input(&event.input, false);
                 if input.is_empty() {
                     // Composition cancelled, remove preview text
-                    if replace_last && self.composition_length > 0 {
+                    if event.replace_last && self.composition_length > 0 {
                         let end = (self.composition_start + self.composition_length).min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
@@ -1812,12 +1902,11 @@ impl Widget for TextInput {
                         self.draw_bg.redraw(cx);
                         cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
                     }
-                    // Always clear composition state on empty input (finish or cancel)
                     self.composition_length = 0;
                     return;
                 }
 
-                if replace_last {
+                if event.replace_last {
                     // IME composition preview
                     if self.composition_length > 0 {
                         // Replace previous composition text
@@ -1866,7 +1955,7 @@ impl Widget for TextInput {
                     } else {
                         // Normal text input (no active composition)
                         self.create_or_extend_edit_group(
-                            if was_paste {
+                            if event.was_paste {
                                 EditKind::Other
                             } else {
                                 EditKind::Insert
@@ -1885,93 +1974,10 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
-                // Immediately update IME context so that IME engines get correct cursor position
-                // Skip if we just received IME input (prevents sync loop during rapid input)
                 if self.ime_update_frame != cx.redraw_id() {
                     self.update_ime_context(cx);
                 }
                 cx.hide_clipboard_actions();
-            }
-            Hit::TextRangeReplace(event) if !self.is_read_only => {
-                // iOS autocorrect/paste, filter based on input_mode
-                let filtered_text = self.filter_input(&event.text, false);
-                if filtered_text.is_empty() && !event.text.is_empty() {
-                    return;
-                }
-
-                // Convert character indices to byte indices
-                let byte_start = self.text.char_indices()
-                    .nth(event.start)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.text.len());
-                let byte_end = self.text.char_indices()
-                    .nth(event.end)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.text.len());
-
-                self.composition_length = 0;
-
-                // Perform the replacement
-                self.create_or_extend_edit_group(EditKind::Other);
-                self.apply_edit(
-                    cx,
-                    Edit {
-                        start: byte_start,
-                        end: byte_end,
-                        replace_with: filtered_text
-                    }
-                );
-
-                self.animator_play(cx, ids!(empty.off));
-                self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
-                if self.ime_update_frame != cx.redraw_id() {
-                    self.update_ime_context(cx);
-                }
-                cx.hide_clipboard_actions();
-            }
-            Hit::ImeTextState(event) if !self.is_read_only => {
-                // Android IME state, Java is source of truth
-                // Convert UTF-16 indices to byte indices (emoji = 2 UTF-16 units)
-                let byte_sel_start = utf16_index_to_byte_index(&event.text, event.selection_start);
-                let byte_sel_end = utf16_index_to_byte_index(&event.text, event.selection_end);
-
-                let text_changed = self.text != event.text;
-                if text_changed {
-                    self.history.create_or_extend_edit_group(EditKind::Other, self.selection);
-                    self.text = event.text.clone();
-                    self.laidout_text = None;
-                }
-
-                // Update cursor/selection
-                self.selection = Selection {
-                    anchor: Cursor { index: byte_sel_start, prefer_next_row: false },
-                    cursor: Cursor { index: byte_sel_end, prefer_next_row: false },
-                };
-
-                // Update composition region
-                if let (Some(comp_start), Some(comp_end)) = (event.composing_start, event.composing_end) {
-                    let byte_comp_start = utf16_index_to_byte_index(&event.text, comp_start);
-                    let byte_comp_end = utf16_index_to_byte_index(&event.text, comp_end);
-                    self.composition_start = byte_comp_start;
-                    self.composition_length = byte_comp_end - byte_comp_start;
-                } else {
-                    // No active composition
-                    self.composition_start = 0;
-                    self.composition_length = 0;
-                }
-
-                // Track sent state to prevent sync loops with Java
-                self.last_sent_ime_text = self.text.clone();
-                self.last_sent_ime_sel_start = event.selection_start;
-                self.last_sent_ime_sel_end = event.selection_end;
-                self.ime_update_frame = cx.redraw_id();
-
-                self.draw_bg.redraw(cx);
-                cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
-                if text_changed {
-                    cx.hide_clipboard_actions();
-                }
             }
             Hit::ImeAction(event) => {
                 // Mobile keyboard action button (Done, Go, Search, etc.)
@@ -2361,22 +2367,6 @@ fn prev_grapheme_boundary(text: &str, index: usize) -> usize {
 fn next_grapheme_boundary(text: &str, index: usize) -> usize {
     let mut cursor = GraphemeCursor::new(index, text.len(), true);
     cursor.next_boundary(text, 0).unwrap().unwrap_or(text.len())
-}
-
-/// Convert UTF-16 code unit index to byte index in a UTF-8 string.
-/// Java/Android uses UTF-16 internally, so String.length() and cursor positions
-/// are in UTF-16 code units. Characters outside the BMP (like emoji) take 2 UTF-16
-/// code units (surrogate pairs) but are single Rust chars.
-fn utf16_index_to_byte_index(s: &str, utf16_idx: usize) -> usize {
-    let mut utf16_count = 0;
-    for (byte_idx, c) in s.char_indices() {
-        if utf16_count >= utf16_idx {
-            return byte_idx;
-        }
-        // Each Rust char takes 1 or 2 UTF-16 code units
-        utf16_count += c.len_utf16();
-    }
-    s.len() // Index at or past end of string
 }
 
 /// Convert byte index in a UTF-8 string to UTF-16 code unit count.

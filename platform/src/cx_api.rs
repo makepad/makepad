@@ -6,7 +6,7 @@ use {
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType, XrCapabilities},
         draw_list::DrawListId,
-        event::{DragItem, HttpRequest, NextFrame, Timer, Trigger, VideoSource},
+        event::{DragItem, HttpRequest, NextFrame, Timer, Trigger, VideoSource, keyboard::CharOffset},
         gpu_info::GpuInfo,
         macos_menu::MacosMenu,
         makepad_futures::executor::Spawner,
@@ -32,6 +32,7 @@ use {
     std::{
         any::{Any, TypeId},
         rc::Rc,
+        ops::Range,
     },
 };
 pub enum OpenUrlInPlace{
@@ -78,7 +79,7 @@ pub trait CxOsApi {
 // - **Sync direction**: Bidirectional (Java ↔ Rust)
 // - **Events**: `ImeTextStateChanged` sends full text + selection + composing region from Java→Rust
 // - **Echo detection**: Circular buffer prevents sync loops when Rust echoes state back
-// - **Programmatic updates**: Rust→Java via `UpdateImeTextState` (e.g., clear button)
+// - **Programmatic updates**: Rust→Java via `SyncImeState` (e.g., clear button)
 //
 // ## iOS
 // - **Source of truth**: Rust's text buffer in TextInput widget
@@ -223,15 +224,13 @@ pub enum CxOsOp {
 
     ShowTextIME(Area, Vec2d, TextInputConfig),
     HideTextIME,
-    /// Sets the text and cursor position to the IME for autocorrect context
-    /// (text, cursor_position)
-    SetIMEText(String, usize),
-    /// Updates IME text state for programmatic changes (Android)
-    /// Only used when Rust changes text outside IME flow (e.g., clear button)
-    UpdateImeTextState {
-        full_text: String,
-        selection_start: usize,
-        selection_end: usize,
+    /// Synchronize IME with current text state
+    /// Used when widget changes text programmatically (clear, paste, undo)
+    /// Platform converts to native format (Android: updateSelection, iOS: update positions)
+    SyncImeState {
+        text: String,
+        selection: Range<CharOffset>,
+        composition: Option<Range<CharOffset>>,
     },
     SetCursor(MouseCursor),
     StartTimer {
@@ -317,8 +316,7 @@ impl std::fmt::Debug for CxOsOp {
 
             Self::ShowTextIME(..)=>write!(f, "ShowTextIME"),
             Self::HideTextIME=>write!(f, "HideTextIME"),
-            Self::SetIMEText(..)=>write!(f, "SetIMEText"),
-            Self::UpdateImeTextState{..}=>write!(f, "UpdateImeTextState"),
+            Self::SyncImeState{..}=>write!(f, "SyncImeState"),
             Self::SetCursor(..)=>write!(f, "SetCursor"),
             Self::StartTimer{..}=>write!(f, "StartTimer"),
             Self::StopTimer(..)=>write!(f, "StopTimer"),
@@ -483,19 +481,14 @@ impl Cx {
         self.platform_ops.push(CxOsOp::HideTextIME);
     }
 
-    /// Syncs text content to IME for autocorrect context
-    pub fn set_ime_text(&mut self, text: &str, cursor_pos: usize) {
-        self.platform_ops.push(CxOsOp::SetIMEText(text.to_string(), cursor_pos));
-    }
-
-    /// Updates IME text state for programmatic changes (Android)
-    /// Only call this when Rust changes text outside of IME input flow (e.g., clear button)
-    /// Normal IME input flows Java→Rust, so this should NOT be called during IME events
-    pub fn update_ime_text_state(&mut self, full_text: String, selection_start: usize, selection_end: usize) {
-        self.platform_ops.push(CxOsOp::UpdateImeTextState {
-            full_text,
-            selection_start,
-            selection_end,
+    /// Synchronize IME with current text state
+    /// Call this when widget changes text programmatically (clear, paste, undo)
+    /// Platform will update native IME state accordingly
+    pub fn sync_ime_state(&mut self, text: String, selection: Range<CharOffset>, composition: Option<Range<CharOffset>>) {
+        self.platform_ops.push(CxOsOp::SyncImeState {
+            text,
+            selection,
+            composition,
         });
     }
 

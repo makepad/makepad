@@ -562,8 +562,10 @@ impl Cx {
                 },
                 CxOsOp::ShowClipboardActions { .. } => {},
                 CxOsOp::HideClipboardActions => {},
-                CxOsOp::SetIMEText(..) => {},
-                CxOsOp::UpdateImeTextState { .. } => {},
+                CxOsOp::SyncImeState { .. } => {
+                    // macOS handles IME locally via NSTextInputClient protocol
+                    // No need to sync state back to system IME
+                },
                 CxOsOp::CopyToClipboard(content) => {
                     with_macos_app(|app| app.copy_to_clipboard(&content));
                 },

@@ -919,16 +919,6 @@ impl Event {
                     return Hit::TextInput(ti.clone())
                 }
             },
-            Event::TextRangeReplace(tr) => {
-                if cx.keyboard.has_key_focus(area) {
-                    return Hit::TextRangeReplace(tr.clone())
-                }
-            },
-            Event::ImeTextState(its) => {
-                if cx.keyboard.has_key_focus(area) {
-                    return Hit::ImeTextState(its.clone())
-                }
-            },
             Event::ImeAction(ia) => {
                 if cx.keyboard.has_key_focus(area) {
                     return Hit::ImeAction(ia.clone())

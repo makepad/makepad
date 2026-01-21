@@ -365,8 +365,9 @@ impl X11Cx {
                     },
                     CxOsOp::ShowClipboardActions { .. } => {},
                     CxOsOp::HideClipboardActions => {},
-                    CxOsOp::SetIMEText(..) => {},
-                    CxOsOp::UpdateImeTextState { .. } => {},
+                    CxOsOp::SyncImeState { .. } => {
+                        // Linux X11 IME handled by input method framework
+                    },
                     CxOsOp::CopyToClipboard(content) => {
                         if let Some(window) = opengl_windows.get(0) {
                             unsafe {

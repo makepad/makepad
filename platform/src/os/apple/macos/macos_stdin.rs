@@ -164,7 +164,7 @@ impl Cx {
                     self.call_event_handler(&Event::KeyUp(e));
                 }
                 HostToStdin::TextInput(e) => {
-                    self.call_event_handler(&Event::TextInput(e));
+                    self.call_event_handler(&Event::TextInput(e.into()));
                 }
                 HostToStdin::MouseDown(e) => {
                     self.fingers.process_tap_count(

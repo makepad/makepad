@@ -47,7 +47,6 @@ use {
             WindowGeomChangeEvent,
             //TimerEvent,
             TextInputEvent,
-            ImeTextStateEvent,
             ImeAction,
             ImeActionEvent,
             TextClipboardEvent,
@@ -55,6 +54,7 @@ use {
             KeyModifiers,
             KeyCode,
             Event,
+            keyboard::{CharOffset, FullTextState},
             WindowGeom,
             VideoPlaybackPreparedEvent,
             VideoTextureUpdatedEvent,
@@ -252,6 +252,9 @@ impl Cx {
                             input: character.to_string(),
                             replace_last: false,
                             was_paste: false,
+                            composition: None,
+                            full_state_sync: None,
+                            replace_range: None,
                         }
                     );
                     self.call_event_handler(&e);
@@ -289,6 +292,9 @@ impl Cx {
                                     input: content,
                                     replace_last: false,
                                     was_paste: true,
+                                    composition: None,
+                                    full_state_sync: None,
+                                    replace_range: None,
                                 });
                                 self.call_event_handler(&e);
                             }
@@ -553,6 +559,9 @@ impl Cx {
                     input: content,
                     replace_last: false,
                     was_paste: true,
+                    composition: None,
+                    full_state_sync: None,
+                    replace_range: None,
                 });
                 self.call_event_handler(&e);
             }
@@ -565,24 +574,31 @@ impl Cx {
                 composing_start,
                 composing_end,
             } => {
-                // Convert composing region from Java's -1 convention to Option
-                let composing_start_opt = if composing_start >= 0 {
-                    Some(composing_start as usize)
-                } else {
-                    None
-                };
-                let composing_end_opt = if composing_end >= 0 {
-                    Some(composing_end as usize)
+                // Convert UTF-16 indices from Java to character offsets
+                let sel_start = CharOffset::from_utf16_index(&full_text, selection_start as usize);
+                let sel_end = CharOffset::from_utf16_index(&full_text, selection_end as usize);
+
+                // Convert composing region from Java's -1 convention to Option<Range>
+                let composition = if composing_start >= 0 && composing_end >= 0 {
+                    let comp_start = CharOffset::from_utf16_index(&full_text, composing_start as usize);
+                    let comp_end = CharOffset::from_utf16_index(&full_text, composing_end as usize);
+                    Some(comp_start..comp_end)
                 } else {
                     None
                 };
 
-                let e = Event::ImeTextState(ImeTextStateEvent {
-                    text: full_text,
-                    selection_start: selection_start as usize,
-                    selection_end: selection_end as usize,
-                    composing_start: composing_start_opt,
-                    composing_end: composing_end_opt,
+                // Android uses full state sync - Java InputConnection is authoritative
+                let e = Event::TextInput(TextInputEvent {
+                    input: String::new(), // Not used for full state sync
+                    replace_last: false,
+                    was_paste: false,
+                    composition: None, // Composition info is in full_state_sync
+                    full_state_sync: Some(FullTextState {
+                        text: full_text,
+                        selection: sel_start..sel_end,
+                        composition,
+                    }),
+                    replace_range: None, // Android uses full state sync, not incremental replacements
                 });
                 self.call_event_handler(&e);
             }
@@ -1016,8 +1032,11 @@ impl Cx {
                     //self.os.keyboard_visible = false;
                     unsafe {android_jni::to_java_show_keyboard(false);}
                 },
-                CxOsOp::UpdateImeTextState { full_text, selection_start, selection_end } => {
-                    unsafe {android_jni::to_java_update_ime_text_state(&full_text, selection_start as i32, selection_end as i32);}
+                CxOsOp::SyncImeState { text, selection, composition: _ } => {
+                    // Convert CharOffset to UTF-16 indices for Java
+                    let sel_start_utf16 = selection.start.to_utf16_index(&text) as i32;
+                    let sel_end_utf16 = selection.end.to_utf16_index(&text) as i32;
+                    unsafe {android_jni::to_java_update_ime_text_state(&text, sel_start_utf16, sel_end_utf16);}
                 },
                 CxOsOp::CopyToClipboard(content) => {
                     unsafe {android_jni::to_java_copy_to_clipboard(content);}

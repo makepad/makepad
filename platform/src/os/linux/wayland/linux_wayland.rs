@@ -321,8 +321,9 @@ impl WaylandCx {
                 },
                 CxOsOp::ShowClipboardActions { .. } => {},
                 CxOsOp::HideClipboardActions => {},
-                CxOsOp::SetIMEText(..) => {},
-                CxOsOp::UpdateImeTextState { .. } => {},
+                CxOsOp::SyncImeState { .. } => {
+                    // Linux Wayland IME handled by input method framework
+                },
                 CxOsOp::CopyToClipboard(content) => {
                 }
                 CxOsOp::SetCursor(cursor) => {
