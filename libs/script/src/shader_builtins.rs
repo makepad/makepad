@@ -7,6 +7,21 @@ use crate::trap::*;
 use crate::*;
 
 pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&mut ScriptNative){
+    // constants
+    let consts = [
+        (id_lut!(PI),3.141592653589793),
+        (id_lut!(E), 2.718281828459045),
+        (id_lut!(LN2), 0.6931471805599453),
+        (id_lut!(LN10), 2.302585092994046),
+        (id_lut!(LOG2E), 1.4426950408889634),
+        (id_lut!(LOG10E), 0.4342944819032518),
+        (id_lut!(SQRT1_2), 0.70710678118654757),
+        (id_lut!(TORAD), 0.017453292519943295),
+        (id_lut!(GOLDEN), 1.618033988749895),
+    ];
+    for (id, val) in consts{
+        heap.set_value_def(math, id.into(),(val).into());
+    }
     // 1 argument functions
     native.add_method(heap, math, id!(abs), script_args!(x=0.0), |vm, args|{ script_value_f64!(vm, args.x).abs().into() });
     native.add_method(heap, math, id!(acos), script_args!(x=0.0), |vm, args|{ script_value_f64!(vm, args.x).acos().into() });

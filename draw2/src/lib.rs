@@ -57,10 +57,10 @@ pub use crate::{
     },*/
 };
 
-pub fn script_run(vm:&mut ScriptVm)->ScriptValue{
+pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{
     vm.heap.new_module(id!(shaders));
-    crate::geometry::script_run(vm);
-    crate::shader::draw_quad::script_run(vm);
+    crate::geometry::script_mod(vm);
+    crate::shader::draw_quad::script_mod(vm);
     NIL
 }
 /*

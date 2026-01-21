@@ -143,7 +143,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     fn script_type_id_static()->ScriptTypeId{ ScriptTypeId::of::<Self>()}
     fn script_new(vm:&mut ScriptVm)->Self;
     
-    fn from_script_run(vm:&mut ScriptVm, f:fn(&mut ScriptVm)->ScriptValue)->Self where Self:Sized{
+    fn from_script_mod(vm:&mut ScriptVm, f:fn(&mut ScriptVm)->ScriptValue)->Self where Self:Sized{
         let value = f(vm);
         Self::script_from_value(vm, value)
     }

@@ -59,6 +59,8 @@ enum State{
     FnArgTypeAssign{lambda:bool,index:u32},
           
     FnBody{lambda:bool},
+    FnReturnType{lambda:bool},
+    FnBodyTyped{lambda:bool},
     EndFnBlock{fn_slot:u32, last_was_sep:bool, index:u32},
     EndFnExpr{fn_slot:u32, index:u32},
     EmitFnArgTyped{index:u32},
@@ -636,7 +638,7 @@ impl ScriptParser{
                 else if tok.is_open_curly(){ // zero args function
                     self.push_code(Opcode::FN_ARGS.into(), self.index);
                     let fn_slot = self.code_len();
-                    self.push_code(Opcode::FN_BODY.into(), self.index);
+                    self.push_code(Opcode::FN_BODY_DYN.into(), self.index);
                     self.state.push(State::EndFnBlock{fn_slot, last_was_sep:false, index:self.index});
                     self.state.push(State::BeginStmt{last_was_sep:false});
                     return 1
@@ -656,7 +658,7 @@ impl ScriptParser{
                 // no args
                 if tok.is_open_curly(){
                     let fn_slot = self.code_len();
-                    self.push_code(Opcode::FN_BODY.into(), self.index);
+                    self.push_code(Opcode::FN_BODY_DYN.into(), self.index);
                     self.state.push(State::EndFnBlock{fn_slot, last_was_sep:false, index:self.index});
                     self.state.push(State::BeginStmt{last_was_sep:false});
                     return 1
@@ -727,8 +729,39 @@ impl ScriptParser{
                 return 1
             }
             State::FnBody{lambda}=>{
+                // Check for return type annotation with ->
+                if op == id!(->){
+                    self.state.push(State::FnReturnType{lambda});
+                    return 1
+                }
                 let fn_slot = self.code_len() as _ ;
-                self.push_code(Opcode::FN_BODY.into(), self.index);
+                self.push_code(Opcode::FN_BODY_DYN.into(), self.index);
+                if tok.is_open_curly(){ // function body
+                    self.state.push(State::EndFnBlock{fn_slot, last_was_sep:false, index:self.index});
+                    self.state.push(State::BeginStmt{last_was_sep:false});
+                    return 1
+                }
+                else if lambda{ // function body can be expression expression
+                    self.state.push(State::EndFnExpr{fn_slot, index:self.index});
+                    self.state.push(State::BeginExpr{required:true});
+                }
+                else{
+                    error!(self, tokenizer, "Unexpected token in function definition, expected {{ {:?}", tok);
+                }
+            }
+            State::FnReturnType{lambda}=>{
+                if id.not_empty(){ // we have a return type identifier
+                    self.push_code(id.into(), self.index);
+                    self.state.push(State::FnBodyTyped{lambda});
+                    return 1
+                }
+                else{
+                    error!(self, tokenizer, "Expected return type after ->");
+                }
+            }
+            State::FnBodyTyped{lambda}=>{
+                let fn_slot = self.code_len() as _ ;
+                self.push_code(Opcode::FN_BODY_TYPED.into(), self.index);
                 if tok.is_open_curly(){ // function body
                     self.state.push(State::EndFnBlock{fn_slot, last_was_sep:false, index:self.index});
                     self.state.push(State::BeginStmt{last_was_sep:false});
