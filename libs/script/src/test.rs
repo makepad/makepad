@@ -63,7 +63,7 @@ pub fn test(){
     }
     
     
-    let _code = script!{
+    let code = script!{
         use mod.std.*
         use mod.shader
         use mod.pod.*
@@ -123,7 +123,7 @@ pub fn test(){
     
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod

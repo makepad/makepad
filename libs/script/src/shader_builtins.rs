@@ -56,6 +56,10 @@ pub fn define_shader_builtins(heap:&mut ScriptHeap, math:ScriptObject, native:&m
     native.add_method(heap, math, id!(tanh), script_args!(x=0.0), |vm, args|{ script_value_f64!(vm, args.x).tanh().into() });
     native.add_method(heap, math, id!(trunc), script_args!(x=0.0), |vm, args|{ script_value_f64!(vm, args.x).trunc().into() });
     
+    // Derivative functions (shader-only, return 0.0 in script runtime)
+    native.add_method(heap, math, id!(dFdx), script_args!(x=0.0), |_vm, _args|{ 0.0.into() });
+    native.add_method(heap, math, id!(dFdy), script_args!(x=0.0), |_vm, _args|{ 0.0.into() });
+    
     // 2 argument functions
     native.add_method(heap, math, id!(atan2), script_args!(y=0.0, x=0.0), |vm, args|{ 
         script_value_f64!(vm, args.y).atan2(script_value_f64!(vm, args.x)).into() 
@@ -139,7 +143,8 @@ pub fn type_table_builtin(
         id!(acos) | id!(acosh) | id!(asin) | id!(asinh) | id!(atan) | id!(atanh) |
         id!(ceil) | id!(cos) | id!(cosh) | id!(degrees) | id!(exp) | id!(exp2) | id!(floor) |
         id!(fract) | id!(inverseSqrt) | id!(log) | id!(log2) | id!(radians) |
-        id!(round) | id!(sin) | id!(sinh) | id!(sqrt) | id!(tan) | id!(tanh) | id!(trunc) => {
+        id!(round) | id!(sin) | id!(sinh) | id!(sqrt) | id!(tan) | id!(tanh) | id!(trunc) |
+        id!(dFdx) | id!(dFdy) => {
              if args.len() != 1 {
                  trap.err_invalid_arg_count();
                  return builtins.pod_void;

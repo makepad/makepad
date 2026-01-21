@@ -740,6 +740,10 @@ impl ScriptTokenizer{
                     else if (c == 'e' || c == 'E') && self.temp.chars().position(|v| v == 'e' ||  v == 'E').is_none(){
                         self.temp.push(c);    
                     }
+                    else if (c == '+' || c == '-') && matches!(self.temp.chars().last(), Some('e') | Some('E')){
+                        // Handle exponent sign in scientific notation like 1e+20 or 1e-5
+                        self.temp.push(c);    
+                    }
                     else if (c == 'x' || c == 'X') && self.temp.chars().position(|v| v == 'x' ||  v == 'X').is_none(){
                         self.temp.push(c);    
                     }
