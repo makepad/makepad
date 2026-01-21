@@ -388,6 +388,7 @@ impl ShaderOutput{
     /// This should be called after `assign_uniform_buffer_indices` has been called.
     pub fn get_uniform_buffer_bindings(&self, heap: &ScriptHeap) -> UniformBufferBindings {
         let mut bindings = UniformBufferBindings::default();
+        
         for io in &self.io {
             if let ShaderIoKind::UniformBuffer = io.kind {
                 if let Some(buf_idx) = io.buffer_index {
@@ -398,6 +399,8 @@ impl ShaderOutput{
                 }
             }
         }
+        println!("{:?}", bindings);
+        
         bindings
     }
 }

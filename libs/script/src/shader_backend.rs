@@ -66,7 +66,49 @@ impl ShaderBackend{
                     _=>panic!()
                 }
             }
-             Self::Hlsl | Self::Glsl | Self::Wgsl =>{
+             Self::Hlsl => {
+                 match mode {
+                     ShaderMode::Vertex => {
+                         // Check for fragment output range first
+                         if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 {
+                             let index = io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0;
+                             return (ShaderIoKind::FragmentOutput(index as u8), ShaderIoPrefix::FullOwned(format!("_iofb.fb{}", index)));
+                         }
+                         match io_type {
+                             SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("input.i_")),
+                             SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("input.i_")),
+                             SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("u_")),
+                             SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("u_")),
+                             SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iov.v.")),
+                             SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v._position")),
+                             SHADER_IO_VERTEX_BUFFER=>(ShaderIoKind::VertexBuffer, ShaderIoPrefix::Prefix("input.vb_")),
+                             SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("")),
+                             _=>panic!()
+                         }
+                     }
+                     ShaderMode::Fragment => {
+                         // Check for fragment output range first
+                         if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 {
+                             let index = io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0;
+                             return (ShaderIoKind::FragmentOutput(index as u8), ShaderIoPrefix::FullOwned(format!("_iofb.fb{}", index)));
+                         }
+                         match io_type {
+                             SHADER_IO_RUST_INSTANCE=>(ShaderIoKind::RustInstance, ShaderIoPrefix::Prefix("_iof.v.")),
+                             SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_iof.v.")),
+                             SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("u_")),
+                             SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("u_")),
+                             SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iof.v.")),
+                             SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iof.v._position")),
+                             SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("")),
+                             _=>panic!()
+                         }
+                     }
+                     _=>panic!()
+                 }
+             }
+             Self::Glsl | Self::Wgsl =>{
                  // Check for fragment output range first
                  if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 {
                      let index = io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0;
@@ -88,6 +130,7 @@ impl ShaderBackend{
     pub fn get_io_all(&self, _mode: ShaderMode) -> &'static str {
         match self{
             Self::Metal => "_io",
+            Self::Hlsl => "_io",
             _ => ""
         }
     }
@@ -95,6 +138,7 @@ impl ShaderBackend{
     pub fn get_io_all_decl(&self, _mode: ShaderMode) -> &'static str {
         match self{
             Self::Metal => "thread Io &_io",
+            Self::Hlsl => "Io _io",
             _ => ""
         }
     }
@@ -103,6 +147,11 @@ impl ShaderBackend{
     pub fn get_io_self(&self, mode: ShaderMode) -> &'static str {
         match self{
             Self::Metal => match mode{
+                ShaderMode::Vertex=>"_iov",
+                ShaderMode::Fragment=>"_iof",
+                _ => ""
+            }
+            Self::Hlsl => match mode{
                 ShaderMode::Vertex=>"_iov",
                 ShaderMode::Fragment=>"_iof",
                 _ => ""
@@ -116,6 +165,11 @@ impl ShaderBackend{
             Self::Metal => match mode{
                 ShaderMode::Vertex=>"thread IoV &_iov",
                 ShaderMode::Fragment=>"thread IoF &_iof",
+                _ => ""
+            }
+            Self::Hlsl => match mode{
+                ShaderMode::Vertex=>"inout IoV _iov",
+                ShaderMode::Fragment=>"inout IoF _iof",
                 _ => ""
             }
             _ => ""

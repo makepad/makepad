@@ -1,5 +1,8 @@
 use crate::{
-    //makepad_shader_compiler::generate_hlsl,
+    makepad_script::*,
+    makepad_script::shader::*,
+    makepad_script::shader_backend::*,
+    makepad_live_id::*,
     makepad_math::*,
     os::{
         windows::win32_app::{TRUE, FALSE,},
@@ -9,9 +12,12 @@ use crate::{
     draw_list::DrawListId,
     event::WindowGeom,
     cx::Cx,
-    draw_shader::CxDrawShaderMapping,
-    draw_pass::{PassClearColor, PassClearDepth, PassId},
+    draw_shader::{CxDrawShaderMapping, CxDrawShaderSource, CxDrawShader, DrawShaderId, UniformBufferBindings},
+    draw_vars::DrawVars,
+    draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
+    script::vm::*,
     window::WindowId,
+    geometry::Geometry,
     texture::{ 
         TextureFormat,
         TexturePixel,
@@ -135,7 +141,7 @@ impl Cx {
     
     fn render_view(
         &mut self,
-        pass_id: PassId,
+        pass_id: DrawPassId,
         draw_list_id: DrawListId,
         zbias: &mut f32,
         zbias_step: f32,
@@ -167,7 +173,7 @@ impl Cx {
                 } else {
                     continue;
                 };
-                let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() { // shader didnt compile somehow
                     continue;
                 }
@@ -194,8 +200,8 @@ impl Cx {
                     draw_item.os.draw_call_uniforms.update_with_f32_constant_data(d3d11_cx, draw_call.draw_call_uniforms.as_slice());
                     
                 }
-                if draw_call.user_uniforms.len() != 0 {
-                    draw_item.os.user_uniforms.update_with_f32_constant_data(d3d11_cx, &mut draw_call.user_uniforms);
+                if draw_call.dyn_uniforms.len() != 0 {
+                    draw_item.os.user_uniforms.update_with_f32_constant_data(d3d11_cx, &mut draw_call.dyn_uniforms);
                 }
                 
                 let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
@@ -246,11 +252,19 @@ impl Cx {
                             }
                         }
                     }
+                    
+                    fn buffer_slot_opt(d3d11_cx: &D3d11Cx, index: Option<u32>, buffer: &Option<ID3D11Buffer>) {
+                        if let Some(idx) = index {
+                            buffer_slot(d3d11_cx, idx, buffer);
+                        }
+                    }
+                    
                     buffer_slot(d3d11_cx, 0, &shp.live_uniforms.buffer);
                     buffer_slot(d3d11_cx, 1, &shp.const_table_uniforms.buffer);
-                    buffer_slot(d3d11_cx, 2, &draw_item.os.draw_call_uniforms.buffer);
-                    buffer_slot(d3d11_cx, 3, &self.passes[pass_id].os.pass_uniforms.buffer);
-                    buffer_slot(d3d11_cx, 4, &draw_list.os.draw_list_uniforms.buffer);
+                    buffer_slot_opt(d3d11_cx, shp.dyn_uniform_buffer_id, &draw_item.os.draw_call_uniforms.buffer);
+                    buffer_slot_opt(d3d11_cx, shp.draw_call_uniform_buffer_id, &draw_item.os.draw_call_uniforms.buffer);
+                    buffer_slot_opt(d3d11_cx, shp.pass_uniform_buffer_id, &self.passes[pass_id].os.pass_uniforms.buffer);
+                    buffer_slot_opt(d3d11_cx, shp.draw_list_uniform_buffer_id, &draw_list.os.draw_list_uniforms.buffer);
                     buffer_slot(d3d11_cx, 5, &draw_item.os.user_uniforms.buffer);
                 }
                 
@@ -305,7 +319,7 @@ impl Cx {
         self.textures[_texture.texture_id()].os.shared_handle
     }
 
-    pub fn setup_pass_render_targets(&mut self, pass_id: PassId, first_target: &Option<ID3D11RenderTargetView >, d3d11_cx: &D3d11Cx) {
+    pub fn setup_pass_render_targets(&mut self, pass_id: DrawPassId, first_target: &Option<ID3D11RenderTargetView >, d3d11_cx: &D3d11Cx) {
         
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         
@@ -348,13 +362,13 @@ impl Cx {
                 color_textures.push(Some(render_target.clone().unwrap()));
                 // possibly clear it
                 match color_texture.clear_color {
-                    PassClearColor::InitWith(color) => {
+                    DrawPassClearColor::InitWith(color) => {
                         if is_initial {
                             let color = [color.x, color.y, color.z, color.w];
                             unsafe {d3d11_cx.context.ClearRenderTargetView(render_target.as_ref().unwrap(), &color)}
                         }
                     },
-                    PassClearColor::ClearWith(color) => {
+                    DrawPassClearColor::ClearWith(color) => {
                         let color = [color.x, color.y, color.z, color.w];
                         unsafe {d3d11_cx.context.ClearRenderTargetView(render_target.as_ref().unwrap(), &color)}
                     }
@@ -370,7 +384,7 @@ impl Cx {
             let is_initial = cxtexture.take_initial();
                         
             match self.passes[pass_id].clear_depth {
-                PassClearDepth::InitWith(depth_clear) => {
+                DrawPassClearDepth::InitWith(depth_clear) => {
                     if is_initial {
                         unsafe {d3d11_cx.context.ClearDepthStencilView(
                             cxtexture.os.depth_stencil_view.as_ref().unwrap(),
@@ -380,7 +394,7 @@ impl Cx {
                         )}
                     }
                 },
-                PassClearDepth::ClearWith(depth_clear) => {
+                DrawPassClearDepth::ClearWith(depth_clear) => {
                     unsafe {d3d11_cx.context.ClearDepthStencilView(
                         cxtexture.os.depth_stencil_view.as_ref().unwrap(),
                         D3D11_CLEAR_DEPTH.0 as u32 | D3D11_CLEAR_STENCIL.0 as u32,
@@ -409,7 +423,7 @@ impl Cx {
         cxpass.os.pass_uniforms.update_with_f32_constant_data(&d3d11_cx, cxpass.pass_uniforms.as_slice());
     }
     
-    pub fn draw_pass_to_window(&mut self, pass_id: PassId, vsync: bool, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
+    pub fn draw_pass_to_window(&mut self, pass_id: DrawPassId, vsync: bool, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -433,7 +447,7 @@ impl Cx {
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
     }
     
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId,  d3d11_cx: &D3d11Cx,texture_id: Option<TextureId>) {
+    pub fn draw_pass_to_texture(&mut self, pass_id: DrawPassId,  d3d11_cx: &D3d11Cx,texture_id: Option<TextureId>) {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -456,37 +470,45 @@ impl Cx {
         );
     }
     
-    pub (crate) fn hlsl_compile_shaders(&mut self, _d3d11_cx: &D3d11Cx) {
-        /*
-        for draw_shader_ptr in &self.draw_shaders.compile_set {
-            if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
-                let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
-                let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
-                let hlsl = generate_hlsl::generate_shader(
-                    draw_shader_def.as_ref().unwrap(),
-                    &cx_shader.mapping.const_table,
-                    &self.shader_registry
-                );
-                
-                if cx_shader.mapping.flags.debug {
-                    crate::log!("{}", hlsl);
+    pub (crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
+        for draw_shader_id in self.draw_shaders.compile_set.iter().cloned().collect::<Vec<_>>() {
+            let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
+            
+            let hlsl = match &cx_shader.mapping.source {
+                CxDrawShaderSource::Combined { source } => source.clone(),
+                CxDrawShaderSource::Separate { .. } => {
+                    crate::error!("D3D11 does not support separate vertex/fragment sources");
+                    continue;
                 }
-                // lets see if we have the shader already
-                for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                    if ds.hlsl == hlsl {
-                        cx_shader.os_shader_id = Some(index);
-                        break;
-                    }
-                }
-                if cx_shader.os_shader_id.is_none() {
-                    if let Some(shp) = CxOsDrawShader::new(d3d11_cx, hlsl, &cx_shader.mapping) {
-                        cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
-                        self.draw_shaders.os_shaders.push(shp);
-                    }
+            };
+            
+            if cx_shader.mapping.flags.debug {
+                crate::log!("{}", hlsl);
+            }
+            
+            // Get the uniform buffer bindings from the mapping
+            let bindings = cx_shader.mapping.uniform_buffer_bindings.clone();
+            
+            // Check if we already have an os_shader with the same source
+            let mut found_os_shader_id = None;
+            for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
+                if ds.hlsl == hlsl {
+                    found_os_shader_id = Some(index);
+                    break;
                 }
             }
-        }*/
-        //self.draw_shaders.compile_set.clear();
+            
+            let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
+            if let Some(os_shader_id) = found_os_shader_id {
+                cx_shader.os_shader_id = Some(os_shader_id);
+            } else {
+                if let Some(shp) = CxOsDrawShader::new(d3d11_cx, hlsl, &cx_shader.mapping, &bindings) {
+                    cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                    self.draw_shaders.os_shaders.push(shp);
+                }
+            }
+        }
+        self.draw_shaders.compile_set.clear();
     }
 
     pub fn share_texture_for_presentable_image(
@@ -1088,6 +1110,103 @@ pub struct CxOsGeometry {
     pub geom_ibuf: D3d11Buffer,
 }
 
+// Shader compilation for HLSL
+impl DrawVars {
+    pub (crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &mut ApplyScope, value: ScriptValue) {
+        use std::fmt::Write;
+        
+        // Compile an HLSL shader
+        if let Some(io_self) = value.as_object() {
+            let mut output = ShaderOutput::default();
+            output.backend = ShaderBackend::Hlsl;
+            
+            output.pre_collect_rust_instance_io(vm, io_self);
+            output.pre_collect_fragment_outputs(vm, io_self);
+            
+            if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), &vm.thread.trap).as_object() {
+                output.mode = ShaderMode::Vertex;
+                ShaderFnCompiler::compile_shader_def(
+                    vm,
+                    &mut output,
+                    id!(vertex),
+                    fnobj,
+                    ShaderType::IoSelf(io_self),
+                    vec![],
+                );
+            }
+            if let Some(fnobj) = vm.heap.object_method(io_self, id!(fragment).into(), &vm.thread.trap).as_object() {
+                output.mode = ShaderMode::Fragment;
+                ShaderFnCompiler::compile_shader_def(
+                    vm,
+                    &mut output,
+                    id!(fragment),
+                    fnobj,
+                    ShaderType::IoSelf(io_self),
+                    vec![],
+                );
+            }
+            
+            // Assign buffer indices to uniform buffers before generating HLSL code
+            // In HLSL, cbuffer registers start from b0
+            // b0 = live uniforms, b1 = const table, b2 = draw call, b3 = pass, b4 = draw list, b5 = user
+            output.assign_uniform_buffer_indices(vm.heap, 3);
+            
+            let mut out = String::new();
+            output.create_struct_defs(vm, &mut out);
+            output.hlsl_create_uniform_buffer_cbuffers(vm, &mut out);
+            output.hlsl_create_uniform_struct(vm, &mut out);
+            output.hlsl_create_instance_struct(vm, &mut out);
+            output.hlsl_create_varying_struct(vm, &mut out);
+            output.hlsl_create_vertex_buffer_struct(vm, &mut out);
+            output.hlsl_create_vertex_input_struct(vm, &mut out);
+            output.hlsl_create_io_structs(vm, &mut out);
+            output.hlsl_create_fragment_output_struct(vm, &mut out);
+            output.hlsl_create_texture_samplers(vm, &mut out);
+            output.create_functions(&mut out);
+            output.hlsl_create_vertex_fn(vm, &mut out);
+            output.hlsl_create_fragment_fn(vm, &mut out);
+            
+            // Create the shader mapping and allocate CxDrawShader
+            let source = CxDrawShaderSource::Combined { source: out };
+            let mapping = CxDrawShaderMapping::from_shader_output(source, &vm.heap, &output);
+            
+            // Set dyn_instance_start and dyn_instance_slots based on mapping
+            self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
+            self.dyn_instance_slots = mapping.instances.total_slots;
+            
+            // Access Cx from the vm host
+            let cx = vm.host.cx_mut();
+            
+            // Allocate CxDrawShader with os_shader_id set to None
+            let index = cx.draw_shaders.shaders.len();
+            cx.draw_shaders.shaders.push(CxDrawShader {
+                debug_id: LiveId(0),
+                os_shader_id: None,
+                mapping,
+            });
+            
+            // Add to compile set for later HLSL compilation
+            cx.draw_shaders.compile_set.insert(index);
+            
+            // Set draw_shader on self
+            self.draw_shader_id = Some(DrawShaderId {
+                generation: cx.draw_shaders.generation,
+                index,
+            });
+            
+            // See if we have a script-set vertex buffer with geometry
+            if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
+                let buffer_value = vm.heap.value(vb_obj, id!(buffer).into(), &vm.thread.trap);
+                if let Some(handle) = buffer_value.as_handle() {
+                    if let Some(geometry) = vm.heap.handle_ref::<Geometry>(handle) {
+                        self.geometry_id = Some(geometry.geometry_id());
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CxOsDrawShader {
     pub hlsl: String,
@@ -1097,12 +1216,17 @@ pub struct CxOsDrawShader {
     pub vertex_shader: ID3D11VertexShader,
     pub pixel_shader_blob: ID3DBlob,
     pub vertex_shader_blob: ID3DBlob,
-    pub input_layout: ID3D11InputLayout
+    pub input_layout: ID3D11InputLayout,
+    // Dynamic buffer indices looked up from shader output
+    pub draw_call_uniform_buffer_id: Option<u32>,
+    pub pass_uniform_buffer_id: Option<u32>,
+    pub draw_list_uniform_buffer_id: Option<u32>,
+    pub dyn_uniform_buffer_id: Option<u32>,
 }
 
 impl CxOsDrawShader {
     
-    fn _new(d3d11_cx: &D3d11Cx, hlsl: String, mapping: &CxDrawShaderMapping) -> Option<Self> {
+    fn new(d3d11_cx: &D3d11Cx, hlsl: String, mapping: &CxDrawShaderMapping, bindings: &UniformBufferBindings) -> Option<Self> {
         
         fn compile_shader(target: &str, entry: &str, shader: &str) -> Result<ID3DBlob, String> {
             unsafe {
@@ -1262,11 +1386,15 @@ impl CxOsDrawShader {
             ).unwrap()
         };
         
-        let mut live_uniforms = D3d11Buffer::default();
-        live_uniforms.update_with_f32_constant_data(d3d11_cx, mapping.live_uniforms_buf.as_ref());
-        
+        let live_uniforms = D3d11Buffer::default();
         let const_table_uniforms = D3d11Buffer::default();
-        //const_table_uniforms.update_with_f32_constant_data(d3d11_cx, mapping.const_table.table.as_ref());
+        
+        // Look up buffer IDs from shader output bindings by Pod type name
+        let draw_call_uniform_buffer_id = bindings.get_by_type_name(id!(DrawCallUniforms)).map(|i| i as u32);
+        let pass_uniform_buffer_id = bindings.get_by_type_name(id!(DrawPassUniforms)).map(|i| i as u32);
+        let draw_list_uniform_buffer_id = bindings.get_by_type_name(id!(DrawListUniforms)).map(|i| i as u32);
+        // dyn_uniform_buffer_id uses the IoUniform cbuffer at register b2
+        let dyn_uniform_buffer_id = Some(2);
         
         Some(Self {
             hlsl,
@@ -1276,7 +1404,11 @@ impl CxOsDrawShader {
             vertex_shader: vs.unwrap(),
             pixel_shader_blob: ps_blob,
             vertex_shader_blob: vs_blob,
-            input_layout: input_layout.unwrap()
+            input_layout: input_layout.unwrap(),
+            draw_call_uniform_buffer_id,
+            pass_uniform_buffer_id,
+            draw_list_uniform_buffer_id,
+            dyn_uniform_buffer_id,
         })
     }
 }

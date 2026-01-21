@@ -40,6 +40,7 @@ pub mod test;
 pub mod shader;
 pub mod shader_backend;
 pub mod shader_metal;
+pub mod shader_hlsl;
 pub mod shader_tables;
 pub mod shader_builtins;
 
