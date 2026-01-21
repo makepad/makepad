@@ -158,6 +158,13 @@ impl Cx {
                         offset: 0
                         atIndex: 1
                     ]}
+                    // Also bind instance buffer to fragment shader so it can access instance data
+                    unsafe {msg_send![
+                        encoder,
+                        setFragmentBuffer: inner.buffer.as_id()
+                        offset: 0
+                        atIndex: 1
+                    ]}
                 }
                 else {crate::error!("Drawing error: instance_buffer None")}
                 
@@ -814,6 +821,9 @@ impl DrawVars{
             // Set dyn_instance_start and dyn_instance_slots based on mapping
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
             self.dyn_instance_slots = mapping.instances.total_slots;
+            
+            // Read default values for dyn_instance slots from the shader object
+            self.read_dyn_instance_defaults(&vm.heap, &mapping, io_self);
             
             // Access Cx from the vm host
             let cx = vm.host.cx_mut();
