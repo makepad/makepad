@@ -48,7 +48,7 @@ pub use crate::{
     shader::{
         //draw_shape::{DrawShape, Shape, Fill},
         draw_quad::DrawQuad,
-        //draw_text::DrawText,
+        draw_text::DrawText,
     },
     /*
     geometry::{

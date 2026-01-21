@@ -140,12 +140,26 @@ impl ShaderStorageFlags{
     pub fn is_readwrite(&self)->bool{self.0 & 3 == 3}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureType {
+    Texture1d,
+    Texture1dArray,
+    Texture2d,
+    Texture2dArray,
+    Texture3d,
+    Texture3dArray,
+    TextureCube,
+    TextureCubeArray,
+    TextureDepth,
+    TextureDepthArray,
+}
+
 #[derive(Debug, Clone)]
 pub enum ShaderIoKind{
     StorageBuffer(ShaderStorageFlags),
     UniformBuffer,
     Sampler(ShaderSamplerOptions),
-    Texture,
+    Texture(TextureType),
     Varying,
     VertexBuffer,
     VertexPosition,

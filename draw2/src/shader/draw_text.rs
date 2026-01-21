@@ -1,16 +1,15 @@
-/*
+
 use {
     crate::{
         cx_2d::Cx2d,
         cx_draw::CxDraw,
-        geometry::GeometryQuad2D,
         makepad_platform::*,
         text::{
             color::Color,
             font::FontId,
             font_family::FontFamilyId,
             fonts::Fonts,
-            geom::{Point, Rect, Size, Transform},
+            geom::{Point, Rect as TextRect, Size, Transform},
             layouter::{
                 BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions,
                 SelectionRect, Style,
@@ -25,122 +24,105 @@ use {
     std::{cell::RefCell, rc::Rc},
 };
 
-live_design! {
-    use link::shaders::*;
-
-    pub DrawText = {{DrawText}} {
-        color: #ffff,
-
-        uniform radius: float;
-        uniform cutoff: float;
-        uniform grayscale_atlas_size: vec2;
-        uniform color_atlas_size: vec2;
-
-        texture grayscale_texture: texture2d
-        texture color_texture: texture2d
-
-        varying pos: vec2
-        varying t: vec2
-        varying world: vec4
+script_mod!{
+    use mod.pod.*
+    use mod.math.*
+    use mod.shader
+    use mod.draw
+    use mod.geom
+            
+    mod.shaders.DrawText = #(DrawText::script_shader(vm)){
+        vertex_pos: shader.vertex_position(vec4f)
+        fb0: shader.fragment_output(0, vec4f)
+        draw_call: shader.uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: shader.uniform_buffer(draw.DrawPassUniforms)
+        draw_list: shader.uniform_buffer(draw.DrawListUniforms)
+        geom: shader.vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+                                
+        pos: shader.varying(vec2f)
+        t: shader.varying(vec2f)
+        world: shader.varying(vec4f)
         
-        fn vertex(self) -> vec4 {
-            let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom_pos);
-            let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw);
-            let p_normalized: vec2 = (p_clipped - self.rect_pos) / self.rect_size;
+        color: shader.instance(#ffff),
+        
+        radius: shader.uniform(float)
+        cutoff: shader.uniform(float)
+        
+        grayscale_atlas_size: shader.uniform(vec2)
+        color_atlas_size: shader.uniform(vec2)
+        
+        grayscale_texture: shader.texture_2d()
+        color_texture: shader.texture_2d()
+        
+        vertex: fn() {
+            let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
+            let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw)
+            let p_normalized = (p_clipped - self.rect_pos) / self.rect_size
 
             self.pos = p_normalized;
-            self.t = mix(self.t_min, self.t_max, p_normalized.xy);
-            self.world = self.view_transform * vec4(
+            self.t = mix(self.t_min, self.t_max, p_normalized.xy)
+            self.world = self.draw_list.view_transform * vec4(
                 p_clipped.x,
                 p_clipped.y,
-                self.glyph_depth + self.draw_zbias,
+                self.glyph_depth + self.draw_call.zbias,
                 1.
-            );
-            return self.camera_projection * (self.camera_view * (self.world));
+            )
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * (self.world))
         }
 
-        fn sdf(self, scale: float, p: vec2) -> float {
+        sdf: fn(scale, p) {
             let s = sample2d(self.grayscale_texture, p).x;
             // 1.1 factor to compensate for text being magically too dark after the fontstack refactor
-            s = clamp(((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5)*1.1, 0.0, 1.0);
-            return s;
+            s = clamp(((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5)*1.1, 0.0, 1.0)
+            return s
         }
 
-        fn get_color(self) -> vec4 {
+        get_color: fn() {
             return self.color
         }
         
-        fn fragment(self) -> vec4 {
-            return depth_clip(self.world, self.pixel(), self.depth_clip);
+        fragment: fn() {
+            self.fb0 = self.pixel();
         }
         
-        fn pixel(self) -> vec4 {
-            let dxt = length(dFdx(self.t));
-            let dyt = length(dFdy(self.t));
+        pixel: fn() {
+            let dxt = length(dFdx(self.t))
+            let dyt = length(dFdy(self.t))
             let color = #0000
             if self.texture_index == 0 {
                 // TODO: Support non square atlases?
-                let scale = (dxt + dyt) * self.grayscale_atlas_size.x * 0.5;
-                let s = self.sdf(scale, self.t.xy);
-                let c = self.get_color();
-                return s * vec4(c.rgb * c.a, c.a);
+                let scale = (dxt + dyt) * self.grayscale_atlas_size.x * 0.5
+                let s = self.sdf(scale, self.t.xy)
+                let c = self.get_color()
+                return s * vec4(c.rgb * c.a, c.a)
             } else {
-                let c = sample2d(self.color_texture, self.t);
-                return vec4(c.rgb * c.a, c.a);
+                let c = sample2d(self.color_texture, self.t)
+                return vec4(c.rgb * c.a, c.a)
             }
         }
     }
 }
 
-#[derive(Live, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawText {
-    #[live]
-    pub geometry: GeometryQuad2D,
-    #[live]
-    pub text_style: TextStyle,
-    #[live(1.0)]
-    pub font_scale: f32,
-    #[live(1.0)]
-    pub draw_depth: f32,
-    #[live]
-    pub debug: bool,
+    #[live] pub text_style: TextStyle,
+    #[live(1.0)] pub font_scale: f32,
+    #[live(1.0)] pub draw_depth: f32,
+    #[live] pub debug: bool,
     
-    #[live]
-    pub temp_y_shift: f32,
+    #[live] pub temp_y_shift: f32,
     
-    #[deref]
-    pub draw_vars: DrawVars,
-    #[calc]
-    pub rect_pos: Vec2f,
-    #[calc]
-    pub rect_size: Vec2f,
-    #[calc]
-    pub draw_clip: Vec4f,
-    #[live(1.0)] 
-    pub depth_clip: f32,
-    #[calc]
-    pub glyph_depth: f32,
-    #[live]
-    pub color: Vec4f,
-    #[calc]
-    pub texture_index: f32,
-    #[calc]
-    pub t_min: Vec2f,
-    #[calc]
-    pub t_max: Vec2f,
-}
-
-impl LiveHook for DrawText {
-    fn before_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
-        self.draw_vars
-            .before_apply_init_shader(cx, apply, index, nodes, &self.geometry);
-    }
-
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
-        self.draw_vars
-            .after_apply_update_self(cx, apply, index, nodes, &self.geometry);
-    }
+    #[deref] pub draw_vars: DrawVars,
+    #[live] pub rect_pos: Vec2f,
+    #[live] pub rect_size: Vec2f,
+    #[live] pub draw_clip: Vec4f,
+    #[live(1.0)] pub depth_clip: f32,
+    #[live] pub glyph_depth: f32,
+    #[live] pub color: Vec4f,
+    #[live] pub texture_index: f32,
+    #[live] pub t_min: Vec2f,
+    #[live] pub t_max: Vec2f,
 }
 
 impl DrawText {
@@ -155,7 +137,7 @@ impl DrawText {
         walk: Walk,
         align: Align,
         text: &str,
-    ) -> makepad_platform::Rect {
+    ) -> Rect {
         let turtle_rect = cx.turtle().inner_rect();
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
@@ -173,7 +155,7 @@ impl DrawText {
         cx: &mut Cx2d,
         walk: Walk,
         laidout_text: &LaidoutText,
-    ) -> makepad_platform::Rect {
+    ) -> Rect {
         use crate::text::geom::{Point, Size};
         use crate::turtle;
 
@@ -222,7 +204,7 @@ impl DrawText {
         &mut self,
         cx: &mut Cx2d,
         text_str: &str,
-        mut f: impl FnMut(&mut Cx2d, makepad_platform::Rect, f32),
+        mut f: impl FnMut(&mut Cx2d, Rect, f32),
     ) {
         let turtle_pos = cx.turtle().pos();
         let turtle_rect = cx.turtle().inner_rect();
@@ -285,7 +267,7 @@ impl DrawText {
            last_row.ascender_in_lpxs * last_row.line_spacing_scale - last_row.ascender_in_lpxs
         )as f64);
         
-        cx.emit_turtle_walk(makepad_platform::Rect {
+        cx.emit_turtle_walk(Rect {
             pos: new_turtle_pos,
             size: dvec2(
                 used_size_in_lpxs.width as f64,
@@ -311,13 +293,13 @@ impl DrawText {
                 prefer_next_row: false,
             },
         }) {
-            let rect_in_lpxs = Rect::new(
+            let rect_in_lpxs = TextRect::new(
                 origin_in_lpxs + Size::from(rect_in_lpxs.origin) * self.font_scale,
                 rect_in_lpxs.size * self.font_scale,
             );
             f(
                 cx,
-                makepad_platform::rect(
+                rect(
                     rect_in_lpxs.origin.x as f64,
                     rect_in_lpxs.origin.y as f64 + shift as f64,
                     rect_in_lpxs.size.width as f64,
@@ -382,14 +364,14 @@ impl DrawText {
         let fonts = cx.fonts.borrow();
         let rasterizer = fonts.rasterizer().borrow();
         let sdfer_settings = rasterizer.sdfer().settings();
-        self.draw_vars.user_uniforms[0] = sdfer_settings.radius;
-        self.draw_vars.user_uniforms[1] = sdfer_settings.cutoff;
+        self.draw_vars.dyn_uniforms[0] = sdfer_settings.radius;
+        self.draw_vars.dyn_uniforms[1] = sdfer_settings.cutoff;
         let grayscale_atlas_size = rasterizer.grayscale_atlas().size();
-        self.draw_vars.user_uniforms[2] = grayscale_atlas_size.width as f32;
-        self.draw_vars.user_uniforms[3] = grayscale_atlas_size.height as f32;
+        self.draw_vars.dyn_uniforms[2] = grayscale_atlas_size.width as f32;
+        self.draw_vars.dyn_uniforms[3] = grayscale_atlas_size.height as f32;
         let color_atlas_size = rasterizer.color_atlas().size();
-        self.draw_vars.user_uniforms[4] = color_atlas_size.width as f32;
-        self.draw_vars.user_uniforms[5] = color_atlas_size.height as f32;
+        self.draw_vars.dyn_uniforms[4] = color_atlas_size.width as f32;
+        self.draw_vars.dyn_uniforms[5] = color_atlas_size.height as f32;
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
     }
@@ -415,7 +397,7 @@ impl DrawText {
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
-                makepad_platform::rect(
+                rect(
                     origin_in_lpxs.x as f64,
                     (origin_in_lpxs.y - row.ascender_in_lpxs * self.font_scale) as f64,
                     width_in_lpxs as f64,
@@ -424,11 +406,11 @@ impl DrawText {
             );
             cx.cx
                 .debug
-                .area(area, makepad_platform::vec4(1.0, 0.0, 0.0, 1.0));
+                .area(area, vec4(1.0, 0.0, 0.0, 1.0));
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
-                makepad_platform::rect(
+                rect(
                     origin_in_lpxs.x as f64,
                     origin_in_lpxs.y as f64,
                     width_in_lpxs as f64,
@@ -437,11 +419,11 @@ impl DrawText {
             );
             cx.cx
                 .debug
-                .area(area, makepad_platform::vec4(0.0, 1.0, 0.0, 1.0));
+                .area(area, vec4(0.0, 1.0, 0.0, 1.0));
             let mut area = Area::Empty;
             cx.add_aligned_rect_area(
                 &mut area,
-                makepad_platform::rect(
+                rect(
                     origin_in_lpxs.x as f64,
                     (origin_in_lpxs.y - row.descender_in_lpxs * self.font_scale) as f64,
                     width_in_lpxs as f64,
@@ -450,7 +432,7 @@ impl DrawText {
             );
             cx.cx
                 .debug
-                .area(area, makepad_platform::vec4(0.0, 0.0, 1.0, 1.0));
+                .area(area, vec4(0.0, 0.0, 1.0, 1.0));
         }
     }
 
@@ -505,7 +487,7 @@ impl DrawText {
         let atlas_image_padding = glyph.atlas_image_padding;
         let atlas_image_size = atlas_image_bounds.size;
         let origin_in_dpxs = glyph.origin_in_dpxs;
-        let bounds_in_dpxs = Rect::new(
+        let bounds_in_dpxs = TextRect::new(
             Point::new(
                 origin_in_dpxs.x - atlas_image_padding as f32,
                 -origin_in_dpxs.y - atlas_image_size.height as f32 + (atlas_image_padding as f32),
@@ -536,8 +518,7 @@ impl DrawText {
     }
 }
 
-#[derive(Debug, Clone, Live, LiveHook, LiveRegister)]
-#[live_ignore]
+#[derive(Debug, Clone, Script, ScriptHook)]
 pub struct TextStyle {
     #[live]
     pub font_family: FontFamily,
@@ -547,7 +528,7 @@ pub struct TextStyle {
     pub line_spacing: f32,
 }
 
-#[derive(Debug, Clone, Live, LiveRegister, PartialEq)]
+#[derive(Debug, Clone, Script, ScriptHook, PartialEq)]
 pub struct FontFamily {
     #[rust]
     id: LiveId,
@@ -559,6 +540,7 @@ impl FontFamily {
     }
 }
 
+/*
 impl LiveHook for FontFamily {
     fn skip_apply(
         &mut self,

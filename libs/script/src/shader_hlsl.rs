@@ -1,6 +1,6 @@
 use std::fmt::Write;
 use crate::vm::ScriptVm;
-use crate::shader::{ShaderOutput, ShaderIoKind};
+use crate::shader::{ShaderOutput, ShaderIoKind, TextureType};
 
 impl ShaderOutput {
     pub fn hlsl_create_instance_struct(&self, vm: &ScriptVm, out: &mut String) {
@@ -159,9 +159,21 @@ impl ShaderOutput {
         let mut tex_idx = 0;
         let mut samp_idx = 0;
         for io in &self.io {
-            match io.kind {
-                ShaderIoKind::Texture => {
-                    writeln!(out, "Texture2D {} : register(t{});", io.name, tex_idx).ok();
+            match &io.kind {
+                ShaderIoKind::Texture(tex_type) => {
+                    let hlsl_type = match tex_type {
+                        TextureType::Texture1d => "Texture1D",
+                        TextureType::Texture1dArray => "Texture1DArray",
+                        TextureType::Texture2d => "Texture2D",
+                        TextureType::Texture2dArray => "Texture2DArray",
+                        TextureType::Texture3d => "Texture3D",
+                        TextureType::Texture3dArray => "Texture3D", // HLSL doesn't support 3D array textures
+                        TextureType::TextureCube => "TextureCube",
+                        TextureType::TextureCubeArray => "TextureCubeArray",
+                        TextureType::TextureDepth => "Texture2D",
+                        TextureType::TextureDepthArray => "Texture2DArray",
+                    };
+                    writeln!(out, "{} {} : register(t{});", hlsl_type, io.name, tex_idx).ok();
                     tex_idx += 1;
                 }
                 ShaderIoKind::Sampler(_) => {
