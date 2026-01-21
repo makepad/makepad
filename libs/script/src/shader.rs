@@ -640,10 +640,9 @@ impl ShaderFnCompiler{
                     self.stack.free_string(s);
                     return (ShaderType::Pod(sc.ty()), s2)
                 }
-                println!("CANT FIND {}", id);
-                // alright lets look it up on our script scope
-                //let )value = vm.heap.scope_value(self.script_scope, id.into(), &self.trap);
-                todo!()
+                self.trap.err_not_found();
+                self.stack.free_string(s);
+                return (ShaderType::Error(NIL), self.stack.new_string())
             },
             _=>(ty, s),
         }
@@ -1047,7 +1046,7 @@ impl ShaderFnCompiler{
                         // another script fn
                         ScriptFnPtr::Script(_fnptr) => {
                             let mut out = self.stack.new_string();
-                            write!(out, "(").ok();
+                            write!(out, "{}", output.backend.get_io_all(output.mode)).ok();
                             self.mes.push(ShaderMe::ScriptCall {
                                 name,
                                 out,
@@ -1479,6 +1478,7 @@ impl ShaderFnCompiler{
 
     fn handle_script_call(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, mut out: String, name: LiveId, fnobj: ScriptObject, sself: ShaderType, args: Vec<ScriptPodType>) {
         // we should compare number of arguments (needs to be exact)
+        // Note: fn_name already includes "(" at the end from compile_shader_def
         let (ret, fn_name) = Self::compile_shader_def(vm, output, name, fnobj, sself, args);
         out.insert_str(0, &fn_name);
         out.push_str(")");
@@ -1500,8 +1500,9 @@ impl ShaderFnCompiler{
                 }
                 ShaderMe::BuiltinCall { mut out, name, fnptr: _, args } => {
                     let ret = type_table_builtin(name, &args, &vm.code.builtins.pod, &self.trap);
+                    let mapped_name = output.backend.map_builtin_name(name);
                     let mut s = self.stack.new_string();
-                    write!(s, "{}(", name).ok();
+                    write!(s, "{}(", mapped_name).ok();
                     out.insert_str(0, &s);
                     self.stack.free_string(s);
                     out.push_str(")");
