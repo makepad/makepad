@@ -49,10 +49,9 @@ script_run!{
             // only pass the clipped position forward
             return self.draw_pass.camera_projection * (self.draw_pass.camera_view * (self.world))
         }
-                
+        
         transform_vertex: fn(rect_pos, rect_size){
             let clipped = self.geom.pos * rect_size + rect_pos;
-                        
             self.pos = (clipped - rect_pos) / rect_size
             // only pass the clipped position forward
             self.world = self.draw_list.view_transform * vec4(

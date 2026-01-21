@@ -1,6 +1,5 @@
 use {
     crate::{
-        script::vm::*,
         makepad_script::*,
         id_pool::*,
         makepad_error_log::*,
