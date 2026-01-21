@@ -671,20 +671,22 @@ impl ScriptThread{
                 self.trap.goto_next();                
             }
             Opcode::FN_ARG_TYPED=>{
-                let value = if opargs.is_nil(){
+                let _value = if opargs.is_nil(){
                     NIL
                 }
                 else{
                     self.pop_stack_resolved(heap)
                 };
-                let _ty = self.pop_stack_value().as_id().unwrap_or(id!());
+                let ty = self.pop_stack_resolved(heap);
                 let id = self.pop_stack_value().as_id().unwrap_or(id!());
                 match self.mes.last().unwrap(){
                     ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..}=>{
                         self.trap.err_unexpected();
                     }
                     ScriptMe::Object(obj)=>{
-                        heap.set_value(*obj, id.into(), value, &mut self.trap);
+                        // Store the resolved type as the parameter's value
+                        // This allows the shader compiler to know the declared type
+                        heap.set_value(*obj, id.into(), ty, &mut self.trap);
                     }
                 };
                 self.trap.goto_next();
