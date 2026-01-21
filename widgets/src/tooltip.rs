@@ -1,3 +1,5 @@
+use makepad_draw::event::TouchUpdateEvent;
+
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -87,12 +89,22 @@ impl Widget for Tooltip {
 
         self.content.handle_event(cx, event, scope);
 
-        // Hide the tooltip if the user taps/clicks, drags, or scrolls anywhere.
-        match event.hits_with_capture_overload(cx, self.draw_bg.area(), true) {
-            Hit::FingerUp(_)
-            | Hit::FingerMove(_)
-            | Hit::FingerScroll(_) => {
+        // Hide the tooltip if any kind of user interaction occurs (taps/clicks, drags, scrolls, etc).
+        //
+        // Typically you don't handle raw events, but we do so here because:
+        // 1. We don't want to impact the way that hit handling occurs for other views.
+        // 2. We don't care about the details of the hit, only the fact that it happened.
+        match event {
+            Event::BackPressed { .. }
+            | Event::MouseDown(_)
+            | Event::MouseUp(_)
+            | Event::Scroll(_) => {
                 self.hide(cx);
+            }
+            Event::TouchUpdate(TouchUpdateEvent { touches, .. }) => {
+                if touches.iter().any(|tp| matches!(tp.state, event::TouchState::Start)) {
+                    self.hide(cx);
+                }
             }
             _ => { }
         }
