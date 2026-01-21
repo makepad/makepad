@@ -659,7 +659,13 @@ impl ScriptThread{
                         self.trap.err_unexpected();
                     }
                     ScriptMe::Object(obj)=>{
-                        heap.set_value(*obj, id.into(), value, &mut self.trap);
+                        // Skip 'self' if it's the first argument (no args added yet)
+                        if id == id!(self) && heap.vec_len(*obj) == 0 {
+                            // ignore self as first argument
+                        }
+                        else {
+                            heap.set_value(*obj, id.into(), value, &mut self.trap);
+                        }
                     }
                 };
                 self.trap.goto_next();                
@@ -683,8 +689,33 @@ impl ScriptThread{
                 };
                 self.trap.goto_next();
             }
-            Opcode::FN_BODY=>{ // alright we have all the args now we get an expression
+            Opcode::FN_BODY_DYN=>{ // alright we have all the args now we get an expression
                 let jump_over_fn = opargs.to_u32();
+                if let Some(me) = self.mes.pop(){
+                    match me{
+                        ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..}=>{
+                            self.trap.err_unexpected();
+                            self.push_stack_unchecked(NIL);
+                        }
+                        ScriptMe::Object(obj)=>{
+                            heap.set_fn(obj, ScriptFnPtr::Script(
+                                ScriptIp{body: self.trap.ip.body, index:(self.trap.ip() + 1)}
+                            ));
+                            self.push_stack_unchecked(obj.into());
+                        }
+                    };
+                    self.trap.goto_rel(jump_over_fn);
+                }
+                else{
+                    self.trap.err_unexpected();
+                    self.push_stack_unchecked(NIL);
+                    self.trap.goto_next();
+                }
+            }
+            Opcode::FN_BODY_TYPED=>{ // typed function body - pop the type and ignore it for now
+                let jump_over_fn = opargs.to_u32();
+                // Pop the return type off the stack (as identifier) and ignore it
+                let _return_type = self.pop_stack_value();
                 if let Some(me) = self.mes.pop(){
                     match me{
                         ScriptMe::Call{..} | ScriptMe::Array(_) | ScriptMe::Pod{..}=>{

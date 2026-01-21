@@ -13,8 +13,8 @@ pub fn script(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn script_run(input: TokenStream) -> TokenStream {
-    script_run_impl(input)
+pub fn script_mod(input: TokenStream) -> TokenStream {
+    script_mod_impl(input)
 }
 
 

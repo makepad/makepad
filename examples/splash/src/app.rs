@@ -1,18 +1,20 @@
 use makepad_draw2::*;
 
 app_main!(App); 
-script_run!{
+script_mod!{
     use mod.std.*
+    
     #(App::script_component(vm)){
         draw_quad: mod.shaders.DrawQuad{
+            pixel: || #0f0
         }
     }
 }
 
 impl App{
     fn run(vm:&mut ScriptVm)->Self{
-        crate::makepad_draw2::script_run(vm);
-        App::from_script_run(vm, self::script_run)
+        crate::makepad_draw2::script_mod(vm);
+        App::from_script_mod(vm, self::script_mod)
     }
 }
 

@@ -2308,7 +2308,8 @@ impl ShaderFnCompiler{
             Opcode::FN_LET_ARGS=>{self.trap.err_not_impl();},
             Opcode::FN_ARG_DYN=>{self.trap.err_not_impl();},
             Opcode::FN_ARG_TYPED=>{self.trap.err_not_impl();},
-            Opcode::FN_BODY=>{self.trap.err_not_impl();},
+            Opcode::FN_BODY_DYN=>{self.trap.err_not_impl();},
+            Opcode::FN_BODY_TYPED=>{self.trap.err_not_impl();},
             Opcode::RETURN=>self.handle_return(vm, opargs),
             Opcode::RETURN_IF_ERR=>{self.trap.err_opcode_not_supported_in_shader();},
 // IF            

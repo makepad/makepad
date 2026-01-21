@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::any::Any;
 
 #[derive(Default, Debug)]
-pub struct ScriptBlock{
+pub struct ScriptMod{
     pub cargo_manifest_path: String,
     pub module_path: String,
     pub file: String,
@@ -25,9 +25,7 @@ pub struct ScriptBlock{
 }
 
 pub enum ScriptSource{
-    Block{
-        block: ScriptBlock,
-    },
+    Mod(ScriptMod),
     Streaming{
         code: String,
     }
@@ -85,11 +83,11 @@ impl ScriptCode{
         if let Some(body) = self.bodies.borrow().get(ip.body as usize){
             if let Some(Some(index)) = body.parser.source_map.get(ip.index as usize){
                 if let Some(rc) = body.tokenizer.token_index_to_row_col(*index){
-                    if let ScriptSource::Block{block} = &body.source{
+                    if let ScriptSource::Mod(script_mod) = &body.source{
                         return Some(
                             ScriptLoc{
-                                file: block.file.clone(),
-                                line: rc.0 + block.line as u32,
+                                file: script_mod.file.clone(),
+                                line: rc.0 + script_mod.line as u32,
                                 col: rc.1
                             }
                         )
@@ -197,14 +195,14 @@ impl <'a> ScriptVm<'a>{
     }
     
     
-    pub fn add_script_block(&mut self, new_block:ScriptBlock)->u16{
+    pub fn add_script_mod(&mut self, new_mod:ScriptMod)->u16{
         let scope = self.heap.new_with_proto(id!(scope).into());
         self.heap.set_object_deep(scope);
         self.heap.set_value_def(scope, id!(mod).into(), self.heap.modules.into());
         let me = self.heap.new_with_proto(id!(root_me).into());
                 
         let new_body = ScriptBody{
-            source: ScriptSource::Block{block:new_block},
+            source: ScriptSource::Mod(new_mod),
             tokenizer: ScriptTokenizer::default(),
             parser: ScriptParser::default(),
             scope,
@@ -212,11 +210,11 @@ impl <'a> ScriptVm<'a>{
         };
         let mut bodies = self.code.bodies.borrow_mut();
         for (i, body) in bodies.iter_mut().enumerate(){
-            if let ScriptSource::Block{block} = &body.source{
-                if let ScriptSource::Block{block:new_block} = &new_body.source{
-                    if  block.file == new_block.file &&
-                    block.line == new_block.line &&
-                    block.column == new_block.column{
+            if let ScriptSource::Mod(script_mod) = &body.source{
+                if let ScriptSource::Mod(new_mod)= &new_body.source{
+                    if  script_mod.file == new_mod.file &&
+                    script_mod.line == new_mod.line &&
+                    script_mod.column == new_mod.column{
                         *body = new_body;
                         return i as u16
                     }
@@ -228,14 +226,14 @@ impl <'a> ScriptVm<'a>{
         i as u16
     }
         
-    pub fn eval(&mut self, block: ScriptBlock)->ScriptValue{
-        let body_id = self.add_script_block(block);
+    pub fn eval(&mut self, script_mod: ScriptMod)->ScriptValue{
+        let body_id = self.add_script_mod(script_mod);
         let mut bodies = self.code.bodies.borrow_mut();
         let body = &mut bodies[body_id as usize];
                 
-        if let ScriptSource::Block{block} = &body.source{
-            body.tokenizer.tokenize(&block.code, &mut self.heap);
-            body.parser.parse(&body.tokenizer, &block.file, (block.line, block.column), &block.values);
+        if let ScriptSource::Mod(script_mod) = &body.source{
+            body.tokenizer.tokenize(&script_mod.code, &mut self.heap);
+            body.parser.parse(&body.tokenizer, &script_mod.file, (script_mod.line, script_mod.column), &script_mod.values);
             drop(bodies);
             // lets point our thread to it
             

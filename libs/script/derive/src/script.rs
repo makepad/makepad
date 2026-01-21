@@ -11,10 +11,10 @@ use {
     std::fmt::Write
 };
 
-pub fn script_run_impl(input: TokenStream) -> TokenStream {
+pub fn script_mod_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let ts = script_impl(input);
-    tb.add("pub fn script_run(vm:&mut ScriptVm)->ScriptValue{");
+    tb.add("pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{");
     tb.add("    let sb=").stream(Some(ts)).add(";");
     tb.add("    vm.eval(sb)");
     tb.add("}");
@@ -30,7 +30,7 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
     if let Some(span) = parser.span() {
         let (s, values) = token_parser_to_whitespace_matching_string(&mut parser, span);
         
-        tb.add("ScriptBlock {");
+        tb.add("ScriptMod {");
         tb.add("    cargo_manifest_path: env!(").string("CARGO_MANIFEST_DIR").add(").trim_start_matches(").string("\\\\?\\").add(").to_string(),");
         tb.add("    module_path :").ident_with_span("module_path", span).add("!().to_string(),");
         tb.add("    file:").ident_with_span("file", span).add("!().to_string().replace(").string("\\").add(",").string("/").add("),");
@@ -47,7 +47,7 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
         tb.add("}");
     }
     else{
-        tb.add("ScriptBlock::default()");
+        tb.add("ScriptMod::default()");
     }
     tb.end()
 }
