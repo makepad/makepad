@@ -11,7 +11,7 @@ pub struct QuadVertex{
     #[live] pub pos: Vec2f
 }
 
-pub fn script_run(vm:&mut ScriptVm)->ScriptValue{
+pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{
     let geom = vm.new_module(id!(geom));
     // lets make a Quad geometry here
     set_script_value_to_pod!(vm, geom.QuadVertex);

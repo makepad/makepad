@@ -23,7 +23,7 @@ pub(crate) fn log_with_level_makepad_platform(file_name:&str, line_start:u32, co
         }
         else{
             unsafe{js_console_log(buf.as_ptr() as u32, buf.len() as u32)};        
-        }    
+        }
     }
 
     if !Cx::has_studio_web_socket() {
@@ -52,7 +52,6 @@ pub(crate) fn log_with_level_makepad_platform(file_name:&str, line_start:u32, co
        }
     }
     else{
-        
        #[cfg(target_os = "android")]
         {
             use std::ffi::c_int;

@@ -60,9 +60,9 @@ impl Cx{
         r
     }*/
     
-    pub fn eval(&mut self, block: ScriptBlock)->ScriptValue{
+    pub fn eval(&mut self, script_mod: ScriptMod)->ScriptValue{
         self.with_vm_and_async(|vm|{
-            vm.eval(block)
+            vm.eval(script_mod)
         })
     }
 }

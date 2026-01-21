@@ -102,12 +102,14 @@ macro_rules! set_script_value_to_pod{
     ($vm:ident, $obj:ident.$id: ident=$val:expr)=>{
         {
             let v = $val::script_pod($vm).expect("Cant make a pod type");
+            $vm.heap.pod_type_name_set(v, id_lut!($id));
             $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), &$vm.thread.trap);
         }
     };
     ($vm:ident, $obj:ident.$id: ident)=>{
         {
             let v = $id::script_pod($vm).expect("Cant make a pod type");
+            $vm.heap.pod_type_name_set(v, id_lut!($id));
             $vm.heap.set_value(($obj).into(), id_lut!($id).into(), v.into(), &$vm.thread.trap);
         }
     };

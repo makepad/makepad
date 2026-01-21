@@ -8,7 +8,7 @@ use {
     },
 };
 
-script_run!{
+script_mod!{
     use mod.pod.*
     use mod.math.*
     use mod.shader
@@ -68,7 +68,11 @@ script_run!{
         }
                 
         fragment: fn(){
-            self.fb0 = #f00
+            self.fb0 = self.pixel()
+        }
+        
+        pixel: fn(){
+            #0f0
         }
     }
 }
