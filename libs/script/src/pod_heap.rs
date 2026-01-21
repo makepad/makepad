@@ -1400,19 +1400,18 @@ impl ScriptHeap{
                     ScriptPodTy::F32 | ScriptPodTy::F16 | ScriptPodTy::U32 | ScriptPodTy::I32 | ScriptPodTy::Bool =>{
                         if v1.elem_ty() != pod_ty_arg.ty{
                             trap.err_invalid_constructor_arg();
-                            return
                         }
                         // check field counter
                         if offset.field_index + 1 > v1.dims(){
                             trap.err_pod_too_much_data();
                         }
+                        offset.field_index += 1;
                         return
                     } 
                     // multi component
                     ScriptPodTy::Vec(v2)=>{
                         if v1.elem_ty() != v2.elem_ty() {
                             trap.err_invalid_constructor_arg();
-                            return
                         }
                         // check field counter
                         if offset.field_index + v2.dims() > v1.dims(){
@@ -1423,6 +1422,7 @@ impl ScriptHeap{
                     }
                     _=>{
                         trap.err_invalid_constructor_arg();
+                        offset.field_index += 1;
                         return
                     }
                 }
