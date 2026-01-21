@@ -30,7 +30,7 @@ script_mod!{
         clip_and_transform_vertex: fn(rect_pos, rect_size){
             let clipped = clamp(
                 clamp(
-                    self.geom.pos * rect_size + rect_pos,
+                    self.geom.pos * rect_size + rect_pos ,
                     self.draw_clip.xy,
                     self.draw_clip.zw
                 )
@@ -64,7 +64,7 @@ script_mod!{
         }
                 
         vertex: fn() {
-            self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos + vec2(self.test), self.rect_size)
         }
                 
         fragment: fn(){

@@ -36,8 +36,8 @@ impl ShaderBackend{
                         SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i[_iov.iid].")),
                         SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u->")),
                         SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("_io.u_")),
-                        SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iov.v.")),
-                        SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v._position")),
+                        SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iov.v->")),
+                        SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v->_position")),
                         SHADER_IO_VERTEX_BUFFER=>(ShaderIoKind::VertexBuffer, ShaderIoPrefix::Prefix("_io.vb[_iov.vid].")),
                         SHADER_IO_FRAGMENT_OUTPUT_0=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("")),
                         SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("_io.")),
@@ -79,8 +79,8 @@ impl ShaderBackend{
                              SHADER_IO_DYN_INSTANCE=>(ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("input.i_")),
                              SHADER_IO_DYN_UNIFORM=>(ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("u_")),
                              SHADER_IO_UNIFORM_BUFFER=>(ShaderIoKind::UniformBuffer, ShaderIoPrefix::Prefix("u_")),
-                             SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iov.v.")),
-                             SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v._position")),
+                            SHADER_IO_VARYING=>(ShaderIoKind::Varying, ShaderIoPrefix::Prefix("_iov.v->")),
+                            SHADER_IO_VERTEX_POSITION=>(ShaderIoKind::VertexPosition, ShaderIoPrefix::Full("_iov.v->_position")),
                              SHADER_IO_VERTEX_BUFFER=>(ShaderIoKind::VertexBuffer, ShaderIoPrefix::Prefix("input.vb_")),
                              SHADER_IO_TEXTURE=>(ShaderIoKind::Texture, ShaderIoPrefix::Prefix("")),
                              SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("")),
@@ -209,6 +209,31 @@ impl ShaderBackend{
                 id_lut!(float4x4);
                 id_lut!(atomic_uint);
                 id_lut!(atomic_int);
+                // Packed types for Metal instance/vertex buffers
+                id_lut!(packed_float2);
+                id_lut!(packed_float3);
+                id_lut!(packed_float4);
+                id_lut!(packed_half2);
+                id_lut!(packed_half3);
+                id_lut!(packed_half4);
+                id_lut!(packed_uint2);
+                id_lut!(packed_uint3);
+                id_lut!(packed_uint4);
+                id_lut!(packed_int2);
+                id_lut!(packed_int3);
+                id_lut!(packed_int4);
+                id_lut!(packed_bool2);
+                id_lut!(packed_bool3);
+                id_lut!(packed_bool4);
+                id_lut!(packed_float2x2);
+                id_lut!(packed_float2x3);
+                id_lut!(packed_float2x4);
+                id_lut!(packed_float3x2);
+                id_lut!(packed_float3x3);
+                id_lut!(packed_float3x4);
+                id_lut!(packed_float4x2);
+                id_lut!(packed_float4x3);
+                id_lut!(packed_float4x4);
                 // Builtin function names
                 id_lut!(dfdx);
                 id_lut!(dfdy);
@@ -285,6 +310,48 @@ impl ShaderBackend{
         }
     }
 
+    /// Map pod type names to packed versions for Metal instance buffers.
+    /// Packed types match CPU-side repr(C) struct alignment.
+    pub fn map_packed_pod_name(&self, name_in:LiveId)->LiveId{
+        match self{
+            Self::Metal=>{
+                match name_in{
+                    id!(f32)=>id!(float),
+                    id!(f16)=>id!(half),
+                    id!(u32)=>id!(uint),
+                    id!(i32)=>id!(int),
+                    id!(vec2f)=>id!(packed_float2),
+                    id!(vec3f)=>id!(packed_float3),
+                    id!(vec4f)=>id!(packed_float4),
+                    id!(vec2h)=>id!(packed_half2),
+                    id!(vec3h)=>id!(packed_half3),
+                    id!(vec4h)=>id!(packed_half4),
+                    id!(vec2u)=>id!(packed_uint2),
+                    id!(vec3u)=>id!(packed_uint3),
+                    id!(vec4u)=>id!(packed_uint4),
+                    id!(vec2i)=>id!(packed_int2),
+                    id!(vec3i)=>id!(packed_int3),
+                    id!(vec4i)=>id!(packed_int4),
+                    id!(vec2b)=>id!(packed_bool2),
+                    id!(vec3b)=>id!(packed_bool3),
+                    id!(vec4b)=>id!(packed_bool4),
+                    // Matrices use packed column vectors
+                    id!(mat2x2f)=>id!(packed_float2x2),
+                    id!(mat2x3f)=>id!(packed_float2x3),
+                    id!(mat2x4f)=>id!(packed_float2x4),
+                    id!(mat3x2f)=>id!(packed_float3x2),
+                    id!(mat3x3f)=>id!(packed_float3x3),
+                    id!(mat3x4f)=>id!(packed_float3x4),
+                    id!(mat4x2f)=>id!(packed_float4x2),
+                    id!(mat4x3f)=>id!(packed_float4x3),
+                    id!(mat4x4f)=>id!(packed_float4x4),
+                    x=>x
+                }
+            }
+            _=>self.map_pod_name(name_in)
+        }
+    }
+    
     pub fn map_pod_name(&self, name_in:LiveId)->LiveId{
         match self{
             Self::Metal | Self::Hlsl=>{
@@ -481,6 +548,32 @@ impl ShaderBackend{
             data: pod_ty.clone()
         };
         self.pod_type_name(&inline, out);
+    }
+    
+    /// Output packed type name for instance buffer structs (Metal only).
+    /// Uses packed_float2, packed_float3, etc. to match CPU struct alignment.
+    pub fn pod_type_name_packed_from_ty(&self, heap: &ScriptHeap, ty: ScriptPodType, out: &mut String) {
+        let pod_ty = heap.pod_type_ref(ty);
+        let inline = ScriptPodTypeInline{
+            self_ref: ty,
+            data: pod_ty.clone()
+        };
+        self.pod_type_name_packed(&inline, out);
+    }
+    
+    /// Output packed type name (for instance buffer structs in Metal).
+    pub fn pod_type_name_packed(&self, ty: &ScriptPodTypeInline, out:&mut String) {
+        match &ty.data.ty {
+            ScriptPodTy::F32 => write!(out, "{}", self.map_packed_pod_name(id!(f32))).ok().unwrap_or(()),
+            ScriptPodTy::F16 => write!(out, "{}", self.map_packed_pod_name(id!(f16))).ok().unwrap_or(()),
+            ScriptPodTy::U32 => write!(out, "{}", self.map_packed_pod_name(id!(u32))).ok().unwrap_or(()),
+            ScriptPodTy::I32 => write!(out, "{}", self.map_packed_pod_name(id!(i32))).ok().unwrap_or(()),
+            ScriptPodTy::Bool => write!(out, "{}", self.map_packed_pod_name(id!(bool))).ok().unwrap_or(()),
+            ScriptPodTy::Vec(v) => write!(out, "{}", self.map_packed_pod_name(v.name())).ok().unwrap_or(()),
+            ScriptPodTy::Mat(m) => write!(out, "{}", self.map_packed_pod_name(m.name())).ok().unwrap_or(()),
+            // For other types, fall back to regular type names
+            _ => self.pod_type_name(ty, out)
+        }
     }
 
     pub fn pod_type_name(&self, ty: &ScriptPodTypeInline, out:&mut String) {

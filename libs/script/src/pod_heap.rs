@@ -59,7 +59,15 @@ impl ScriptHeap{
     
     pub fn pod_type_ref(&self, ty:ScriptPodType)->&ScriptPodTypeData{
         &self.pod_types[ty.index as usize]
-    }    
+    }
+    
+    /// Get pod data for a ScriptPod value.
+    /// Returns the pod type and data slice for extracting values.
+    pub fn pod_data(&self, pod: ScriptPod) -> (&ScriptPodTypeData, &[u32]) {
+        let pod_data = &self.pods[pod.index as usize];
+        let pod_type = &self.pod_types[pod_data.ty.index as usize];
+        (pod_type, &pod_data.data)
+    }
         
     pub fn pod_type_name(&self, ty:ScriptPodType)->Option<LiveId>{
         let ty = &self.pod_types[ty.index as usize];
