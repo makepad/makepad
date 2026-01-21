@@ -31,7 +31,17 @@ fn main() {
         "macos"=>{
             use std::process::Command;
             let out_dir = env::var("OUT_DIR").unwrap();
-            if !Command::new("clang").args(&["src/os/apple/metal_xpc.m", "-c", "-o"])
+            // Extract architecture from target triple (e.g., "aarch64-apple-darwin" -> "arm64")
+            let arch = if target.starts_with("aarch64") {
+                "arm64"
+            } else if target.starts_with("x86_64") {
+                "x86_64"
+            } else {
+                panic!("Unsupported architecture: {}", target);
+            };
+
+            if !Command::new("clang")
+                .args(&["-arch", arch, "src/os/apple/metal_xpc.m", "-c", "-o"])
                 .arg(&format!("{}/metal_xpc.o", out_dir))
                 .status().unwrap().success() {
                 panic!("CLANG FAILED");
