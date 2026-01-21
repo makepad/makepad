@@ -1,6 +1,6 @@
 use std::fmt::Write;
 use crate::vm::ScriptVm;
-use crate::shader::{ShaderOutput, ShaderIoKind};
+use crate::shader::{ShaderOutput, ShaderIoKind, TextureType};
 
 impl ShaderOutput {
     pub fn metal_create_io_struct(&self, vm: &ScriptVm, out: &mut String) {
@@ -9,8 +9,20 @@ impl ShaderOutput {
         writeln!(out, "    constant IoInstance *i;").ok();
         for io in &self.io {
             match &io.kind {
-                ShaderIoKind::Texture => {
-                    writeln!(out, "    texture2d<float> {};", io.name).ok();
+                ShaderIoKind::Texture(tex_type) => {
+                    let metal_type = match tex_type {
+                        TextureType::Texture1d => "texture1d<float>",
+                        TextureType::Texture1dArray => "texture1d_array<float>",
+                        TextureType::Texture2d => "texture2d<float>",
+                        TextureType::Texture2dArray => "texture2d_array<float>",
+                        TextureType::Texture3d => "texture3d<float>",
+                        TextureType::Texture3dArray => "texture3d<float>", // Metal doesn't support 3D array textures
+                        TextureType::TextureCube => "texturecube<float>",
+                        TextureType::TextureCubeArray => "texturecube_array<float>",
+                        TextureType::TextureDepth => "depth2d<float>",
+                        TextureType::TextureDepthArray => "depth2d_array<float>",
+                    };
+                    writeln!(out, "    {} {};", metal_type, io.name).ok();
                 }
                 ShaderIoKind::Sampler(_) => {
                     writeln!(out, "    sampler {};", io.name).ok();
@@ -135,9 +147,21 @@ impl ShaderOutput {
         let mut tex_idx = 0;
         let mut samp_idx = 0;
         for io in &self.io {
-            match io.kind {
-                ShaderIoKind::Texture => {
-                    writeln!(out, "    texture2d<float> {} [[texture({})]],", io.name, tex_idx).ok();
+            match &io.kind {
+                ShaderIoKind::Texture(tex_type) => {
+                    let metal_type = match tex_type {
+                        TextureType::Texture1d => "texture1d<float>",
+                        TextureType::Texture1dArray => "texture1d_array<float>",
+                        TextureType::Texture2d => "texture2d<float>",
+                        TextureType::Texture2dArray => "texture2d_array<float>",
+                        TextureType::Texture3d => "texture3d<float>",
+                        TextureType::Texture3dArray => "texture3d<float>",
+                        TextureType::TextureCube => "texturecube<float>",
+                        TextureType::TextureCubeArray => "texturecube_array<float>",
+                        TextureType::TextureDepth => "depth2d<float>",
+                        TextureType::TextureDepthArray => "depth2d_array<float>",
+                    };
+                    writeln!(out, "    {} {} [[texture({})]],", metal_type, io.name, tex_idx).ok();
                     tex_idx += 1;
                 }
                 ShaderIoKind::Sampler(_) => {
@@ -158,14 +182,11 @@ impl ShaderOutput {
         writeln!(out, "    _io.u = u;").ok();
         
         for io in &self.io {
-            match io.kind {
+            match &io.kind {
                 ShaderIoKind::UniformBuffer => {
                     writeln!(out, "    _io.u_{} = u_{};", io.name, io.name).ok();
                 }
-                ShaderIoKind::Texture => {
-                    writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
-                }
-                ShaderIoKind::Sampler(_) => {
+                ShaderIoKind::Texture(_) | ShaderIoKind::Sampler(_) => {
                     writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
                 }
                 _=>()
@@ -206,10 +227,22 @@ impl ShaderOutput {
         let mut tex_idx = 0;
         let mut samp_idx = 0;
         for io in &self.io {
-            match io.kind {
-                ShaderIoKind::Texture => {
+            match &io.kind {
+                ShaderIoKind::Texture(tex_type) => {
+                    let metal_type = match tex_type {
+                        TextureType::Texture1d => "texture1d<float>",
+                        TextureType::Texture1dArray => "texture1d_array<float>",
+                        TextureType::Texture2d => "texture2d<float>",
+                        TextureType::Texture2dArray => "texture2d_array<float>",
+                        TextureType::Texture3d => "texture3d<float>",
+                        TextureType::Texture3dArray => "texture3d<float>",
+                        TextureType::TextureCube => "texturecube<float>",
+                        TextureType::TextureCubeArray => "texturecube_array<float>",
+                        TextureType::TextureDepth => "depth2d<float>",
+                        TextureType::TextureDepthArray => "depth2d_array<float>",
+                    };
                     writeln!(out, ",").ok();
-                    write!(out, "    texture2d<float> {} [[texture({})]]", io.name, tex_idx).ok();
+                    write!(out, "    {} {} [[texture({})]]", metal_type, io.name, tex_idx).ok();
                     tex_idx += 1;
                 }
                 ShaderIoKind::Sampler(_) => {
@@ -229,14 +262,11 @@ impl ShaderOutput {
         writeln!(out, "    _io.u = u;").ok();
         
         for io in &self.io {
-            match io.kind {
+            match &io.kind {
                 ShaderIoKind::UniformBuffer => {
                     writeln!(out, "    _io.u_{} = u_{};", io.name, io.name).ok();
                 }
-                ShaderIoKind::Texture => {
-                    writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
-                }
-                ShaderIoKind::Sampler(_) => {
+                ShaderIoKind::Texture(_) | ShaderIoKind::Sampler(_) => {
                     writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
                 }
                 _=>()

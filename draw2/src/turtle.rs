@@ -466,7 +466,7 @@ pub struct Align {
 }
 
 /// Specifies the direction in which walks are laid out.
-#[derive(Copy, Clone, Debug, Script, ScriptHook)]
+#[derive(Copy, Clone, Debug, Script, ScriptHook, PartialEq)]
 pub enum Flow {
     // Walks are laid out from left to right.
     #[pick {
