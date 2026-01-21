@@ -20,7 +20,7 @@ macro_rules!app_main {
     ( $ app: ident) => {
         #[cfg(not(any(target_arch = "wasm32", target_os="android", target_env="ohos")))]
         pub fn app_main() {
-            Cx::init_log();
+            //Cx::init_log();
             if Cx::pre_start(){
                 return
             }

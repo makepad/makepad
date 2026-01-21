@@ -209,6 +209,12 @@ impl ShaderBackend{
                 id_lut!(float4x4);
                 id_lut!(atomic_uint);
                 id_lut!(atomic_int);
+                // Builtin function names
+                id_lut!(dfdx);
+                id_lut!(dfdy);
+                id_lut!(ddx);
+                id_lut!(ddy);
+                id_lut!(rsqrt);
             }
             Self::Glsl=>{
                 id_lut!(float);
@@ -229,11 +235,56 @@ impl ShaderBackend{
                 id_lut!(mat2);
                 id_lut!(mat3);
                 id_lut!(mat4);
+                // Builtin function names
+                id_lut!(dFdx);
+                id_lut!(dFdy);
+                id_lut!(inversesqrt);
             }
-            Self::Wgsl=>{}
+            Self::Wgsl=>{
+                // Builtin function names
+                id_lut!(dpdx);
+                id_lut!(dpdy);
+            }
         }
     }
     
+    pub fn map_builtin_name(&self, name_in:LiveId)->LiveId{
+        match self{
+            Self::Metal=>{
+                match name_in{
+                    id!(dFdx)=>id!(dfdx),
+                    id!(dFdy)=>id!(dfdy),
+                    id!(inverseSqrt)=>id!(rsqrt),
+                    x=>x
+                }
+            }
+            Self::Hlsl=>{
+                match name_in{
+                    id!(dFdx)=>id!(ddx),
+                    id!(dFdy)=>id!(ddy),
+                    id!(inverseSqrt)=>id!(rsqrt),
+                    x=>x
+                }
+            }
+            Self::Glsl=>{
+                match name_in{
+                    // GLSL uses dFdx/dFdy natively
+                    id!(inverseSqrt)=>id!(inversesqrt),
+                    x=>x
+                }
+            }
+            Self::Wgsl=>{
+                match name_in{
+                    // WGSL uses dpdx/dpdy
+                    id!(dFdx)=>id!(dpdx),
+                    id!(dFdy)=>id!(dpdy),
+                    id!(inverseSqrt)=>id!(inverseSqrt),
+                    x=>x
+                }
+            }
+        }
+    }
+
     pub fn map_pod_name(&self, name_in:LiveId)->LiveId{
         match self{
             Self::Metal | Self::Hlsl=>{
