@@ -1430,9 +1430,35 @@ impl ScriptParser{
                             }
                         }
                         if last.is_heq_prio(next_state){
-                            self.state.push(State::EmitOp{what_op:op, index:self.index});
-                            self.state.push(State::BeginExpr{required:true});
+                            // Push `last` back first
                             self.state.push(last);
+                            
+                            // Find the correct position to insert the new operator.
+                            // It should be inserted below ALL EmitOp states that have higher or equal priority.
+                            // This ensures correct operator precedence for expressions like t.x*t.y + t.z*t.w
+                            let op_order = State::operator_order(op);
+                            let is_assign = State::is_assign_operator(op);
+                            let mut insert_pos = self.state.len();
+                            for i in (0..self.state.len()).rev() {
+                                if let State::EmitOp{what_op, ..} = &self.state[i] {
+                                    // If both are assignment operators, don't treat as heq_prio (right-to-left associativity)
+                                    let pending_is_assign = State::is_assign_operator(*what_op);
+                                    if pending_is_assign && is_assign {
+                                        break;
+                                    }
+                                    if State::operator_order(*what_op) <= op_order {
+                                        insert_pos = i;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            
+                            // Insert new operator and BeginExpr at the found position
+                            self.state.insert(insert_pos, State::BeginExpr{required:true});
+                            self.state.insert(insert_pos, State::EmitOp{what_op:op, index:self.index});
                             return 1
                         }
                         else{
