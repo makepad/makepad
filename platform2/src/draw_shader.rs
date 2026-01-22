@@ -307,8 +307,8 @@ pub struct CxDrawShaderMapping {
     pub instances: DrawShaderInputs,
     pub dyn_instances: DrawShaderInputs,
     pub dyn_uniforms: DrawShaderInputs,
+    pub geometries: DrawShaderInputs,
     // pub const_table: DrawShaderConstTable,
-    // pub geometries: DrawShaderInputs,
     // pub live_instances: DrawShaderInputs,
     // pub live_uniforms: DrawShaderInputs,
     // pub draw_call_uniforms: DrawShaderInputs,
@@ -334,6 +334,8 @@ impl CxDrawShaderMapping {
         let mut dyn_instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         // Use platform-specific packing for uniforms
         let mut dyn_uniforms = DrawShaderInputs::new(uniform_packing());
+        // Geometries for vertex buffer fields
+        let mut geometries = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         let mut textures = Vec::new();
         
         let mut rect_pos = None;
@@ -381,6 +383,15 @@ impl CxDrawShaderMapping {
             }
         }
         
+        // Process VertexBuffer (geometry) fields
+        for io in &output.io {
+            if let ShaderIoKind::VertexBuffer = io.kind {
+                let pod_ty = heap.pod_type_ref(io.ty);
+                let slots = pod_ty.ty.slots();
+                geometries.push(io.name, slots);
+            }
+        }
+        
         // Process Texture and Sampler fields
         for io in &output.io {
             match &io.kind {
@@ -396,6 +407,7 @@ impl CxDrawShaderMapping {
         instances.finalize();
         dyn_instances.finalize();
         dyn_uniforms.finalize();
+        geometries.finalize();
         
         // Get uniform buffer bindings from the shader output
         // (must call assign_uniform_buffer_indices before from_shader_output)
@@ -407,6 +419,7 @@ impl CxDrawShaderMapping {
             instances,
             dyn_instances,
             dyn_uniforms,
+            geometries,
             textures,
             uses_time: false, // TODO: detect time usage in shader
             rect_pos,

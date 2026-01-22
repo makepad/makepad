@@ -2,7 +2,6 @@ use crate::{
     makepad_script::*,
     makepad_script::shader::*,
     makepad_script::shader_backend::*,
-    makepad_live_id::*,
     makepad_math::*,
     os::{
         windows::win32_app::{TRUE, FALSE,},
@@ -1113,7 +1112,6 @@ pub struct CxOsGeometry {
 // Shader compilation for HLSL
 impl DrawVars {
     pub (crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &mut ApplyScope, value: ScriptValue) {
-        use std::fmt::Write;
         
         // Compile an HLSL shader
         if let Some(io_self) = value.as_object() {
