@@ -10,6 +10,7 @@ workspace.members = [
     "examples/ui_zoo",
     "examples/news_feed",
     "examples/web_cam",
+    "examples/arracing",
     "examples/splash",
     "examples/text_flow",
     "examples/teamtalk",
