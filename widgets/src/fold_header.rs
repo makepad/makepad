@@ -100,7 +100,7 @@ impl Widget for FoldHeader {
             );
             self.draw_state.set(DrawState::DrawBody);
         }
-        if self.opened == 0.0 {
+        if self.opened < 0.1 {
             self.body.set_visible(cx, false);
         } else {
             self.body.set_visible(cx, true);
