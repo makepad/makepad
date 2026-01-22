@@ -300,4 +300,27 @@ impl ShaderOutput {
         }
         writeln!(out, "}};").ok();
     }
+    
+    pub fn metal_create_sampler_decls(&self, out: &mut String) {
+        use crate::shader::{SamplerFilter, SamplerAddress, SamplerCoord};
+        
+        for (idx, sampler) in self.samplers.iter().enumerate() {
+            let filter = match sampler.filter {
+                SamplerFilter::Nearest => "nearest",
+                SamplerFilter::Linear => "linear",
+            };
+            let address = match sampler.address {
+                SamplerAddress::Repeat => "repeat",
+                SamplerAddress::ClampToEdge => "clamp_to_edge",
+                SamplerAddress::ClampToZero => "clamp_to_zero",
+                SamplerAddress::MirroredRepeat => "mirrored_repeat",
+            };
+            let coord = match sampler.coord {
+                SamplerCoord::Normalized => "normalized",
+                SamplerCoord::Pixel => "pixel",
+            };
+            writeln!(out, "constexpr sampler _s{}(filter::{}, address::{}, coord::{});", 
+                idx, filter, address, coord).ok();
+        }
+    }
 }
