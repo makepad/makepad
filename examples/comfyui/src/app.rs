@@ -1,7 +1,7 @@
 use makepad_draw2::*;
 
 app_main!(App); 
-script_run!{
+script_mod!{
     use mod.std.*;
     #(App::script_api(vm)){
     }
@@ -9,8 +9,8 @@ script_run!{
 
 impl App{
     fn run(vm:&mut ScriptVm)->Self{
-        crate::makepad_draw2::script_run(vm);
-        let r = App::script_run(vm, script_run);
+        crate::makepad_draw2::script_mod(vm);
+        let r = App::from_script_mod(vm, script_mod);
         r
     }
 }
@@ -18,7 +18,7 @@ impl App{
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[script] window: WindowHandle,
-    #[script] pass: Pass,
+    #[script] pass: DrawPass,
     #[script] depth_texture: Texture,
    // #[script] draw_quad: DrawQuad,
     #[script] main_draw_list: DrawList2d,
@@ -308,7 +308,7 @@ impl MatchEvent for App{
             size: TextureSize::Auto,
             initial: true,
         });
-        self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
+        self.pass.set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
         self.pass.set_window_clear_color(cx, vec4(0.0, 0.0, 1.0, 0.0));
     }
     

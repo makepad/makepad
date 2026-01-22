@@ -30,7 +30,12 @@ script_mod!{
     use mod.shader
     use mod.draw
     use mod.geom
-            
+    use mod.res
+    
+    mod.fonts = {
+        latin_regular: {data: res.from_crate("self","resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
+    }
+    
     mod.shaders.DrawText = #(DrawText::script_shader(vm)){
         vertex_pos: shader.vertex_position(vec4f)
         fb0: shader.fragment_output(0, vec4f)
@@ -42,8 +47,6 @@ script_mod!{
         pos: shader.varying(vec2f)
         t: shader.varying(vec2f)
         world: shader.varying(vec4f)
-        
-        
         
         radius: shader.uniform(float)
         cutoff: shader.uniform(float)
