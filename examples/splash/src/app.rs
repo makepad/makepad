@@ -4,15 +4,15 @@ app_main!(App);
 script_mod!{
     use mod.pod.*
     use mod.math.*
-    use mod.std.*
     use mod.sdf.*
+    
     #(App::script_component(vm)){
         draw_quad: mod.shaders.DrawQuad{
             test: mod.shader.instance(0.5)
             pixel: ||{
                 let sdf = Sdf2d.viewport(self.pos*self.rect_size)
-                sdf.circle(30 30 25)
-                sdf.fill(#0f0)
+                sdf.circle(40 40 35)
+                sdf.fill(mix(#0f0 #f00 self.pos.y))
                 sdf.result
             }
         }
