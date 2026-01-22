@@ -689,7 +689,10 @@ pub struct FingerMoveEvent {
     pub abs: Vec2d,
     pub digit_id: DigitId,
     pub device: DigitDevice,
-    
+    /// Whether a platform-native long press has occurred between
+    /// the original finger-down event and this finger-move event.
+    pub has_long_press_occurred: bool,
+
     pub tap_count: u32,
     pub modifiers: KeyModifiers,
     pub time: f64,
@@ -1084,6 +1087,7 @@ impl Event {
                                                     abs: t.abs,
                                                     digit_id,
                                                     device,
+                                                    has_long_press_occurred: capture.has_long_press_occurred,
                                                     tap_count,
                                                     modifiers: e.modifiers,
                                                     time: e.time,
@@ -1135,6 +1139,7 @@ impl Event {
                                     abs: t.abs,
                                     digit_id,
                                     device,
+                                    has_long_press_occurred: capture.has_long_press_occurred,
                                     tap_count,
                                     modifiers: e.modifiers,
                                     time: e.time,
@@ -1176,6 +1181,7 @@ impl Event {
                                             abs: e.abs,
                                             digit_id,
                                             device,
+                                            has_long_press_occurred: capture.has_long_press_occurred,
                                             tap_count,
                                             modifiers: e.modifiers,
                                             time: e.time,
@@ -1229,6 +1235,7 @@ impl Event {
                             abs: e.abs,
                             digit_id,
                             device,
+                            has_long_press_occurred: capture.has_long_press_occurred,
                             tap_count,
                             modifiers: e.modifiers,
                             time: e.time,
