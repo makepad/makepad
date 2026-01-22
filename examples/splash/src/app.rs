@@ -10,11 +10,13 @@ script_mod!{
         draw_quad: mod.shaders.DrawQuad{
             test: mod.shader.instance(0.5)
             pixel: ||{
-                let x = Sdf2d.viewport(self.pos*self.rect_size)
-                x.circle(30,30,25)
-                x.fill(#0f0)
-                x.result
+                let sdf = Sdf2d.viewport(self.pos*self.rect_size)
+                sdf.circle(30 30 25)
+                sdf.fill(#0f0)
+                sdf.result
             }
+        }
+        draw_text: mod.shaders.DrawText{
         }
     }
 }
