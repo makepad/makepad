@@ -43,16 +43,13 @@ script_mod!{
         t: shader.varying(vec2f)
         world: shader.varying(vec4f)
         
-        color: shader.instance(#ffff),
+        
         
         radius: shader.uniform(float)
         cutoff: shader.uniform(float)
         
-        grayscale_atlas_size: shader.uniform(vec2)
-        color_atlas_size: shader.uniform(vec2)
-        
-        grayscale_texture: shader.texture_2d()
-        color_texture: shader.texture_2d()
+        grayscale_texture: shader.texture_2d(float)
+        color_texture: shader.texture_2d(float)
         
         vertex: fn() {
             let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
@@ -71,10 +68,10 @@ script_mod!{
         }
 
         sdf: fn(scale, p) {
-            let s = sample2d(self.grayscale_texture, p).x;
+            let s = self.grayscale_texture.sample_2d(p).x;
+            //let s = sample2d(self.grayscale_texture, p).x;
             // 1.1 factor to compensate for text being magically too dark after the fontstack refactor
-            s = clamp(((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5)*1.1, 0.0, 1.0)
-            return s
+            return clamp(((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5)*1.1, 0.0, 1.0)
         }
 
         get_color: fn() {
@@ -91,12 +88,12 @@ script_mod!{
             let color = #0000
             if self.texture_index == 0 {
                 // TODO: Support non square atlases?
-                let scale = (dxt + dyt) * self.grayscale_atlas_size.x * 0.5
+                let scale = (dxt + dyt) * self.grayscale_texture.size().x * 0.5
                 let s = self.sdf(scale, self.t.xy)
                 let c = self.get_color()
                 return s * vec4(c.rgb * c.a, c.a)
             } else {
-                let c = sample2d(self.color_texture, self.t)
+                let c = self.color_texture.sample_2d(self.t)
                 return vec4(c.rgb * c.a, c.a)
             }
         }
@@ -366,12 +363,12 @@ impl DrawText {
         let sdfer_settings = rasterizer.sdfer().settings();
         self.draw_vars.dyn_uniforms[0] = sdfer_settings.radius;
         self.draw_vars.dyn_uniforms[1] = sdfer_settings.cutoff;
-        let grayscale_atlas_size = rasterizer.grayscale_atlas().size();
-        self.draw_vars.dyn_uniforms[2] = grayscale_atlas_size.width as f32;
-        self.draw_vars.dyn_uniforms[3] = grayscale_atlas_size.height as f32;
-        let color_atlas_size = rasterizer.color_atlas().size();
-        self.draw_vars.dyn_uniforms[4] = color_atlas_size.width as f32;
-        self.draw_vars.dyn_uniforms[5] = color_atlas_size.height as f32;
+        //let grayscale_atlas_size = rasterizer.grayscale_atlas().size();
+        //self.draw_vars.dyn_uniforms[2] = grayscale_atlas_size.width as f32;
+        //self.draw_vars.dyn_uniforms[3] = grayscale_atlas_size.height as f32;
+        //let color_atlas_size = rasterizer.color_atlas().size();
+        //self.draw_vars.dyn_uniforms[4] = color_atlas_size.width as f32;
+        //self.draw_vars.dyn_uniforms[5] = color_atlas_size.height as f32;
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
     }

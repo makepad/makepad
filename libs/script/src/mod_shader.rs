@@ -205,6 +205,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
             output.metal_create_io_struct(vm, &mut out);
             output.metal_create_varying_struct(vm, &mut out);
             output.metal_create_vertex_buffer_struct(vm, &mut out);
+            output.metal_create_sampler_decls(&mut out);
             output.metal_create_io_vertex_struct(vm, &mut out);
             output.metal_create_vertex_fn(vm, &mut out);
             output.metal_create_io_fragment_struct(vm, &mut out);

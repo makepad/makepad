@@ -804,6 +804,7 @@ impl DrawVars{
             output.metal_create_io_vertex_struct(vm, &mut out);
             output.metal_create_io_framebuffer_struct(vm, &mut out);
             output.metal_create_io_fragment_struct(vm, &mut out);
+            output.metal_create_sampler_decls(&mut out);
             output.create_functions(&mut out);
             output.metal_create_vertex_fn(vm, &mut out);
             output.metal_create_fragment_main_fn(vm, &mut out);

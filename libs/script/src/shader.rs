@@ -38,7 +38,10 @@ pub struct ShaderPodArg{
 
 #[derive(Debug)]
 pub enum ShaderMe{
-    FnBody{ret:Option<ScriptPodType>},
+    FnBody{
+        ret: Option<ScriptPodType>,
+        escaped: bool,  // true when all code paths have returned
+    },
     LoopBody,
     ForLoop{
         var_id: LiveId,
@@ -48,12 +51,20 @@ pub enum ShaderMe{
         start_pos: usize,
         stack_depth: usize,
         phi: Option<String>,
-        phi_type: Option<ShaderType>
+        phi_type: Option<ShaderType>,
+        has_return: bool,         // true if current branch has a return
+        if_branch_returned: bool, // remembers if the if-branch returned (used when in else)
     },
     BuiltinCall{name:LiveId, fnptr: NativeId, args:Vec<(ShaderType, String)>},
     ScriptCall{out:String, name:LiveId, fnobj: ScriptObject, sself:ShaderType, args:Vec<ShaderType>},
     Pod{pod_ty:ScriptPodType, args: Vec<ShaderPodArg>},
     ArrayConstruct{args:Vec<String>, elem_ty:Option<ScriptPodType>},
+    TextureBuiltin{
+        method_id: LiveId,
+        tex_type: TextureType,
+        texture_expr: String,
+        args: Vec<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -63,6 +74,7 @@ pub enum ShaderType{
     PodType(ScriptPodType),
     Pod(ScriptPodType),
     PodPtr(ScriptPodType), // Pointer to pod type (used for uniform buffers in Metal)
+    Texture(TextureType), // Texture type for method calls like .size()
     Id(LiveId),
     AbstractInt,
     AbstractFloat,
@@ -75,6 +87,7 @@ impl ShaderType{
         match self{
             Self::Pod(ty) => Some(*ty),
             Self::PodPtr(ty) => Some(*ty),
+            Self::Texture(_) => None, // Textures don't have a concrete pod type
             Self::Id(_id) => None,
             Self::None => None,
             Self::IoSelf(_) => None,
@@ -122,6 +135,43 @@ impl ShaderScopeItem{
             Self::Let{shadow,..}=>*shadow,
             Self::Var{shadow,..}=>*shadow,
             Self::PodType{shadow,..}=>*shadow,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SamplerFilter {
+    Nearest,
+    Linear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SamplerAddress {
+    Repeat,
+    ClampToEdge,
+    ClampToZero,
+    MirroredRepeat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SamplerCoord {
+    Normalized,
+    Pixel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShaderSampler {
+    pub filter: SamplerFilter,
+    pub address: SamplerAddress,
+    pub coord: SamplerCoord,
+}
+
+impl Default for ShaderSampler {
+    fn default() -> Self {
+        Self {
+            filter: SamplerFilter::Linear,
+            address: SamplerAddress::Repeat,
+            coord: SamplerCoord::Normalized,
         }
     }
 }
@@ -214,6 +264,7 @@ pub struct ShaderOutput{
     pub recur_block: Vec<ScriptObject>,
     pub structs: BTreeSet<ScriptPodType>,
     pub functions: Vec<ShaderFn>,
+    pub samplers: Vec<ShaderSampler>,
 }
 
 /// Mapping of uniform buffer type names to their assigned buffer indices
@@ -429,6 +480,18 @@ impl ShaderOutput{
         
         bindings
     }
+    
+    /// Get or create a sampler with the given properties, returns the sampler index
+    pub fn get_or_create_sampler(&mut self, sampler: ShaderSampler) -> usize {
+        // Check if we already have this sampler
+        if let Some(idx) = self.samplers.iter().position(|s| *s == sampler) {
+            return idx;
+        }
+        // Create new sampler
+        let idx = self.samplers.len();
+        self.samplers.push(sampler);
+        idx
+    }
 }
 
 
@@ -598,16 +661,51 @@ impl ShaderFnCompiler{
         output.backend.register_ids();
         
         self.mes.push(ShaderMe::FnBody{
-            ret:None
+            ret: None,
+            escaped: false,
         });
         // alright lets go trace the opcodes
         self.trap.ip = fnip;
         self.trap.in_rust = true;
         let bodies = vm.code.bodies.borrow();
-        let mut body = &bodies[self.trap.ip.body as usize];
-        while (self.trap.ip.index as usize) < body.parser.opcodes.len(){
+        let body = &bodies[self.trap.ip.body as usize];
+        
+        // Calculate function end position from the FN_BODY_DYN opcode that precedes the function body
+        // fnip.index points to the first opcode AFTER FN_BODY_DYN
+        // FN_BODY_DYN's opargs contains the jump offset from its position to the end of the function
+        let fn_body_opcode = body.parser.opcodes[(fnip.index - 1) as usize];
+        let fn_end_index = if let Some((_opcode, args)) = fn_body_opcode.as_opcode() {
+            (fnip.index - 1) + args.to_u32()
+        } else {
+            // Fallback to opcodes.len() if we can't find FN_BODY_DYN
+            body.parser.opcodes.len() as u32
+        };
+        
+        while self.trap.ip.index < fn_end_index {
             let opcode = body.parser.opcodes[self.trap.ip.index as usize];
-            if let Some((opcode, args)) = opcode.as_opcode(){
+            
+            // Skip processing when in unreachable code (after a return in current branch)
+            // But still need to process control flow opcodes to maintain structure
+            if self.is_unreachable() {
+                if let Some((op, args)) = opcode.as_opcode() {
+                    // Only process control flow opcodes when unreachable
+                    match op {
+                        Opcode::IF_TEST => self.handle_if_test_unreachable(args),
+                        // IF_ELSE is special: it transitions to the else branch which IS reachable
+                        // (if the parent scope is reachable). Check if parent scope is unreachable.
+                        Opcode::IF_ELSE => {
+                            if self.is_parent_scope_unreachable() {
+                                self.handle_if_else_unreachable(args);
+                            } else {
+                                self.handle_if_else(args);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                self.trap.goto_next();
+                self.handle_if_else_phi_unreachable();
+            } else if let Some((opcode, args)) = opcode.as_opcode(){
                 self.opcode(vm, output, opcode, args);
                 self.trap.goto_next();
                 self.handle_if_else_phi(vm, output);
@@ -625,22 +723,16 @@ impl ShaderFnCompiler{
                     }
                 }
             }
-            if let Some(trap) = self.trap.on.take(){
-                match trap{
-                                        
-                    ScriptTrapOn::Return(_value)=>{
-                        break
-                    }
-                    _=>panic!()
-                }
-            }
-                                    
-            body = &bodies[self.trap.ip.body as usize];
+            // The trap handling for Return is no longer needed since we use fn_end_index
+            // to determine when to stop. The trap may still be set by handle_return but
+            // we ignore it and continue processing to properly close all control structures.
+            self.trap.on.take();
         }
-        if let Some(ShaderMe::FnBody{ret}) = self.mes.pop(){
+        let value = self.mes.pop();
+        if let Some(ShaderMe::FnBody{ret, ..}) = value{
             return ret.unwrap_or(vm.code.builtins.pod.pod_void)
         }
-        panic!()
+        panic!("Unexpected ME at end {:?}", value)
     }
 
     fn pop_resolved(&mut self, _vm:&ScriptVm)->(ShaderType,String){
@@ -805,6 +897,7 @@ impl ShaderFnCompiler{
                 }
             },
             ShaderType::Error(_) => "error".to_string(),
+            ShaderType::Texture(tex_type) => format!("texture({:?})", tex_type),
         }
     }
 
@@ -998,9 +1091,58 @@ impl ShaderFnCompiler{
         self.stack.free_string(instance_s);
     }
     
+    /// Check if we're currently in unreachable code (after a return in the current branch)
+    fn is_unreachable(&self) -> bool {
+        // Check if ANY IfBody in the scope chain has returned (making subsequent code unreachable)
+        // or if the FnBody is fully escaped
+        for me in self.mes.iter().rev() {
+            match me {
+                ShaderMe::IfBody { has_return, .. } => {
+                    if *has_return {
+                        return true;
+                    }
+                    // Continue checking parent scopes
+                }
+                ShaderMe::FnBody { escaped, .. } => {
+                    return *escaped;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    
+    /// Check if the PARENT scope is unreachable (skipping the innermost IfBody)
+    /// Used for IF_ELSE to determine if the else branch should generate code
+    fn is_parent_scope_unreachable(&self) -> bool {
+        let mut skipped_first_if = false;
+        for me in self.mes.iter().rev() {
+            match me {
+                ShaderMe::IfBody { has_return, .. } => {
+                    if !skipped_first_if {
+                        // Skip the innermost IfBody (the one we're transitioning out of)
+                        skipped_first_if = true;
+                        continue;
+                    }
+                    if *has_return {
+                        return true;
+                    }
+                }
+                ShaderMe::FnBody { escaped, .. } => {
+                    return *escaped;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    
     fn handle_if_else_phi(&mut self, vm:&ScriptVm, output: &ShaderOutput){
-        if let Some(ShaderMe::IfBody{target_ip, phi, start_pos, stack_depth, phi_type}) = self.mes.last(){
+        if let Some(ShaderMe::IfBody{target_ip, phi, start_pos, stack_depth, phi_type, has_return, if_branch_returned}) = self.mes.last(){
             if self.trap.ip.index >= *target_ip{
+                // Check if both branches returned (escape analysis)
+                let both_returned = *if_branch_returned && *has_return;
+                
                 if self.stack.types.len() > *stack_depth{
                     let (ty, val) = self.stack.pop(&self.trap);
                     if let Some(phi) = phi{
@@ -1029,6 +1171,22 @@ impl ShaderFnCompiler{
                 self.out.push_str("}\n");
                 self.shader_scope.exit_scope();
                 self.mes.pop();
+                
+                // If both branches returned, propagate escape status up
+                if both_returned {
+                    // Find the parent and mark it as having returned/escaped
+                    if let Some(parent) = self.mes.last_mut() {
+                        match parent {
+                            ShaderMe::IfBody { has_return, .. } => {
+                                *has_return = true;
+                            }
+                            ShaderMe::FnBody { escaped, .. } => {
+                                *escaped = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
     }
@@ -1299,7 +1457,7 @@ impl ShaderFnCompiler{
                             ShaderType::AbstractInt | ShaderType::AbstractFloat=>{
                                 vm.heap.pod_check_abstract_constructor_arg(pod_ty, &mut offset, &self.trap);
                             }
-                            ShaderType::None|ShaderType::Range{..}|ShaderType::Error(_)|ShaderType::IoSelf(_)|ShaderType::PodType(_)=>{}
+                            ShaderType::None|ShaderType::Range{..}|ShaderType::Error(_)|ShaderType::IoSelf(_)|ShaderType::PodType(_)|ShaderType::Texture(_)=>{}
                         }
                         out.push_str(&arg.s);
                   }
@@ -1574,6 +1732,9 @@ impl ShaderFnCompiler{
                 ShaderMe::ScriptCall { out, name, fnobj, sself, args } => {
                     self.handle_script_call(vm, output, out, name, fnobj, sself, args);
                 }
+                ShaderMe::TextureBuiltin { method_id, tex_type: _, texture_expr, args } => {
+                    self.handle_texture_builtin_exec(vm, output, method_id, texture_expr, args);
+                }
                 ShaderMe::BuiltinCall { name, fnptr: _, args } => {
                     let builtins = &vm.code.builtins.pod;
                     
@@ -1646,141 +1807,295 @@ impl ShaderFnCompiler{
         }
     }
 
+    fn handle_texture_builtin_exec(
+        &mut self,
+        vm: &mut ScriptVm,
+        output: &mut ShaderOutput,
+        method_id: LiveId,
+        texture_expr: String,
+        args: Vec<String>,
+    ) {
+        // Handle texture methods - these are virtual methods that transpile to backend-specific code
+        match method_id {
+            id!(size) => {
+                // size() returns vec2f with the texture dimensions
+                let mut s = self.stack.new_string();
+                match output.backend {
+                    ShaderBackend::Metal => {
+                        // Metal: float2(texture.get_width(), texture.get_height())
+                        write!(s, "float2({}.get_width(), {}.get_height())", texture_expr, texture_expr).ok();
+                    }
+                    ShaderBackend::Wgsl => {
+                        // WGSL: textureDimensions(texture) - returns vec2<u32>, cast to vec2<f32>
+                        write!(s, "vec2f(0.0, 0.0)").ok(); // Placeholder
+                    }
+                    ShaderBackend::Hlsl => {
+                        // HLSL: texture.GetDimensions() 
+                        write!(s, "float2(0.0, 0.0)").ok(); // Placeholder
+                    }
+                    ShaderBackend::Glsl => {
+                        // GLSL: textureSize(texture, 0)
+                        write!(s, "vec2(0.0, 0.0)").ok(); // Placeholder
+                    }
+                }
+                self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_vec2f), s);
+            }
+            id!(sample_2d) => {
+                // sample_2d(coord) samples the texture at normalized coordinates
+                // Returns vec4f
+                if args.len() != 1 {
+                    self.trap.err_invalid_arg_count();
+                    let empty = self.stack.new_string();
+                    self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_vec4f), empty);
+                } else {
+                    let coord = &args[0];
+                    let mut s = self.stack.new_string();
+                    
+                    // Get or create the default sampler (linear, repeat, normalized)
+                    let sampler = ShaderSampler::default();
+                    let sampler_idx = output.get_or_create_sampler(sampler);
+                    
+                    match output.backend {
+                        ShaderBackend::Metal => {
+                            // Metal: texture.sample(sampler, coord)
+                            write!(s, "{}.sample(_s{}, {})", texture_expr, sampler_idx, coord).ok();
+                        }
+                        ShaderBackend::Wgsl => {
+                            // WGSL: textureSample(texture, sampler, coord)
+                            write!(s, "vec4f(0.0, 0.0, 0.0, 0.0)").ok(); // Placeholder
+                        }
+                        ShaderBackend::Hlsl => {
+                            // HLSL: texture.Sample(sampler, coord)
+                            write!(s, "float4(0.0, 0.0, 0.0, 0.0)").ok(); // Placeholder
+                        }
+                        ShaderBackend::Glsl => {
+                            // GLSL: texture(sampler2D, coord)
+                            write!(s, "vec4(0.0, 0.0, 0.0, 0.0)").ok(); // Placeholder
+                        }
+                    }
+                    self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_vec4f), s);
+                }
+            }
+            _ => {
+                self.trap.err_not_found();
+            }
+        }
+        self.stack.free_string(texture_expr);
+        for arg in args {
+            self.stack.free_string(arg);
+        }
+    }
+
     fn handle_method_call_args(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs) {
         let (method_ty, method_s) = self.stack.pop(&self.trap);
         let (self_ty, self_s) = self.stack.pop(&self.trap);
         self.stack.free_string(method_s);
         
         if let ShaderType::Id(method_id) = method_ty {
+            // Handle method calls on Texture types (e.g., texture.size())
+            if let ShaderType::Texture(tex_type) = self_ty {
+                self.handle_texture_method_call_args(vm, output, opargs, method_id, tex_type, self_s);
+                return;
+            }
+            
             if let ShaderType::Id(self_id) = self_ty {
-                let self_s_slice = if self_id == id!(self) { "_self" } else { &self_s };
+                // Try to resolve as variable on shader scope - extract info before mutable borrows
+                let scope_info = self.shader_scope.find_var(self_id).map(|(var, _)| {
+                    match var {
+                        ShaderScopeItem::IoSelf(obj) => (Some(*obj), None),
+                        _ => (None, Some(var.ty())),
+                    }
+                });
                 
-                // Try to resolve as variable on shader scope
-                if let Some((var, _name)) = self.shader_scope.find_var(self_id){
-                    
-                    // its a method call on IoSelf
-                    if let ShaderScopeItem::IoSelf(obj) = var{
-                        let fnobj = vm.heap.value(*obj, method_id.into(), &self.trap);
-                        if let Some(fnobj) = fnobj.as_object(){
-                            if let Some(fnptr) = vm.heap.as_fn(fnobj) {
-                                match fnptr {
-                                    ScriptFnPtr::Script(_fnptr) => {
-                                        let mut out = self.stack.new_string();
-                                        write!(out, "{}", output.backend.get_io_all(output.mode)).ok();
-                                        if out.len()>0{write!(out,", ").ok();}
-                                        write!(out, "{}", output.backend.get_io_self(output.mode)).ok();
-                                        self.mes.push(ShaderMe::ScriptCall {
-                                            name: method_id,
-                                            out,
-                                            fnobj,
-                                            sself: ShaderType::IoSelf(*obj),
-                                            args: vec![],
-                                        });
-                                    }
-                                    ScriptFnPtr::Native(_) => {todo!()}
-                                }
-                                self.stack.free_string(self_s);
-                                self.maybe_pop_to_me(vm, opargs);
-                                return
-                            }
+                if let Some((io_self_obj, pod_ty_opt)) = scope_info {
+                    // Method call on IoSelf
+                    if let Some(obj) = io_self_obj {
+                        if self.handle_io_self_method_call_args(vm, output, opargs, method_id, obj, &self_s) {
+                            self.stack.free_string(self_s);
+                            return;
                         }
                     }
                     
-                    // Its a method call on a POD
-                    let pod_ty = var.ty();
-                    // It is a Pod instance. Look up method on the type.
-                    let pod_ty_data = &vm.heap.pod_types[pod_ty.index as usize];
-                    let fnobj = vm.heap.value(pod_ty_data.object, method_id.into(), &self.trap);
-                    
-                    if let Some(fnobj) = fnobj.as_object(){
-                        if let Some(fnptr) = vm.heap.as_fn(fnobj) {
-                            match fnptr {
-                                ScriptFnPtr::Script(_fnptr) => {
-                                    let mut out = self.stack.new_string();
-                                    write!(out, "{}", output.backend.get_io_all(output.mode)).ok(); 
-                                    match output.backend {
-                                        ShaderBackend::Wgsl => {
-                                            if out.len()>0{write!(out,", ").ok();}
-                                            write!(out, "&{}", self_s_slice).ok();
-                                        }
-                                        ShaderBackend::Metal => {
-                                            // Metal uses references (thread T&), not pointers
-                                            // Pass the variable directly without &
-                                            if out.len()>0{write!(out,", ").ok();}
-                                            write!(out, "{}", self_s_slice).ok();
-                                        }
-                                        ShaderBackend::Hlsl | ShaderBackend::Glsl => {
-                                            if out.len()>0{write!(out,", ").ok();}
-                                            write!(out, "{}", self_s_slice).ok();
-                                        }
-                                    }
-                                    self.mes.push(ShaderMe::ScriptCall {
-                                        name: method_id,
-                                        out,
-                                        fnobj,
-                                        sself: ShaderType::Pod(pod_ty),
-                                        args: vec![],
-                                    });
-                                }
-                                ScriptFnPtr::Native(fnptr) => {
-                                    // Store self as first argument
-                                    let mut self_arg = self.stack.new_string();
-                                    write!(self_arg, "{}", self_s_slice).ok();
-                                    self.mes.push(ShaderMe::BuiltinCall {
-                                        name: method_id,
-                                        fnptr,
-                                        args: vec![(ShaderType::Pod(pod_ty), self_arg)]
-                                    });
-                                }
-                            }
-                            self.stack.free_string(self_s);
-                            self.maybe_pop_to_me(vm, opargs);
-                            return
+                    // Method call on a Pod instance
+                    if let Some(pod_ty) = pod_ty_opt {
+                        let self_s_slice = if self_id == id!(self) { "_self" } else { &self_s };
+                        if self.handle_pod_method_call_args(vm, output, opargs, method_id, pod_ty, self_s_slice, &self_s) {
+                            return;
                         }
                     }
                 }
-                else{               
-                    // Try to resolve as PodType in script scope
-                    let value = vm.heap.scope_value(self.script_scope, self_id.into(), &self.trap);
-                    if let Some(pod_ty) = vm.heap.pod_type(value) {
-                        self.ensure_struct_name(vm, output, pod_ty, self_id);
-                        // It is a PodType. Look up static method.
-                        let pod_ty_data = &vm.heap.pod_types[pod_ty.index as usize];
-                        let fnobj = vm.heap.value(pod_ty_data.object, method_id.into(), &self.trap);
-                        
-                        if let Some(fnobj) = fnobj.as_object(){
-                            if let Some(fnptr) = vm.heap.as_fn(fnobj) {
-                                match fnptr {
-                                    ScriptFnPtr::Script(_fnptr) => {
-                                        let mut out = self.stack.new_string();
-                                        write!(out, "{}", output.backend.get_io_all(output.mode)).ok();
-                                        self.mes.push(ShaderMe::ScriptCall {
-                                            name: method_id,
-                                            out,
-                                            fnobj,
-                                            sself: ShaderType::PodType(pod_ty),
-                                            args: Default::default(),
-                                        });
-                                    }
-                                    ScriptFnPtr::Native(fnptr) => {
-                                        self.mes.push(ShaderMe::BuiltinCall {
-                                            name: method_id,
-                                            fnptr,
-                                            args: Default::default()
-                                        });
-                                    }
-                                }
-                                self.stack.free_string(self_s);
-                                self.maybe_pop_to_me(vm, opargs);
-                                return
-                            }
-                        }
+                else {
+                    // Try to resolve as PodType static method in script scope
+                    if self.handle_pod_type_method_call_args(vm, output, opargs, method_id, self_id, &self_s) {
+                        return;
                     }
                 }
             }
         }
         self.stack.free_string(self_s);
         self.trap.err_not_impl();
+    }
+    
+    fn handle_io_self_method_call_args(
+        &mut self,
+        vm: &mut ScriptVm,
+        output: &mut ShaderOutput,
+        opargs: OpcodeArgs,
+        method_id: LiveId,
+        obj: ScriptObject,
+        _self_s: &str,
+    ) -> bool {
+        let fnobj = vm.heap.value(obj, method_id.into(), &self.trap);
+        if let Some(fnobj) = fnobj.as_object() {
+            if let Some(fnptr) = vm.heap.as_fn(fnobj) {
+                match fnptr {
+                    ScriptFnPtr::Script(_fnptr) => {
+                        let mut out = self.stack.new_string();
+                        write!(out, "{}", output.backend.get_io_all(output.mode)).ok();
+                        if out.len() > 0 { write!(out, ", ").ok(); }
+                        write!(out, "{}", output.backend.get_io_self(output.mode)).ok();
+                        self.mes.push(ShaderMe::ScriptCall {
+                            name: method_id,
+                            out,
+                            fnobj,
+                            sself: ShaderType::IoSelf(obj),
+                            args: vec![],
+                        });
+                    }
+                    ScriptFnPtr::Native(_) => { todo!() }
+                }
+                self.maybe_pop_to_me(vm, opargs);
+                return true;
+            }
+        }
+        false
+    }
+    
+    fn handle_pod_method_call_args(
+        &mut self,
+        vm: &mut ScriptVm,
+        output: &mut ShaderOutput,
+        opargs: OpcodeArgs,
+        method_id: LiveId,
+        pod_ty: ScriptPodType,
+        self_s_slice: &str,
+        self_s: &String,
+    ) -> bool {
+        let pod_ty_data = &vm.heap.pod_types[pod_ty.index as usize];
+        let fnobj = vm.heap.value(pod_ty_data.object, method_id.into(), &self.trap);
+        
+        if let Some(fnobj) = fnobj.as_object() {
+            if let Some(fnptr) = vm.heap.as_fn(fnobj) {
+                match fnptr {
+                    ScriptFnPtr::Script(_fnptr) => {
+                        let mut out = self.stack.new_string();
+                        write!(out, "{}", output.backend.get_io_all(output.mode)).ok();
+                        match output.backend {
+                            ShaderBackend::Wgsl => {
+                                if out.len() > 0 { write!(out, ", ").ok(); }
+                                write!(out, "&{}", self_s_slice).ok();
+                            }
+                            ShaderBackend::Metal => {
+                                // Metal uses references (thread T&), not pointers
+                                // Pass the variable directly without &
+                                if out.len() > 0 { write!(out, ", ").ok(); }
+                                write!(out, "{}", self_s_slice).ok();
+                            }
+                            ShaderBackend::Hlsl | ShaderBackend::Glsl => {
+                                if out.len() > 0 { write!(out, ", ").ok(); }
+                                write!(out, "{}", self_s_slice).ok();
+                            }
+                        }
+                        self.mes.push(ShaderMe::ScriptCall {
+                            name: method_id,
+                            out,
+                            fnobj,
+                            sself: ShaderType::Pod(pod_ty),
+                            args: vec![],
+                        });
+                    }
+                    ScriptFnPtr::Native(fnptr) => {
+                        // Store self as first argument
+                        let mut self_arg = self.stack.new_string();
+                        write!(self_arg, "{}", self_s_slice).ok();
+                        self.mes.push(ShaderMe::BuiltinCall {
+                            name: method_id,
+                            fnptr,
+                            args: vec![(ShaderType::Pod(pod_ty), self_arg)]
+                        });
+                    }
+                }
+                self.stack.free_string(self_s.clone());
+                self.maybe_pop_to_me(vm, opargs);
+                return true;
+            }
+        }
+        false
+    }
+    
+    fn handle_pod_type_method_call_args(
+        &mut self,
+        vm: &mut ScriptVm,
+        output: &mut ShaderOutput,
+        opargs: OpcodeArgs,
+        method_id: LiveId,
+        self_id: LiveId,
+        self_s: &String,
+    ) -> bool {
+        let value = vm.heap.scope_value(self.script_scope, self_id.into(), &self.trap);
+        if let Some(pod_ty) = vm.heap.pod_type(value) {
+            self.ensure_struct_name(vm, output, pod_ty, self_id);
+            // It is a PodType. Look up static method.
+            let pod_ty_data = &vm.heap.pod_types[pod_ty.index as usize];
+            let fnobj = vm.heap.value(pod_ty_data.object, method_id.into(), &self.trap);
+            
+            if let Some(fnobj) = fnobj.as_object() {
+                if let Some(fnptr) = vm.heap.as_fn(fnobj) {
+                    match fnptr {
+                        ScriptFnPtr::Script(_fnptr) => {
+                            let mut out = self.stack.new_string();
+                            write!(out, "{}", output.backend.get_io_all(output.mode)).ok();
+                            self.mes.push(ShaderMe::ScriptCall {
+                                name: method_id,
+                                out,
+                                fnobj,
+                                sself: ShaderType::PodType(pod_ty),
+                                args: Default::default(),
+                            });
+                        }
+                        ScriptFnPtr::Native(fnptr) => {
+                            self.mes.push(ShaderMe::BuiltinCall {
+                                name: method_id,
+                                fnptr,
+                                args: Default::default()
+                            });
+                        }
+                    }
+                    self.stack.free_string(self_s.clone());
+                    self.maybe_pop_to_me(vm, opargs);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    
+    fn handle_texture_method_call_args(
+        &mut self, 
+        _vm: &mut ScriptVm, 
+        _output: &mut ShaderOutput, 
+        _opargs: OpcodeArgs,
+        method_id: LiveId, 
+        tex_type: TextureType,
+        texture_expr: String
+    ) {
+        // Push TextureBuiltin to collect arguments - actual code gen happens in handle_call_exec
+        self.mes.push(ShaderMe::TextureBuiltin {
+            method_id,
+            tex_type,
+            texture_expr,
+            args: vec![],
+        });
     }
     
     fn handle_assign(&mut self, vm: &mut ScriptVm) {
@@ -1993,9 +2308,29 @@ impl ShaderFnCompiler{
     }
 
     fn handle_return(&mut self, vm: &mut ScriptVm, opargs: OpcodeArgs) {
-        // lets find our FnBody
-        if let Some(me) = self.mes.iter_mut().rev().find(|v| if let ShaderMe::FnBody { .. } = v { true } else { false }) {
-            if let ShaderMe::FnBody { ret } = me {
+        // Check if we're already escaped (all code paths have returned)
+        let already_escaped = self.mes.iter().rev()
+            .find_map(|me| match me {
+                ShaderMe::FnBody { escaped, .. } => Some(*escaped),
+                _ => None,
+            })
+            .unwrap_or(false);
+        
+        if already_escaped {
+            // Still need to consume the stack value if present
+            if !opargs.is_nil() {
+                let (_ty, s) = self.stack.pop(&self.trap);
+                self.stack.free_string(s);
+            }
+            return;
+        }
+        
+        // Check if we're inside an IfBody before taking mutable borrow
+        let inside_if = self.mes.iter().any(|me| matches!(me, ShaderMe::IfBody { .. }));
+        
+        // Find our FnBody to record return type
+        if let Some(me) = self.mes.iter_mut().rev().find(|v| matches!(v, ShaderMe::FnBody { .. })) {
+            if let ShaderMe::FnBody { ret, escaped } = me {
                 // we can also return a void
                 let (ty, s) = if opargs.is_nil() {
                     (vm.code.builtins.pod.pod_void, self.stack.new_string())
@@ -2021,10 +2356,27 @@ impl ShaderFnCompiler{
                 }
 
                 self.stack.free_string(s);
+                
+                // If not inside an IfBody (return at function level), mark function as escaped
+                if !inside_if {
+                    *escaped = true;
+                }
+            }
+        }
+        
+        // Mark the innermost IfBody as having a return
+        if let Some(me) = self.mes.iter_mut().rev().find(|v| matches!(v, ShaderMe::IfBody { .. })) {
+            if let ShaderMe::IfBody { has_return, .. } = me {
+                *has_return = true;
             }
         }
 
-        self.trap.on.set(Some(ScriptTrapOn::Return(NIL)));
+        // NOTE: For a transpiler (unlike an interpreter), we do NOT set the trap here.
+        // The interpreter sets ScriptTrapOn::Return to actually return control flow,
+        // but the transpiler just generates code and must continue processing all opcodes
+        // to properly close if/else blocks and other control structures.
+        // The compile_fn loop uses fn_end_index (derived from FN_BODY_DYN's opargs) to know
+        // when to stop, rather than relying on the Return trap.
     }
 
     fn handle_if_test(&mut self, opargs: OpcodeArgs) {
@@ -2042,6 +2394,24 @@ impl ShaderFnCompiler{
             stack_depth: self.stack.types.len(),
             phi: None,
             phi_type: None,
+            has_return: false,
+            if_branch_returned: false,
+        });
+    }
+    
+    /// Handle IF_TEST when in unreachable code - don't generate code or pop stack,
+    /// but track the control structure so we can properly close it
+    fn handle_if_test_unreachable(&mut self, opargs: OpcodeArgs) {
+        // Don't pop from stack or generate code - just track the structure
+        // Mark has_return: true since we're already in unreachable code
+        self.mes.push(ShaderMe::IfBody {
+            target_ip: self.trap.ip.index + opargs.to_u32(),
+            start_pos: self.out.len(),
+            stack_depth: self.stack.types.len(),
+            phi: None,
+            phi_type: None,
+            has_return: true,  // Already unreachable, so this branch is "returned"
+            if_branch_returned: false,
         });
     }
 
@@ -2052,6 +2422,8 @@ impl ShaderFnCompiler{
             stack_depth,
             phi,
             phi_type,
+            has_return,
+            if_branch_returned,
         }) = self.mes.last_mut()
         {
             if self.stack.types.len() > *stack_depth {
@@ -2071,8 +2443,53 @@ impl ShaderFnCompiler{
             self.shader_scope.exit_scope();
             self.shader_scope.enter_scope();
             *target_ip = self.trap.ip.index + opargs.to_u32();
+            // Save whether the if-branch returned, reset has_return for else branch
+            *if_branch_returned = *has_return;
+            *has_return = false;
         } else {
             self.trap.err_unexpected();
+        }
+    }
+    
+    /// Handle IF_ELSE when in unreachable code - just update structure, no code generation
+    fn handle_if_else_unreachable(&mut self, opargs: OpcodeArgs) {
+        if let Some(ShaderMe::IfBody {
+            target_ip,
+            has_return,
+            if_branch_returned,
+            ..
+        }) = self.mes.last_mut()
+        {
+            *target_ip = self.trap.ip.index + opargs.to_u32();
+            // Save whether the if-branch "returned", keep has_return true since we're unreachable
+            *if_branch_returned = *has_return;
+            // Keep has_return true since we're in unreachable code - else branch is also unreachable
+            *has_return = true;
+        }
+    }
+    
+    /// Handle if/else phi when in unreachable code - just close the structure
+    fn handle_if_else_phi_unreachable(&mut self) {
+        if let Some(ShaderMe::IfBody { target_ip, has_return, if_branch_returned, .. }) = self.mes.last() {
+            if self.trap.ip.index >= *target_ip {
+                let both_returned = *if_branch_returned && *has_return;
+                self.mes.pop();
+                
+                // If both branches returned, propagate up
+                if both_returned {
+                    if let Some(parent) = self.mes.last_mut() {
+                        match parent {
+                            ShaderMe::IfBody { has_return, .. } => {
+                                *has_return = true;
+                            }
+                            ShaderMe::FnBody { escaped, .. } => {
+                                *escaped = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2091,6 +2508,60 @@ impl ShaderFnCompiler{
             return ShaderType::Pod(pod_ty);
         }
         ShaderType::None
+    }
+    
+    /// Find the highest (most ancestral) shader IO definition for a field in the prototype chain.
+    /// This ensures that if a parent defines `x: shader.uniform(vec4f)` and a child overrides
+    /// with `x: #ffff`, we still use the uniform type from the parent.
+    /// Returns (value_object, shader_io_type) if found, or None if no shader IO marker exists.
+    fn find_highest_shader_io(
+        vm: &ScriptVm, 
+        io_self: ScriptObject, 
+        field_id: LiveId,
+        _trap: &ScriptTrap
+    ) -> Option<(ScriptObject, ShaderIoType)> {
+        
+        let mut result: Option<(ScriptObject, ShaderIoType)> = None;
+        let mut current: Option<ScriptObject> = Some(io_self);
+        
+        // Walk up the prototype chain
+        while let Some(obj) = current {
+            // Check if this object has the field directly (not inherited)
+            let obj_data = vm.heap.object_data(obj);
+            if let Some(map_value) = obj_data.map.get(&field_id.into()) {
+                if let Some(value_obj) = map_value.value.as_object() {
+                    if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
+                        // Found a shader IO marker - keep track of it (will be overwritten by higher ones)
+                        result = Some((value_obj, io_type));
+                    }
+                }
+            }
+            
+            // Move to parent prototype
+            current = vm.heap.proto(obj).as_object();
+        }
+        
+        result
+    }
+    
+    /// Get the value for a field, preferring inherited shader IO markers over local values.
+    /// If a shader IO marker exists higher in the prototype chain, returns that.
+    /// Otherwise returns the normal (lowest/most derived) value.
+    fn get_io_self_field_value(
+        vm: &ScriptVm,
+        io_self: ScriptObject,
+        field_id: LiveId,
+        trap: &ScriptTrap
+    ) -> (ScriptValue, Option<ShaderIoType>) {
+        
+        // First, try to find the highest shader IO definition
+        if let Some((io_obj, io_type)) = Self::find_highest_shader_io(vm, io_self, field_id, trap) {
+            return (io_obj.into(), Some(io_type));
+        }
+        
+        // No shader IO marker found - get the normal value (for RustInstance fields)
+        let value = vm.heap.value(io_self, field_id.into(), trap);
+        (value, None)
     }
 
     fn handle_field(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
@@ -2123,53 +2594,85 @@ impl ShaderFnCompiler{
                 self.stack.free_string(field_s);
                 self.stack.free_string(instance_s);
                 return
+            } else if let ShaderType::Texture(tex_type) = instance_ty {
+                // Field/method access on a texture - push texture and field name for method call handling
+                // The field name (like "size") will be used as the method name
+                self.stack.push(&self.trap, ShaderType::Texture(tex_type), instance_s);
+                self.stack.push(&self.trap, ShaderType::Id(field_id), field_s);
+                return
             } else if let ShaderType::IoSelf(obj) = instance_ty{
-                let value = vm.heap.value(obj, field_id.into(), &self.trap);
-                if let Some(value_obj) = value.as_object(){
-                    if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
-                        // This is an explicitly marked shader IO type (uniform, varying, etc.)
-                        let proto = vm.heap.proto(value.as_object().unwrap());
-                        let ty = Self::type_from_value(vm, proto);
-                        let concrete_ty = match ty {
-                            ShaderType::Pod(pt) => Some(pt),
-                            ShaderType::PodType(pt) => Some(pt),
-                            _ => None
-                        };
-                                                 
-                        if let Some(pod_ty) = concrete_ty {
-                            let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, io_type);
-                            // lets see if our podtype has a name. ifnot use pod_ty
-                            vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
-                            if !output.io.iter().any(|io| io.name == field_id) {
-                                output.io.push(ShaderIo {
-                                    kind: kind.clone(),
-                                    name: field_id,
-                                    ty: pod_ty,
-                                    buffer_index: None,
-                                });
-                            }
-                            let mut s = self.stack.new_string();
-                            match prefix {
-                                ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, field_id).ok(),
-                                ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
-                                ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
-                            };
-                            // UniformBuffer in Metal is a pointer, use PodPtr for correct -> access
-                            let shader_ty = if matches!(kind, ShaderIoKind::UniformBuffer) && matches!(output.backend, ShaderBackend::Metal) {
-                                ShaderType::PodPtr(pod_ty)
-                            } else {
-                                ShaderType::Pod(pod_ty)
-                            };
-                            self.stack.push(&self.trap, shader_ty, s);
-                            self.stack.free_string(field_s);
-                            self.stack.free_string(instance_s);
-                            return
+                // Look up field value, preferring the highest shader IO marker in the prototype chain
+                let (value, maybe_io_type) = Self::get_io_self_field_value(vm, obj, field_id, &self.trap);
+                
+                if let Some(io_type) = maybe_io_type {
+                    // Found a shader IO marker (uniform, varying, texture, etc.)
+                    let value_obj = value.as_object().unwrap();
+                    let proto = vm.heap.proto(value_obj);
+                    let ty = Self::type_from_value(vm, proto);
+                    let concrete_ty = match ty {
+                        ShaderType::Pod(pt) => Some(pt),
+                        ShaderType::PodType(pt) => Some(pt),
+                        _ => None
+                    };
+                                             
+                    let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, io_type);
+                    
+                    // Handle texture types specially - they don't have a concrete pod type
+                    if let ShaderIoKind::Texture(tex_type) = &kind {
+                        if !output.io.iter().any(|io| io.name == field_id) {
+                            output.io.push(ShaderIo {
+                                kind: kind.clone(),
+                                name: field_id,
+                                ty: ScriptPodType::VOID, // Textures don't have a pod type
+                                buffer_index: None,
+                            });
                         }
+                        let mut s = self.stack.new_string();
+                        match prefix {
+                            ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, field_id).ok(),
+                            ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+                            ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
+                        };
+                        self.stack.push(&self.trap, ShaderType::Texture(*tex_type), s);
+                        self.stack.free_string(field_s);
+                        self.stack.free_string(instance_s);
+                        return
+                    }
+                    
+                    if let Some(pod_ty) = concrete_ty {
+                        // lets see if our podtype has a name. ifnot use pod_ty
+                        vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
+                        if !output.io.iter().any(|io| io.name == field_id) {
+                            output.io.push(ShaderIo {
+                                kind: kind.clone(),
+                                name: field_id,
+                                ty: pod_ty,
+                                buffer_index: None,
+                            });
+                        }
+                        let mut s = self.stack.new_string();
+                        match prefix {
+                            ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, field_id).ok(),
+                            ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+                            ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
+                        };
+                        // UniformBuffer in Metal is a pointer, use PodPtr for correct -> access
+                        let shader_ty = if matches!(kind, ShaderIoKind::UniformBuffer) && matches!(output.backend, ShaderBackend::Metal) {
+                            ShaderType::PodPtr(pod_ty)
+                        } else {
+                            ShaderType::Pod(pod_ty)
+                        };
+                        self.stack.push(&self.trap, shader_ty, s);
+                        self.stack.free_string(field_s);
+                        self.stack.free_string(instance_s);
+                        return
                     }
                 }
-                // Check if this is a Rust struct field (not shader IO marked, but a valid POD type)
-                // These come from Rust structs via script_shader(vm) and should be treated as RustInstance
-                let ty = Self::type_from_value(vm, value);
+                
+                // No shader IO marker found - check if this is a Rust struct field
+                // Get the actual value (might be different from shader IO lookup)
+                let actual_value = vm.heap.value(obj, field_id.into(), &self.trap);
+                let ty = Self::type_from_value(vm, actual_value);
                 let concrete_ty = match ty {
                     ShaderType::Pod(pt) => Some(pt),
                     ShaderType::PodType(pt) => Some(pt),
@@ -2507,7 +3010,7 @@ impl ShaderFnCompiler{
     fn pop_to_me(&mut self, vm:&ScriptVm){
         if let Some(me) = self.mes.last_mut(){
             match me{
-                ShaderMe::FnBody{ ret:_} | ShaderMe::ForLoop{..} | ShaderMe::IfBody{..}=>{
+                ShaderMe::FnBody{ .. } | ShaderMe::ForLoop{..} | ShaderMe::IfBody{..}=>{
                     let (_ty,s) = self.stack.pop(&self.trap);
                     self.out.push_str(&s);
                     self.out.push_str(";\n");
@@ -2556,6 +3059,10 @@ impl ShaderFnCompiler{
                     else {
                         *elem_ty = Some(arg_ty);
                     }
+                    args.push(s);
+                }
+                ShaderMe::TextureBuiltin{args, ..}=>{
+                    let (_ty, s) = self.stack.pop(&self.trap);
                     args.push(s);
                 }
                 ShaderMe::ScriptCall{out, args, ..}=>{
