@@ -84,8 +84,6 @@ class MakepadSurface
 
     // Shared Editable buffer for IME - this is the source of truth for Java side
     private SpannableStringBuilder mEditable = new SpannableStringBuilder();
-    // Lock for mEditable thread safety (accessed from IME thread and UI thread)
-    private final Object mEditableLock = new Object();
 
     // Keyboard configuration (set by Rust via configureKeyboard)
     private int mInputMode = 0;         // 0=Text, 1=Ascii, 2=Url, 3=Numeric, 4=Tel, 5=Email, 6=Decimal, 7=Search
@@ -104,44 +102,26 @@ class MakepadSurface
         private int mExtractedTextToken = 0;
         // For cursor updates
         private int mCursorUpdateMode = 0;
-        // Track recent states sent to Rust to detect stale echoes
-        // Using a small circular buffer to handle rapid IME operations
-        private String[] mRecentSentTexts = new String[4];
-        private int mRecentSentIndex = 0;
-        private String mLastSentTextToRust = "";
-        // Lock for echo buffer thread safety (accessed from IME thread and UI thread)
-        private final Object mEchoLock = new Object();
+        // Track last text sent to Rust to detect stale echoes
+        private String mLastSentText = null;
 
         public MakepadInputConnection(View view, boolean fullEditor) {
             super(view, fullEditor);
         }
 
-        // Check if text was recently sent to Rust (circular buffer lookup)
+        // Check if text was recently sent to Rust
         private boolean wasRecentlySentToRust(String text) {
-            synchronized (mEchoLock) {
-                for (String sent : mRecentSentTexts) {
-                    if (text.equals(sent)) return true;
-                }
-                return false;
-            }
+            return text.equals(mLastSentText);
         }
 
         // Record text as sent to Rust
         private void recordSentToRust(String text) {
-            synchronized (mEchoLock) {
-                mRecentSentTexts[mRecentSentIndex] = text;
-                mRecentSentIndex = (mRecentSentIndex + 1) % mRecentSentTexts.length;
-                mLastSentTextToRust = text;
-            }
+            mLastSentText = text;
         }
 
-        // Clear recent sent buffer (e.g., after applying genuine Rust update)
+        // Clear sent buffer (e.g., after applying genuine Rust update)
         private void clearRecentSentBuffer() {
-            synchronized (mEchoLock) {
-                for (int i = 0; i < mRecentSentTexts.length; i++) {
-                    mRecentSentTexts[i] = null;
-                }
-            }
+            mLastSentText = null;
         }
 
         // Filter input based on mInputMode to prevent invalid characters (e.g., emojis in numeric fields)
@@ -227,12 +207,10 @@ class MakepadSurface
             }
 
             ExtractedText et = new ExtractedText();
-            synchronized (mEditableLock) {
-                et.text = mEditable.toString();
-                et.startOffset = 0;
-                et.selectionStart = Selection.getSelectionStart(mEditable);
-                et.selectionEnd = Selection.getSelectionEnd(mEditable);
-            }
+            et.text = mEditable.toString();
+            et.startOffset = 0;
+            et.selectionStart = Selection.getSelectionStart(mEditable);
+            et.selectionEnd = Selection.getSelectionEnd(mEditable);
 
             return et;
         }
@@ -287,17 +265,11 @@ class MakepadSurface
 
         // Notify Rust of current text state
         private void notifyRustOfTextState() {
-            String fullText;
-            int selStart, selEnd, compStart, compEnd;
-
-            // Synchronize mEditable reads to avoid race with UI thread updates
-            synchronized (mEditableLock) {
-                fullText = mEditable.toString();
-                selStart = Selection.getSelectionStart(mEditable);
-                selEnd = Selection.getSelectionEnd(mEditable);
-                compStart = BaseInputConnection.getComposingSpanStart(mEditable);
-                compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
-            }
+            String fullText = mEditable.toString();
+            int selStart = Selection.getSelectionStart(mEditable);
+            int selEnd = Selection.getSelectionEnd(mEditable);
+            int compStart = BaseInputConnection.getComposingSpanStart(mEditable);
+            int compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
 
             // Track what we're sending so we can detect stale echoes from Rust
             recordSentToRust(fullText);
@@ -829,6 +801,11 @@ class MakepadSurface
                 break;
         }
 
+        // Prevent personalized learning for secure/password fields
+        if (mIsSecure) {
+            imeOptions |= EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
+        }
+
         // Add IME_FLAG_FORCE_ASCII for ASCII input mode
         if (mInputMode == 1) {  // Ascii
             imeOptions |= EditorInfo.IME_FLAG_FORCE_ASCII;
@@ -865,9 +842,7 @@ class MakepadSurface
         // If config changed and keyboard is already showing, restart input to apply new settings
         if (changed && mInputConnection != null) {
             // Finalize any in-progress composition before restart to avoid stale state
-            synchronized (mEditableLock) {
-                BaseInputConnection.removeComposingSpans(mEditable);
-            }
+            BaseInputConnection.removeComposingSpans(mEditable);
             InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
             if (imm != null) {
                 imm.restartInput(this);
@@ -877,10 +852,7 @@ class MakepadSurface
 
     // Called from Rust to update text state (for programmatic changes, not IME input)
     public void updateImeTextState(String fullText, int selStart, int selEnd) {
-        String currentText;
-        synchronized (mEditableLock) {
-            currentText = mEditable.toString();
-        }
+        String currentText = mEditable.toString();
         boolean textChanged = !currentText.equals(fullText);
 
         // Check for stale echoes - if Rust sends back text we recently sent to it,
@@ -898,12 +870,10 @@ class MakepadSurface
         selEnd = Math.max(selStart, Math.min(selEnd, textLen));
 
         if (textChanged) {
-            // Text content changed - update Editable and restart IME
-            synchronized (mEditableLock) {
-                BaseInputConnection.removeComposingSpans(mEditable);
-                mEditable.replace(0, mEditable.length(), fullText);
-                Selection.setSelection(mEditable, selStart, selEnd);
-            }
+            // Text content changed - update Editable and notify IME
+            BaseInputConnection.removeComposingSpans(mEditable);
+            mEditable.replace(0, mEditable.length(), fullText);
+            Selection.setSelection(mEditable, selStart, selEnd);
 
             // Clear stale buffer since we're applying Rust's authoritative state
             // Do NOT call recordSentToRust here, that's only for Java -> Rust sends
@@ -912,32 +882,34 @@ class MakepadSurface
                 mInputConnection.clearRecentSentBuffer();
             }
 
-            // Only restart input when text content actually changed
+            // Notify IME of text change without restarting input
+            // restartInput() destroys composition state and causes IME flicker;
+            // updateExtractedText() + updateSelection() is the lightweight alternative
             if (mInputConnection != null) {
                 InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
                 if (imm != null) {
-                    imm.restartInput(this);
+                    if (mInputConnection.mExtractedTextRequest != null) {
+                        ExtractedText et = new ExtractedText();
+                        et.text = fullText;
+                        et.startOffset = 0;
+                        et.selectionStart = selStart;
+                        et.selectionEnd = selEnd;
+                        imm.updateExtractedText(this, mInputConnection.mExtractedTextToken, et);
+                    }
+                    imm.updateSelection(this, selStart, selEnd, -1, -1);
                 }
             }
         } else {
             // Only selection changed - just update selection, no restart needed
-            int currentSelStart, currentSelEnd;
-            synchronized (mEditableLock) {
-                currentSelStart = Selection.getSelectionStart(mEditable);
-                currentSelEnd = Selection.getSelectionEnd(mEditable);
-                if (currentSelStart != selStart || currentSelEnd != selEnd) {
-                    Selection.setSelection(mEditable, selStart, selEnd);
-                }
-            }
+            int currentSelStart = Selection.getSelectionStart(mEditable);
+            int currentSelEnd = Selection.getSelectionEnd(mEditable);
             if (currentSelStart != selStart || currentSelEnd != selEnd) {
+                Selection.setSelection(mEditable, selStart, selEnd);
                 // Notify IME of selection change without restart
                 InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
                 if (imm != null) {
-                    int compStart, compEnd;
-                    synchronized (mEditableLock) {
-                        compStart = BaseInputConnection.getComposingSpanStart(mEditable);
-                        compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
-                    }
+                    int compStart = BaseInputConnection.getComposingSpanStart(mEditable);
+                    int compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
                     imm.updateSelection(this, selStart, selEnd, compStart, compEnd);
                 }
             }
@@ -951,10 +923,8 @@ class MakepadSurface
     // Select all text in the InputConnection's Editable and notify IME
     // Used by ActionMode's Select All to sync Java-side selection with Rust
     public void selectAllInEditable() {
-        synchronized (mEditableLock) {
-            int len = mEditable.length();
-            Selection.setSelection(mEditable, 0, len);
-        }
+        int len = mEditable.length();
+        Selection.setSelection(mEditable, 0, len);
         // Notify IME of the selection change
         if (mInputConnection != null) {
             mInputConnection.notifyImeOfSelectionUpdate();
