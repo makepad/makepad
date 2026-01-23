@@ -56,7 +56,9 @@ script_mod!{
         draw_pass: shader.uniform_buffer(draw.DrawPassUniforms)
         draw_list: shader.uniform_buffer(draw.DrawListUniforms)
         geom: shader.vertex_buffer(geom.QuadVertex, geom.QuadGeom)
-                                
+        
+        color: #ffff
+        
         pos: shader.varying(vec2f)
         t: shader.varying(vec2f)
         world: shader.varying(vec4f)
@@ -90,7 +92,7 @@ script_mod!{
         }
 
         get_color: fn() {
-            return #ffff
+            return self.color
         }
         
         fragment: fn() {
