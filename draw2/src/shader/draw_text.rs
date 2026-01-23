@@ -30,10 +30,26 @@ script_mod!{
     use mod.shader
     use mod.draw
     use mod.geom
+    use mod.res
     
-    mod.res.crate("self:resources/test.jpg")
+    mod.text = {
+        TextStyle: #(TextStyle::script_api(vm))
+        FontFamily: #(FontFamily::script_component(vm))
+        FontMember: #(FontMember::script_api(vm))
+    }
+    
+    use mod.text.*
+    
+    let test_text_style = TextStyle{
+        font_size: 20
+        font_family:FontFamily{
+            $latin: FontMember{res: res.file("/Users/admin/makepad/widgets/resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
+        }
+        line_spacing: 1.2
+    }
     
     mod.shaders.DrawText = #(DrawText::script_shader(vm)){
+        text_style: test_text_style,
         vertex_pos: shader.vertex_position(vec4f)
         fb0: shader.fragment_output(0, vec4f)
         draw_call: shader.uniform_buffer(draw.DrawCallUniforms)
@@ -47,7 +63,7 @@ script_mod!{
         
         radius: shader.uniform(float)
         cutoff: shader.uniform(float)
-        
+
         grayscale_texture: shader.texture_2d(float)
         color_texture: shader.texture_2d(float)
         
@@ -69,13 +85,12 @@ script_mod!{
 
         sdf: fn(scale, p) {
             let s = self.grayscale_texture.sample_2d(p).x;
-            //let s = sample2d(self.grayscale_texture, p).x;
             // 1.1 factor to compensate for text being magically too dark after the fontstack refactor
             return clamp(((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5)*1.1, 0.0, 1.0)
         }
 
         get_color: fn() {
-            return self.color
+            return #ffff
         }
         
         fragment: fn() {
@@ -85,9 +100,7 @@ script_mod!{
         pixel: fn() {
             let dxt = length(dFdx(self.t))
             let dyt = length(dFdy(self.t))
-            let color = #0000
             if self.texture_index == 0 {
-                // TODO: Support non square atlases?
                 let scale = (dxt + dyt) * self.grayscale_texture.size().x * 0.5
                 let s = self.sdf(scale, self.t.xy)
                 let c = self.get_color()
@@ -362,6 +375,8 @@ impl DrawText {
         let rasterizer = fonts.rasterizer().borrow();
         let sdfer_settings = rasterizer.sdfer().settings();
         self.draw_vars.dyn_uniforms[0] = sdfer_settings.radius;
+                
+        //self.draw_vars.dyn_uniforms[0] = sdfer_settings.radius;
         self.draw_vars.dyn_uniforms[1] = sdfer_settings.cutoff;
         //let grayscale_atlas_size = rasterizer.grayscale_atlas().size();
         //self.draw_vars.dyn_uniforms[2] = grayscale_atlas_size.width as f32;
@@ -380,6 +395,7 @@ impl DrawText {
         row: &LaidoutRow,
         out_instances: &mut Vec<f32>,
     ) {
+        
         for glyph in &row.glyphs {
             self.draw_glyph(
                 cx,
@@ -498,6 +514,7 @@ impl DrawText {
 
         self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y) + vec2(0.0,self.temp_y_shift* font_size_in_lpxs);
         self.rect_size = vec2(bounds_in_lpxs.size.width, bounds_in_lpxs.size.height);
+        
         if let Some(color) = color {
             self.color = vec4(
                 color.r as f32,
@@ -509,7 +526,6 @@ impl DrawText {
         self.texture_index = texture_index;
         self.t_min = vec2(t_min.x, t_min.y);
         self.t_max = vec2(t_max.x, t_max.y);
-
         output.extend_from_slice(self.draw_vars.as_slice());
         self.glyph_depth += 0.000001;
     }
@@ -525,7 +541,17 @@ pub struct TextStyle {
     pub line_spacing: f32,
 }
 
-#[derive(Debug, Clone, Script, ScriptHook, PartialEq)]
+#[derive(Debug, Clone, Script, ScriptHook)]
+pub struct FontMember {
+    #[live]
+    pub res: Option<ScriptHandleRef>,
+    #[live]
+    pub asc: f32,
+    #[live]
+    pub desc: f32,
+}
+
+#[derive(Debug, Clone, Script, PartialEq)]
 pub struct FontFamily {
     #[rust]
     id: LiveId,
@@ -537,68 +563,54 @@ impl FontFamily {
     }
 }
 
-/*
-impl LiveHook for FontFamily {
-    fn skip_apply(
-        &mut self,
-        cx: &mut Cx,
-        _apply: &mut Apply,
-        index: usize,
-        nodes: &[LiveNode],
-    ) -> Option<usize> {
+impl ScriptHook for FontFamily {
+    fn on_skip_apply(&mut self, vm: &mut ScriptVm, _apply: &mut ApplyScope, value: ScriptValue) -> bool {
+        let Some(obj) = value.as_object() else {
+            return false;
+        };
+        
+        let cx = vm.host.cx_mut();
         CxDraw::lazy_construct_fonts(cx);
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
-
-        let mut id = LiveId::seeded();
-        let mut next_child_index = Some(index + 1);
-        while let Some(child_index) = next_child_index {
-            if let LiveValue::Font(font) = &nodes[child_index].value {
-                id = id.id_append(font.to_live_id());
-            }
-            next_child_index = nodes.next_child(child_index);
-        }
-        self.id = id;
-
+        
+        // Use the object index as the unique id
+        self.id = LiveId(obj.index() as u64);
+        
         let font_family_id = self.to_font_family_id();
         if !fonts.is_font_family_known(font_family_id) {
             let mut font_ids = Vec::new();
-            let mut next_child_index = Some(index + 1);
-            while let Some(child_index) = next_child_index {
-                if let LiveValue::Font(font) = &nodes[child_index].value {
-                    let font_id: FontId = (font.to_live_id().0).into();
+            
+            let len = vm.heap.vec_len(obj);
+            for i in 0..len {
+                let kv = vm.heap.vec_key_value(obj, i, &vm.thread.trap);
+                let member = FontMember::script_from_value(vm, kv.value);
+                
+                if let Some(ref handle_ref) = member.res {
+                    let handle = handle_ref.as_handle();
+                    let font_id: FontId = (handle.index() as u64).into();
+                    
                     if !fonts.is_font_known(font_id) {
-                        // alright so if we have a multipart font we have to combine it here
-                        let data = if font.paths.len()>1{
-                            // combine them. TODO do this better.
-                            let mut data = Vec::new();
-                            for path in &*font.paths{
-                                let dep = cx.get_dependency(path).unwrap();
-                                data.extend(&*dep);
-                            }
-                            Rc::new(data)
+                        let cx = vm.host.cx_mut();
+                        if let Some(data) = cx.get_resource(handle) {
+                            fonts.define_font(
+                                font_id,
+                                FontDefinition {
+                                    data,
+                                    index: 0,
+                                    ascender_fudge_in_ems: member.asc,
+                                    descender_fudge_in_ems: member.desc,
+                                },
+                            );
                         }
-                        else{
-                            cx.get_dependency(font.paths[0].as_str()).unwrap().into()
-                        };
-                        fonts.define_font(
-                            font_id,
-                            FontDefinition {
-                                data,
-                                index: 0,
-                                ascender_fudge_in_ems: font.ascender_fudge,
-                                descender_fudge_in_ems: font.descender_fudge,
-                            },
-                        );
                     }
                     font_ids.push(font_id);
                 }
-                next_child_index = nodes.next_child(child_index);
             }
+            
             fonts.define_font_family(font_family_id, FontFamilyDefinition { font_ids });
         }
-
-        Some(nodes.skip_node(index))
+        
+        true
     }
 }
-*/

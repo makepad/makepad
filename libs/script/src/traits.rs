@@ -32,7 +32,11 @@ pub struct ScriptTypeProp {
 
 #[derive(Default, Debug)]
 pub struct ScriptTypeProps{
-    pub props: LiveIdMap<LiveId, ScriptTypeProp>
+    pub props: LiveIdMap<LiveId, ScriptTypeProp>,
+    /// The order index where Rust instance fields begin (after #[deref] field).
+    /// Fields with order < rust_instance_start are NOT part of shader instance data.
+    /// Default is 0, meaning all fields are instance fields (for types without deref).
+    pub rust_instance_start: u32,
 }
 
 impl ScriptTypeProps {
@@ -41,8 +45,25 @@ impl ScriptTypeProps {
         self.props.insert(id, ScriptTypeProp { order, ty });
     }
     
+    /// Mark the current position as where Rust instance fields begin.
+    /// Call this AFTER processing the deref field in script_proto_props.
+    pub fn mark_rust_instance_start(&mut self) {
+        self.rust_instance_start = self.props.len() as u32;
+    }
+    
     pub fn iter_ordered(&self) -> impl Iterator<Item = (LiveId, ScriptTypeId)> + '_ {
         let mut ordered: Vec<_> = self.props.iter().map(|(k, v)| (*k, *v)).collect();
+        ordered.sort_by_key(|(_, prop)| prop.order);
+        ordered.into_iter().map(|(id, prop)| (id, prop.ty))
+    }
+    
+    /// Iterate only over props that are part of the Rust instance data (after deref).
+    pub fn iter_rust_instance_ordered(&self) -> impl Iterator<Item = (LiveId, ScriptTypeId)> + '_ {
+        let rust_instance_start = self.rust_instance_start;
+        let mut ordered: Vec<_> = self.props.iter()
+            .filter(|(_, prop)| prop.order >= rust_instance_start)
+            .map(|(k, v)| (*k, *v))
+            .collect();
         ordered.sort_by_key(|(_, prop)| prop.order);
         ordered.into_iter().map(|(id, prop)| (id, prop.ty))
     }
@@ -81,6 +102,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     /// Builds a pod struct type from the macro-generated type reflection.
     /// This iterates through the ScriptTypeProps in order and generates
     /// a ScriptPodTy::Struct with fields matching the struct's layout.
+    /// Uses iter_rust_instance_ordered() to skip fields before #[deref].
     fn script_pod(vm: &mut ScriptVm) -> Option<ScriptPodType> where Self: Sized {
         use crate::pod::*;
         
@@ -91,9 +113,10 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
         let type_check = vm.heap.registered_type(type_id)?;
         
         // Build pod fields from the type props
+        // Use iter_rust_instance_ordered to skip config fields before #[deref]
         let mut fields = Vec::new();
         
-        for (field_name, field_type_id) in type_check.props.iter_ordered() {
+        for (field_name, field_type_id) in type_check.props.iter_rust_instance_ordered() {
             // Try to get the pod type for this field's type
             if let Some(pod_type) = vm.heap.type_id_to_pod_type(field_type_id, &vm.code.builtins.pod) {
                 let pod_type_data = vm.heap.pod_type_ref(pod_type);

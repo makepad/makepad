@@ -301,14 +301,15 @@ impl ShaderOutput{
         
         // Walk from deepest prototype to io_self
         // Only collect Rust type properties - dyn properties are added during compilation
+        // Use iter_rust_instance_ordered() to skip fields that come BEFORE the #[deref] field
         for proto_obj in proto_chain {
             let obj_data = vm.heap.object_data(proto_obj);
             let ty_index = obj_data.tag.as_type_index();
             
             if let Some(ty_index) = ty_index {
-                // Collect the ordered props first
+                // Collect the ordered props, skipping fields before #[deref]
                 let type_check = vm.heap.type_check(ty_index);
-                let ordered_props: Vec<_> = type_check.props.iter_ordered().collect();
+                let ordered_props: Vec<_> = type_check.props.iter_rust_instance_ordered().collect();
                 
                 for (field_id, _type_id) in ordered_props {
                     // Get the value and its pod type - we emit ALL rust fields
@@ -329,49 +330,100 @@ impl ShaderOutput{
         }
     }
     
-    /// Pre-collect fragment outputs from the shader object prototype chain.
-    /// Walks the prototype chain and finds all properties marked with SHADER_IO_FRAGMENT_OUTPUT_*.
-    pub fn pre_collect_fragment_outputs(&mut self, vm: &mut ScriptVm, io_self: ScriptObject) {
-        use crate::mod_shader::{SHADER_IO_FRAGMENT_OUTPUT_0, SHADER_IO_FRAGMENT_OUTPUT_MAX};
+    /// Pre-collect ALL shader IO (uniforms, textures, fragment outputs) in definition order.
+    /// Walks from deepest prototype to io_self, collecting all shader IO properties in a single pass.
+    /// This ensures IO appears in definition order, not access order during compilation.
+    /// 
+    /// Note: RustInstance and DynInstance are handled separately - RustInstance via 
+    /// pre_collect_rust_instance_io (from Rust type properties), DynInstance during compilation.
+    pub fn pre_collect_shader_io(&mut self, vm: &mut ScriptVm, io_self: ScriptObject) {
+        // Use recursion to process from deepest prototype first (no temporary Vec needed)
+        self.pre_collect_shader_io_recursive(vm, io_self);
         
-        // Walk the prototype chain
-        let mut current = Some(io_self);
-        while let Some(obj) = current {
-            // Iterate over all key-value pairs in this object
-            let obj_data = vm.heap.object_data(obj);
-            for kv in &obj_data.vec {
-                if let Some(value_obj) = kv.value.as_object() {
-                    if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
-                        // Check if it's a fragment output
-                        if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 {
-                            let index = (io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0) as u8;
+        // Set pod type names for uniforms (requires mutable heap, done after iteration)
+        for io in &self.io {
+            if matches!(io.kind, ShaderIoKind::Uniform) {
+                vm.heap.pod_type_name_if_not_set(io.ty, io.name);
+            }
+        }
+    }
+    
+    fn pre_collect_shader_io_recursive(&mut self, vm: &ScriptVm, obj: ScriptObject) {
+        use crate::mod_shader::*;
+        
+        // First recurse to prototype (to process deepest first)
+        if let Some(proto_obj) = vm.heap.proto(obj).as_object() {
+            self.pre_collect_shader_io_recursive(vm, proto_obj);
+        }
+        
+        // Then process this object's map entries in insertion order
+        let obj_data = vm.heap.object_data(obj);
+        obj_data.map_iter_ordered(|key, value| {
+            if let Some(value_obj) = value.as_object() {
+                if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
+                    if let Some(field_id) = key.as_id() {
+                        // Skip if already exists (derived class overrides)
+                        if self.io.iter().any(|io| io.name == field_id) {
+                            return;
+                        }
+                        
+                        // Get the pod type from the prototype
+                        let proto_value = vm.heap.proto(value_obj);
+                        let pod_ty = Self::get_pod_type_from_value(vm, proto_value);
+                        
+                        // Handle different shader IO types
+                        match io_type {
+                            // Uniforms
+                            SHADER_IO_DYN_UNIFORM => {
+                                if let Some(pod_ty) = pod_ty {
+                                    self.io.push(ShaderIo {
+                                        kind: ShaderIoKind::Uniform,
+                                        name: field_id,
+                                        ty: pod_ty,
+                                        buffer_index: None,
+                                    });
+                                }
+                            }
                             
-                            // Get the pod type from the prototype of the fragment output object
-                            let proto_value = vm.heap.proto(value_obj);
-                            if let Some(pod_ty) = Self::get_pod_type_from_value(vm, proto_value) {
-                                // Check if we already have this fragment output index
+                            // Fragment outputs
+                            io_type if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 
+                                    && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 => {
+                                let index = (io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0) as u8;
+                                // Check by index, not name
                                 let already_exists = self.io.iter().any(|io| {
                                     matches!(io.kind, ShaderIoKind::FragmentOutput(idx) if idx == index)
                                 });
-                                
                                 if !already_exists {
-                                    if let Some(key_id) = kv.key.as_id() {
+                                    if let Some(pod_ty) = pod_ty {
                                         self.io.push(ShaderIo {
                                             kind: ShaderIoKind::FragmentOutput(index),
-                                            name: key_id,
+                                            name: field_id,
                                             ty: pod_ty,
                                             buffer_index: None,
                                         });
                                     }
                                 }
                             }
+                            
+                            // Textures
+                            SHADER_IO_TEXTURE_1D => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture1d), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            SHADER_IO_TEXTURE_1D_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture1dArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            SHADER_IO_TEXTURE_2D => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture2d), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            SHADER_IO_TEXTURE_2D_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture2dArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            SHADER_IO_TEXTURE_3D => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture3d), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            SHADER_IO_TEXTURE_3D_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture3dArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            SHADER_IO_TEXTURE_CUBE => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureCube), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            SHADER_IO_TEXTURE_CUBE_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureCubeArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            SHADER_IO_TEXTURE_DEPTH => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureDepth), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            SHADER_IO_TEXTURE_DEPTH_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureDepthArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            
+                            // Other IO types are handled during compilation or elsewhere
+                            _ => {}
                         }
                     }
                 }
             }
-            // Move to next prototype
-            current = vm.heap.proto(obj).as_object();
-        }
+        });
     }
     
     fn get_pod_type_from_value(vm: &ScriptVm, value: ScriptValue) -> Option<ScriptPodType> {

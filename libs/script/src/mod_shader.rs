@@ -171,7 +171,7 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
             output.backend = ShaderBackend::Metal;
                         
             output.pre_collect_rust_instance_io(vm, io_self);
-            output.pre_collect_fragment_outputs(vm, io_self);
+            output.pre_collect_shader_io(vm, io_self);
             
             if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), &vm.thread.trap).as_object(){
                 output.mode = ShaderMode::Vertex;

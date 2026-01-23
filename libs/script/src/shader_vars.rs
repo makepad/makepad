@@ -491,7 +491,7 @@ impl ShaderFnCompiler {
             self.trap.err_have_to_initialise_variable();
             self.stack.pop(&self.trap);
         } else {
-            let (ty_value, value) = self.stack.pop(&self.trap);
+            let (ty_value, value) = self.pop_resolved(vm);
             let (ty_id, _id) = self.stack.pop(&self.trap);
             if let ShaderType::Id(id) = ty_id {
                 // lets define our let type
@@ -532,7 +532,7 @@ impl ShaderFnCompiler {
             self.trap.err_have_to_initialise_variable();
             self.stack.pop(&self.trap);
         } else {
-            let (ty_value, value) = self.stack.pop(&self.trap);
+            let (ty_value, value) = self.pop_resolved(vm);
             let (ty_id, _id) = self.stack.pop(&self.trap);
             if let ShaderType::Id(id) = ty_id {
                 // lets define our let type
