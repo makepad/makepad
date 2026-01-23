@@ -16,6 +16,7 @@ script_mod!{
             }
         }
         draw_text: mod.shaders.DrawText{
+            color:#ffff
         }
     }
 }

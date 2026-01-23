@@ -64,7 +64,6 @@ pub fn test(){
         }
     }
     
-    
     let code = script!{
         use mod.std.*
         use mod.shader
@@ -96,7 +95,7 @@ pub fn test(){
             vtx: shader.vertex_buffer(vertices)
             unitest: shader.uniform(1.0)
             unitest2: shader.uniform(1.0)
-            color: #ffff
+            color: 1.0
             draw: shader.uniform_buffer(draw_uniforms)
             y: shader.instance(1.0)
             x: shader.instance(1.0)
