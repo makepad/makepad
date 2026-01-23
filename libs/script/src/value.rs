@@ -67,10 +67,12 @@ pub struct ScriptArray{
 
 impl ScriptObject{
     pub const ZERO:ScriptObject = ScriptObject{index:0};
+    pub fn index(&self) -> u32 { self.index }
 }
 
 impl ScriptHandle{
     pub const ZERO:ScriptHandle = ScriptHandle{ty:ScriptHandleType(0),index:0};
+    pub fn index(&self) -> u32 { self.index }
 }
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]

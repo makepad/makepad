@@ -245,17 +245,19 @@ impl ShaderFnCompiler {
         // Check if we're inside an IfBody before taking mutable borrow
         let inside_if = self.mes.iter().any(|me| matches!(me, ShaderMe::IfBody { .. }));
 
+        // Pop and resolve the return value BEFORE borrowing self.mes mutably
+        // Use pop_resolved to resolve Id types (like variable names) to their actual Pod types
+        let (ty, s) = if opargs.is_nil() {
+            (vm.code.builtins.pod.pod_void, self.stack.new_string())
+        } else {
+            let (ty, s) = self.pop_resolved(vm);
+            let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
+            (ty, s)
+        };
+
         // Find our FnBody to record return type
         if let Some(me) = self.mes.iter_mut().rev().find(|v| matches!(v, ShaderMe::FnBody { .. })) {
             if let ShaderMe::FnBody { ret, escaped } = me {
-                // we can also return a void
-                let (ty, s) = if opargs.is_nil() {
-                    (vm.code.builtins.pod.pod_void, self.stack.new_string())
-                } else {
-                    let (ty, s) = self.stack.pop(&self.trap);
-                    let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
-                    (ty, s)
-                };
                 if let Some(ret) = ret {
                     if ty != *ret {
                         self.trap.err_return_type_changed();
@@ -272,14 +274,14 @@ impl ShaderFnCompiler {
                     self.out.push_str(";\n");
                 }
 
-                self.stack.free_string(s);
-
                 // If not inside an IfBody (return at function level), mark function as escaped
                 if !inside_if {
                     *escaped = true;
                 }
             }
         }
+
+        self.stack.free_string(s);
 
         // Mark the innermost IfBody as having a return
         if let Some(me) = self.mes.iter_mut().rev().find(|v| matches!(v, ShaderMe::IfBody { .. })) {

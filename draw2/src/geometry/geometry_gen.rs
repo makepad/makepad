@@ -2,7 +2,6 @@
 use {
     crate::{
         makepad_platform::*,
-        makepad_platform::makepad_script::*
     },
 };
 

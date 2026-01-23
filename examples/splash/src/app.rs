@@ -5,7 +5,7 @@ script_mod!{
     use mod.pod.*
     use mod.math.*
     use mod.sdf.*
-    
+    mod.res.load_all()
     #(App::script_component(vm)){
         draw_quad: mod.shaders.DrawQuad{ 
             pixel: ||{
@@ -66,6 +66,7 @@ impl MatchEvent for App{
         cx.begin_root_turtle(size, Layout::flow_down());
         
         self.draw_quad.draw_abs(cx, rect(10.,10.,200.,100.));
+        self.draw_text.draw_abs(cx, dvec2(10., 10.), "TEST");
         
         cx.end_pass_sized_turtle();
         self.main_draw_list.end(cx);

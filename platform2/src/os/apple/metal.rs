@@ -141,6 +141,9 @@ impl Cx {
                     geometry.dirty = false;
                 }
                 
+                // Uncomment to enable draw call debug output:
+                // Self::_debug_call_info(sh, draw_item, draw_call, instances, geometry);
+                
                 if let Some(inner) = geometry.os.vertex_buffer.get().cpu_read().inner.as_ref() {
                     unsafe {msg_send![
                         encoder,
@@ -267,6 +270,85 @@ impl Cx {
                 gpu_read_guards.push(geometry.os.index_buffer.get().gpu_read());
             }
         }
+    }
+    
+    /// Debug helper for printing draw call info. Uncomment the call in render_view to enable.
+    #[allow(dead_code)]
+    fn _debug_call_info(
+        sh: &CxDrawShader,
+        draw_item: &crate::draw_list::CxDrawItem,
+        draw_call: &crate::draw_list::CxDrawCall,
+        instances: u64,
+        geometry: &crate::geometry::CxGeometry,
+    ) {
+        let instance_data = draw_item.instances.as_ref().unwrap();
+        let total_slots = sh.mapping.instances.total_slots;
+        
+        println!("=== METAL DRAW CALL DEBUG ===");
+        println!("  shader debug_id: {:?}", sh.debug_id);
+        println!("  instance_count: {}", instances);
+        println!("  total_slots per instance: {}", total_slots);
+        println!("  instance_data.len(): {} floats", instance_data.len());
+        
+        // Print instance layout (all instance fields: dyn + rust)
+        println!("  --- Instance Layout ({} inputs, {} total_slots) ---", sh.mapping.instances.inputs.len(), sh.mapping.instances.total_slots);
+        for input in &sh.mapping.instances.inputs {
+            println!("    {:?}: offset={}, slots={}", input.id, input.offset, input.slots);
+        }
+        
+        // Print dyn_instances layout (just the dynamic portion)
+        if !sh.mapping.dyn_instances.inputs.is_empty() {
+            println!("  --- Dyn Instance Layout ({} inputs, {} total_slots) ---", sh.mapping.dyn_instances.inputs.len(), sh.mapping.dyn_instances.total_slots);
+            for input in &sh.mapping.dyn_instances.inputs {
+                println!("    {:?}: offset={}, slots={}", input.id, input.offset, input.slots);
+            }
+        }
+        
+        // Print first few instances with named values
+        let num_instances_to_print = 3.min(instances as usize);
+        for inst_idx in 0..num_instances_to_print {
+            let base = inst_idx * total_slots;
+            if base + total_slots <= instance_data.len() {
+                println!("  --- Instance {} ---", inst_idx);
+                for input in &sh.mapping.instances.inputs {
+                    let start = base + input.offset;
+                    let end = start + input.slots;
+                    if end <= instance_data.len() {
+                        let values = &instance_data[start..end];
+                        println!("    {:?}: {:?}", input.id, values);
+                    }
+                }
+            }
+        }
+        if instances > 3 {
+            println!("  ... ({} more instances)", instances - 3);
+        }
+        
+        // Print uniform info
+        let draw_call_uniforms = draw_call.draw_call_uniforms.as_slice();
+        println!("    dyn_uniforms ({} floats): {:?}", draw_call.dyn_uniforms.len(), &draw_call.dyn_uniforms[..draw_call.dyn_uniforms.len().min(8)]);
+        println!("    draw_call_uniforms ({} floats): {:?}", draw_call_uniforms.len(), draw_call_uniforms);
+        
+        // Print texture info
+        println!("    texture_slots count: {}", sh.mapping.textures.len());
+        for (i, slot) in draw_call.texture_slots.iter().enumerate() {
+            if let Some(texture) = slot {
+                println!("    texture[{}]: Some(id={})", i, texture.texture_id().0);
+            } else {
+                println!("    texture[{}]: None", i);
+            }
+        }
+        
+        // Print geometry info
+        println!(">>> METAL drawIndexedPrimitives:");
+        println!("    indexCount: {}", geometry.indices.len());
+        println!("    instanceCount: {}", instances);
+        println!("    geometry vertices: {}", geometry.vertices.len());
+        if !geometry.vertices.is_empty() {
+            let num_verts = 12.min(geometry.vertices.len());
+            println!("    first {} vertex floats: {:?}", num_verts, &geometry.vertices[..num_verts]);
+        }
+        println!("=============================");
     }
     
     pub fn draw_pass(
@@ -764,7 +846,7 @@ impl DrawVars{
             output.backend = ShaderBackend::Metal;
                                     
             output.pre_collect_rust_instance_io(vm, io_self);
-            output.pre_collect_fragment_outputs(vm, io_self);
+            output.pre_collect_shader_io(vm, io_self);
             
             if let Some(fnobj) = vm.heap.object_method(io_self, id!(vertex).into(), &vm.thread.trap).as_object(){
                 output.mode = ShaderMode::Vertex;
