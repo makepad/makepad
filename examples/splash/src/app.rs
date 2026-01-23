@@ -7,8 +7,7 @@ script_mod!{
     use mod.sdf.*
     
     #(App::script_component(vm)){
-        draw_quad: mod.shaders.DrawQuad{
-            test: mod.shader.instance(0.5)
+        draw_quad: mod.shaders.DrawQuad{ 
             pixel: ||{
                 let sdf = Sdf2d.viewport(self.pos*self.rect_size)
                 sdf.circle(40 40 35)
@@ -30,12 +29,12 @@ impl App{
 
 #[derive(Script)]
 pub struct App {
-    #[script] window: WindowHandle,
-    #[script] pass: DrawPass,
-    #[script] depth_texture: Texture,
+    #[new] window: WindowHandle,
+    #[new] pass: DrawPass,
+    #[new] depth_texture: Texture,
     #[live] draw_quad: DrawQuad,
     #[live] draw_text: DrawText,
-    #[script] main_draw_list: DrawList2d,
+    #[new] main_draw_list: DrawList2d,
 }
 
 impl ScriptHook for App{

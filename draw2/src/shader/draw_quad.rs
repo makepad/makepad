@@ -63,7 +63,7 @@ script_mod!{
         }
                 
         vertex: fn() {
-            self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos + vec2(self.test), self.rect_size)
+            self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
         }
                 
         fragment: fn(){

@@ -10,6 +10,7 @@ pub mod std;
 pub mod script;
 pub mod timer;
 pub mod task;
+pub mod res;
 
 pub fn define_script_modules(vm:&mut ScriptVm){
     crate::script::draw::define_draw_module(vm);
@@ -18,4 +19,5 @@ pub fn define_script_modules(vm:&mut ScriptVm){
     crate::script::run::define_run_module(vm);
     crate::script::timer::extend_std_module_with_timer(vm);
     crate::script::task::extend_std_module_with_task(vm);
+    crate::script::res::extend_std_module_with_res(vm);
 }

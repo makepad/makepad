@@ -30,11 +30,8 @@ script_mod!{
     use mod.shader
     use mod.draw
     use mod.geom
-    use mod.res
     
-    mod.fonts = {
-        latin_regular: {data: res.from_crate("self","resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
-    }
+    mod.res.crate("self:resources/test.jpg")
     
     mod.shaders.DrawText = #(DrawText::script_shader(vm)){
         vertex_pos: shader.vertex_position(vec4f)
