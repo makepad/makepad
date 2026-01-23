@@ -3,6 +3,68 @@ use crate::heap::*;
 use std::any::TypeId;
 use std::fmt::Debug;
 use std::fmt;
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
+#[derive(Debug)]
+pub struct ScriptHandleRef{
+    pub(crate) roots: Rc<RefCell<HashMap<ScriptHandle, usize>>>,
+    pub(crate) handle: ScriptHandle
+}
+
+impl From<ScriptHandleRef> for ScriptValue{
+    fn from(v:ScriptHandleRef) -> Self{
+        ScriptValue::from_handle(v.as_handle())
+    }
+}
+
+impl Clone for ScriptHandleRef{
+    fn clone(&self)->Self{
+        let mut roots = self.roots.borrow_mut();
+        match roots.entry(self.handle) {
+            Entry::Occupied(mut occ) => {
+                let value = occ.get_mut();
+                *value += 1;
+            }
+            Entry::Vacant(_vac) => {
+                eprintln!("ScriptHandleRef root is vacant!");
+            }
+        }
+        Self{
+            roots: self.roots.clone(),
+            handle: self.handle.clone()
+        }
+    }
+}
+
+impl ScriptHandleRef{
+    pub fn as_handle(&self)->ScriptHandle{self.handle}
+}
+
+impl Drop for ScriptHandleRef{
+    fn drop(&mut self){
+        let mut roots = self.roots.borrow_mut();
+        match roots.entry(self.handle) {
+            Entry::Occupied(mut occ) => {
+                let value = occ.get_mut();
+                if *value >= 1{
+                    *value -= 1;
+                }
+                else{
+                    eprintln!("ScriptHandleRef is 0!");
+                }
+                if *value == 0{
+                    occ.remove();
+                }
+            }
+            Entry::Vacant(_vac) => {
+                eprintln!("ScriptHandleRef root is vacant!");
+            }
+        }
+    }
+}
 
 impl ScriptHeap{
      

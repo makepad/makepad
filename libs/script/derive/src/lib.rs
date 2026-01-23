@@ -19,7 +19,7 @@ pub fn script_mod(input: TokenStream) -> TokenStream {
 
 
 #[proc_macro_derive(Script, attributes(
-    script,
+    new,
     live,
     rust,
     pick,

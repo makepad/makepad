@@ -21,6 +21,7 @@ pub struct ScriptHeap{
     
     pub(crate) root_objects: Rc<RefCell<HashMap<ScriptObject, usize>>>,
     pub(crate) root_arrays: Rc<RefCell<HashMap<ScriptArray, usize>>>,
+    pub(crate) root_handles: Rc<RefCell<HashMap<ScriptHandle, usize>>>,
     
     pub(crate) objects: Vec<ScriptObjectData>,
     pub(crate) objects_free: Vec<ScriptObject>,
