@@ -360,7 +360,7 @@ live_design! {
             instance empty: 0.0
             instance disabled: 0.0
             instance blink: 0.0
-            
+
             uniform border_radius: 0.5
 
             uniform color: (THEME_COLOR_TEXT_CURSOR)
@@ -378,6 +378,14 @@ live_design! {
                     mix(THEME_COLOR_U_HIDDEN, self.color, (1.0-self.blink) * self.focus)
                 );
                 return sdf.result;
+            }
+        }
+
+        draw_composition_underline: {
+            uniform color: #8
+
+            fn pixel(self) -> vec4 {
+                return self.color;
             }
         }
 
@@ -591,6 +599,9 @@ pub struct TextInput {
     #[live] draw_text: DrawText,
     #[live] draw_selection: DrawQuad,
     #[live] draw_cursor: DrawQuad,
+    /// The quad used to draw a thin underline beneath text that is currently being composed
+    /// via IME
+    #[live] draw_composition_underline: DrawQuad,
 
     #[layout] layout: Layout,
     #[walk] walk: Walk,
@@ -960,6 +971,41 @@ impl TextInput {
             );
         }
         self.draw_selection.end_many_instances(cx);
+    }
+
+    /// Draws a thin underline beneath the active IME composition range to visually indicate
+    /// text that is still being composed and has not yet been committed.
+    fn draw_composition_underline(&mut self, cx: &mut Cx2d, text_rect: Rect) {
+        if self.composition_length == 0 {
+            return;
+        }
+
+        let laidout_text = self
+            .laidout_text
+            .as_ref()
+            .expect("layout should never be `None` here");
+
+        let comp_end = (self.composition_start + self.composition_length).min(self.text.len());
+        let composition_selection = Selection {
+            anchor: Cursor { index: self.composition_start.min(self.text.len()), prefer_next_row: false },
+            cursor: Cursor { index: comp_end, prefer_next_row: false },
+        };
+
+        let selection = self.selection_to_password_selection(composition_selection);
+        let underline_height = 1.5 * self.draw_text.font_scale;
+
+        self.draw_composition_underline.begin_many_instances(cx);
+        for SelectionRect { rect_in_lpxs, .. } in laidout_text.selection_rects(selection) {
+            let scaled_x = text_rect.pos.x + (rect_in_lpxs.origin.x * self.draw_text.font_scale) as f64;
+            let scaled_y = text_rect.pos.y + ((rect_in_lpxs.origin.y + rect_in_lpxs.size.height) * self.draw_text.font_scale) as f64 - underline_height as f64;
+            let scaled_w = (rect_in_lpxs.size.width * self.draw_text.font_scale) as f64;
+
+            self.draw_composition_underline.draw_abs(
+                cx,
+                rect(scaled_x, scaled_y, scaled_w, underline_height as f64)
+            );
+        }
+        self.draw_composition_underline.end_many_instances(cx);
     }
 
     /// Calculate the bounding rectangle of the current text selection in screen coordinates
@@ -1343,10 +1389,12 @@ impl Widget for TextInput {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_selection.append_to_draw_call(cx);
+        self.draw_composition_underline.append_to_draw_call(cx);
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
         let cursor_rect = self.draw_cursor(cx, text_rect);
         self.draw_selection(cx, text_rect);
+        self.draw_composition_underline(cx, text_rect);
         self.scroll_to_cursor(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
