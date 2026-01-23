@@ -239,6 +239,7 @@ impl ScriptHeap{
     }
         
     fn set_value_shallow_checked(&mut self, top_ptr:ScriptObject, key:ScriptValue, key_id:LiveId, value:ScriptValue, trap:&ScriptTrap)->ScriptValue{
+        
         let object = &self.objects[top_ptr.index as usize];
         if object.tag.is_frozen(){
             return trap.err_frozen()
@@ -250,6 +251,7 @@ impl ScriptHeap{
                 if let Some(ty_index) = self.type_index.get(&type_prop.ty){
                     let check_prop = &self.type_check[ty_index.0 as usize];
                     if let Some(object) = &check_prop.object{
+                        //println!("SET VALUE {:?} {:?}", key, value);
                         if !(*object.check)(self, value){
                             return trap.err_invalid_prop_type()
                         }
