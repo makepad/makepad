@@ -129,7 +129,7 @@ pub struct IosApp {
     edit_menu_delegate_instance: ObjcId,
     edit_menu_interaction: Option<ObjcId>,
     /// Cached keyboard config to avoid redundant reloadInputViews calls
-    last_keyboard_config: Option<TextInputConfig>,
+    pub(crate) last_keyboard_config: Option<TextInputConfig>,
     /// Keyboard notification observer delegate - stored for cleanup
     keyboard_observer_delegate: Option<ObjcId>,
 }
@@ -245,6 +245,7 @@ impl IosApp {
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillShow:) name: UIKeyboardWillShowNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidHide:) name: UIKeyboardDidHideNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillHide:) name: UIKeyboardWillHideNotification object: nil];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(inputModeDidChange:) name: UITextInputCurrentInputModeDidChangeNotification object: nil];
 
             // Store the delegate for cleanup
             self.keyboard_observer_delegate = Some(textfield_dlg);

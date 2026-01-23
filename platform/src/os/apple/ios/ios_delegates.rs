@@ -415,6 +415,20 @@ pub fn define_textfield_delegate() -> *const Class {
             }));
         }
     }
+    extern "C" fn input_mode_did_change(_: &Object, _: Sel, _notif: ObjcId) {
+        // When keyboard language changes, reload input views so iOS re-queries
+        // autocorrectionType (which dynamically checks CJK vs non-CJK)
+        try_with_ios_app(|app| {
+            if let Some(text_input_view) = app.text_input_view {
+                unsafe {
+                    let () = msg_send![text_input_view, reloadInputViews];
+                }
+            }
+            // Clear cached config so configure_keyboard doesn't skip next call
+            app.last_keyboard_config = None;
+        });
+    }
+
     unsafe {
         decl.add_method(sel!(keyboardDidChangeFrame:), keyboard_did_change_frame as extern "C" fn(&Object, Sel, ObjcId),);
         decl.add_method(sel!(keyboardWillChangeFrame:), keyboard_will_change_frame as extern "C" fn(&Object, Sel, ObjcId),);
@@ -422,6 +436,7 @@ pub fn define_textfield_delegate() -> *const Class {
         decl.add_method(sel!(keyboardDidShow:), keyboard_did_show as extern "C" fn(&Object, Sel, ObjcId),);
         decl.add_method(sel!(keyboardWillHide:), keyboard_will_hide as extern "C" fn(&Object, Sel, ObjcId),);
         decl.add_method(sel!(keyboardDidHide:), keyboard_did_hide as extern "C" fn(&Object, Sel, ObjcId),);
+        decl.add_method(sel!(inputModeDidChange:), input_mode_did_change as extern "C" fn(&Object, Sel, ObjcId));
     }
     decl.add_ivar::<*mut c_void>("display_ptr");
     return decl.register();
