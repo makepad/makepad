@@ -1,5 +1,6 @@
 
 use crate::makepad_live_id::*;
+use crate::makepad_math::*;
 use makepad_script_derive::*;
 use crate::traits::*;
 use crate::heap::*;
@@ -37,6 +38,7 @@ pub fn test(){
     #[repr(C)]
     pub struct ShaderTest2{
         #[deref] parent: ShaderTest,
+        #[live] color: Vec4f,
         #[live] child_field: f32, 
         #[live] unused_field2: f32
     }
@@ -94,6 +96,7 @@ pub fn test(){
             vtx: shader.vertex_buffer(vertices)
             unitest: shader.uniform(1.0)
             unitest2: shader.uniform(1.0)
+            color: #ffff
             draw: shader.uniform_buffer(draw_uniforms)
             y: shader.instance(1.0)
             x: shader.instance(1.0)
@@ -111,8 +114,10 @@ pub fn test(){
                 self.vertex_pos = self.vtx.pos
             }
             fragment: fn(){
+                ~self.color
+                
+                let t = mix(#f0f, self.color, 0.5)
                 let q = self.testfn()
-                ~q
                 let v = self.unitest2 + self.vy + self.unitest
                 let t = self.draw.field + self.parent_field + self.child_field
                 let x = sdf.new()
