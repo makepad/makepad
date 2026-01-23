@@ -156,9 +156,9 @@ impl App {
 
 #[derive(Script, ScriptHook)]
 pub struct App {
-    #[script] window: WindowHandle,
-    #[script] pass: Pass,
-    #[script] main_draw_list: DrawList2d,
+    #[new] window: WindowHandle,
+    #[new] pass: Pass,
+    #[new] main_draw_list: DrawList2d,
 }
 
 // this is the protocol enum with 'micro-serde' binary serialise/deserialise macro on it.

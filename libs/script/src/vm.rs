@@ -12,6 +12,7 @@ use crate::mod_shader::*;
 use crate::object::*;
 use std::cell::RefCell;
 use std::any::Any;
+use std::collections::HashMap;
 
 #[derive(Default, Debug)]
 pub struct ScriptMod{
@@ -57,6 +58,7 @@ pub struct ScriptCode{
     pub builtins: ScriptBuiltins,
     pub native: RefCell<ScriptNative>,
     pub bodies: RefCell<Vec<ScriptBody>>,
+    pub crate_manifests: RefCell<HashMap<String, String>>,
 }
 
 pub struct ScriptLoc{
@@ -196,6 +198,15 @@ impl <'a> ScriptVm<'a>{
     
     
     pub fn add_script_mod(&mut self, new_mod:ScriptMod)->u16{
+        // Register this crate's manifest path for crate path resolution
+        let crate_name = new_mod.module_path.split("::").next().unwrap_or("");
+        if !crate_name.is_empty() {
+            self.code.crate_manifests.borrow_mut().insert(
+                crate_name.replace('-', "_"),
+                new_mod.cargo_manifest_path.clone()
+            );
+        }
+        
         let scope = self.heap.new_with_proto(id!(scope).into());
         self.heap.set_object_deep(scope);
         self.heap.set_value_def(scope, id!(mod).into(), self.heap.modules.into());
@@ -310,6 +321,7 @@ impl ScriptVmBase{
                 builtins,
                 native: RefCell::new(native),
                 bodies: Default::default(),
+                crate_manifests: Default::default(),
             },
             threads: vec![ScriptThread::new(ScriptThreadId(0))],
             heap: heap,

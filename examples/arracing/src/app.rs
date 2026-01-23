@@ -17,11 +17,11 @@ impl App{
 
 #[derive(Script, ScriptHook)]
 pub struct App {
-    #[script] window: WindowHandle,
-    #[script] pass: DrawPass,
-    #[script] depth_texture: Texture,
+    #[new] window: WindowHandle,
+    #[new] pass: DrawPass,
+    #[new] depth_texture: Texture,
     #[rust] smooth_throttle: f32,
-    #[script] main_draw_list: DrawList2d,
+    #[new] main_draw_list: DrawList2d,
 }
  
 impl MatchEvent for App{

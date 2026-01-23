@@ -156,9 +156,9 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         for field in &fields {
             tb.ident(&field.name).add(":");
             
-            if let Some(attr) = field.attrs.iter().find(|a| a.name == "script" || a.name == "live" ||a.name == "deref" || a.name == "rust"){
+            if let Some(attr) = field.attrs.iter().find(|a| a.name == "new" || a.name == "live" ||a.name == "deref" || a.name == "rust"){
                 if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                    if attr.name == "live" || attr.name =="script" || attr.name == "deref" {
+                    if attr.name == "live" || attr.name =="new" || attr.name == "deref" {
                         tb.add("ScriptNew::script_new(vm)");
                     }
                     else {
