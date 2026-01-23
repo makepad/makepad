@@ -739,6 +739,11 @@ impl TextInput {
     /// Updates the IME text context for platform IME
     /// Uses state comparison (Flutter-style) to prevent sync loops
     fn update_ime_context(&mut self, cx: &mut Cx) {
+        // Don't sync back to platform during active composition since the platform IME is the source of truth during it.
+        if self.composition_length > 0 {
+            return;
+        }
+
         use crate::makepad_platform::event::keyboard::CharOffset;
 
         // Convert byte indices to character offsets
@@ -1936,6 +1941,7 @@ impl Widget for TextInput {
                             }
                         );
                     }
+                    self.ime_update_frame = cx.redraw_id();
                 } else {
                     // Final commit or regular text input
                     if self.composition_length > 0 {
