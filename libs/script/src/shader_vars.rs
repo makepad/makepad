@@ -320,6 +320,7 @@ impl ShaderFnCompiler {
 
         result
     }
+    
 
     /// Get the value for a field, preferring inherited shader IO markers over local values.
     /// If a shader IO marker exists higher in the prototype chain, returns that.
@@ -445,8 +446,25 @@ impl ShaderFnCompiler {
                     }
                 }
 
-                // No shader IO marker found - check if this is a Rust struct field
-                // Get the actual value (might be different from shader IO lookup)
+                // No shader IO marker found - check if this is a RustInstance field
+                // RustInstance fields are pre-collected into output.io, so just look it up there
+                if let Some(io) = output.io.iter().find(|io| io.name == field_id && matches!(io.kind, ShaderIoKind::RustInstance)) {
+                    let pod_ty = io.ty;
+                    let (_, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, SHADER_IO_RUST_INSTANCE);
+                    let mut s = self.stack.new_string();
+                    match prefix {
+                        ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, field_id).ok(),
+                        ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+                        ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
+                    };
+                    self.stack.push(&self.trap, ShaderType::Pod(pod_ty), s);
+                    self.stack.free_string(field_s);
+                    self.stack.free_string(instance_s);
+                    return;
+                }
+                
+                // Not a RustInstance field - check if the actual value has a pod type
+                // (This path handles dynamically defined script fields)
                 let actual_value = vm.heap.value(obj, field_id.into(), &self.trap);
                 let ty = Self::type_from_value(vm, actual_value);
                 let concrete_ty = match ty {
@@ -456,7 +474,7 @@ impl ShaderFnCompiler {
                 };
 
                 if let Some(pod_ty) = concrete_ty {
-                    // This is a Rust struct field - treat it as RustInstance
+                    // This is a script-defined pod value
                     let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, SHADER_IO_RUST_INSTANCE);
                     vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
                     if !output.io.iter().any(|io| io.name == field_id) {
