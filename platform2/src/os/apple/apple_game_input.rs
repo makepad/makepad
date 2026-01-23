@@ -70,7 +70,7 @@ impl AppleGameInput {
                 callback_clone(GameInputConnectedEvent::Connected(info));
             });
             
-            let () = msg_send![center, addObserverForName: GCControllerDidConnectNotification object: nil queue: nil usingBlock: block];
+            let () = msg_send![center, addObserverForName: GCControllerDidConnectNotification object: nil queue: nil usingBlock: &block];
 
             let callback_clone = callback.clone();
             let block = objc_block!(move | note: ObjcId | {
@@ -88,7 +88,7 @@ impl AppleGameInput {
                 };
                 callback_clone(GameInputConnectedEvent::Disconnected(info));
             });
-             let () = msg_send![center, addObserverForName: GCControllerDidDisconnectNotification object: nil queue: nil usingBlock: block];
+             let () = msg_send![center, addObserverForName: GCControllerDidDisconnectNotification object: nil queue: nil usingBlock: &block];
 
         }
         
