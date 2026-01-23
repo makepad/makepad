@@ -520,7 +520,7 @@ class MakepadSurface
 
         @Override
         public boolean performEditorAction(int actionCode) {
-            // Handle editor actions (Done, Go, Search, Send, Next) for single-line inputs
+            // Handle editor actions (Done, Go, Search, Send, Next)
             // These are triggered when user presses the action button on the soft keyboard
 
             // EditorInfo action codes:
@@ -528,13 +528,18 @@ class MakepadSurface
             // IME_ACTION_SEARCH = 3, IME_ACTION_SEND = 4, IME_ACTION_NEXT = 5,
             // IME_ACTION_DONE = 6, IME_ACTION_PREVIOUS = 7
 
+            if (mIsMultiline && actionCode <= EditorInfo.IME_ACTION_NONE) {
+                // For multiline with unspecified/none action, insert a newline.
+                // Some IMEs (e.g. SwiftKey) call performEditorAction(IME_ACTION_UNSPECIFIED)
+                // instead of sendKeyEvent(KEYCODE_ENTER) or commitText("\n").
+                return commitText("\n", 1);
+            }
+
             // Notify Rust about the editor action
             // For single-line inputs, this should trigger TextInputAction::Returned
             MakepadNative.onImeEditorAction(actionCode);
 
-            // Return true for single-line (we fully handled the action)
-            // Return false for multiline to let system handle default behavior
-            return !mIsMultiline;
+            return true;
         }
     }
 
