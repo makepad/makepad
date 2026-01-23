@@ -1570,7 +1570,6 @@ impl Widget for TextInput {
             }) if modifiers.is_primary() => {
                 self.select_all(cx);
                 // Show clipboard actions after select all
-                // show_clipboard_actions is a no-op on unsupported platforms
                 let has_selection = !self.selected_text().is_empty();
                 let selection_rect = self.get_selection_rect(cx);
                 cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);

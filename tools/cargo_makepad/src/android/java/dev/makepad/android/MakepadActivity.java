@@ -277,28 +277,6 @@ class MakepadSurface
             MakepadNative.onImeTextStateChanged(fullText, selStart, selEnd, compStart, compEnd);
         }
 
-        // Called from Rust when text changes programmatically (not from IME)
-        public void updateFromRust(String fullText, int selStart, int selEnd) {
-            // Clear any existing composing spans
-            BaseInputConnection.removeComposingSpans(mEditable);
-
-            // Update editable content
-            mEditable.replace(0, mEditable.length(), fullText);
-
-            // Clamp selection to valid range
-            int textLen = mEditable.length();
-            selStart = Math.max(0, Math.min(selStart, textLen));
-            selEnd = Math.max(selStart, Math.min(selEnd, textLen));
-            Selection.setSelection(mEditable, selStart, selEnd);
-
-            // Force IME to re-query state - CRITICAL for keeping IME in sync
-            InputMethodManager imm = (InputMethodManager)
-                getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
-            if (imm != null) {
-                imm.restartInput(MakepadSurface.this);
-            }
-        }
-
         @Override
         public CharSequence getTextBeforeCursor(int n, int flags) {
             // Delegate to super which uses getEditable()
