@@ -8,7 +8,10 @@ use {
             apple::ios_app::IosApp,
             apple::apple_util::{nsstring_to_string, str_to_nsstring},
             apple::apple_sys::*,
-            apple::ios_app::{with_ios_app, get_ios_class_global, IOS_APP},
+            apple::ios_app::{
+                with_ios_app, get_ios_class_global, IOS_APP,
+                UI_TEXT_AUTOCORRECTION_DEFAULT, UI_TEXT_AUTOCORRECTION_NO,
+            },
             apple::ios::ios_event::IosEvent,
         },
     },
@@ -30,9 +33,14 @@ fn utf16_len(s: &str) -> i64 {
 // This is critical for callbacks from UIKit that can occur during borrows.
 fn try_with_ios_app<R>(f: impl FnOnce(&mut crate::os::apple::ios::ios_app::IosApp) -> R) -> Option<R> {
     IOS_APP.try_with(|app| {
-        if let Ok(mut app_ref) = app.try_borrow_mut() {
-            if let Some(app) = app_ref.as_mut() {
-                return Some(f(app));
+        match app.try_borrow_mut() {
+            Ok(mut app_ref) => {
+                if let Some(app) = app_ref.as_mut() {
+                    return Some(f(app));
+                }
+            }
+            Err(_) => {
+                crate::log!("Warning: try_with_ios_app skipped due to re-entrant borrow");
             }
         }
         None
@@ -641,11 +649,20 @@ pub fn define_text_input_view() -> *const Class {
     // UIKeyInput protocol methods
     // ==========================================================================
 
-    extern "C" fn has_text(_this: &Object, _: Sel) -> BOOL {
-        // Always return YES so iOS keeps sending deleteBackward events
-        // even when our buffer is empty (user might be deleting initial text
-        // that we don't track)
-        YES
+    extern "C" fn has_text(this: &Object, _: Sel) -> BOOL {
+        unsafe {
+            let buffer: ObjcId = *this.get_ivar("textBuffer");
+            if buffer != nil {
+                let len: u64 = msg_send![buffer, length];
+                if len > 0 { return YES; }
+            }
+            let marked: ObjcId = *this.get_ivar("markedText");
+            if marked != nil {
+                let len: u64 = msg_send![marked, length];
+                if len > 0 { return YES; }
+            }
+            NO
+        }
     }
 
     // Helper to get or create the text buffer
@@ -929,9 +946,14 @@ pub fn define_text_input_view() -> *const Class {
 
     extern "C" fn selected_text_range(this: &Object, _: Sel) -> ObjcId {
         unsafe {
+            let sel_start: i64 = *this.get_ivar("selectionStart");
+            let sel_end: i64 = *this.get_ivar("selectionEnd");
             let cursor: i64 = *this.get_ivar("cursorPosition");
+            // Use selection if set, otherwise use cursor
+            let start = if sel_start != sel_end { sel_start } else { cursor };
+            let end = if sel_start != sel_end { sel_end } else { cursor };
             let range_class = get_ios_class_global().text_range;
-            msg_send![range_class, rangeWithStart: cursor end: cursor]
+            msg_send![range_class, rangeWithStart: start end: end]
         }
     }
 
@@ -1375,11 +1397,11 @@ pub fn define_text_input_view() -> *const Class {
                         || lang.starts_with("ja")  // Japanese
                         || lang.starts_with("ko")  // Korean
                     {
-                        return 1; // UITextAutocorrectionTypeNo
+                        return UI_TEXT_AUTOCORRECTION_NO;
                     }
                 }
             }
-            0 // UITextAutocorrectionTypeDefault
+            UI_TEXT_AUTOCORRECTION_DEFAULT
         }
     }
 

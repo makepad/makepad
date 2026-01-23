@@ -26,6 +26,34 @@ use {
     }
 };
 
+// UIKeyboardType
+pub const UI_KEYBOARD_TYPE_DEFAULT: i64 = 0;
+pub const UI_KEYBOARD_TYPE_ASCII_CAPABLE: i64 = 1;
+pub const UI_KEYBOARD_TYPE_URL: i64 = 3;
+pub const UI_KEYBOARD_TYPE_NUMBER_PAD: i64 = 4;
+pub const UI_KEYBOARD_TYPE_PHONE_PAD: i64 = 5;
+pub const UI_KEYBOARD_TYPE_EMAIL_ADDRESS: i64 = 7;
+pub const UI_KEYBOARD_TYPE_DECIMAL_PAD: i64 = 8;
+pub const UI_KEYBOARD_TYPE_WEB_SEARCH: i64 = 10;
+
+// UITextAutocapitalizationType
+pub const UI_TEXT_AUTOCAPITALIZATION_NONE: i64 = 0;
+pub const UI_TEXT_AUTOCAPITALIZATION_WORDS: i64 = 1;
+pub const UI_TEXT_AUTOCAPITALIZATION_SENTENCES: i64 = 2;
+pub const UI_TEXT_AUTOCAPITALIZATION_ALL: i64 = 3;
+
+// UITextAutocorrectionType
+pub const UI_TEXT_AUTOCORRECTION_DEFAULT: i64 = 0;
+pub const UI_TEXT_AUTOCORRECTION_NO: i64 = 1;
+pub const UI_TEXT_AUTOCORRECTION_YES: i64 = 2;
+
+// UIReturnKeyType
+pub const UI_RETURN_KEY_DEFAULT: i64 = 0;
+pub const UI_RETURN_KEY_GO: i64 = 1;
+pub const UI_RETURN_KEY_SEARCH: i64 = 6;
+pub const UI_RETURN_KEY_SEND: i64 = 7;
+pub const UI_RETURN_KEY_DONE: i64 = 9;
+
 // this value will be fetched from multiple threads (post signal uses it)
 pub static mut IOS_CLASSES: *const IosClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
@@ -225,10 +253,10 @@ impl IosApp {
             (*text_input_view).set_ivar::<f64>("ime_pos_x", 0.0);
             (*text_input_view).set_ivar::<f64>("ime_pos_y", 0.0);
             // Initialize keyboard config ivars with defaults
-            (*text_input_view).set_ivar::<i64>("_keyboard_type", 0);           // UIKeyboardTypeDefault
-            (*text_input_view).set_ivar::<i64>("_autocapitalization_type", 2); // UITextAutocapitalizationTypeSentences
-            (*text_input_view).set_ivar::<i64>("_autocorrection_type", -1);    // Use CJK detection logic
-            (*text_input_view).set_ivar::<i64>("_return_key_type", 0);         // UIReturnKeyDefault
+            (*text_input_view).set_ivar::<i64>("_keyboard_type", UI_KEYBOARD_TYPE_DEFAULT);
+            (*text_input_view).set_ivar::<i64>("_autocapitalization_type", UI_TEXT_AUTOCAPITALIZATION_SENTENCES);
+            (*text_input_view).set_ivar::<i64>("_autocorrection_type", -1);  // Use CJK detection logic
+            (*text_input_view).set_ivar::<i64>("_return_key_type", UI_RETURN_KEY_DEFAULT);
             (*text_input_view).set_ivar::<bool>("_secure_text_entry", false);
 
             let () = msg_send![text_input_view, setUserInteractionEnabled: YES];
@@ -432,40 +460,36 @@ impl IosApp {
 
                     if let Some(text_input_view) = app.text_input_view {
                         unsafe {
-                            // InputMode to UIKeyboardType
                             let kb_type: i64 = match config.input_mode {
-                                InputMode::Text => 0,      // UIKeyboardTypeDefault
-                                InputMode::Ascii => 1,     // UIKeyboardTypeASCIICapable
-                                InputMode::Url => 3,       // UIKeyboardTypeURL
-                                InputMode::Numeric => 4,   // UIKeyboardTypeNumberPad
-                                InputMode::Tel => 5,       // UIKeyboardTypePhonePad
-                                InputMode::Email => 7,     // UIKeyboardTypeEmailAddress
-                                InputMode::Decimal => 8,   // UIKeyboardTypeDecimalPad
-                                InputMode::Search => 10,   // UIKeyboardTypeWebSearch
+                                InputMode::Text => UI_KEYBOARD_TYPE_DEFAULT,
+                                InputMode::Ascii => UI_KEYBOARD_TYPE_ASCII_CAPABLE,
+                                InputMode::Url => UI_KEYBOARD_TYPE_URL,
+                                InputMode::Numeric => UI_KEYBOARD_TYPE_NUMBER_PAD,
+                                InputMode::Tel => UI_KEYBOARD_TYPE_PHONE_PAD,
+                                InputMode::Email => UI_KEYBOARD_TYPE_EMAIL_ADDRESS,
+                                InputMode::Decimal => UI_KEYBOARD_TYPE_DECIMAL_PAD,
+                                InputMode::Search => UI_KEYBOARD_TYPE_WEB_SEARCH,
                             };
 
-                            // AutoCapitalize to UITextAutocapitalizationType
                             let autocap_type: i64 = match config.autocapitalize {
-                                AutoCapitalize::None => 0,          // UITextAutocapitalizationTypeNone
-                                AutoCapitalize::Words => 1,         // UITextAutocapitalizationTypeWords
-                                AutoCapitalize::Sentences => 2,     // UITextAutocapitalizationTypeSentences
-                                AutoCapitalize::AllCharacters => 3, // UITextAutocapitalizationTypeAllCharacters
+                                AutoCapitalize::None => UI_TEXT_AUTOCAPITALIZATION_NONE,
+                                AutoCapitalize::Words => UI_TEXT_AUTOCAPITALIZATION_WORDS,
+                                AutoCapitalize::Sentences => UI_TEXT_AUTOCAPITALIZATION_SENTENCES,
+                                AutoCapitalize::AllCharacters => UI_TEXT_AUTOCAPITALIZATION_ALL,
                             };
 
                             let autocorrect_type: i64 = match config.autocorrect {
-                                AutoCorrect::Default => -1, // use CJK detection logic (our default)
-                                AutoCorrect::Disabled => 1,  // UITextAutocorrectionTypeNo
-                                AutoCorrect::Enabled => 2,   // UITextAutocorrectionTypeYes
+                                AutoCorrect::Default => -1, // use CJK detection logic
+                                AutoCorrect::Disabled => UI_TEXT_AUTOCORRECTION_NO,
+                                AutoCorrect::Enabled => UI_TEXT_AUTOCORRECTION_YES,
                             };
 
-                            // ReturnKeyType to UIReturnKeyType
                             let return_type: i64 = match config.return_key_type {
-                                ReturnKeyType::Default => 0, // UIReturnKeyDefault
-                                ReturnKeyType::Go => 1,      // UIReturnKeyGo
-                                // ReturnKeyType::Next => 4,    // UIReturnKeyNext
-                                ReturnKeyType::Search => 6,  // UIReturnKeySearch
-                                ReturnKeyType::Send => 7,    // UIReturnKeySend
-                                ReturnKeyType::Done => 9,    // UIReturnKeyDone
+                                ReturnKeyType::Default => UI_RETURN_KEY_DEFAULT,
+                                ReturnKeyType::Go => UI_RETURN_KEY_GO,
+                                ReturnKeyType::Search => UI_RETURN_KEY_SEARCH,
+                                ReturnKeyType::Send => UI_RETURN_KEY_SEND,
+                                ReturnKeyType::Done => UI_RETURN_KEY_DONE,
                             };
 
                             (*text_input_view).set_ivar::<i64>("_keyboard_type", kb_type);
@@ -559,8 +583,10 @@ impl IosApp {
                             let ns_text = str_to_nsstring(&text);
                             let () = msg_send![buffer, appendString: ns_text];
 
-                            // Set cursor position (UTF-16 index)
+                            // Set cursor position and selection (UTF-16 index)
                             (*text_input_view).set_ivar("cursorPosition", cursor_utf16_pos as i64);
+                            (*text_input_view).set_ivar("selectionStart", cursor_utf16_pos as i64);
+                            (*text_input_view).set_ivar("selectionEnd", cursor_utf16_pos as i64);
 
                             // Notify AFTER changes (CRITICAL for autocorrect positioning)
                             if input_delegate != nil {
