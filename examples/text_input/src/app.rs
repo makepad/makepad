@@ -26,7 +26,7 @@ live_design!{
                             flow: Down,
                             spacing: 5,
                             <Label> {
-                                text: "1. Default (multiline, autocorrect, sentences cap)"
+                                text: "1. Default (multiline, autocorrect, sentences capitalization)"
                             }
                             input_default = <TextInput> {
                                 empty_text: "Default text input..."
@@ -147,13 +147,13 @@ live_design!{
                             }
                         }
 
-                        // 8. All caps input
+                        // 8. All caps hint (mobile keyboard only)
                         <View> {
                             height: Fit
                             flow: Down,
                             spacing: 5,
                             <Label> {
-                                text: "8. All caps (All characters Capitalization)"
+                                text: "8. Autocapitalize hint (mobile only, shifts keyboard to caps)"
                             }
                             input_allcaps = <TextInput> {
                                 empty_text: "ALL CAPS INPUT"
@@ -164,13 +164,13 @@ live_design!{
                             }
                         }
 
-                        // 9. ASCII input
+                        // 9. ASCII input (filtered on all platforms)
                         <View> {
                             height: Fit
                             flow: Down,
                             spacing: 5,
                             <Label> {
-                                text: "9. ASCII (ASCII keyboard)"
+                                text: "9. ASCII (filtered on all platforms, ASCII keyboard on mobile)"
                             }
                             input_ascii = <TextInput> {
                                 empty_text: "ASCII input"

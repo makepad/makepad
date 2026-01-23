@@ -609,13 +609,19 @@ pub struct TextInput {
 
     #[live] is_password: bool,
     #[live] is_read_only: bool,
-    // IME/keyboard configuration for mobile platforms
+    /// Input mode controls both the mobile soft keyboard layout and widget-level
+    /// input filtering. Ascii, Numeric, Decimal, and Tel modes filter input on
+    /// all platforms. Url, Email, and Search only affect the keyboard layout on mobile.
     #[live] input_mode: InputMode,
-    /// Autocapitalization behavior for soft keyboards.
+    /// Autocapitalization hint for mobile soft keyboards. This only affects the
+    /// keyboard's default shift state on iOS/Android — it does not transform input
+    /// text and has no effect on desktop platforms.
     #[live] autocapitalize: AutoCapitalize,
-    /// Autocorrection behavior for soft keyboards.
+    /// Autocorrection hint for mobile soft keyboards. Only affects iOS/Android;
+    /// has no effect on desktop platforms.
     #[live] autocorrect: AutoCorrect,
-    /// Return key type, controls the visual appearance and action of the return key.
+    /// Return key appearance on mobile soft keyboards. On desktop, Enter/Return
+    /// behavior is controlled by is_multiline instead.
     #[live] return_key_type: ReturnKeyType,
     /// Whether the text input is multiline.
     #[live(true)] is_multiline: bool,
