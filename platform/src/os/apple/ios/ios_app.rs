@@ -242,8 +242,6 @@ impl IosApp {
 
             let marked_text: ObjcId = msg_send![class!(NSMutableAttributedString), alloc];
             let marked_text: ObjcId = msg_send![marked_text, init];
-            // Retain markedText since we're storing it as ivar (not owned by ObjC runtime)
-            let () = msg_send![marked_text, retain];
             (*text_input_view).set_ivar::<ObjcId>("markedText", marked_text);
             (*text_input_view).set_ivar::<i64>("cursorPosition", 0);
             (*text_input_view).set_ivar::<i64>("selectionStart", 0);

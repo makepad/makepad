@@ -1856,6 +1856,8 @@ impl Widget for TextInput {
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
             }
             Hit::TextInput(event) if !self.is_read_only => {
+                // Text changes invalidate any preserved cursor from a pending tap gesture
+                self.preserved_selection_cursor = None;
                 // Unified text input handler for all platforms
                 // Handle Android full state sync (authoritative from Java InputConnection)
                 if let Some(full_state) = &event.full_state_sync {

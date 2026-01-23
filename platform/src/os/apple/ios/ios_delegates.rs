@@ -28,6 +28,29 @@ fn utf16_len(s: &str) -> i64 {
     s.encode_utf16().count() as i64
 }
 
+/// Convert two UTF-16 indices to character offsets in a single pass.
+/// Assumes end >= start.
+fn utf16_indices_to_char_offsets(text: &str, utf16_start: usize, utf16_end: usize) -> (usize, usize) {
+    let mut utf16_count = 0;
+    let char_len = text.chars().count();
+    let mut char_start = char_len;
+    let mut found_start = false;
+    for (char_idx, c) in text.chars().enumerate() {
+        if !found_start && utf16_count >= utf16_start {
+            char_start = char_idx;
+            found_start = true;
+        }
+        if utf16_count >= utf16_end {
+            return (char_start, char_idx);
+        }
+        utf16_count += c.len_utf16();
+    }
+    if !found_start {
+        char_start = char_len;
+    }
+    (char_start, char_len)
+}
+
 // Helper to safely access IosApp without causing re-entrant borrow panics.
 // Returns None if we're already inside a with_ios_app call.
 // This is critical for callbacks from UIKit that can occur during borrows.
@@ -1100,9 +1123,7 @@ pub fn define_text_input_view() -> *const Class {
 
             // Convert UTF-16 indices to character indices for Makepad
             // iOS uses UTF-16 code units, but Makepad expects character indices
-            use crate::event::keyboard::CharOffset;
-            let char_start = CharOffset::from_utf16_index(&buffer_string, range_start).0;
-            let char_end = CharOffset::from_utf16_index(&buffer_string, range_end).0;
+            let (char_start, char_end) = utf16_indices_to_char_offsets(&buffer_string, range_start, range_end);
 
             // Send the range replacement event to Makepad
             IosApp::send_text_range_replace(char_start, char_end, new_string.clone());
@@ -1292,13 +1313,21 @@ pub fn define_text_input_view() -> *const Class {
         first_rect_for_range(this, sel, nil)
     }
 
+    /// Returns an empty array. Proper implementation requires a custom
+    /// UITextSelectionRect subclass and access to per-line text layout info from
+    /// Rust, which is significant work for minimal benefit since our own renderer
+    /// already handles selection highlighting. The consequence is that iOS system
+    /// selection handles won't show exact per-line rects, but firstRectForRange
+    /// is still used for cursor positioning so the input remains functional.
     extern "C" fn selection_rects_for_range(_: &Object, _: Sel, _range: ObjcId) -> ObjcId {
-        // Return an empty array for now, in the future we might want to implement this for selection rects 
         unsafe { msg_send![class!(NSArray), array] }
     }
 
+    /// Returns position 0 (no hit testing). Proper implementation would require
+    /// access to text layout from the Rust side, which lives in the widget layer,
+    /// not the platform layer. As a result, system text cursor drag (moving the
+    /// cursor by dragging the iOS loupe/magnifier) won't work.
     extern "C" fn closest_position_to_point(_: &Object, _: Sel, _point: NSPoint) -> ObjcId {
-        // Return position 0 - we don't do hit testing
         unsafe {
             let pos_class = get_ios_class_global().text_position;
             msg_send![pos_class, positionWithOffset: 0i64]
