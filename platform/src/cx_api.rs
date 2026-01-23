@@ -78,7 +78,8 @@ pub trait CxOsApi {
 // - **Source of truth**: Java's `mEditable` (SpannableStringBuilder) in MakepadInputConnection
 // - **Sync direction**: Bidirectional (Java ↔ Rust)
 // - **Events**: `ImeTextStateChanged` sends full text + selection + composing region from Java→Rust
-// - **Echo detection**: Circular buffer prevents sync loops when Rust echoes state back
+// - **Echo detection**: Both sides track last-sent state to avoid sync loops
+//   (Java: `mLastSentText`, Rust: `last_sent_ime_text` + selection cache)
 // - **Programmatic updates**: Rust→Java via `SyncImeState` (e.g., clear button)
 //
 // ## iOS
