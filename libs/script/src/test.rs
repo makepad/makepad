@@ -63,7 +63,7 @@ pub fn test(){
     }
     
     
-    let _code = script!{
+    let code = script!{
         use mod.std.*
         use mod.shader
         use mod.pod.*
@@ -93,6 +93,7 @@ pub fn test(){
         let test_shader = #(ShaderTest2::script_shader(vm)){
             vtx: shader.vertex_buffer(vertices)
             unitest: shader.uniform(1.0)
+            unitest2: shader.uniform(1.0)
             draw: shader.uniform_buffer(draw_uniforms)
             y: shader.instance(1.0)
             x: shader.instance(1.0)
@@ -101,12 +102,18 @@ pub fn test(){
             vertex_pos: shader.vertex_position(vec4f)
             pixel: shader.fragment_output(0, vec4f)
             otherfn: |x| x + 1
+            testfn: ||{
+                let s = 1.0
+                return s
+            }
             vertex: fn(){
                 self.vy = 1.0
                 self.vertex_pos = self.vtx.pos
             }
             fragment: fn(){
-                let v = self.vy + self.unitest
+                let q = self.testfn()
+                ~q
+                let v = self.unitest2 + self.vy + self.unitest
                 let t = self.draw.field + self.parent_field + self.child_field
                 let x = sdf.new()
                 x.set_field(1f)
@@ -123,7 +130,7 @@ pub fn test(){
     
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod

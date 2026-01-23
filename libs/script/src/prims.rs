@@ -4,6 +4,7 @@ use crate::value::*;
 use crate::heap::*;
 use crate::traits::*;
 use crate::object::*;
+use crate::handle::*;
 use makepad_live_id::*;
 use crate::function::*;
 use crate::pod::*;
@@ -106,6 +107,21 @@ script_primitive!(
     }
 );
 
+script_primitive!(
+    ScriptHandleRef, 
+    fn script_new(vm:&mut ScriptVm)->Self{vm.heap.new_handle_ref(ScriptHandle::ZERO)},
+    fn script_type_check(_heap:&ScriptHeap, value:ScriptValue)->bool{
+        value.as_handle().is_some()
+    },
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        if let Some(handle) = value.as_handle(){
+            *self = vm.heap.new_handle_ref(handle)
+        }
+    },
+    fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{
+        self.as_handle().into()
+    }
+);
 
 script_primitive!(
     u32, 
