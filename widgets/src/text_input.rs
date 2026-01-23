@@ -633,9 +633,9 @@ pub struct TextInput {
     #[rust] preserved_selection_cursor: Option<Cursor>,
     /// Skip finger move after long press to prevent selection changes
     #[rust] ignore_next_move: bool,
-    /// IME composition tracking - byte index where composition starts
+    /// IME composition tracking - byte index in self.text where composition starts
     #[rust] composition_start: usize,
-    /// IME composition tracking - byte length of current composition
+    /// IME composition tracking - byte length of current composition in self.text
     #[rust] composition_length: usize,
     /// Frame ID when IME input was last received; prevents race condition in update_ime_context
     /// Uses frame counter instead of bool to avoid timing issues between event/draw
@@ -1569,14 +1569,11 @@ impl Widget for TextInput {
                 ..
             }) if modifiers.is_primary() => {
                 self.select_all(cx);
-                // On touch platforms, show clipboard actions after select all
-                // This handles the case where select_all is triggered from the clipboard menu
-                #[cfg(any(target_os = "ios", target_os = "android"))]
-                {
-                    let has_selection = !self.selected_text().is_empty();
-                    let selection_rect = self.get_selection_rect(cx);
-                    cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
-                }
+                // Show clipboard actions after select all
+                // show_clipboard_actions is a no-op on unsupported platforms
+                let has_selection = !self.selected_text().is_empty();
+                let selection_rect = self.get_selection_rect(cx);
+                cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
             }
             Hit::FingerDown(FingerDownEvent {
                 abs,
@@ -1916,6 +1913,11 @@ impl Widget for TextInput {
                     let byte_start = start.to_byte_index(&self.text);
                     let byte_end = end.to_byte_index(&self.text);
 
+                    // Adjust composition_start if edit was before active composition
+                    if self.composition_length > 0 && byte_start < self.composition_start {
+                        let edit_delta = filtered_text.len() as isize - (byte_end - byte_start) as isize;
+                        self.composition_start = (self.composition_start as isize + edit_delta).max(0) as usize;
+                    }
                     self.composition_length = 0;
                     self.create_or_extend_edit_group(EditKind::Other);
                     self.apply_edit(

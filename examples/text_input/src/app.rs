@@ -153,7 +153,7 @@ live_design!{
                             flow: Down,
                             spacing: 5,
                             <Label> {
-                                text: "8. All caps (AllCharacters capitalization)"
+                                text: "8. All caps (All characters Capitalization)"
                             }
                             input_allcaps = <TextInput> {
                                 empty_text: "ALL CAPS INPUT"
