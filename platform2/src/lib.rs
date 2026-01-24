@@ -38,6 +38,7 @@ mod geometry;
 mod debug;
 mod component_map;
 mod component_list;
+pub mod component;
 mod performance_stats;
 pub mod studio;
 
@@ -207,6 +208,11 @@ pub use {
             ActionCastRef,
             ActionTrait,
             ActionDefaultRef
+        },
+        component::{
+            ComponentInfo,
+            ComponentRegistry,
+            ComponentRegistries,
         },
         cursor::MouseCursor,
         macos_menu::MacosMenu,

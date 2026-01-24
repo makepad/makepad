@@ -57,7 +57,7 @@ script_mod!{
         draw_list: shader.uniform_buffer(draw.DrawListUniforms)
         geom: shader.vertex_buffer(geom.QuadVertex, geom.QuadGeom)
         
-        color: #ffff
+        color: #fff
         
         pos: shader.varying(vec2f)
         t: shader.varying(vec2f)
@@ -115,7 +115,7 @@ script_mod!{
     }
 }
 
-#[derive(Script, ScriptHook)]
+#[derive(Script)]
 #[repr(C)]
 pub struct DrawText {
     #[live] pub text_style: TextStyle,
@@ -131,10 +131,13 @@ pub struct DrawText {
     #[live] pub draw_clip: Vec4f,
     #[live(1.0)] pub depth_clip: f32,
     #[live] pub glyph_depth: f32,
-    #[live] pub color: Vec4f,
+    #[live(vec4(1.,1.,1.,1.))] pub color: Vec4f,
     #[live] pub texture_index: f32,
     #[live] pub t_min: Vec2f,
     #[live] pub t_max: Vec2f,
+}
+
+impl ScriptHook for DrawText{
 }
 
 impl DrawText {
@@ -516,7 +519,6 @@ impl DrawText {
 
         self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y) + vec2(0.0,self.temp_y_shift* font_size_in_lpxs);
         self.rect_size = vec2(bounds_in_lpxs.size.width, bounds_in_lpxs.size.height);
-        
         if let Some(color) = color {
             self.color = vec4(
                 color.r as f32,
