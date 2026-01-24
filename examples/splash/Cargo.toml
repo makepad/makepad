@@ -8,4 +8,4 @@ license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "EVyKRfOGV339Re5CS45PMHHxw_M="
 
 [dependencies]
-makepad-draw2 = { path = "../../draw2", version = "2.0.0" }
+makepad-widgets2 = { path = "../../widgets2", version = "2.0.0" }

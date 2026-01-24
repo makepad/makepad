@@ -1246,6 +1246,9 @@ impl fmt::Display for ScriptValue {
         if let Some(_) = self.as_string(){
             return write!(f, "[String]")
         }
+        if let Some(x) = self.as_color(){
+            return write!(f, "[Color:{:8x}]", x)
+        }
         if let Some(r) = self.as_inline_string(|s|{
                 write!(f, "{s}")
             }){

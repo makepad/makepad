@@ -1,4 +1,4 @@
-use makepad_draw2::*;
+use makepad_widgets2::*;
 
 app_main!(App); 
 script_mod!{
@@ -16,14 +16,14 @@ script_mod!{
             }
         }
         draw_text: mod.shaders.DrawText{
-            color:#ffff
+            color:#f00
         }
     }
 }
 
 impl App{
     fn run(vm:&mut ScriptVm)->Self{
-        crate::makepad_draw2::script_mod(vm);
+        crate::makepad_widgets2::script_mod(vm);
         App::from_script_mod(vm, self::script_mod)
     }
 }
