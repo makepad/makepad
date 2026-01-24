@@ -12,6 +12,7 @@ use {
     },
     crate::{
         action::{ActionSend,ACTION_SENDER_GLOBAL},
+        component::ComponentRegistries,
         draw_shader::CxDrawShaders,
         draw_matrix::CxDrawMatrixPool,
         os::CxOs,
@@ -106,6 +107,8 @@ pub struct Cx {
     
     pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
 
+    pub components: ComponentRegistries,
+    
     pub (crate) self_ref: Option<Rc<RefCell<Cx>>>,
     pub (crate) in_draw_event: bool,
 
@@ -334,6 +337,8 @@ impl Cx {
             debug: Default::default(),
             
             globals: Default::default(),
+            
+            components: ComponentRegistries::new(),
 
             executor: Some(executor),
             spawner,

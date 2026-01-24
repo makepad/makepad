@@ -1,0 +1,34 @@
+[package]
+name = "makepad-widgets2"
+version = "2.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad widgets2"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "N0YGjn7dnhc4DEHmww9lwuYwMVI="
+
+[dependencies]
+makepad-draw2 = { path = "../draw2", version = "2.0.0" }
+makepad-derive-widget2 = {path = "./derive_widget", version="2.0.0"}
+
+makepad-zune-jpeg ={ version = "0.3.17 ",  path = "../libs/zune-jpeg" }
+makepad-zune-png ={ version = "0.4.10", path = "../libs/zune-png"  }
+
+makepad-html ={ path = "../libs/html", version = "1.0.0" }
+unicode-segmentation = "1.11.0"
+pulldown-cmark = { version = "0.12.2", default-features = false, features = ["simd"] }
+
+#makepad-fonts-emoji = {path = "../widgets/fonts/emoji", version = "1.0.0"}
+#makepad-fonts-chinese-regular = {path = "../widgets/fonts/chinese_regular", version = "1.0.1"}
+#makepad-fonts-chinese-regular-2 = {path = "../widgets/fonts/chinese_regular_2", version = "1.0.1"}
+#makepad-fonts-chinese-bold = {path = "../widgets/fonts/chinese_bold", version = "1.0.1"}
+#makepad-fonts-chinese-bold-2 = {path = "../widgets/fonts/chinese_bold_2", version = "1.0.1"}
+
+serde = { version = "1.0", optional = true, features = ["derive"] }
+
+[features]
+default = []
+## Enables certain public-facing types to derive serde serialization traits.
+serde = ["dep:serde", "makepad-draw2/serde", "makepad-derive-widget2/serde"]
