@@ -660,6 +660,11 @@ pub fn define_text_input_view() -> *const Class {
     decl.add_ivar::<i64>("_return_key_type");         // UIReturnKeyType
     decl.add_ivar::<bool>("_secure_text_entry");      // isSecureTextEntry
 
+    // Floating cursor state (keyboard trackpad)
+    decl.add_ivar::<BOOL>("floating_cursor_active");
+    decl.add_ivar::<f64>("floating_cursor_last_x");
+    decl.add_ivar::<f64>("floating_cursor_last_y");
+
     // ==========================================================================
     // UIResponder methods
     // ==========================================================================
@@ -787,28 +792,40 @@ pub fn define_text_input_view() -> *const Class {
 
         unsafe {
             let buffer = get_text_buffer(this);
+            let buffer_len: u64 = msg_send![buffer, length];
             let cursor: i64 = *this.get_ivar("cursorPosition");
 
-            if cursor > 0 {
+            // Clamp cursor to valid range to handle out-of-sync states
+            let cursor = cursor.max(0).min(buffer_len as i64);
+
+            if cursor > 0 && buffer_len > 0 {
                 // Get buffer string to properly handle multi-code-unit characters (emoji)
                 let buffer_string = nsstring_to_string(buffer);
 
+                // Ensure cursor doesn't exceed string's UTF-16 length
+                let cursor_clamped = (cursor as usize).min(buffer_string.encode_utf16().count());
+
                 // Find character before cursor (handles emoji as single unit)
-                let char_before_cursor = CharOffset::from_utf16_index(&buffer_string, cursor as usize);
+                let char_before_cursor = CharOffset::from_utf16_index(&buffer_string, cursor_clamped);
                 if char_before_cursor.0 > 0 {
                     // Get UTF-16 position of previous character
                     let prev_char_offset = CharOffset(char_before_cursor.0 - 1);
                     let prev_char_utf16_start = prev_char_offset.to_utf16_index(&buffer_string) as u64;
-                    let delete_len = (cursor as u64) - prev_char_utf16_start;
+                    let delete_len = (cursor_clamped as u64).saturating_sub(prev_char_utf16_start);
 
-                    // Delete the entire previous character (1 or 2 UTF-16 code units)
-                    let range = NSRange {
-                        location: prev_char_utf16_start,
-                        length: delete_len
-                    };
-                    let () = msg_send![buffer, deleteCharactersInRange: range];
-                    (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", prev_char_utf16_start as i64);
+                    if delete_len > 0 && prev_char_utf16_start + delete_len <= buffer_len {
+                        // Delete the entire previous character (1 or 2 UTF-16 code units)
+                        let range = NSRange {
+                            location: prev_char_utf16_start,
+                            length: delete_len
+                        };
+                        let () = msg_send![buffer, deleteCharactersInRange: range];
+                        (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", prev_char_utf16_start as i64);
+                    }
                 }
+            } else if cursor != 0 {
+                // Reset cursor if buffer is empty but cursor wasn't at 0
+                (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", 0i64);
             }
         }
 
@@ -1477,6 +1494,93 @@ pub fn define_text_input_view() -> *const Class {
     }
 
     // ==========================================================================
+    // UITextInput protocol - Floating cursor methods (keyboard trackpad)
+    // ==========================================================================
+
+    extern "C" fn begin_floating_cursor(this: &mut Object, _: Sel, point: NSPoint) {
+        unsafe {
+            this.set_ivar::<BOOL>("floating_cursor_active", YES);
+            this.set_ivar::<f64>("floating_cursor_last_x", point.x);
+            this.set_ivar::<f64>("floating_cursor_last_y", point.y);
+        }
+    }
+
+    extern "C" fn update_floating_cursor(this: &mut Object, _: Sel, point: NSPoint) {
+        unsafe {
+            let active: BOOL = *this.get_ivar("floating_cursor_active");
+            if active == NO {
+                return;
+            }
+
+            let last_x: f64 = *this.get_ivar("floating_cursor_last_x");
+            let last_y: f64 = *this.get_ivar("floating_cursor_last_y");
+            let delta_x = point.x - last_x;
+            let delta_y = point.y - last_y;
+
+            // Threshold in points (~character width for horizontal, ~line height for vertical)
+            const MOVE_THRESHOLD_X: f64 = 10.0;
+            const MOVE_THRESHOLD_Y: f64 = 20.0;
+
+            let time = try_with_ios_app(|app| app.time_now()).unwrap_or(0.0);
+
+            // Handle horizontal movement
+            if delta_x.abs() >= MOVE_THRESHOLD_X {
+                let steps = (delta_x / MOVE_THRESHOLD_X).trunc() as i32;
+                let key_code = if steps > 0 { KeyCode::ArrowRight } else { KeyCode::ArrowLeft };
+
+                for _ in 0..steps.abs() {
+                    IosApp::do_callback(IosEvent::KeyDown(KeyEvent {
+                        key_code,
+                        is_repeat: false,
+                        modifiers: Default::default(),
+                        time,
+                    }));
+                    IosApp::do_callback(IosEvent::KeyUp(KeyEvent {
+                        key_code,
+                        is_repeat: false,
+                        modifiers: Default::default(),
+                        time,
+                    }));
+                }
+
+                let consumed = (steps as f64) * MOVE_THRESHOLD_X;
+                this.set_ivar::<f64>("floating_cursor_last_x", last_x + consumed);
+            }
+
+            // Handle vertical movement
+            if delta_y.abs() >= MOVE_THRESHOLD_Y {
+                let steps = (delta_y / MOVE_THRESHOLD_Y).trunc() as i32;
+                // Positive Y is down on iOS, so positive delta = ArrowDown
+                let key_code = if steps > 0 { KeyCode::ArrowDown } else { KeyCode::ArrowUp };
+
+                for _ in 0..steps.abs() {
+                    IosApp::do_callback(IosEvent::KeyDown(KeyEvent {
+                        key_code,
+                        is_repeat: false,
+                        modifiers: Default::default(),
+                        time,
+                    }));
+                    IosApp::do_callback(IosEvent::KeyUp(KeyEvent {
+                        key_code,
+                        is_repeat: false,
+                        modifiers: Default::default(),
+                        time,
+                    }));
+                }
+
+                let consumed = (steps as f64) * MOVE_THRESHOLD_Y;
+                this.set_ivar::<f64>("floating_cursor_last_y", last_y + consumed);
+            }
+        }
+    }
+
+    extern "C" fn end_floating_cursor(this: &mut Object, _: Sel) {
+        unsafe {
+            this.set_ivar::<BOOL>("floating_cursor_active", NO);
+        }
+    }
+
+    // ==========================================================================
     // Register all methods
     // ==========================================================================
 
@@ -1612,6 +1716,20 @@ pub fn define_text_input_view() -> *const Class {
         );
         decl.add_method(sel!(isSecureTextEntry), is_secure_text_entry as extern "C" fn(&Object, Sel) -> BOOL);
         decl.add_method(sel!(textContentType), text_content_type as extern "C" fn(&Object, Sel) -> ObjcId);
+
+        // UITextInput - Floating cursor (keyboard trackpad)
+        decl.add_method(
+            sel!(beginFloatingCursorAtPoint:),
+            begin_floating_cursor as extern "C" fn(&mut Object, Sel, NSPoint),
+        );
+        decl.add_method(
+            sel!(updateFloatingCursorAtPoint:),
+            update_floating_cursor as extern "C" fn(&mut Object, Sel, NSPoint),
+        );
+        decl.add_method(
+            sel!(endFloatingCursor),
+            end_floating_cursor as extern "C" fn(&mut Object, Sel),
+        );
     }
 
     // Protocol conformance

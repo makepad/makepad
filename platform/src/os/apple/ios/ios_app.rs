@@ -256,6 +256,10 @@ impl IosApp {
             (*text_input_view).set_ivar::<i64>("_autocorrection_type", -1);  // Use CJK detection logic
             (*text_input_view).set_ivar::<i64>("_return_key_type", UI_RETURN_KEY_DEFAULT);
             (*text_input_view).set_ivar::<bool>("_secure_text_entry", false);
+            // Floating cursor (keyboard trackpad) state
+            (*text_input_view).set_ivar::<BOOL>("floating_cursor_active", NO);
+            (*text_input_view).set_ivar::<f64>("floating_cursor_last_x", 0.0);
+            (*text_input_view).set_ivar::<f64>("floating_cursor_last_y", 0.0);
 
             let () = msg_send![text_input_view, setUserInteractionEnabled: YES];
             let () = msg_send![mtk_view_obj, addSubview: text_input_view];
