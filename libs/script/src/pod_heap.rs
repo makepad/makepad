@@ -1521,7 +1521,7 @@ impl ScriptHeap{
                 let mut offset_of = offset_of;
                 for i in 0..vt.dims(){
                     if i>0{
-                        print!(" ");
+                        write!(out, ", ").ok();
                     }
                     if vt.elem_size() == 2{
                         if offset_of&3>=2{
@@ -1542,10 +1542,16 @@ impl ScriptHeap{
                write!(out, "{}(", mt.name()).ok();
                 let (dim_x,dim_y) = mt.dims();
                 let mut offset_of = offset_of;
-                for _y in 0..dim_y{
+                for y in 0..dim_y{
+                    if y > 0 {
+                        write!(out, ", ").ok();
+                    }
                     write!(out, "[").ok();
-                    for _x in 0..dim_x{
-                       write!(out, "{} ",f32::from_bits(data[offset_of>>2])).ok();
+                    for x in 0..dim_x{
+                        if x > 0 {
+                            write!(out, ", ").ok();
+                        }
+                        write!(out, "{}",f32::from_bits(data[offset_of>>2])).ok();
                         offset_of += mt.elem_size();
                     }
                     write!(out, "]").ok();

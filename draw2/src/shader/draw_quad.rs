@@ -15,7 +15,7 @@ script_mod!{
     use mod.draw
     use mod.geom
     
-    mod.shaders.DrawQuad = #(DrawQuad::script_shader(vm)){
+    mod.shaders.DrawQuad = mod.std.set_type_default() do #(DrawQuad::script_shader(vm)){
         vertex_pos: shader.vertex_position(vec4f)
         fb0: shader.fragment_output(0, vec4f)
         draw_call: shader.uniform_buffer(draw.DrawCallUniforms)

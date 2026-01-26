@@ -80,7 +80,7 @@ pub struct ScriptTypeCheck{
     pub object: Option<ScriptTypeObject>,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub struct ScriptTypeIndex(pub(crate) u32);
 
 
@@ -166,6 +166,17 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     fn script_type_id_static()->ScriptTypeId{ ScriptTypeId::of::<Self>()}
     fn script_new(vm:&mut ScriptVm)->Self;
     
+    fn script_new_with_default(vm:&mut ScriptVm)->Self where Self:Sized{
+        let type_id = Self::script_type_id_static();
+        if let Some(default_obj) = vm.heap.type_default_for_id(type_id){
+            Self::script_from_value(vm, default_obj.into())
+        }
+        else{
+            Self::script_new(vm)
+        }
+    }
+    
+    
     fn from_script_mod(vm:&mut ScriptVm, f:fn(&mut ScriptVm)->ScriptValue)->Self where Self:Sized{
         let value = f(vm);
         Self::script_from_value(vm, value)
@@ -175,7 +186,6 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_from_value(vm:&mut ScriptVm, value:ScriptValue)->Self where Self:Sized{
         let mut s = Self::script_new(vm);
-        s.on_new(vm);
         s.script_apply(vm, &mut ApplyScope::default(), value);
         s
     }    

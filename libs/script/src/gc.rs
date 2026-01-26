@@ -148,6 +148,10 @@ impl ScriptHeap{
                 }
             }                
         }
+        // Mark type_defaults objects
+        for obj in self.type_defaults.values(){
+            self.mark_vec.push(ScriptGcMark::Object(*obj));
+        }
         let roots = self.root_objects.borrow();
         for item in roots.keys(){
             self.mark_vec.push(ScriptGcMark::Object(*item));

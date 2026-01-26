@@ -48,7 +48,7 @@ script_mod!{
         line_spacing: 1.2
     }
     
-    mod.shaders.DrawText = #(DrawText::script_shader(vm)){
+    mod.shaders.DrawText = mod.std.set_type_default() do #(DrawText::script_shader(vm)){
         text_style: test_text_style,
         vertex_pos: shader.vertex_position(vec4f)
         fb0: shader.fragment_output(0, vec4f)
@@ -57,7 +57,7 @@ script_mod!{
         draw_list: shader.uniform_buffer(draw.DrawListUniforms)
         geom: shader.vertex_buffer(geom.QuadVertex, geom.QuadGeom)
         
-        color: #fff
+        color: #f0f
         
         pos: shader.varying(vec2f)
         t: shader.varying(vec2f)
@@ -138,6 +138,12 @@ pub struct DrawText {
 }
 
 impl ScriptHook for DrawText{
+    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+        if let Some(obj) = value.as_object(){
+            println!("ON BEFORE {:?}", obj)
+        }
+        
+    }
 }
 
 impl DrawText {

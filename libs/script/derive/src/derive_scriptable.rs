@@ -159,7 +159,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             if let Some(attr) = field.attrs.iter().find(|a| a.name == "new" || a.name == "live" ||a.name == "deref" || a.name == "rust"){
                 if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
                     if attr.name == "live" || attr.name =="new" || attr.name == "deref" {
-                        tb.add("ScriptNew::script_new(vm)");
+                        tb.add("ScriptNew::script_new_with_default(vm)");
                     }
                     else {
                         tb.add("Default::default()");
@@ -194,21 +194,13 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             }
             
             // Process live fields
-            if let Some(attr) = field.attrs.iter().find(|a| a.name == "live"){
+            if let Some(_attr) = field.attrs.iter().find(|a| a.name == "live"){
                 // Skip live fields that come BEFORE the deref field - they are not instance data
                 if let Some(deref_idx) = deref_index {
                     if idx < deref_idx {
-                        // Still add to prototype for scripting, but don't add to props
+                        // Still register prototype for scripting, but don't add to props
                         // (props is used for shader instance field collection)
                         tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto(vm);");
-                        tb.add("let value:ScriptValue = ");
-                        if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                            tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_default(vm);");
-                        } else {
-                            tb.add("(").stream(attr.args.clone()).add(").script_to_value(vm);");
-                        }  
-                        tb.add("vm.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
-                            .ident(&field.name).add(")), value,&vm.thread.trap);");
                         // Note: NOT adding to props - these are config fields, not instance data
                         continue;
                     }
@@ -216,18 +208,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 
                 // This is either a field after deref, or there's no deref field
                 tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto(vm);");
-                
-                tb.add("let value:ScriptValue = ");
-                if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                                        
-                    tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_default(vm);");
-                }
-                else {
-                    tb.add("(").stream(attr.args.clone()).add(").script_to_value(vm);");
-                }  
-                tb.add("vm.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
-                    .ident(&field.name).add(")), value,&vm.thread.trap);");
-                tb.add("props.insert(id!(").ident(&field.name).add("),<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
+                tb.add("props.insert(id_lut!(").ident(&field.name).add("),<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_type_id_static());");
             }
         }
         

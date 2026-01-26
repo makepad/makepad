@@ -435,6 +435,7 @@ impl fmt::Display for ScriptValueType {
             Self::OBJECT=>write!(f,"object"),
             Self::ARRAY=>write!(f,"array"),
             Self::POD=>write!(f,"pod"),
+            Self::POD_TYPE=>write!(f,"pod_type"),
             Self::OPCODE=>write!(f,"opcode"),
             Self::INLINE_STRING_0=>write!(f,"string0"),
             Self::INLINE_STRING_1=>write!(f,"string1"),
@@ -1274,6 +1275,12 @@ impl fmt::Display for ScriptValue {
         }
         if let Some(ptr) = self.as_handle(){
             return write!(f, "[ScriptHandle:{}]",ptr.index)
+        }
+        if let Some(ptr) = self.as_pod_type(){
+            return write!(f, "[ScriptPodType:{}]",ptr.index)
+        }
+        if let Some(ptr) = self.as_pod(){
+            return write!(f, "[ScriptPod:{}]",ptr.index)
         }
         if let Some(error) = self.as_err(){
             return write!(f, "{}", error.ty)
