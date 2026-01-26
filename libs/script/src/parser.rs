@@ -67,6 +67,7 @@ enum State{
     EmitFnArgDyn{index:u32},
     
     EmitUnary{what_op:LiveId, index:u32},
+    EmitSplat{index:u32},
     EmitOp{what_op:LiveId, index:u32},
     EmitFieldAssign{what_op:LiveId, index:u32},
     EmitIndexAssign{what_op:LiveId, index:u32},
@@ -845,6 +846,10 @@ impl ScriptParser{
                 self.push_code(State::operator_to_unary(what_op), index);
                 return 0
             }
+            State::EmitSplat{index}=>{
+                self.push_code(Opcode::ME_SPLAT.into(), index);
+                return 0
+            }
             State::EmitReturn{index}=>{
                 self.push_code(Opcode::RETURN.into(), index);
                 return 0
@@ -1460,6 +1465,12 @@ impl ScriptParser{
                     self.state.push(State::BeginExpr{required:true});
                     return 1
                 }
+                if op == id!(..){
+                    // Prefix .. is the splat operator
+                    self.state.push(State::EmitSplat{index:self.index});
+                    self.state.push(State::BeginExpr{required:true});
+                    return 1
+                }
                 if !required && (sep == id!(;) || sep == id!(,)){
                    // self.push_code(NIL, self.index);
                 }
@@ -1711,6 +1722,11 @@ impl ScriptParser{
                         }
                         if opcode == Opcode::BREAK || opcode == Opcode::CONTINUE{
                             //code.set_opcode_is_statement();
+                            self.state.push(State::BeginStmt{last_was_sep:false});
+                            return 0;
+                        }
+                        if opcode == Opcode::ME_SPLAT{
+                            // ME_SPLAT already handles merging into me, no pop_to_me needed
                             self.state.push(State::BeginStmt{last_was_sep:false});
                             return 0;
                         }

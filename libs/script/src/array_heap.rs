@@ -66,6 +66,30 @@ impl ScriptHeap{
             array.storage.push(kv.value);
         }
     }
+    
+    /// Merges all elements from source array into target array.
+    /// Used by the splat operator (..) to spread one array into another.
+    pub fn merge_array(&mut self, target:ScriptArray, source:ScriptArray, trap:&ScriptTrap){
+        // Get the storage from source first
+        let source_storage = &self.arrays[source.index as usize].storage;
+        let values: Vec<ScriptValue> = match source_storage {
+            ScriptArrayStorage::ScriptValue(v) => v.iter().copied().collect(),
+            ScriptArrayStorage::U8(v) => v.iter().map(|x| ScriptValue::from_f64(*x as f64)).collect(),
+            ScriptArrayStorage::U16(v) => v.iter().map(|x| ScriptValue::from_f64(*x as f64)).collect(),
+            ScriptArrayStorage::U32(v) => v.iter().map(|x| ScriptValue::from_f64(*x as f64)).collect(),
+            ScriptArrayStorage::F32(v) => v.iter().map(|x| ScriptValue::from_f64(*x as f64)).collect(),
+        };
+        
+        let target_arr = &mut self.arrays[target.index as usize];
+        if target_arr.tag.is_frozen(){
+            trap.err_frozen();
+            return 
+        }
+        target_arr.tag.set_dirty();
+        for v in values {
+            target_arr.storage.push(v);
+        }
+    }
         
     pub fn array_push_unchecked(&mut self, array:ScriptArray, value:ScriptValue){
         if let Some(obj) = value.as_object(){

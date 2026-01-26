@@ -385,7 +385,11 @@ pub fn test(){
         let x = {sub:[{prop:1, x:1}]}
         x.sub[0] += {prop:2}
         assert(x.sub[0].prop == 2 && x.sub[0].x == 1)
-                
+        
+        // prefix use of .. splat operator
+        let x = {a:1 b:2}
+        let y = {b:3, ..x}
+        assert(y.a == 1 && y.b == 3)
     };
         
     let _code = script!{
