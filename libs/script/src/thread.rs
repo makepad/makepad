@@ -180,6 +180,16 @@ impl ScriptThread{
         }
     }
     
+    pub fn peek_stack_value_at(&mut self, offset: usize)->ScriptValue{
+        let len = self.stack.len();
+        if offset < len {
+            return self.stack[len - 1 - offset]
+        }
+        else{
+            self.trap.err_stack_underflow()
+        }
+    }
+    
     pub fn pop_stack_value(&mut self)->ScriptValue{
         if let Some(value) = self.stack.pop(){
             return value
