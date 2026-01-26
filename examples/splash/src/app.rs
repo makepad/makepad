@@ -20,9 +20,7 @@ script_mod!{
                 sdf.result
             }
         }
-        draw_text+:{
-            color: #f00
-        }
+        me.draw_text.color = #f00
     }
     ~x
     x

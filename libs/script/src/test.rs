@@ -368,11 +368,24 @@ pub fn test(){
         assert(a_wild == 1)
         assert(b_wild == 2)
         
-        // test protoinheriting
+        // test protoinheriting operators
         let x = {obj:{prop:1}}
         let y = x{obj +: {prop:2}}
         assert(x.obj.prop == 1)
         assert(y.obj.prop == 2)
+        
+        let x = {prop:1, x:1}
+        x += {prop:2}
+        assert(x.prop == 2 && x.x == 1)
+        
+        let x = {sub:{prop:1, x:1}}
+        x.sub += {prop:2}
+        assert(x.sub.prop == 2 && x.sub.x == 1)
+        
+        let x = {sub:[{prop:1, x:1}]}
+        x.sub[0] += {prop:2}
+        assert(x.sub[0].prop == 2 && x.sub[0].x == 1)
+                
     };
         
     let _code = script!{
