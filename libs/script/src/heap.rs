@@ -23,6 +23,8 @@ pub struct ScriptHeap{
     pub(crate) root_arrays: Rc<RefCell<HashMap<ScriptArray, usize>>>,
     pub(crate) root_handles: Rc<RefCell<HashMap<ScriptHandle, usize>>>,
     
+    pub(crate) type_defaults: HashMap<ScriptTypeIndex, ScriptObject>,
+    
     pub(crate) objects: Vec<ScriptObjectData>,
     pub(crate) objects_free: Vec<ScriptObject>,
     
@@ -155,6 +157,48 @@ impl ScriptHeap{
     
     pub fn type_check(&self, index: ScriptTypeIndex)->&ScriptTypeCheck{
         &self.type_check[index.0 as usize]
+    }
+    
+    pub fn set_type_default(&mut self, obj: ScriptObject)->bool{
+        let object = &self.objects[obj.index as usize];
+        if let Some(ty_index) = object.tag.as_type_index(){
+            // Add to type_defaults mapping (GC will scan this table)
+            self.type_defaults.insert(ty_index, obj);
+            true
+        }
+        else{
+            false
+        }
+    }
+    
+    pub fn type_default(&self, ty_index: ScriptTypeIndex)->Option<ScriptObject>{
+        self.type_defaults.get(&ty_index).copied()
+    }
+    
+    pub fn type_default_for_id(&self, type_id: ScriptTypeId)->Option<ScriptObject>{
+        if let Some(ty_index) = self.type_index.get(&type_id){
+            self.type_defaults.get(ty_index).copied()
+        }
+        else{
+            None
+        }
+    }
+    
+    /// Look up a field's ScriptTypeId from the type-check structure of an object.
+    /// This is used when the field value isn't on the prototype but the type is registered.
+    pub fn field_type_from_type_check(&self, obj: ScriptObject, field_id: LiveId) -> Option<ScriptTypeId> {
+        let object = &self.objects[obj.index as usize];
+        if let Some(ty_index) = object.tag.as_type_index() {
+            let type_check = &self.type_check[ty_index.0 as usize];
+            if let Some(prop) = type_check.props.props.get(&field_id) {
+                return Some(prop.ty);
+            }
+        }
+        // Also check the prototype chain
+        if let Some(proto_obj) = object.proto.as_object() {
+            return self.field_type_from_type_check(proto_obj, field_id);
+        }
+        None
     }
                 
         
@@ -383,12 +427,33 @@ impl ScriptHeap{
     pub fn println(&self, value:ScriptValue){
         let mut out = String::new();
         let mut recur = Vec::new();
-        self.to_debug_string(value, &mut recur, &mut out);
+        self.to_debug_string(value, &mut recur, &mut out, true, 0);
         println!("{out}");
     }
     
-    pub fn to_debug_string(&self, value:ScriptValue, recur:&mut Vec<ScriptValue>, out:&mut String){
+    pub fn to_debug_string(&self, value:ScriptValue, recur:&mut Vec<ScriptValue>, out:&mut String, formatted: bool, depth: usize){
+        fn write_indent(out: &mut String, depth: usize) {
+            for _ in 0..depth {
+                out.push_str("- - ");
+            }
+        }
+        
+        fn write_separator(out: &mut String, formatted: bool, depth: usize, first: bool) {
+            if !first {
+                if formatted {
+                    out.push_str(",\n");
+                    write_indent(out, depth);
+                } else {
+                    out.push_str(", ");
+                }
+            }
+        }
+        
         if let Some(obj) = value.as_object(){
+            if self.is_fn(obj){
+                write!(out, "<fn {}>", obj.index()).ok();
+                return
+            }
             if recur.iter().any(|v| *v == value){
                 write!(out, "<recur>").ok();
                 return
@@ -404,45 +469,68 @@ impl ScriptHeap{
             }
             let mut ptr = obj;
             // scan up the chain to set the proto value
-            write!(out, "{{").ok();
+            write!(out, "<{}>{{", obj.index()).ok();
+            
+            // Check if object has any content (for formatted output)
+            let has_content = {
+                let obj_data = &self.objects[obj.index as usize];
+                obj_data.map_len() > 0 || !obj_data.vec.is_empty() || obj_data.tag.as_type_index().is_some()
+            };
+            
+            if formatted && has_content {
+                out.push('\n');
+                write_indent(out, depth + 1);
+            }
+            
             let mut first = true;
             
             // if we have a type index, output type checked base properties first
             if let Some(ty_index) = object.tag.as_type_index(){
+                write!(out, "<type ").ok();
                 let type_check = &self.type_check[ty_index.0 as usize];
                 for (prop_id, _prop_ty) in type_check.props.iter_ordered(){
                     if !first{write!(out, ", ").ok();}
-                    write!(out, "{}:typed", prop_id).ok();
+                    write!(out, "{}", prop_id).ok();
                     first = false;
                 }
+                write!(out, ">").ok();
             }
             
             loop{
                 let object = &self.objects[ptr.index as usize];
                 
                 object.map_iter(|key,value|{
-                    if !first{write!(out, ", ").ok();}
+                    write_separator(out, formatted, depth + 1, first);
                     if key != NIL{
-                        self.to_debug_string(key, recur, out);
-                        write!(out, ":").ok();
+                        self.to_debug_string(key, recur, out, formatted, depth + 1);
+                        write!(out, ": ").ok();
                     }
-                    self.to_debug_string(value, recur, out);
+                    self.to_debug_string(value, recur, out, formatted, depth + 1);
                     first = false;
                 });
                 for kv in object.vec.iter(){
-                    if !first{write!(out, ", ").ok();}
+                    write_separator(out, formatted, depth + 1, first);
                     if kv.key != NIL{
-                        write!(out, "{}:", kv.key).ok();
+                        write!(out, "{}: ", kv.key).ok();
                     }
-                    self.to_debug_string(kv.value, recur, out);
+                    self.to_debug_string(kv.value, recur, out, formatted, depth + 1);
                     first = false;
                 }
                 if let Some(next_ptr) = object.proto.as_object(){
-                    if !first{write!(out, ",").ok();}
-                    write!(out, "^").ok();
+                    if formatted {
+                        if !first { out.push_str(",\n"); write_indent(out, depth + 1); }
+                        write!(out, "^<{}>", next_ptr.index()).ok();
+                    } else {
+                        if !first{write!(out, ",").ok();}
+                        write!(out, "^<{}>", next_ptr.index()).ok();
+                    }
                     ptr = next_ptr
                 }
                 else{
+                    if formatted && has_content {
+                        out.push('\n');
+                        write_indent(out, depth);
+                    }
                     write!(out, "/{}", object.proto).ok();
                     break;
                 }
@@ -459,10 +547,29 @@ impl ScriptHeap{
             let array = &self.arrays[arr.index as usize];
             let len = array.storage.len();
             write!(out, "[").ok();
-            for i in 0..len{
-                if i!=0{write!(out, ", ").ok();}
-                self.to_debug_string(array.storage.index(i).unwrap(), recur, out);
+            
+            if formatted && len > 0 {
+                out.push('\n');
+                write_indent(out, depth + 1);
             }
+            
+            for i in 0..len{
+                if i != 0 {
+                    if formatted {
+                        out.push_str(",\n");
+                        write_indent(out, depth + 1);
+                    } else {
+                        out.push_str(", ");
+                    }
+                }
+                self.to_debug_string(array.storage.index(i).unwrap(), recur, out, formatted, depth + 1);
+            }
+            
+            if formatted && len > 0 {
+                out.push('\n');
+                write_indent(out, depth);
+            }
+            
             write!(out, "]").ok();
             recur.pop();
         }

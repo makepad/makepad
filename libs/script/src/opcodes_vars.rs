@@ -167,6 +167,7 @@ impl ScriptThread {
     pub(crate) fn handle_proto_field(&mut self, heap: &mut ScriptHeap) {
         let field = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
+        println!("PROTO FIELD {}", field);
         if let Some(obj) = object.as_object(){
             let value = heap.value(obj, field, &self.trap);
             self.push_stack_unchecked(value)
@@ -327,7 +328,7 @@ impl ScriptThread {
                 else{
                     let mut out = String::new();
                     let mut recur = Vec::new();
-                    heap.to_debug_string(value, &mut recur, &mut out);
+                    heap.to_debug_string(value, &mut recur, &mut out, true, 0);
                     log_with_level(&loc.file, loc.line, loc.col, loc.line, loc.col, format!("{:?}:{out}", value.value_type()), LogLevel::Log);
                 }
             }
