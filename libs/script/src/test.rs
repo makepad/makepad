@@ -90,7 +90,7 @@ pub fn test(){
             pos: vec4,
         }
         let test_p1 = 1.0
-        let test_obj = {p2:2.0}
+        let test_obj = {test_p1:2.0 objfn:fn(){self.test_p1}}
         let test_uni = struct{p3:3.0}
         let test_buf = shader.uniform_buffer(test_uni)
         let test_tex = shader.texture_2d(float)
@@ -110,9 +110,10 @@ pub fn test(){
             otherfn: |x| x + 1
             testfn: ||{
                 let k = test_p1
-                let m = test_obj.p2
-                let n = test_buf.p3
-                let o = test_tex.sample(vec2(2.0))
+                let m = test_obj.test_p1
+                let n = test_obj.objfn()
+                //let n = test_buf.p3
+                //let o = test_tex.sample(vec2(2.0))
                 let s = 1.0
                 return s
             }

@@ -7,6 +7,13 @@ impl ShaderOutput {
         writeln!(out, "struct Io {{").ok();
         writeln!(out, "    constant IoUniform *u;").ok();
         writeln!(out, "    constant IoInstance *i;").ok();
+        
+        // Add scope uniforms buffer pointer if we have any scope uniforms
+        let has_scope_uniforms = self.io.iter().any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
+        if has_scope_uniforms {
+            writeln!(out, "    constant IoScopeUniform *su;").ok();
+        }
+        
         for io in &self.io {
             match &io.kind {
                 ShaderIoKind::Texture(tex_type) => {
@@ -43,6 +50,26 @@ impl ShaderOutput {
                     writeln!(out, "    constant IoVertexBuffer *vb;").ok();
                     have_vb = true;
                 }
+            }
+        }
+        writeln!(out, "}};").ok();
+    }
+    
+    /// Creates the IoScopeUniform struct that holds values read from the script scope.
+    /// This struct is populated by reading values from scope_uniforms sources before drawing.
+    pub fn metal_create_scope_uniform_struct(&self, vm: &ScriptVm, out: &mut String) {
+        // Only create the struct if there are scope uniforms
+        let has_scope_uniforms = self.io.iter().any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
+        if !has_scope_uniforms {
+            return;
+        }
+        
+        writeln!(out, "struct IoScopeUniform {{").ok();
+        for io in &self.io {
+            if let ShaderIoKind::ScopeUniform = io.kind {
+                write!(out, "    ").ok();
+                self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
+                writeln!(out, " {};", io.name).ok();
             }
         }
         writeln!(out, "}};").ok();
@@ -129,6 +156,8 @@ impl ShaderOutput {
     }
 
     pub fn metal_create_vertex_fn(&self, vm: &ScriptVm, out: &mut String) {
+        let has_scope_uniforms = self.io.iter().any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
+        
         writeln!(out, "vertex IoVarying vertex_main(").ok();
         writeln!(out, "    constant IoVertexBuffer *vb [[buffer(0)]],").ok();
         writeln!(out, "    constant IoInstance *i [[buffer(1)]],").ok();
@@ -142,6 +171,17 @@ impl ShaderOutput {
                 self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
                 writeln!(out, " *u_{} [[buffer({})]],", io.name, buf_idx).ok();
             }
+        }
+        
+        // Add scope uniforms buffer parameter if we have any
+        if has_scope_uniforms {
+            // Use a fixed buffer index for scope uniforms (after uniform buffers)
+            let scope_uniform_buffer_idx = self.io.iter()
+                .filter_map(|io| io.buffer_index)
+                .max()
+                .map(|m| m + 1)
+                .unwrap_or(3);
+            writeln!(out, "    constant IoScopeUniform *su [[buffer({})]],", scope_uniform_buffer_idx).ok();
         }
         
         let mut tex_idx = 0;
@@ -181,6 +221,10 @@ impl ShaderOutput {
         writeln!(out, "    _io.i = i;").ok();
         writeln!(out, "    _io.u = u;").ok();
         
+        if has_scope_uniforms {
+            writeln!(out, "    _io.su = su;").ok();
+        }
+        
         for io in &self.io {
             match &io.kind {
                 ShaderIoKind::UniformBuffer => {
@@ -207,6 +251,8 @@ impl ShaderOutput {
     }
 
     pub fn metal_create_fragment_main_fn(&self, vm: &ScriptVm, out: &mut String) {
+        let has_scope_uniforms = self.io.iter().any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
+        
         writeln!(out, "fragment IoFb fragment_main(").ok();
         writeln!(out, "    IoVarying v [[stage_in]],").ok();
         writeln!(out, "    constant IoVertexBuffer *vb [[buffer(0)]],").ok();
@@ -222,6 +268,17 @@ impl ShaderOutput {
                 self.backend.pod_type_name_from_ty(vm.heap, io.ty, out);
                 write!(out, " *u_{} [[buffer({})]]", io.name, buf_idx).ok();
             }
+        }
+        
+        // Add scope uniforms buffer parameter if we have any
+        if has_scope_uniforms {
+            let scope_uniform_buffer_idx = self.io.iter()
+                .filter_map(|io| io.buffer_index)
+                .max()
+                .map(|m| m + 1)
+                .unwrap_or(3);
+            writeln!(out, ",").ok();
+            write!(out, "    constant IoScopeUniform *su [[buffer({})]]", scope_uniform_buffer_idx).ok();
         }
         
         let mut tex_idx = 0;
@@ -260,6 +317,10 @@ impl ShaderOutput {
         writeln!(out, "    _io.vb = vb;").ok();
         writeln!(out, "    _io.i = i;").ok();
         writeln!(out, "    _io.u = u;").ok();
+        
+        if has_scope_uniforms {
+            writeln!(out, "    _io.su = su;").ok();
+        }
         
         for io in &self.io {
             match &io.kind {

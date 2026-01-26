@@ -52,6 +52,7 @@ impl ShaderBackend{
                         SHADER_IO_TEXTURE_DEPTH=>(ShaderIoKind::Texture(TextureType::TextureDepth), ShaderIoPrefix::Prefix("_io.")),
                         SHADER_IO_TEXTURE_DEPTH_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureDepthArray), ShaderIoPrefix::Prefix("_io.")),
                         SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("_io.")),
+                        SHADER_IO_SCOPE_UNIFORM=>(ShaderIoKind::ScopeUniform, ShaderIoPrefix::Prefix("_io.su->")),
                         
                         _=>panic!()
                     }
@@ -79,6 +80,7 @@ impl ShaderBackend{
                             SHADER_IO_TEXTURE_DEPTH=>(ShaderIoKind::Texture(TextureType::TextureDepth), ShaderIoPrefix::Prefix("_io.")),
                             SHADER_IO_TEXTURE_DEPTH_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureDepthArray), ShaderIoPrefix::Prefix("_io.")),
                             SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("_io.")),
+                            SHADER_IO_SCOPE_UNIFORM=>(ShaderIoKind::ScopeUniform, ShaderIoPrefix::Prefix("_io.su->")),
                             _=>panic!()
                         }
                     }
@@ -112,6 +114,7 @@ impl ShaderBackend{
                              SHADER_IO_TEXTURE_DEPTH=>(ShaderIoKind::Texture(TextureType::TextureDepth), ShaderIoPrefix::Prefix("")),
                              SHADER_IO_TEXTURE_DEPTH_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureDepthArray), ShaderIoPrefix::Prefix("")),
                              SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_SCOPE_UNIFORM=>(ShaderIoKind::ScopeUniform, ShaderIoPrefix::Prefix("su_")),
                              _=>panic!()
                          }
                      }
@@ -139,6 +142,7 @@ impl ShaderBackend{
                              SHADER_IO_TEXTURE_DEPTH=>(ShaderIoKind::Texture(TextureType::TextureDepth), ShaderIoPrefix::Prefix("")),
                              SHADER_IO_TEXTURE_DEPTH_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureDepthArray), ShaderIoPrefix::Prefix("")),
                              SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("")),
+                             SHADER_IO_SCOPE_UNIFORM=>(ShaderIoKind::ScopeUniform, ShaderIoPrefix::Prefix("su_")),
                              _=>panic!()
                          }
                      }
@@ -169,6 +173,7 @@ impl ShaderBackend{
                     SHADER_IO_TEXTURE_DEPTH=>(ShaderIoKind::Texture(TextureType::TextureDepth), ShaderIoPrefix::Prefix("tex_")),
                     SHADER_IO_TEXTURE_DEPTH_ARRAY=>(ShaderIoKind::Texture(TextureType::TextureDepthArray), ShaderIoPrefix::Prefix("tex_")),
                     SHADER_IO_SAMPLER=>(ShaderIoKind::Sampler(ShaderSamplerOptions::default()), ShaderIoPrefix::Prefix("sampler_")),
+                    SHADER_IO_SCOPE_UNIFORM=>(ShaderIoKind::ScopeUniform, ShaderIoPrefix::Prefix("su_")),
                     _=>panic!()
                 }
             }
