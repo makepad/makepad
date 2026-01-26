@@ -470,8 +470,53 @@ impl ShaderFnCompiler {
                     }
                 }
                 
-                // Clear any error from value lookup failure
-                self.trap.err.take();
+                // Value not found on prototype - try to get the type from type-check structure
+                self.trap.err.take(); // Clear any error from value lookup
+                if let Some(field_type_id) = vm.heap.field_type_from_type_check(obj, field_id) {
+                    // Found field type in type-check structure - convert to pod type
+                    if let Some(pod_ty) = vm.heap.type_id_to_pod_type(field_type_id, &vm.code.builtins.pod) {
+                        // Check if we already have this scope uniform
+                        let existing = output.scope_uniforms.iter().find(|su| 
+                            su.source_obj == obj && su.key == field_id
+                        );
+                        
+                        let shader_name = if let Some(existing) = existing {
+                            existing.shader_name
+                        } else {
+                            let shader_name = self.generate_scope_uniform_name(output, field_id, obj);
+                            output.scope_uniforms.push(ScopeUniformSource {
+                                source_obj: obj,
+                                key: field_id,
+                                shader_name,
+                                ty: pod_ty,
+                            });
+                            if !output.io.iter().any(|io| io.name == shader_name && matches!(io.kind, ShaderIoKind::ScopeUniform)) {
+                                vm.heap.pod_type_name_if_not_set(pod_ty, shader_name);
+                                output.io.push(ShaderIo {
+                                    kind: ShaderIoKind::ScopeUniform,
+                                    name: shader_name,
+                                    ty: pod_ty,
+                                    buffer_index: None,
+                                });
+                            }
+                            shader_name
+                        };
+                        
+                        let mut s = self.stack.new_string();
+                        let (_, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, SHADER_IO_SCOPE_UNIFORM);
+                        match prefix {
+                            ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, shader_name).ok(),
+                            ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+                            ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
+                        };
+                        self.stack.push(&self.trap, ShaderType::Pod(pod_ty), s);
+                        self.stack.free_string(field_s);
+                        self.stack.free_string(instance_s);
+                        return;
+                    }
+                }
+                
+                // Field not found in type-check structure either
                 self.trap.err_not_found();
                 self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
                 self.stack.free_string(field_s);
@@ -598,7 +643,11 @@ impl ShaderFnCompiler {
                     }
                 }
 
-                // No shader IO marker found - check if this is a RustInstance field
+                // No shader IO marker found - clear any trap error from value lookup
+                // before checking RustInstance fields (which don't depend on prototype values)
+                self.trap.err.take();
+                
+                // Check if this is a RustInstance field
                 // RustInstance fields are pre-collected into output.io, so just look it up there
                 if let Some(io) = output.io.iter().find(|io| io.name == field_id && matches!(io.kind, ShaderIoKind::RustInstance)) {
                     let pod_ty = io.ty;
@@ -648,9 +697,36 @@ impl ShaderFnCompiler {
                     self.stack.free_string(instance_s);
                     return;
                 }
+                
+                // Fallback: Look up field type from type-check structure
+                self.trap.err.take(); // Clear any error
+                if let Some(field_type_id) = vm.heap.field_type_from_type_check(obj, field_id) {
+                    if let Some(pod_ty) = vm.heap.type_id_to_pod_type(field_type_id, &vm.code.builtins.pod) {
+                        let (kind, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, SHADER_IO_RUST_INSTANCE);
+                        vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
+                        if !output.io.iter().any(|io| io.name == field_id) {
+                            output.io.push(ShaderIo {
+                                kind,
+                                name: field_id,
+                                ty: pod_ty,
+                                buffer_index: None,
+                            });
+                        }
+                        let mut s = self.stack.new_string();
+                        match prefix {
+                            ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, field_id).ok(),
+                            ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+                            ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
+                        };
+                        self.stack.push(&self.trap, ShaderType::Pod(pod_ty), s);
+                        self.stack.free_string(field_s);
+                        self.stack.free_string(instance_s);
+                        return;
+                    }
+                }
             }
         }
-        self.trap.err_no_matching_shader_type();
+        self.trap.err_not_found();
         self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
         self.stack.free_string(field_s);
         self.stack.free_string(instance_s);

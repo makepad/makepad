@@ -71,4 +71,13 @@ pub fn define_std_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
         
         return vm.thread.last_err
     });
+    
+    native.add_method(heap, std, id!(set_type_default), script_args!(obj=NIL), |vm, args|{
+        if let Some(obj) = script_value!(vm, args.obj).as_object(){
+            if vm.heap.set_type_default(obj){
+                return obj.into()
+            }
+        }
+        NIL
+    });
 }

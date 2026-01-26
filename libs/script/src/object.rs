@@ -560,6 +560,13 @@ impl ScriptObjectData{
             }
             vm.thread.trap.err_unexpected()
         });
+        
+        native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(gc_id), &[], |vm, args|{
+            if let Some(sself) = script_value!(vm, args.self).as_object(){
+                return sself.index().into()
+            }
+            vm.thread.trap.err_unexpected()
+        });
                     
         native.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id!(extend), &[], |vm, args|{
             if let Some(sself) = script_value!(vm, args.self).as_object(){

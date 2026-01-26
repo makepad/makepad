@@ -11,8 +11,8 @@ script_mod!{
         SOME_COLOR: #fff
     }
     
-    #(App::script_component(vm)){
-        draw_quad: mod.shaders.DrawQuad{ 
+    let x = #(App::script_component(vm)){
+        draw_quad: mod.shaders.DrawQuad{
             pixel: ||{
                 let sdf = Sdf2d.viewport(self.pos*self.rect_size)
                 sdf.circle(40 40 35)
@@ -20,10 +20,13 @@ script_mod!{
                 sdf.result
             }
         }
-        draw_text: mod.shaders.DrawText{
-            color:#f00
-        }
+        //draw_text: mod.shaders.DrawText{
+        //    color: #700
+        //}
+        me.draw_text.color = #700
     }
+    ~x
+    x
 }
 
 impl App{

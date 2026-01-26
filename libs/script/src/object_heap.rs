@@ -591,16 +591,21 @@ impl ScriptHeap{
         trap.err_not_found()
     }
         
-    #[inline]
     pub fn value_apply_if_dirty(&mut self, obj:ScriptValue, key:ScriptValue)->Option<ScriptValue>{
+        let debug = key == live_id!(draw_text).into();
+        
         if let Some(ptr) = obj.as_object(){
+            if debug{
+                println!("Finding value {} {}", ptr.index, key);
+            }
             // only do top level if dirty
             let object = &mut self.objects[ptr.index as usize];
-            if let Some(value) = object.map_get_if_dirty(&key){
+            if let Some(value) = object.map_get(&key){
+                if debug{println!("Fetched value {} {} {}", ptr.index, key, value);}
                 return Some(value)
             }
             // if we havent been applied before apply prototype chain too
-            if !object.tag.is_first_applied(){
+            //if !object.tag.is_first_applied(){
                 let mut ptr = if let Some(next_ptr) = object.proto.as_object(){
                     next_ptr
                 }
@@ -609,11 +614,15 @@ impl ScriptHeap{
                 };
                 loop{
                     let object = &self.objects[ptr.index as usize];
-                    // skip the last prototype, since its already default valued on the Rust object
-                    if !object.proto.is_object(){
-                        return None
+                    if debug{
+                        println!("PROTO {}", ptr.index)
                     }
+                    // skip the last prototype, since its already default valued on the Rust object
+                    //if !object.proto.is_object(){
+                    //    return None
+                    //}
                     if let Some(value) = object.map_get(&key){
+                         println!("Fetched proto value {} {} {}", ptr.index, key, value);
                         return Some(value)
                     }
                     if let Some(next_ptr) = object.proto.as_object(){
@@ -623,7 +632,7 @@ impl ScriptHeap{
                         return None
                     }
                 }
-            }
+            //}
         }
         None    
     }
