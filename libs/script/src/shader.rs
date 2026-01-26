@@ -846,7 +846,8 @@ impl ShaderFnCompiler{
             Opcode::SHALLOW_NEQ=>{self.trap.err_opcode_not_supported_in_shader();},
             // Object/Array begin
             Opcode::BEGIN_PROTO=>{self.trap.err_opcode_not_supported_in_shader();},
-            Opcode::BEGIN_PROTO_ME=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::PROTO_INHERIT_READ=>{self.trap.err_opcode_not_supported_in_shader();},
+            Opcode::PROTO_INHERIT_WRITE=>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::END_PROTO=>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::BEGIN_BARE=>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::END_BARE=>{self.trap.err_opcode_not_supported_in_shader();},

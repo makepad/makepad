@@ -590,6 +590,51 @@ impl ScriptHeap{
         // TODO implement string lookup
         trap.err_not_found()
     }
+    
+    /// Create a default instance for a type-checked field that doesn't exist on the prototype.
+    /// This is used for deep prototypical inheritance - when accessing obj.field where field
+    /// only exists in the type-check structure, we create a new instance and set it on obj.
+    pub fn proto_field_from_type_check(&mut self, obj: ScriptObject, field_id: LiveId, trap: &ScriptTrap) -> ScriptValue {
+        // Get the field's type_id from the type-check structure
+        if let Some(field_type_id) = self.field_type_from_type_check(obj, field_id) {
+            // Look up the type_default for this type
+            if let Some(default_obj) = self.type_default_for_id(field_type_id) {
+                // Create a new object with the default as prototype
+                let new_obj = self.new_with_proto(default_obj.into());
+                // Set it on the parent object
+                self.set_value(obj, field_id.into(), new_obj.into(), trap);
+                return new_obj.into();
+            }
+        }
+        trap.err_not_found()
+    }
+    
+    /// Handle proto_field access for a value that exists on the prototype chain.
+    /// If the value is an object that comes from a prototype (not directly on obj),
+    /// create a new object with it as prototype and set it on obj.
+    pub fn proto_field_from_value(&mut self, obj: ScriptObject, field: ScriptValue, trap: &ScriptTrap) -> ScriptValue {
+        // First check if the field exists directly on this object
+        let obj_data = &self.objects[obj.index as usize];
+        if let Some(value) = obj_data.map_get(&field) {
+            // Field exists directly on object, return as-is
+            return value;
+        }
+        
+        // Field doesn't exist directly - get from prototype chain
+        let value = self.value(obj, field, trap);
+        
+        // If it's an object from prototype, create a new instance
+        if let Some(value_obj) = value.as_object() {
+            // Create a new object with the prototype value as its proto
+            let new_obj = self.new_with_proto(value_obj.into());
+            // Set it on the current object
+            self.set_value(obj, field, new_obj.into(), trap);
+            return new_obj.into();
+        }
+        
+        // Not an object (primitive or nil) - return as-is
+        value
+    }
         
     pub fn value_apply_if_dirty(&mut self, obj:ScriptValue, key:ScriptValue)->Option<ScriptValue>{
         let debug = key == live_id!(draw_text).into();
