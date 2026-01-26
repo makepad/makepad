@@ -117,7 +117,7 @@ impl ScriptNew for WindowHandle {
 }
 
 impl ScriptApply for WindowHandle {
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue) {
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut Apply, value:ScriptValue) {
         if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(inner_size)){
             vm.host.cx_mut().windows[self.window_id()].create_inner_size = Some(v);
         }

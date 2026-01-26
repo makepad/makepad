@@ -847,7 +847,7 @@ pub struct CxOsDrawShader {
 
 // alright lets go process this shader
 impl DrawVars{
-    pub (crate) fn compile_shader(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+    pub (crate) fn compile_shader(&mut self, vm:&mut ScriptVm, _apply:&mut Apply, value:ScriptValue){
         // alright lets compile a metal shader
         if let Some(io_self) = value.as_object(){
             let mut output = ShaderOutput::default();

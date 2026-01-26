@@ -12,17 +12,14 @@ script_mod!{
     }
     
     let x = #(App::script_component(vm)){
-        draw_quad+:{
-            pixel: ||{
-                let sdf = Sdf2d.viewport(self.pos*self.rect_size)
-                sdf.circle(40 40 35)
-                sdf.fill(mix(theme.SOME_COLOR #f00 self.pos.y))
-                sdf.result
-            }
+        me.draw_quad.pixel = ||{
+            let sdf = Sdf2d.viewport(self.pos*self.rect_size)
+            sdf.circle(40 40 35)
+            sdf.fill(mix(theme.SOME_COLOR #f00 self.pos.y))
+            sdf.result
         }
         me.draw_text.color = #f00
     }
-    ~x
     x
 }
 
@@ -44,7 +41,7 @@ pub struct App {
 }
 
 impl ScriptHook for App{
-    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){
+    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){
     }
 }
 

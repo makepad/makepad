@@ -70,13 +70,13 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 
         tb.add("impl").stream(generic.clone());
         tb.add("ScriptHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-        tb.add("    fn on_deref_before_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){");
+        tb.add("    fn on_deref_before_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue){");
         tb.add("         <Self as ScriptHook>::on_before_apply(self, vm, apply, value);");
         // Note: Don't recursively call on_deref_before_apply on deref field here - 
         // the deref field's script_apply will call its own on_deref_before_apply
         tb.add("    }");
         
-        tb.add("    fn on_deref_after_apply(&mut self,vm: &mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){");
+        tb.add("    fn on_deref_after_apply(&mut self,vm: &mut ScriptVm, apply:&mut Apply, value:ScriptValue){");
         
         tb.add("        <Self as ScriptHook>::on_after_apply(self, vm, apply, value);");
         // Note: Don't recursively call on_deref_after_apply on deref field here -
@@ -94,7 +94,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         tb.add("    fn script_type_id(&self)->ScriptTypeId{ ScriptTypeId::of::<Self>()}");
         
-        tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue) {");
+        tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue) {");
         tb.add("       if <Self as ScriptHook>::on_skip_apply(self, vm, apply, value) || value.is_nil(){return};");
         
         tb.add("        <Self as ScriptHookDeref>::on_deref_before_apply(self, vm, apply, value);");
@@ -408,7 +408,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("ScriptApply for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 
         tb.add("    fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}");
-        tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){");
+        tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue){");
         tb.add("        if self.on_skip_apply(vm, apply, value){");
         tb.add("            return");
         tb.add("        }");
@@ -664,7 +664,7 @@ impl ScriptToValue for EnumTest{
     
 impl ScriptApply for EnumTest{
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue){
         if self.on_skip_apply(vm, apply, value){
             return
         }
