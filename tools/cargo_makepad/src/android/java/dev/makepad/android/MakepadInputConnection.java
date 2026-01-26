@@ -61,21 +61,21 @@ public class MakepadInputConnection extends BaseInputConnection {
         Editable editable = mSurface.getEditable();
 
         switch (inputMode) {
-            case 1: // Ascii - only ASCII characters (code point < 128)
+            case MakepadSurface.INPUT_MODE_ASCII:
                 StringBuilder ascii = new StringBuilder();
                 for (int i = 0; i < text.length(); i++) {
                     char c = text.charAt(i);
                     if (c < 128) ascii.append(c);
                 }
                 return ascii;
-            case 3: // Numeric - digits only
+            case MakepadSurface.INPUT_MODE_NUMERIC:
                 StringBuilder numeric = new StringBuilder();
                 for (int i = 0; i < text.length(); i++) {
                     char c = text.charAt(i);
                     if (Character.isDigit(c)) numeric.append(c);
                 }
                 return numeric;
-            case 6: // Decimal - digits, decimal point, and sign
+            case MakepadSurface.INPUT_MODE_DECIMAL:
                 StringBuilder decimal = new StringBuilder();
                 boolean hasDot = editable.toString().contains(".");
                 for (int i = 0; i < text.length(); i++) {
@@ -88,7 +88,7 @@ public class MakepadInputConnection extends BaseInputConnection {
                     }
                 }
                 return decimal;
-            case 4: // Tel - digits and phone characters
+            case MakepadSurface.INPUT_MODE_TEL:
                 StringBuilder tel = new StringBuilder();
                 for (int i = 0; i < text.length(); i++) {
                     char c = text.charAt(i);
@@ -98,7 +98,7 @@ public class MakepadInputConnection extends BaseInputConnection {
                     }
                 }
                 return tel;
-            default: // Text (0), Url (2), Email (5), Search (7) - allow all
+            default: // TEXT, URL, EMAIL, SEARCH - allow all
                 return text;
         }
     }

@@ -649,8 +649,8 @@ pub struct TextInput {
     #[rust] ime_update_frame: u64,
     /// Track last sent IME state to prevent sync loops
     #[rust] last_sent_ime_text: String,
-    #[rust] last_sent_ime_sel_start: usize,  // UTF-16 index for Android comparison
-    #[rust] last_sent_ime_sel_end: usize,    // UTF-16 index for Android comparison
+    #[rust] last_sent_ime_sel_start: usize,  // UTF-16 index 
+    #[rust] last_sent_ime_sel_end: usize,    // UTF-16 index 
 }
 
  impl LiveHook for TextInput{
@@ -1499,7 +1499,7 @@ impl Widget for TextInput {
                     None
                 );
 
-                // Update cache to match what we just sent (use UTF-16 for comparison)
+                // Update cache to match what we just sent
                 self.last_sent_ime_text = self.text.clone();
                 self.last_sent_ime_sel_start = byte_index_to_utf16_index(&self.text, self.selection.start().index);
                 self.last_sent_ime_sel_end = byte_index_to_utf16_index(&self.text, self.selection.end().index);

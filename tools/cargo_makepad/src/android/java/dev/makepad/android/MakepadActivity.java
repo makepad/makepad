@@ -84,11 +84,40 @@ class MakepadSurface
     // Shared Editable buffer for IME - this is the source of truth for Java side
     private SpannableStringBuilder mEditable = new SpannableStringBuilder();
 
+    // Keyboard configuration constants (must match Rust KeyboardType enum)
+    static final int INPUT_MODE_TEXT = 0;
+    static final int INPUT_MODE_ASCII = 1;
+    static final int INPUT_MODE_URL = 2;
+    static final int INPUT_MODE_NUMERIC = 3;
+    static final int INPUT_MODE_TEL = 4;
+    static final int INPUT_MODE_EMAIL = 5;
+    static final int INPUT_MODE_DECIMAL = 6;
+    static final int INPUT_MODE_SEARCH = 7;
+
+    // Autocapitalize constants (must match Rust Autocapitalize enum)
+    static final int AUTOCAP_NONE = 0;
+    static final int AUTOCAP_WORDS = 1;
+    static final int AUTOCAP_SENTENCES = 2;
+    static final int AUTOCAP_ALL = 3;
+
+    // Autocorrect constants (must match Rust Autocorrect enum)
+    static final int AUTOCORRECT_DEFAULT = 0;
+    static final int AUTOCORRECT_YES = 1;
+    static final int AUTOCORRECT_NO = 2;
+
+    // Return key type constants (must match Rust ReturnKeyType enum)
+    static final int RETURN_KEY_DEFAULT = 0;
+    static final int RETURN_KEY_GO = 1;
+    static final int RETURN_KEY_SEARCH = 2;
+    static final int RETURN_KEY_SEND = 3;
+    static final int RETURN_KEY_NEXT = 4;
+    static final int RETURN_KEY_DONE = 5;
+
     // Keyboard configuration (set by Rust via configureKeyboard)
-    private int mInputMode = 0;         // 0=Text, 1=Ascii, 2=Url, 3=Numeric, 4=Tel, 5=Email, 6=Decimal, 7=Search
-    private int mAutocapitalize = 2;    // 0=None, 1=Words, 2=Sentences, 3=All
-    private int mAutocorrect = 0;       // 0=Default, 1=Yes, 2=No
-    private int mReturnKeyType = 0;     // 0=Default, 1=Go, 2=Search, 3=Send, 5=Done
+    private int mInputMode = INPUT_MODE_TEXT;
+    private int mAutocapitalize = AUTOCAP_SENTENCES;
+    private int mAutocorrect = AUTOCORRECT_DEFAULT;
+    private int mReturnKeyType = RETURN_KEY_DEFAULT;
     private boolean mIsMultiline = true;
     private boolean mIsSecure = false;
 
@@ -129,7 +158,6 @@ class MakepadSurface
 
         getViewTreeObserver().addOnGlobalLayoutListener(this);
 
-        // Initialize selection spans in the Editable - CRITICAL for BaseInputConnection to work
         Selection.setSelection(mEditable, 0, 0);
     }
 
@@ -295,30 +323,30 @@ class MakepadSurface
         int inputType = InputType.TYPE_CLASS_TEXT;
 
         switch (mInputMode) {
-            case 1: // Ascii - use visible password variation for ASCII-only keyboard
+            case INPUT_MODE_ASCII:
                 // TYPE_TEXT_VARIATION_VISIBLE_PASSWORD shows ASCII keyboard without masking
                 // This is the closest Android equivalent to iOS's UIKeyboardTypeASCIICapable
                 inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
                 break;
-            case 2: // Url
+            case INPUT_MODE_URL:
                 inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;
                 break;
-            case 3: // Numeric
+            case INPUT_MODE_NUMERIC:
                 inputType = InputType.TYPE_CLASS_NUMBER;
                 break;
-            case 4: // Tel
+            case INPUT_MODE_TEL:
                 inputType = InputType.TYPE_CLASS_PHONE;
                 break;
-            case 5: // Email
+            case INPUT_MODE_EMAIL:
                 inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS;
                 break;
-            case 6: // Decimal
+            case INPUT_MODE_DECIMAL:
                 inputType = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED;
                 break;
-            case 7: // Search
+            case INPUT_MODE_SEARCH:
                 inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT;
                 break;
-            default: // Text (0)
+            default: // INPUT_MODE_TEXT
                 inputType = InputType.TYPE_CLASS_TEXT;
                 break;
         }
@@ -326,27 +354,27 @@ class MakepadSurface
         if ((inputType & InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT) {
             // Autocapitalization
             switch (mAutocapitalize) {
-                case 0: // None
+                case AUTOCAP_NONE:
                     // No flag needed
                     break;
-                case 1: // Words
+                case AUTOCAP_WORDS:
                     inputType |= InputType.TYPE_TEXT_FLAG_CAP_WORDS;
                     break;
-                case 2: // Sentences (default)
+                case AUTOCAP_SENTENCES:
                     inputType |= InputType.TYPE_TEXT_FLAG_CAP_SENTENCES;
                     break;
-                case 3: // AllCharacters
+                case AUTOCAP_ALL:
                     inputType |= InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS;
                     break;
             }
 
             // Autocorrect
             switch (mAutocorrect) {
-                case 0: // Default - enable auto-correct
-                case 1: // Yes
+                case AUTOCORRECT_DEFAULT:
+                case AUTOCORRECT_YES:
                     inputType |= InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
                     break;
-                case 2: // No
+                case AUTOCORRECT_NO:
                     inputType |= InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
                     break;
             }
@@ -369,22 +397,22 @@ class MakepadSurface
 
         // Return key type
         switch (mReturnKeyType) {
-            case 1: // Go
+            case RETURN_KEY_GO:
                 imeOptions |= EditorInfo.IME_ACTION_GO;
                 break;
-            case 2: // Search
+            case RETURN_KEY_SEARCH:
                 imeOptions |= EditorInfo.IME_ACTION_SEARCH;
                 break;
-            case 3: // Send
+            case RETURN_KEY_SEND:
                 imeOptions |= EditorInfo.IME_ACTION_SEND;
                 break;
-            case 4: // Next
+            case RETURN_KEY_NEXT:
                 imeOptions |= EditorInfo.IME_ACTION_NEXT;
                 break;
-            case 5: // Done
+            case RETURN_KEY_DONE:
                 imeOptions |= EditorInfo.IME_ACTION_DONE;
                 break;
-            default: // Default (0)
+            default: // RETURN_KEY_DEFAULT
                 if (!mIsMultiline) {
                     imeOptions |= EditorInfo.IME_ACTION_DONE;
                 }
@@ -397,7 +425,7 @@ class MakepadSurface
         }
 
         // Add IME_FLAG_FORCE_ASCII for ASCII input mode
-        if (mInputMode == 1) {  // Ascii
+        if (mInputMode == INPUT_MODE_ASCII) {
             imeOptions |= EditorInfo.IME_FLAG_FORCE_ASCII;
         }
 
