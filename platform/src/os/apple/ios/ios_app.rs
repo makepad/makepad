@@ -17,6 +17,7 @@ use {
             cx_native::EventFlow,
             ios::{
                 ios_delegates::*,
+                ios_text_input::*,
                 ios_event::*,
             }
         },
