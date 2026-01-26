@@ -69,6 +69,145 @@ impl ScriptThread {
         self.trap.goto_next();
     }
     
+    /// Part 1 of scope-inherit (value += {}) operator.
+    /// Peeks the identifier from stack, reads scope variable value, pushes proto value on stack.
+    pub(crate) fn handle_scope_inherit_read(&mut self, heap: &mut ScriptHeap) {
+        let id = self.peek_stack_value();
+        let proto = if let Some(id) = id.as_id() {
+            let value = self.scope_value(heap, id);
+            // If not found or error, clear error and use NIL (will create bare object)
+            if value.is_nil() || value.is_err() {
+                self.trap.err.take();
+                NIL
+            } else {
+                value
+            }
+        } else {
+            NIL
+        };
+        self.push_stack_unchecked(proto);
+        self.trap.goto_next();
+    }
+    
+    /// Part 2 of scope-inherit (value += {}) operator.
+    /// Pops the constructed object and identifier from stack, assigns to scope variable.
+    /// Pushes NIL to satisfy POP_TO_ME (the assignment has no result value).
+    pub(crate) fn handle_scope_inherit_write(&mut self, heap: &mut ScriptHeap) {
+        let object = self.pop_stack_resolved(heap);
+        let id = self.pop_stack_value();
+        if let Some(id) = id.as_id() {
+            self.set_scope_value(heap, id, object);
+        }
+        // Push NIL as result so POP_TO_ME has something to pop
+        self.push_stack_unchecked(NIL);
+        self.trap.goto_next();
+    }
+    
+    /// Part 1 of field-inherit (obj.field += {}) operator.
+    /// Stack has [object, field]. Peeks both, reads object.field, pushes proto value.
+    pub(crate) fn handle_field_inherit_read(&mut self, heap: &ScriptHeap) {
+        let field = self.peek_stack_value();
+        let object = self.peek_stack_value_at(1);
+        // Resolve if it's an identifier
+        let object = if let Some(id) = object.as_id() {
+            if !object.is_escaped_id() {
+                self.scope_value(heap, id)
+            } else {
+                object
+            }
+        } else {
+            object
+        };
+        let proto = if let Some(obj) = object.as_object() {
+            let value = heap.value(obj, field, &self.trap);
+            if value.is_nil() || value.is_err() {
+                self.trap.err.take();
+                NIL
+            } else {
+                value
+            }
+        } else {
+            NIL
+        };
+        self.push_stack_unchecked(proto);
+        self.trap.goto_next();
+    }
+    
+    /// Part 2 of field-inherit (obj.field += {}) operator.
+    /// Pops built_object, field, object from stack. Writes built_object to object.field.
+    /// Pushes NIL to satisfy POP_TO_ME.
+    pub(crate) fn handle_field_inherit_write(&mut self, heap: &mut ScriptHeap) {
+        let built_object = self.pop_stack_resolved(heap);
+        let field = self.pop_stack_value();
+        let object = self.pop_stack_resolved(heap);
+        if let Some(obj) = object.as_object() {
+            if field.is_string_like() {
+                heap.set_string_keys(obj);
+            }
+            heap.set_value(obj, field, built_object, &self.trap);
+        }
+        // Push NIL as result so POP_TO_ME has something to pop
+        self.push_stack_unchecked(NIL);
+        self.trap.goto_next();
+    }
+    
+    /// Part 1 of index-inherit (obj[index] += {}) operator.
+    /// Stack has [object, index]. Peeks both, reads object[index], pushes proto value.
+    pub(crate) fn handle_index_inherit_read(&mut self, heap: &ScriptHeap) {
+        let index = self.peek_stack_value();
+        let object = self.peek_stack_value_at(1);
+        // Resolve if it's an identifier
+        let object = if let Some(id) = object.as_id() {
+            if !object.is_escaped_id() {
+                self.scope_value(heap, id)
+            } else {
+                object
+            }
+        } else {
+            object
+        };
+        let proto = if let Some(obj) = object.as_object() {
+            let value = heap.value(obj, index, &self.trap);
+            if value.is_nil() || value.is_err() {
+                self.trap.err.take();
+                NIL
+            } else {
+                value
+            }
+        } else if let Some(arr) = object.as_array() {
+            let idx = index.as_index();
+            let value = heap.array_index(arr, idx, &self.trap);
+            if value.is_nil() || value.is_err() {
+                self.trap.err.take();
+                NIL
+            } else {
+                value
+            }
+        } else {
+            NIL
+        };
+        self.push_stack_unchecked(proto);
+        self.trap.goto_next();
+    }
+    
+    /// Part 2 of index-inherit (obj[index] += {}) operator.
+    /// Pops built_object, index, object from stack. Writes built_object to object[index].
+    /// Pushes NIL to satisfy POP_TO_ME.
+    pub(crate) fn handle_index_inherit_write(&mut self, heap: &mut ScriptHeap) {
+        let built_object = self.pop_stack_resolved(heap);
+        let index = self.pop_stack_value();
+        let object = self.pop_stack_resolved(heap);
+        if let Some(obj) = object.as_object() {
+            heap.set_value(obj, index, built_object, &self.trap);
+        } else if let Some(arr) = object.as_array() {
+            let idx = index.as_index();
+            heap.set_array_index(arr, idx, built_object, &self.trap);
+        }
+        // Push NIL as result so POP_TO_ME has something to pop
+        self.push_stack_unchecked(NIL);
+        self.trap.goto_next();
+    }
+    
     pub(crate) fn handle_end_proto(&mut self, heap: &mut ScriptHeap, code: &ScriptCode) {
         let me = self.mes.pop().unwrap();
         if let ScriptMe::Object(me) = me{

@@ -144,6 +144,12 @@ impl Opcode{
     pub const PROTO_INHERIT_READ:Self = Self(66);
     pub const END_PROTO:Self = Self(67);
     pub const PROTO_INHERIT_WRITE:Self = Self(118);
+    pub const SCOPE_INHERIT_READ:Self = Self(119);
+    pub const SCOPE_INHERIT_WRITE:Self = Self(120);
+    pub const FIELD_INHERIT_READ:Self = Self(121);
+    pub const FIELD_INHERIT_WRITE:Self = Self(122);
+    pub const INDEX_INHERIT_READ:Self = Self(123);
+    pub const INDEX_INHERIT_WRITE:Self = Self(124);
     pub const BEGIN_BARE:Self = Self(68);
     pub const END_BARE:Self = Self(69);
     pub const BEGIN_ARRAY:Self = Self(70);
@@ -305,6 +311,12 @@ impl fmt::Display for Opcode {
             Self::PROTO_INHERIT_READ => return write!(f, "<proto_inh_rd>"),
             Self::END_PROTO => return write!(f, "}}"),
             Self::PROTO_INHERIT_WRITE => return write!(f, "<proto_inh_wr>"),
+            Self::SCOPE_INHERIT_READ => return write!(f, "<scope_inh_rd>"),
+            Self::SCOPE_INHERIT_WRITE => return write!(f, "<scope_inh_wr>"),
+            Self::FIELD_INHERIT_READ => return write!(f, "<field_inh_rd>"),
+            Self::FIELD_INHERIT_WRITE => return write!(f, "<field_inh_wr>"),
+            Self::INDEX_INHERIT_READ => return write!(f, "<idx_inh_rd>"),
+            Self::INDEX_INHERIT_WRITE => return write!(f, "<idx_inh_wr>"),
             Self::BEGIN_BARE => return write!(f, "<bare>{{"),
             Self::END_BARE => return write!(f, "}}"),
             
