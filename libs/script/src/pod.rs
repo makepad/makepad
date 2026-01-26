@@ -327,6 +327,15 @@ impl ScriptPodTy{
         }
     }
     
+    pub fn is_float_type(&self)->bool{
+        match self{
+            Self::F32 | Self::F16 => true,
+            Self::Vec(v) => matches!(v.elem_ty(), ScriptPodTy::F32 | ScriptPodTy::F16),
+            Self::Mat(_) => true, // Matrices are float-based
+            _ => false,
+        }
+    }
+    
     /// Calculates the struct layout (align_of and size_of) from a slice of fields.
     /// Returns (align_of, size_of) tuple.
     /// 

@@ -7,6 +7,7 @@ use {
         makepad_live_id::*,
         makepad_script::shader::*,
         makepad_script::heap::ScriptHeap,
+        makepad_script::value::ScriptObject,
         //draw_vars::DrawVars,
         os::CxOsDrawShader,
         cx::Cx
@@ -323,6 +324,12 @@ pub struct CxDrawShaderMapping {
     //pub live_uniforms_buf: Vec<f32>,
     /// Mapping from uniform buffer type names to Metal buffer indices
     pub uniform_buffer_bindings: UniformBufferBindings,
+    /// Layout for scope uniforms (uses slots, 4-byte alignment)
+    pub scope_uniforms: DrawShaderInputs,
+    /// Source objects and keys for scope uniforms (parallel to scope_uniforms.inputs)
+    pub scope_uniform_sources: Vec<(ScriptObject, LiveId)>,
+    /// Buffer for scope uniform data (filled before draw calls, in f32 slots)
+    pub scope_uniforms_buf: Vec<f32>,
 }
 
 impl CxDrawShaderMapping {
@@ -413,6 +420,27 @@ impl CxDrawShaderMapping {
         // (must call assign_uniform_buffer_indices before from_shader_output)
         let uniform_buffer_bindings = output.get_uniform_buffer_bindings(heap);
         
+        // Build scope uniforms layout using DrawShaderInputs (4-byte slot alignment)
+        let mut scope_uniforms = DrawShaderInputs::new(uniform_packing());
+        let mut scope_uniform_sources = Vec::new();
+        
+        // Process scope uniforms in order - same order as they appear in the io list
+        for io in &output.io {
+            if let ShaderIoKind::ScopeUniform = io.kind {
+                // Find the corresponding ScopeUniformSource
+                if let Some(source) = output.scope_uniforms.iter().find(|su| su.shader_name == io.name) {
+                    let pod_ty = heap.pod_type_ref(source.ty);
+                    let slots = pod_ty.ty.slots();
+                    scope_uniforms.push(io.name, slots);
+                    scope_uniform_sources.push((source.source_obj, source.key));
+                }
+            }
+        }
+        scope_uniforms.finalize();
+        
+        // Allocate the buffer for scope uniforms (as f32 slots)
+        let scope_uniforms_buf = vec![0.0f32; scope_uniforms.total_slots];
+        
         CxDrawShaderMapping {
             source,
             flags: DrawShaderFlags::default(),
@@ -426,6 +454,118 @@ impl CxDrawShaderMapping {
             rect_size,
             draw_clip,
             uniform_buffer_bindings,
+            scope_uniforms,
+            scope_uniform_sources,
+            scope_uniforms_buf,
+        }
+    }
+    
+    /// Fill the scope uniform buffer from script values.
+    /// 
+    /// This reads values from the script heap using the source_obj and key for each entry,
+    /// converts them to f32 slots, and writes to the buffer.
+    pub fn fill_scope_uniforms_buffer(
+        &mut self,
+        heap: &ScriptHeap,
+        trap: &crate::makepad_script::trap::ScriptTrap,
+    ) {
+        for (i, input) in self.scope_uniforms.inputs.iter().enumerate() {
+            if i >= self.scope_uniform_sources.len() {
+                break;
+            }
+            let (source_obj, key) = self.scope_uniform_sources[i];
+            
+            // Read the value from the heap
+            let value = heap.scope_value(source_obj, key, trap);
+            
+            // Write value to buffer at the input's offset
+            let offset = input.offset;
+            let slots = input.slots;
+            
+            // Handle different value types and write as f32 slots
+            Self::write_value_to_slots(value, &mut self.scope_uniforms_buf[offset..offset + slots], heap);
+        }
+    }
+    
+    /// Write a script value to f32 slots.
+    fn write_value_to_slots(
+        value: crate::makepad_script::value::ScriptValue,
+        dst: &mut [f32],
+        heap: &ScriptHeap,
+    ) {
+        use crate::makepad_math::Vec4f;
+        
+        // Handle f64/f32 (abstract float) -> single f32 slot
+        if let Some(v) = value.as_f64() {
+            if !dst.is_empty() {
+                dst[0] = v as f32;
+            }
+            return;
+        }
+        if let Some(v) = value.as_f32() {
+            if !dst.is_empty() {
+                dst[0] = v;
+            }
+            return;
+        }
+        
+        // Handle u32
+        if let Some(v) = value.as_u32() {
+            if !dst.is_empty() {
+                dst[0] = f32::from_bits(v);
+            }
+            return;
+        }
+        if let Some(v) = value.as_u40() {
+            if !dst.is_empty() {
+                dst[0] = f32::from_bits(v as u32);
+            }
+            return;
+        }
+        
+        // Handle i32
+        if let Some(v) = value.as_i32() {
+            if !dst.is_empty() {
+                dst[0] = f32::from_bits(v as u32);
+            }
+            return;
+        }
+        
+        // Handle bool
+        if let Some(v) = value.as_bool() {
+            if !dst.is_empty() {
+                dst[0] = f32::from_bits(v as u32);
+            }
+            return;
+        }
+        
+        // Handle colors -> vec4f (4 slots)
+        if let Some(c) = value.as_color() {
+            let v = Vec4f::from_u32(c);
+            if dst.len() >= 4 {
+                dst[0] = v.x;
+                dst[1] = v.y;
+                dst[2] = v.z;
+                dst[3] = v.w;
+            }
+            return;
+        }
+        
+        // Handle pod types (vec2f, vec3f, vec4f, structs, etc.)
+        if let Some(pod) = value.as_pod() {
+            let (_pod_type, data) = heap.pod_data(pod);
+            // Copy pod data as f32 slots
+            for (i, &u) in data.iter().enumerate() {
+                if i < dst.len() {
+                    dst[i] = f32::from_bits(u);
+                }
+            }
+            return;
+        }
+        
+        // Default: zero the slots
+        for slot in dst.iter_mut() {
+            *slot = 0.0;
         }
     }
     
