@@ -112,7 +112,7 @@ pub fn test(){
                 let k = test_p1
                 let m = test_obj.test_p1
                 let n = test_obj.objfn()
-                //let n = test_buf.p3
+                let n = test_buf.p3
                 //let o = test_tex.sample(vec2(2.0))
                 let s = 1.0
                 return s

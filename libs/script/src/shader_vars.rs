@@ -64,6 +64,13 @@ impl ShaderFnCompiler {
             ShaderType::Error(_) => "error".to_string(),
             ShaderType::Texture(tex_type) => format!("texture({:?})", tex_type),
             ShaderType::ScopeObject(_) => "scope_object".to_string(),
+            ShaderType::ScopeUniformBuffer { pod_ty, .. } => {
+                if let Some(name) = vm.heap.pod_type_name(*pod_ty) {
+                    format!("scope_uniform_buffer<{}>", name)
+                } else {
+                    "scope_uniform_buffer".to_string()
+                }
+            }
         }
     }
 
@@ -454,6 +461,58 @@ impl ShaderFnCompiler {
                 self.trap.err.take();
                 self.trap.err_not_found();
                 self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                self.stack.free_string(field_s);
+                self.stack.free_string(instance_s);
+                return;
+            } else if let ShaderType::ScopeUniformBuffer { obj, pod_ty } = instance_ty {
+                // Field access on a scope-level uniform buffer (e.g., test_buf.p3)
+                // Look up the field on the pod type
+                if let Some(ret_ty) = vm.heap.pod_field_type(pod_ty, field_id, &vm.code.builtins.pod) {
+                    // Check if we already have this scope uniform buffer registered
+                    let existing = output.scope_uniform_buffers.iter().find(|sub| sub.obj == obj);
+                    
+                    let shader_name = if let Some(existing) = existing {
+                        existing.shader_name
+                    } else {
+                        // Generate unique names for this scope uniform buffer:
+                        // - shader_name: identifier used in shader code (us_{id})
+                        // - struct_type_name: the struct type name (IoScopeUniformBuf{id})
+                        let (shader_name, struct_type_name) = self.generate_scope_uniform_buffer_names(output, obj);
+                        
+                        // Add to scope_uniform_buffers for runtime tracking
+                        output.scope_uniform_buffers.push(ScopeUniformBufferSource {
+                            obj,
+                            pod_ty,
+                            shader_name,
+                        });
+                        
+                        // Add to IO list as UniformBuffer
+                        // Set the struct type name (not the shader identifier name)
+                        vm.heap.pod_type_name_if_not_set(pod_ty, struct_type_name);
+                        output.io.push(ShaderIo {
+                            kind: ShaderIoKind::UniformBuffer,
+                            name: shader_name,
+                            ty: pod_ty,
+                            buffer_index: None,
+                        });
+                        
+                        shader_name
+                    };
+                    
+                    // Generate field access code
+                    // Note: Don't use the backend prefix since our name already has `us_` prefix
+                    let mut s = self.stack.new_string();
+                    // For Metal, uniform buffers are pointers, use ->
+                    if matches!(output.backend, ShaderBackend::Metal) {
+                        write!(s, "{}->{}", shader_name, field_id).ok();
+                    } else {
+                        write!(s, "{}.{}", shader_name, field_id).ok();
+                    }
+                    self.stack.push(&self.trap, ShaderType::Pod(ret_ty), s);
+                } else {
+                    self.trap.err_not_found();
+                    self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                }
                 self.stack.free_string(field_s);
                 self.stack.free_string(instance_s);
                 return;

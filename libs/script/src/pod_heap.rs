@@ -169,21 +169,12 @@ impl ScriptHeap{
                 });
             }
         }
-        if let Some(f) = val.as_f64(){
-            if f.fract() == 0.0 && f >= i32::MIN as f64 && f <= i32::MAX as f64 {
-                let pod_type = &self.pod_types[builtins.pod_i32.index as usize];
-                return Some(ScriptPodTypeInline{
-                    self_ref: builtins.pod_i32,
-                    data: pod_type.clone()
-                });
-            }
-            else{
-                let pod_type = &self.pod_types[builtins.pod_f32.index as usize];
-                return Some(ScriptPodTypeInline{
-                    self_ref: builtins.pod_f32,
-                    data: pod_type.clone()
-                });
-            }
+        if let Some(_f) = val.as_f64(){
+            let pod_type = &self.pod_types[builtins.pod_f32.index as usize];
+            return Some(ScriptPodTypeInline{
+                self_ref: builtins.pod_f32,
+                data: pod_type.clone()
+            });
         }
         if val.is_f32(){
             let pod_type = &self.pod_types[builtins.pod_f32.index as usize];

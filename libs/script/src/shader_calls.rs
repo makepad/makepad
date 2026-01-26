@@ -279,6 +279,7 @@ impl ShaderFnCompiler {
                         | ShaderType::Error(_)
                         | ShaderType::IoSelf(_)
                         | ShaderType::ScopeObject(_)
+                        | ShaderType::ScopeUniformBuffer { .. }
                         | ShaderType::PodType(_)
                         | ShaderType::Texture(_) => {}
                     }

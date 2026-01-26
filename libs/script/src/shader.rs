@@ -81,6 +81,9 @@ pub enum ShaderType{
     /// A script scope object that we're accessing properties from.
     /// Properties are flattened into ScopeUniforms.
     ScopeObject(ScriptObject),
+    /// A uniform buffer defined in the script scope (e.g., `let buf = shader.uniform_buffer(...)`)
+    /// Contains the uniform buffer object and its pod type.
+    ScopeUniformBuffer { obj: ScriptObject, pod_ty: ScriptPodType },
 }
 
 impl ShaderType{
@@ -93,6 +96,7 @@ impl ShaderType{
             Self::None => None,
             Self::IoSelf(_) => None,
             Self::ScopeObject(_) => None, // Scope objects don't have a concrete pod type
+            Self::ScopeUniformBuffer { pod_ty, .. } => Some(*pod_ty),
             Self::PodType(_) => None,
             Self::AbstractInt => Some(builtins.pod_i32),
             Self::AbstractFloat => Some(builtins.pod_f32),
@@ -268,6 +272,18 @@ pub struct ScopeUniformEntry {
     pub size: usize,
 }
 
+/// Tracks a uniform buffer defined in the script scope (e.g., `let buf = shader.uniform_buffer(...)`)
+/// This is distinct from uniform buffers on io_self - these come from the surrounding scope.
+#[derive(Debug, Clone)]
+pub struct ScopeUniformBufferSource {
+    /// The uniform buffer ScriptObject itself (needed for runtime buffer binding)
+    pub obj: ScriptObject,
+    /// The pod type of the uniform buffer's prototype
+    pub pod_ty: ScriptPodType,
+    /// The name used in the shader code
+    pub shader_name: LiveId,
+}
+
 #[allow(unused)]
 #[derive(Debug)]
 pub struct ShaderIo{
@@ -317,6 +333,9 @@ pub struct ShaderOutput{
     /// Tracks scope uniform sources for buffer refresh after compilation.
     /// These are values read from the script scope (not from io_self).
     pub scope_uniforms: Vec<ScopeUniformSource>,
+    /// Tracks uniform buffers defined in the script scope (e.g., `let buf = shader.uniform_buffer(...)`)
+    /// These need to be bound at runtime using the stored ScriptObject reference.
+    pub scope_uniform_buffers: Vec<ScopeUniformBufferSource>,
 }
 
 /// Mapping of uniform buffer type names to their assigned buffer indices
@@ -926,9 +945,22 @@ impl ShaderFnCompiler{
                 // Not found in shader scope - try script scope for scope uniforms
                 let value = vm.heap.scope_value(self.script_scope, id.into(), &self.trap);
                 if !value.is_nil() && self.trap.err.get().is_none() {
-                    // Check if this is a shader_io type - we don't support those as scope uniforms
+                    // Check if this is a shader_io type
                     if let Some(value_obj) = value.as_object() {
-                        if vm.heap.as_shader_io(value_obj).is_some() {
+                        if let Some(io_type) = vm.heap.as_shader_io(value_obj) {
+                            // Uniform buffers from scope are supported
+                            if io_type == SHADER_IO_UNIFORM_BUFFER {
+                                // Get the pod type from the prototype
+                                let proto_value = vm.heap.proto(value_obj);
+                                if let Some(pod_ty) = vm.heap.pod_type(proto_value) {
+                                    self.stack.free_string(s);
+                                    return (ShaderType::ScopeUniformBuffer { obj: value_obj, pod_ty }, self.stack.new_string())
+                                } else if let Some(pod_ty) = proto_value.as_pod_type() {
+                                    self.stack.free_string(s);
+                                    return (ShaderType::ScopeUniformBuffer { obj: value_obj, pod_ty }, self.stack.new_string())
+                                }
+                            }
+                            // Other shader_io types are not supported in scope
                             self.trap.err_opcode_not_supported_in_shader();
                             self.stack.free_string(s);
                             return (ShaderType::Error(NIL), self.stack.new_string())
@@ -1010,6 +1042,13 @@ impl ShaderFnCompiler{
     /// Generate a unique name for a scope uniform, handling collisions.
     /// Uses the source object's index to create unique names when there are collisions.
     pub(crate) fn generate_scope_uniform_name(&self, output: &ShaderOutput, base_name: LiveId, source_obj: ScriptObject) -> LiveId {
+        // First, ensure base_name is actually in the LUT. If not, use a default.
+        let base_name_str = base_name.as_string(|s| s.map(|s| s.to_string()));
+        let base_name_str = base_name_str.unwrap_or_else(|| "scope_uni".to_string());
+        
+        // Re-register the base name to ensure it's in the LUT
+        let base_name = LiveId::from_str_with_lut(&base_name_str).unwrap_or_else(|_| id!(scope_uni));
+        
         // Check if name is already used
         let name_used = output.io.iter().any(|io| io.name == base_name) ||
                        output.scope_uniforms.iter().any(|su| su.shader_name == base_name);
@@ -1021,7 +1060,7 @@ impl ShaderFnCompiler{
         // Name collision - use the object index to create a unique name
         // Format: base_name_objN where N is the object index
         // Use from_str_with_lut to register the name in the LiveId lookup table
-        let unique_name_str = format!("{}_obj{}", base_name, source_obj.index);
+        let unique_name_str = format!("{}_obj{}", base_name_str, source_obj.index);
         let unique_name = LiveId::from_str_with_lut(&unique_name_str).unwrap_or_else(|_| LiveId::from_str(&unique_name_str));
         
         // Check if this unique name is also used (very unlikely but possible)
@@ -1034,7 +1073,7 @@ impl ShaderFnCompiler{
         
         // Fallback: add counter suffix
         for i in 1..100 {
-            let new_name_str = format!("{}_obj{}_{}", base_name, source_obj.index, i);
+            let new_name_str = format!("{}_obj{}_{}", base_name_str, source_obj.index, i);
             let new_name = LiveId::from_str_with_lut(&new_name_str).unwrap_or_else(|_| LiveId::from_str(&new_name_str));
             let new_name_used = output.io.iter().any(|io| io.name == new_name) ||
                                output.scope_uniforms.iter().any(|su| su.shader_name == new_name);
@@ -1047,6 +1086,45 @@ impl ShaderFnCompiler{
         unique_name
     }
     
+    /// Generate names for a scope uniform buffer.
+    /// These are uniform buffers defined in the script scope, e.g., `let buf = shader.uniform_buffer(...)`
+    /// Returns (shader_name, struct_type_name):
+    /// - shader_name: identifier used in shader code, e.g., `scopebuf_{obj_index}`
+    /// - struct_type_name: the struct type name, e.g., `IoScopeUniformBuf{obj_index}`
+    pub(crate) fn generate_scope_uniform_buffer_names(&self, output: &ShaderOutput, obj: ScriptObject) -> (LiveId, LiveId) {
+        // Generate the shader identifier name: scopebuf_{index}
+        let shader_name_str = format!("scopebuf_{}", obj.index);
+        let shader_name = LiveId::from_str_with_lut(&shader_name_str).unwrap_or_else(|_| LiveId::from_str(&shader_name_str));
+        
+        // Generate the struct type name: IoScopeUniformBuf{index}
+        let struct_name_str = format!("IoScopeUniformBuf{}", obj.index);
+        let struct_name = LiveId::from_str_with_lut(&struct_name_str).unwrap_or_else(|_| LiveId::from_str(&struct_name_str));
+        
+        // Check if shader name is already used (shouldn't happen since obj.index is unique, but just in case)
+        let name_used = output.io.iter().any(|io| io.name == shader_name) ||
+                       output.scope_uniform_buffers.iter().any(|sub| sub.shader_name == shader_name);
+        
+        if !name_used {
+            return (shader_name, struct_name);
+        }
+        
+        // Name collision - add counter suffix
+        for i in 0..100 {
+            let new_shader_name_str = format!("scopebuf_{}_{}", obj.index, i);
+            let new_shader_name = LiveId::from_str_with_lut(&new_shader_name_str).unwrap_or_else(|_| LiveId::from_str(&new_shader_name_str));
+            let new_struct_name_str = format!("IoScopeUniformBuf{}_{}", obj.index, i);
+            let new_struct_name = LiveId::from_str_with_lut(&new_struct_name_str).unwrap_or_else(|_| LiveId::from_str(&new_struct_name_str));
+            
+            let new_name_used = output.io.iter().any(|io| io.name == new_shader_name) ||
+                               output.scope_uniform_buffers.iter().any(|sub| sub.shader_name == new_shader_name);
+            if !new_name_used {
+                return (new_shader_name, new_struct_name);
+            }
+        }
+        
+        // Final fallback - should never reach here
+        (shader_name, struct_name)
+    }
     
     fn push_immediate(&mut self, value:ScriptValue, builtins:&ScriptPodBuiltins, backend:&ShaderBackend){
         if let Some(v) = value.as_f64(){ // abstract int or float
