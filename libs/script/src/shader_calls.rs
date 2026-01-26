@@ -684,8 +684,8 @@ impl ShaderFnCompiler {
                 }
                 self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_vec2f), s);
             }
-            id!(sample_2d) => {
-                // sample_2d(coord) samples the texture at normalized coordinates
+            id!(sample) => {
+                // sample(coord) samples the texture at normalized coordinates
                 // Returns vec4f
                 if args.len() != 1 {
                     self.trap.err_invalid_arg_count();

@@ -86,7 +86,7 @@ script_mod!{
         }
 
         sdf: fn(scale, p) {
-            let s = self.grayscale_texture.sample_2d(p).x;
+            let s = self.grayscale_texture.sample(p).x;
             // 1.1 factor to compensate for text being magically too dark after the fontstack refactor
             return clamp(((s - (1.0 - self.cutoff)) * self.radius / scale + 0.5)*1.1, 0.0, 1.0)
         }
@@ -108,7 +108,7 @@ script_mod!{
                 let c = self.get_color()
                 return s * vec4(c.rgb * c.a, c.a)
             } else {
-                let c = self.color_texture.sample_2d(self.t)
+                let c = self.color_texture.sample(self.t)
                 return vec4(c.rgb * c.a, c.a)
             }
         }
