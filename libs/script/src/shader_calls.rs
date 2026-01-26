@@ -592,20 +592,9 @@ impl ShaderFnCompiler {
                 ShaderMe::BuiltinCall { name, fnptr: _, args } => {
                     let builtins = &vm.code.builtins.pod;
 
-                    // Helper to check if a pod type is float-based
-                    let is_float_type = |pt: ScriptPodType| -> bool {
-                        let pod_ty = &vm.heap.pod_types[pt.index as usize];
-                        match &pod_ty.ty {
-                            ScriptPodTy::F32 | ScriptPodTy::F16 => true,
-                            ScriptPodTy::Vec(v) => matches!(v.elem_ty(), ScriptPodTy::F32 | ScriptPodTy::F16),
-                            ScriptPodTy::Mat(_) => true, // Matrices are float-based
-                            _ => false,
-                        }
-                    };
-
                     // Check if any arg is a float type - if so, abstract ints should be floats
                     let has_float = args.iter().any(|(ty, _)| match ty {
-                        ShaderType::Pod(pt) => is_float_type(*pt),
+                        ShaderType::Pod(pt) => vm.heap.pod_types[pt.index as usize].ty.is_float_type(),
                         ShaderType::AbstractFloat => true,
                         _ => false,
                     });
@@ -680,16 +669,17 @@ impl ShaderFnCompiler {
                         write!(s, "float2({}.get_width(), {}.get_height())", texture_expr, texture_expr).ok();
                     }
                     ShaderBackend::Wgsl => {
-                        // WGSL: textureDimensions(texture) - returns vec2<u32>, cast to vec2<f32>
-                        write!(s, "vec2f(0.0, 0.0)").ok(); // Placeholder
+                        // WGSL: textureDimensions(texture) returns vec2<u32>, cast to vec2<f32>
+                        write!(s, "vec2f(textureDimensions({}))", texture_expr).ok();
                     }
                     ShaderBackend::Hlsl => {
-                        // HLSL: texture.GetDimensions()
-                        write!(s, "float2(0.0, 0.0)").ok(); // Placeholder
+                        // HLSL: GetDimensions requires output params, use helper function
+                        output.hlsl_needs_tex_size = true;
+                        write!(s, "_mpTexSize2D({})", texture_expr).ok();
                     }
                     ShaderBackend::Glsl => {
-                        // GLSL: textureSize(texture, 0)
-                        write!(s, "vec2(0.0, 0.0)").ok(); // Placeholder
+                        // GLSL: textureSize(texture, 0) returns ivec2, cast to vec2
+                        write!(s, "vec2(textureSize({}, 0))", texture_expr).ok();
                     }
                 }
                 self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_vec2f), s);
@@ -716,15 +706,15 @@ impl ShaderFnCompiler {
                         }
                         ShaderBackend::Wgsl => {
                             // WGSL: textureSample(texture, sampler, coord)
-                            write!(s, "vec4f(0.0, 0.0, 0.0, 0.0)").ok(); // Placeholder
+                            write!(s, "textureSample({}, _s{}, {})", texture_expr, sampler_idx, coord).ok();
                         }
                         ShaderBackend::Hlsl => {
                             // HLSL: texture.Sample(sampler, coord)
-                            write!(s, "float4(0.0, 0.0, 0.0, 0.0)").ok(); // Placeholder
+                            write!(s, "{}.Sample(_s{}, {})", texture_expr, sampler_idx, coord).ok();
                         }
                         ShaderBackend::Glsl => {
-                            // GLSL: texture(sampler2D, coord)
-                            write!(s, "vec4(0.0, 0.0, 0.0, 0.0)").ok(); // Placeholder
+                            // GLSL 4.0+: texture(sampler2D(texture, sampler), coord)
+                            write!(s, "texture(sampler2D({}, _s{}), {})", texture_expr, sampler_idx, coord).ok();
                         }
                     }
                     self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_vec4f), s);

@@ -284,6 +284,10 @@ impl ShaderFnCompiler {
         if let Some(pod_ty) = vm.code.builtins.pod.value_to_exact_type(value) {
             return ShaderType::Pod(pod_ty);
         }
+        // Check if it's a color - colors map to vec4f
+        if value.is_color() {
+            return ShaderType::Pod(vm.code.builtins.pod.pod_vec4f);
+        }
         if let Some(pod_ty) = vm.heap.pod_type(value) {
             return ShaderType::PodType(pod_ty);
         }
@@ -438,7 +442,6 @@ impl ShaderFnCompiler {
                                 key: field_id,
                                 shader_name,
                                 ty: pod_ty,
-                                offset: 0, // Will be computed later by compute_scope_uniform_layout
                             });
                             // Also add to IO list
                             if !output.io.iter().any(|io| io.name == shader_name && matches!(io.kind, ShaderIoKind::ScopeUniform)) {

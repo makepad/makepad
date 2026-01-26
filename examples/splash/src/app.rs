@@ -6,12 +6,17 @@ script_mod!{
     use mod.math.*
     use mod.sdf.*
     mod.res.load_all()
+    
+    let theme = {
+        SOME_COLOR: #fff
+    }
+    
     #(App::script_component(vm)){
         draw_quad: mod.shaders.DrawQuad{ 
             pixel: ||{
                 let sdf = Sdf2d.viewport(self.pos*self.rect_size)
                 sdf.circle(40 40 35)
-                sdf.fill(mix(#0f0 #f00 self.pos.y))
+                sdf.fill(mix(theme.SOME_COLOR #f00 self.pos.y))
                 sdf.result
             }
         }

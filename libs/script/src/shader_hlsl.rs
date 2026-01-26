@@ -3,6 +3,13 @@ use crate::vm::ScriptVm;
 use crate::shader::{ShaderOutput, ShaderIoKind, TextureType};
 
 impl ShaderOutput {
+    /// Emit HLSL helper functions that are needed by the shader
+    pub fn hlsl_create_helpers(&self, _vm: &ScriptVm, out: &mut String) {
+        if self.hlsl_needs_tex_size {
+            writeln!(out, "float2 _mpTexSize2D(Texture2D tex) {{ uint w, h; tex.GetDimensions(w, h); return float2(w, h); }}").ok();
+        }
+    }
+
     pub fn hlsl_create_instance_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct IoInstance {{").ok();
         
