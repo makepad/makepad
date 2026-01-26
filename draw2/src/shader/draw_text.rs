@@ -138,11 +138,7 @@ pub struct DrawText {
 }
 
 impl ScriptHook for DrawText{
-    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
-        if let Some(obj) = value.as_object(){
-            println!("ON BEFORE {:?}", obj)
-        }
-        
+    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, value:ScriptValue){
     }
 }
 
@@ -574,7 +570,7 @@ impl FontFamily {
 }
 
 impl ScriptHook for FontFamily {
-    fn on_skip_apply(&mut self, vm: &mut ScriptVm, _apply: &mut ApplyScope, value: ScriptValue) -> bool {
+    fn on_skip_apply(&mut self, vm: &mut ScriptVm, _apply: &mut Apply, value: ScriptValue) -> bool {
         let Some(obj) = value.as_object() else {
             return false;
         };

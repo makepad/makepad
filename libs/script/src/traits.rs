@@ -11,17 +11,17 @@ pub type ScriptTypeId = std::any::TypeId;
 // sself we implement
 pub trait ScriptHook{
     fn on_new(&mut self, _vm:&mut ScriptVm){}
-    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){}
-    fn on_after_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){}
-    fn on_skip_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue)->bool{false}
+    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){}
+    fn on_after_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){}
+    fn on_skip_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue)->bool{false}
     fn on_type_check(_heap:&ScriptHeap, _value:ScriptValue)->bool{false}
     fn on_proto_build(_vm:&mut ScriptVm, _obj:ScriptObject, _props:&mut ScriptTypeProps){}
     fn on_proto_methods(_vm:&mut ScriptVm, _obj:ScriptObject){}
 }
 
 pub trait ScriptHookDeref {
-    fn on_deref_before_apply(&mut self,_vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){}
-    fn on_deref_after_apply(&mut self,_vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){}
+    fn on_deref_before_apply(&mut self,_vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){}
+    fn on_deref_after_apply(&mut self,_vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -186,7 +186,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_from_value(vm:&mut ScriptVm, value:ScriptValue)->Self where Self:Sized{
         let mut s = Self::script_new(vm);
-        s.script_apply(vm, &mut ApplyScope::default(), value);
+        s.script_apply(vm, &mut Apply::default(), value);
         s
     }    
     
@@ -252,16 +252,16 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
 // sself as well
 pub trait ScriptApply{
     fn script_type_id(&self)->ScriptTypeId where Self:'static { ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut ApplyScope, _value:ScriptValue){}
+    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){}
     fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{NIL}
     fn script_to_value_props(&self, _vm:&mut ScriptVm, _obj:ScriptObject){}
 }
 
 pub trait ScriptReset{
-    fn script_reset(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue);
+    fn script_reset(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue);
 }
 
 
 #[derive(Default)]
-pub struct ApplyScope{
+pub struct Apply{
 }

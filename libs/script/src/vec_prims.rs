@@ -50,7 +50,7 @@ impl<T> ScriptNew for  Vec<T> where T: ScriptApply + ScriptNew + 'static + Scrip
 }
 impl<T> ScriptApply for Vec<T> where T: ScriptApply + ScriptNew + 'static + ScriptDeriveMarker{
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue){
         if let Some(obj) = value.as_object(){
             let len = vm.heap.vec_len(obj);
             self.resize_with(len, || ScriptNew::script_new(vm));
@@ -145,7 +145,7 @@ impl ScriptNew for Vec<u8> {
 
 impl ScriptApply for Vec<u8> {
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut Apply, value:ScriptValue){
         if let Some(obj) = value.as_object(){
             self.clear();
             for kv in vm.heap.vec_ref(obj){
@@ -204,7 +204,7 @@ impl ScriptNew for Vec<ScriptValue> {
 }
 impl ScriptApply for Vec<ScriptValue> {
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut Apply, value:ScriptValue){
         if let Some(obj) = value.as_object(){
             self.clear();
             for kv in vm.heap.vec_ref(obj){
@@ -272,7 +272,7 @@ impl<K,V> ScriptApply for HashMap<K,V>
     where K: ScriptApply + ScriptNew  + 'static  + Eq + Hash,
           V: ScriptApply + ScriptNew  + 'static  {
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut Apply, value:ScriptValue){
         if let Some(obj) = value.as_object(){
             // hashmaps and btreemaps are cleared and copied fresh we can optimise later
             self.clear();
@@ -339,7 +339,7 @@ impl<K,V> ScriptApply for BTreeMap<K,V>
     where K: ScriptApply + ScriptNew  + 'static + Ord,
           V: ScriptApply + ScriptNew  + 'static {
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut ApplyScope, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&mut Apply, value:ScriptValue){
         if let Some(obj) = value.as_object(){
             // hashmaps and btreemaps are cleared and copied fresh we can optimise later
             self.clear();
