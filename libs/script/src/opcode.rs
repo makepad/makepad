@@ -209,6 +209,7 @@ impl Opcode{
     pub const USE:Self = Self(115);
     pub const VAR_TYPED:Self = Self(116);
     pub const VAR_DYN:Self = Self(117);
+    pub const ME_SPLAT:Self = Self(125);
 }
 
 
@@ -377,6 +378,7 @@ impl fmt::Display for Opcode {
             Self::USE=>return write!(f, "use"),
             Self::OK_TEST=>return write!(f, "ok_test"),
             Self::OK_END=>return write!(f, "ok_end"),
+            Self::ME_SPLAT=>return write!(f, "..splat"),
             _=>return write!(f, "OP{}",self.0)
         }
     }

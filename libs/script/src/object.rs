@@ -748,6 +748,16 @@ impl ScriptObjectData{
     pub fn merge_map_from_other(&mut self, other:&ScriptObjectData){
         self.map.extend(other.map.iter());
     }
+    
+    /// Merge map entries from other, but only if the key doesn't already exist in self.
+    /// Used by the splat operator to not overwrite existing values.
+    pub fn merge_map_from_other_no_overwrite(&mut self, other:&ScriptObjectData){
+        for (k, v) in other.map.iter() {
+            if !self.map.contains_key(k) {
+                self.map.insert(*k, *v);
+            }
+        }
+    }
      
     pub fn push_vec_from_other(&mut self, other:&ScriptObjectData){
         self.vec.extend_from_slice(&other.vec);
