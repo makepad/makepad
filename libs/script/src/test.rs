@@ -90,6 +90,8 @@ pub fn test(){
             pos: vec4,
         }
         let test_p1 = 1.0
+        let test_col = #0f0
+        let theme = {TEST_COL: #0f0}
         let test_obj = {test_p1:2.0 objfn:fn(){self.sub_obj.test_p1} sub_obj:{test_p1:3.0}}
         let test_uni = struct{p3:3.0}
         let test_buf = shader.uniform_buffer(test_uni)
@@ -113,6 +115,8 @@ pub fn test(){
                 let m = test_obj.test_p1
                 let n = test_obj.objfn()
                 let n = test_buf.p3
+                let p = test_col
+                let q = theme.TEST_COL
                 let o = test_tex.sample(vec2(2.0))
                 let s = 1.0
                 return s

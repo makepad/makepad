@@ -197,6 +197,13 @@ impl Cx {
                         let () = msg_send![encoder, setVertexBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
                     }
+                    if let Some(id) = shp.scope_uniform_buffer_id {
+                        let scope_buf = &sh.mapping.scope_uniforms_buf;
+                        if !scope_buf.is_empty() {
+                            let () = msg_send![encoder, setVertexBytes: scope_buf.as_ptr() as *const std::ffi::c_void length: (scope_buf.len() * 4) as u64 atIndex: id];
+                            let () = msg_send![encoder, setFragmentBytes: scope_buf.as_ptr() as *const std::ffi::c_void length: (scope_buf.len() * 4) as u64 atIndex: id];
+                        }
+                    }
                     /*
                     let ct = &sh.mapping.const_table.table;
                     if ct.len()>0 {
@@ -834,6 +841,7 @@ pub struct CxOsDrawShader {
     pass_uniform_buffer_id: Option<u64>,
     draw_list_uniform_buffer_id: Option<u64>,
     dyn_uniform_buffer_id: Option<u64>,
+    scope_uniform_buffer_id: Option<u64>,
     pub mtlsl: String,
 }
 
@@ -880,6 +888,7 @@ impl DrawVars{
             output.create_struct_defs(vm, &mut out);
             output.metal_create_instance_struct(vm, &mut out);
             output.metal_create_uniform_struct(vm, &mut out);
+            output.metal_create_scope_uniform_struct(vm, &mut out);
             output.metal_create_varying_struct(vm, &mut out);
             output.metal_create_vertex_buffer_struct(vm, &mut out);
             output.metal_create_io_struct(vm, &mut out);
@@ -894,6 +903,12 @@ impl DrawVars{
             // Create the shader mapping and allocate CxDrawShader
             let source = CxDrawShaderSource::Combined { source: out };
             let mut mapping = CxDrawShaderMapping::from_shader_output(source, &vm.heap, &output);
+            
+            // Fill the scope uniform buffer from current script values
+            mapping.fill_scope_uniforms_buffer(
+                &vm.heap,
+                &vm.thread.trap,
+            );
             
             // Check for debug: true on the shader object
             let debug_value = vm.heap.value(io_self, id!(debug).into(), &vm.thread.trap);
@@ -1019,6 +1034,8 @@ impl CxOsDrawShader {
         let draw_list_uniform_buffer_id = bindings.get_by_type_name(id!(DrawListUniforms)).map(|i| i as u64);
         // dyn_uniform_buffer_id is not in bindings, it uses the IoUniform struct at buffer(2)
         let dyn_uniform_buffer_id = Some(2);
+        // scope_uniform_buffer_id comes from bindings if there are scope uniforms
+        let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u64);
         
         return Some(Self {
             _library: library,
@@ -1027,6 +1044,7 @@ impl CxOsDrawShader {
             pass_uniform_buffer_id,
             draw_list_uniform_buffer_id,
             dyn_uniform_buffer_id,
+            scope_uniform_buffer_id,
             mtlsl,
         });
     }

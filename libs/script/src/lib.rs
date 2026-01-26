@@ -44,6 +44,7 @@ pub mod pod_heap;
 pub mod function;
 pub mod test;
 pub mod shader;
+pub mod shader_output;
 pub mod shader_ops;
 pub mod shader_control;
 pub mod shader_calls;

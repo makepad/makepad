@@ -199,9 +199,6 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
             
             output.assign_uniform_buffer_indices(vm.heap, 3);
             
-            // Compute scope uniform layout (offsets and sizes)
-            let scope_layout = output.compute_scope_uniform_layout(vm.heap);
-            
             let mut out = String::new();
             output.create_struct_defs(vm, &mut out);
             output.metal_create_instance_struct(vm, &mut out);
@@ -220,12 +217,12 @@ pub fn define_shader_module(heap:&mut ScriptHeap, native:&mut ScriptNative){
                 println!("{}{{\n{}}}\n",fns.call_sig, fns.out);
             }
             
-            // Print scope uniform layout for debugging
-            if !scope_layout.entries.is_empty() {
-                println!("\nScopeUniformLayout (total_size: {} bytes):", scope_layout.total_size);
-                for entry in &scope_layout.entries {
-                    println!("  - source_obj: {}, key: {}, offset: {}, size: {}", 
-                        entry.source_obj.index, entry.key, entry.offset, entry.size);
+            // Print scope uniforms for debugging
+            if !output.scope_uniforms.is_empty() {
+                println!("\nScope Uniforms ({} entries):", output.scope_uniforms.len());
+                for su in &output.scope_uniforms {
+                    println!("  - source_obj: {}, key: {}, shader_name: {}", 
+                        su.source_obj.index, su.key, su.shader_name);
                 }
             }
             
