@@ -280,6 +280,7 @@ impl ShaderFnCompiler {
                         | ShaderType::IoSelf(_)
                         | ShaderType::ScopeObject(_)
                         | ShaderType::ScopeUniformBuffer { .. }
+                        | ShaderType::ScopeTexture { .. }
                         | ShaderType::PodType(_)
                         | ShaderType::Texture(_) => {}
                     }
@@ -750,6 +751,12 @@ impl ShaderFnCompiler {
                 self.handle_texture_method_call_args(vm, output, opargs, method_id, tex_type, self_s);
                 return;
             }
+            
+            // Handle method calls on ScopeTexture types (e.g., scope_texture.sample())
+            if let ShaderType::ScopeTexture { tex_type, .. } = self_ty {
+                self.handle_texture_method_call_args(vm, output, opargs, method_id, tex_type, self_s);
+                return;
+            }
 
             if let ShaderType::Id(self_id) = self_ty {
                 // Try to resolve as variable on shader scope - extract info before mutable borrows
@@ -782,6 +789,12 @@ impl ShaderFnCompiler {
                     
                     // Not a PodType - try as ScopeObject method call
                     if self.handle_scope_object_method_call_by_id(vm, output, opargs, method_id, self_id) {
+                        self.stack.free_string(self_s);
+                        return;
+                    }
+                    
+                    // Try as scope texture method call (e.g., test_tex.sample(...))
+                    if self.handle_scope_texture_method_call_by_id(vm, output, opargs, method_id, self_id) {
                         self.stack.free_string(self_s);
                         return;
                     }
@@ -902,6 +915,103 @@ impl ShaderFnCompiler {
         
         // It's a scope object - handle the method call
         self.handle_scope_object_method_call_args(vm, output, opargs, method_id, value_obj)
+    }
+    
+    /// Handle method call on a scope texture identified by name (self_id).
+    /// This is called for expressions like `test_tex.sample(coord)` where `test_tex`
+    /// is a texture defined in the script scope.
+    pub(crate) fn handle_scope_texture_method_call_by_id(
+        &mut self,
+        vm: &mut ScriptVm,
+        output: &mut ShaderOutput,
+        _opargs: OpcodeArgs,
+        method_id: LiveId,
+        self_id: LiveId,
+    ) -> bool {
+        use crate::mod_shader::*;
+        use std::fmt::Write;
+        
+        // Look up self_id in script scope
+        let script_value = vm.heap.scope_value(self.script_scope, self_id.into(), &self.trap);
+        if script_value.is_nil() || self.trap.err.get().is_some() {
+            self.trap.err.take();
+            return false;
+        }
+        
+        // Must be an object
+        let value_obj = match script_value.as_object() {
+            Some(obj) => obj,
+            None => return false,
+        };
+        
+        // Must be a texture shader_io type
+        let io_type = match vm.heap.as_shader_io(value_obj) {
+            Some(io_type) => io_type,
+            None => return false,
+        };
+        
+        // Check if it's a texture type
+        let tex_type = match io_type {
+            SHADER_IO_TEXTURE_1D => TextureType::Texture1d,
+            SHADER_IO_TEXTURE_1D_ARRAY => TextureType::Texture1dArray,
+            SHADER_IO_TEXTURE_2D => TextureType::Texture2d,
+            SHADER_IO_TEXTURE_2D_ARRAY => TextureType::Texture2dArray,
+            SHADER_IO_TEXTURE_3D => TextureType::Texture3d,
+            SHADER_IO_TEXTURE_3D_ARRAY => TextureType::Texture3dArray,
+            SHADER_IO_TEXTURE_CUBE => TextureType::TextureCube,
+            SHADER_IO_TEXTURE_CUBE_ARRAY => TextureType::TextureCubeArray,
+            SHADER_IO_TEXTURE_DEPTH => TextureType::TextureDepth,
+            SHADER_IO_TEXTURE_DEPTH_ARRAY => TextureType::TextureDepthArray,
+            _ => return false,
+        };
+        
+        // Check if we already have this scope texture registered
+        let existing = output.scope_textures.iter().find(|st| st.obj == value_obj);
+        
+        let shader_name = if let Some(existing) = existing {
+            existing.shader_name
+        } else {
+            // Generate unique name for this scope texture
+            let shader_name = self.generate_scope_texture_name(output, self_id, value_obj);
+            
+            // Add to scope_textures for runtime tracking
+            output.scope_textures.push(ScopeTextureSource {
+                obj: value_obj,
+                tex_type,
+                shader_name,
+            });
+            
+            // Add to IO list as Texture
+            if !output.io.iter().any(|io| io.name == shader_name && matches!(io.kind, ShaderIoKind::Texture(_))) {
+                output.io.push(ShaderIo {
+                    kind: ShaderIoKind::Texture(tex_type),
+                    name: shader_name,
+                    ty: ScriptPodType::VOID, // Textures don't have a pod type
+                    buffer_index: None,
+                });
+            }
+            
+            shader_name
+        };
+        
+        // Generate the texture expression with proper prefix
+        let mut texture_expr = self.stack.new_string();
+        let (_, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, io_type);
+        match prefix {
+            ShaderIoPrefix::Prefix(prefix) => write!(texture_expr, "{}{}", prefix, shader_name).ok(),
+            ShaderIoPrefix::Full(full) => write!(texture_expr, "{}", full).ok(),
+            ShaderIoPrefix::FullOwned(full) => write!(texture_expr, "{}", full).ok(),
+        };
+        
+        // Push TextureBuiltin ME to handle the method call
+        self.mes.push(ShaderMe::TextureBuiltin {
+            method_id,
+            tex_type,
+            texture_expr,
+            args: vec![],
+        });
+        
+        true
     }
 
     pub(crate) fn handle_pod_method_call_args(
