@@ -63,6 +63,7 @@ impl ShaderFnCompiler {
             }
             ShaderType::Error(_) => "error".to_string(),
             ShaderType::Texture(tex_type) => format!("texture({:?})", tex_type),
+            ShaderType::ScopeTexture { tex_type, .. } => format!("scope_texture({:?})", tex_type),
             ShaderType::ScopeObject(_) => "scope_object".to_string(),
             ShaderType::ScopeUniformBuffer { pod_ty, .. } => {
                 if let Some(name) = vm.heap.pod_type_name(*pod_ty) {
@@ -386,13 +387,14 @@ impl ShaderFnCompiler {
                 self.stack.push(&self.trap, ShaderType::Id(field_id), field_s);
                 return;
             } else if let ShaderType::ScopeObject(obj) = instance_ty {
-                // Field access on a scope object (e.g., test_obj.p2 or test_obj.objfn)
+                // Field access on a scope object (e.g., test_obj.p2 or test_obj.objfn or test_obj.sub_obj)
                 // Look up the field value
                 let value = vm.heap.value(obj, field_id.into(), &self.trap);
                 
                 if !value.is_nil() && self.trap.err.get().is_none() {
-                    // Check if this is a shader_io type - not supported for scope objects
+                    // Check if this is an object
                     if let Some(value_obj) = value.as_object() {
+                        // Check if this is a shader_io type - not supported for scope objects
                         if vm.heap.as_shader_io(value_obj).is_some() {
                             self.trap.err_opcode_not_supported_in_shader();
                             self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
@@ -409,9 +411,17 @@ impl ShaderFnCompiler {
                             self.stack.push(&self.trap, ShaderType::Id(field_id), field_s);
                             return;
                         }
+                        
+                        // It's a regular sub-object (like test_obj.sub_obj) - return it as ScopeObject
+                        // so that further field access can continue (e.g., test_obj.sub_obj.test_p1)
+                        let empty_s = self.stack.new_string();
+                        self.stack.push(&self.trap, ShaderType::ScopeObject(value_obj), empty_s);
+                        self.stack.free_string(field_s);
+                        self.stack.free_string(instance_s);
+                        return;
                     }
                     
-                    // Get the pod type from the value - it's a regular property
+                    // Get the pod type from the value - it's a regular property (primitive or pod)
                     if let Some(pod_ty) = self.get_scope_value_pod_type(vm, value) {
                         // Check if we already have this scope uniform
                         let existing = output.scope_uniforms.iter().find(|su| 

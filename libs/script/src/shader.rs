@@ -84,6 +84,9 @@ pub enum ShaderType{
     /// A uniform buffer defined in the script scope (e.g., `let buf = shader.uniform_buffer(...)`)
     /// Contains the uniform buffer object and its pod type.
     ScopeUniformBuffer { obj: ScriptObject, pod_ty: ScriptPodType },
+    /// A texture defined in the script scope (e.g., `let tex = shader.texture_2d(float)`)
+    /// Contains the texture object and its type.
+    ScopeTexture { obj: ScriptObject, tex_type: TextureType, shader_name: LiveId },
 }
 
 impl ShaderType{
@@ -92,6 +95,7 @@ impl ShaderType{
             Self::Pod(ty) => Some(*ty),
             Self::PodPtr(ty) => Some(*ty),
             Self::Texture(_) => None, // Textures don't have a concrete pod type
+            Self::ScopeTexture { .. } => None, // Scope textures don't have a concrete pod type
             Self::Id(_id) => None,
             Self::None => None,
             Self::IoSelf(_) => None,
@@ -284,6 +288,18 @@ pub struct ScopeUniformBufferSource {
     pub shader_name: LiveId,
 }
 
+/// Tracks a texture defined in the script scope (e.g., `let tex = shader.texture_2d(float)`)
+/// This is distinct from textures on io_self - these come from the surrounding scope.
+#[derive(Debug, Clone)]
+pub struct ScopeTextureSource {
+    /// The texture ScriptObject itself (needed for runtime texture binding)
+    pub obj: ScriptObject,
+    /// The texture type (2d, cube, etc.)
+    pub tex_type: TextureType,
+    /// The name used in the shader code
+    pub shader_name: LiveId,
+}
+
 #[allow(unused)]
 #[derive(Debug)]
 pub struct ShaderIo{
@@ -330,12 +346,9 @@ pub struct ShaderOutput{
     pub structs: BTreeSet<ScriptPodType>,
     pub functions: Vec<ShaderFn>,
     pub samplers: Vec<ShaderSampler>,
-    /// Tracks scope uniform sources for buffer refresh after compilation.
-    /// These are values read from the script scope (not from io_self).
     pub scope_uniforms: Vec<ScopeUniformSource>,
-    /// Tracks uniform buffers defined in the script scope (e.g., `let buf = shader.uniform_buffer(...)`)
-    /// These need to be bound at runtime using the stored ScriptObject reference.
     pub scope_uniform_buffers: Vec<ScopeUniformBufferSource>,
+    pub scope_textures: Vec<ScopeTextureSource>,
 }
 
 /// Mapping of uniform buffer type names to their assigned buffer indices
@@ -960,6 +973,62 @@ impl ShaderFnCompiler{
                                     return (ShaderType::ScopeUniformBuffer { obj: value_obj, pod_ty }, self.stack.new_string())
                                 }
                             }
+                            // Textures from scope are supported
+                            let tex_type = match io_type {
+                                SHADER_IO_TEXTURE_1D => Some(TextureType::Texture1d),
+                                SHADER_IO_TEXTURE_1D_ARRAY => Some(TextureType::Texture1dArray),
+                                SHADER_IO_TEXTURE_2D => Some(TextureType::Texture2d),
+                                SHADER_IO_TEXTURE_2D_ARRAY => Some(TextureType::Texture2dArray),
+                                SHADER_IO_TEXTURE_3D => Some(TextureType::Texture3d),
+                                SHADER_IO_TEXTURE_3D_ARRAY => Some(TextureType::Texture3dArray),
+                                SHADER_IO_TEXTURE_CUBE => Some(TextureType::TextureCube),
+                                SHADER_IO_TEXTURE_CUBE_ARRAY => Some(TextureType::TextureCubeArray),
+                                SHADER_IO_TEXTURE_DEPTH => Some(TextureType::TextureDepth),
+                                SHADER_IO_TEXTURE_DEPTH_ARRAY => Some(TextureType::TextureDepthArray),
+                                _ => None,
+                            };
+                            if let Some(tex_type) = tex_type {
+                                // Check if we already have this scope texture registered
+                                let existing = output.scope_textures.iter().find(|st| st.obj == value_obj);
+                                
+                                let shader_name = if let Some(existing) = existing {
+                                    existing.shader_name
+                                } else {
+                                    // Generate unique name for this scope texture
+                                    let shader_name = self.generate_scope_texture_name(output, id, value_obj);
+                                    
+                                    // Add to scope_textures for runtime tracking
+                                    output.scope_textures.push(ScopeTextureSource {
+                                        obj: value_obj,
+                                        tex_type,
+                                        shader_name,
+                                    });
+                                    
+                                    // Add to IO list as Texture
+                                    if !output.io.iter().any(|io| io.name == shader_name && matches!(io.kind, ShaderIoKind::Texture(_))) {
+                                        output.io.push(ShaderIo {
+                                            kind: ShaderIoKind::Texture(tex_type),
+                                            name: shader_name,
+                                            ty: ScriptPodType::VOID, // Textures don't have a pod type
+                                            buffer_index: None,
+                                        });
+                                    }
+                                    
+                                    shader_name
+                                };
+                                
+                                // Generate the texture expression with proper prefix
+                                let mut s2 = self.stack.new_string();
+                                let (_, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, io_type);
+                                match prefix {
+                                    ShaderIoPrefix::Prefix(prefix) => write!(s2, "{}{}", prefix, shader_name).ok(),
+                                    ShaderIoPrefix::Full(full) => write!(s2, "{}", full).ok(),
+                                    ShaderIoPrefix::FullOwned(full) => write!(s2, "{}", full).ok(),
+                                };
+                                
+                                self.stack.free_string(s);
+                                return (ShaderType::ScopeTexture { obj: value_obj, tex_type, shader_name }, s2)
+                            }
                             // Other shader_io types are not supported in scope
                             self.trap.err_opcode_not_supported_in_shader();
                             self.stack.free_string(s);
@@ -1124,6 +1193,51 @@ impl ShaderFnCompiler{
         
         // Final fallback - should never reach here
         (shader_name, struct_name)
+    }
+    
+    /// Generate a unique name for a scope texture.
+    /// These are textures defined in the script scope, e.g., `let tex = shader.texture_2d(float)`
+    pub(crate) fn generate_scope_texture_name(&self, output: &ShaderOutput, base_name: LiveId, obj: ScriptObject) -> LiveId {
+        // First, ensure base_name is actually in the LUT. If not, use a default.
+        let base_name_str = base_name.as_string(|s| s.map(|s| s.to_string()));
+        let base_name_str = base_name_str.unwrap_or_else(|| format!("scope_tex_{}", obj.index));
+        
+        // Re-register the base name to ensure it's in the LUT
+        let base_name = LiveId::from_str_with_lut(&base_name_str).unwrap_or_else(|_| id!(scope_tex));
+        
+        // Check if name is already used
+        let name_used = output.io.iter().any(|io| io.name == base_name && matches!(io.kind, ShaderIoKind::Texture(_))) ||
+                       output.scope_textures.iter().any(|st| st.shader_name == base_name);
+        
+        if !name_used {
+            return base_name;
+        }
+        
+        // Name collision - use the object index to create a unique name
+        let unique_name_str = format!("{}_obj{}", base_name_str, obj.index);
+        let unique_name = LiveId::from_str_with_lut(&unique_name_str).unwrap_or_else(|_| LiveId::from_str(&unique_name_str));
+        
+        // Check if this unique name is also used
+        let unique_name_used = output.io.iter().any(|io| io.name == unique_name && matches!(io.kind, ShaderIoKind::Texture(_))) ||
+                              output.scope_textures.iter().any(|st| st.shader_name == unique_name);
+        
+        if !unique_name_used {
+            return unique_name;
+        }
+        
+        // Fallback: add counter suffix
+        for i in 1..100 {
+            let new_name_str = format!("{}_obj{}_{}", base_name_str, obj.index, i);
+            let new_name = LiveId::from_str_with_lut(&new_name_str).unwrap_or_else(|_| LiveId::from_str(&new_name_str));
+            let new_name_used = output.io.iter().any(|io| io.name == new_name && matches!(io.kind, ShaderIoKind::Texture(_))) ||
+                               output.scope_textures.iter().any(|st| st.shader_name == new_name);
+            if !new_name_used {
+                return new_name;
+            }
+        }
+        
+        // Final fallback
+        unique_name
     }
     
     fn push_immediate(&mut self, value:ScriptValue, builtins:&ScriptPodBuiltins, backend:&ShaderBackend){
