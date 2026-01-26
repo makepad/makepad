@@ -99,7 +99,8 @@ impl ScriptThread {
 
 // Object/Array begin
             Opcode::BEGIN_PROTO => self.handle_begin_proto(heap),
-            Opcode::BEGIN_PROTO_ME => self.handle_begin_proto_me(heap),
+            Opcode::PROTO_INHERIT_READ => self.handle_proto_inherit_read(heap),
+            Opcode::PROTO_INHERIT_WRITE => self.handle_proto_inherit_write(heap),
             Opcode::END_PROTO => self.handle_end_proto(heap, code),
             Opcode::BEGIN_BARE => self.handle_begin_bare(heap),
             Opcode::END_BARE => self.handle_end_bare(),

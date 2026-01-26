@@ -141,8 +141,9 @@ impl Opcode{
     pub const ASSIGN_INDEX_IFNIL:Self = Self(64);    
 
     pub const BEGIN_PROTO:Self = Self(65);
-    pub const BEGIN_PROTO_ME:Self = Self(66);
+    pub const PROTO_INHERIT_READ:Self = Self(66);
     pub const END_PROTO:Self = Self(67);
+    pub const PROTO_INHERIT_WRITE:Self = Self(118);
     pub const BEGIN_BARE:Self = Self(68);
     pub const END_BARE:Self = Self(69);
     pub const BEGIN_ARRAY:Self = Self(70);
@@ -301,8 +302,9 @@ impl fmt::Display for Opcode {
             Self::ASSIGN_INDEX_IFNIL => return write!(f, "[]?="),
                                         
             Self::BEGIN_PROTO => return write!(f, "<proto>{{"),
-            Self::BEGIN_PROTO_ME => return write!(f, "<protome>{{"),
+            Self::PROTO_INHERIT_READ => return write!(f, "<proto_inh_rd>"),
             Self::END_PROTO => return write!(f, "}}"),
+            Self::PROTO_INHERIT_WRITE => return write!(f, "<proto_inh_wr>"),
             Self::BEGIN_BARE => return write!(f, "<bare>{{"),
             Self::END_BARE => return write!(f, "}}"),
             

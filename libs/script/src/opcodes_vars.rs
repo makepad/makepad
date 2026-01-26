@@ -22,17 +22,50 @@ impl ScriptThread {
         self.trap.goto_next();
     }
     
-    pub(crate) fn handle_begin_proto_me(&mut self, heap: &mut ScriptHeap) {
+    /// Part 1 of proto-inherit (+:) operator.
+    /// Reads the field from current me (following prototype chain or type-check),
+    /// leaves field on stack, and pushes the proto value on stack for BEGIN_PROTO.
+    pub(crate) fn handle_proto_inherit_read(&mut self, heap: &mut ScriptHeap) {
         let field = self.peek_stack_value();
         let me = self.mes.last().unwrap();
-        let proto = if let ScriptMe::Object(object) = me{
-            heap.value(*object, field, &self.trap)
-        }
-        else{
+        let proto = if let ScriptMe::Object(object) = me {
+            // First try to get value from prototype chain (handles inheritance)
+            let value = heap.proto_field_from_value(*object, field, &self.trap);
+            
+            // If value not found, try to create from type-check structure
+            if value.is_nil() || value.is_err() {
+                self.trap.err.take(); // Clear any error from value lookup
+                if let Some(field_id) = field.as_id() {
+                    heap.proto_field_from_type_check(*object, field_id, &self.trap)
+                } else {
+                    NIL
+                }
+            } else {
+                value
+            }
+        } else {
             NIL
         };
-        let me = heap.new_with_proto(proto);
-        self.mes.push(ScriptMe::Object(me));
+        self.push_stack_unchecked(proto);
+        self.trap.goto_next();
+    }
+    
+    /// Part 2 of proto-inherit (+:) operator.
+    /// Pops the constructed object and field from stack, writes object to current me[field].
+    /// Pushes NIL to satisfy POP_TO_ME (the assignment has no result value).
+    pub(crate) fn handle_proto_inherit_write(&mut self, heap: &mut ScriptHeap) {
+        let object = self.pop_stack_resolved(heap);
+        let field = self.pop_stack_value();
+        if let Some(me) = self.mes.last() {
+            if let ScriptMe::Object(me_obj) = me {
+                if field.is_string_like() {
+                    heap.set_string_keys(*me_obj);
+                }
+                heap.set_value(*me_obj, field, object, &self.trap);
+            }
+        }
+        // Push NIL as result so POP_TO_ME has something to pop
+        self.push_stack_unchecked(NIL);
         self.trap.goto_next();
     }
     
@@ -167,10 +200,23 @@ impl ScriptThread {
     pub(crate) fn handle_proto_field(&mut self, heap: &mut ScriptHeap) {
         let field = self.pop_stack_value();
         let object = self.pop_stack_resolved(heap);
-        println!("PROTO FIELD {}", field);
         if let Some(obj) = object.as_object(){
-            let value = heap.value(obj, field, &self.trap);
-            self.push_stack_unchecked(value)
+            // First try to get value from prototype chain (handles inheritance)
+            let value = heap.proto_field_from_value(obj, field, &self.trap);
+            
+            // If value not found, try to create from type-check structure
+            if value.is_nil() || value.is_err() {
+                self.trap.err.take(); // Clear any error from value lookup
+                if let Some(field_id) = field.as_id() {
+                    let value = heap.proto_field_from_type_check(obj, field_id, &self.trap);
+                    self.push_stack_unchecked(value);
+                } else {
+                    let value = self.trap.err_not_found();
+                    self.push_stack_unchecked(value);
+                }
+            } else {
+                self.push_stack_unchecked(value)
+            }
         }
         else{
             let value = self.trap.err_not_object();
