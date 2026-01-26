@@ -36,7 +36,7 @@ pub struct DrawVars {
 }
 
 impl ScriptHook for DrawVars{
-    fn on_before_apply(&mut self, vm:&mut ScriptVm, apply:&mut ApplyScope, value:ScriptValue){
+    fn on_before_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue){
         self.compile_shader(vm, apply, value)
     }
 }
