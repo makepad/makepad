@@ -278,6 +278,7 @@ impl ShaderFnCompiler {
                         | ShaderType::Range { .. }
                         | ShaderType::Error(_)
                         | ShaderType::IoSelf(_)
+                        | ShaderType::ScopeObject(_)
                         | ShaderType::PodType(_)
                         | ShaderType::Texture(_) => {}
                     }
@@ -331,6 +332,9 @@ impl ShaderFnCompiler {
             }
         } else if let ShaderType::IoSelf(_) = sself {
             write!(method_name_prefix, "io_").ok();
+        } else if let ShaderType::ScopeObject(obj) = sself {
+            // Use the object index to create a unique prefix for scope object methods
+            write!(method_name_prefix, "scope{}_", obj.index).ok();
         }
 
         // First pass: resolve AbstractInt/AbstractFloat against declared parameter types
@@ -445,6 +449,10 @@ impl ShaderFnCompiler {
             }
             write!(fn_args, "{}", output.backend.get_io_self_decl(output.mode)).ok();
             compiler.shader_scope.define_io_self(obj);
+        } else if let ShaderType::ScopeObject(obj) = sself {
+            // ScopeObject methods don't have a _self parameter - `self` references
+            // are resolved to IoScopeUniform accesses at compile time
+            compiler.shader_scope.define_scope_object(obj);
         }
 
         let argc = vm.heap.vec_len(fnobj);
@@ -770,6 +778,12 @@ impl ShaderFnCompiler {
                     if self.handle_pod_type_method_call_args(vm, output, opargs, method_id, self_id, &self_s) {
                         return;
                     }
+                    
+                    // Not a PodType - try as ScopeObject method call
+                    if self.handle_scope_object_method_call_by_id(vm, output, opargs, method_id, self_id) {
+                        self.stack.free_string(self_s);
+                        return;
+                    }
                 }
             }
         }
@@ -814,6 +828,79 @@ impl ShaderFnCompiler {
             }
         }
         false
+    }
+    
+    pub(crate) fn handle_scope_object_method_call_args(
+        &mut self,
+        vm: &mut ScriptVm,
+        output: &mut ShaderOutput,
+        opargs: OpcodeArgs,
+        method_id: LiveId,
+        obj: ScriptObject,
+    ) -> bool {
+        // Look up the method on the scope object
+        let fnobj = vm.heap.value(obj, method_id.into(), &self.trap);
+        if let Some(fnobj) = fnobj.as_object() {
+            if let Some(fnptr) = vm.heap.as_fn(fnobj) {
+                match fnptr {
+                    ScriptFnPtr::Script(_fnptr) => {
+                        // For ScopeObject methods, we only pass the io_all parameter
+                        // since `self` references are resolved to IoScopeUniform accesses
+                        // at compile time (no runtime _self parameter)
+                        let mut out = self.stack.new_string();
+                        write!(out, "{}", output.backend.get_io_all(output.mode)).ok();
+                        self.mes.push(ShaderMe::ScriptCall {
+                            name: method_id,
+                            out,
+                            fnobj,
+                            sself: ShaderType::ScopeObject(obj),
+                            args: vec![],
+                        });
+                    }
+                    ScriptFnPtr::Native(_) => {
+                        // Native methods on scope objects not supported
+                        self.trap.err_opcode_not_supported_in_shader();
+                        return false;
+                    }
+                }
+                self.maybe_pop_to_me(vm, opargs);
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// Handle method call on a scope object identified by name (self_id).
+    /// This is called when PodType handling didn't match - we try to resolve
+    /// the identifier as a scope object and call the method on it.
+    pub(crate) fn handle_scope_object_method_call_by_id(
+        &mut self,
+        vm: &mut ScriptVm,
+        output: &mut ShaderOutput,
+        opargs: OpcodeArgs,
+        method_id: LiveId,
+        self_id: LiveId,
+    ) -> bool {
+        // Look up self_id in script scope
+        let script_value = vm.heap.scope_value(self.script_scope, self_id.into(), &self.trap);
+        if script_value.is_nil() || self.trap.err.get().is_some() {
+            self.trap.err.take();
+            return false;
+        }
+        
+        // Must be an object
+        let value_obj = match script_value.as_object() {
+            Some(obj) => obj,
+            None => return false,
+        };
+        
+        // Must not be a shader_io type or a function
+        if vm.heap.as_shader_io(value_obj).is_some() || vm.heap.as_fn(value_obj).is_some() {
+            return false;
+        }
+        
+        // It's a scope object - handle the method call
+        self.handle_scope_object_method_call_args(vm, output, opargs, method_id, value_obj)
     }
 
     pub(crate) fn handle_pod_method_call_args(

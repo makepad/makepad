@@ -77,7 +77,10 @@ pub enum ShaderType{
     AbstractInt,
     AbstractFloat,
     Range{start:String, end:String, ty:ScriptPodType},
-    Error(ScriptValue)
+    Error(ScriptValue),
+    /// A script scope object that we're accessing properties from.
+    /// Properties are flattened into ScopeUniforms.
+    ScopeObject(ScriptObject),
 }
 
 impl ShaderType{
@@ -89,6 +92,7 @@ impl ShaderType{
             Self::Id(_id) => None,
             Self::None => None,
             Self::IoSelf(_) => None,
+            Self::ScopeObject(_) => None, // Scope objects don't have a concrete pod type
             Self::PodType(_) => None,
             Self::AbstractInt => Some(builtins.pod_i32),
             Self::AbstractFloat => Some(builtins.pod_f32),
@@ -112,6 +116,7 @@ pub struct ShaderFn{
 #[derive(Debug)]
 pub enum ShaderScopeItem{
     IoSelf(ScriptObject),
+    ScopeObject(ScriptObject),
     Let{ty:ScriptPodType, shadow:usize},
     Var{ty:ScriptPodType, shadow:usize},
     PodType{ty:ScriptPodType, shadow:usize}
@@ -121,6 +126,7 @@ impl ShaderScopeItem{
     pub fn ty(&self)->ScriptPodType{
         match self{
             Self::IoSelf(_)=>ScriptPodType::VOID,
+            Self::ScopeObject(_)=>ScriptPodType::VOID,
             Self::Let{ty,..}=>*ty,
             Self::Var{ty,..}=>*ty,
             Self::PodType{ty,..}=>*ty,
@@ -130,6 +136,7 @@ impl ShaderScopeItem{
     pub fn shadow(&self)->usize{
         match self{
             Self::IoSelf(_)=>0,
+            Self::ScopeObject(_)=>0,
             Self::Let{shadow,..}=>*shadow,
             Self::Var{shadow,..}=>*shadow,
             Self::PodType{shadow,..}=>*shadow,
@@ -215,6 +222,50 @@ pub enum ShaderIoKind{
     RustInstance,
     Uniform,
     DynInstance,
+    ScopeUniform,
+}
+
+/// Tracks the source of a scope uniform for buffer refresh after compilation.
+/// Each scope uniform comes from either:
+/// - A direct scope value: `test_p1` -> source_obj is the scope, key is `test_p1`
+/// - An object property: `test_obj.p2` -> source_obj is `test_obj`, key is `p2`
+#[derive(Debug, Clone)]
+pub struct ScopeUniformSource {
+    /// The source object to read the value from
+    pub source_obj: ScriptObject,
+    /// The key to read from the source object  
+    pub key: LiveId,
+    /// The name used in the shader (may be prefixed for collision avoidance)
+    pub shader_name: LiveId,
+    /// The pod type of this uniform
+    pub ty: ScriptPodType,
+    /// Offset in bytes within the IoScopeUniform buffer (set after all uniforms collected)
+    pub offset: usize,
+}
+
+/// Information needed to fill the IoScopeUniform buffer at runtime.
+/// This is the Rust-side representation for populating the GPU buffer.
+#[derive(Debug, Clone, Default)]
+pub struct ScopeUniformLayout {
+    /// List of entries describing where to read values and where to write them
+    pub entries: Vec<ScopeUniformEntry>,
+    /// Total size of the buffer in bytes
+    pub total_size: usize,
+}
+
+/// A single entry in the scope uniform buffer layout
+#[derive(Debug, Clone)]
+pub struct ScopeUniformEntry {
+    /// The source object to read the value from
+    pub source_obj: ScriptObject,
+    /// The key to read from the source object
+    pub key: LiveId,
+    /// The pod type of this uniform
+    pub ty: ScriptPodType,
+    /// Offset in bytes within the buffer
+    pub offset: usize,
+    /// Size in bytes of this entry
+    pub size: usize,
 }
 
 #[allow(unused)]
@@ -263,6 +314,9 @@ pub struct ShaderOutput{
     pub structs: BTreeSet<ScriptPodType>,
     pub functions: Vec<ShaderFn>,
     pub samplers: Vec<ShaderSampler>,
+    /// Tracks scope uniform sources for buffer refresh after compilation.
+    /// These are values read from the script scope (not from io_self).
+    pub scope_uniforms: Vec<ScopeUniformSource>,
 }
 
 /// Mapping of uniform buffer type names to their assigned buffer indices
@@ -542,6 +596,57 @@ impl ShaderOutput{
         self.samplers.push(sampler);
         idx
     }
+    
+    /// Compute the layout for the IoScopeUniform buffer.
+    /// This calculates offsets for each scope uniform and returns a `ScopeUniformLayout`
+    /// that can be used by Rust code to fill the buffer at runtime.
+    /// 
+    /// Call this after shader compilation is complete (after vertex and fragment shaders).
+    pub fn compute_scope_uniform_layout(&mut self, heap: &ScriptHeap) -> ScopeUniformLayout {
+        let mut layout = ScopeUniformLayout::default();
+        let mut offset = 0usize;
+        
+        // Process scope uniforms in order - same order as they appear in the io list
+        for io in &self.io {
+            if let ShaderIoKind::ScopeUniform = io.kind {
+                // Find the corresponding ScopeUniformSource
+                if let Some(source) = self.scope_uniforms.iter_mut().find(|su| su.shader_name == io.name) {
+                    let pod_type_ref = heap.pod_type_ref(source.ty);
+                    let align = pod_type_ref.ty.align_of();
+                    let size = pod_type_ref.ty.size_of();
+                    
+                    // Align offset to type alignment
+                    let rem = offset % align;
+                    if rem != 0 {
+                        offset += align - rem;
+                    }
+                    
+                    // Update offset in source
+                    source.offset = offset;
+                    
+                    // Add entry to layout
+                    layout.entries.push(ScopeUniformEntry {
+                        source_obj: source.source_obj,
+                        key: source.key,
+                        ty: source.ty,
+                        offset,
+                        size,
+                    });
+                    
+                    offset += size;
+                }
+            }
+        }
+        
+        // Align total size to 16 bytes (typical GPU uniform buffer alignment)
+        let rem = offset % 16;
+        if rem != 0 {
+            offset += 16 - rem;
+        }
+        layout.total_size = offset;
+        
+        layout
+    }
 }
 
 
@@ -605,6 +710,11 @@ impl ShaderScope{
     pub fn define_io_self(&mut self, sself:ScriptObject) {
         let scope = self.shader_scope.last_mut().unwrap();
         scope.insert(id!(self),ShaderScopeItem::IoSelf(sself) );
+    }
+    
+    pub fn define_scope_object(&mut self, sself:ScriptObject) {
+        let scope = self.shader_scope.last_mut().unwrap();
+        scope.insert(id!(self),ShaderScopeItem::ScopeObject(sself) );
     }
     
     pub fn define_var(&mut self, id: LiveId, ty: ScriptPodType) -> usize {
@@ -785,16 +895,20 @@ impl ShaderFnCompiler{
         panic!("Unexpected ME at end {:?}", value)
     }
 
-    pub(crate) fn pop_resolved(&mut self, _vm:&ScriptVm)->(ShaderType,String){
+    pub(crate) fn pop_resolved(&mut self, vm:&mut ScriptVm, output:&mut ShaderOutput)->(ShaderType,String){
         let (ty, s) = self.stack.pop(&self.trap);
         // if ty is an id, look it up
         match ty{
             ShaderType::Id(id)=>{
-                // look it up on our scope
+                // First, look it up on our shader scope (local variables)
                 if let Some((sc, shadow)) = self.shader_scope.find_var(id){
                     let mut s2 = self.stack.new_string();
                     if let ShaderScopeItem::IoSelf(obj) = sc{
                         return (ShaderType::IoSelf(*obj), s2)
+                    }
+                    if let ShaderScopeItem::ScopeObject(obj) = sc{
+                        // `self` is a ScopeObject - return it for field access handling
+                        return (ShaderType::ScopeObject(*obj), s2)
                     }
                     if shadow > 0 {
                         write!(s2, "_s{}{}", shadow, id).ok();
@@ -808,12 +922,129 @@ impl ShaderFnCompiler{
                     self.stack.free_string(s);
                     return (ShaderType::Pod(sc.ty()), s2)
                 }
+                
+                // Not found in shader scope - try script scope for scope uniforms
+                let value = vm.heap.scope_value(self.script_scope, id.into(), &self.trap);
+                if !value.is_nil() && self.trap.err.get().is_none() {
+                    // Check if this is a shader_io type - we don't support those as scope uniforms
+                    if let Some(value_obj) = value.as_object() {
+                        if vm.heap.as_shader_io(value_obj).is_some() {
+                            self.trap.err_opcode_not_supported_in_shader();
+                            self.stack.free_string(s);
+                            return (ShaderType::Error(NIL), self.stack.new_string())
+                        }
+                        // Check if this is an object we can walk for properties
+                        // Return ScopeObject so handle_field can process property access
+                        self.stack.free_string(s);
+                        return (ShaderType::ScopeObject(value_obj), self.stack.new_string())
+                    }
+                    
+                    // It's a direct value - add as scope uniform
+                    if let Some(pod_ty) = self.get_scope_value_pod_type(vm, value) {
+                        // Check if we already have this scope uniform
+                        let existing = output.scope_uniforms.iter().find(|su| 
+                            su.source_obj == self.script_scope && su.key == id
+                        );
+                        
+                        let shader_name = if let Some(existing) = existing {
+                            existing.shader_name
+                        } else {
+                            // Generate unique name if there's a collision (use script_scope as source obj)
+                            let shader_name = self.generate_scope_uniform_name(output, id, self.script_scope);
+                            output.scope_uniforms.push(ScopeUniformSource {
+                                source_obj: self.script_scope,
+                                key: id,
+                                shader_name,
+                                ty: pod_ty,
+                                offset: 0, // Will be computed later by compute_scope_uniform_layout
+                            });
+                            // Also add to IO list
+                            if !output.io.iter().any(|io| io.name == shader_name && matches!(io.kind, ShaderIoKind::ScopeUniform)) {
+                                vm.heap.pod_type_name_if_not_set(pod_ty, shader_name);
+                                output.io.push(ShaderIo {
+                                    kind: ShaderIoKind::ScopeUniform,
+                                    name: shader_name,
+                                    ty: pod_ty,
+                                    buffer_index: None,
+                                });
+                            }
+                            shader_name
+                        };
+                        
+                        let mut s2 = self.stack.new_string();
+                        let (_, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, SHADER_IO_SCOPE_UNIFORM);
+                        match prefix {
+                            ShaderIoPrefix::Prefix(prefix) => write!(s2, "{}{}", prefix, shader_name).ok(),
+                            ShaderIoPrefix::Full(full) => write!(s2, "{}", full).ok(),
+                            ShaderIoPrefix::FullOwned(full) => write!(s2, "{}", full).ok(),
+                        };
+                        self.stack.free_string(s);
+                        return (ShaderType::Pod(pod_ty), s2)
+                    }
+                }
+                
+                // Clear any error from scope_value lookup failure
+                self.trap.err.take();
                 self.trap.err_not_found();
                 self.stack.free_string(s);
                 return (ShaderType::Error(NIL), self.stack.new_string())
             },
             _=>(ty, s),
         }
+    }
+    
+    /// Get the pod type from a scope value, if it's a supported type
+    pub(crate) fn get_scope_value_pod_type(&self, vm: &ScriptVm, value: ScriptValue) -> Option<ScriptPodType> {
+        // Check if it's a primitive type (f32, f64, bool, etc.)
+        if let Some(pod_ty) = vm.code.builtins.pod.value_to_exact_type(value) {
+            return Some(pod_ty);
+        }
+        // Check if it's a pod instance
+        if let Some(pod) = value.as_pod() {
+            let pod = &vm.heap.pods[pod.index as usize];
+            return Some(pod.ty);
+        }
+        None
+    }
+    
+    /// Generate a unique name for a scope uniform, handling collisions.
+    /// Uses the source object's index to create unique names when there are collisions.
+    pub(crate) fn generate_scope_uniform_name(&self, output: &ShaderOutput, base_name: LiveId, source_obj: ScriptObject) -> LiveId {
+        // Check if name is already used
+        let name_used = output.io.iter().any(|io| io.name == base_name) ||
+                       output.scope_uniforms.iter().any(|su| su.shader_name == base_name);
+        
+        if !name_used {
+            return base_name;
+        }
+        
+        // Name collision - use the object index to create a unique name
+        // Format: base_name_objN where N is the object index
+        // Use from_str_with_lut to register the name in the LiveId lookup table
+        let unique_name_str = format!("{}_obj{}", base_name, source_obj.index);
+        let unique_name = LiveId::from_str_with_lut(&unique_name_str).unwrap_or_else(|_| LiveId::from_str(&unique_name_str));
+        
+        // Check if this unique name is also used (very unlikely but possible)
+        let unique_name_used = output.io.iter().any(|io| io.name == unique_name) ||
+                              output.scope_uniforms.iter().any(|su| su.shader_name == unique_name);
+        
+        if !unique_name_used {
+            return unique_name;
+        }
+        
+        // Fallback: add counter suffix
+        for i in 1..100 {
+            let new_name_str = format!("{}_obj{}_{}", base_name, source_obj.index, i);
+            let new_name = LiveId::from_str_with_lut(&new_name_str).unwrap_or_else(|_| LiveId::from_str(&new_name_str));
+            let new_name_used = output.io.iter().any(|io| io.name == new_name) ||
+                               output.scope_uniforms.iter().any(|su| su.shader_name == new_name);
+            if !new_name_used {
+                return new_name;
+            }
+        }
+        
+        // Final fallback - should never reach here
+        unique_name
     }
     
     
@@ -884,56 +1115,56 @@ impl ShaderFnCompiler{
         match opcode{
 // Arithmetic
             Opcode::NOT=>{}
-            Opcode::NEG=>self.handle_neg(vm, opargs, "-"),
-            Opcode::MUL=>self.handle_arithmetic(vm, opargs, "*", false),
-            Opcode::DIV=>self.handle_arithmetic(vm, opargs, "/", false),
-            Opcode::MOD=>self.handle_arithmetic(vm, opargs, "%", false),
-            Opcode::ADD=>self.handle_arithmetic(vm, opargs, "+", false),
-            Opcode::SUB=>self.handle_arithmetic(vm, opargs, "-", false),
-            Opcode::SHL=>self.handle_arithmetic(vm, opargs, ">>", true),
-            Opcode::SHR=>self.handle_arithmetic(vm, opargs, "<<", true),
-            Opcode::AND=>self.handle_arithmetic(vm, opargs, "&", true),
-            Opcode::OR=>self.handle_arithmetic(vm, opargs, "|", true),
-            Opcode::XOR=>self.handle_arithmetic(vm, opargs, "^", true),
+            Opcode::NEG=>self.handle_neg(vm, output, opargs, "-"),
+            Opcode::MUL=>self.handle_arithmetic(vm, output, opargs, "*", false),
+            Opcode::DIV=>self.handle_arithmetic(vm, output, opargs, "/", false),
+            Opcode::MOD=>self.handle_arithmetic(vm, output, opargs, "%", false),
+            Opcode::ADD=>self.handle_arithmetic(vm, output, opargs, "+", false),
+            Opcode::SUB=>self.handle_arithmetic(vm, output, opargs, "-", false),
+            Opcode::SHL=>self.handle_arithmetic(vm, output, opargs, ">>", true),
+            Opcode::SHR=>self.handle_arithmetic(vm, output, opargs, "<<", true),
+            Opcode::AND=>self.handle_arithmetic(vm, output, opargs, "&", true),
+            Opcode::OR=>self.handle_arithmetic(vm, output, opargs, "|", true),
+            Opcode::XOR=>self.handle_arithmetic(vm, output, opargs, "^", true),
                         
 // ASSIGN
             Opcode::ASSIGN=>self.handle_assign(vm),
-            Opcode::ASSIGN_ADD=>{self.handle_arithmetic_assign(vm, opargs, "+=", false);},
-            Opcode::ASSIGN_SUB=>{self.handle_arithmetic_assign(vm, opargs, "-=", false);},
-            Opcode::ASSIGN_MUL=>{self.handle_arithmetic_assign(vm, opargs, "*=", false);},
-            Opcode::ASSIGN_DIV=>{self.handle_arithmetic_assign(vm, opargs, "/=", false);},
-            Opcode::ASSIGN_MOD=>{self.handle_arithmetic_assign(vm, opargs, "%=", false);},
-            Opcode::ASSIGN_AND=>{self.handle_arithmetic_assign(vm, opargs, "&=", true);},
-            Opcode::ASSIGN_OR=>{self.handle_arithmetic_assign(vm, opargs, "|=", true);},
-            Opcode::ASSIGN_XOR=>{self.handle_arithmetic_assign(vm, opargs, "^=", true);},
-            Opcode::ASSIGN_SHL=>{self.handle_arithmetic_assign(vm, opargs, ">>=", true);},
-            Opcode::ASSIGN_SHR=>{self.handle_arithmetic_assign(vm, opargs, "<<=", true);},
+            Opcode::ASSIGN_ADD=>{self.handle_arithmetic_assign(vm, output, opargs, "+=", false);},
+            Opcode::ASSIGN_SUB=>{self.handle_arithmetic_assign(vm, output, opargs, "-=", false);},
+            Opcode::ASSIGN_MUL=>{self.handle_arithmetic_assign(vm, output, opargs, "*=", false);},
+            Opcode::ASSIGN_DIV=>{self.handle_arithmetic_assign(vm, output, opargs, "/=", false);},
+            Opcode::ASSIGN_MOD=>{self.handle_arithmetic_assign(vm, output, opargs, "%=", false);},
+            Opcode::ASSIGN_AND=>{self.handle_arithmetic_assign(vm, output, opargs, "&=", true);},
+            Opcode::ASSIGN_OR=>{self.handle_arithmetic_assign(vm, output, opargs, "|=", true);},
+            Opcode::ASSIGN_XOR=>{self.handle_arithmetic_assign(vm, output, opargs, "^=", true);},
+            Opcode::ASSIGN_SHL=>{self.handle_arithmetic_assign(vm, output, opargs, ">>=", true);},
+            Opcode::ASSIGN_SHR=>{self.handle_arithmetic_assign(vm, output, opargs, "<<=", true);},
             Opcode::ASSIGN_IFNIL=>{self.trap.err_not_impl();},
 // ASSIGN FIELD                       
             Opcode::ASSIGN_FIELD=>self.handle_assign_field(vm, output),
-            Opcode::ASSIGN_FIELD_ADD=>{self.handle_arithmetic_field_assign(vm, opargs, "+=", false);},
-            Opcode::ASSIGN_FIELD_SUB=>{self.handle_arithmetic_field_assign(vm, opargs, "-=", false);},
-            Opcode::ASSIGN_FIELD_MUL=>{self.handle_arithmetic_field_assign(vm, opargs, "*=", false);},
-            Opcode::ASSIGN_FIELD_DIV=>{self.handle_arithmetic_field_assign(vm, opargs, "/=", false);},
-            Opcode::ASSIGN_FIELD_MOD=>{self.handle_arithmetic_field_assign(vm, opargs, "%=", false);},
-            Opcode::ASSIGN_FIELD_AND=>{self.handle_arithmetic_field_assign(vm, opargs, "&=", true);},
-            Opcode::ASSIGN_FIELD_OR=>{self.handle_arithmetic_field_assign(vm, opargs, "|=", true);},
-            Opcode::ASSIGN_FIELD_XOR=>{self.handle_arithmetic_field_assign(vm, opargs, "^=", true);},
-            Opcode::ASSIGN_FIELD_SHL=>{self.handle_arithmetic_field_assign(vm, opargs, ">>=", true);},
-            Opcode::ASSIGN_FIELD_SHR=>{self.handle_arithmetic_field_assign(vm, opargs, "<<=", true);},
+            Opcode::ASSIGN_FIELD_ADD=>{self.handle_arithmetic_field_assign(vm, output, opargs, "+=", false);},
+            Opcode::ASSIGN_FIELD_SUB=>{self.handle_arithmetic_field_assign(vm, output, opargs, "-=", false);},
+            Opcode::ASSIGN_FIELD_MUL=>{self.handle_arithmetic_field_assign(vm, output, opargs, "*=", false);},
+            Opcode::ASSIGN_FIELD_DIV=>{self.handle_arithmetic_field_assign(vm, output, opargs, "/=", false);},
+            Opcode::ASSIGN_FIELD_MOD=>{self.handle_arithmetic_field_assign(vm, output, opargs, "%=", false);},
+            Opcode::ASSIGN_FIELD_AND=>{self.handle_arithmetic_field_assign(vm, output, opargs, "&=", true);},
+            Opcode::ASSIGN_FIELD_OR=>{self.handle_arithmetic_field_assign(vm, output, opargs, "|=", true);},
+            Opcode::ASSIGN_FIELD_XOR=>{self.handle_arithmetic_field_assign(vm, output, opargs, "^=", true);},
+            Opcode::ASSIGN_FIELD_SHL=>{self.handle_arithmetic_field_assign(vm, output, opargs, ">>=", true);},
+            Opcode::ASSIGN_FIELD_SHR=>{self.handle_arithmetic_field_assign(vm, output, opargs, "<<=", true);},
             Opcode::ASSIGN_FIELD_IFNIL=>{self.trap.err_not_impl();},
                                     
-            Opcode::ASSIGN_INDEX=>self.handle_assign_index(vm),
-            Opcode::ASSIGN_INDEX_ADD=>{self.handle_arithmetic_index_assign(vm, opargs, "+=", false);},
-            Opcode::ASSIGN_INDEX_SUB=>{self.handle_arithmetic_index_assign(vm, opargs, "-=", false);},
-            Opcode::ASSIGN_INDEX_MUL=>{self.handle_arithmetic_index_assign(vm, opargs, "*=", false);},
-            Opcode::ASSIGN_INDEX_DIV=>{self.handle_arithmetic_index_assign(vm, opargs, "/=", false);},
-            Opcode::ASSIGN_INDEX_MOD=>{self.handle_arithmetic_index_assign(vm, opargs, "%=", false);},
-            Opcode::ASSIGN_INDEX_AND=>{self.handle_arithmetic_index_assign(vm, opargs, "&=", true);},
-            Opcode::ASSIGN_INDEX_OR=>{self.handle_arithmetic_index_assign(vm, opargs, "|=", true);},
-            Opcode::ASSIGN_INDEX_XOR=>{self.handle_arithmetic_index_assign(vm, opargs, "^=", true);},
-            Opcode::ASSIGN_INDEX_SHL=>{self.handle_arithmetic_index_assign(vm, opargs, ">>=", true);},
-            Opcode::ASSIGN_INDEX_SHR=>{self.handle_arithmetic_index_assign(vm, opargs, "<<=", true);},
+            Opcode::ASSIGN_INDEX=>self.handle_assign_index(vm, output),
+            Opcode::ASSIGN_INDEX_ADD=>{self.handle_arithmetic_index_assign(vm, output, opargs, "+=", false);},
+            Opcode::ASSIGN_INDEX_SUB=>{self.handle_arithmetic_index_assign(vm, output, opargs, "-=", false);},
+            Opcode::ASSIGN_INDEX_MUL=>{self.handle_arithmetic_index_assign(vm, output, opargs, "*=", false);},
+            Opcode::ASSIGN_INDEX_DIV=>{self.handle_arithmetic_index_assign(vm, output, opargs, "/=", false);},
+            Opcode::ASSIGN_INDEX_MOD=>{self.handle_arithmetic_index_assign(vm, output, opargs, "%=", false);},
+            Opcode::ASSIGN_INDEX_AND=>{self.handle_arithmetic_index_assign(vm, output, opargs, "&=", true);},
+            Opcode::ASSIGN_INDEX_OR=>{self.handle_arithmetic_index_assign(vm, output, opargs, "|=", true);},
+            Opcode::ASSIGN_INDEX_XOR=>{self.handle_arithmetic_index_assign(vm, output, opargs, "^=", true);},
+            Opcode::ASSIGN_INDEX_SHL=>{self.handle_arithmetic_index_assign(vm, output, opargs, ">>=", true);},
+            Opcode::ASSIGN_INDEX_SHR=>{self.handle_arithmetic_index_assign(vm, output, opargs, "<<=", true);},
             Opcode::ASSIGN_INDEX_IFNIL=>{self.trap.err_not_impl();},
 // ASSIGN ME            
             Opcode::ASSIGN_ME=>self.handle_assign_me(vm),
@@ -945,16 +1176,16 @@ impl ShaderFnCompiler{
 // CONCAT  
             Opcode::CONCAT=>{self.trap.err_opcode_not_supported_in_shader();},
 // EQUALITY
-            Opcode::EQ=>{self.handle_eq(vm, opargs, "==");},
-            Opcode::NEQ=>{self.handle_eq(vm, opargs, "!=");},
+            Opcode::EQ=>{self.handle_eq(vm, output, opargs, "==");},
+            Opcode::NEQ=>{self.handle_eq(vm, output, opargs, "!=");},
                         
-            Opcode::LT=>{self.handle_eq(vm, opargs, "<");},
-            Opcode::GT=>{self.handle_eq(vm, opargs, ">");},
-            Opcode::LEQ=>{self.handle_eq(vm, opargs, "<=");},
-            Opcode::GEQ=>{self.handle_eq(vm, opargs, ">=");},
+            Opcode::LT=>{self.handle_eq(vm, output, opargs, "<");},
+            Opcode::GT=>{self.handle_eq(vm, output, opargs, ">");},
+            Opcode::LEQ=>{self.handle_eq(vm, output, opargs, "<=");},
+            Opcode::GEQ=>{self.handle_eq(vm, output, opargs, ">=");},
                         
-            Opcode::LOGIC_AND =>{self.handle_logic(vm, opargs, "&&");},
-            Opcode::LOGIC_OR =>{self.handle_logic(vm, opargs, "||");},
+            Opcode::LOGIC_AND =>{self.handle_logic(vm, output, opargs, "&&");},
+            Opcode::LOGIC_OR =>{self.handle_logic(vm, output, opargs, "||");},
             Opcode::NIL_OR =>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::SHALLOW_EQ =>{self.trap.err_opcode_not_supported_in_shader();},
             Opcode::SHALLOW_NEQ=>{self.trap.err_opcode_not_supported_in_shader();},
@@ -983,7 +1214,7 @@ impl ShaderFnCompiler{
             Opcode::FN_ARG_TYPED=>{self.trap.err_not_impl();},
             Opcode::FN_BODY_DYN=>{self.trap.err_not_impl();},
             Opcode::FN_BODY_TYPED=>{self.trap.err_not_impl();},
-            Opcode::RETURN=>self.handle_return(vm, opargs),
+            Opcode::RETURN=>self.handle_return(vm, output, opargs),
             Opcode::RETURN_IF_ERR=>{self.trap.err_opcode_not_supported_in_shader();},
 // IF            
             Opcode::IF_TEST=>self.handle_if_test(opargs),

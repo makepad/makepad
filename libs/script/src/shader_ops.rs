@@ -10,53 +10,53 @@ use crate::shader::*;
 use crate::shader_tables::*;
 
 impl ShaderFnCompiler {
-    pub(crate) fn handle_neg(&mut self, vm: &ScriptVm, _opargs: OpcodeArgs, op: &str) {
-        let (t1, s1) = self.pop_resolved(vm);
+    pub(crate) fn handle_neg(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, _opargs: OpcodeArgs, op: &str) {
+        let (t1, s1) = self.pop_resolved(vm, output);
         let mut s = self.stack.new_string();
         write!(s, "({}{})", op, s1).ok();
         let ty = type_table_neg(&t1, &self.trap, &vm.code.builtins.pod);
         self.stack.push(&self.trap, ty, s);
     }
 
-    pub(crate) fn handle_eq(&mut self, vm: &ScriptVm, opargs: OpcodeArgs, op: &str) {
+    pub(crate) fn handle_eq(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, op: &str) {
         let (t2, s2) = if opargs.is_u32() {
             let mut s = self.stack.new_string();
             write!(s, "{}", opargs.to_u32()).ok();
             (ShaderType::AbstractInt, s)
         } else {
-            self.pop_resolved(vm)
+            self.pop_resolved(vm, output)
         };
-        let (t1, s1) = self.pop_resolved(vm);
+        let (t1, s1) = self.pop_resolved(vm, output);
         let mut s = self.stack.new_string();
         write!(s, "({} {} {})", s1, op, s2).ok();
         let ty = type_table_eq(&t1, &t2, &self.trap, &vm.code.builtins.pod);
         self.stack.push(&self.trap, ty, s);
     }
 
-    pub(crate) fn handle_logic(&mut self, vm: &ScriptVm, opargs: OpcodeArgs, op: &str) {
+    pub(crate) fn handle_logic(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, op: &str) {
         let (t2, s2) = if opargs.is_u32() {
             let mut s = self.stack.new_string();
             write!(s, "{}", opargs.to_u32()).ok();
             (ShaderType::AbstractInt, s)
         } else {
-            self.pop_resolved(vm)
+            self.pop_resolved(vm, output)
         };
-        let (t1, s1) = self.pop_resolved(vm);
+        let (t1, s1) = self.pop_resolved(vm, output);
         let mut s = self.stack.new_string();
         write!(s, "({} {} {})", s1, op, s2).ok();
         let ty = type_table_logic(&t1, &t2, &self.trap, &vm.code.builtins.pod);
         self.stack.push(&self.trap, ty, s);
     }
 
-    pub(crate) fn handle_arithmetic(&mut self, vm: &ScriptVm, opargs: OpcodeArgs, op: &str, is_int: bool) {
+    pub(crate) fn handle_arithmetic(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, op: &str, is_int: bool) {
         let (t2, s2) = if opargs.is_u32() {
             let mut s = self.stack.new_string();
             write!(s, "{}", opargs.to_u32()).ok();
             (ShaderType::AbstractInt, s)
         } else {
-            self.pop_resolved(vm)
+            self.pop_resolved(vm, output)
         };
-        let (t1, s1) = self.pop_resolved(vm);
+        let (t1, s1) = self.pop_resolved(vm, output);
         let mut s = self.stack.new_string();
         write!(s, "({} {} {})", s1, op, s2).ok();
         let ty = if is_int {
@@ -67,13 +67,13 @@ impl ShaderFnCompiler {
         self.stack.push(&self.trap, ty, s);
     }
 
-    pub(crate) fn handle_arithmetic_assign(&mut self, vm: &ScriptVm, opargs: OpcodeArgs, op: &str, is_int: bool) {
+    pub(crate) fn handle_arithmetic_assign(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, op: &str, is_int: bool) {
         let (t2, s2) = if opargs.is_u32() {
             let mut s = self.stack.new_string();
             write!(s, "{}", opargs.to_u32()).ok();
             (ShaderType::AbstractInt, s)
         } else {
-            self.pop_resolved(vm)
+            self.pop_resolved(vm, output)
         };
         let (id_ty, id_s) = self.stack.pop(&self.trap);
         if let ShaderType::Id(id) = id_ty {
@@ -108,17 +108,17 @@ impl ShaderFnCompiler {
         self.stack.free_string(id_s);
     }
 
-    pub(crate) fn handle_arithmetic_field_assign(&mut self, vm: &ScriptVm, opargs: OpcodeArgs, op: &str, is_int: bool) {
+    pub(crate) fn handle_arithmetic_field_assign(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, op: &str, is_int: bool) {
         let (t2, s2) = if opargs.is_u32() {
             let mut s = self.stack.new_string();
             write!(s, "{}", opargs.to_u32()).ok();
             (ShaderType::AbstractInt, s)
         } else {
-            self.pop_resolved(vm)
+            self.pop_resolved(vm, output)
         };
 
         let (field_ty, field_s) = self.stack.pop(&self.trap);
-        let (instance_ty, instance_s) = self.pop_resolved(vm);
+        let (instance_ty, instance_s) = self.pop_resolved(vm, output);
 
         if let ShaderType::Id(field_id) = field_ty {
             if let ShaderType::Pod(pod_ty) = instance_ty {
@@ -177,17 +177,17 @@ impl ShaderFnCompiler {
         self.stack.free_string(instance_s);
     }
 
-    pub(crate) fn handle_arithmetic_index_assign(&mut self, vm: &ScriptVm, opargs: OpcodeArgs, op: &str, is_int: bool) {
+    pub(crate) fn handle_arithmetic_index_assign(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, op: &str, is_int: bool) {
         let (t2, s2) = if opargs.is_u32() {
             let mut s = self.stack.new_string();
             write!(s, "{}", opargs.to_u32()).ok();
             (ShaderType::AbstractInt, s)
         } else {
-            self.pop_resolved(vm)
+            self.pop_resolved(vm, output)
         };
 
-        let (index_ty, index_s) = self.pop_resolved(vm);
-        let (instance_ty, instance_s) = self.pop_resolved(vm);
+        let (index_ty, index_s) = self.pop_resolved(vm, output);
+        let (instance_ty, instance_s) = self.pop_resolved(vm, output);
 
         if let ShaderType::Pod(pod_ty) = instance_ty {
             let builtins = &vm.code.builtins.pod;
