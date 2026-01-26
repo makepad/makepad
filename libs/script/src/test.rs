@@ -89,7 +89,11 @@ pub fn test(){
         let vertices = struct{
             pos: vec4,
         }
-        
+        let test_p1 = 1.0
+        let test_obj = {p2:2.0}
+        let test_uni = struct{p3:3.0}
+        let test_buf = shader.uniform_buffer(test_uni)
+        let test_tex = shader.texture_2d(float)
         // alright. lets figure out the shader sself
         let test_shader = #(ShaderTest2::script_shader(vm)){
             vtx: shader.vertex_buffer(vertices)
@@ -105,6 +109,10 @@ pub fn test(){
             pixel: shader.fragment_output(0, vec4f)
             otherfn: |x| x + 1
             testfn: ||{
+                let k = test_p1
+                let m = test_obj.p2
+                let n = test_buf.p3
+                let o = test_tex.sample(vec2(2.0))
                 let s = 1.0
                 return s
             }
@@ -113,8 +121,6 @@ pub fn test(){
                 self.vertex_pos = self.vtx.pos
             }
             fragment: fn(){
-                ~self.color
-                
                 let t = mix(#f0f, self.color, 0.5)
                 let q = self.testfn()
                 let v = self.unitest2 + self.vy + self.unitest
