@@ -224,7 +224,7 @@ impl ShaderFnCompiler {
         }
     }
 
-    pub(crate) fn handle_return(&mut self, vm: &mut ScriptVm, opargs: OpcodeArgs) {
+    pub(crate) fn handle_return(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs) {
         // Check if we're already escaped (all code paths have returned)
         let already_escaped = self.mes.iter().rev()
             .find_map(|me| match me {
@@ -250,7 +250,7 @@ impl ShaderFnCompiler {
         let (ty, s) = if opargs.is_nil() {
             (vm.code.builtins.pod.pod_void, self.stack.new_string())
         } else {
-            let (ty, s) = self.pop_resolved(vm);
+            let (ty, s) = self.pop_resolved(vm, output);
             let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
             (ty, s)
         };

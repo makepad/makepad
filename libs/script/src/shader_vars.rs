@@ -63,6 +63,7 @@ impl ShaderFnCompiler {
             }
             ShaderType::Error(_) => "error".to_string(),
             ShaderType::Texture(tex_type) => format!("texture({:?})", tex_type),
+            ShaderType::ScopeObject(_) => "scope_object".to_string(),
         }
     }
 
@@ -94,9 +95,9 @@ impl ShaderFnCompiler {
     }
 
     pub(crate) fn handle_assign_field(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
-        let (value_ty, value_s) = self.pop_resolved(vm);
+        let (value_ty, value_s) = self.pop_resolved(vm, output);
         let (field_ty, field_s) = self.stack.pop(&self.trap);
-        let (instance_ty, instance_s) = self.pop_resolved(vm);
+        let (instance_ty, instance_s) = self.pop_resolved(vm, output);
 
         if let ShaderType::Id(field_id) = field_ty {
             if let ShaderType::Pod(pod_ty) = instance_ty {
@@ -204,10 +205,10 @@ impl ShaderFnCompiler {
         self.stack.free_string(instance_s);
     }
 
-    pub(crate) fn handle_assign_index(&mut self, vm: &mut ScriptVm) {
-        let (value_ty, value_s) = self.pop_resolved(vm);
-        let (index_ty, index_s) = self.pop_resolved(vm);
-        let (instance_ty, instance_s) = self.pop_resolved(vm);
+    pub(crate) fn handle_assign_index(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
+        let (value_ty, value_s) = self.pop_resolved(vm, output);
+        let (index_ty, index_s) = self.pop_resolved(vm, output);
+        let (instance_ty, instance_s) = self.pop_resolved(vm, output);
 
         if let ShaderType::Pod(pod_ty) = instance_ty {
             let builtins = &vm.code.builtins.pod;
@@ -343,7 +344,7 @@ impl ShaderFnCompiler {
 
     pub(crate) fn handle_field(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
         let (field_ty, field_s) = self.stack.pop(&self.trap);
-        let (instance_ty, instance_s) = self.pop_resolved(vm);
+        let (instance_ty, instance_s) = self.pop_resolved(vm, output);
 
         if let ShaderType::Id(field_id) = field_ty {
             if let ShaderType::Pod(pod_ty) = instance_ty {
@@ -376,6 +377,85 @@ impl ShaderFnCompiler {
                 // The field name (like "size") will be used as the method name
                 self.stack.push(&self.trap, ShaderType::Texture(tex_type), instance_s);
                 self.stack.push(&self.trap, ShaderType::Id(field_id), field_s);
+                return;
+            } else if let ShaderType::ScopeObject(obj) = instance_ty {
+                // Field access on a scope object (e.g., test_obj.p2 or test_obj.objfn)
+                // Look up the field value
+                let value = vm.heap.value(obj, field_id.into(), &self.trap);
+                
+                if !value.is_nil() && self.trap.err.get().is_none() {
+                    // Check if this is a shader_io type - not supported for scope objects
+                    if let Some(value_obj) = value.as_object() {
+                        if vm.heap.as_shader_io(value_obj).is_some() {
+                            self.trap.err_opcode_not_supported_in_shader();
+                            self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                            self.stack.free_string(field_s);
+                            self.stack.free_string(instance_s);
+                            return;
+                        }
+                        
+                        // Check if it's a function - if so, push it for calling
+                        if vm.heap.as_fn(value_obj).is_some() {
+                            // Push the ScopeObject as the receiver and the function for calling
+                            // Similar to how IoSelf handles method calls
+                            self.stack.push(&self.trap, ShaderType::ScopeObject(obj), instance_s);
+                            self.stack.push(&self.trap, ShaderType::Id(field_id), field_s);
+                            return;
+                        }
+                    }
+                    
+                    // Get the pod type from the value - it's a regular property
+                    if let Some(pod_ty) = self.get_scope_value_pod_type(vm, value) {
+                        // Check if we already have this scope uniform
+                        let existing = output.scope_uniforms.iter().find(|su| 
+                            su.source_obj == obj && su.key == field_id
+                        );
+                        
+                        let shader_name = if let Some(existing) = existing {
+                            existing.shader_name
+                        } else {
+                            // Generate unique name if there's a collision (use obj as source)
+                            let shader_name = self.generate_scope_uniform_name(output, field_id, obj);
+                            output.scope_uniforms.push(ScopeUniformSource {
+                                source_obj: obj,
+                                key: field_id,
+                                shader_name,
+                                ty: pod_ty,
+                                offset: 0, // Will be computed later by compute_scope_uniform_layout
+                            });
+                            // Also add to IO list
+                            if !output.io.iter().any(|io| io.name == shader_name && matches!(io.kind, ShaderIoKind::ScopeUniform)) {
+                                vm.heap.pod_type_name_if_not_set(pod_ty, shader_name);
+                                output.io.push(ShaderIo {
+                                    kind: ShaderIoKind::ScopeUniform,
+                                    name: shader_name,
+                                    ty: pod_ty,
+                                    buffer_index: None,
+                                });
+                            }
+                            shader_name
+                        };
+                        
+                        let mut s = self.stack.new_string();
+                        let (_, prefix) = output.backend.get_shader_io_kind_and_prefix(output.mode, SHADER_IO_SCOPE_UNIFORM);
+                        match prefix {
+                            ShaderIoPrefix::Prefix(prefix) => write!(s, "{}{}", prefix, shader_name).ok(),
+                            ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+                            ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
+                        };
+                        self.stack.push(&self.trap, ShaderType::Pod(pod_ty), s);
+                        self.stack.free_string(field_s);
+                        self.stack.free_string(instance_s);
+                        return;
+                    }
+                }
+                
+                // Clear any error from value lookup failure
+                self.trap.err.take();
+                self.trap.err_not_found();
+                self.stack.push(&self.trap, ShaderType::Pod(vm.code.builtins.pod.pod_void), String::new());
+                self.stack.free_string(field_s);
+                self.stack.free_string(instance_s);
                 return;
             } else if let ShaderType::IoSelf(obj) = instance_ty {
                 // Look up field value, preferring the highest shader IO marker in the prototype chain
@@ -509,7 +589,7 @@ impl ShaderFnCompiler {
             self.trap.err_have_to_initialise_variable();
             self.stack.pop(&self.trap);
         } else {
-            let (ty_value, value) = self.pop_resolved(vm);
+            let (ty_value, value) = self.pop_resolved(vm, output);
             let (ty_id, _id) = self.stack.pop(&self.trap);
             if let ShaderType::Id(id) = ty_id {
                 // lets define our let type
@@ -550,7 +630,7 @@ impl ShaderFnCompiler {
             self.trap.err_have_to_initialise_variable();
             self.stack.pop(&self.trap);
         } else {
-            let (ty_value, value) = self.pop_resolved(vm);
+            let (ty_value, value) = self.pop_resolved(vm, output);
             let (ty_id, _id) = self.stack.pop(&self.trap);
             if let ShaderType::Id(id) = ty_id {
                 // lets define our let type
