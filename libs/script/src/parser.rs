@@ -74,6 +74,7 @@ enum State{
     EndBare,
     EndBareSquare,
     EndProto,
+    EndProtoInherit,
     EndRound,
     
     CallMaybeDo{is_method:bool, index:u32},
@@ -144,7 +145,7 @@ impl State{
             id!(&&)  => 16,
             id!(||) | id!(|?)  => 17,
             id!(..) =>  18,
-            id!(:) | id!(=) | id!(>:) | id!(<:) | id!(^:) | id!(+=)  | id!(-=) | id!(*=) | id!(/=) | id!(%=) => 19,
+            id!(:) | id!(=) | id!(>:) | id!(<:) | id!(^:) | id!(+:) | id!(+=)  | id!(-=) | id!(*=) | id!(/=) | id!(%=) => 19,
             id!(&=) | id!(|=)  | id!(^=) | id!(<<=) | id!(>>=) | id!(?=) => 20,
             _=>0
         }
@@ -152,7 +153,7 @@ impl State{
     
     fn is_assign_operator(op:LiveId)->bool{
         match op{
-            id!(=) | id!(:) | id!(+=) | id!(<:) | id!(+=) |
+            id!(=) | id!(:) | id!(+=) | id!(<:) | id!(+:) | id!(+=) |
             id!(-=) | id!(*=) | id!(/=) |
             id!(%=) | id!(&=) | id!(|=) | 
             id!(^=) | id!(<<=) | id!(>>=) | 
@@ -891,6 +892,19 @@ impl ScriptParser{
                     return 0
                 }
             }
+            // emit prototype instruction + proto inherit write (for +: operator)
+            State::EndProtoInherit=>{
+                self.push_code(Opcode::END_PROTO.into(), self.index);
+                self.push_code(Opcode::PROTO_INHERIT_WRITE.into(), self.index);
+                self.state.push(State::EndExpr);
+                if tok.is_close_curly() {
+                    return 1
+                }
+                else {
+                    error!(self, tokenizer, "Expected }} not found");
+                    return 0
+                }
+            }
             State::EmitCallFromDo{is_method, index}=>{
                 self.set_pop_to_me();
                 if is_method{
@@ -1177,20 +1191,17 @@ impl ScriptParser{
                     return 1
                 }
                 if tok.is_open_curly(){
-                    /*
-                    if let Some(State::EmitUnary{what_op:id!(+),..}) = self.state.last(){
+                    // Check if there's a pending +: operator for proto-inherit
+                    if let Some(State::EmitOp{what_op:id!(+:),..}) = self.state.last(){
                         self.state.pop();
-                        if let Some(State::EmitOp{what_op:id!(:),..}) = self.state.last(){
-                            // ok so we need to emit BEGIN_PROTO_ME
-                            self.push_code(Opcode::BEGIN_PROTO_ME.into(), self.index);
-                            self.state.push(State::EndBare);
-                            self.state.push(State::BeginStmt(false));
-                            return 1
-                        }
-                        else{
-                            error!(self, tokenizer, "Found +{{ protoinherit. Left hand side must be field:")
-                        }
-                    }*/
+                        // Proto-inherit operator: field +: { ... }
+                        // Emit PROTO_INHERIT_READ to read field and push proto value
+                        self.push_code(Opcode::PROTO_INHERIT_READ.into(), self.index);
+                        self.push_code(Opcode::BEGIN_PROTO.into(), self.index);
+                        self.state.push(State::EndProtoInherit);
+                        self.state.push(State::BeginStmt{last_was_sep:false});
+                        return 1
+                    }
                     self.push_code(Opcode::BEGIN_BARE.into(), self.index);
                     self.state.push(State::EndBare);
                     self.state.push(State::BeginStmt{last_was_sep:false});
@@ -1497,6 +1508,15 @@ impl ScriptParser{
                         }
                         else if let State::EmitOp{what_op:id!(.?),index} = last{
                             self.push_code(State::operator_to_opcode(id!(.?)), index);
+                        }
+                        else if let State::EmitOp{what_op:id!(+:),..} = last{
+                            // Proto-inherit operator: field +: Proto { ... }
+                            // Emit PROTO_INHERIT_READ to read field and push proto value
+                            self.push_code(Opcode::PROTO_INHERIT_READ.into(), self.index);
+                            self.push_code(Opcode::BEGIN_PROTO.into(), self.index);
+                            self.state.push(State::EndProtoInherit);
+                            self.state.push(State::BeginStmt{last_was_sep:false});
+                            return 1
                         }
                         else{
                             self.state.push(last);
