@@ -793,6 +793,29 @@ impl ScriptHeap{
         }
         NIL
     }
+    
+    /// Merges the vec and map parts of a source object into a target object.
+    /// Used by the splat operator (..) to spread one object into another.
+    /// Map entries from source are only added if they don't already exist in target.
+    pub fn merge_object(&mut self, target:ScriptObject, source:ScriptObject, trap:&ScriptTrap)->ScriptValue{
+        if target == source{
+            return trap.err_invalid_args()
+        }
+        let (target, source) = if target.index > source.index{
+            let (o1, o2) = self.objects.split_at_mut(target.index as _);
+            (&mut o2[0], &mut o1[source.index as usize])
+        }else{
+            let (o1, o2) = self.objects.split_at_mut(source.index as _);
+            (&mut o1[target.index as usize], &mut o2[0])
+        };
+        if target.tag.is_vec_frozen(){
+            return trap.err_vec_frozen()
+        }
+        target.push_vec_from_other(source);
+        // Only add map entries that don't already exist in target
+        target.merge_map_from_other_no_overwrite(source);
+        NIL
+    }
             
     pub fn vec_push(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue, trap:&ScriptTrap)->ScriptValue{
         let object = &mut self.objects[ptr.index as usize];

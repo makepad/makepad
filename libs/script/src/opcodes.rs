@@ -172,6 +172,7 @@ impl ScriptThread {
             Opcode::ME_FIELD => self.handle_me_field(heap, code),
             Opcode::PROTO_FIELD => self.handle_proto_field(heap),
             Opcode::POP_TO_ME => self.handle_pop_to_me(heap, code),
+            Opcode::ME_SPLAT => self.handle_me_splat(heap),
 
 // Array index            
             Opcode::ARRAY_INDEX => self.handle_array_index(heap, code),

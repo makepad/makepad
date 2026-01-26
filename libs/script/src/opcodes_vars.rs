@@ -368,6 +368,67 @@ impl ScriptThread {
         self.pop_to_me(heap, code);
         self.trap.goto_next();
     }
+    
+    /// Handle the splat operator (..) which spreads a source value into the current me context.
+    /// For objects: merges both vec and map from source into target
+    /// For arrays: merges all elements from source into target
+    /// For call args: pushes all elements from source as unnamed args
+    pub(crate) fn handle_me_splat(&mut self, heap: &mut ScriptHeap) {
+        let source = self.pop_stack_resolved(heap);
+        if !self.call_has_me(){
+            self.trap.goto_next();
+            return;
+        }
+        
+        match self.mes.last().unwrap(){
+            ScriptMe::Object(obj) => {
+                // Splat into an object: merge vec and map
+                if let Some(source_obj) = source.as_object(){
+                    heap.merge_object(*obj, source_obj, &self.trap);
+                }
+                else if let Some(source_arr) = source.as_array(){
+                    // Splat array into object: push array elements to vec
+                    let len = heap.array_len(source_arr);
+                    for i in 0..len {
+                        let v = heap.array_index(source_arr, i, &self.trap);
+                        heap.vec_push(*obj, NIL, v, &self.trap);
+                    }
+                }
+            }
+            ScriptMe::Array(arr) => {
+                // Splat into an array: merge all elements
+                if let Some(source_arr) = source.as_array(){
+                    heap.merge_array(*arr, source_arr, &self.trap);
+                }
+                else if let Some(source_obj) = source.as_object(){
+                    // Splat object vec into array (array_push_vec takes array, object)
+                    heap.array_push_vec(*arr, source_obj, &self.trap);
+                }
+            }
+            ScriptMe::Call{args, ..} => {
+                // Splat into call args: push each element as unnamed arg
+                if let Some(source_obj) = source.as_object(){
+                    let len = heap.vec_len(source_obj);
+                    for i in 0..len {
+                        let kv = heap.vec_key_value(source_obj, i, &self.trap);
+                        heap.unnamed_fn_arg(*args, kv.value, &self.trap);
+                    }
+                }
+                else if let Some(source_arr) = source.as_array(){
+                    let len = heap.array_len(source_arr);
+                    for i in 0..len {
+                        let v = heap.array_index(source_arr, i, &self.trap);
+                        heap.unnamed_fn_arg(*args, v, &self.trap);
+                    }
+                }
+            }
+            ScriptMe::Pod{..} => {
+                // Splat not supported for pods
+                self.trap.err_not_impl();
+            }
+        }
+        self.trap.goto_next();
+    }
 
     // Array index handler
     
