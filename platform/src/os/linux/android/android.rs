@@ -118,8 +118,29 @@ impl Cx {
                 },
                 Ok(message) => {
                     self.handle_message(message);
-                    // Process queued platform ops immediately (critical for IME shadow buffer sync)
-                    // Without this, Gboard queries stale data before the next frame
+                    // ================================================================
+                    // IME ECHO PREVENTION - IMMEDIATE PLATFORM OPS PROCESSING
+                    // ================================================================
+                    // Process queued platform ops immediately after handling messages.
+                    // This is critical for IME shadow buffer synchronization.
+                    //
+                    // Without immediate processing, the sequence would be:
+                    //   1. Java InputConnection sends text to Rust (ImeTextStateChanged)
+                    //   2. Rust widget updates state and queues SyncImeState
+                    //   3. ... wait until next frame ...
+                    //   4. Gboard queries Java's stale buffer (before SyncImeState runs)
+                    //   5. Autocorrect/prediction breaks due to stale data
+                    //
+                    // With immediate processing:
+                    //   1. Java InputConnection sends text to Rust
+                    //   2. Rust widget updates and queues SyncImeState
+                    //   3. handle_platform_ops() runs SyncImeState immediately
+                    //   4. Java buffer updated before Gboard's next query
+                    //
+                    // There's three layers of echo preventions, see also:
+                    //   - MakepadInputConnection.java
+                    //   - text_input.rs: update_ime_context() and ime_update_frame
+                    // ================================================================
                     self.handle_platform_ops();
                 },
                 Err(e) => {
@@ -1033,6 +1054,15 @@ impl Cx {
                     unsafe {android_jni::to_java_show_keyboard(false);}
                 },
                 CxOsOp::SyncImeState { text, selection, composition: _ } => {
+                    // ECHO PREVENTION: Sync Rust's authoritative text state to Java.
+                    // This is called from text_input.rs update_ime_context() when:
+                    //   1. Widget text/selection changed programmatically (not from IME)
+                    //   2. State comparison shows actual change from last sent state
+                    //
+                    // The Java side (updateImeTextState) will check wasRecentlySentToRust()
+                    // to avoid applying stale echoes. Only genuine programmatic changes
+                    // (like clearing text via a button) will actually update Java's buffer.
+
                     // Convert CharOffset to UTF-16 indices for Java
                     let sel_start_utf16 = selection.start.to_utf16_index(&text) as i32;
                     let sel_end_utf16 = selection.end.to_utf16_index(&text) as i32;

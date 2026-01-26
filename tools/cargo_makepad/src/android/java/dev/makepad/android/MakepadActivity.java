@@ -43,7 +43,6 @@ import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
 import android.view.inputmethod.BaseInputConnection;
-import android.view.inputmethod.CursorAnchorInfo;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.ExtractedText;
 import android.view.inputmethod.ExtractedTextRequest;
@@ -93,404 +92,17 @@ class MakepadSurface
     private boolean mIsMultiline = true;
     private boolean mIsSecure = false;
 
-    // Inner class for IME support - uses Editable and delegates to BaseInputConnection
-    private class MakepadInputConnection extends BaseInputConnection {
-        // Batch edit nesting count
-        private int mBatchEditNestCount = 0;
-        // For getExtractedText monitoring
-        private ExtractedTextRequest mExtractedTextRequest = null;
-        private int mExtractedTextToken = 0;
-        // For cursor updates
-        private int mCursorUpdateMode = 0;
-        // Track last text sent to Rust to detect stale echoes
-        private String mLastSentText = null;
-
-        public MakepadInputConnection(View view, boolean fullEditor) {
-            super(view, fullEditor);
-        }
-
-        // Check if text was recently sent to Rust
-        private boolean wasRecentlySentToRust(String text) {
-            return text.equals(mLastSentText);
-        }
-
-        // Record text as sent to Rust
-        private void recordSentToRust(String text) {
-            mLastSentText = text;
-        }
-
-        // Clear sent buffer (e.g., after applying genuine Rust update)
-        private void clearRecentSentBuffer() {
-            mLastSentText = null;
-        }
-
-        // Filter input based on mInputMode to prevent invalid characters (e.g., emojis in numeric fields)
-        private CharSequence filterInput(CharSequence text) {
-            if (text == null || text.length() == 0) return text;
-
-            switch (mInputMode) {
-                case 1: // Ascii - only ASCII characters (code point < 128)
-                    StringBuilder ascii = new StringBuilder();
-                    for (int i = 0; i < text.length(); i++) {
-                        char c = text.charAt(i);
-                        if (c < 128) ascii.append(c);
-                    }
-                    return ascii;
-                case 3: // Numeric - digits only
-                    StringBuilder numeric = new StringBuilder();
-                    for (int i = 0; i < text.length(); i++) {
-                        char c = text.charAt(i);
-                        if (Character.isDigit(c)) numeric.append(c);
-                    }
-                    return numeric;
-                case 6: // Decimal - digits, decimal point, and sign
-                    StringBuilder decimal = new StringBuilder();
-                    boolean hasDot = mEditable.toString().contains(".");
-                    for (int i = 0; i < text.length(); i++) {
-                        char c = text.charAt(i);
-                        if (Character.isDigit(c) || c == '-' || c == '+') {
-                            decimal.append(c);
-                        } else if (c == '.' && !hasDot) {
-                            decimal.append(c);
-                            hasDot = true;
-                        }
-                    }
-                    return decimal;
-                case 4: // Tel - digits and phone characters
-                    StringBuilder tel = new StringBuilder();
-                    for (int i = 0; i < text.length(); i++) {
-                        char c = text.charAt(i);
-                        if (Character.isDigit(c) || c == '+' || c == '-' || c == ' '
-                            || c == '(' || c == ')' || c == '*' || c == '#') {
-                            tel.append(c);
-                        }
-                    }
-                    return tel;
-                default: // Text (0), Url (2), Email (5), Search (7) - allow all
-                    return text;
-            }
-        }
-
-        // Return our shared Editable - this is the key change!
-        // BaseInputConnection methods operate on this Editable automatically
-        @Override
-        public Editable getEditable() {
-            return mEditable;
-        }
-
-        @Override
-        public boolean beginBatchEdit() {
-            mBatchEditNestCount++;
-            return true;
-        }
-
-        @Override
-        public boolean endBatchEdit() {
-            if (mBatchEditNestCount > 0) {
-                mBatchEditNestCount--;
-            }
-            // Notify Rust when batch edit completes
-            if (mBatchEditNestCount == 0) {
-                notifyRustOfTextState();
-            }
-            return mBatchEditNestCount > 0;
-        }
-
-        @Override
-        public ExtractedText getExtractedText(ExtractedTextRequest request, int flags) {
-            if (request == null) return null;
-
-            // Remember request if monitoring
-            if ((flags & InputConnection.GET_EXTRACTED_TEXT_MONITOR) != 0) {
-                mExtractedTextRequest = request;
-                mExtractedTextToken = request.token;
-            }
-
-            ExtractedText et = new ExtractedText();
-            et.text = mEditable.toString();
-            et.startOffset = 0;
-            et.selectionStart = Selection.getSelectionStart(mEditable);
-            et.selectionEnd = Selection.getSelectionEnd(mEditable);
-
-            return et;
-        }
-
-        @Override
-        public boolean setComposingRegion(int start, int end) {
-            // Let BaseInputConnection handle span management on mEditable
-            boolean result = super.setComposingRegion(start, end);
-            // Don't notify Rust here - wait for actual text change
-            return result;
-        }
-
-        @Override
-        public boolean requestCursorUpdates(int cursorUpdateMode) {
-            mCursorUpdateMode = cursorUpdateMode;
-
-            if ((cursorUpdateMode & InputConnection.CURSOR_UPDATE_IMMEDIATE) != 0) {
-                sendCursorUpdate();
-            }
-            return true;
-        }
-
-        private void sendCursorUpdate() {
-            if (mCursorUpdateMode == 0) return;
-
-            InputMethodManager imm = (InputMethodManager)
-                getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
-            if (imm == null) return;
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                CursorAnchorInfo.Builder builder = new CursorAnchorInfo.Builder();
-                int cursorStart = Selection.getSelectionStart(mEditable);
-                int cursorEnd = Selection.getSelectionEnd(mEditable);
-                builder.setSelectionRange(cursorStart, cursorEnd);
-                builder.setMatrix(new android.graphics.Matrix());
-                imm.updateCursorAnchorInfo(MakepadSurface.this, builder.build());
-            }
-        }
-
-        // Notify IME of current cursor and composition state
-        private void notifyImeOfSelectionUpdate() {
-            InputMethodManager imm = (InputMethodManager)
-                getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
-            if (imm == null) return;
-
-            int selStart = Selection.getSelectionStart(mEditable);
-            int selEnd = Selection.getSelectionEnd(mEditable);
-            int compStart = BaseInputConnection.getComposingSpanStart(mEditable);
-            int compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
-            imm.updateSelection(MakepadSurface.this, selStart, selEnd, compStart, compEnd);
-        }
-
-        // Notify Rust of current text state
-        private void notifyRustOfTextState() {
-            String fullText = mEditable.toString();
-            int selStart = Selection.getSelectionStart(mEditable);
-            int selEnd = Selection.getSelectionEnd(mEditable);
-            int compStart = BaseInputConnection.getComposingSpanStart(mEditable);
-            int compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
-
-            // Track what we're sending so we can detect stale echoes from Rust
-            recordSentToRust(fullText);
-
-            MakepadNative.onImeTextStateChanged(fullText, selStart, selEnd, compStart, compEnd);
-        }
-
-        @Override
-        public CharSequence getTextBeforeCursor(int n, int flags) {
-            // Delegate to super which uses getEditable()
-            return super.getTextBeforeCursor(n, flags);
-        }
-
-        @Override
-        public CharSequence getTextAfterCursor(int n, int flags) {
-            // Delegate to super which uses getEditable()
-            return super.getTextAfterCursor(n, flags);
-        }
-
-        @Override
-        public CharSequence getSelectedText(int flags) {
-            // Delegate to super which uses getEditable()
-            return super.getSelectedText(flags);
-        }
-
-        @Override
-        public boolean setComposingText(CharSequence text, int newCursorPosition) {
-            // Let BaseInputConnection handle the Editable manipulation
-            boolean result = super.setComposingText(text, newCursorPosition);
-
-            // Notify IME of state change
-            notifyImeOfSelectionUpdate();
-
-            // Notify Rust (unless in batch edit)
-            if (mBatchEditNestCount == 0) {
-                notifyRustOfTextState();
-            }
-
-            return result;
-        }
-
-        @Override
-        public boolean commitText(CharSequence text, int newCursorPosition) {
-            // Filter input based on input mode (e.g., prevent emojis in numeric fields)
-            CharSequence filtered = filterInput(text);
-            if (filtered.length() == 0 && text.length() > 0) {
-                // All characters were filtered out - consume but don't insert
-                return true;
-            }
-
-            // Let BaseInputConnection handle the Editable manipulation
-            boolean result = super.commitText(filtered, newCursorPosition);
-
-            // Notify IME of state change
-            notifyImeOfSelectionUpdate();
-
-            // Notify Rust (unless in batch edit)
-            if (mBatchEditNestCount == 0) {
-                notifyRustOfTextState();
-            }
-
-            return result;
-        }
-
-        @Override
-        public boolean finishComposingText() {
-            boolean hadComposition = BaseInputConnection.getComposingSpanStart(mEditable) >= 0;
-
-            // Let BaseInputConnection clear the composing spans
-            boolean result = super.finishComposingText();
-
-            // Notify IME
-            notifyImeOfSelectionUpdate();
-
-            // Notify Rust if there was a composition
-            if (hadComposition && mBatchEditNestCount == 0) {
-                notifyRustOfTextState();
-            }
-
-            return result;
-        }
-
-        @Override
-        public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-            // Let BaseInputConnection handle the Editable manipulation
-            boolean result = super.deleteSurroundingText(beforeLength, afterLength);
-
-            // Notify IME of state change
-            notifyImeOfSelectionUpdate();
-
-            // Notify Rust (unless in batch edit)
-            if (mBatchEditNestCount == 0) {
-                notifyRustOfTextState();
-            }
-
-            return result;
-        }
-
-        @Override
-        public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
-            // Use code point deletion which properly handles surrogate pairs (emoji, etc.)
-            // This is called by sendKeyEvent for backspace/delete to avoid corrupting strings
-            boolean result = super.deleteSurroundingTextInCodePoints(beforeLength, afterLength);
-
-            // Notify IME of state change
-            notifyImeOfSelectionUpdate();
-
-            // Notify Rust (unless in batch edit)
-            if (mBatchEditNestCount == 0) {
-                notifyRustOfTextState();
-            }
-
-            return result;
-        }
-
-        @Override
-        public boolean setSelection(int start, int end) {
-            // Short-circuit if already at this selection (prevents Samsung keyboard loop)
-            // Samsung may respond to imm.updateSelection() by calling setSelection() again
-            int currentStart = Selection.getSelectionStart(mEditable);
-            int currentEnd = Selection.getSelectionEnd(mEditable);
-            if (currentStart == start && currentEnd == end) {
-                return true;  // Already there, no notifications needed
-            }
-
-            // Let BaseInputConnection handle selection on Editable
-            boolean result = super.setSelection(start, end);
-
-            // Notify IME
-            notifyImeOfSelectionUpdate();
-
-            // Notify Rust
-            if (mBatchEditNestCount == 0) {
-                notifyRustOfTextState();
-            }
-
-            return result;
-        }
-
-        @Override
-        public void closeConnection() {
-            super.closeConnection();
-        }
-
-        @Override
-        public boolean sendKeyEvent(KeyEvent event) {
-            // Intercept DELETE key events and translate to deleteSurroundingTextInCodePoints()
-            // This is needed for Samsung keyboard delete which uses sendKeyEvent() instead of deleteSurroundingText()
-            // sendKeyEvent() dispatches to View asynchronously, which causes sync issues with Samsung
-            // We use deleteSurroundingTextInCodePoints (API 24+) instead of deleteSurroundingText
-            // because emoji characters are surrogate pairs (2 UTF-16 code units) and we need to
-            // delete the full code point, not just one code unit which would corrupt the string.
-            if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                int keyCode = event.getKeyCode();
-
-                if (keyCode == KeyEvent.KEYCODE_DEL) {
-                    // Check if there's a selection to delete
-                    int selStart = Selection.getSelectionStart(mEditable);
-                    int selEnd = Selection.getSelectionEnd(mEditable);
-                    if (selStart != selEnd) {
-                        // Selection exists - delete it by replacing with empty text
-                        return commitText("", 1);
-                    }
-                    // No selection - delete one code point before cursor
-                    // deleteSurroundingTextInCodePoints handles surrogate pairs properly
-                    return deleteSurroundingTextInCodePoints(1, 0);
-                }
-
-                if (keyCode == KeyEvent.KEYCODE_FORWARD_DEL) {
-                    // Check if there's a selection to delete
-                    int selStart = Selection.getSelectionStart(mEditable);
-                    int selEnd = Selection.getSelectionEnd(mEditable);
-                    if (selStart != selEnd) {
-                        // Selection exists - delete it by replacing with empty text
-                        return commitText("", 1);
-                    }
-                    // No selection - delete one code point after cursor
-                    return deleteSurroundingTextInCodePoints(0, 1);
-                }
-
-                if (keyCode == KeyEvent.KEYCODE_ENTER) {
-                    // Handle Enter key from IME
-                    // Some IMEs send sendKeyEvent(ENTER) instead of commitText("\n")
-                    if (mIsMultiline) {
-                        // For multiline: insert newline via commitText
-                        // This ensures proper notification to Rust via ImeTextState
-                        return commitText("\n", 1);
-                    }
-                    // For single-line: block the Enter key event
-                    // The action button (Done/Go/etc) is handled via performEditorAction
-                    return true;
-                }
-            }
-
-            // For other keys (e.g., arrows), use default behavior
-            return super.sendKeyEvent(event);
-        }
-
-        @Override
-        public boolean performEditorAction(int actionCode) {
-            // Handle editor actions (Done, Go, Search, Send, Next)
-            // These are triggered when user presses the action button on the soft keyboard
-
-            // EditorInfo action codes:
-            // IME_ACTION_UNSPECIFIED = 0, IME_ACTION_NONE = 1, IME_ACTION_GO = 2,
-            // IME_ACTION_SEARCH = 3, IME_ACTION_SEND = 4, IME_ACTION_NEXT = 5,
-            // IME_ACTION_DONE = 6, IME_ACTION_PREVIOUS = 7
-
-            if (mIsMultiline && actionCode <= EditorInfo.IME_ACTION_NONE) {
-                // For multiline with unspecified/none action, insert a newline.
-                // Some IMEs (e.g. SwiftKey) call performEditorAction(IME_ACTION_UNSPECIFIED)
-                // instead of sendKeyEvent(KEYCODE_ENTER) or commitText("\n").
-                return commitText("\n", 1);
-            }
-
-            // Notify Rust about the editor action
-            // For single-line inputs, this should trigger TextInputAction::Returned
-            MakepadNative.onImeEditorAction(actionCode);
-
-            return true;
-        }
+    // Package-private getters for MakepadInputConnection to access shared state
+    Editable getEditable() {
+        return mEditable;
+    }
+
+    int getInputMode() {
+        return mInputMode;
+    }
+
+    boolean isMultiline() {
+        return mIsMultiline;
     }
 
     // The X,Y coordinates and pointer ID of the most recent ACTION_DOWN touch.
@@ -833,12 +445,15 @@ class MakepadSurface
         String currentText = mEditable.toString();
         boolean textChanged = !currentText.equals(fullText);
 
-        // Check for stale echoes - if Rust sends back text we recently sent to it,
-        // it's just echoing old state and should be ignored to prevent rollback
-        // TODO: there might be a better way to avoid this
+        // ECHO PREVENTION: Check if this is Rust echoing back text we recently sent.
+        // This happens because:
+        //   1. Java sends text to Rust via onImeTextStateChanged
+        //   2. Rust widget processes it and updates internal state
+        //   3. Rust may sync state back via SyncImeState -> updateImeTextState
+        //   4. Without this check, we'd overwrite fresh IME state with stale echo
         if (textChanged && mInputConnection != null) {
             if (mInputConnection.wasRecentlySentToRust(fullText)) {
-                return;
+                return;  // Stale echo - ignore to prevent rollback
             }
         }
 
@@ -853,9 +468,9 @@ class MakepadSurface
             mEditable.replace(0, mEditable.length(), fullText);
             Selection.setSelection(mEditable, selStart, selEnd);
 
-            // Clear stale buffer since we're applying Rust's authoritative state
-            // Do NOT call recordSentToRust here, that's only for Java -> Rust sends
-            // (in onImeTextStateChanged). Recording here would corrupt echo detection.
+            // ECHO PREVENTION: Clear the sent buffer after applying Rust's authoritative
+            // state update. This ensures the next text we send to Rust won't be incorrectly
+            // detected as an echo. Only clear here, NOT in recordSentToRust().
             if (mInputConnection != null) {
                 mInputConnection.clearRecentSentBuffer();
             }

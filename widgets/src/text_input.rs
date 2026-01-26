@@ -645,11 +645,12 @@ pub struct TextInput {
     #[rust] composition_length: usize,
     /// Frame ID when IME input was last received; prevents race condition in update_ime_context
     /// Uses frame counter instead of bool to avoid timing issues between event/draw
+    /// If this matches cx.redraw_id(), we skip syncing to avoid echoing state back.
     #[rust] ime_update_frame: u64,
-    /// Track last sent IME state to prevent sync loops (Flutter-style state comparison)
+    /// Track last sent IME state to prevent sync loops
     #[rust] last_sent_ime_text: String,
-    #[rust] last_sent_ime_sel_start: usize,
-    #[rust] last_sent_ime_sel_end: usize,
+    #[rust] last_sent_ime_sel_start: usize,  // UTF-16 index for Android comparison
+    #[rust] last_sent_ime_sel_end: usize,    // UTF-16 index for Android comparison
 }
 
  impl LiveHook for TextInput{
@@ -753,8 +754,10 @@ impl TextInput {
         &self.text[self.selection.start().index..self.selection.end().index]
     }
 
-    /// Updates the IME text context for platform IME
-    /// Uses state comparison (Flutter-style) to prevent sync loops
+    /// Updates the IME text context for platform IME.
+    ///
+    /// ECHO PREVENTION:
+    /// Only sends state to platform if it differs from what we last sent.
     fn update_ime_context(&mut self, cx: &mut Cx) {
         // Don't sync back to platform during active composition since the platform IME is the source of truth during it.
         if self.composition_length > 0 {
@@ -1404,7 +1407,9 @@ impl Widget for TextInput {
         self.scroll_to_cursor(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
-            // Skip if we received IME input this frame (prevents echoing stale state back)
+            // ECHO PREVENTION: Skip if we received IME input this frame.
+            // The frame counter (ime_update_frame) is set when we process TextInput events.
+            // If it matches current redraw_id, the IME just sent us state - don't echo it back.
             if self.ime_update_frame != cx.redraw_id() {
                 self.update_ime_context(cx);
             }

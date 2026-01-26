@@ -254,6 +254,7 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) 
             (r_class_path.to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadNative.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("MakepadInputConnection.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadNetwork.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadWebSocket.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadWebSocketReader.java").to_str().unwrap()),
@@ -309,7 +310,7 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths, urls:&AndroidSDKUrls) -> 
             (compiled_java_classes_dir.join("MakepadActivity$5$1.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$5$2.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadActivity$6.class").to_str().unwrap()),
-            (compiled_java_classes_dir.join("MakepadSurface$MakepadInputConnection.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadInputConnection.class").to_str().unwrap()),
             (build_paths.java_class.to_str().unwrap()),
             (build_paths.xr_class.to_str().unwrap()),
         ]
