@@ -1935,13 +1935,14 @@ impl Widget for TextInput {
                             replace_with: filtered_text
                         }
                     );
+                    // Do not sync back to platform, since the platform IME already knows the composition text.
+                    // Otherwise syncing back might clear the iOS buffer and cause it to lose the pending trigger character 
+                    // (space, period, etc.) that iOS was about to insert after autocorrect.
+                    self.ime_update_frame = cx.redraw_id();
 
                     self.animator_play(cx, ids!(empty.off));
                     self.draw_bg.redraw(cx);
                     cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
-                    if self.ime_update_frame != cx.redraw_id() {
-                        self.update_ime_context(cx);
-                    }
                     cx.hide_clipboard_actions();
                     return;
                 }
