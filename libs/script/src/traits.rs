@@ -2,7 +2,13 @@
 use crate::vm::*;
 use crate::value::*;
 use crate::heap::*;
+use crate::apply::*;
 use makepad_live_id::*;
+
+
+// ============================================================================
+// Script traits
+// ============================================================================
 
 pub trait ScriptDeriveMarker{}
 
@@ -237,7 +243,6 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_shader(vm:&mut ScriptVm)->ScriptValue{
         let val = Self::script_proto(vm);
-        
         vm.heap.freeze_shader(val.into());
         val
     }
@@ -259,9 +264,4 @@ pub trait ScriptApply{
 
 pub trait ScriptReset{
     fn script_reset(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue);
-}
-
-
-#[derive(Default)]
-pub struct Apply{
 }

@@ -145,73 +145,47 @@ impl ViewOptimize {
 #[derive(Live, LiveRegisterWidget, WidgetRef, WidgetSet)]
 pub struct View {
     // draw info per UI element
-    #[live]
-    pub draw_bg: DrawColor,
+    #[live] pub draw_bg: DrawColor,
 
-    #[live(false)]
-    pub show_bg: bool,
+    #[live(false)] pub show_bg: bool,
 
-    #[layout]
-    pub layout: Layout,
+    #[layout] pub layout: Layout,
 
-    #[walk]
-    pub walk: Walk,
+    #[walk] pub walk: Walk,
 
     //#[live] use_cache: bool,
-    #[live]
-    dpi_factor: Option<f64>,
+    #[live] dpi_factor: Option<f64>,
 
-    #[live]
-    optimize: ViewOptimize,
-    #[live]
-    debug: ViewDebug,
-    #[live]
-    event_order: EventOrder,
+    #[live] optimize: ViewOptimize,
+    #[live] debug: ViewDebug,
+    #[live] event_order: EventOrder,
 
-    #[live(true)]
-    pub visible: bool,
+    #[live(true)] pub visible: bool,
 
-    #[live(true)]
-    grab_key_focus: bool,
-    #[live(false)]
-    block_signal_event: bool,
-    #[live]
-    cursor: Option<MouseCursor>,
-    #[live(false)]
-    capture_overload: bool,
-    #[live]
-    scroll_bars: Option<LivePtr>,
-    #[live(false)]
-    design_mode: bool,
+    #[live(true)] grab_key_focus: bool,
+    #[live(false)] block_signal_event: bool,
+    #[live] cursor: Option<MouseCursor>,
+    #[live(false)] capture_overload: bool,
+    #[live] scroll_bars: Option<LivePtr>,
+    #[live(false)] design_mode: bool,
 
-    #[rust]
-    find_cache: RefCell<SmallVec<[(u64, WidgetSet);3]>>,
+    #[rust] find_cache: RefCell<SmallVec<[(u64, WidgetSet);3]>>,
 
-    #[rust]
-    scroll_bars_obj: Option<Box<ScrollBars>>,
-    #[rust]
-    view_size: Option<Vec2d>,
+    #[rust] scroll_bars_obj: Option<Box<ScrollBars>>,
+    #[rust] view_size: Option<Vec2d>,
     
-    #[rust]
-    area: Area,
-    #[rust]
-    draw_list: Option<DrawList2d>,
+    #[rust] area: Area,
+    #[rust] draw_list: Option<DrawList2d>,
 
-    #[rust]
-    texture_cache: Option<ViewTextureCache>,
-    #[rust]
-    defer_walks: SmallVec<[(LiveId, DeferredWalk);1]>,
-    #[rust]
-    draw_state: DrawStateWrap<DrawState>,
-    #[rust]
-    children: SmallVec<[(LiveId, WidgetRef);2]>,
-    #[rust]
-    live_update_order: SmallVec<[LiveId;1]>,
+    #[rust] texture_cache: Option<ViewTextureCache>,
+    #[rust] defer_walks: SmallVec<[(LiveId, DeferredWalk);1]>,
+    #[rust] draw_state: DrawStateWrap<DrawState>,
+    #[rust] children: SmallVec<[(LiveId, WidgetRef);2]>,
+    #[rust] live_update_order: SmallVec<[LiveId;1]>,
     //#[rust]
     //draw_order: Vec<LiveId>,
 
-    #[animator]
-    animator: Animator,
+    #[animator] animator: Animator,
 }
 
 struct ViewTextureCache {
