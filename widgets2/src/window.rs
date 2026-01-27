@@ -163,7 +163,7 @@ impl LiveHook for Window {
        
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
         if self.demo{
             self.demo_next_frame = cx.new_next_frame();
         }

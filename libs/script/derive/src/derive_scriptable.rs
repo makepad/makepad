@@ -70,17 +70,15 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                 
         tb.add("impl").stream(generic.clone());
         tb.add("ScriptHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-        tb.add("    fn on_deref_before_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue){");
-        tb.add("         <Self as ScriptHook>::on_before_apply(self, vm, apply, value);");
-        // Note: Don't recursively call on_deref_before_apply on deref field here - 
-        // the deref field's script_apply will call its own on_deref_before_apply
+        tb.add("    fn on_deref_before_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue){");
+        tb.add("         <Self as ScriptHook>::on_before_apply(self, vm, apply, scope, value);");
+        tb.add("         <Self as ScriptHook>::on_before_dispatch(self, vm, apply, scope, value);");
         tb.add("    }");
         
-        tb.add("    fn on_deref_after_apply(&mut self,vm: &mut ScriptVm, apply:&mut Apply, value:ScriptValue){");
+        tb.add("    fn on_deref_after_apply(&mut self,vm: &mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue){");
         
-        tb.add("        <Self as ScriptHook>::on_after_apply(self, vm, apply, value);");
-        // Note: Don't recursively call on_deref_after_apply on deref field here -
-        // the deref field's script_apply will call its own on_deref_after_apply
+        tb.add("        <Self as ScriptHook>::on_after_apply(self, vm, apply, scope, value);");
+        tb.add("        <Self as ScriptHook>::on_after_dispatch(self, vm, apply, scope, value);");
         tb.add("    }");
         tb.add("}");
                 
@@ -94,25 +92,25 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         tb.add("    fn script_type_id(&self)->ScriptTypeId{ ScriptTypeId::of::<Self>()}");
         
-        tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue) {");
-        tb.add("       if <Self as ScriptHook>::on_skip_apply(self, vm, apply, value) || value.is_nil(){return};");
+        tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue) {");
+        tb.add("       if <Self as ScriptHook>::on_custom_apply(self, vm, apply, scope, value) || value.is_nil(){return};");
         
-        tb.add("        <Self as ScriptHookDeref>::on_deref_before_apply(self, vm, apply, value);");
+        tb.add("        <Self as ScriptHookDeref>::on_deref_before_apply(self, vm, apply, scope, value);");
         
         
         for field in &fields {
             if field.attrs.iter().any( | a | a.name == "live" ){
                 tb.add("if let Some(v) = vm.heap.value_apply_if_dirty(value, id!(")
                     .ident(&field.name).add(").into()){");
-                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(",vm, apply, v);");
+                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(",vm, apply, scope, v);");
                 tb.add("}");
             }
             if field.attrs.iter().any( | a | a.name =="deref" || a.name == "splat" || a.name =="walk" || a.name=="layout"){
-                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(", vm, apply, value);");
+                tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(&mut self.").ident(&field.name).add(", vm, apply, scope, value);");
             }
         }
         tb.add("        if let Some(o) = value.as_object(){vm.heap.set_first_applied_and_clean(o);}");
-        tb.add("        <Self as ScriptHookDeref>::on_deref_after_apply(self, vm, apply, value);");
+        tb.add("        <Self as ScriptHookDeref>::on_deref_after_apply(self, vm, apply, scope, value);");
         tb.add("    }");
         
         
@@ -152,7 +150,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("    fn script_type_id_static()->ScriptTypeId{ ScriptTypeId::of::<Self>()}");
         
         tb.add("    fn script_new(vm: &mut ScriptVm) -> Self {");
-        tb.add("        let mut ret = Self {");
+        tb.add("        Self {");
         for field in &fields {
             tb.ident(&field.name).add(":");
             
@@ -174,9 +172,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             }
             tb.add(",");
         }
-        tb.add("        };");
-        tb.add("        <Self as ScriptHook>::on_new(&mut ret, vm);");
-        tb.add("        ret");
+        tb.add("        }");
         tb.add("    }");
         
          
@@ -317,9 +313,9 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         tb.add("    fn script_type_id_static()->ScriptTypeId{ScriptTypeId::of::<Self>()}");
         tb.add("    fn script_new(vm:&mut ScriptVm)->Self{");
-        tb.add("        let mut ret = ");
+        tb.add("       ");
         items[pick.unwrap()].gen_new(tb) ?;
-        tb.add("        ;ret.on_new(vm);ret");
+        tb.add("       ");
         tb.add("    }");
         
         tb.add("    fn script_default(vm:&mut ScriptVm)->ScriptValue{");
@@ -408,8 +404,8 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         tb.add("ScriptApply for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 
         tb.add("    fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}");
-        tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue){");
-        tb.add("        if self.on_skip_apply(vm, apply, value){");
+        tb.add("    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, value:ScriptValue){");
+        tb.add("        if self.on_custom_apply(vm, apply, scope, value){");
         tb.add("            return");
         tb.add("        }");
         tb.add("        if let Some(object) = value.as_object(){");
@@ -438,7 +434,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add(") = self{");
                     for (i, arg) in args.iter().enumerate(){
                         tb.add("            if let Some(v) = vm.heap.vec_value_if_exist(object, ").unsuf_usize(i).add("){");
-                        tb.add("                 <").stream(Some(arg.clone())).add(" as ScriptApply>::script_apply(").ident(&format!("v{i}")).add(", vm, apply, v);");
+                        tb.add("                 <").stream(Some(arg.clone())).add(" as ScriptApply>::script_apply(").ident(&format!("v{i}")).add(", vm, apply, scope, v);");
                         tb.add("            }");
                     }
                     tb.add("            }");
@@ -459,7 +455,7 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
                     tb.add("} = self{");
                     for (i, field) in fields.iter().enumerate(){
                         tb.add("if let Some(v) = vm.heap.value_apply_if_dirty(value, ScriptValue::from_id(id!(").ident(&field.name).add("))){");
-                        tb.add("    <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(").ident(&format!("v{i}")).add(", vm, apply, v);");
+                        tb.add("    <").stream(Some(field.ty.clone())).add(" as ScriptApply>::script_apply(").ident(&format!("v{i}")).add(", vm, apply, scope, v);");
                         tb.add("}");
                     }
                     tb.add("            }");
@@ -664,7 +660,7 @@ impl ScriptToValue for EnumTest{
     
 impl ScriptApply for EnumTest{
     fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue){
+    fn script_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, value:ScriptValue){
         if self.on_skip_apply(vm, apply, value){
             return
         }

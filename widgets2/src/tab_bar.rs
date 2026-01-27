@@ -221,7 +221,7 @@ pub struct TabBar {
 }
 
 impl LiveHook for TabBar {
-    /*fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
+    /*fn after_apply(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(tab).as_field()) {
             for (tab, templl) in self.tabs.values_mut() {
                 tab.apply(cx, apply, index, nodes);
@@ -231,7 +231,7 @@ impl LiveHook for TabBar {
     }*/
     
     // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         if nodes[index].is_instance_prop() {
             if let Some(live_ptr) = apply.from.to_live_ptr(cx, index){
                 let id = nodes[index].id;

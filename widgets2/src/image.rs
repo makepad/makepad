@@ -117,7 +117,7 @@ impl ImageCacheImpl for Image {
 }
 
 impl LiveHook for Image{
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
         match apply.from{
             ApplyFrom::NewFromDoc{..}|// newed from DSL,
             ApplyFrom:: UpdateFromDoc{..}|

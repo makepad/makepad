@@ -5,6 +5,7 @@ script_mod!{
     use mod.pod.*
     
     mod.themes.skeleton = {
+        let theme = me
         // GLOBAL PARAMETERS
         space_factor: 10. // Increase for a less dense layout
         corner_radius: 2.5
@@ -312,7 +313,7 @@ script_mod!{
             line_spacing: 1.2
         }
         font_code: TextStyle{
-            font_size: me.font_size_code
+            font_size: theme.font_size_code
             font_family: FontFamily{
                 $latin: FontMember{res: res.crate("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
             }

@@ -36,7 +36,7 @@ pub struct DrawVars {
 }
 
 impl ScriptHook for DrawVars{
-    fn on_before_apply(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue){
+    fn on_before_apply(&mut self, vm:&mut ScriptVm, apply:&Apply, _scope:&mut Scope, value:ScriptValue){
         self.compile_shader(vm, apply, value)
     }
 }
@@ -71,7 +71,7 @@ impl DrawVars {
     
     
     /*
-    pub fn init_shader(&mut self, cx: &mut Cx, apply: &mut Apply, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
+    pub fn init_shader(&mut self, cx: &mut Cx, apply: &Apply, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
         self.draw_shader = None;
         
         if cx.draw_shaders.error_set.contains(&draw_shader_ptr) {
@@ -682,7 +682,7 @@ impl DrawVars {
         }
     }
     /*
-    pub fn before_apply_init_shader(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn before_apply_init_shader(&mut self, cx: &mut Cx, apply: &Apply, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         
         let draw_shader_ptr = if let Some(file_id) = apply.from.file_id() {
             let generation = cx.live_registry.borrow().file_id_to_file(file_id).generation;
@@ -694,7 +694,7 @@ impl DrawVars {
         self.init_shader(cx, apply, draw_shader_ptr, geometry_fields)
     }
     
-    pub fn apply_slots(cx: &mut Cx, slots: usize, output: &mut [f32], offset: usize, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    pub fn apply_slots(cx: &mut Cx, slots: usize, output: &mut [f32], offset: usize, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         match slots {
             1 => {
                 let mut v: f32 = 0.0;
@@ -732,7 +732,7 @@ impl DrawVars {
         }
     }
     
-    pub fn apply_value(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    pub fn apply_value(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         
         if nodes[index].origin.node_has_prefix() && nodes[index].value.is_id() {
             return nodes.skip_node(index)
@@ -781,7 +781,7 @@ impl DrawVars {
         nodes.skip_node(index)
     }
     
-    pub fn after_apply_update_self(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn after_apply_update_self(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         // alright. so.if we are ApplyFrom::
         if apply.from.is_from_doc() {
             self.init_slicer(cx);

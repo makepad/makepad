@@ -26,7 +26,7 @@ pub struct ExpandablePanel {
 }
 
 impl LiveHook for ExpandablePanel {
-    fn after_apply_from(&mut self, cx: &mut Cx, apply: &mut Apply) {
+    fn after_apply_from(&mut self, cx: &mut Cx, apply: &Apply) {
         if apply.from.is_from_doc() {
             self.apply_over(cx, live! {
                 panel = { margin: { top: (self.initial_offset) }}

@@ -679,7 +679,7 @@ impl CxDrawShaderMapping {
         }
     }*/
     /*
-    pub fn update_live_and_user_uniforms(&mut self, cx: &mut Cx, apply: &mut Apply) {
+    pub fn update_live_and_user_uniforms(&mut self, cx: &mut Cx, apply: &Apply) {
         // and write em into the live_uniforms buffer
         let live_registry = cx.live_registry.clone();
         let live_registry = live_registry.borrow();

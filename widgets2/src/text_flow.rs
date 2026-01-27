@@ -338,7 +338,7 @@ pub struct TextFlow {
 
 impl LiveHook for TextFlow{
     // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
         match apply.from {
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id,..} => {

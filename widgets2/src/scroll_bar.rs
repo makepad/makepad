@@ -1,36 +1,39 @@
 use crate::makepad_draw::*;
+use crate::makepad_derive_widget::*;
+use crate::animator::*;
 
-live_design!{
-    link widgets;
-    use link::theme::*;
-    use makepad_draw::shader::std::*;
+script_mod!{
+    use mod.pod.*
+    use mod.math.*
+    use mod.sdf.*
+    use mod.theme
+    use mod.shader
+    use mod.shaders
+    use mod.animator.*
     
-    DrawScrollBar= {{DrawScrollBar}} {}
-    
-    pub ScrollBarBase= {{ScrollBar}} {}
-    
-    pub ScrollBar = <ScrollBarBase> {
+    mod.widgets.ScrollBarBase = #(ScrollBar::script_component(vm))
+    mod.widgets.ScrollBar = mod.widgets.ScrollBarBase{
         bar_size: 10.0,
         bar_side_margin: 3.0
         min_handle_size: 30.0
 
-        draw_bg: {
-            instance drag: 0.0
-            instance hover: 0.0
+        draw_bg : {
+            drag: shader.instance(0.0)
+            hover: shader.instance(0.0)
 
-            uniform size: 6.0
-            uniform border_size: (THEME_BEVELING)
-            uniform border_radius: 1.5
+            size: shader.uniform(6.0)
+            border_size: shader.uniform(theme.beveling)
+            border_radius: shader.uniform(1.5)
 
-            uniform color: (THEME_COLOR_OUTSET)
-            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_drag: (THEME_COLOR_OUTSET_DRAG)
+            color: shader.uniform(theme.color_outset)
+            color_hover: shader.uniform(theme.color_outset_hover)
+            color_drag: shader.uniform(theme.color_outset_drag)
 
-            uniform border_color: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_drag: (THEME_COLOR_U_HIDDEN)
+            border_color: shader.uniform(theme.color_u_hidden)
+            border_color_hover: shader.uniform(theme.color_u_hidden)
+            border_color_drag: shader.uniform(theme.color_u_hidden)
 
-            fn pixel(self) -> vec4 {
+            pixel: fn() -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 if self.is_vertical > 0.5 {
                     sdf.box(
@@ -75,18 +78,17 @@ live_design!{
             }
         }
 
-        animator: {
-            hover = {
-                default: off
-                off = {
+        animator: Animator{
+            hover: States{
+                default: @off
+                off: State{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {drag: 0.0, hover: 0.0}
                     }
                 }
-                                
-                on = {
-                    cursor: Default,
+                on: State{
+                    //cursor: Cursor.Default,
                     from: {
                         all: Forward {duration: 0.1}
                         drag: Forward {duration: 0.01}
@@ -98,9 +100,8 @@ live_design!{
                         }
                     }
                 }
-                                
-                drag = {
-                    cursor: Default,
+                drag: State{
+                    //cursor: Cursor.Default,
                     from: {all: Snap}
                     apply: {
                         draw_bg: {
@@ -113,24 +114,24 @@ live_design!{
         }
     }
 
-    pub ScrollBarTabs = <ScrollBar> {
+    mod.widgets.ScrollBarTabs = mod.widgets.ScrollBar {
         draw_bg: {
-            instance drag: 0.0
-            instance hover: 0.0
+            drag: shader.instance(0.0)
+            hover: shader.instance(0.0)
 
-            uniform size: 6.0
-            uniform border_size: 1.0
-            uniform border_radius: 1.5
+            size: shader.uniform(6.0)
+            border_size: shader.uniform(1.0)
+            border_radius: shader.uniform(1.5)
 
-            uniform color: (THEME_COLOR_U_HIDDEN)
-            uniform color_hover: (THEME_COLOR_OUTSET_HOVER)
-            uniform color_drag: (THEME_COLOR_OUTSET_DRAG)
+            color: shader.uniform(theme.color_u_hidden)
+            color_hover: shader.uniform(theme.color_outset_hover)
+            color_drag: shader.uniform(theme.color_outset_drag)
 
-            uniform border_color: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_hover: (THEME_COLOR_U_HIDDEN)
-            uniform border_color_drag: (THEME_COLOR_U_HIDDEN)
+            border_color: shader.uniform(theme.color_u_hidden)
+            border_color_hover: shader.uniform(theme.color_u_hidden)
+            border_color_drag: shader.uniform(theme.color_u_hidden)
 
-            fn pixel(self) -> vec4 {
+            pixel: fn() -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 if self.is_vertical > 0.5 {
                     sdf.box(
@@ -179,8 +180,7 @@ live_design!{
 
 }
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
-#[live_ignore]
+#[derive(Copy, Clone, Debug, Script, ScriptHook)]
 pub enum ScrollAxis {
     #[pick] Horizontal,
     Vertical
@@ -200,7 +200,7 @@ enum ScrollState {
     Flick { delta: f64, next_frame: NextFrame },
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook, Animator)]
 pub struct ScrollBar {
     #[live] draw_bg: DrawScrollBar,
     #[live] pub bar_size: f64,
@@ -223,7 +223,7 @@ pub struct ScrollBar {
     #[live(false)] drag_scrolling: bool,
 
     #[animator] animator: Animator,
-    
+
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
     #[rust] view_total: f64, // the total view area
@@ -237,7 +237,7 @@ pub struct ScrollBar {
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState,
 }
 
-#[derive(Live, LiveHook, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawScrollBar {
     #[deref] draw_super: DrawQuad,
@@ -288,11 +288,12 @@ impl ScrollBar {
     }
     
     // writes the norm_scroll value into the shader
-    pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
-        let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self.draw_bg.apply_over(cx, live!{
-            norm_scroll: (norm_scroll)
-        });
+    pub fn update_shader_scroll_pos(&mut self, _cx: &mut Cx) {
+        let (_norm_scroll, _) = self.get_normalized_scroll_pos();
+        todo!()
+        //self.draw_bg.apply_over(cx, live!{
+        //    norm_scroll: (norm_scroll)
+        //});
         //self.draw_bg.set_norm_scroll(cx, norm_scroll);
     }
     

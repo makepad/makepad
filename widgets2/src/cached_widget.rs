@@ -67,7 +67,7 @@ impl LiveHook for CachedWidget {
     fn before_apply(
         &mut self,
         _cx: &mut Cx,
-        apply: &mut Apply,
+        apply: &Apply,
         _index: usize,
         _nodes: &[LiveNode],
     ) {
@@ -83,7 +83,7 @@ impl LiveHook for CachedWidget {
     fn apply_value_instance(
         &mut self,
         cx: &mut Cx,
-        apply: &mut Apply,
+        apply: &Apply,
         index: usize,
         nodes: &[LiveNode],
     ) -> usize {
@@ -111,7 +111,7 @@ impl LiveHook for CachedWidget {
     ///
     /// This method is called after all properties have been applied to the widget.
     /// It ensures that the child widget is properly cached and retrieved from the global cache.
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
         // Ensure the global widget cache exists
         if !cx.has_global::<WidgetWrapperCache>() {
             cx.set_global(WidgetWrapperCache::default())
