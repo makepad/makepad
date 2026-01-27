@@ -104,5 +104,6 @@ impl ScriptTrap{
     err_fwd!(err_index_out_of_bounds);
     err_fwd!(err_use_only_named_or_ordered_pod_fields);
     err_fwd!(err_assign_not_allowed);
+    err_fwd!(err_range_requires_numbers);
 }
 

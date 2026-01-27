@@ -329,20 +329,34 @@ impl ShaderFnCompiler {
     }
 
     pub(crate) fn handle_range(&mut self, vm: &mut ScriptVm) {
-        let (_end_ty, end_s) = self.stack.pop(&self.trap);
+        let (end_ty, end_s) = self.stack.pop(&self.trap);
         let (start_ty, start_s) = self.stack.pop(&self.trap);
-        if let Some(ty) = start_ty.make_concrete(&vm.code.builtins.pod) {
+        // Validate that both operands can be made into concrete numeric types
+        let start_concrete = start_ty.make_concrete(&vm.code.builtins.pod);
+        let end_concrete = end_ty.make_concrete(&vm.code.builtins.pod);
+        if let (Some(start_pod), Some(end_pod)) = (start_concrete, end_concrete) {
+            // Check that both are numeric types
+            let start_is_number = vm.heap.pod_type_ref(start_pod).ty.is_number();
+            let end_is_number = vm.heap.pod_type_ref(end_pod).ty.is_number();
+            if !start_is_number || !end_is_number {
+                self.stack.free_string(start_s);
+                self.stack.free_string(end_s);
+                self.trap.err_range_requires_numbers();
+                return;
+            }
             self.stack.push(
                 &self.trap,
                 ShaderType::Range {
                     start: start_s,
                     end: end_s,
-                    ty,
+                    ty: start_pod,
                 },
                 String::new(),
             );
         } else {
-            self.trap.err_no_matching_shader_type();
+            self.stack.free_string(start_s);
+            self.stack.free_string(end_s);
+            self.trap.err_range_requires_numbers();
         }
     }
 }

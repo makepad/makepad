@@ -332,7 +332,12 @@ impl ScriptObjectTag{
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN|Self::VALIDATED|Self::MAP_ADD|Self::VEC_FROZEN
     }
-        
+    
+    pub fn freeze_ext(&mut self){
+        self.0 &= !(Self::FREEZE_MASK);
+        self.0 |= Self::FROZEN|Self::VALIDATED|Self::MAP_ADD
+    }
+            
     pub fn needs_checking(&self)->bool{
         self.0 & (Self::NEED_CHECK_MASK) != 0
     }
