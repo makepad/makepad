@@ -25,7 +25,7 @@ pub fn derive_animator_impl(input: TokenStream) ->  TokenStream {
         };
                 
         // alright now. we have a field
-        let animator_field = fields.iter().find( | field | field.attrs.iter().any( | a | a.name == "animator"));
+        let animator_field = fields.iter().find( | field | field.name == "animator");
         
         if let Some(animator_field) = animator_field {
                         

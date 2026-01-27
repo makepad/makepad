@@ -1,6 +1,21 @@
 use crate::makepad_platform::*;
 use std::f64::consts::PI;
 
+script_mod!{
+    mod.animator = {
+        Animator: mod.std.set_type_default() do #(Animator::script_ext(vm)){
+        }
+        State: #(State::script_ext(vm)){
+        }
+        States: #(State::script_ext(vm)){
+        }
+        Play: #(Play::script_api(vm)),
+        ..me.Play,
+        Ease: #(Ease::script_api(vm)),
+        ..me.Ease
+    }
+}
+
 pub trait AnimatorImpl {
         
     fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]){
@@ -48,15 +63,109 @@ pub enum Animate {
     No
 }
 
+#[derive(Default, Script)]
+struct States {
+}
+
+impl ScriptHook for States {
+    fn on_custom_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, _value: ScriptValue) -> bool {
+        true
+    }
+}
+
+#[derive(Default, Script)]
+struct State {
+}
+
+impl ScriptHook for State {
+    fn on_custom_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, value: ScriptValue) -> bool {
+        true
+    }
+}
+
+
+#[derive(Default, Script)]
+pub struct Animator {
+    #[rust] pub next_frame: NextFrame,
+}
+
+impl ScriptHook for Animator {
+    fn on_custom_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, value: ScriptValue) -> bool {
+        let Some(obj) = value.as_object() else {
+            return false;
+        };
+/*        
+        let font_family_id = self.to_font_family_id();
+        if !fonts.is_font_family_known(font_family_id) {
+            let mut font_ids = Vec::new();
+                        
+            let len = vm.heap.vec_len(obj);
+            for i in 0..len {
+                let kv = vm.heap.vec_key_value(obj, i, &vm.thread.trap);
+                let member = FontMember::script_from_value(vm, kv.value);
+                                
+                if let Some(ref handle_ref) = member.res {
+                    let handle = handle_ref.as_handle();
+                    let font_id: FontId = (handle.index() as u64).into();
+                                        
+                    if !fonts.is_font_known(font_id) {
+                        let cx = vm.host.cx_mut();
+                        if let Some(data) = cx.get_resource(handle) {
+                            fonts.define_font(
+                                font_id,
+                                FontDefinition {
+                                    data,
+                                    index: 0,
+                                    ascender_fudge_in_ems: member.asc,
+                                    descender_fudge_in_ems: member.desc,
+                                },
+                            );
+                        }
+                    }
+                    font_ids.push(font_id);
+                }
+            }
+                        
+            fonts.define_font_family(font_family_id, FontFamilyDefinition { font_ids });
+        }*/ 
+        true
+    }
+}
+
+#[derive(Copy, Clone)]
+pub enum AnimatorAction {
+    Animating {redraw: bool},
+    None
+}
+
+impl Animator{
+    pub fn play(&mut self, _cx:&mut Cx, _state: &[LiveId;2])->Option<ScriptValue>{
+        None
+    }
+    
+    pub fn cut(&mut self, _cx:&mut Cx, _state: &[LiveId;2])->Option<ScriptValue>{
+        None
+    }
+    
+    pub fn in_state(&self, _cx:&Cx, _state: &[LiveId;2])->bool{
+        false
+    }   
+    
+    pub fn handle_event(&mut self, _cx:&mut Cx, _event:&Event, _act:&mut AnimatorAction)->Option<ScriptValue>{
+        None
+    }          
+}
+
+
 // deserialisable DSL structure
 #[derive(Debug, Clone, Script, ScriptHook)]
 pub struct KeyFrame {
     #[live(Ease::Linear)]
     pub ease: Ease,
-        
+            
     #[live(1.0)]
     pub time: f64,
-        
+            
     #[live(NIL)]
     pub value: ScriptValue,
 }
@@ -65,18 +174,18 @@ pub struct KeyFrame {
 pub enum Play {
     #[pick {duration: 1.0}]
     Forward {duration: f64},
-        
+            
     Snap,
-        
+            
     #[live {duration: 1.0, end: 1.0}]
     Reverse {duration: f64, end: f64},
-        
+            
     #[live {duration: 1.0, end: 1.0}]
     Loop {duration: f64, end: f64},
-        
+            
     #[live {duration: 1.0, end: 1.0}]
     ReverseLoop {duration: f64, end: f64},
-        
+            
     #[live {duration: 1.0, end: 1.0}]
     BounceLoop {duration: f64, end: f64},
 }
@@ -92,7 +201,7 @@ impl Play {
             Self::BounceLoop {duration, ..} => *duration,
         }
     }*/
-        
+            
     pub fn get_ended_time(&self, time: f64) -> (bool, f64) {
         match self {
             Self::Snap => (true, 1.0),
@@ -161,7 +270,7 @@ pub enum Ease {
     #[live] OutBounce,
     #[live] InOutBounce,
     #[live {d1: 0.82, d2: 0.97, max: 100}] ExpDecay {d1: f64, d2: f64, max: usize},
-        
+            
     #[live {begin: 0.0, end: 1.0}] Pow {begin: f64, end: f64},
     #[live {cp0: 0.0, cp1: 0.0, cp2: 1.0, cp3: 1.0}] Bezier {cp0: f64, cp1: f64, cp2: f64, cp3: f64}
 }
@@ -173,7 +282,7 @@ impl Ease {
                 if t > 0.999 {
                     return 1.0;
                 }
-                
+                                
                 // first we count the number of steps we'd need to decay
                 let mut di = *d1;
                 let mut dt = 1.0;
@@ -223,7 +332,7 @@ impl Ease {
                 let t2 = (((a - 1.) * -b) / (a * (1. - b))).powf(t);
                 return (-a * b + b * a * t2) / (a * t2 - b);
             },
-                        
+                                    
             Self::InQuad => {
                 return t * t;
             },
@@ -364,7 +473,7 @@ impl Ease {
             Self::OutElastic => {
                 let p = 0.3;
                 let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
-                                
+                                                
                 if t < 0.001 {
                     return 0.;
                 }
@@ -446,11 +555,11 @@ impl Ease {
                 if t > 1. {
                     return 1.;
                 }
-                                
+                                                
                 if (cp0 - cp1).abs() < 0.001 && (cp2 - cp3).abs() < 0.001 {
                     return t;
                 }
-                                
+                                                
                 let epsilon = 1.0 / 200.0 * t;
                 let cx = 3.0 * cp0;
                 let bx = 3.0 * (cp2 - cp0) - cx;
@@ -459,7 +568,7 @@ impl Ease {
                 let by = 3.0 * (cp3 - cp1) - cy;
                 let ay = 1.0 - cy - by;
                 let mut u = t;
-                                
+                                                
                 for _i in 0..6 {
                     let x = ((ax * u + bx) * u + cx) * u - t;
                     if x.abs() < epsilon {
@@ -471,14 +580,14 @@ impl Ease {
                     }
                     u = u - x / d;
                 };
-                                
+                                                
                 if t > 1. {
                     return (ay + by) + cy;
                 }
                 if t < 0. {
                     return 0.0;
                 }
-                                
+                                                
                 let mut w = 0.0;
                 let mut v = 1.0;
                 u = t;
@@ -487,7 +596,7 @@ impl Ease {
                     if (x - t).abs() < epsilon {
                         return ((ay * u + by) * u + cy) * u;
                     }
-                                        
+                                                            
                     if t > x {
                         w = u;
                     }
@@ -496,38 +605,9 @@ impl Ease {
                     }
                     u = (v - w) * 0.5 + w;
                 }
-                                
+                                                
                 return ((ay * u + by) * u + cy) * u;
             }
         }
     }
-}
-
-#[derive(Default)]
-pub struct Animator {
-    pub next_frame: NextFrame,
-}
-
-#[derive(Copy, Clone)]
-pub enum AnimatorAction {
-    Animating {redraw: bool},
-    None
-}
-
-impl Animator{
-    pub fn play(&mut self, _cx:&mut Cx, _state: &[LiveId;2])->Option<ScriptValue>{
-        None
-    }
-    
-    pub fn cut(&mut self, _cx:&mut Cx, _state: &[LiveId;2])->Option<ScriptValue>{
-        None
-    }
-    
-    pub fn in_state(&self, _cx:&Cx, _state: &[LiveId;2])->bool{
-        false
-    }   
-    
-    pub fn handle_event(&mut self, _cx:&mut Cx, _event:&Event, _act:&mut AnimatorAction)->Option<ScriptValue>{
-        None
-    }          
 }

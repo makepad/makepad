@@ -48,7 +48,7 @@ script_mod!{
         line_spacing: 1.2
     }
     
-    mod.shaders.DrawText = mod.std.set_type_default() do #(DrawText::script_shader(vm)){
+    mod.draw.DrawText = mod.std.set_type_default() do #(DrawText::script_shader(vm)){
         text_style: test_text_style,
         vertex_pos: shader.vertex_position(vec4f)
         fb0: shader.fragment_output(0, vec4f)
@@ -115,7 +115,7 @@ script_mod!{
     }
 }
 
-#[derive(Script)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawText {
     #[live] pub text_style: TextStyle,
@@ -137,10 +137,6 @@ pub struct DrawText {
     #[live] pub t_max: Vec2f,
 }
 
-impl ScriptHook for DrawText{
-    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue){
-    }
-}
 
 impl DrawText {
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2d, text: &str) {

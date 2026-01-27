@@ -7,6 +7,7 @@ script_mod!{
     use mod.res
 
     mod.themes.dark = {
+        mod.theme = me
         let theme = me
         // GLOBAL PARAMETERS
         color_contrast: 1.0

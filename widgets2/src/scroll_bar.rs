@@ -7,9 +7,15 @@ script_mod!{
     use mod.math.*
     use mod.sdf.*
     use mod.theme
+    use mod.draw
     use mod.shader
-    use mod.shaders
     use mod.animator.*
+    use mod.draw.MouseCursor
+    
+    //use mod.animator.*
+    let DrawScrollBar = mod.std.set_type_default() do #(DrawScrollBar::script_shader(vm)){
+        ..mod.draw.DrawQuad // splat in draw quad
+    }
     
     mod.widgets.ScrollBarBase = #(ScrollBar::script_component(vm))
     mod.widgets.ScrollBar = mod.widgets.ScrollBarBase{
@@ -17,24 +23,24 @@ script_mod!{
         bar_side_margin: 3.0
         min_handle_size: 30.0
 
-        draw_bg : {
+        draw_bg +: {
             drag: shader.instance(0.0)
             hover: shader.instance(0.0)
-
+                    
             size: shader.uniform(6.0)
             border_size: shader.uniform(theme.beveling)
             border_radius: shader.uniform(1.5)
-
+                    
             color: shader.uniform(theme.color_outset)
             color_hover: shader.uniform(theme.color_outset_hover)
             color_drag: shader.uniform(theme.color_outset_drag)
-
+                    
             border_color: shader.uniform(theme.color_u_hidden)
             border_color_hover: shader.uniform(theme.color_u_hidden)
             border_color_drag: shader.uniform(theme.color_u_hidden)
-
+                    
             pixel: fn() -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size);
                 if self.is_vertical > 0.5 {
                     sdf.box(
                         1.,
@@ -53,7 +59,7 @@ script_mod!{
                         self.border_radius
                     );
                 }
-
+                            
                 sdf.fill_keep(mix(
                     self.color,
                     mix(
@@ -63,7 +69,7 @@ script_mod!{
                     ),
                     self.hover
                 ));
-
+                            
                 sdf.stroke(mix(
                     self.border_color,
                     mix(
@@ -73,12 +79,12 @@ script_mod!{
                     ),
                     self.hover
                 ), self.border_size);
-
+                            
                 return sdf.result
             }
         }
 
-        animator: Animator{
+        animator : Animator{
             hover: States{
                 default: @off
                 off: State{
@@ -88,7 +94,7 @@ script_mod!{
                     }
                 }
                 on: State{
-                    //cursor: Cursor.Default,
+                    cursor: MouseCursor.Default,
                     from: {
                         all: Forward {duration: 0.1}
                         drag: Forward {duration: 0.01}
@@ -101,7 +107,7 @@ script_mod!{
                     }
                 }
                 drag: State{
-                    //cursor: Cursor.Default,
+                    cursor: MouseCursor.Default,
                     from: {all: Snap}
                     apply: {
                         draw_bg: {
@@ -115,7 +121,7 @@ script_mod!{
     }
 
     mod.widgets.ScrollBarTabs = mod.widgets.ScrollBar {
-        draw_bg: {
+        draw_bg +: {
             drag: shader.instance(0.0)
             hover: shader.instance(0.0)
 
@@ -132,7 +138,7 @@ script_mod!{
             border_color_drag: shader.uniform(theme.color_u_hidden)
 
             pixel: fn() -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size);
                 if self.is_vertical > 0.5 {
                     sdf.box(
                         1.,
@@ -222,7 +228,7 @@ pub struct ScrollBar {
     /// Whether to enable drag scrolling
     #[live(false)] drag_scrolling: bool,
 
-    #[animator] animator: Animator,
+    #[live] animator: Animator,
 
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
