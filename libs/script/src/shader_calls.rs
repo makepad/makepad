@@ -516,6 +516,11 @@ impl ShaderFnCompiler {
                     let ret = compiler.compile_fn(vm, output, fnip);
                     output.recur_block.pop();
 
+                    // Ensure struct return types are registered in output.structs
+                    if let ScriptPodTy::Struct{..} = vm.heap.pod_type_ref(ret).ty {
+                        output.structs.insert(ret);
+                    }
+
                     match output.backend {
                         ShaderBackend::Wgsl => {
                             write!(call_sig, "fn {}({})", fn_name, fn_args).ok();

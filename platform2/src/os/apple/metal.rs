@@ -142,7 +142,7 @@ impl Cx {
                 }
                 
                 // Uncomment to enable draw call debug output:
-                // Self::_debug_call_info(sh, draw_item, draw_call, instances, geometry);
+                //Self::_debug_call_info(sh, draw_item.instances.as_ref().unwrap(), draw_call, instances, geometry);
                 
                 if let Some(inner) = geometry.os.vertex_buffer.get().cpu_read().inner.as_ref() {
                     unsafe {msg_send![
@@ -283,12 +283,11 @@ impl Cx {
     #[allow(dead_code)]
     fn _debug_call_info(
         sh: &CxDrawShader,
-        draw_item: &crate::draw_list::CxDrawItem,
+        instance_data: &[f32],
         draw_call: &crate::draw_list::CxDrawCall,
         instances: u64,
         geometry: &crate::geometry::CxGeometry,
     ) {
-        let instance_data = draw_item.instances.as_ref().unwrap();
         let total_slots = sh.mapping.instances.total_slots;
         
         println!("=== METAL DRAW CALL DEBUG ===");
@@ -920,8 +919,9 @@ impl DrawVars{
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
             self.dyn_instance_slots = mapping.instances.total_slots;
             
-            // Read default values for dyn_instance slots from the shader object
+            // Read default values for dyn_instance and dyn_uniform slots from the shader object
             self.read_dyn_instance_defaults(&vm.heap, &mapping, io_self);
+            self.read_dyn_uniforms_defaults(&vm.heap, &mapping, io_self);
             
             // Access Cx from the vm host
             let cx = vm.host.cx_mut();

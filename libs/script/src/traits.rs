@@ -79,9 +79,9 @@ pub struct ScriptTypeProp {
 #[derive(Default, Debug)]
 pub struct ScriptTypeProps{
     pub props: LiveIdMap<LiveId, ScriptTypeProp>,
-    /// The order index where Rust instance fields begin (after #[deref] field).
-    /// Fields with order < rust_instance_start are NOT part of shader instance data.
-    /// Default is 0, meaning all fields are instance fields (for types without deref).
+    /// Reserved for future use. Currently always 0 since config fields before #[deref]
+    /// are simply not added to props during script_proto_props generation.
+    /// The ordering is: parent fields first (via recursive call), then child's fields after deref.
     pub rust_instance_start: u32,
 }
 
@@ -92,7 +92,8 @@ impl ScriptTypeProps {
     }
     
     /// Mark the current position as where Rust instance fields begin.
-    /// Call this AFTER processing the deref field in script_proto_props.
+    /// Note: This is no longer called in the derive macro since parent fields ARE instance data.
+    /// Config fields before #[deref] are excluded by not adding them to props at all.
     pub fn mark_rust_instance_start(&mut self) {
         self.rust_instance_start = self.props.len() as u32;
     }
@@ -103,7 +104,9 @@ impl ScriptTypeProps {
         ordered.into_iter().map(|(id, prop)| (id, prop.ty))
     }
     
-    /// Iterate only over props that are part of the Rust instance data (after deref).
+    /// Iterate over props that are part of the Rust instance data.
+    /// Returns all props in order: deref parent fields first, then child's own fields.
+    /// Note: rust_instance_start is currently always 0, so this returns all props.
     pub fn iter_rust_instance_ordered(&self) -> impl Iterator<Item = (LiveId, ScriptTypeId)> + '_ {
         let rust_instance_start = self.rust_instance_start;
         let mut ordered: Vec<_> = self.props.iter()

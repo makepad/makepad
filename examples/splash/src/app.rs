@@ -1,4 +1,5 @@
 use makepad_widgets2::*;
+use makepad_widgets2::scroll_bar::{ScrollBar, ScrollAxis, ScrollBarAction};
 
 app_main!(App); 
 script_mod!{
@@ -18,7 +19,7 @@ script_mod!{
             sdf.fill(mix(theme.SOME_COLOR #f00 self.pos.y))
             sdf.result
         }
-        me.draw_text.color = #f00
+        me.draw_text.color = #fff
     }
     x
 }
@@ -37,6 +38,7 @@ pub struct App {
     #[new] depth_texture: Texture,
     #[live] draw_quad: DrawQuad,
     #[live] draw_text: DrawText,
+    #[live] scroll_bar: ScrollBar,
     #[new] main_draw_list: DrawList2d,
 }
 
@@ -55,7 +57,7 @@ impl MatchEvent for App{
             initial: true,
         });
         self.pass.set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
-        self.pass.set_window_clear_color(cx, vec4(0.0, 0.0, 1.0, 0.0));
+        self.pass.set_window_clear_color(cx, vec4(0.2, 0.2, 0.2, 0.0));
     }
 
     fn handle_draw_2d(&mut self, cx: &mut Cx2d){
@@ -70,7 +72,12 @@ impl MatchEvent for App{
         cx.begin_root_turtle(size, Layout::flow_down());
         
         self.draw_quad.draw_abs(cx, rect(10.,10.,200.,100.));
-        self.draw_text.draw_abs(cx, dvec2(10., 10.), "TEST");
+        self.draw_text.draw_abs(cx, dvec2(10., 100.), "Text output");
+        
+        // Draw a vertical scrollbar on the right side
+        let view_rect = Rect { pos: dvec2(0., 0.), size:dvec2(200.,200.) };
+        let view_total = dvec2(size.x, 1000.0); // Content is 1000px tall
+        self.scroll_bar.draw_scroll_bar(cx, ScrollAxis::Vertical, view_rect, view_total);
         
         cx.end_pass_sized_turtle();
         self.main_draw_list.end(cx);
@@ -86,6 +93,20 @@ impl AppMain for App {
         if let Event::GameInputConnected(ev) = event{
             println!("{:?}", ev);
         }
+        
+        // Handle scrollbar events
+        self.scroll_bar.handle_event_with(cx, event, &mut |_cx, action| {
+            match action {
+                ScrollBarAction::Scroll { scroll_pos, .. } => {
+                    println!("Scrollbar position: {}", scroll_pos);
+                }
+                ScrollBarAction::ScrollDone => {
+                    println!("Scroll done");
+                }
+                ScrollBarAction::None => {}
+            }
+        });
+        
         let _ = self.match_event_with_draw_2d(cx, event);
     }
 }

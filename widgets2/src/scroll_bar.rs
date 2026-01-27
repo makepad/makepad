@@ -18,11 +18,10 @@ script_mod!{
     }
     
     mod.widgets.ScrollBarBase = #(ScrollBar::script_component(vm))
-    mod.widgets.ScrollBar = mod.widgets.ScrollBarBase{
+    mod.widgets.ScrollBar = mod.std.set_type_default() do mod.widgets.ScrollBarBase{
         bar_size: 10.0,
         bar_side_margin: 3.0
         min_handle_size: 30.0
-
         draw_bg +: {
             drag: shader.instance(0.0)
             hover: shader.instance(0.0)
@@ -39,7 +38,7 @@ script_mod!{
             border_color_hover: shader.uniform(theme.color_u_hidden)
             border_color_drag: shader.uniform(theme.color_u_hidden)
                     
-            pixel: fn() -> vec4 {
+            pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size);
                 if self.is_vertical > 0.5 {
                     sdf.box(
@@ -47,7 +46,7 @@ script_mod!{
                         self.rect_size.y * self.norm_scroll,
                         self.size,
                         self.rect_size.y * self.norm_handle,
-                        self.border_radius
+                        1
                     );
                 }
                 else {
@@ -79,7 +78,6 @@ script_mod!{
                     ),
                     self.hover
                 ), self.border_size);
-                            
                 return sdf.result
             }
         }
@@ -665,7 +663,6 @@ impl ScrollBar {
     }
     
     pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: ScrollAxis, view_rect: Rect, view_total: Vec2d) -> f64 {
-        
         self.axis = axis;
         
         match self.axis {
@@ -708,13 +705,14 @@ impl ScrollBar {
                 self.view_total = view_total.y;
                 self.view_visible = view_rect.size.y;
                 self.scroll_pos = self.scroll_pos.min(self.view_total - self.view_visible).max(0.);
+                
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     self.draw_bg.is_vertical = 1.0;
                     self.draw_bg.norm_scroll = norm_scroll as f32;
                     self.draw_bg.norm_handle = norm_handle as f32;
                     let scroll = cx.turtle().scroll();
-                    self.draw_bg.draw_rel(
+                    self.draw_bg.draw_abs(
                         cx,
                         Rect {
                             pos: dvec2(view_rect.size.x - self.bar_size, self.bar_side_margin) + scroll,

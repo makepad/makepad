@@ -63,6 +63,7 @@ script_mod!{
         color_u_3: mix(theme.color_w, theme.color_w_h, pow(0.75, theme.color_contrast))
         color_u_2: mix(theme.color_w, theme.color_w_h, pow(0.85, theme.color_contrast))
         color_u_15: mix(theme.color_w, theme.color_w_h, pow(0.9, theme.color_contrast))
+        
         color_u_1: mix(theme.color_w, theme.color_w_h, pow(0.95, theme.color_contrast))
         color_u_hidden: theme.color_w_h
 

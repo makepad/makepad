@@ -2,6 +2,7 @@ use {
     crate::{
         makepad_script::*,
         makepad_script::mod_shader::SHADER_IO_DYN_INSTANCE,
+        makepad_script::mod_shader::ShaderIoType,
         makepad_script::pod_heap,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
         makepad_script::trap::ScriptTrap,
@@ -21,7 +22,7 @@ pub const DRAW_CALL_USER_UNIFORMS: usize = 256;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
 pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
 
-#[derive(Clone, Script)]
+#[derive(Clone, Script, Debug)]
 #[repr(C)]
 pub struct DrawVars {
     #[rust] pub area: Area,
@@ -519,40 +520,60 @@ impl DrawVars {
             let offset = base_offset + input.offset;
             let slots = input.slots;
             
-            // Look up the value on the shader object
-            let value = heap.value(io_self, input.id.into(), &trap);
-            
-            // Check if this is a shader IO object (e.g., shader.instance(value))
-            let default_value = if let Some(value_obj) = value.as_object() {
-                if let Some(io_type) = heap.as_shader_io(value_obj) {
-                    if io_type == SHADER_IO_DYN_INSTANCE {
-                        // The default value is stored as the prototype
-                        heap.proto(value_obj)
-                    } else {
-                        value
-                    }
-                } else {
-                    value
-                }
-            } else {
-                value
-            };
+            // Look up the value on the shader object and extract default from shader IO
+            let default_value = Self::extract_shader_io_default(heap, io_self, input.id, SHADER_IO_DYN_INSTANCE, &trap);
             
             // Extract float values from the default value and write to dyn_instances
-            self.write_value_to_slots(heap, default_value, offset, slots);
+            Self::write_value_to_f32_slots(heap, default_value, &mut self.dyn_instances, offset, slots);
         }
     }
     
-    /// Write a ScriptValue to dyn_instances slots as f32 values.
-    fn write_value_to_slots(&mut self, heap: &ScriptHeap, value: ScriptValue, offset: usize, slots: usize) {
+    /// Read default values for dyn_uniform slots from a shader script object.
+    /// 
+    /// When a shader defines `myuniform: shader.uniform(1.0)`, the value (1.0) becomes
+    /// the prototype of the shader IO object. This method iterates through all dyn_uniform
+    /// inputs from the shader mapping and reads their default values from the shader object.
+    pub fn read_dyn_uniforms_defaults(&mut self, heap: &ScriptHeap, mapping: &CxDrawShaderMapping, io_self: ScriptObject) {
+        use crate::makepad_script::mod_shader::SHADER_IO_DYN_UNIFORM;
+        let trap = ScriptTrap::default();
         
+        for input in &mapping.dyn_uniforms.inputs {
+            let offset = input.offset;
+            let slots = input.slots;
+            
+            // Look up the value on the shader object and extract default from shader IO
+            let default_value = Self::extract_shader_io_default(heap, io_self, input.id, SHADER_IO_DYN_UNIFORM, &trap);
+            
+            // Extract float values from the default value and write to dyn_uniforms
+            Self::write_value_to_f32_slots(heap, default_value, &mut self.dyn_uniforms, offset, slots);
+        }
+    }
+    
+    /// Extract the default value from a shader IO object.
+    /// 
+    /// For shader IO objects (e.g., shader.instance(value) or shader.uniform(value)),
+    /// the default value is stored as the prototype.
+    fn extract_shader_io_default(heap: &ScriptHeap, io_self: ScriptObject, id: LiveId, expected_io_type: ShaderIoType, trap: &ScriptTrap) -> ScriptValue {
+        let value = heap.value(io_self, id.into(), trap);
         
-        
+        if let Some(value_obj) = value.as_object() {
+            if let Some(io_type) = heap.as_shader_io(value_obj) {
+                if io_type == expected_io_type {
+                    // The default value is stored as the prototype
+                    return heap.proto(value_obj);
+                }
+            }
+        }
+        value
+    }
+    
+    /// Write a ScriptValue to f32 slots in an output array.
+    fn write_value_to_f32_slots(heap: &ScriptHeap, value: ScriptValue, output: &mut [f32], offset: usize, slots: usize) {
         // Try f64 first (most common for abstract numbers)
         if let Some(v) = value.as_f64() {
             let v = v as f32;
             for i in 0..slots {
-                self.dyn_instances[offset + i] = v;
+                output[offset + i] = v;
             }
             return;
         }
@@ -561,7 +582,7 @@ impl DrawVars {
         if let Some(v) = value.as_u40() {
             let v = v as f32;
             for i in 0..slots {
-                self.dyn_instances[offset + i] = v;
+                output[offset + i] = v;
             }
             return;
         }
@@ -569,7 +590,7 @@ impl DrawVars {
         // Try f32
         if let Some(v) = value.as_f32() {
             for i in 0..slots {
-                self.dyn_instances[offset + i] = v;
+                output[offset + i] = v;
             }
             return;
         }
@@ -577,7 +598,7 @@ impl DrawVars {
         // Try f16
         if let Some(v) = value.as_f16() {
             for i in 0..slots {
-                self.dyn_instances[offset + i] = v;
+                output[offset + i] = v;
             }
             return;
         }
@@ -586,14 +607,14 @@ impl DrawVars {
         if let Some(v) = value.as_u32() {
             let v = v as f32;
             for i in 0..slots {
-                self.dyn_instances[offset + i] = v;
+                output[offset + i] = v;
             }
             return;
         }
         if let Some(v) = value.as_i32() {
             let v = v as f32;
             for i in 0..slots {
-                self.dyn_instances[offset + i] = v;
+                output[offset + i] = v;
             }
             return;
         }
@@ -601,10 +622,10 @@ impl DrawVars {
         // Try color (u32 RGBA)
         if let Some(c) = value.as_color() {
             let v = Vec4f::from_u32(c);
-            if slots >= 1 { self.dyn_instances[offset + 0] = v.x; }
-            if slots >= 2 { self.dyn_instances[offset + 1] = v.y; }
-            if slots >= 3 { self.dyn_instances[offset + 2] = v.z; }
-            if slots >= 4 { self.dyn_instances[offset + 3] = v.w; }
+            if slots >= 1 { output[offset + 0] = v.x; }
+            if slots >= 2 { output[offset + 1] = v.y; }
+            if slots >= 3 { output[offset + 2] = v.z; }
+            if slots >= 4 { output[offset + 3] = v.w; }
             return;
         }
         
@@ -616,13 +637,13 @@ impl DrawVars {
                 ScriptPodTy::F32 => {
                     let v = f32::from_bits(data[0]);
                     for i in 0..slots {
-                        self.dyn_instances[offset + i] = v;
+                        output[offset + i] = v;
                     }
                 }
                 ScriptPodTy::F16 => {
                     let v = pod_heap::f16_to_f32(data[0] as u16);
                     for i in 0..slots {
-                        self.dyn_instances[offset + i] = v;
+                        output[offset + i] = v;
                     }
                 }
                 ScriptPodTy::Vec(vec_ty) => {
@@ -630,31 +651,31 @@ impl DrawVars {
                     match vec_ty {
                         ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f => {
                             for i in 0..dims.min(slots) {
-                                self.dyn_instances[offset + i] = f32::from_bits(data[i]);
+                                output[offset + i] = f32::from_bits(data[i]);
                             }
                         }
                         ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h => {
                             for i in 0..dims.min(slots) {
                                 if i & 1 == 1 {
-                                    self.dyn_instances[offset + i] = pod_heap::f16_to_f32((data[i >> 1] >> 16) as u16);
+                                    output[offset + i] = pod_heap::f16_to_f32((data[i >> 1] >> 16) as u16);
                                 } else {
-                                    self.dyn_instances[offset + i] = pod_heap::f16_to_f32(data[i >> 1] as u16);
+                                    output[offset + i] = pod_heap::f16_to_f32(data[i >> 1] as u16);
                                 }
                             }
                         }
                         ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u => {
                             for i in 0..dims.min(slots) {
-                                self.dyn_instances[offset + i] = data[i] as f32;
+                                output[offset + i] = data[i] as f32;
                             }
                         }
                         ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i => {
                             for i in 0..dims.min(slots) {
-                                self.dyn_instances[offset + i] = data[i] as i32 as f32;
+                                output[offset + i] = data[i] as i32 as f32;
                             }
                         }
                         ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b => {
                             for i in 0..dims.min(slots) {
-                                self.dyn_instances[offset + i] = if data[i] != 0 { 1.0 } else { 0.0 };
+                                output[offset + i] = if data[i] != 0 { 1.0 } else { 0.0 };
                             }
                         }
                     }
@@ -663,13 +684,13 @@ impl DrawVars {
                     // Matrices are stored as f32 arrays (column-major order)
                     let dim = mat_ty.dim();
                     for i in 0..dim.min(slots) {
-                        self.dyn_instances[offset + i] = f32::from_bits(data[i]);
+                        output[offset + i] = f32::from_bits(data[i]);
                     }
                 }
                 _ => {
                     // For other pod types, default to 0
                     for i in 0..slots {
-                        self.dyn_instances[offset + i] = 0.0;
+                        output[offset + i] = 0.0;
                     }
                 }
             }
@@ -678,7 +699,7 @@ impl DrawVars {
         
         // Default: fill with zeros
         for i in 0..slots {
-            self.dyn_instances[offset + i] = 0.0;
+            output[offset + i] = 0.0;
         }
     }
     /*
