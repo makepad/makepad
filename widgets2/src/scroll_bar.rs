@@ -13,23 +13,24 @@ script_mod!{
     use mod.draw.MouseCursor
     
     //use mod.animator.*
-    let DrawScrollBar = mod.std.set_type_default() do #(DrawScrollBar::script_shader(vm)){
+    mod.std.set_type_default() do #(DrawScrollBar::script_shader(vm)){
         ..mod.draw.DrawQuad // splat in draw quad
     }
     
     mod.widgets.ScrollBarBase = #(ScrollBar::script_component(vm))
     mod.widgets.ScrollBar = mod.std.set_type_default() do mod.widgets.ScrollBarBase{
-        bar_size: 10.0,
+        bar_size: 10.0
         bar_side_margin: 3.0
         min_handle_size: 30.0
         draw_bg +: {
+            debug: true
             drag: shader.instance(0.0)
             hover: shader.instance(0.0)
                     
             size: shader.uniform(6.0)
             border_size: shader.uniform(theme.beveling)
             border_radius: shader.uniform(1.5)
-                    
+            
             color: shader.uniform(theme.color_outset)
             color_hover: shader.uniform(theme.color_outset_hover)
             color_drag: shader.uniform(theme.color_outset_drag)
@@ -37,80 +38,79 @@ script_mod!{
             border_color: shader.uniform(theme.color_u_hidden)
             border_color_hover: shader.uniform(theme.color_u_hidden)
             border_color_drag: shader.uniform(theme.color_u_hidden)
-                    
+            
             pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size);
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 if self.is_vertical > 0.5 {
                     sdf.box(
-                        1.,
-                        self.rect_size.y * self.norm_scroll,
-                        self.size,
-                        self.rect_size.y * self.norm_handle,
-                        1
-                    );
+                        1.
+                        self.rect_size.y * self.norm_scroll
+                        self.size
+                        self.rect_size.y * self.norm_handle
+                        self.border_radius
+                    )
                 }
                 else {
                     sdf.box(
-                        self.rect_size.x * self.norm_scroll,
-                        1.,
-                        self.rect_size.x * self.norm_handle,
-                        self.size,
+                        self.rect_size.x * self.norm_scroll
+                        1.
+                        self.rect_size.x * self.norm_handle
+                        self.size
                         self.border_radius
-                    );
+                    )
                 }
-                            
+                
                 sdf.fill_keep(mix(
-                    self.color,
+                    self.color
                     mix(
-                        self.color_hover,
-                        self.color_drag,
+                        self.color_hover
+                        self.color_drag
                         self.drag
-                    ),
+                    )
                     self.hover
-                ));
-                            
+                ))
+                
                 sdf.stroke(mix(
-                    self.border_color,
+                    self.border_color
                     mix(
-                        self.border_color_hover,
-                        self.border_color_drag,
+                        self.border_color_hover
+                        self.border_color_drag
                         self.drag
-                    ),
+                    )
                     self.hover
-                ), self.border_size);
+                ) self.border_size)
                 return sdf.result
             }
         }
 
-        animator : Animator{
+        animator: Animator{
             hover: States{
                 default: @off
                 off: State{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        draw_bg: {drag: 0.0, hover: 0.0}
+                        draw_bg: {drag: 0 hover: 0}
                     }
                 }
                 on: State{
-                    cursor: MouseCursor.Default,
+                    cursor: MouseCursor.Default
                     from: {
                         all: Forward {duration: 0.1}
                         drag: Forward {duration: 0.01}
                     }
                     apply: {
                         draw_bg: {
-                            drag: 0.0,
-                            hover: [{time: 0.0, value: 1.0}],
+                            drag: 0
+                            hover: [{time: 0 value: 1}]
                         }
                     }
                 }
                 drag: State{
-                    cursor: MouseCursor.Default,
+                    cursor: MouseCursor.Default
                     from: {all: Snap}
                     apply: {
                         draw_bg: {
-                            drag: 1.0,
-                            hover: 1.0,
+                            drag: 1 hover: 1
                         }
                     }
                 }
@@ -136,35 +136,35 @@ script_mod!{
             border_color_drag: shader.uniform(theme.color_u_hidden)
 
             pixel: fn() -> vec4 {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size);
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 if self.is_vertical > 0.5 {
                     sdf.box(
                         1.,
-                        self.rect_size.y * self.norm_scroll,
-                        self.size,
-                        self.rect_size.y * self.norm_handle,
+                        self.rect_size.y * self.norm_scroll
+                        self.size
+                        self.rect_size.y * self.norm_handle
                         self.border_radius
-                    );
+                    )
                 }
                 else {
                     sdf.box(
-                        self.rect_size.x * self.norm_scroll,
-                        1.,
-                        self.rect_size.x * self.norm_handle,
-                        self.size,
+                        self.rect_size.x * self.norm_scroll
+                        1.
+                        self.rect_size.x * self.norm_handle
+                        self.size
                         self.border_radius
-                    );
+                    )
                 }
 
                 sdf.fill_keep(mix(
-                    self.color,
+                    self.color
                     mix(
-                        self.color_hover,
-                        self.color_drag,
+                        self.color_hover
+                        self.color_drag
                         self.drag
                     ),
                     self.hover
-                ));
+                ))
 
                 sdf.stroke(mix(
                     self.border_color,
@@ -174,7 +174,7 @@ script_mod!{
                         self.drag
                     ),
                     self.hover
-                ), self.border_size);
+                ), self.border_size)
 
                 return sdf.result
             }

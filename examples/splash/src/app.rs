@@ -9,18 +9,19 @@ script_mod!{
     mod.res.load_all()
     
     let theme = {
-        SOME_COLOR: #fff
+        test_color: #fff
     }
     
     let x = #(App::script_component(vm)){
         me.draw_quad.pixel = ||{
             let sdf = Sdf2d.viewport(self.pos*self.rect_size)
             sdf.circle(40 40 35)
-            sdf.fill(mix(theme.SOME_COLOR #f00 self.pos.y))
+            sdf.fill(mix(theme.test_color #f00 self.pos.y))
             sdf.result
         }
         me.draw_text.color = #fff
     }
+    ~x
     x
 }
 
@@ -57,7 +58,7 @@ impl MatchEvent for App{
             initial: true,
         });
         self.pass.set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
-        self.pass.set_window_clear_color(cx, vec4(0.2, 0.2, 0.2, 0.0));
+        self.pass.set_window_clear_color(cx, vec4(0.05, 0.05, 0.05, 0.0));
     }
 
     fn handle_draw_2d(&mut self, cx: &mut Cx2d){
@@ -95,10 +96,11 @@ impl AppMain for App {
         }
         
         // Handle scrollbar events
-        self.scroll_bar.handle_event_with(cx, event, &mut |_cx, action| {
+        self.scroll_bar.handle_event_with(cx, event, &mut |cx, action| {
             match action {
                 ScrollBarAction::Scroll { scroll_pos, .. } => {
                     println!("Scrollbar position: {}", scroll_pos);
+                    cx.redraw_all()
                 }
                 ScrollBarAction::ScrollDone => {
                     println!("Scroll done");

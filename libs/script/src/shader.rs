@@ -350,7 +350,7 @@ impl ShaderFnCompiler{
                             if self.is_parent_scope_unreachable() {
                                 self.handle_if_else_unreachable(args);
                             } else {
-                                self.handle_if_else(args);
+                                self.handle_if_else(vm, args);
                             }
                         }
                         _ => {}
@@ -886,7 +886,7 @@ impl ShaderFnCompiler{
 // IF            
             Opcode::IF_TEST=>self.handle_if_test(opargs),
                         
-            Opcode::IF_ELSE=>self.handle_if_else(opargs),
+            Opcode::IF_ELSE=>self.handle_if_else(vm, opargs),
 // Use            
             Opcode::USE=>{self.trap.err_opcode_not_supported_in_shader();},
 // Field            

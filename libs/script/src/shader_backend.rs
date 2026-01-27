@@ -229,6 +229,20 @@ impl ShaderBackend{
         }
     }
     
+    /// Generate a variable declaration statement for the backend.
+    /// For C-style backends (Metal, HLSL, GLSL): `type_name var_name;\n`
+    /// For WGSL: `var var_name:type_name;\n`
+    pub fn write_var_decl(&self, out: &mut String, ty_name: LiveId, var_name: &str) {
+        match self {
+            Self::Metal | Self::Hlsl | Self::Glsl => {
+                write!(out, "{} {};\n", ty_name, var_name).ok();
+            }
+            Self::Wgsl => {
+                write!(out, "var {}:{};\n", var_name, ty_name).ok();
+            }
+        }
+    }
+    
     pub fn register_ids(&self){
         match self{
             Self::Metal | Self::Hlsl=>{
