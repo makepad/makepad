@@ -133,6 +133,15 @@ impl ScriptThread {
     pub(crate) fn handle_range(&mut self, heap: &mut ScriptHeap, code: &ScriptCode) {
         let end = self.pop_stack_resolved(heap);
         let start = self.pop_stack_resolved(heap);
+        // Validate that both operands are numbers
+        if !start.is_number() {
+            self.push_stack_unchecked(self.trap.err_range_requires_numbers());
+            return;
+        }
+        if !end.is_number() {
+            self.push_stack_unchecked(self.trap.err_range_requires_numbers());
+            return;
+        }
         let range = heap.new_with_proto(code.builtins.range.into());
         heap.set_value_def(range, id!(start).into(), start);
         heap.set_value_def(range, id!(end).into(), end);

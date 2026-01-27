@@ -11,6 +11,7 @@ pub fn define_draw_module(vm:&mut ScriptVm){
     set_script_value_to_pod!(vm, draw.DrawCallUniforms);
     set_script_value_to_pod!(vm, draw.DrawListUniforms);
     set_script_value_to_pod!(vm, draw.DrawPassUniforms);
+    set_script_value_to_api!(vm, draw.MouseCursor);
     
     vm.new_handle_type(id!(geometry));
     

@@ -137,7 +137,11 @@ impl ScriptHeap{
     pub fn freeze_shader(&mut self, ptr: ScriptObject){
         self.objects[ptr.index as usize].tag.freeze_shader()
     }
-                    
+    
+    pub fn freeze_ext(&mut self, ptr: ScriptObject){
+        self.objects[ptr.index as usize].tag.freeze_ext()
+    }
+                        
     pub fn freeze_api(&mut self, ptr: ScriptObject){
         self.objects[ptr.index as usize].tag.freeze_api()
     }
@@ -799,10 +803,9 @@ impl ScriptHeap{
             let (o1, o2) = self.objects.split_at_mut(source.index as _);
             (&mut o1[target.index as usize], &mut o2[0])
         };
-        if target.tag.is_vec_frozen(){
-            return trap.err_vec_frozen()
+        if !target.tag.is_vec_frozen(){
+            target.push_vec_from_other(source);
         }
-        target.push_vec_from_other(source);
         // Only add map entries that don't already exist in target
         target.merge_map_from_other_no_overwrite(source);
         NIL

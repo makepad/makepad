@@ -174,9 +174,15 @@ pub use crate::{
 };
 
 pub fn script_mod(vm: &mut ScriptVm){
-    vm.heap.new_module(id!(themes));
     makepad_draw2::script_mod(vm);
+    
+    vm.heap.new_module(id!(themes));
     crate::theme_desktop_dark::script_mod(vm);
+    
+    crate::animator::script_mod(vm);
+    
+    vm.heap.new_module(id!(widgets));
+    crate::scroll_bar::script_mod(vm);
     //crate::theme_desktop_dark::script_mod(vm);
     //makepad_fonts_emoji2::script_mod(vm);
     //makepad_fonts_chinese_regular2::script_mod(vm);

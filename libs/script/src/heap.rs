@@ -494,6 +494,11 @@ impl ScriptHeap{
                     first = false;
                 }
                 write!(out, ">").ok();
+                if formatted {
+                    out.push('\n');
+                    write_indent(out, depth + 1);
+                }
+                first = true;
             }
             
             loop{
