@@ -1,4 +1,4 @@
-
+use crate::apply::*;
 use crate::vm::*;
 use crate::value::*;
 use crate::heap::*;

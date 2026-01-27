@@ -54,12 +54,14 @@ pub mod shader_metal;
 pub mod shader_hlsl;
 pub mod shader_tables;
 pub mod shader_builtins;
+pub mod apply;
 
 pub use gc::*;
 pub use makepad_live_id::*;
 pub use value::*;
 pub use vm::*;
 pub use makepad_script_derive::*;
+pub use apply::*;
 pub use traits::*;
 pub use thread::*;
 pub use heap::*;

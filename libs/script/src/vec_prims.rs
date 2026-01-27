@@ -5,6 +5,7 @@ use crate::heap::*;
 use crate::traits::*;
 use crate::array::*;
 use crate::object::*;
+use crate::apply::*;
 use std::hash::Hash;
 use std::collections::HashMap;
 use std::collections::BTreeMap;

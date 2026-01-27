@@ -21,7 +21,8 @@ live_design! {
             instance down: 0.0,
             instance focus: 0.0,
             instance disabled: 0.0
-
+            
+            color: theme.color_label_inner,
             color: (THEME_COLOR_LABEL_INNER)
             uniform color_hover: (THEME_COLOR_LABEL_INNER_HOVER)
             uniform color_down: (THEME_COLOR_LABEL_INNER_DOWN)

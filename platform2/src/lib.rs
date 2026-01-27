@@ -16,7 +16,6 @@ pub mod thread;
 pub mod audio;
 pub mod midi;
 pub mod video;
-pub mod scope;
 pub mod script;
 
 mod draw_matrix;
@@ -79,6 +78,7 @@ pub use {
     makepad_math::*,
     makepad_math::makepad_micro_serde,
     makepad_script::{
+        apply::*,
         heap::*,
         value::*,
         object::*,
@@ -111,7 +111,6 @@ pub use {
         os::*,
         cx_api::{CxOsApi,OpenUrlInPlace, CxOsOp},
         media_api::CxMediaApi,
-        scope::*,
         script::{
             vm::*,
         },

@@ -66,14 +66,14 @@ pub mod root;
 pub mod debug_view;
 pub mod performance_view;
 pub mod nav_control;
-
+*/
 pub mod view;
+/*
 pub mod adaptive_view;
 pub mod view_ui;
 
 pub mod toggle_panel;
 pub mod command_text_input;
-
 */
 pub mod widget;
 pub mod widget_match_event;
