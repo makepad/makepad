@@ -211,48 +211,47 @@ pub struct ShaderFn{
 
 impl ShaderOutput{
     /// Pre-collect ALL Rust instance fields in the correct order for struct layout.
-    /// Walks from deepest prototype to io_self, collecting ALL rust type properties.
+    /// Uses recursion to process from deepest prototype to io_self, collecting all rust type properties.
     /// Dyn instance fields are NOT pre-collected - they are added during compilation
     /// as encountered, and their order doesn't matter.
     /// 
     /// IoInstance struct layout: Dyn fields first (any order), Rust fields last (must match Repr(C))
-    /// RustInstance fields are pushed in the correct order, so no sorting is needed later.
+    /// RustInstance fields are pushed in the correct order: deref parent fields first, then child fields.
     pub fn pre_collect_rust_instance_io(&mut self, vm: &mut ScriptVm, io_self: ScriptObject) {
-        // First, collect all prototypes in order (deepest first)
-        let mut proto_chain = Vec::new();
-        let mut current = io_self;
-        proto_chain.push(current);
-        while let Some(proto_obj) = vm.heap.proto(current).as_object() {
-            proto_chain.push(proto_obj);
-            current = proto_obj;
+        self.pre_collect_rust_instance_io_recursive(vm, io_self);
+    }
+    
+    fn pre_collect_rust_instance_io_recursive(&mut self, vm: &mut ScriptVm, obj: ScriptObject) {
+        // First, recurse to prototype (to process deepest ancestor first)
+        // This ensures parent's RustInstance fields come before child's fields
+        if let Some(proto_obj) = vm.heap.proto(obj).as_object() {
+            self.pre_collect_rust_instance_io_recursive(vm, proto_obj);
         }
-        // Reverse so deepest (root) prototype comes first
-        proto_chain.reverse();
         
-        // Walk from deepest prototype to io_self
-        // Only collect Rust type properties - dyn properties are added during compilation
-        // Use iter_rust_instance_ordered() to skip fields that come BEFORE the #[deref] field
-        for proto_obj in proto_chain {
-            let obj_data = vm.heap.object_data(proto_obj);
-            let ty_index = obj_data.tag.as_type_index();
+        // Then process this object's type properties
+        let obj_data = vm.heap.object_data(obj);
+        let ty_index = obj_data.tag.as_type_index();
+        
+        if let Some(ty_index) = ty_index {
+            // Collect the ordered props - iter_rust_instance_ordered returns all instance fields
+            // (parent fields + this type's fields after deref) because rust_instance_start is now
+            // correctly left at 0 (config fields before deref are skipped during script_proto_props)
+            let type_check = vm.heap.type_check(ty_index);
+            // Collect into a Vec first to avoid borrow issues with heap mutation below
+            let ordered_props: Vec<_> = type_check.props.iter_rust_instance_ordered().collect();
             
-            if let Some(ty_index) = ty_index {
-                // Collect the ordered props, skipping fields before #[deref]
-                let type_check = vm.heap.type_check(ty_index);
-                let ordered_props: Vec<_> = type_check.props.iter_rust_instance_ordered().collect();
-                
-                for (field_id, type_id) in ordered_props {
-                    // Get the pod type from the type_id (no longer need to look up values on prototype)
-                    if let Some(pod_ty) = vm.heap.type_id_to_pod_type(type_id, &vm.code.builtins.pod) {
-                        if !self.io.iter().any(|io| io.name == field_id) {
-                            vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
-                            self.io.push(ShaderIo {
-                                kind: ShaderIoKind::RustInstance,
-                                name: field_id,
-                                ty: pod_ty,
-                                buffer_index: None,
-                            });
-                        }
+            for (field_id, type_id) in ordered_props {
+                // Get the pod type from the type_id
+                if let Some(pod_ty) = vm.heap.type_id_to_pod_type(type_id, &vm.code.builtins.pod) {
+                    // Skip if already added (handles duplicate prototypes in chain)
+                    if !self.io.iter().any(|io| io.name == field_id) {
+                        vm.heap.pod_type_name_if_not_set(pod_ty, field_id);
+                        self.io.push(ShaderIo {
+                            kind: ShaderIoKind::RustInstance,
+                            name: field_id,
+                            ty: pod_ty,
+                            buffer_index: None,
+                        });
                     }
                 }
             }

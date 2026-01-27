@@ -513,6 +513,11 @@ impl ScriptMapTag{
     fn set_order(&mut self, order: u32) {
         self.0 = (self.0 & !Self::ORDER_MASK) | (order as u64);
     }
+    
+    fn with_order_offset(self, offset: u32) -> Self {
+        let new_order = self.order() + offset;
+        Self((self.0 & !Self::ORDER_MASK) | (new_order as u64))
+    }
 }
 
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
@@ -751,15 +756,25 @@ impl ScriptObjectData{
     }
     
     pub fn merge_map_from_other(&mut self, other:&ScriptObjectData){
-        self.map.extend(other.map.iter());
+        let offset = self.map.len() as u32;
+        for (k, v) in other.map.iter() {
+            self.map.insert(*k, ScriptMapValue {
+                value: v.value,
+                tag: v.tag.with_order_offset(offset),
+            });
+        }
     }
     
     /// Merge map entries from other, but only if the key doesn't already exist in self.
     /// Used by the splat operator to not overwrite existing values.
     pub fn merge_map_from_other_no_overwrite(&mut self, other:&ScriptObjectData){
+        let offset = self.map.len() as u32;
         for (k, v) in other.map.iter() {
             if !self.map.contains_key(k) {
-                self.map.insert(*k, *v);
+                self.map.insert(*k, ScriptMapValue {
+                    value: v.value,
+                    tag: v.tag.with_order_offset(offset),
+                });
             }
         }
     }

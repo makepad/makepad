@@ -64,7 +64,7 @@ pub fn test(){
         }
     }
     
-    let _code = script!{
+    let code = script!{
         use mod.std.*
         use mod.shader
         use mod.pod.*
@@ -101,6 +101,7 @@ pub fn test(){
             vtx: shader.vertex_buffer(vertices)
             unitest: shader.uniform(1.0)
             unitest2: shader.uniform(1.0)
+            unicolor: shader.uniform(test_col)
             color: 1.0
             draw: shader.uniform_buffer(draw_uniforms)
             y: shader.instance(1.0)
@@ -111,6 +112,7 @@ pub fn test(){
             pixel: shader.fragment_output(0, vec4f)
             otherfn: |x| x + 1
             testfn: ||{
+                let c = self.unicolor;
                 let k = test_p1
                 let m = test_obj.test_p1
                 let n = test_obj.objfn()
@@ -145,7 +147,7 @@ pub fn test(){
     
     // lets define a handle type with some methods on it
     // Our unit tests :)
-    let code = script!{
+    let _code = script!{
         use mod.std.assert
         use mod.std.println
         use mod.pod
