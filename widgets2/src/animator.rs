@@ -3,12 +3,9 @@ use std::f64::consts::PI;
 
 script_mod!{
     mod.animator = {
-        Animator: mod.std.set_type_default() do #(Animator::script_ext(vm)){
-        }
-        State: #(State::script_ext(vm)){
-        }
-        States: #(State::script_ext(vm)){
-        }
+        Animator: mod.std.set_type_default() do #(Animator::script_ext(vm)){}
+        State: #(State::script_ext(vm)){}
+        States: #(States::script_ext(vm)){}
         Play: #(Play::script_api(vm)),
         ..me.Play,
         Ease: #(Ease::script_api(vm)),
@@ -78,7 +75,7 @@ struct State {
 }
 
 impl ScriptHook for State {
-    fn on_custom_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, value: ScriptValue) -> bool {
+    fn on_custom_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, _value: ScriptValue) -> bool {
         true
     }
 }
@@ -90,8 +87,8 @@ pub struct Animator {
 }
 
 impl ScriptHook for Animator {
-    fn on_custom_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, value: ScriptValue) -> bool {
-        let Some(obj) = value.as_object() else {
+    fn on_custom_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, value: ScriptValue) -> bool {
+        let Some(_obj) = value.as_object() else {
             return false;
         };
 /*        

@@ -8,6 +8,7 @@ use crate::opcode::*;
 use crate::mod_pod::*;
 use crate::mod_shader::*;
 use crate::shader_backend::*;
+use crate::pod::ScriptPodTy;
 use std::fmt::Write;
 use crate::makepad_error_log::*;
 
@@ -755,13 +756,17 @@ impl ShaderFnCompiler{
     }
 
     pub(crate) fn ensure_struct_name(&self, vm: &mut ScriptVm, output: &mut ShaderOutput, pod_ty: ScriptPodType, used_name: LiveId) -> LiveId {
+        // Always insert struct types into output.structs so they get defined in shader output
+        if let ScriptPodTy::Struct{..} = vm.heap.pod_type_ref(pod_ty).ty {
+            output.structs.insert(pod_ty);
+        }
+        
         if let Some(name) = vm.heap.pod_type_name(pod_ty) {
             if name != used_name && used_name != id!(self) && used_name != id!(vec2) && used_name != id!(vec3) && used_name != id!(vec4) {
                 self.trap.err_struct_name_not_consistent();
             }
             return name;
         }
-        output.structs.insert(pod_ty);
         vm.heap.pod_type_name_set(pod_ty, used_name);
         used_name
     }

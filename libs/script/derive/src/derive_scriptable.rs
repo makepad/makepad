@@ -183,10 +183,11 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
         
         for (idx, field) in fields.iter().enumerate() {
             // Process deref field - recursively adds props from the base type
+            // Note: We do NOT call mark_rust_instance_start() here because parent's fields
+            // ARE part of the Rust instance data. Config fields before deref are excluded
+            // by the continue statement below, not by rust_instance_start filtering.
             if field.attrs.iter().find(|a| a.name == "deref").is_some(){
                 tb.add("<").stream(Some(field.ty.clone())).add(" as ScriptNew>::script_proto_props(vm, obj, props);");
-                // Mark where Rust instance fields begin (fields AFTER the deref)
-                tb.add("props.mark_rust_instance_start();");
             }
             
             // Process live fields

@@ -76,7 +76,7 @@ script_mod!{
     }
 }
 
-#[derive(Script)]
+#[derive(Script, Debug)]
 #[repr(C)]
 pub struct DrawQuad {
     #[rust] pub many_instances: Option<ManyInstances>,

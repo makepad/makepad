@@ -504,7 +504,7 @@ impl ScriptHeap{
             loop{
                 let object = &self.objects[ptr.index as usize];
                 
-                object.map_iter(|key,value|{
+                object.map_iter_ordered(|key,value|{
                     write_separator(out, formatted, depth + 1, first);
                     if key != NIL{
                         self.to_debug_string(key, recur, out, formatted, depth + 1);
