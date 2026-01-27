@@ -64,28 +64,68 @@ impl ShaderFnCompiler {
                 let both_returned = *if_branch_returned && *has_return;
 
                 if self.stack.types.len() > *stack_depth {
+                    // Else branch has a value on the stack
                     let (ty, val) = self.stack.pop(&self.trap);
-                    if let Some(phi) = phi {
+                    
+                    // Check if the else value is void
+                    let else_concrete = ty.make_concrete(&vm.code.builtins.pod);
+                    let else_is_void = else_concrete.map(|t| t == vm.code.builtins.pod.pod_void).unwrap_or(false);
+                    
+                    if else_is_void {
+                        // Emit void value as statement
+                        if !val.is_empty() {
+                            self.out.push_str(&val);
+                            self.out.push_str(";\n");
+                        }
+                    } else if let Some(phi) = phi {
                         if let Some(phi_type) = phi_type {
-                            self.out.push_str(&format!("{} = {};\n", phi, val));
                             // declare the phi at start
                             let ty = type_table_if_else(phi_type, &ty, &self.trap, &vm.code.builtins.pod);
                             let ty = ty.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
+                            
+                            // Skip phi handling if type is void
+                            if ty != vm.code.builtins.pod.pod_void {
+                                self.out.push_str(&format!("{} = {};\n", phi, val));
+                                let ty_name = if let Some(name) = vm.heap.pod_type_name(ty) {
+                                    output.backend.map_pod_name(name)
+                                } else {
+                                    id!(unknown)
+                                };
+                                // Generate backend-appropriate variable declaration
+                                let mut s = self.stack.new_string();
+                                output.backend.write_var_decl(&mut s, ty_name, phi);
+                                self.out.insert_str(*start_pos, &s);
+                                self.stack.free_string(s);
+                                let mut s = self.stack.new_string();
+                                write!(s, "{}", phi).ok();
+                                self.stack.push(&self.trap, ShaderType::Pod(ty), s);
+                            }
+                        }
+                    }
+                    self.stack.free_string(val);
+                } else if let Some(phi) = phi {
+                    // If branch had a value (created phi) but else branch has no value.
+                    // The phi assignment was already written in handle_if_else, so we must
+                    // declare the phi variable to make the shader code valid.
+                    // However, since only one branch has a value, we can't use this as
+                    // an expression result, so we don't push it onto the stack.
+                    if let Some(phi_type) = phi_type {
+                        let ty = phi_type.make_concrete(&vm.code.builtins.pod).unwrap_or(vm.code.builtins.pod.pod_void);
+                        
+                        // Skip phi handling if type is void
+                        if ty != vm.code.builtins.pod.pod_void {
                             let ty_name = if let Some(name) = vm.heap.pod_type_name(ty) {
                                 output.backend.map_pod_name(name)
                             } else {
                                 id!(unknown)
                             };
+                            // Generate backend-appropriate variable declaration
                             let mut s = self.stack.new_string();
-                            write!(s, "let {phi}:{ty_name};\n").ok();
+                            output.backend.write_var_decl(&mut s, ty_name, phi);
                             self.out.insert_str(*start_pos, &s);
                             self.stack.free_string(s);
-                            let mut s = self.stack.new_string();
-                            write!(s, "{}", phi).ok();
-                            self.stack.push(&self.trap, ShaderType::Pod(ty), s);
                         }
                     }
-                    self.stack.free_string(val);
                 }
                 self.out.push_str("}\n");
                 self.shader_scope.exit_scope();
@@ -146,7 +186,7 @@ impl ShaderFnCompiler {
         });
     }
 
-    pub(crate) fn handle_if_else(&mut self, opargs: OpcodeArgs) {
+    pub(crate) fn handle_if_else(&mut self, vm: &ScriptVm, opargs: OpcodeArgs) {
         if let Some(ShaderMe::IfBody {
             target_ip,
             start_pos,
@@ -159,15 +199,27 @@ impl ShaderFnCompiler {
         {
             if self.stack.types.len() > *stack_depth {
                 let (ty, val) = self.stack.pop(&self.trap);
-                *phi_type = Some(ty);
-                let phi_name = if let Some(p) = phi {
-                    p.clone()
+                // Check if the type is void - if so, don't create a phi, just emit as statement
+                let concrete_ty = ty.make_concrete(&vm.code.builtins.pod);
+                let is_void = concrete_ty.map(|t| t == vm.code.builtins.pod.pod_void).unwrap_or(false);
+                
+                if is_void {
+                    // Emit as statement without phi assignment
+                    if !val.is_empty() {
+                        self.out.push_str(&val);
+                        self.out.push_str(";\n");
+                    }
                 } else {
-                    let s = format!("_phi_{}", start_pos);
-                    *phi = Some(s.clone());
-                    s
-                };
-                self.out.push_str(&format!("{} = {};\n", phi_name, val));
+                    *phi_type = Some(ty);
+                    let phi_name = if let Some(p) = phi {
+                        p.clone()
+                    } else {
+                        let s = format!("_phi_{}", start_pos);
+                        *phi = Some(s.clone());
+                        s
+                    };
+                    self.out.push_str(&format!("{} = {};\n", phi_name, val));
+                }
                 self.stack.free_string(val);
             }
             self.out.push_str("}\nelse{\n");
