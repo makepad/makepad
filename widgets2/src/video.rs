@@ -354,7 +354,7 @@ impl LiveHook for Video {
         self.should_prepare_playback = self.autoplay;
     }
 
-    fn after_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
         self.lazy_create_image_cache(cx);
         self.thumbnail_texture = Some(Texture::new(cx));
 

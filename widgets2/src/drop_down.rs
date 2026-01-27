@@ -424,7 +424,7 @@ struct DrawLabelText {
 }
 
 impl LiveHook for DropDown {
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
         if self.popup_menu.is_none() || !apply.from.is_from_doc() {
             return
         }

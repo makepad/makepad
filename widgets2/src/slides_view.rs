@@ -111,14 +111,14 @@ enum DrawState {
 }
 
 impl LiveHook for SlidesView {
-    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+    fn before_apply(&mut self, _cx: &mut Cx, apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = apply.from {
             //self.children.clear();
             self.draw_order.clear();
         }
     }
     
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
         match apply.from {
             ApplyFrom::Animate | ApplyFrom::Over => {

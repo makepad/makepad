@@ -1,7 +1,9 @@
 use proc_macro::TokenStream;
 
 mod derive_widget;
+mod derive_animator;
 use crate::derive_widget::*;
+use crate::derive_animator::*;
 
 
 /*
@@ -24,6 +26,14 @@ pub fn derive_widget(input: TokenStream) -> TokenStream {
 pub fn derive_widget(input: TokenStream) -> TokenStream {
     derive_widget_impl(input)
 }
+
+#[proc_macro_derive(Animator, attributes(
+    animator,
+))]
+pub fn derive_animator(input: TokenStream) -> TokenStream {
+    derive_animator_impl(input)
+}
+
 /*
 #[proc_macro_derive(WidgetWrap, attributes(
     walk,

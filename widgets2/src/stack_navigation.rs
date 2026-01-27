@@ -418,7 +418,7 @@ pub struct StackNavigation {
 }
 
 impl LiveHook for StackNavigation {
-    fn after_apply_from(&mut self, cx: &mut Cx, apply: &mut Apply) {
+    fn after_apply_from(&mut self, cx: &mut Cx, apply: &Apply) {
         if apply.from.is_new_from_doc() {
             self.navigation_stack = NavigationStack::default();
         } else {

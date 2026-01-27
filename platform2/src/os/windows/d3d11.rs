@@ -1111,7 +1111,7 @@ pub struct CxOsGeometry {
 
 // Shader compilation for HLSL
 impl DrawVars {
-    pub (crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &mut Apply, value: ScriptValue) {
+    pub (crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
         
         // Compile an HLSL shader
         if let Some(io_self) = value.as_object() {

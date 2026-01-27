@@ -171,116 +171,69 @@ impl<'a,'b> Scope<'a,'b>{
 }
 
 // ============================================================================
-// ApplyFrom - Source of apply operation
+// Apply - Source of apply operation
 // ============================================================================
 
-/// File identifier for live DSL documents (wraps u16 index)
-#[derive(Clone, Copy, Default, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ApplyFileId(pub u16);
-
-#[derive(Debug, Clone, Copy)]
-pub enum ApplyFrom {
-    NewFromDoc {file_id: ApplyFileId},
-    UpdateFromDoc {file_id: ApplyFileId},
+#[derive(Debug, Clone, Copy, Default)]
+pub enum Apply {
     New,
+    Reload,
+    Update,
     Animate,
-    AnimatorInit,
+    #[default]
     Over,
 }
 
-impl Default for ApplyFrom {
-    fn default() -> Self {
-        ApplyFrom::Over
-    }
-}
-
-impl ApplyFrom {
-    pub fn is_from_doc(&self) -> bool {
+impl Apply {
+    pub fn is_from_script(&self) -> bool {
         match self {
-            Self::NewFromDoc {..} => true,
-            Self::UpdateFromDoc {..} => true,
-            _ => false
-        }
-    }
-
-    pub fn is_new_from_doc(&self) -> bool {
-        match self {
-            Self::NewFromDoc {..} => true,
+            Self::New => true,
+            Self::Reload => true,
+            Self::Update => true,
             _ => false
         }
     }
     
-    pub fn should_apply_reset(&self) -> bool {
+    pub fn is_from_rust(&self) -> bool {
         match self {
-            Self::UpdateFromDoc{..}  => true,
+            Self::Animate => true,
+            Self::Over => true,
+            _ => false
+        }
+    }
+
+    pub fn is_new(&self) -> bool {
+        match self {
+            Self::New => true,
             _ => false
         }
     }
     
-    pub fn is_update_from_doc(&self) -> bool {
+    pub fn is_update(&self) -> bool {
         match self {
-            Self::UpdateFromDoc {..} => true,
+            Self::Update => true,
             _ => false
         }
     }
-        
-    pub fn file_id(&self) -> Option<ApplyFileId> {
+    
+    pub fn is_reload(&self) -> bool {
         match self {
-            Self::NewFromDoc {file_id} => Some(*file_id),
-            Self::UpdateFromDoc {file_id,..} => Some(*file_id),
-            _ => None
+            Self::Reload => true,
+            _ => false
         }
     }
     
-    pub fn with_scope<'a, 'b, 'c>(self, scope:&'c mut Scope<'a,'b>)->Apply<'a, 'b, 'c>{
-        Apply{
-            from: self,
-            scope: Some(scope)
+    pub fn is_animate(&self) -> bool {
+        match self {
+            Self::Animate => true,
+            _ => false
         }
     }
-}
-
-// ============================================================================
-// Apply - Context for apply operations including source and scope
-// ============================================================================
-
-pub struct Apply<'a,'b,'c> {
-    pub from: ApplyFrom,
-    pub scope: Option<&'c mut Scope<'a,'b>>,
-}
-
-impl Default for Apply<'_, '_, '_> {
-    fn default() -> Self {
-        Self {
-            from: ApplyFrom::default(),
-            scope: None,
-        }
-    }
-}
-
-impl<'a,'b, 'c> From<ApplyFrom> for Apply<'a,'b,'c> {
-    fn from(from: ApplyFrom) -> Self {
-        Self {
-            from,
-            scope: None,
-        }
-    }
-}
-
-impl <'a,'b,'c> Apply<'a,'b,'c>{
-    pub fn override_from<F, R>(&mut self, from:ApplyFrom, f: F) -> R where F: FnOnce(&mut Apply) -> R{
-        if let Some(scope) = &mut self.scope{
-            f(&mut Apply{
-                from: from,
-                scope: Some(*scope)
-            })
-        }
-        else{
-            f(&mut Apply{
-                from: from,
-                scope: None
-            })
-            
+    
+    pub fn is_over(&self) -> bool {
+        match self {
+            Self::Over => true,
+            _ => false
         }
     }
 }

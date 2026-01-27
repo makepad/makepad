@@ -151,7 +151,7 @@ impl LiveHook for AdaptiveView {
     fn before_apply(
         &mut self,
         _cx: &mut Cx,
-        apply: &mut Apply,
+        apply: &Apply,
         _index: usize,
         _nodes: &[LiveNode],
     ) {
@@ -160,7 +160,7 @@ impl LiveHook for AdaptiveView {
         }
     }
 
-    fn after_apply_from(&mut self, cx: &mut Cx, apply: &mut Apply) {
+    fn after_apply_from(&mut self, cx: &mut Cx, apply: &Apply) {
         // Do not override the current selector if we are updating from the doc
         if let ApplyFrom::UpdateFromDoc { .. } = apply.from {
             return;
@@ -182,7 +182,7 @@ impl LiveHook for AdaptiveView {
     fn apply_value_instance(
         &mut self,
         cx: &mut Cx,
-        apply: &mut Apply,
+        apply: &Apply,
         index: usize,
         nodes: &[LiveNode],
     ) -> usize {
