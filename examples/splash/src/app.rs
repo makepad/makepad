@@ -41,7 +41,8 @@ pub struct App {
 }
 
 impl ScriptHook for App{
-    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){
+    fn on_alive(&self){
+        println!("ALIVE!")
     }
 }
 

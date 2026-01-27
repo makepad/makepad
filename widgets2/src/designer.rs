@@ -126,7 +126,7 @@ pub struct Designer {
 
 impl LiveHook for Designer {
     
-    fn before_apply(&mut self, cx: &mut Cx, _apply: &mut Apply, _index: usize, _nodes: &[LiveNode]){
+    fn before_apply(&mut self, cx: &mut Cx, _apply: &Apply, _index: usize, _nodes: &[LiveNode]){
         self.data.update_from_live_registry(cx);
     }
     

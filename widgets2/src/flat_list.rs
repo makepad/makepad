@@ -70,14 +70,14 @@ pub struct FlatList {
 
 impl LiveHook for FlatList {
             
-    fn before_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+    fn before_apply(&mut self, _cx: &mut Cx, apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = apply.from {
             self.templates.clear();
         }
     }
     
     // hook the apply flow to collect our templates and apply to instanced childnodes
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         if nodes[index].is_instance_prop() {
             if let Some(live_ptr) = apply.from.to_live_ptr(cx, index){
                 let id = nodes[index].id;
@@ -96,7 +96,7 @@ impl LiveHook for FlatList {
         nodes.skip_node(index)
     }
     
-    fn after_apply(&mut self, _cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, _cx: &mut Cx, _applyl: &Apply, _index: usize, _nodes: &[LiveNode]) {
         if let Flow::Down = self.layout.flow {
             self.vec_index = Vec2Index::Y
         }

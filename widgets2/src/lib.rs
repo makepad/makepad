@@ -8,6 +8,7 @@ pub use makepad_platform::log;
 pub use makepad_zune_jpeg;
 pub use makepad_zune_png;
 
+pub mod animator;
 // pub mod button;
 // pub mod cached_widget;
 // pub mod label;
@@ -21,7 +22,7 @@ pub use makepad_zune_png;
 // pub mod radio_button;
 // pub mod text_input;
 // pub mod slider;
-// pub mod scroll_bar;
+ pub mod scroll_bar;
 // pub mod scroll_bars;
 // pub mod splitter;
 // pub mod vectorline;
@@ -79,8 +80,6 @@ pub mod widget;
 pub mod widget_match_event;
 
 // pub mod touch_gesture;
-
-
 // #[macro_use]
 // pub mod data_binding;
 
@@ -105,51 +104,51 @@ pub mod designer_toolbox;
 
 
 pub use crate::{
-/*    
-    data_binding::{DataBindingStore, DataBindingMap},
-    button::*,
-    cached_widget::*,
-    view::*,
-    adaptive_view::*,
-    image::*,
-    image_blend::*,
-    icon::*,
-    label::*,
-    slider::*,
-    root::*,
-    text_flow::*,
-    markdown::*,
-    html::*,
-    check_box::*,
-    drop_down::*,
-    modal::*,
-    tooltip::*,
-    popup_notification::*,
-    video::*,
-    radio_button::*,
-    text_input::*,
-    link_label::*,
-    portal_list::*,
-    portal_list2::*,
-    flat_list::*,
-    page_flip::*,
-    slide_panel::*,
-    fold_button::*,
-    dock::*,
-    stack_navigation::*,
-    expandable_panel::*,
-    command_text_input::*,
-    window::*,
-    multi_window::*,
-    web_view::*,
-    scroll_bars::{ScrollBars},
-    scroll_shadow::{DrawScrollShadow},
-    scroll_bar::{ScrollBar},
-    slides_view::{SlidesView},
-    widget_match_event::WidgetMatchEvent,
-    toggle_panel::*,
-    defer_with_redraw::*,
-    */
+    
+//    data_binding::{DataBindingStore, DataBindingMap},
+//    button::*,
+//    cached_widget::*,
+//    view::*,
+//    adaptive_view::*,
+//    image::*,
+//    image_blend::*,
+//    icon::*,
+//    label::*,
+//    slider::*,
+//    root::*,
+//    text_flow::*,
+//    markdown::*,
+//    html::*,
+//    check_box::*,
+//    drop_down::*,
+//    modal::*,
+//    tooltip::*,
+//    popup_notification::*,
+//    video::*,
+//    radio_button::*,
+//    text_input::*,
+//    link_label::*,
+//    portal_list::*,
+//    portal_list2::*,
+//    flat_list::*,
+//    page_flip::*,
+//    slide_panel::*,
+//    fold_button::*,
+//    dock::*,
+//    stack_navigation::*,
+//    expandable_panel::*,
+//    command_text_input::*,
+//    window::*,
+//    multi_window::*,
+//    web_view::*,
+//    scroll_bars::{ScrollBars},
+//    scroll_shadow::{DrawScrollShadow},
+//    scroll_bar::{ScrollBar},
+//    slides_view::{SlidesView},
+//    widget_match_event::WidgetMatchEvent,
+//    toggle_panel::*,
+//    defer_with_redraw::*,
+
     widget::{
         WidgetSet,
         WidgetUid,
@@ -175,7 +174,10 @@ pub use crate::{
 };
 
 pub fn script_mod(vm: &mut ScriptVm){
+    vm.heap.new_module(id!(themes));
     makepad_draw2::script_mod(vm);
+    crate::theme_desktop_dark::script_mod(vm);
+    //crate::theme_desktop_dark::script_mod(vm);
     //makepad_fonts_emoji2::script_mod(vm);
     //makepad_fonts_chinese_regular2::script_mod(vm);
     //makepad_fonts_chinese_regular2_2::script_mod(vm);

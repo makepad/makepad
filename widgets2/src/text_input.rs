@@ -621,7 +621,7 @@ pub struct TextInput {
 }
 
  impl LiveHook for TextInput{
-     fn apply_value_unknown(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+     fn apply_value_unknown(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         if nodes[index].id == live_id!(text){
             if !apply.from.is_update_from_doc(){
                 return self.text.apply(cx, apply, index, nodes)

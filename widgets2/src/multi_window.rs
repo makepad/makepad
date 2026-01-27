@@ -22,7 +22,7 @@ pub struct MultiWindow {
 }
 
 impl LiveHook for MultiWindow {
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
         match apply.from {
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {

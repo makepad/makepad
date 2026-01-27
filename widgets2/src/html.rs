@@ -279,7 +279,7 @@ pub struct Html {
 
 // alright lets parse the HTML
 impl LiveHook for Html {
-    fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&mut Apply) {
+    fn after_apply_from(&mut self, _cx: &mut Cx, _apply:&Apply) {
         let mut errors = Some(Vec::new());
         let new_doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
         if new_doc != self.doc{
@@ -677,7 +677,7 @@ pub struct HtmlLink {
 impl LiveHook for HtmlLink {
     // After an HtmlLink instance has been instantiated ("applied"),
     // populate its struct fields from the `<a>` tag's attributes.
-    fn after_apply(&mut self, _cx: &mut Cx, apply: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, _cx: &mut Cx, apply: &Apply, _index: usize, _nodes: &[LiveNode]) {
         //log!("HtmlLink::after_apply(): apply.from: {:?}, apply.scope exists: {:?}", apply.from, apply.scope.is_some());
         match apply.from {
             ApplyFrom::NewFromDoc {..} => {

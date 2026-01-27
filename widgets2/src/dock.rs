@@ -338,7 +338,7 @@ pub enum DockItem {
 
 
 impl LiveHook for Dock {
-    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
         match apply.from {
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id,..} => {
@@ -376,7 +376,7 @@ impl LiveHook for Dock {
     }
 
     // alright lets update our tabs and splitters as well
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(tab_bar).as_field()) {
             for tab_bar in self.tab_bars.values_mut() {
                 tab_bar.tab_bar.apply(cx, apply, index, nodes);

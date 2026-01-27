@@ -89,7 +89,7 @@ pub struct DrawQuad {
 }
 
 impl ScriptHook for DrawQuad{
-    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){
+    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue){
     }
 }
 
@@ -238,10 +238,10 @@ pub struct DrawQuad {
 }
 
 impl LiveHook for DrawQuad{
-    fn before_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]){
+    fn before_apply(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]){
         self.draw_vars.before_apply_init_shader(cx, apply, index, nodes, &self.geometry);
     }
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) {
         self.draw_vars.after_apply_update_self(cx, apply, index, nodes, &self.geometry);
     }
 }

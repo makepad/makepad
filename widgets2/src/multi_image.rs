@@ -35,7 +35,7 @@ impl ImageCacheImpl for MultiImage {
 }
 
 impl LiveHook for MultiImage{
-    fn after_apply(&mut self, cx: &mut Cx, _applyl: &mut Apply, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _applyl: &Apply, _index: usize, _nodes: &[LiveNode]) {
         self.lazy_create_image_cache(cx);
         for (i,source) in [self.source1.clone(), self.source2.clone(), self.source2.clone(), self.source3.clone()].iter().enumerate(){
             if source.as_str().len()>0 {

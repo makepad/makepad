@@ -338,7 +338,7 @@ impl WidgetSet {
 /*
 impl LiveHook for WidgetSet {}
 impl LiveApply for WidgetSet {
-    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         for inner in &self.0 {
             let mut inner = inner.0.borrow_mut();
             if let Some(component) = &mut *inner {
@@ -776,7 +776,7 @@ impl WidgetRef {
         self.apply(cx, &mut ApplyFrom::Over.into(), 0, nodes);
     }
     
-    fn store_designer_backref(&self, cx:&mut Cx, apply:&mut Apply, index:usize){
+    fn store_designer_backref(&self, cx:&mut Cx, apply:&Apply, index:usize){
         if let Some(scope) = &mut apply.scope{
             if let Some(file_id) = apply.from.file_id(){
                 if let Some(dd) = scope.data.get_mut::<DesignerDataToWidget>(){
@@ -787,7 +787,7 @@ impl WidgetRef {
         }
     }
     
-    fn apply(&self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         let mut inner = self.0.borrow_mut();
         if let LiveValue::Class { live_type, .. } = nodes[index].value {
             if let Some(component) = &mut *inner {
@@ -843,7 +843,7 @@ impl WidgetRef {
 /*
 impl LiveHook for WidgetRef {}
 impl LiveApply for WidgetRef {
-    fn apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply: &Apply, index: usize, nodes: &[LiveNode]) -> usize {
         <WidgetRef>::apply(self, cx, apply, index, nodes)
     }
 }

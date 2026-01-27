@@ -16,18 +16,58 @@ pub type ScriptTypeId = std::any::TypeId;
 
 // sself we implement
 pub trait ScriptHook{
-    fn on_new(&mut self, _vm:&mut ScriptVm){}
-    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){}
-    fn on_after_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){}
-    fn on_skip_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue)->bool{false}
+    // these are the root entrypoints, and they by default dispatch to simpler lifecycle points
+    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue){}
+    
+    fn on_before_dispatch(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope, _value:ScriptValue){
+        match apply{
+            Apply::New=>self.on_before_new_scoped(vm, scope),
+            Apply::Update=>self.on_before_update_scoped(vm, scope),
+            Apply::Reload=>self.on_before_reload_scoped(vm, scope),
+            _=>()
+        }
+    }
+    
+    fn on_after_apply(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope,  _value:ScriptValue){}
+    
+    fn on_after_dispatch(&mut self, vm:&mut ScriptVm, apply:&Apply, scope:&mut Scope,  _value:ScriptValue){
+        match apply{
+            Apply::New=>self.on_after_new_scoped(vm, scope),
+            Apply::Update=>self.on_after_update_scoped(vm, scope),
+            Apply::Reload=>self.on_after_reload_scoped(vm, scope),
+            _=>()
+        }
+        self.on_alive()
+    }
+    // allows you to provide a custom apply impl, return true to skip generated apply code    
+    fn on_custom_apply(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope,  _value:ScriptValue)->bool{false}
+    
+    // implemented by procmacro for reflection into script objects/type cchecking
     fn on_type_check(_heap:&ScriptHeap, _value:ScriptValue)->bool{false}
     fn on_proto_build(_vm:&mut ScriptVm, _obj:ScriptObject, _props:&mut ScriptTypeProps){}
     fn on_proto_methods(_vm:&mut ScriptVm, _obj:ScriptObject){}
+    
+    // Simple signatured lifecyclehooks
+    fn on_alive(&self){} // use this hook to quickly check if your object is alive, useful for debugging
+    fn on_before_new(&mut self, _vm:&mut ScriptVm){}
+    fn on_before_reload(&mut self, _vm:&mut ScriptVm){}
+    fn on_before_update(&mut self, _vm:&mut ScriptVm){}
+    fn on_after_new(&mut self, _vm:&mut ScriptVm){}
+    fn on_after_reload(&mut self, _vm:&mut ScriptVm){}
+    fn on_after_update(&mut self, _vm:&mut ScriptVm){}
+    
+    // simple with scope
+    fn on_before_new_scoped(&mut self, vm:&mut ScriptVm, _scope:&mut Scope){self.on_before_new(vm)}
+    fn on_before_reload_scoped(&mut self, vm:&mut ScriptVm, _scope:&mut Scope){self.on_before_reload(vm)}
+    fn on_before_update_scoped(&mut self, vm:&mut ScriptVm, _scope:&mut Scope){self.on_before_update(vm)}
+    fn on_after_new_scoped(&mut self, vm:&mut ScriptVm, _scope:&mut Scope){self.on_after_new(vm)}
+    fn on_after_reload_scoped(&mut self, vm:&mut ScriptVm, _scope:&mut Scope){self.on_after_reload(vm)}
+    fn on_after_update_scoped(&mut self, vm:&mut ScriptVm, _scope:&mut Scope){self.on_after_update(vm)}
 }
 
 pub trait ScriptHookDeref {
-    fn on_deref_before_apply(&mut self,_vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){}
-    fn on_deref_after_apply(&mut self,_vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){}
+    fn on_deref_before_apply(&mut self,_vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope,  _value:ScriptValue){}
+    fn on_deref_after_apply(&mut self,_vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue){}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -192,7 +232,7 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     
     fn script_from_value(vm:&mut ScriptVm, value:ScriptValue)->Self where Self:Sized{
         let mut s = Self::script_new(vm);
-        s.script_apply(vm, &mut Apply::default(), value);
+        s.script_apply(vm, &Apply::default(), &mut Scope::empty(), value);
         s
     }    
     
@@ -254,14 +294,13 @@ pub trait ScriptNew:  ScriptApply + ScriptHook where Self:'static{
     }
 }
 
-// sself as well
 pub trait ScriptApply{
     fn script_type_id(&self)->ScriptTypeId where Self:'static { ScriptTypeId::of::<Self>()}
-    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){}
+    fn script_apply(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue){}
     fn script_to_value(&self, _vm:&mut ScriptVm)->ScriptValue{NIL}
     fn script_to_value_props(&self, _vm:&mut ScriptVm, _obj:ScriptObject){}
 }
 
 pub trait ScriptReset{
-    fn script_reset(&mut self, vm:&mut ScriptVm, apply:&mut Apply, value:ScriptValue);
+    fn script_reset(&mut self, vm:&mut ScriptVm, apply:&Apply, value:ScriptValue);
 }

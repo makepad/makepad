@@ -49,7 +49,7 @@ pub enum ViewDebug {
 
 impl LiveHook for ViewDebug {
     /*
-    fn before_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, _nodes: &[LiveNode]){
+    fn before_apply(&mut self, cx: &mut Cx, apply: &Apply, index: usize, _nodes: &[LiveNode]){
         match apply.from{
             ApplyFrom::NewFromDoc{file_id} | ApplyFrom::UpdateFromDoc{file_id}=>{
                 // store this here
@@ -70,7 +70,7 @@ impl LiveHook for ViewDebug {
     fn skip_apply(
         &mut self,
         _cx: &mut Cx,
-        _apply: &mut Apply,
+        _apply: &Apply,
         index: usize,
         nodes: &[LiveNode],
     ) -> Option<usize> {
@@ -198,7 +198,7 @@ impl LiveHook for View {
     fn before_apply(
         &mut self,
         _cx: &mut Cx,
-        apply: &mut Apply,
+        apply: &Apply,
         _index: usize,
         _nodes: &[LiveNode],
     ) {
@@ -212,7 +212,7 @@ impl LiveHook for View {
     fn after_apply(
         &mut self,
         cx: &mut Cx,
-        apply: &mut Apply,
+        apply: &Apply,
         _index: usize,
         _nodes: &[LiveNode],
     ) {
@@ -242,7 +242,7 @@ impl LiveHook for View {
     fn apply_value_instance(
         &mut self,
         cx: &mut Cx,
-        apply: &mut Apply,
+        apply: &Apply,
         index: usize,
         nodes: &[LiveNode],
     ) -> usize { 
