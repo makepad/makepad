@@ -7,92 +7,91 @@ pub use makepad_derive_widget::*;
 pub use makepad_platform::log;
 pub use makepad_zune_jpeg;
 pub use makepad_zune_png;
-/*
-pub mod button;
-pub mod cached_widget;
-pub mod label;
-pub mod image;
-pub mod image_blend;
-pub mod icon;
-pub mod link_label;
-pub mod drop_down;
-pub mod popup_menu;
-pub mod check_box;
-pub mod radio_button;
-pub mod text_input;
-pub mod slider;
-pub mod scroll_bar;
-pub mod scroll_bars;
-pub mod splitter;
-pub mod vectorline;
-pub mod fold_header;
-pub mod fold_button;
-pub mod multi_window;
-pub mod dock;
-pub mod tab;
-pub mod tab_bar;
-pub mod tab_close_button;
-pub mod portal_list;
-pub mod portal_list2;
-pub mod stack_navigation;
-pub mod expandable_panel;
-pub mod desktop_button;
-pub mod window;
-pub mod scroll_shadow;
-pub mod window_menu;
-pub mod html;
-pub mod markdown;
-pub mod text_flow;
-pub mod multi_image;
-pub mod modal;
-pub mod tooltip;
-pub mod popup_notification;
-pub mod loading_spinner;
-pub mod web_view;
+
+// pub mod button;
+// pub mod cached_widget;
+// pub mod label;
+// pub mod image;
+// pub mod image_blend;
+// pub mod icon;
+// pub mod link_label;
+// pub mod drop_down;
+// pub mod popup_menu;
+// pub mod check_box;
+// pub mod radio_button;
+// pub mod text_input;
+// pub mod slider;
+// pub mod scroll_bar;
+// pub mod scroll_bars;
+// pub mod splitter;
+// pub mod vectorline;
+// pub mod fold_header;
+// pub mod fold_button;
+// pub mod multi_window;
+// pub mod dock;
+// pub mod tab;
+// pub mod tab_bar;
+// pub mod tab_close_button;
+// pub mod portal_list;
+// pub mod portal_list2;
+// pub mod stack_navigation;
+// pub mod expandable_panel;
+// pub mod desktop_button;
+// pub mod window;
+// pub mod scroll_shadow;
+// pub mod window_menu;
+// pub mod html;
+// pub mod markdown;
+// pub mod text_flow;
+// pub mod multi_image;
+// pub mod modal;
+// pub mod tooltip;
+// pub mod popup_notification;
+// pub mod loading_spinner;
+// pub mod web_view;
 
 // Only available on Android at the moment
 // #[cfg(target_os="android")]
-pub mod video;
-pub mod rotated_image;
-pub mod slide_panel;
-pub mod page_flip;
-pub mod keyboard_view;
-pub mod flat_list;
-pub mod file_tree;
-pub mod slides_view;
-pub mod color_picker;
-pub mod root;
+// pub mod video;
+// pub mod rotated_image;
+// pub mod slide_panel;
+// pub mod page_flip;
+// pub mod keyboard_view;
+// pub mod flat_list;
+// pub mod file_tree;
+// pub mod slides_view;
+// pub mod color_picker;
+// pub mod root;
 
-pub mod debug_view;
-pub mod performance_view;
-pub mod nav_control;
-*/
-pub mod view;
-/*
-pub mod adaptive_view;
-pub mod view_ui;
+// pub mod debug_view;
+// pub mod performance_view;
+// pub mod nav_control;
 
-pub mod toggle_panel;
-pub mod command_text_input;
-*/
+// pub mod view;
+
+// pub mod adaptive_view;
+// pub mod view_ui;
+
+// pub mod toggle_panel;
+// pub mod command_text_input;
+
 pub mod widget;
 pub mod widget_match_event;
 
-pub mod touch_gesture;
+// pub mod touch_gesture;
 
-/*
-#[macro_use]
-pub mod data_binding;
+
+// #[macro_use]
+// pub mod data_binding;
 
 pub mod theme_desktop_skeleton;
 pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
-pub mod theme_mobile_dark;
-pub mod theme_mobile_light;
-pub mod image_cache;
-pub mod bare_step;
-pub mod turtle_step;
 
+// pub mod image_cache;
+// pub mod bare_step;
+// pub mod turtle_step;
+/*
 pub mod designer;
 pub mod designer_dummy;
 pub mod designer_theme;
@@ -101,9 +100,9 @@ pub mod designer_view;
 pub mod designer_outline;
 pub mod designer_data;
 pub mod designer_toolbox;
-
-pub mod defer_with_redraw;
 */
+//pub mod defer_with_redraw;
+
 
 pub use crate::{
 /*    
@@ -174,6 +173,16 @@ pub use crate::{
         DrawStateWrap,
     }
 };
+
+pub fn script_mod(vm: &mut ScriptVm){
+    makepad_draw2::script_mod(vm);
+    //makepad_fonts_emoji2::script_mod(vm);
+    //makepad_fonts_chinese_regular2::script_mod(vm);
+    //makepad_fonts_chinese_regular2_2::script_mod(vm);
+    //makepad_fonts_chinese_bold2::script_mod(vm);
+    //makepad_fonts_chinese_bold2_2::script_mod(vm);
+    
+}
 
 /*
 pub fn live_design(cx: &mut Cx) {

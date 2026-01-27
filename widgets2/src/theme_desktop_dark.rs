@@ -1,416 +1,410 @@
 use crate::makepad_platform::*;
 
-live_design! {
-    link theme_desktop_dark;
-    use link::shaders::*;
+script_mod!{
+    use mod.math.*
+    use mod.pod.*
     
-    // GLOBAL PARAMETERS
-    pub THEME_COLOR_CONTRAST = 1.0
-    pub THEME_COLOR_TINT = #0000ff
-    pub THEME_COLOR_TINT_AMOUNT = 0.0
-    pub THEME_SPACE_FACTOR = 6. // Increase for a less dense layout
-    pub THEME_CORNER_RADIUS = 2.5
-    pub THEME_BEVELING = 0.75
-    pub THEME_FONT_SIZE_BASE = 10.
-    pub THEME_FONT_SIZE_CONTRAST = 2.5// Greater values = greater font-size steps between font-formats (i.e. from H3 to H2)
+    mod.themes.dark = {
+        // GLOBAL PARAMETERS
+        color_contrast: 1.0
+        color_tint: #0000ff
+        color_tint_amount: 0.0
+        space_factor: 6. // Increase for a less dense layout
+        corner_radius: 2.5
+        beveling: 0.75
+        font_size_base: 10.
+        font_size_contrast: 2.5 // Greater values = greater font-size steps between font-formats (i.e. from H3 to H2)
 
-    // DIMENSIONS
-    pub THEME_SPACE_1 = (0.5 * (THEME_SPACE_FACTOR))
-    pub THEME_SPACE_2 = (1.0 * (THEME_SPACE_FACTOR))
-    pub THEME_SPACE_3 = (1.5 * (THEME_SPACE_FACTOR))
+        // DIMENSIONS
+        space_1: 0.5 * me.space_factor
+        space_2: 1.0 * me.space_factor
+        space_3: 1.5 * me.space_factor
 
-    pub THEME_MSPACE_1 = {top: (THEME_SPACE_1), right: (THEME_SPACE_1), bottom: (THEME_SPACE_1), left: (THEME_SPACE_1)} 
-    pub THEME_MSPACE_H_1 = {top: 0., right: (THEME_SPACE_1), bottom: 0., left: (THEME_SPACE_1)}
-    pub THEME_MSPACE_V_1 = {top: (THEME_SPACE_1), right: 0., bottom: (THEME_SPACE_1), left: 0.}
-    pub THEME_MSPACE_2 = {top: (THEME_SPACE_2), right: (THEME_SPACE_2), bottom: (THEME_SPACE_2), left: (THEME_SPACE_2)}
-    pub THEME_MSPACE_H_2 = {top: 0., right: (THEME_SPACE_2), bottom: 0., left: (THEME_SPACE_2)}
-    pub THEME_MSPACE_V_2 = {top: (THEME_SPACE_2), right: 0., bottom: (THEME_SPACE_2), left: 0.}
-    pub THEME_MSPACE_3 = {top: (THEME_SPACE_3), right: (THEME_SPACE_3), bottom: (THEME_SPACE_3), left: (THEME_SPACE_3)}
-    pub THEME_MSPACE_H_3 = {top: 0., right: (THEME_SPACE_3), bottom: 0., left: (THEME_SPACE_3)}
-    pub THEME_MSPACE_V_3 = {top: (THEME_SPACE_3), right: 0., bottom: (THEME_SPACE_3), left: 0.}
+        mspace_1: {top: me.space_1, right: me.space_1, bottom: me.space_1, left: me.space_1} 
+        mspace_h_1: {top: 0., right: me.space_1, bottom: 0., left: me.space_1}
+        mspace_v_1: {top: me.space_1, right: 0., bottom: me.space_1, left: 0.}
+        mspace_2: {top: me.space_2, right: me.space_2, bottom: me.space_2, left: me.space_2}
+        mspace_h_2: {top: 0., right: me.space_2, bottom: 0., left: me.space_2}
+        mspace_v_2: {top: me.space_2, right: 0., bottom: me.space_2, left: 0.}
+        mspace_3: {top: me.space_3, right: me.space_3, bottom: me.space_3, left: me.space_3}
+        mspace_h_3: {top: 0., right: me.space_3, bottom: 0., left: me.space_3}
+        mspace_v_3: {top: me.space_3, right: 0., bottom: me.space_3, left: 0.}
 
-    pub THEME_DATA_ITEM_HEIGHT = (7.75 * THEME_SPACE_1);
-    pub THEME_DATA_ICON_WIDTH = (2.6 * THEME_SPACE_2);
-    pub THEME_DATA_ICON_HEIGHT = (3.6 * THEME_SPACE_2);
+        data_item_height: 7.75 * me.space_1
+        data_icon_width: 2.6 * me.space_2
+        data_icon_height: 3.6 * me.space_2
 
-    pub THEME_CONTAINER_CORNER_RADIUS = (THEME_CORNER_RADIUS * 2.)
-    pub THEME_TEXTSELECTION_CORNER_RADIUS = (THEME_CORNER_RADIUS * .5)
-    pub THEME_TAB_HEIGHT = (6 * THEME_SPACE_FACTOR),
-    pub THEME_TAB_FLAT_HEIGHT = (5.5 * THEME_SPACE_FACTOR),
-    pub THEME_SPLITTER_HORIZONTAL = 16.0,
-    pub THEME_SPLITTER_SIZE = 10.0,
-    pub THEME_SPLITTER_MIN_HORIZONTAL = (THEME_TAB_HEIGHT),
-    pub THEME_SPLITTER_MAX_HORIZONTAL = (THEME_TAB_HEIGHT + THEME_SPLITTER_SIZE),
-    pub THEME_SPLITTER_MIN_VERTICAL = (THEME_SPLITTER_HORIZONTAL),
-    pub THEME_SPLITTER_MAX_VERTICAL = (THEME_SPLITTER_HORIZONTAL + THEME_SPLITTER_SIZE),
-    pub THEME_SPLITTER_SIZE = 5.0
-    pub THEME_DOCK_BORDER_SIZE: 0.0
+        container_corner_radius: me.corner_radius * 2.
+        textselection_corner_radius: me.corner_radius * 0.5
+        tab_height: 6 * me.space_factor
+        tab_flat_height: 5.5 * me.space_factor
+        splitter_horizontal: 16.0
+        splitter_size: 5.0
+        splitter_min_horizontal: me.tab_height
+        splitter_max_horizontal: me.tab_height + me.splitter_size
+        splitter_min_vertical: me.splitter_horizontal
+        splitter_max_vertical: me.splitter_horizontal + me.splitter_size
+        dock_border_size: 0.0
 
-    // COLOR PALETTE
-    pub THEME_COLOR_W = #FFFFFFFF
-    pub THEME_COLOR_W_H = #FFFFFF00
-    pub THEME_COLOR_B = #000000FF
-    pub THEME_COLOR_B_H = #00000000
+        // COLOR PALETTE
+        color_w: #FFFFFFFF
+        color_w_h: #FFFFFF00
+        color_b: #000000FF
+        color_b_h: #00000000
 
-    pub THEME_COLOR_WHITE = (mix(THEME_COLOR_W, #FFFFFF00, pow(0.1, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_U_6 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.2, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_U_5 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.35, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_U_4 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.6, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_U_3 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.75, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_U_2 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.85, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_U_15 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.9, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_U_1 = (mix(THEME_COLOR_W, THEME_COLOR_W_H, pow(0.95, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_U_HIDDEN = (THEME_COLOR_W_H)
+        color_white: mix(me.color_w, #FFFFFF00, pow(0.1, me.color_contrast))
+        color_u_6: mix(me.color_w, me.color_w_h, pow(0.2, me.color_contrast))
+        color_u_5: mix(me.color_w, me.color_w_h, pow(0.35, me.color_contrast))
+        color_u_4: mix(me.color_w, me.color_w_h, pow(0.6, me.color_contrast))
+        color_u_3: mix(me.color_w, me.color_w_h, pow(0.75, me.color_contrast))
+        color_u_2: mix(me.color_w, me.color_w_h, pow(0.85, me.color_contrast))
+        color_u_15: mix(me.color_w, me.color_w_h, pow(0.9, me.color_contrast))
+        color_u_1: mix(me.color_w, me.color_w_h, pow(0.95, me.color_contrast))
+        color_u_hidden: me.color_w_h
 
-    pub THEME_COLOR_D_HIDDEN = (THEME_COLOR_B_H)
-    pub THEME_COLOR_D_025 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.95, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_D_05 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.9, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_D_1 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.85, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_D_2 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.75, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_D_3 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.6, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_D_4 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.4, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_D_5 = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.25, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_BLACK = (mix(THEME_COLOR_B, THEME_COLOR_B_H, pow(0.1, THEME_COLOR_CONTRAST)))
+        color_d_hidden: me.color_b_h
+        color_d_025: mix(me.color_b, me.color_b_h, pow(0.95, me.color_contrast))
+        color_d_05: mix(me.color_b, me.color_b_h, pow(0.9, me.color_contrast))
+        color_d_1: mix(me.color_b, me.color_b_h, pow(0.85, me.color_contrast))
+        color_d_2: mix(me.color_b, me.color_b_h, pow(0.75, me.color_contrast))
+        color_d_3: mix(me.color_b, me.color_b_h, pow(0.6, me.color_contrast))
+        color_d_4: mix(me.color_b, me.color_b_h, pow(0.4, me.color_contrast))
+        color_d_5: mix(me.color_b, me.color_b_h, pow(0.25, me.color_contrast))
+        color_black: mix(me.color_b, me.color_b_h, pow(0.1, me.color_contrast))
 
-    pub THEME_COLOR_BG_APP = (mix(
-        (THEME_COLOR_B * mix(#ffffff, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)),
-        (THEME_COLOR_W * mix(#ffffff, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)),
-        pow(0.3, THEME_COLOR_CONTRAST)))
-    pub THEME_COLOR_FG_APP = (mix(
-        (THEME_COLOR_B * mix(#ffffff, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)),
-        (THEME_COLOR_W * mix(#ffffff, THEME_COLOR_TINT, THEME_COLOR_TINT_AMOUNT)),
-        pow(0.36, THEME_COLOR_CONTRAST))
-    )
-    pub THEME_COLOR_OPAQUE_U_6 = (mix(THEME_COLOR_FG_APP, #F, 0.8))
-    pub THEME_COLOR_OPAQUE_U_5 = (mix(THEME_COLOR_FG_APP, #F, 0.7))
-    pub THEME_COLOR_OPAQUE_U_4 = (mix(THEME_COLOR_FG_APP, #F, 0.5))
-    pub THEME_COLOR_OPAQUE_U_3 = (mix(THEME_COLOR_FG_APP, #F, 0.35))
-    pub THEME_COLOR_OPAQUE_U_2 = (mix(THEME_COLOR_FG_APP, #F, 0.25))
-    pub THEME_COLOR_OPAQUE_U_1 = (mix(THEME_COLOR_FG_APP, #F, 0.15))
+        color_bg_app: mix(
+            me.color_b * mix(#ffffff, me.color_tint, me.color_tint_amount),
+            me.color_w * mix(#ffffff, me.color_tint, me.color_tint_amount),
+            pow(0.3, me.color_contrast))
+        color_fg_app: mix(
+            me.color_b * mix(#ffffff, me.color_tint, me.color_tint_amount),
+            me.color_w * mix(#ffffff, me.color_tint, me.color_tint_amount),
+            pow(0.36, me.color_contrast))
+        color_opaque_u_6: mix(me.color_fg_app, #F, 0.8)
+        color_opaque_u_5: mix(me.color_fg_app, #F, 0.7)
+        color_opaque_u_4: mix(me.color_fg_app, #F, 0.5)
+        color_opaque_u_3: mix(me.color_fg_app, #F, 0.35)
+        color_opaque_u_2: mix(me.color_fg_app, #F, 0.25)
+        color_opaque_u_1: mix(me.color_fg_app, #F, 0.15)
 
-    pub THEME_COLOR_OPAQUE_D_1 = (mix(THEME_COLOR_FG_APP, #0, 0.15))
-    pub THEME_COLOR_OPAQUE_D_2 = (mix(THEME_COLOR_FG_APP, #0, 0.25))
-    pub THEME_COLOR_OPAQUE_D_3 = (mix(THEME_COLOR_FG_APP, #0, 0.45))
-    pub THEME_COLOR_OPAQUE_D_4 = (mix(THEME_COLOR_FG_APP, #0, 0.6))
-    pub THEME_COLOR_OPAQUE_D_5 = (mix(THEME_COLOR_FG_APP, #0, 0.75))
+        color_opaque_d_1: mix(me.color_fg_app, #0, 0.15)
+        color_opaque_d_2: mix(me.color_fg_app, #0, 0.25)
+        color_opaque_d_3: mix(me.color_fg_app, #0, 0.45)
+        color_opaque_d_4: mix(me.color_fg_app, #0, 0.6)
+        color_opaque_d_5: mix(me.color_fg_app, #0, 0.75)
 
-    // BASICS
-    pub THEME_COLOR_MAKEPAD = #FF5C39FF
+        // BASICS
+        color_makepad: #FF5C39FF
 
-    pub THEME_COLOR_SHADOW = (THEME_COLOR_D_3)
-    pub THEME_COLOR_SHADOW_FOCUS = (THEME_COLOR_D_5)
-    pub THEME_COLOR_SHADOW_DISABLED = (THEME_COLOR_OPAQUE_D_3)
-    pub THEME_COLOR_SHADOW_FLAT = (THEME_COLOR_D_2)
-    pub THEME_COLOR_FLAT_FOCUS = (THEME_COLOR_U_2)
-    pub THEME_COLOR_SHADOW_FLAT_DISABLED = (THEME_COLOR_OPAQUE_D_3)
-    pub THEME_COLOR_LIGHT = (THEME_COLOR_U_2)
-    pub THEME_COLOR_LIGHT_HOVER = (THEME_COLOR_OPAQUE_U_2)
-    pub THEME_COLOR_LIGHT_FOCUS = (THEME_COLOR_OPAQUE_U_2)
-    pub THEME_COLOR_LIGHT_DISABLED = (THEME_COLOR_OPAQUE_U_1)
+        color_shadow: me.color_d_3
+        color_shadow_focus: me.color_d_5
+        color_shadow_disabled: me.color_opaque_d_3
+        color_shadow_flat: me.color_d_2
+        color_flat_focus: me.color_u_2
+        color_shadow_flat_disabled: me.color_opaque_d_3
+        color_light: me.color_u_2
+        color_light_hover: me.color_opaque_u_2
+        color_light_focus: me.color_opaque_u_2
+        color_light_disabled: me.color_opaque_u_1
 
-    pub THEME_COLOR_BG_HIGHLIGHT = (THEME_COLOR_U_1)
-    pub THEME_COLOR_BG_UNFOCUSSED = (THEME_COLOR_BG_HIGHLIGHT * 0.85)
-    pub THEME_COLOR_APP_CAPTION_BAR = (THEME_COLOR_D_HIDDEN)
-    pub THEME_COLOR_DRAG_QUAD = (THEME_COLOR_U_5)
-    pub THEME_COLOR_DRAG_TARGET_PREVIEW = (THEME_COLOR_U_2)
+        color_bg_highlight: me.color_u_1
+        color_bg_unfocussed: me.color_bg_highlight * 0.85
+        color_app_caption_bar: me.color_d_hidden
+        color_drag_quad: me.color_u_5
+        color_drag_target_preview: me.color_u_2
 
-    pub THEME_COLOR_CURSOR = (THEME_COLOR_WHITE)
-    pub THEME_COLOR_CURSOR_FOCUS = (THEME_COLOR_WHITE)
-    pub THEME_COLOR_CURSOR_EMPTY = (THEME_COLOR_WHITE)
-    pub THEME_COLOR_CURSOR_DISABLED = (THEME_COLOR_U_HIDDEN)
-    pub THEME_COLOR_CURSOR_BORDER = (THEME_COLOR_WHITE)
+        color_cursor: me.color_white
+        color_cursor_focus: me.color_white
+        color_cursor_empty: me.color_white
+        color_cursor_disabled: me.color_u_hidden
+        color_cursor_border: me.color_white
 
-    pub THEME_COLOR_HIGHLIGHT = (THEME_COLOR_U_1)
-    pub THEME_COLOR_TEXT_CURSOR = (THEME_COLOR_WHITE)
-    pub THEME_COLOR_BG_HIGHLIGHT_INLINE = (THEME_COLOR_D_3)
+        color_highlight: me.color_u_1
+        color_text_cursor: me.color_white
+        color_bg_highlight_inline: me.color_d_3
 
-    pub THEME_COLOR_TEXT = (THEME_COLOR_U_5)
-    pub THEME_COLOR_TEXT_VAL = (THEME_COLOR_U_3)
-    pub THEME_COLOR_TEXT_HL = (THEME_COLOR_TEXT)
-    pub THEME_COLOR_TEXT_HOVER = (THEME_COLOR_TEXT)
-    pub THEME_COLOR_TEXT_FOCUS = (THEME_COLOR_TEXT)
-    pub THEME_COLOR_TEXT_DOWN = (THEME_COLOR_TEXT)
-    pub THEME_COLOR_TEXT_DISABLED = (THEME_COLOR_U_1)
-    pub THEME_COLOR_TEXT_PLACEHOLDER = (THEME_COLOR_U_4)
-    pub THEME_COLOR_TEXT_PLACEHOLDER_HOVER = (THEME_COLOR_U_4)
-    pub THEME_COLOR_TEXT_META = (THEME_COLOR_U_4)
+        color_text: me.color_u_5
+        color_text_val: me.color_u_3
+        color_text_hl: me.color_text
+        color_text_hover: me.color_text
+        color_text_focus: me.color_text
+        color_text_down: me.color_text
+        color_text_disabled: me.color_u_1
+        color_text_placeholder: me.color_u_4
+        color_text_placeholder_hover: me.color_u_4
+        color_text_meta: me.color_u_4
 
-    pub THEME_COLOR_LABEL_INNER = (THEME_COLOR_U_5)
-    pub THEME_COLOR_LABEL_INNER_DOWN = (THEME_COLOR_U_3)
-    pub THEME_COLOR_LABEL_INNER_DRAG = (THEME_COLOR_LABEL_INNER_DOWN)
-    pub THEME_COLOR_LABEL_INNER_HOVER = (THEME_COLOR_LABEL_INNER)
-    pub THEME_COLOR_LABEL_INNER_FOCUS = (THEME_COLOR_LABEL_INNER)
-    pub THEME_COLOR_LABEL_INNER_ACTIVE = (THEME_COLOR_LABEL_INNER)
-    pub THEME_COLOR_LABEL_INNER_INACTIVE = (THEME_COLOR_U_4)
-    pub THEME_COLOR_LABEL_INNER_DISABLED = (THEME_COLOR_U_2)
+        color_label_inner: me.color_u_5
+        color_label_inner_down: me.color_u_3
+        color_label_inner_drag: me.color_label_inner_down
+        color_label_inner_hover: me.color_label_inner
+        color_label_inner_focus: me.color_label_inner
+        color_label_inner_active: me.color_label_inner
+        color_label_inner_inactive: me.color_u_4
+        color_label_inner_disabled: me.color_u_2
 
-    pub THEME_COLOR_LABEL_OUTER = (THEME_COLOR_U_5)
-    pub THEME_COLOR_LABEL_OUTER_OFF = (THEME_COLOR_U_3)
-    pub THEME_COLOR_LABEL_OUTER_DOWN = (THEME_COLOR_LABEL_OUTER)
+        color_label_outer: me.color_u_5
+        color_label_outer_off: me.color_u_3
+        color_label_outer_down: me.color_label_outer
 
-    pub THEME_COLOR_LABEL_OUTER_DRAG = (THEME_COLOR_LABEL_OUTER)
-    pub THEME_COLOR_LABEL_OUTER_HOVER = (THEME_COLOR_LABEL_OUTER)
-    pub THEME_COLOR_LABEL_OUTER_FOCUS = (THEME_COLOR_LABEL_OUTER)
-    pub THEME_COLOR_LABEL_OUTER_ACTIVE = (THEME_COLOR_LABEL_OUTER)
-    pub THEME_COLOR_LABEL_OUTER_ACTIVE_FOCUS = (THEME_COLOR_LABEL_OUTER)
-    pub THEME_COLOR_LABEL_OUTER_DISABLED = (THEME_COLOR_U_2)
+        color_label_outer_drag: me.color_label_outer
+        color_label_outer_hover: me.color_label_outer
+        color_label_outer_focus: me.color_label_outer
+        color_label_outer_active: me.color_label_outer
+        color_label_outer_active_focus: me.color_label_outer
+        color_label_outer_disabled: me.color_u_2
 
-    pub THEME_COLOR_BG_CONTAINER = (THEME_COLOR_D_3 * 0.8)
-    pub THEME_COLOR_BG_EVEN = (THEME_COLOR_BG_CONTAINER * 0.875)
-    pub THEME_COLOR_BG_ODD = (THEME_COLOR_BG_CONTAINER * 1.125)
+        color_bg_container: me.color_d_3 * 0.8
+        color_bg_even: me.color_bg_container * 0.875
+        color_bg_odd: me.color_bg_container * 1.125
 
-    pub THEME_COLOR_BEVEL = (THEME_COLOR_SHADOW_FLAT)
-    pub THEME_COLOR_BEVEL_HOVER = (THEME_COLOR_FLAT_FOCUS)
-    pub THEME_COLOR_BEVEL_FOCUS = (THEME_COLOR_BEVEL_HOVER)
-    pub THEME_COLOR_BEVEL_ACTIVE = (THEME_COLOR_BEVEL)
-    pub THEME_COLOR_BEVEL_EMPTY = (THEME_COLOR_BEVEL)
-    pub THEME_COLOR_BEVEL_DOWN = (THEME_COLOR_BEVEL_HOVER)
-    pub THEME_COLOR_BEVEL_DRAG = (THEME_COLOR_BEVEL_HOVER)
-    pub THEME_COLOR_BEVEL_DISABLED = (THEME_COLOR_SHADOW_FLAT_DISABLED)
+        color_bevel: me.color_shadow_flat
+        color_bevel_hover: me.color_flat_focus
+        color_bevel_focus: me.color_bevel_hover
+        color_bevel_active: me.color_bevel
+        color_bevel_empty: me.color_bevel
+        color_bevel_down: me.color_bevel_hover
+        color_bevel_drag: me.color_bevel_hover
+        color_bevel_disabled: me.color_shadow_flat_disabled
 
-    pub THEME_COLOR_BEVEL_INSET_2 = (THEME_COLOR_LIGHT)
-    pub THEME_COLOR_BEVEL_INSET_2_HOVER = (THEME_COLOR_LIGHT_FOCUS)
-    pub THEME_COLOR_BEVEL_INSET_2_FOCUS = (THEME_COLOR_BEVEL_INSET_2_HOVER)
-    pub THEME_COLOR_BEVEL_INSET_2_ACTIVE = (THEME_COLOR_BEVEL_INSET_2)
-    pub THEME_COLOR_BEVEL_INSET_2_EMPTY = (THEME_COLOR_BEVEL_INSET_2)
-    pub THEME_COLOR_BEVEL_INSET_2_DOWN = (THEME_COLOR_BEVEL_INSET_2_HOVER)
-    pub THEME_COLOR_BEVEL_INSET_2_DRAG = (THEME_COLOR_BEVEL_INSET_2_HOVER)
-    pub THEME_COLOR_BEVEL_INSET_2_DISABLED = (THEME_COLOR_LIGHT_DISABLED)
+        color_bevel_inset_2: me.color_light
+        color_bevel_inset_2_hover: me.color_light_focus
+        color_bevel_inset_2_focus: me.color_bevel_inset_2_hover
+        color_bevel_inset_2_active: me.color_bevel_inset_2
+        color_bevel_inset_2_empty: me.color_bevel_inset_2
+        color_bevel_inset_2_down: me.color_bevel_inset_2_hover
+        color_bevel_inset_2_drag: me.color_bevel_inset_2_hover
+        color_bevel_inset_2_disabled: me.color_light_disabled
 
-    pub THEME_COLOR_BEVEL_INSET_1 = (THEME_COLOR_SHADOW)
-    pub THEME_COLOR_BEVEL_INSET_1_HOVER = (THEME_COLOR_BEVEL_INSET_1)
-    pub THEME_COLOR_BEVEL_INSET_1_FOCUS = (THEME_COLOR_BEVEL_INSET_2_HOVER)
-    pub THEME_COLOR_BEVEL_INSET_1_ACTIVE = (THEME_COLOR_BEVEL_INSET_1)
-    pub THEME_COLOR_BEVEL_INSET_1_EMPTY = (THEME_COLOR_BEVEL_INSET_1)
-    pub THEME_COLOR_BEVEL_INSET_1_DOWN = (THEME_COLOR_BEVEL_INSET_1)
-    pub THEME_COLOR_BEVEL_INSET_1_DRAG = (THEME_COLOR_BEVEL_INSET_1)
-    pub THEME_COLOR_BEVEL_INSET_1_DISABLED = (THEME_COLOR_SHADOW_DISABLED)
+        color_bevel_inset_1: me.color_shadow
+        color_bevel_inset_1_hover: me.color_bevel_inset_1
+        color_bevel_inset_1_focus: me.color_bevel_inset_2_hover
+        color_bevel_inset_1_active: me.color_bevel_inset_1
+        color_bevel_inset_1_empty: me.color_bevel_inset_1
+        color_bevel_inset_1_down: me.color_bevel_inset_1
+        color_bevel_inset_1_drag: me.color_bevel_inset_1
+        color_bevel_inset_1_disabled: me.color_shadow_disabled
 
-    pub THEME_COLOR_BEVEL_OUTSET_1 = (THEME_COLOR_LIGHT)
-    pub THEME_COLOR_BEVEL_OUTSET_1_HOVER = (THEME_COLOR_LIGHT_HOVER)
-    pub THEME_COLOR_BEVEL_OUTSET_1_FOCUS = (THEME_COLOR_BEVEL_OUTSET_1_HOVER)
-    pub THEME_COLOR_BEVEL_OUTSET_1_ACTIVE = (THEME_COLOR_LIGHT)
-    pub THEME_COLOR_BEVEL_OUTSET_1_DOWN = (THEME_COLOR_SHADOW)
-    pub THEME_COLOR_BEVEL_OUTSET_1_DRAG = (THEME_COLOR_BEVEL_OUTSET_1_DOWN)
-    pub THEME_COLOR_BEVEL_OUTSET_1_DISABLED = (THEME_COLOR_LIGHT_DISABLED)
+        color_bevel_outset_1: me.color_light
+        color_bevel_outset_1_hover: me.color_light_hover
+        color_bevel_outset_1_focus: me.color_bevel_outset_1_hover
+        color_bevel_outset_1_active: me.color_light
+        color_bevel_outset_1_down: me.color_shadow
+        color_bevel_outset_1_drag: me.color_bevel_outset_1_down
+        color_bevel_outset_1_disabled: me.color_light_disabled
 
-    pub THEME_COLOR_BEVEL_OUTSET_2 = (THEME_COLOR_SHADOW)
-    pub THEME_COLOR_BEVEL_OUTSET_2_HOVER = (THEME_COLOR_SHADOW)
-    pub THEME_COLOR_BEVEL_OUTSET_2_FOCUS = (THEME_COLOR_BEVEL_OUTSET_2_HOVER)
-    pub THEME_COLOR_BEVEL_OUTSET_2_ACTIVE = (THEME_COLOR_SHADOW)
-    pub THEME_COLOR_BEVEL_OUTSET_2_DOWN = (THEME_COLOR_LIGHT)
-    pub THEME_COLOR_BEVEL_OUTSET_2_DRAG = (THEME_COLOR_BEVEL_OUTSET_2_DOWN)
-    pub THEME_COLOR_BEVEL_OUTSET_2_FOCUS = (THEME_COLOR_SHADOW_FOCUS)
-    pub THEME_COLOR_BEVEL_OUTSET_2_DISABLED = (THEME_COLOR_SHADOW_DISABLED)
+        color_bevel_outset_2: me.color_shadow
+        color_bevel_outset_2_hover: me.color_shadow
+        color_bevel_outset_2_focus: me.color_shadow_focus
+        color_bevel_outset_2_active: me.color_shadow
+        color_bevel_outset_2_down: me.color_light
+        color_bevel_outset_2_drag: me.color_bevel_outset_2_down
+        color_bevel_outset_2_disabled: me.color_shadow_disabled
 
-    // Background of textinputs, radios, checkboxes etc.
-    pub THEME_COLOR_INSET = (THEME_COLOR_D_1)
-    pub THEME_COLOR_INSET_HOVER = (THEME_COLOR_INSET)
-    pub THEME_COLOR_INSET_DOWN = (THEME_COLOR_INSET_HOVER)
-    pub THEME_COLOR_INSET_ACTIVE = (THEME_COLOR_INSET_HOVER)
-    pub THEME_COLOR_INSET_FOCUS = (THEME_COLOR_INSET_HOVER)
-    pub THEME_COLOR_INSET_DRAG = (THEME_COLOR_INSET)
-    pub THEME_COLOR_INSET_DISABLED = (THEME_COLOR_D_025)
-    pub THEME_COLOR_INSET_EMPTY = (THEME_COLOR_INSET)
+        // Background of textinputs, radios, checkboxes etc.
+        color_inset: me.color_d_1
+        color_inset_hover: me.color_inset
+        color_inset_down: me.color_inset_hover
+        color_inset_active: me.color_inset_hover
+        color_inset_focus: me.color_inset_hover
+        color_inset_drag: me.color_inset
+        color_inset_disabled: me.color_d_025
+        color_inset_empty: me.color_inset
 
-    pub THEME_COLOR_INSET_1 = (THEME_COLOR_D_3)
-    pub THEME_COLOR_INSET_1_HOVER = (THEME_COLOR_INSET_1)
-    pub THEME_COLOR_INSET_1_DOWN = (THEME_COLOR_INSET_1_HOVER)
-    pub THEME_COLOR_INSET_1_ACTIVE = (THEME_COLOR_INSET_1_HOVER)
-    pub THEME_COLOR_INSET_1_FOCUS = (THEME_COLOR_INSET_1_HOVER)
-    pub THEME_COLOR_INSET_1_DRAG = (THEME_COLOR_INSET_1)
-    pub THEME_COLOR_INSET_1_DISABLED = (THEME_COLOR_D_025)
-    pub THEME_COLOR_INSET_1_EMPTY = (THEME_COLOR_INSET_1)
+        color_inset_1: me.color_d_3
+        color_inset_1_hover: me.color_inset_1
+        color_inset_1_down: me.color_inset_1_hover
+        color_inset_1_active: me.color_inset_1_hover
+        color_inset_1_focus: me.color_inset_1_hover
+        color_inset_1_drag: me.color_inset_1
+        color_inset_1_disabled: me.color_d_025
+        color_inset_1_empty: me.color_inset_1
 
-    pub THEME_COLOR_INSET_2 = (THEME_COLOR_D_05)
-    pub THEME_COLOR_INSET_2_HOVER = (THEME_COLOR_INSET_2)
-    pub THEME_COLOR_INSET_2_DOWN = (THEME_COLOR_INSET_2_HOVER)
-    pub THEME_COLOR_INSET_2_ACTIVE = (THEME_COLOR_INSET_2_HOVER)
-    pub THEME_COLOR_INSET_2_FOCUS = (THEME_COLOR_INSET_2_HOVER)
-    pub THEME_COLOR_INSET_2_DRAG = (THEME_COLOR_INSET_2)
-    pub THEME_COLOR_INSET_2_EMPTY = (THEME_COLOR_D_HIDDEN)
-    pub THEME_COLOR_INSET_2_DISABLED = (THEME_COLOR_D_025)
+        color_inset_2: me.color_d_05
+        color_inset_2_hover: me.color_inset_2
+        color_inset_2_down: me.color_inset_2_hover
+        color_inset_2_active: me.color_inset_2_hover
+        color_inset_2_focus: me.color_inset_2_hover
+        color_inset_2_drag: me.color_inset_2
+        color_inset_2_empty: me.color_d_hidden
+        color_inset_2_disabled: me.color_d_025
 
-    // WIDGET COLORS
-    pub THEME_COLOR_OUTSET = (THEME_COLOR_U_15)
-    pub THEME_COLOR_OUTSET_DOWN = (THEME_COLOR_D_1)
-    pub THEME_COLOR_OUTSET_HOVER = (THEME_COLOR_U_2)
-    pub THEME_COLOR_OUTSET_ACTIVE = (THEME_COLOR_U_3)
-    pub THEME_COLOR_OUTSET_FOCUS = (THEME_COLOR_OUTSET)
-    pub THEME_COLOR_OUTSET_DRAG = (THEME_COLOR_U_2)
-    pub THEME_COLOR_OUTSET_DISABLED = (THEME_COLOR_U_1)
-    pub THEME_COLOR_OUTSET_INACTIVE = (THEME_COLOR_D_HIDDEN)
+        // WIDGET COLORS
+        color_outset: me.color_u_15
+        color_outset_down: me.color_d_1
+        color_outset_hover: me.color_u_2
+        color_outset_active: me.color_u_3
+        color_outset_focus: me.color_outset
+        color_outset_drag: me.color_u_2
+        color_outset_disabled: me.color_u_1
+        color_outset_inactive: me.color_d_hidden
 
-    pub THEME_COLOR_OUTSET_1 = (THEME_COLOR_U_1)
-    pub THEME_COLOR_OUTSET_1_DOWN = (THEME_COLOR_D_2)
-    pub THEME_COLOR_OUTSET_1_DRAG = (THEME_COLOR_OUTSET_1_DOWN)
-    pub THEME_COLOR_OUTSET_1_HOVER = (THEME_COLOR_U_2)
-    pub THEME_COLOR_OUTSET_1_ACTIVE = (THEME_COLOR_U_4)
-    pub THEME_COLOR_OUTSET_1_FOCUS = (THEME_COLOR_OUTSET_1)
-    pub THEME_COLOR_OUTSET_1_DISABLED = (THEME_COLOR_U_1)
+        color_outset_1: me.color_u_1
+        color_outset_1_down: me.color_d_2
+        color_outset_1_drag: me.color_outset_1_down
+        color_outset_1_hover: me.color_u_2
+        color_outset_1_active: me.color_u_4
+        color_outset_1_focus: me.color_outset_1
+        color_outset_1_disabled: me.color_u_1
 
-    pub THEME_COLOR_OUTSET_2 = (THEME_COLOR_D_1)
-    pub THEME_COLOR_OUTSET_2_DOWN = (THEME_COLOR_D_HIDDEN)
-    pub THEME_COLOR_OUTSET_2_DRAG = (THEME_COLOR_OUTSET_2_DOWN)
-    pub THEME_COLOR_OUTSET_2_HOVER = (THEME_COLOR_OUTSET_2)
-    pub THEME_COLOR_OUTSET_2_ACTIVE = (THEME_COLOR_U_1)
-    pub THEME_COLOR_OUTSET_2_FOCUS = (THEME_COLOR_OUTSET_2)
-    pub THEME_COLOR_OUTSET_2_DISABLED = (THEME_COLOR_U_1)
+        color_outset_2: me.color_d_1
+        color_outset_2_down: me.color_d_hidden
+        color_outset_2_drag: me.color_outset_2_down
+        color_outset_2_hover: me.color_outset_2
+        color_outset_2_active: me.color_u_1
+        color_outset_2_focus: me.color_outset_2
+        color_outset_2_disabled: me.color_u_1
 
-    pub THEME_COLOR_ICON = (THEME_COLOR_D_2)
-    pub THEME_COLOR_ICON_INACTIVE = (THEME_COLOR_INSET)
-    pub THEME_COLOR_ICON_ACTIVE = (THEME_COLOR_U_4)
-    pub THEME_COLOR_ICON_DISABLED = (THEME_COLOR_D_1)
+        color_icon: me.color_d_2
+        color_icon_inactive: me.color_inset
+        color_icon_active: me.color_u_4
+        color_icon_disabled: me.color_d_1
 
-    pub THEME_COLOR_MARK = (THEME_COLOR_U_5)
-    pub THEME_COLOR_MARK_EMPTY = (THEME_COLOR_INSET)
-    pub THEME_COLOR_MARK_OFF = (THEME_COLOR_U_HIDDEN)
-    pub THEME_COLOR_MARK_HOVER = (THEME_COLOR_MARK)
-    pub THEME_COLOR_MARK_ACTIVE = (THEME_COLOR_MARK)
-    pub THEME_COLOR_MARK_ACTIVE_HOVER = (THEME_COLOR_MARK)
-    pub THEME_COLOR_MARK_FOCUS = (THEME_COLOR_MARK)
-    pub THEME_COLOR_MARK_DOWN = (THEME_COLOR_U_4)
-    pub THEME_COLOR_MARK_DISABLED = (THEME_COLOR_D_HIDDEN)
+        color_mark: me.color_u_5
+        color_mark_empty: me.color_inset
+        color_mark_off: me.color_u_hidden
+        color_mark_hover: me.color_mark
+        color_mark_active: me.color_mark
+        color_mark_active_hover: me.color_mark
+        color_mark_focus: me.color_mark
+        color_mark_down: me.color_u_4
+        color_mark_disabled: me.color_d_hidden
 
-    pub THEME_COLOR_SELECTION = (THEME_COLOR_D_HIDDEN)
-    pub THEME_COLOR_SELECTION_HOVER = (THEME_COLOR_U_3)
-    pub THEME_COLOR_SELECTION_DOWN = (THEME_COLOR_U_3)
-    pub THEME_COLOR_SELECTION_FOCUS = (THEME_COLOR_U_3)
-    pub THEME_COLOR_SELECTION_EMPTY = (THEME_COLOR_D_HIDDEN)
-    pub THEME_COLOR_SELECTION_DISABLED = (THEME_COLOR_D_HIDDEN)
+        color_selection: me.color_d_hidden
+        color_selection_hover: me.color_u_3
+        color_selection_down: me.color_u_3
+        color_selection_focus: me.color_u_3
+        color_selection_empty: me.color_d_hidden
+        color_selection_disabled: me.color_d_hidden
 
-    // Progress bars, slider amounts etc.
-    pub THEME_COLOR_VAL = (THEME_COLOR_OPAQUE_U_2)
-    pub THEME_COLOR_VAL_HOVER = (THEME_COLOR_OPAQUE_U_3)
-    pub THEME_COLOR_VAL_FOCUS = (THEME_COLOR_OPAQUE_U_3)
-    pub THEME_COLOR_VAL_DRAG = (THEME_COLOR_OPAQUE_U_3)
-    pub THEME_COLOR_VAL_DISABLED = (THEME_COLOR_U_HIDDEN)
+        // Progress bars, slider amounts etc.
+        color_val: me.color_opaque_u_2
+        color_val_hover: me.color_opaque_u_3
+        color_val_focus: me.color_opaque_u_3
+        color_val_drag: me.color_opaque_u_3
+        color_val_disabled: me.color_u_hidden
 
-    pub THEME_COLOR_VAL_1 = (THEME_COLOR_OPAQUE_U_1)
-    pub THEME_COLOR_VAL_1_HOVER = (THEME_COLOR_OPAQUE_U_2)
-    pub THEME_COLOR_VAL_1_FOCUS = (THEME_COLOR_OPAQUE_U_2)
-    pub THEME_COLOR_VAL_1_DRAG = (THEME_COLOR_OPAQUE_U_2)
-    pub THEME_COLOR_VAL_1_DISABLED = (THEME_COLOR_U_HIDDEN)
-    
-    pub THEME_COLOR_VAL_2 = (THEME_COLOR_OPAQUE_U_2)
-    pub THEME_COLOR_VAL_2_HOVER = (THEME_COLOR_OPAQUE_U_3)
-    pub THEME_COLOR_VAL_2_FOCUS = (THEME_COLOR_OPAQUE_U_3)
-    pub THEME_COLOR_VAL_2_DRAG = (THEME_COLOR_OPAQUE_U_3)
-    pub THEME_COLOR_VAL_2_DISABLED = (THEME_COLOR_U_HIDDEN)
+        color_val_1: me.color_opaque_u_1
+        color_val_1_hover: me.color_opaque_u_2
+        color_val_1_focus: me.color_opaque_u_2
+        color_val_1_drag: me.color_opaque_u_2
+        color_val_1_disabled: me.color_u_hidden
+        
+        color_val_2: me.color_opaque_u_2
+        color_val_2_hover: me.color_opaque_u_3
+        color_val_2_focus: me.color_opaque_u_3
+        color_val_2_drag: me.color_opaque_u_3
+        color_val_2_disabled: me.color_u_hidden
 
 
-    // WIDGET SPECIFIC COLORS
-    pub THEME_COLOR_HANDLE: (THEME_COLOR_OPAQUE_U_3);
-    pub THEME_COLOR_HANDLE_HOVER: (THEME_COLOR_OPAQUE_U_4);
-    pub THEME_COLOR_HANDLE_FOCUS: (THEME_COLOR_OPAQUE_U_3);
-    pub THEME_COLOR_HANDLE_DISABLED: (THEME_COLOR_U_HIDDEN);
-    pub THEME_COLOR_HANDLE_DRAG: (THEME_COLOR_OPAQUE_U_5);
+        // WIDGET SPECIFIC COLORS
+        color_handle: me.color_opaque_u_3
+        color_handle_hover: me.color_opaque_u_4
+        color_handle_focus: me.color_opaque_u_3
+        color_handle_disabled: me.color_u_hidden
+        color_handle_drag: me.color_opaque_u_5
 
-    pub THEME_COLOR_HANDLE_1: (THEME_COLOR_OPAQUE_U_1);
-    pub THEME_COLOR_HANDLE_1_HOVER: (THEME_COLOR_OPAQUE_U_2);
-    pub THEME_COLOR_HANDLE_1_FOCUS: (THEME_COLOR_OPAQUE_U_2);
-    pub THEME_COLOR_HANDLE_1_DISABLED: (THEME_COLOR_U_HIDDEN);
-    pub THEME_COLOR_HANDLE_1_DRAG: (THEME_COLOR_OPAQUE_U_2);
+        color_handle_1: me.color_opaque_u_1
+        color_handle_1_hover: me.color_opaque_u_2
+        color_handle_1_focus: me.color_opaque_u_2
+        color_handle_1_disabled: me.color_u_hidden
+        color_handle_1_drag: me.color_opaque_u_2
 
-    pub THEME_COLOR_HANDLE_2: (THEME_COLOR_OPAQUE_D_5);
-    pub THEME_COLOR_HANDLE_2_HOVER: (THEME_COLOR_OPAQUE_D_5);
-    pub THEME_COLOR_HANDLE_2_FOCUS: (THEME_COLOR_OPAQUE_D_5);
-    pub THEME_COLOR_HANDLE_2_DISABLED: (THEME_COLOR_U_HIDDEN);
-    pub THEME_COLOR_HANDLE_2_DRAG: (THEME_COLOR_OPAQUE_D_5);
+        color_handle_2: me.color_opaque_d_5
+        color_handle_2_hover: me.color_opaque_d_5
+        color_handle_2_focus: me.color_opaque_d_5
+        color_handle_2_disabled: me.color_u_hidden
+        color_handle_2_drag: me.color_opaque_d_5
 
-    pub THEME_COLOR_DOCK_TAB_ACTIVE = (THEME_COLOR_FG_APP)
+        color_dock_tab_active: me.color_fg_app
 
-    // TODO: THESE ARE APPLICATION SPECIFIC COLORS THAT SHOULD BE MOVED FROM THE GENERAL THEME TO THE GIVEN PROJECT
-    pub THEME_COLOR_HIGH = #C00
-    pub THEME_COLOR_MID = #FA0
-    pub THEME_COLOR_LOW = #8A0
-    pub THEME_COLOR_PANIC = #f0f
-    pub THEME_COLOR_ICON_WAIT = (THEME_COLOR_LOW),
-    pub THEME_COLOR_ERROR = (THEME_COLOR_HIGH),
-    pub THEME_COLOR_WARNING = (THEME_COLOR_MID),
-    pub THEME_COLOR_ICON_PANIC = (THEME_COLOR_HIGH)
+        // TODO: THESE ARE APPLICATION SPECIFIC COLORS THAT SHOULD BE MOVED FROM THE GENERAL THEME TO THE GIVEN PROJECT
+        color_high: #C00
+        color_mid: #FA0
+        color_low: #8A0
+        color_panic: #f0f
+        color_icon_wait: me.color_low
+        color_error: me.color_high
+        color_warning: me.color_mid
+        color_icon_panic: me.color_high
 
-    // TYPOGRAPHY
-    pub THEME_FONT_SIZE_CODE = 9.0
-    pub THEME_FONT_WDGT_LINE_SPACING = 1.2
-    pub THEME_FONT_HL_LINE_SPACING = 1.05
-    pub THEME_FONT_LONGFORM_LINE_SPACING = 1.2
+        // TYPOGRAPHY
+        font_size_code: 9.0
+        font_wdgt_line_spacing: 1.2
+        font_hl_line_spacing: 1.05
+        font_longform_line_spacing: 1.2
 
-    pub THEME_FONT_SIZE_1 = (THEME_FONT_SIZE_BASE + 8 * THEME_FONT_SIZE_CONTRAST)
-    pub THEME_FONT_SIZE_2 = (THEME_FONT_SIZE_BASE + 4 * THEME_FONT_SIZE_CONTRAST)
-    pub THEME_FONT_SIZE_3 = (THEME_FONT_SIZE_BASE + 2 * THEME_FONT_SIZE_CONTRAST)
-    pub THEME_FONT_SIZE_4 = (THEME_FONT_SIZE_BASE + 1 * THEME_FONT_SIZE_CONTRAST)
-    pub THEME_FONT_SIZE_P = (THEME_FONT_SIZE_BASE)
+        font_size_1: me.font_size_base + 8 * me.font_size_contrast
+        font_size_2: me.font_size_base + 4 * me.font_size_contrast
+        font_size_3: me.font_size_base + 2 * me.font_size_contrast
+        font_size_4: me.font_size_base + 1 * me.font_size_contrast
+        font_size_p: me.font_size_base
 
-    pub THEME_FONT_LABEL = {
-        font_family:{
-            latin = font("crate://self/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-            chinese = font(
-                "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
-                "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
-                0.0, 
-                0.0)
-            emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
-        },
-        line_spacing: 1.2
-    } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
-    pub THEME_FONT_REGULAR = {
-        font_family: {
-            latin = font("crate://self/resources/IBMPlexSans-Text.ttf", -0.1, 0.0),
-            chinese = font(
-                "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
-                "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
-                0.0, 
-                0.0)
-            emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
-        },
-        line_spacing: 1.2
-    }
-    pub THEME_FONT_BOLD = {
-        font_family:{
-            latin = font("crate://self/resources/IBMPlexSans-SemiBold.ttf", -0.1, 0.0),
-            chinese = font(
-                "crate://makepad_fonts_chinese_bold/resources/LXGWWenKaiBold.ttf",
-                "crate://makepad_fonts_chinese_bold_2/resources/LXGWWenKaiBold.ttf.2",
-                0.0, 
-                0.0)
-            emoji = font("crate://makepad_fonts_emoji/resources/NotoColorEmoji.ttf", 0.0, 0.0)
-        },
-        line_spacing: 1.2
-    }
-    pub THEME_FONT_ITALIC = {
-        font_family:{
-            latin = font("crate://self/resources/IBMPlexSans-Italic.ttf", -0.1, 0.0),
-            chinese = font(
-                "crate://makepad_fonts_chinese_regular/resources/LXGWWenKaiRegular.ttf",
-                "crate://makepad_fonts_chinese_regular_2/resources/LXGWWenKaiRegular.ttf.2",
-                0.0, 
-                0.0)
-        },
-        line_spacing: 1.2
-    }
-    pub THEME_FONT_BOLD_ITALIC = {
-        font_family:{
-            latin = font("crate://self/resources/IBMPlexSans-BoldItalic.ttf", -0.1, 0.0),
-            chinese = font(
-                "crate://makepad_fonts_chinese_bold/resources/LXGWWenKaiBold.ttf",
-                "crate://makepad_fonts_chinese_bold_2/resources/LXGWWenKaiBold.ttf.2",
-                0.0, 
-                0.0)
-        },
-        line_spacing: 1.2
-    }
-    pub THEME_FONT_CODE = {
-        font_size: (THEME_FONT_SIZE_CODE),
-        font_family:{
-            latin = font("crate://self/resources/LiberationMono-Regular.ttf", 0.0, 0.0)
-        },
-        line_spacing: 1.35
-    }
-    pub THEME_FONT_ICONS = {
-        font_family:{
-            latin = font("crate://self/resources/fa-solid-900.ttf", 0.0, 0.0)
-        },
-        line_spacing: 1.2,
+        font_label: TextStyle{
+            font_family: FontFamily{
+                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                /*$chinese: FontMember{res: res.split_crate(
+                    "makepad_fonts_chinese_regular2:resources/LXGWWenKaiRegular.ttf"
+                    "makepad_fonts_chinese_regular2_2:resources/LXGWWenKaiRegular.ttf.2"
+                ) asc: 0.0 desc: 0.0}
+                $emoji: FontMember{res: res.crate("makepad_fonts_emoji2:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}*/
+            }
+            line_spacing: 1.2
+        } 
+        font_regular: TextStyle{
+            font_family: FontFamily{
+                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                /*$chinese: FontMember{res: res.split_crate(
+                    "makepad_fonts_chinese_regular2:resources/LXGWWenKaiRegular.ttf"
+                    "makepad_fonts_chinese_regular2_2:resources/LXGWWenKaiRegular.ttf.2"
+                ) asc: 0.0 desc: 0.0}
+                $emoji: FontMember{res: res.crate("makepad_fonts_emoji2:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}*/
+            }
+            line_spacing: 1.2
+        }
+        font_bold: TextStyle{
+            font_family: FontFamily{
+                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+                /*$chinese: FontMember{res: res.split_crate(
+                    "makepad_fonts_chinese_bold2:resources/LXGWWenKaiBold.ttf"
+                    "makepad_fonts_chinese_bold2_2:resources/LXGWWenKaiBold.ttf.2"
+                ) asc: 0.0 desc: 0.0}
+                $emoji: FontMember{res: res.crate("makepad_fonts_emoji2:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}*/
+            }
+            line_spacing: 1.2
+        }
+        font_italic: TextStyle{
+            font_family: FontFamily{
+                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
+                /*$chinese: FontMember{res: res.split_crate(
+                    "makepad_fonts_chinese_regular2:resources/LXGWWenKaiRegular.ttf"
+                    "makepad_fonts_chinese_regular2_2:resources/LXGWWenKaiRegular.ttf.2"
+                ) asc: 0.0 desc: 0.0}*/
+            }
+            line_spacing: 1.2
+        }
+        font_bold_italic: TextStyle{
+            font_family: FontFamily{
+                $latin: FontMember{res: res.crate("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
+                /*$chinese: FontMember{res: res.split_crate(
+                    "makepad_fonts_chinese_bold2:resources/LXGWWenKaiBold.ttf"
+                    "makepad_fonts_chinese_bold2_2:resources/LXGWWenKaiBold.ttf.2"
+                ) asc: 0.0 desc: 0.0}*/
+            }
+            line_spacing: 1.2
+        }
+        font_code: TextStyle{
+            font_size: me.font_size_code
+            font_family: FontFamily{
+                $latin: FontMember{res: res.crate("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+            }
+            line_spacing: 1.35
+        }
+        font_icons: TextStyle{
+            font_family: FontFamily{
+                $latin: FontMember{res: res.crate("self:resources/fa-solid-900.ttf") asc: 0.0 desc: 0.0}
+            }
+            line_spacing: 1.2
+        }
     }
 }

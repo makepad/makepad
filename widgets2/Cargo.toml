@@ -20,11 +20,11 @@ makepad-html ={ path = "../libs/html", version = "1.0.0" }
 unicode-segmentation = "1.11.0"
 pulldown-cmark = { version = "0.12.2", default-features = false, features = ["simd"] }
 
-#makepad-fonts-emoji = {path = "../widgets/fonts/emoji", version = "1.0.0"}
-#makepad-fonts-chinese-regular = {path = "../widgets/fonts/chinese_regular", version = "1.0.1"}
-#makepad-fonts-chinese-regular-2 = {path = "../widgets/fonts/chinese_regular_2", version = "1.0.1"}
-#makepad-fonts-chinese-bold = {path = "../widgets/fonts/chinese_bold", version = "1.0.1"}
-#makepad-fonts-chinese-bold-2 = {path = "../widgets/fonts/chinese_bold_2", version = "1.0.1"}
+#makepad-fonts-emoji2 = {path = "./fonts/emoji", version = "2.0.0"}
+#makepad-fonts-chinese-regular2 = {path = "./fonts/chinese_regular", version = "2.0.0"}
+#makepad-fonts-chinese-regular2-2 = {path = "./fonts/chinese_regular_2", version = "2.0.0"}
+#makepad-fonts-chinese-bold2 = {path = "./fonts/chinese_bold", version = "2.0.0"}
+#makepad-fonts-chinese-bold2-2 = {path = "./fonts/chinese_bold_2", version = "2.0.0"}
 
 serde = { version = "1.0", optional = true, features = ["derive"] }
 
