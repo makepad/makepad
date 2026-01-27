@@ -138,7 +138,7 @@ pub struct DrawText {
 }
 
 impl ScriptHook for DrawText{
-    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, value:ScriptValue){
+    fn on_before_apply(&mut self, _vm:&mut ScriptVm, _apply:&mut Apply, _value:ScriptValue){
     }
 }
 

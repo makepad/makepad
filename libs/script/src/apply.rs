@@ -1,7 +1,11 @@
-use crate::makepad_live_id::*;
+use makepad_live_id::*;
+use smallvec::*;
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
-use smallvec::*;
+
+// ============================================================================
+// HeapLiveIdPath - A path of LiveIds for tracking scope hierarchy
+// ============================================================================
 
 #[derive(Default, Clone)]
 pub struct HeapLiveIdPath{
@@ -37,14 +41,9 @@ impl Debug for HeapLiveIdPath {
     }
 }
 
-
-#[derive(Default)]
-pub struct Scope<'a,'b>{
-    pub path: HeapLiveIdPath,
-    pub data: ScopeDataMut<'a>,
-    pub props: ScopeDataRef<'b>,
-    pub index: usize
-}
+// ============================================================================
+// ScopeDataRef / ScopeDataMut - Type-erased data containers for scope
+// ============================================================================
 
 #[derive(Default)]
 pub struct ScopeDataRef<'a>(Option<&'a dyn Any>);
@@ -66,6 +65,18 @@ impl <'a> ScopeDataMut<'a>{
     pub fn get_mut<T: Any>(&mut self) -> Option<&mut T> {
         self.0.as_mut().and_then(|r| r.downcast_mut())
     }
+}
+
+// ============================================================================
+// Scope - Context passed during apply operations
+// ============================================================================
+
+#[derive(Default)]
+pub struct Scope<'a,'b>{
+    pub path: HeapLiveIdPath,
+    pub data: ScopeDataMut<'a>,
+    pub props: ScopeDataRef<'b>,
+    pub index: usize
 }
 
 impl<'a,'b> Scope<'a,'b>{
@@ -156,5 +167,120 @@ impl<'a,'b> Scope<'a,'b>{
         std::mem::swap(&mut self.props, &mut props);
         self.index = old_index;
         r
+    }
+}
+
+// ============================================================================
+// ApplyFrom - Source of apply operation
+// ============================================================================
+
+/// File identifier for live DSL documents (wraps u16 index)
+#[derive(Clone, Copy, Default, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ApplyFileId(pub u16);
+
+#[derive(Debug, Clone, Copy)]
+pub enum ApplyFrom {
+    NewFromDoc {file_id: ApplyFileId},
+    UpdateFromDoc {file_id: ApplyFileId},
+    New,
+    Animate,
+    AnimatorInit,
+    Over,
+}
+
+impl Default for ApplyFrom {
+    fn default() -> Self {
+        ApplyFrom::Over
+    }
+}
+
+impl ApplyFrom {
+    pub fn is_from_doc(&self) -> bool {
+        match self {
+            Self::NewFromDoc {..} => true,
+            Self::UpdateFromDoc {..} => true,
+            _ => false
+        }
+    }
+
+    pub fn is_new_from_doc(&self) -> bool {
+        match self {
+            Self::NewFromDoc {..} => true,
+            _ => false
+        }
+    }
+    
+    pub fn should_apply_reset(&self) -> bool {
+        match self {
+            Self::UpdateFromDoc{..}  => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_update_from_doc(&self) -> bool {
+        match self {
+            Self::UpdateFromDoc {..} => true,
+            _ => false
+        }
+    }
+        
+    pub fn file_id(&self) -> Option<ApplyFileId> {
+        match self {
+            Self::NewFromDoc {file_id} => Some(*file_id),
+            Self::UpdateFromDoc {file_id,..} => Some(*file_id),
+            _ => None
+        }
+    }
+    
+    pub fn with_scope<'a, 'b, 'c>(self, scope:&'c mut Scope<'a,'b>)->Apply<'a, 'b, 'c>{
+        Apply{
+            from: self,
+            scope: Some(scope)
+        }
+    }
+}
+
+// ============================================================================
+// Apply - Context for apply operations including source and scope
+// ============================================================================
+
+pub struct Apply<'a,'b,'c> {
+    pub from: ApplyFrom,
+    pub scope: Option<&'c mut Scope<'a,'b>>,
+}
+
+impl Default for Apply<'_, '_, '_> {
+    fn default() -> Self {
+        Self {
+            from: ApplyFrom::default(),
+            scope: None,
+        }
+    }
+}
+
+impl<'a,'b, 'c> From<ApplyFrom> for Apply<'a,'b,'c> {
+    fn from(from: ApplyFrom) -> Self {
+        Self {
+            from,
+            scope: None,
+        }
+    }
+}
+
+impl <'a,'b,'c> Apply<'a,'b,'c>{
+    pub fn override_from<F, R>(&mut self, from:ApplyFrom, f: F) -> R where F: FnOnce(&mut Apply) -> R{
+        if let Some(scope) = &mut self.scope{
+            f(&mut Apply{
+                from: from,
+                scope: Some(*scope)
+            })
+        }
+        else{
+            f(&mut Apply{
+                from: from,
+                scope: None
+            })
+            
+        }
     }
 }
