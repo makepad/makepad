@@ -365,7 +365,13 @@ impl ScriptHeap{
                 if object.tag.is_string_keys(){
                     if let Some(skey) = key_id.as_string(|s|{
                         if let Some(s) = s{
-                            self.check_intern_string(s)
+                            // Try to get existing interned string
+                            if let Some(existing) = self.check_intern_string(s){
+                                Some(existing)
+                            } else {
+                                // Not interned yet - intern it now to maintain consistency
+                                Some(self.new_string_from_str(s))
+                            }
                         }
                         else{
                             None
@@ -373,6 +379,8 @@ impl ScriptHeap{
                     }){
                         return self.set_value_shallow(ptr, skey, value, trap);
                     }
+                    // LiveId couldn't be converted to string - fall through to use LiveId
+                    // This happens for hashed IDs that lost their string representation
                 }
                 return self.set_value_shallow(ptr, key, value, trap);
             }
@@ -626,6 +634,24 @@ impl ScriptHeap{
         if let Some(value) = obj_data.map_get(&field) {
             // Field exists directly on object, return as-is
             return value;
+        }
+        // Handle is_string_keys: convert LiveId to string key
+        if obj_data.tag.is_string_keys() {
+            if let Some(id) = field.as_id() {
+                if let Some(value) = id.as_string(|s| {
+                    if let Some(s) = s {
+                        if let Some(idx) = self.check_intern_string(s) {
+                            self.objects[obj.index as usize].map_get(&idx)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }) {
+                    return value;
+                }
+            }
         }
         
         // Field doesn't exist directly - get from prototype chain

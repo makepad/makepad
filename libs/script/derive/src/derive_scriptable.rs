@@ -112,14 +112,14 @@ fn derive_script_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> 
             }
         }
         
-        tb.add("        if !apply.is_default() {");
         for field in &fields {
             if field.attrs.iter().any( | a | a.name == "apply_default"){
                 tb.add("    if let Some(default_value) = <").stream(Some(field.ty.clone())).add(" as ScriptApplyDefault>::script_apply_default(&mut self.").ident(&field.name).add(",vm, apply, scope, value){");
-                tb.add("        self.script_apply(vm, &Apply::Default, scope, default_value);");
+                tb.add("        self.script_apply(vm, &Apply::Default(apply.as_default().map_or(0, |x| x + 1)), scope, default_value);");
                 tb.add("    }");
             }
         }
+        tb.add("        if !apply.is_default() {");
         tb.add("            <Self as ScriptHookDeref>::on_deref_after_apply(self, vm, apply, scope, value);");
         tb.add("        }");
         tb.add("    }");
