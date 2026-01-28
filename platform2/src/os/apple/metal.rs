@@ -846,73 +846,6 @@ pub struct CxOsDrawShader {
 
 // alright lets go process this shader
 impl DrawVars{
-    /// Compute a hash of all function IDs on an object by iterating through 
-    /// the prototype chain and hashing each function's ScriptIp.
-    fn compute_function_hash(heap: &ScriptHeap, obj: ScriptObject) -> LiveId {
-        let mut hash = LiveId(LiveId::SEED);
-        
-        // Walk the prototype chain to collect all functions
-        let mut current = Some(obj);
-        while let Some(cur_obj) = current {
-            // Iterate through the object's map entries
-            for (key, value) in heap.map_ref(cur_obj).iter() {
-                // Check if the value is a function object
-                if let Some(fn_obj) = value.value.as_object() {
-                    if let Some(fn_ptr) = heap.as_fn(fn_obj) {
-                        // Hash the key (method name)
-                        if let Some(key_id) = key.as_id() {
-                            hash = hash.id_append(key_id);
-                        }
-                        // Hash the function pointer
-                        match fn_ptr {
-                            ScriptFnPtr::Script(ip) => {
-                                // Hash the ScriptIp as bytes
-                                let ip_bytes = ip.to_u40().to_be_bytes();
-                                hash = hash.bytes_append(&ip_bytes);
-                            }
-                            ScriptFnPtr::Native(native_id) => {
-                                // Hash native function ID
-                                let id_bytes = native_id.index.to_be_bytes();
-                                hash = hash.bytes_append(&id_bytes);
-                            }
-                        }
-                    }
-                }
-            }
-            // Move to prototype
-            current = heap.proto(cur_obj).as_object();
-        }
-        
-        hash
-    }
-    
-    /// Helper to finalize shader setup after finding a cached shader ID
-    fn finalize_cached_shader(&mut self, vm: &mut ScriptVm, io_self: ScriptObject, shader_id: DrawShaderId) {
-        let cx = vm.host.cx();
-        let mapping = &cx.draw_shaders.shaders[shader_id.index].mapping;
-        
-        // Set dyn_instance_start and dyn_instance_slots based on mapping
-        self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
-        self.dyn_instance_slots = mapping.instances.total_slots;
-        
-        // Set draw_shader on self
-        self.draw_shader_id = Some(shader_id);
-        
-        // See if we have a script-set vertex buffer with geometry
-        let mut output = ShaderOutput::default();
-        output.backend = ShaderBackend::Metal;
-        output.pre_collect_shader_io(vm, io_self);
-        
-        if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
-            let buffer_value = vm.heap.value(vb_obj, id!(buffer).into(), &vm.thread.trap);
-            if let Some(handle) = buffer_value.as_handle() {
-                if let Some(geometry) = vm.heap.handle_ref::<Geometry>(handle) {
-                    self.geometry_id = Some(geometry.geometry_id());
-                }
-            }
-        }
-    }
-    
     pub (crate) fn compile_shader(&mut self, vm:&mut ScriptVm, _apply:&Apply, value:ScriptValue){
         // Shader caching strategy:
         // 1. Check object_id cache (fastest - exact same object)
@@ -924,20 +857,20 @@ impl DrawVars{
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
-                    self.finalize_cached_shader(vm, io_self, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
             }
             
             // Cache 2: Compute function hash and check if we've seen these functions before
-            let fnhash = Self::compute_function_hash(&vm.heap, io_self);
+            let fnhash = DrawVars::compute_shader_functions_hash(&vm.heap, io_self);
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
                     // Add to object_id cache for faster lookup next time
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders.cache_object_id_to_shader.insert(io_self, shader_id);
-                    self.finalize_cached_shader(vm, io_self, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
             }
@@ -1006,12 +939,24 @@ impl DrawVars{
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders.cache_object_id_to_shader.insert(io_self, shader_id);
                     cx.draw_shaders.cache_functions_to_shader.insert(fnhash, shader_id);
-                    self.finalize_cached_shader(vm, io_self, shader_id);
+                    self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
             }
             
-            let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), &vm.heap, &output);
+            // Extract geometry_id from the vertex buffer object before creating the mapping
+            let geometry_id = if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
+                let buffer_value = vm.heap.value(vb_obj, id!(buffer).into(), &vm.thread.trap);
+                if let Some(handle) = buffer_value.as_handle() {
+                    vm.heap.handle_ref::<Geometry>(handle).map(|g| g.geometry_id())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            
+            let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), &vm.heap, &output, geometry_id);
             
             // Fill the scope uniform buffer from current script values
             mapping.fill_scope_uniforms_buffer(
@@ -1054,17 +999,8 @@ impl DrawVars{
             // Set draw_shader on self
             self.draw_shader_id = Some(shader_id);
             
-            // See if we have a script-set vertex buffer with geometry
-            // Find the vertex buffer object by looking for SHADER_IO_VERTEX_BUFFER type,
-            // then get its buffer property which should be a Handle<Geometry>
-            if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
-                let buffer_value = vm.heap.value(vb_obj, id!(buffer).into(), &vm.thread.trap);
-                if let Some(handle) = buffer_value.as_handle() {
-                    if let Some(geometry) = vm.heap.handle_ref::<Geometry>(handle) {
-                        self.geometry_id = Some(geometry.geometry_id());
-                    }
-                }
-            }
+            // Use the geometry_id stored on the mapping
+            self.geometry_id = geometry_id;
         }
     }
 }
