@@ -1,5 +1,6 @@
 use crate::makepad_platform::*;
 use std::f64::consts::PI;
+use makepad_math::Vec4f;
 
 pub fn script_mod(vm:&mut ScriptVm){
     
@@ -121,10 +122,41 @@ pub struct AnimatorState {
     #[live] pub apply: Option<ScriptObject>,
 }
 
+/// Runtime state for a single animation track
+#[derive(Clone)]
+struct AnimatorTrack {
+    /// The state group this track belongs to (e.g., "hover")
+    group_id: LiveId,
+    /// The current state id (e.g., "off", "on", "drag")
+    state_id: LiveId,
+    /// The previous state id we're animating from
+    from_state_id: LiveId,
+    /// When the animation started
+    start_time: f64,
+    /// The Play mode for this animation
+    play: Play,
+    /// The ease function
+    ease: Ease,
+    /// The target apply object (what we're animating to)
+    target_apply: ScriptObject,
+    /// The starting values (captured when animation begins)
+    from_values: ScriptObject,
+    /// Whether this track needs redraw
+    redraw: bool,
+}
+
 #[derive(Default, Script)]
 pub struct Animator {
     #[rust] pub next_frame: NextFrame,
     #[rust] pub state_groups: LiveIdMap<LiveId, AnimatorStates>,
+    /// Runtime: Current state for each state group
+    #[rust] current_states: LiveIdMap<LiveId, LiveId>,
+    /// Runtime: Active animation tracks (one per state group that's animating)
+    #[rust] tracks: Vec<AnimatorTrack>,
+    /// Runtime: Last applied values per state group (for interpolation)
+    #[rust] last_values: LiveIdMap<LiveId, ScriptObject>,
+    /// Runtime: Cached interpolation result object (reused each frame to avoid allocations)
+    #[rust] interpolation_cache: Option<ScriptObject>,
 }
 
 impl ScriptHook for Animator {
@@ -148,6 +180,9 @@ impl ScriptHook for Animator {
 
 impl ScriptApplyDefault for Animator{
     fn script_apply_default(&mut self, _vm:&mut ScriptVm, apply:&Apply, _scope:&mut Scope, _value:ScriptValue)->Option<ScriptValue>{
+        if !apply.is_new(){
+            return None
+        }
         let index = apply.as_default().map_or(0, |x| x + 1);
         let (_, states) = self.state_groups.iter().nth(index)?;
         let state = states.states.get(&states.default)?;
@@ -166,22 +201,318 @@ pub enum AnimatorAction {
 }
 
 impl Animator{
-    pub fn play(&mut self, _cx:&mut Cx, _state: &[LiveId;2])->Option<ScriptValue>{
-        println!("PLAY");
-        None
+    /// Start animating to a new state
+    pub fn play(&mut self, cx:&mut Cx, state: &[LiveId;2])->Option<ScriptValue>{
+        let group_id = state[0];
+        let target_state_id = state[1];
+        
+        // Get the state group
+        let states = self.state_groups.get(&group_id)?;
+        
+        // Get the target state
+        let target_state = states.states.get(&target_state_id)?;
+        
+        // Get the apply object
+        let target_apply = target_state.apply?;
+        
+        // Find existing track for this group (if any)
+        let existing_track_idx = self.tracks.iter().position(|t| t.group_id == group_id);
+        
+        // Get the current state for this group (from current_states or default)
+        let current_state_id = self.current_states.get(&group_id).copied()
+            .unwrap_or(states.default);
+        
+        // Determine from_state_id for Play mode lookup:
+        // If there's an active track, we're coming from that track's target state
+        let from_state_id = existing_track_idx
+            .map(|idx| self.tracks[idx].state_id)
+            .unwrap_or(current_state_id);
+        
+        // If we're already in this state and not animating, do nothing
+        if current_state_id == target_state_id && existing_track_idx.is_none() {
+            return None;
+        }
+        
+        // Determine the Play mode from the target state's `from` map
+        let play = target_state.from.get(&from_state_id)
+            .or_else(|| target_state.from.get(&id!(all)))
+            .copied()
+            .unwrap_or(Play::Forward { duration: 0.3 });
+        
+        // Set cursor if specified
+        if let Some(cursor) = target_state.cursor {
+            cx.set_cursor(cursor);
+        }
+        
+        // For snap, we don't animate - just apply immediately
+        if matches!(play, Play::Snap) {
+            // Remove any existing track for this group
+            self.tracks.retain(|t| t.group_id != group_id);
+            // Update current state
+            self.current_states.insert(group_id, target_state_id);
+            // Store last values
+            self.last_values.insert(group_id, target_apply);
+            // Return the apply object directly
+            return Some(target_apply.into());
+        }
+        
+        // Get the from values - this is what we animate FROM:
+        // 1. If there's an active track with interpolation_cache, use the cache (current interpolated state)
+        // 2. Otherwise use last_values (the state from last completed animation)
+        // 3. Fall back to current_state's static apply
+        let from_values = if existing_track_idx.is_some() {
+            // Interrupting an animation - use cached interpolation state if available,
+            // otherwise use the existing track's from_values (where that animation started)
+            self.interpolation_cache.or_else(|| {
+                existing_track_idx.map(|idx| self.tracks[idx].from_values)
+            })
+        } else {
+            // No active animation - use last completed values
+            self.last_values.get(&group_id).copied()
+        }.or_else(|| {
+            // Fall back to the current state's static apply
+            let current_state = states.states.get(&current_state_id)?;
+            current_state.apply
+        })?;
+        
+        // Remove any existing track for this group
+        self.tracks.retain(|t| t.group_id != group_id);
+        
+        // Create new track
+        // Use NEG_INFINITY as marker - will be set to actual time on first NextFrame
+        let track = AnimatorTrack {
+            group_id,
+            state_id: target_state_id,
+            from_state_id,
+            start_time: f64::NEG_INFINITY,
+            play,
+            ease: Ease::Linear, // Could be made configurable
+            target_apply,
+            from_values,
+            redraw: true,
+        };
+        
+        self.tracks.push(track);
+        
+        // Request next frame
+        self.next_frame = cx.new_next_frame();
+        
+        // Return the interpolated value at t=0 (which is the from_values)
+        Some(from_values.into())
     }
     
-    pub fn cut(&mut self, _cx:&mut Cx, _state: &[LiveId;2])->Option<ScriptValue>{
-        None
+    /// Immediately cut to a state without animation
+    pub fn cut(&mut self, cx:&mut Cx, state: &[LiveId;2])->Option<ScriptValue>{
+        let group_id = state[0];
+        let target_state_id = state[1];
+        
+        // Get the state group
+        let states = self.state_groups.get(&group_id)?;
+        
+        // Get the target state
+        let target_state = states.states.get(&target_state_id)?;
+        
+        // Get the apply object
+        let target_apply = target_state.apply?;
+        
+        // Set cursor if specified
+        if let Some(cursor) = target_state.cursor {
+            cx.set_cursor(cursor);
+        }
+        
+        // Remove any existing track for this group
+        self.tracks.retain(|t| t.group_id != group_id);
+        
+        // Update current state
+        self.current_states.insert(group_id, target_state_id);
+        
+        // Store last values
+        self.last_values.insert(group_id, target_apply);
+        
+        // Return the apply object directly
+        Some(target_apply.into())
     }
     
-    pub fn in_state(&self, _cx:&Cx, _state: &[LiveId;2])->bool{
+    /// Check if the animator is in a specific state
+    pub fn in_state(&self, _cx:&Cx, state: &[LiveId;2])->bool{
+        let group_id = state[0];
+        let state_id = state[1];
+        
+        // Check current state
+        if let Some(current) = self.current_states.get(&group_id) {
+            return *current == state_id;
+        }
+        
+        // Fall back to default
+        if let Some(states) = self.state_groups.get(&group_id) {
+            return states.default == state_id;
+        }
+        
         false
     }   
     
-    pub fn handle_event(&mut self, _cx:&mut Cx, _event:&Event, _act:&mut AnimatorAction)->Option<ScriptValue>{
+    /// Handle animation events (NextFrame)
+    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, act:&mut AnimatorAction)->Option<ScriptValue>{
+        if let Event::NextFrame(nf) = event {
+            if !nf.set.contains(&self.next_frame) {
+                return None;
+            }
+            
+            if self.tracks.is_empty() {
+                return None;
+            }
+            
+            let current_time = nf.time;
+            
+            // Initialize start_time for tracks that just started
+            for track in &mut self.tracks {
+                if track.start_time == f64::NEG_INFINITY {
+                    track.start_time = current_time;
+                }
+            }
+            
+            let mut any_animating = false;
+            let mut any_redraw = false;
+            
+            // Process tracks and interpolate in one pass
+            let result = cx.with_vm(|vm| {
+                // Get or create the cached result object (reused across frames)
+                let result = self.interpolation_cache.get_or_insert_with(|| vm.heap.new_object());
+                let result = *result;
+                
+                for track in &self.tracks {
+                    let elapsed = current_time - track.start_time;
+                    let (ended, time) = track.play.get_ended_time(elapsed);
+                    let mix = if ended { 1.0 } else { track.ease.map(time) };
+                    
+                    if !ended {
+                        any_animating = true;
+                    }
+                    if track.redraw {
+                        any_redraw = true;
+                    }
+                    
+                    // Interpolate directly using from_values from the track
+                    Self::interpolate_object(vm, result, track.from_values, track.target_apply, mix);
+                }
+                result
+            });
+            
+            // Update state and remove ended tracks
+            self.tracks.retain(|track| {
+                let elapsed = current_time - track.start_time;
+                let (ended, _) = track.play.get_ended_time(elapsed);
+                if ended {
+                    self.current_states.insert(track.group_id, track.state_id);
+                    self.last_values.insert(track.group_id, track.target_apply);
+                    false
+                } else {
+                    true
+                }
+            });
+            
+            // Request next frame if still animating
+            if any_animating {
+                self.next_frame = cx.new_next_frame();
+            }
+            
+            *act = AnimatorAction::Animating { redraw: any_redraw };
+            
+            return Some(result.into());
+        }
         None
-    }          
+    }
+    
+    /// Recursively interpolate between two objects
+    fn interpolate_object(vm: &mut ScriptVm, result: ScriptObject, from: ScriptObject, to: ScriptObject, mix: f64) {
+        // Iterate over the 'to' object's properties
+        vm.map_mut_with(to, |vm, to_map| {
+            for (key, to_value) in to_map.iter() {
+                let to_val = to_value.value;
+                
+                // Try to get corresponding value from 'from'
+                let from_val = vm.heap.value(from, *key, &Default::default());
+                
+                // Get existing value at this key in result (for reusing nested objects)
+                let existing = vm.heap.value(result, *key, &Default::default());
+                
+                // Interpolate based on type, reusing existing nested objects from result
+                let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
+                
+                // Set on result
+                vm.heap.set_value_def(result, *key, interpolated);
+            }
+        });
+    }
+    
+    /// Interpolate between two ScriptValues
+    /// `existing` is the current value at this key in the result object (for reusing nested objects)
+    fn interpolate_value(vm: &mut ScriptVm, from: ScriptValue, to: ScriptValue, mix: f64, existing: ScriptValue) -> ScriptValue {
+        // Handle snap (apply_transform objects) - these should not be interpolated
+        if let Some(to_obj) = to.as_object() {
+            if vm.heap.has_apply_transform(to) {
+                return to;
+            }
+            
+            // If it's an object, recursively interpolate
+            if let Some(from_obj) = from.as_object() {
+                // Reuse existing nested object from result if available, otherwise create new
+                let result_obj = existing.as_object().unwrap_or_else(|| vm.heap.new_object());
+                Self::interpolate_object(vm, result_obj, from_obj, to_obj, mix);
+                return result_obj.into();
+            } else {
+                // Can't interpolate different types, return 'to' at mix >= 0.5
+                return if mix >= 0.5 { to } else { from };
+            }
+        }
+        
+        // Numbers (f64)
+        if let (Some(from_f), Some(to_f)) = (from.as_number(), to.as_number()) {
+            let result = from_f + (to_f - from_f) * mix;
+            return ScriptValue::from_f64(result);
+        }
+        
+        // Colors
+        if let (Some(from_c), Some(to_c)) = (from.as_color(), to.as_color()) {
+            let from_vec = Vec4f::from_u32(from_c);
+            let to_vec = Vec4f::from_u32(to_c);
+            let mix_f = mix as f32;
+            let result = Vec4f {
+                x: from_vec.x + (to_vec.x - from_vec.x) * mix_f,
+                y: from_vec.y + (to_vec.y - from_vec.y) * mix_f,
+                z: from_vec.z + (to_vec.z - from_vec.z) * mix_f,
+                w: from_vec.w + (to_vec.w - from_vec.w) * mix_f,
+            };
+            return ScriptValue::from_color(result.to_u32());
+        }
+        
+        // Pods (vectors)
+        if let (Some(from_pod), Some(to_pod)) = (from.as_pod(), to.as_pod()) {
+            return Self::interpolate_pod(vm, from_pod, to_pod, mix);
+        }
+        
+        // Booleans - snap at 0.5
+        if from.is_bool() || to.is_bool() {
+            return if mix >= 0.5 { to } else { from };
+        }
+        
+        // IDs - snap at 0.5
+        if from.is_id() || to.is_id() {
+            return if mix >= 0.5 { to } else { from };
+        }
+        
+        // Default: return 'to' at mix >= 0.5
+        if mix >= 0.5 { to } else { from }
+    }
+    
+    /// Interpolate between two pod values (vectors)
+    /// For now, pods snap at mix >= 0.5 since creating interpolated pods requires
+    /// internal APIs. Most animation use cases are for f32/f64/colors which are handled above.
+    fn interpolate_pod(_vm: &mut ScriptVm, from: ScriptPod, to: ScriptPod, mix: f64) -> ScriptValue {
+        // Pods (vectors, matrices, etc) snap at 0.5
+        // The common animation case is f32/f64 numbers and colors, which are handled separately
+        if mix >= 0.5 { to.into() } else { from.into() }
+    }
 }
 
 
@@ -204,7 +535,7 @@ pub enum Play {
     Forward {duration: f64},
             
     Snap,
-            
+    
     #[live {duration: 1.0, end: 1.0}]
     Reverse {duration: f64, end: f64},
             
