@@ -180,7 +180,7 @@ pub enum Apply {
     Reload,
     Update,
     Animate,
-    Default,
+    Default(usize),
     #[default]
     Over,
 }
@@ -238,9 +238,17 @@ impl Apply {
         }
     }
     
+    pub fn as_default(&self) -> Option<usize> {
+        match self {
+            Self::Default(u) => Some(*u),
+            _ => None
+        }
+    }
+    
+        
     pub fn is_default(&self) -> bool {
         match self {
-            Self::Default => true,
+            Self::Default(_) => true,
             _ => false
         }
     }

@@ -24,15 +24,15 @@ script_mod!{
         min_handle_size: 30.0
         draw_bg +: {
             drag: shader.instance(0.0)
-            hover: shader.instance(0.0)
+            hover: shader.instance(1.0)
                     
             size: shader.uniform(6.0)
             border_size: shader.uniform(theme.beveling)
             border_radius: shader.uniform(1.5)
             
             color: shader.uniform(theme.color_outset)
-            color_hover: shader.uniform(theme.color_outset_hover)
-            color_drag: shader.uniform(theme.color_outset_drag)
+            color_hover: shader.uniform(#f00)//shader.uniform(theme.color_outset_hover)
+            color_drag:  shader.uniform(#0f0)//shader.uniform(theme.color_outset_drag)
                     
             border_color: shader.uniform(theme.color_u_hidden)
             border_color_hover: shader.uniform(theme.color_u_hidden)
@@ -66,7 +66,7 @@ script_mod!{
                         self.color_drag
                         self.drag
                     )
-                    self.hover
+                    1
                 ))
                 
                 sdf.stroke(mix(
@@ -88,7 +88,7 @@ script_mod!{
                 off: AnimatorState{
                     from: {all: Play.Forward {duration: 0.1}}
                     apply: {
-                        draw_bg: {drag: 0 hover: 0}
+                        draw_bg: {drag: 1 hover: 0}
                     }
                 }
                 on: AnimatorState{
@@ -109,7 +109,7 @@ script_mod!{
                     from: {all: Play.Snap}
                     apply: {
                         draw_bg: {
-                            drag: 1 
+                            drag: 1
                             hover: 1
                         }
                     }

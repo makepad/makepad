@@ -148,9 +148,16 @@ impl ScriptHook for Animator {
 }
 
 impl ScriptApplyDefault for Animator{
-    fn script_apply_default(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue)->Option<ScriptValue>{
-        println!("APPLYING DEFAULT");
-        None
+    fn script_apply_default(&mut self, _vm:&mut ScriptVm, apply:&Apply, _scope:&mut Scope, _value:ScriptValue)->Option<ScriptValue>{
+        let index = apply.as_default().map_or(0, |x| x + 1);
+        let (_, states) = self.state_groups.iter().nth(index)?;
+        let state = states.states.get(&states.default)?;
+        
+        // Return the apply value from that state
+        let apply = state.apply?.into();
+        _vm.heap.println(apply);
+        println!("{}", apply);
+        Some(apply)
     }
 }
 

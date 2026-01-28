@@ -31,6 +31,7 @@ impl MatchEvent for App{
             use mod.fs
             use mod.std
             use mod.run
+            
             let self_ip = "10.0.0.112"
             let comfy_ip = "10.0.0.165:8000"
             let openai_base = "http://127.0.0.1:8080"
@@ -157,7 +158,7 @@ impl MatchEvent for App{
                 if display.landscape model.width else model.height
                 flow[model.image].inputs.height = 
                 if display.landscape model.height else model.width
-                
+                ~flow.to_json()
                 let req = net.HttpRequest{
                     url: "http://" + comfy_ip + "/prompt"
                     method: net.HttpMethod.POST
