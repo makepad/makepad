@@ -1173,7 +1173,7 @@ impl DrawVars {
             self.dyn_instance_slots = mapping.instances.total_slots;
             
             // Read default values for dyn_instance slots from the shader object
-            self.read_dyn_instance_defaults(&vm.heap, &mapping, io_self);
+            self.fill_dyn_instances(&vm.heap, &mapping, io_self);
             
             // Access Cx from the vm host
             let cx = vm.host.cx_mut();

@@ -212,10 +212,6 @@ impl<'a> CxDraw<'a> {
         }
         let draw_shader = draw_vars.draw_shader_id.unwrap();
         
-        if draw_shader.generation != self.draw_shaders.generation {
-            return None
-        }
-        
         let sh = &self.cx.draw_shaders[draw_shader.index];
         
         let current_draw_list_id = *self.draw_list_stack.last().unwrap();

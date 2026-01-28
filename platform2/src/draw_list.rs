@@ -23,7 +23,7 @@ use {
         },
         draw_vars::{
             DrawVars,
-            DRAW_CALL_USER_UNIFORMS,
+            DRAW_CALL_DYN_UNIFORMS,
             DRAW_CALL_TEXTURE_SLOTS
         },
         texture::Texture,
@@ -198,7 +198,7 @@ pub struct CxDrawCall {
     pub total_instance_slots: usize,
     pub draw_call_uniforms: DrawCallUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
-    pub dyn_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
+    pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS], // user uniforms
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
@@ -319,30 +319,6 @@ pub struct CxRectArea{
 }
 
 impl CxDrawList {
-/*
-    pub fn intersect_clip(&mut self, clip: (Vec2f, Vec2f)) -> (Vec2f, Vec2f) {
-        if !self.unclipped {
-            let min_x = self.rect.pos.x - self.parent_scroll.x;
-            let min_y = self.rect.pos.y - self.parent_scroll.y;
-            let max_x = self.rect.pos.x + self.rect.size.x - self.parent_scroll.x;
-            let max_y = self.rect.pos.y + self.rect.size.y - self.parent_scroll.y;
-            
-            let ret = (Vec2f {
-                x: min_x.max(clip.0.x),
-                y: min_y.max(clip.0.y)
-            }, Vec2f {
-                x: max_x.min(clip.1.x),
-                y: max_y.min(clip.1.y)
-            });
-            self.clip_points = ret;
-            ret
-        }
-        else {
-            self.clip_points = clip;
-            clip
-        }
-    }*/
-    
     pub fn find_appendable_drawcall(&mut self, sh: &CxDrawShader, draw_vars: &DrawVars) -> Option<usize> {
         // find our drawcall to append to the current layer
         if draw_vars.draw_shader_id.is_none(){
