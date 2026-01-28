@@ -1,18 +1,40 @@
 use crate::makepad_platform::*;
 use std::f64::consts::PI;
 
-script_mod!{
-    mod.animator = {
-        Animator: mod.std.set_type_default() do #(Animator::script_ext(vm)){}
-        State: #(State::script_ext(vm)){}
-        States: #(States::script_ext(vm)){}
-        Play: #(Play::script_api(vm)),
-        ..me.Play,
-        Ease: #(Ease::script_api(vm)),
-        ..me.Ease
-    }
+pub fn script_mod(vm:&mut ScriptVm){
+    
+    let animator = vm.new_module(id!(animator));
+    
+    // Register the native apply_transform function that computes the snap value
+    // This function receives the snap object and returns the stored value
+    let snap_transform_id = vm.add_apply_transform_fn(|vm, object|{
+        // The snap object stores the value to return
+        script_value!(vm, object.value)
+    });
+    
+    // Register the 'snap' function on animator module
+    // It returns an object with apply_transform set, so when applied to a field
+    // it will return the stored value
+    vm.add_method(animator, id!(snap), script_args!(value = NIL), move |vm, args|{
+        let value = script_value!(vm, args.value);
+        let snap_obj = vm.heap.new_object();
+        vm.heap.set_value_def(snap_obj, id!(value).into(), value);
+        vm.heap.set_object_apply_transform(snap_obj, snap_transform_id);
+        snap_obj.into()
+    });
+    
+    script_mod!{
+        use mod.animator;
+        
+        animator.Animator = mod.std.set_type_default() do #(Animator::script_ext(vm)){}
+        animator.AnimatorStates = #(AnimatorState::script_ext(vm)){}
+        animator.AnimatorState =  #(AnimatorState::script_api(vm)){}
+        animator.Play =  #(Play::script_api(vm))
+        animator.Ease = #(Ease::script_api(vm))
+    };
+    script_mod(vm);
 }
-
+    
 pub trait AnimatorImpl {
         
     fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]){
@@ -60,74 +82,78 @@ pub enum Animate {
     No
 }
 
+/// Container for all states within a state group (e.g., hover: {off, on, drag})
 #[derive(Default, Script)]
-struct States {
+pub struct AnimatorStates {
+    #[live] default: LiveId,
+    #[rust] states: LiveIdMap<LiveId, AnimatorState>
 }
 
-impl ScriptHook for States {
-    fn on_custom_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, _value: ScriptValue) -> bool {
+impl ScriptHook for AnimatorStates {
+    fn on_custom_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, value: ScriptValue) -> bool {
+        let Some(obj) = value.as_object() else {
+            return false;
+        };
+        
+        vm.map_mut_with(obj, |vm, map| {
+            for (key, map_value) in map.iter() {
+                if let Some(key_id) = key.as_id() {
+                    if key_id == id!(default) {
+                        if let Some(default_id) = map_value.value.as_id() {
+                            self.default = default_id;
+                        }
+                    } else {
+                        let state = AnimatorState::script_from_value(vm, map_value.value);
+                        self.states.insert(key_id, state);
+                    }
+                }
+            }
+        });
+        
         true
     }
 }
 
-#[derive(Default, Script)]
-struct State {
+/// A single animation state (e.g., off, on, drag)
+#[derive(Default, Script, ScriptHook)]
+pub struct AnimatorState {
+    #[live] pub cursor: Option<MouseCursor>,
+    #[live] pub from: LiveIdMap<LiveId, Play>,
+    #[live] pub apply: Option<ScriptObject>,
 }
-
-impl ScriptHook for State {
-    fn on_custom_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, _value: ScriptValue) -> bool {
-        true
-    }
-}
-
 
 #[derive(Default, Script)]
 pub struct Animator {
     #[rust] pub next_frame: NextFrame,
+    #[rust] pub state_groups: LiveIdMap<LiveId, AnimatorStates>,
 }
 
 impl ScriptHook for Animator {
-    fn on_custom_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, value: ScriptValue) -> bool {
-        let Some(_obj) = value.as_object() else {
+    fn on_custom_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope:&mut Scope, value: ScriptValue) -> bool {
+        let Some(obj) = value.as_object() else {
             return false;
         };
-/*        
-        let font_family_id = self.to_font_family_id();
-        if !fonts.is_font_family_known(font_family_id) {
-            let mut font_ids = Vec::new();
-                        
-            let len = vm.heap.vec_len(obj);
-            for i in 0..len {
-                let kv = vm.heap.vec_key_value(obj, i, &vm.thread.trap);
-                let member = FontMember::script_from_value(vm, kv.value);
-                                
-                if let Some(ref handle_ref) = member.res {
-                    let handle = handle_ref.as_handle();
-                    let font_id: FontId = (handle.index() as u64).into();
-                                        
-                    if !fonts.is_font_known(font_id) {
-                        let cx = vm.host.cx_mut();
-                        if let Some(data) = cx.get_resource(handle) {
-                            fonts.define_font(
-                                font_id,
-                                FontDefinition {
-                                    data,
-                                    index: 0,
-                                    ascender_fudge_in_ems: member.asc,
-                                    descender_fudge_in_ems: member.desc,
-                                },
-                            );
-                        }
-                    }
-                    font_ids.push(font_id);
+        
+        vm.map_mut_with(obj, |vm, map| {
+            for (key, map_value) in map.iter() {
+                if let Some(group_id) = key.as_id() {
+                    let states = AnimatorStates::script_from_value(vm, map_value.value);
+                    self.state_groups.insert(group_id, states);
                 }
             }
-                        
-            fonts.define_font_family(font_family_id, FontFamilyDefinition { font_ids });
-        }*/ 
+        });
+        
         true
     }
 }
+
+impl ScriptApplyDefault for Animator{
+    fn script_apply_default(&mut self, _vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, _value:ScriptValue)->Option<ScriptValue>{
+        println!("APPLYING DEFAULT");
+        None
+    }
+}
+
 
 #[derive(Copy, Clone)]
 pub enum AnimatorAction {
@@ -137,6 +163,7 @@ pub enum AnimatorAction {
 
 impl Animator{
     pub fn play(&mut self, _cx:&mut Cx, _state: &[LiveId;2])->Option<ScriptValue>{
+        println!("PLAY");
         None
     }
     

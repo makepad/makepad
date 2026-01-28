@@ -19,6 +19,8 @@ pub fn script_mod(input: TokenStream) -> TokenStream {
 
 
 #[proc_macro_derive(Script, attributes(
+    apply_default,
+    source,
     new,
     live,
     rust,

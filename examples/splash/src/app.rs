@@ -21,7 +21,6 @@ script_mod!{
         }
         me.draw_text.color = #fff
     }
-    ~x
     x
 }
 

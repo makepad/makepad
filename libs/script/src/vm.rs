@@ -10,6 +10,7 @@ use crate::mod_math::*;
 use crate::mod_pod::*;
 use crate::mod_shader::*;
 use crate::object::*;
+use crate::function::*;
 use std::cell::RefCell;
 use std::any::Any;
 use std::collections::HashMap;
@@ -128,6 +129,47 @@ impl <'a> ScriptVm<'a>{
         self.thread.call(self.heap, self.code, self.host, fnobj, args)
     }
     
+    /// Checks if the value has an apply transform and calls it, returning the transformed value.
+    /// Returns None if no transform exists, Some(transformed) if a transform was applied.
+    pub fn call_apply_transform(&mut self, value: ScriptValue) -> Option<ScriptValue> {
+        if let Some(obj) = value.as_object() {
+            if let Some(ni) = self.heap.objects[obj.index as usize].tag.as_apply_transform() {
+                let native = self.code.native.borrow();
+                let result = (*native.functions[ni.index as usize])(
+                    &mut ScriptVm {
+                        host: self.host,
+                        heap: self.heap,
+                        thread: self.thread,
+                        code: self.code
+                    },
+                    obj
+                );
+                drop(native);
+                return Some(result);
+            }
+        }
+        else if let Some(arr) = value.as_array() {
+            if let Some(ni) = self.heap.arrays[arr.index as usize].tag.as_apply_transform() {
+                // For arrays, we need to create a temporary args object
+                let args_obj = self.heap.new_object();
+                self.heap.set_value_def(args_obj, id!(self).into(), value);
+                let native = self.code.native.borrow();
+                let result = (*native.functions[ni.index as usize])(
+                    &mut ScriptVm {
+                        host: self.host,
+                        heap: self.heap,
+                        thread: self.thread,
+                        code: self.code
+                    },
+                    args_obj
+                );
+                drop(native);
+                return Some(result);
+            }
+        }
+        None
+    }
+    
     pub fn resume(&mut self)->ScriptValue{
         self.thread.is_paused = false;
         self.thread.run_core(self.heap, self.code, self.host)
@@ -194,6 +236,13 @@ impl <'a> ScriptVm<'a>{
     pub fn add_method<F>(&mut self, module:ScriptObject, method:LiveId, args:&[(LiveId, ScriptValue)], f: F) 
     where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
         self.code.native.borrow_mut().add_method(&mut self.heap, module, method, args, f)
+    }
+    
+    /// Registers a native function to be used as an apply_transform and returns its NativeId.
+    /// This is used for creating objects that transform to a computed value when applied.
+    pub fn add_apply_transform_fn<F>(&mut self, f: F) -> NativeId
+    where F: Fn(&mut ScriptVm, ScriptObject)->ScriptValue + 'static{
+        self.code.native.borrow_mut().add_apply_transform_fn(f)
     }
     
     

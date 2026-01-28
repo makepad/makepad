@@ -23,7 +23,6 @@ script_mod!{
         bar_side_margin: 3.0
         min_handle_size: 30.0
         draw_bg +: {
-            debug: true
             drag: shader.instance(0.0)
             hover: shader.instance(0.0)
                     
@@ -84,33 +83,34 @@ script_mod!{
         }
 
         animator: Animator{
-            hover: States{
+            hover: {
                 default: @off
-                off: State{
-                    from: {all: Forward {duration: 0.1}}
+                off: AnimatorState{
+                    from: {all: Play.Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {drag: 0 hover: 0}
                     }
                 }
-                on: State{
+                on: AnimatorState{
                     cursor: MouseCursor.Default
                     from: {
-                        all: Forward {duration: 0.1}
-                        drag: Forward {duration: 0.01}
+                        all: Play.Forward {duration: 0.1}
+                        drag: Play.Forward {duration: 0.01}
                     }
                     apply: {
                         draw_bg: {
                             drag: 0
-                            hover: [{time: 0 value: 1}]
+                            hover: snap(1)
                         }
                     }
                 }
-                drag: State{
+                drag: AnimatorState{
                     cursor: MouseCursor.Default
-                    from: {all: Snap}
+                    from: {all: Play.Snap}
                     apply: {
                         draw_bg: {
-                            drag: 1 hover: 1
+                            drag: 1 
+                            hover: 1
                         }
                     }
                 }
@@ -174,7 +174,7 @@ script_mod!{
                         self.drag
                     ),
                     self.hover
-                ), self.border_size)
+                ) self.border_size)
 
                 return sdf.result
             }
@@ -206,6 +206,7 @@ enum ScrollState {
 
 #[derive(Script, ScriptHook, Animator)]
 pub struct ScrollBar {
+    #[source] source: ScriptObjectRef,
     #[live] draw_bg: DrawScrollBar,
     #[live] pub bar_size: f64,
     #[live] pub min_handle_size: f64, //minimum size of the handle in pixels
@@ -226,7 +227,7 @@ pub struct ScrollBar {
     /// Whether to enable drag scrolling
     #[live(false)] drag_scrolling: bool,
 
-    #[live] animator: Animator,
+    #[apply_default] animator: Animator,
 
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,

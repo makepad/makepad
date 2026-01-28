@@ -74,10 +74,10 @@ impl ScriptNew for DrawPass {
 
 impl ScriptApply for DrawPass {
     fn script_apply(&mut self, vm:&mut ScriptVm, _apply:&Apply, _scope:&mut Scope, value:ScriptValue) {
-        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(clear_color)){
+        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(clear_color)){
             vm.host.cx_mut().passes[self.draw_pass_id()].clear_color = v;
         }
-        if let Some(v) = ScriptNew::script_from_dirty(vm, value, id!(dont_clear)){
+        if let Some(v) = ScriptNew::script_from_apply_value(vm, value, id!(dont_clear)){
             vm.host.cx_mut().passes[self.draw_pass_id()].dont_clear = v;
         }
     }

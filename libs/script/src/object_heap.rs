@@ -145,6 +145,10 @@ impl ScriptHeap{
     pub fn freeze_api(&mut self, ptr: ScriptObject){
         self.objects[ptr.index as usize].tag.freeze_api()
     }
+    
+    pub fn set_object_apply_transform(&mut self, ptr: ScriptObject, ni: NativeId){
+        self.objects[ptr.index as usize].tag.set_apply_transform(ni)
+    }
         
     pub fn set_type(&mut self, obj: ScriptObject, ty:ScriptTypeIndex){
         self.objects[obj.index as usize].tag.set_type_index(ty);
@@ -640,37 +644,31 @@ impl ScriptHeap{
         value
     }
         
-    pub fn value_apply_if_dirty(&mut self, obj:ScriptValue, key:ScriptValue)->Option<ScriptValue>{
+    pub fn value_for_apply(&mut self, obj:ScriptValue, key:ScriptValue)->Option<ScriptValue>{
         
         if let Some(ptr) = obj.as_object(){
             // only do top level if dirty
             let object = &mut self.objects[ptr.index as usize];
-            if let Some(value) = object.map_get_if_dirty(&key){
+            if let Some(value) = object.map_get(&key){
                 return Some(value)
             }
             // if we havent been applied before apply prototype chain too
-            if !object.tag.is_first_applied(){
-                let mut ptr = if let Some(next_ptr) = object.proto.as_object(){
-                    next_ptr
+            let mut ptr = if let Some(next_ptr) = object.proto.as_object(){
+                next_ptr
+            }
+            else{
+                return None
+            };
+            loop{
+                let object = &self.objects[ptr.index as usize];
+                if let Some(value) = object.map_get(&key){
+                    return Some(value)
+                }
+                if let Some(next_ptr) = object.proto.as_object(){
+                    ptr = next_ptr
                 }
                 else{
                     return None
-                };
-                loop{
-                    let object = &self.objects[ptr.index as usize];
-                    // skip the last prototype, since its already default valued on the Rust object
-                    //if !object.proto.is_object(){
-                    //    return None
-                    //}
-                    if let Some(value) = object.map_get(&key){
-                        return Some(value)
-                    }
-                    if let Some(next_ptr) = object.proto.as_object(){
-                        ptr = next_ptr
-                    }
-                    else{
-                        return None
-                    }
                 }
             }
         }
