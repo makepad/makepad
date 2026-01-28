@@ -636,21 +636,71 @@ pub struct TextInput {
     #[rust] selection: Selection,
     #[rust] history: History,
     #[rust] blink_timer: Timer,
+    /// Stores the cursor position from a tap when the tap landed on an existing selection.
+    /// Defers collapsing the selection until FingerUp to distinguish tap from drag:
+    /// - Tap (no drag): cursor moves to tap position, collapsing the selection
+    /// - Drag: cleared, starts a new drag-to-select from that point instead
     #[rust] preserved_selection_cursor: Option<Cursor>,
     /// Skip finger move after long press to prevent selection changes
     #[rust] ignore_next_move: bool,
-    /// IME composition tracking - byte index in self.text where composition starts
+
+    // ===== IME (Input Method Editor) State =====
+    //
+    // For platform-level IME architecture, see `platform/src/ime.rs`.
+    //
+    // IME allows users to input complex characters (e.g., Chinese, Japanese, Korean)
+    // through a composition process where text is previewed before being committed.
+    // Similarly the composition process is used for autocorrect and autocompletion features, among others.
+    //
+    // ## Widget Sync Model
+    // This widget is the source of truth for text content. The platform IME receives
+    // our state via `sync_ime_state()` and sends changes back via TextInput events.
+    // During active composition, the platform IME is temporarily authoritative.
+    //
+    // ## Echo Prevention (Two Mechanisms)
+    // 1. `ime_update_frame` - Same-frame guard: skips sync entirely when IME just sent input
+    //    (catches composition-end edge case where state changed but shouldn't echo)
+    // 2. `last_sent_ime_*` - State-diff guard: only syncs when state actually differs
+    //
+    // ## Platform Differences in Event Handling
+    // - Android: `full_state_sync` - receives complete text + selection + composition
+    // - iOS: `replace_range` - receives specific range replacement for autocorrect/paste
+    // - Both: `replace_last` + `input` - universal composition preview handling
+
+    /// Byte index in self.text where the active IME composition starts.
+    /// Only valid when has_composition() returns true.
     #[rust] composition_start: usize,
-    /// IME composition tracking - byte length of current composition in self.text
-    #[rust] composition_length: usize,
-    /// Frame ID when IME input was last received; prevents race condition in update_ime_context
-    /// Uses frame counter instead of bool to avoid timing issues between event/draw
-    /// If this matches cx.redraw_id(), we skip syncing to avoid echoing state back.
+    /// Byte index in self.text where the active IME composition ends.
+    /// When composition_end == composition_start, there is no active composition.
+    #[rust] composition_end: usize,
+    /// Frame ID when IME input was last received.
+    ///
+    /// SAME-FRAME ECHO PREVENTION:
+    /// When the platform IME sends text input, we update self.text. During the draw
+    /// phase of the same frame, update_ime_context() would normally sync our state
+    /// back to the platform. But echoing back state the IME just sent us can confuse
+    /// some IMEs (especially on Android where the InputConnection expects to be
+    /// authoritative during composition).
+    ///
+    /// This works alongside `last_sent_ime_*` (state-diff guard) but catches cases
+    /// where composition just ended: `has_composition()` is now false, state differs
+    /// from last sent, but we still shouldn't echo because the IME just told us.
     #[rust] ime_update_frame: u64,
-    /// Track last sent IME state to prevent sync loops
+    /// Cached copy of the last text we sent to the platform IME.
+    /// Used to prevent syncing back to the platform IME when the state hasn't changed from what we last sent.
+    ///
+    /// Without this, the following loop can occur:
+    /// 1. Platform IME sends us text "abc"
+    /// 2. We update self.text = "abc"
+    /// 3. On next draw, we call sync_ime_state("abc")
+    /// 4. Platform receives "abc", thinks it's new input
+    /// 5. Platform sends "abc" back to us as a change event
+    /// 6. Loop continues...
     #[rust] last_sent_ime_text: String,
-    #[rust] last_sent_ime_sel_start: usize,  // UTF-16 index 
-    #[rust] last_sent_ime_sel_end: usize,    // UTF-16 index 
+    /// Cached selection start (byte index) we last sent to the platform IME.
+    #[rust] last_sent_ime_sel_start: usize,
+    /// Cached selection end (byte index) we last sent to the platform IME.
+    #[rust] last_sent_ime_sel_end: usize, 
 }
 
  impl LiveHook for TextInput{
@@ -699,7 +749,12 @@ impl TextInput {
         self.set_is_read_only(cx, !self.is_read_only);
     }
 
-    /// Build IME configuration from widget properties for mobile platforms
+    /// Build configuration for the platform soft keyboard from widget properties.
+    ///
+    /// This configuration controls the keyboard's appearance and behavior on mobile platforms
+    /// (iOS/Android), including: keyboard layout (numeric, email, etc.), autocapitalization,
+    /// autocorrection, and the return key type (Done, Go, Search, etc.). On desktop platforms,
+    /// these settings have no effect.
     pub fn get_ime_config(&self) -> TextInputConfig {
         TextInputConfig {
             input_mode: self.input_mode,
@@ -754,13 +809,18 @@ impl TextInput {
         &self.text[self.selection.start().index..self.selection.end().index]
     }
 
+    /// Returns true if there is an active IME composition in progress
+    fn has_composition(&self) -> bool {
+        self.composition_end > self.composition_start
+    }
+
     /// Updates the IME text context for platform IME.
     ///
     /// ECHO PREVENTION:
     /// Only sends state to platform if it differs from what we last sent.
     fn update_ime_context(&mut self, cx: &mut Cx) {
         // Don't sync back to platform during active composition since the platform IME is the source of truth during it.
-        if self.composition_length > 0 {
+        if self.has_composition() {
             return;
         }
 
@@ -770,19 +830,15 @@ impl TextInput {
         let sel_start_chars = self.text[..self.selection.start().index].chars().count();
         let sel_end_chars = self.text[..self.selection.end().index].chars().count();
 
-        // Convert to UTF-16 for comparison (Android uses UTF-16)
-        let sel_start_utf16 = byte_index_to_utf16_index(&self.text, self.selection.start().index);
-        let sel_end_utf16 = byte_index_to_utf16_index(&self.text, self.selection.end().index);
-
         // Only send if state actually changed from what we last sent
         // This prevents the sync loop where IME sends state → we echo it back → IME gets confused
         if self.text != self.last_sent_ime_text
-            || sel_start_utf16 != self.last_sent_ime_sel_start
-            || sel_end_utf16 != self.last_sent_ime_sel_end
+            || self.selection.start().index != self.last_sent_ime_sel_start
+            || self.selection.end().index != self.last_sent_ime_sel_end
         {
             self.last_sent_ime_text = self.text.clone();
-            self.last_sent_ime_sel_start = sel_start_utf16;
-            self.last_sent_ime_sel_end = sel_end_utf16;
+            self.last_sent_ime_sel_start = self.selection.start().index;
+            self.last_sent_ime_sel_end = self.selection.end().index;
 
             // Sync via unified operation
             cx.sync_ime_state(
@@ -985,7 +1041,7 @@ impl TextInput {
     /// Draws a thin underline beneath the active IME composition range to visually indicate
     /// text that is still being composed and has not yet been committed.
     fn draw_composition_underline(&mut self, cx: &mut Cx2d, text_rect: Rect) {
-        if self.composition_length == 0 {
+        if !self.has_composition() {
             return;
         }
 
@@ -994,10 +1050,9 @@ impl TextInput {
             .as_ref()
             .expect("layout should never be `None` here");
 
-        let comp_end = (self.composition_start + self.composition_length).min(self.text.len());
         let composition_selection = Selection {
             anchor: Cursor { index: self.composition_start.min(self.text.len()), prefer_next_row: false },
-            cursor: Cursor { index: comp_end, prefer_next_row: false },
+            cursor: Cursor { index: self.composition_end.min(self.text.len()), prefer_next_row: false },
         };
 
         let selection = self.selection_to_password_selection(composition_selection);
@@ -1243,7 +1298,7 @@ impl TextInput {
         cx.stop_timer(self.blink_timer);
         cx.hide_text_ime();
         self.composition_start = 0;
-        self.composition_length = 0;
+        self.composition_end = 0;
         match cx.os_type() {
             OsType::Android(_) | OsType::Ios(_) => {
                 cx.hide_clipboard_actions();
@@ -1501,8 +1556,8 @@ impl Widget for TextInput {
 
                 // Update cache to match what we just sent
                 self.last_sent_ime_text = self.text.clone();
-                self.last_sent_ime_sel_start = byte_index_to_utf16_index(&self.text, self.selection.start().index);
-                self.last_sent_ime_sel_end = byte_index_to_utf16_index(&self.text, self.selection.end().index);
+                self.last_sent_ime_sel_start = self.selection.start().index;
+                self.last_sent_ime_sel_end = self.selection.end().index;
                 cx.widget_action(uid, &scope.path, TextInputAction::KeyFocus);
             },
             Hit::KeyFocusLost(_) => {
@@ -1888,20 +1943,18 @@ impl Widget for TextInput {
                     };
 
                     // Update composition from platform
-                    if let Some(comp_range) = &full_state.composition {
-                        let comp_start_byte = comp_range.start.to_byte_index(&self.text);
-                        let comp_end_byte = comp_range.end.to_byte_index(&self.text);
-                        self.composition_start = comp_start_byte;
-                        self.composition_length = comp_end_byte - comp_start_byte;
+                    if let Some(composition_range) = &full_state.composition {
+                        self.composition_start = composition_range.start.to_byte_index(&self.text);
+                        self.composition_end = composition_range.end.to_byte_index(&self.text);
                     } else {
                         self.composition_start = 0;
-                        self.composition_length = 0;
+                        self.composition_end = 0;
                     }
 
-                    // Track sent state to prevent sync loops
+                    // Track sent state to prevent sync loops (using byte indices for efficiency)
                     self.last_sent_ime_text = self.text.clone();
-                    self.last_sent_ime_sel_start = full_state.selection.start.to_utf16_index(&self.text);
-                    self.last_sent_ime_sel_end = full_state.selection.end.to_utf16_index(&self.text);
+                    self.last_sent_ime_sel_start = sel_start_byte;
+                    self.last_sent_ime_sel_end = sel_end_byte;
                     self.ime_update_frame = cx.redraw_id();
 
                     self.draw_bg.redraw(cx);
@@ -1913,10 +1966,17 @@ impl Widget for TextInput {
                 }
 
                 // Handle iOS range replacement (autocorrect/paste)
+                // iOS uses a different model than Android: instead of sending full state,
+                // iOS's UITextInput sends `replaceRange:withText:` for autocorrect and paste.
+                // This specifies an exact range to replace, which may NOT match the current
+                // selection (e.g., autocorrecting "teh" to "the" while cursor is elsewhere).
+                // Android handles equivalent operations via full_state_sync above.
                 if let Some((start, end)) = event.replace_range {
                     let filtered_text = self.filter_input(&event.input, false);
+                    // Input filtering: if all characters were filtered out but input wasn't
+                    // empty, the input was invalid for this field (e.g., letters in numeric-only).
+                    // We re-sync to reject it.
                     if filtered_text.is_empty() && !event.input.is_empty() {
-                        // Re-sync IME state to reject invalid input
                         self.update_ime_context(cx);
                         return;
                     }
@@ -1926,11 +1986,11 @@ impl Widget for TextInput {
                     let byte_end = end.to_byte_index(&self.text);
 
                     // Adjust composition_start if edit was before active composition
-                    if self.composition_length > 0 && byte_start < self.composition_start {
+                    if self.has_composition() && byte_start < self.composition_start {
                         let edit_delta = filtered_text.len() as isize - (byte_end - byte_start) as isize;
                         self.composition_start = (self.composition_start as isize + edit_delta).max(0) as usize;
                     }
-                    self.composition_length = 0;
+                    self.composition_end = self.composition_start;
                     self.create_or_extend_edit_group(EditKind::Other);
                     self.apply_edit(
                         cx,
@@ -1956,30 +2016,29 @@ impl Widget for TextInput {
                 let input = self.filter_input(&event.input, false);
                 if input.is_empty() {
                     // Composition cancelled, remove preview text
-                    if event.replace_last && self.composition_length > 0 {
-                        let end = (self.composition_start + self.composition_length).min(self.text.len());
+                    if event.replace_last && self.has_composition() {
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
                             Edit {
                                 start: self.composition_start.min(self.text.len()),
-                                end,
+                                end: self.composition_end.min(self.text.len()),
                                 replace_with: String::new()
                             }
                         );
                         self.draw_bg.redraw(cx);
                         cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
                     }
-                    self.composition_length = 0;
+                    self.composition_end = self.composition_start;
                     return;
                 }
 
                 if event.replace_last {
                     // IME composition preview
-                    if self.composition_length > 0 {
+                    if self.has_composition() {
                         // Replace previous composition text
                         let start = self.composition_start.min(self.text.len());
-                        let end = (self.composition_start + self.composition_length).min(self.text.len());
+                        let end = self.composition_end.min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
@@ -1989,11 +2048,11 @@ impl Widget for TextInput {
                                 replace_with: input.clone()
                             }
                         );
-                        self.composition_length = input.len();
+                        self.composition_end = self.composition_start + input.len();
                     } else {
                         // First composition character, record start position
                         self.composition_start = self.selection.start().index;
-                        self.composition_length = input.len();
+                        self.composition_end = self.composition_start + input.len();
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
@@ -2007,10 +2066,10 @@ impl Widget for TextInput {
                     self.ime_update_frame = cx.redraw_id();
                 } else {
                     // Final commit or regular text input
-                    if self.composition_length > 0 {
+                    if self.has_composition() {
                         // Replace composition with final committed text
                         let start = self.composition_start.min(self.text.len());
-                        let end = (self.composition_start + self.composition_length).min(self.text.len());
+                        let end = self.composition_end.min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
@@ -2020,7 +2079,7 @@ impl Widget for TextInput {
                                 replace_with: input
                             }
                         );
-                        self.composition_length = 0;
+                        self.composition_end = self.composition_start;
                     } else {
                         // Normal text input (no active composition)
                         self.create_or_extend_edit_group(
@@ -2043,9 +2102,6 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 cx.widget_action(uid, &scope.path, TextInputAction::Changed(self.text.clone()));
-                if self.ime_update_frame != cx.redraw_id() {
-                    self.update_ime_context(cx);
-                }
                 cx.hide_clipboard_actions();
             }
             Hit::ImeAction(event) => {
@@ -2060,6 +2116,14 @@ impl Widget for TextInput {
                         cx.widget_action(uid, &scope.path, TextInputAction::Returned(self.text.clone(), mods));
                     }
                     ImeAction::Next | ImeAction::Previous => {
+                        // These actions indicate form field navigation (e.g., "Next" button
+                        // on a keyboard that moves to the next text field). We emit Returned
+                        // so the parent form can handle field navigation, but unlike Done/Go,
+                        // we don't hide the keyboard or release focus since the keyboard
+                        // should remain visible for the next field.
+                        //
+                        // TODO: Implement proper field navigation, perhaps emitting another action here 
+                        // that is used somewhere to swap focus to the next field.
                         cx.widget_action(uid, &scope.path, TextInputAction::Returned(self.text.clone(), mods));
                     }
                     ImeAction::Unspecified | ImeAction::None => {}
@@ -2436,13 +2500,4 @@ fn prev_grapheme_boundary(text: &str, index: usize) -> usize {
 fn next_grapheme_boundary(text: &str, index: usize) -> usize {
     let mut cursor = GraphemeCursor::new(index, text.len(), true);
     cursor.next_boundary(text, 0).unwrap().unwrap_or(text.len())
-}
-
-/// Convert byte index in a UTF-8 string to UTF-16 code unit count.
-/// Used when sending cursor positions back to Java/Android.
-fn byte_index_to_utf16_index(s: &str, byte_idx: usize) -> usize {
-    s[..byte_idx.min(s.len())]
-        .chars()
-        .map(|c| c.len_utf16())
-        .sum()
 }

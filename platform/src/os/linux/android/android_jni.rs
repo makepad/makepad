@@ -13,7 +13,7 @@ use {
     crate::{
         area::Area,
         cx::AndroidParams,
-        cx_api::{TextInputConfig, InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType},
+        ime::{TextInputConfig, InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType},
         event::{HttpRequest, TouchPoint, TouchState, VideoSource},
         makepad_live_id::*,
         makepad_math::*,

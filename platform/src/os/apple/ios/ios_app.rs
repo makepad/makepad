@@ -6,7 +6,7 @@ use {
         time::Instant,
     },
     crate::{
-        cx_api::TextInputConfig,
+        ime::TextInputConfig,
         event::*,
         event::keyboard::CharOffset,
         os::{
@@ -451,7 +451,7 @@ impl IosApp {
     /// Configure keyboard settings (UITextInputTraits)
     /// Uses caching to avoid calling reloadInputViews every frame
     pub fn configure_keyboard(config: &TextInputConfig) {
-        use crate::cx_api::{InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType};
+        use crate::ime::{InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType};
 
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
