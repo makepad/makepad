@@ -12,6 +12,7 @@ use {
         makepad_script::heap::ScriptHeap,
         makepad_script::value::ScriptObject,
         draw_vars::DrawVars,
+        geometry::GeometryId,
         os::CxOsDrawShader,
         cx::Cx
     }
@@ -293,10 +294,11 @@ pub struct CxDrawShaderMapping {
     pub scope_uniforms: DrawShaderInputs,
     pub scope_uniform_sources: Vec<(ScriptObject, LiveId)>,
     pub scope_uniforms_buf: Vec<f32>,
+    pub geometry_id: Option<GeometryId>,
 }
 
 impl CxDrawShaderMapping {
-    pub fn from_shader_output(source:ScriptObjectRef, code:CxDrawShaderCode, heap: &ScriptHeap, output: &ShaderOutput) -> CxDrawShaderMapping {
+    pub fn from_shader_output(source:ScriptObjectRef, code:CxDrawShaderCode, heap: &ScriptHeap, output: &ShaderOutput, geometry_id: Option<GeometryId>) -> CxDrawShaderMapping {
         // Use attribute packing for instances (they're vertex attributes)
         // instances contains ALL instance fields (dyn first, then rust)
         let mut instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
@@ -421,6 +423,7 @@ impl CxDrawShaderMapping {
             scope_uniforms,
             scope_uniform_sources,
             scope_uniforms_buf,
+            geometry_id,
         }
     }
     

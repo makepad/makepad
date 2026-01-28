@@ -1172,11 +1172,11 @@ impl DrawVars {
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
             self.dyn_instance_slots = mapping.instances.total_slots;
             
-            // Read default values for dyn_instance slots from the shader object
-            self.fill_dyn_instances(&vm.heap, &mapping, io_self);
-            
             // Access Cx from the vm host
             let cx = vm.host.cx_mut();
+            
+            // Read default values for dyn_instance slots from the shader object
+            self.fill_dyn_instances(cx, &vm.heap, &mapping, io_self);
             
             // Allocate CxDrawShader with os_shader_id set to None
             let index = cx.draw_shaders.shaders.len();
