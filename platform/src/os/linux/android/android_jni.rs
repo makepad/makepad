@@ -879,7 +879,7 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
     let env = attach_jni_env();
 
     // Convert Makepad enums to Android integer values
-    let input_mode = match config.input_mode {
+    let input_mode = match config.soft_keyboard.input_mode {
         InputMode::Text => 0,
         InputMode::Ascii => 1,
         InputMode::Url => 2,
@@ -890,20 +890,20 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
         InputMode::Search => 7,
     };
 
-    let autocapitalize = match config.autocapitalize {
+    let autocapitalize = match config.soft_keyboard.autocapitalize {
         AutoCapitalize::None => 0,
         AutoCapitalize::Words => 1,
         AutoCapitalize::Sentences => 2,
         AutoCapitalize::AllCharacters => 3,
     };
 
-    let autocorrect = match config.autocorrect {
+    let autocorrect = match config.soft_keyboard.autocorrect {
         AutoCorrect::Default => 0,
         AutoCorrect::Enabled => 1,
         AutoCorrect::Disabled => 2,
     };
 
-    let return_key_type = match config.return_key_type {
+    let return_key_type = match config.soft_keyboard.return_key_type {
         ReturnKeyType::Default => 0,
         ReturnKeyType::Go => 1,
         ReturnKeyType::Search => 2,

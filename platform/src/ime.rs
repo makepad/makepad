@@ -141,13 +141,23 @@ impl Default for ReturnKeyType {
     fn default() -> Self { ReturnKeyType::Default }
 }
 
-/// Combined IME/keyboard configuration for text input
+/// Soft keyboard configuration for mobile platforms (iOS/Android).
+/// These settings have no effect on desktop platforms.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct TextInputConfig {
+pub struct SoftKeyboardConfig {
     pub input_mode: InputMode,
     pub autocapitalize: AutoCapitalize,
     pub autocorrect: AutoCorrect,
     pub return_key_type: ReturnKeyType,
+}
+
+/// Text input configuration combining cross-platform and mobile-specific settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TextInputConfig {
+    /// Soft keyboard settings for mobile platforms. No effect on desktop.
+    pub soft_keyboard: SoftKeyboardConfig,
+    /// Whether the input field supports multiple lines.
     pub is_multiline: bool,
+    /// Whether to mask input characters (password field).
     pub is_secure: bool,
 }

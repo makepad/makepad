@@ -463,7 +463,7 @@ impl IosApp {
 
                     if let Some(text_input_view) = app.text_input_view {
                         unsafe {
-                            let kb_type: i64 = match config.input_mode {
+                            let kb_type: i64 = match config.soft_keyboard.input_mode {
                                 InputMode::Text => UI_KEYBOARD_TYPE_DEFAULT,
                                 InputMode::Ascii => UI_KEYBOARD_TYPE_ASCII_CAPABLE,
                                 InputMode::Url => UI_KEYBOARD_TYPE_URL,
@@ -474,20 +474,20 @@ impl IosApp {
                                 InputMode::Search => UI_KEYBOARD_TYPE_WEB_SEARCH,
                             };
 
-                            let autocap_type: i64 = match config.autocapitalize {
+                            let autocap_type: i64 = match config.soft_keyboard.autocapitalize {
                                 AutoCapitalize::None => UI_TEXT_AUTOCAPITALIZATION_NONE,
                                 AutoCapitalize::Words => UI_TEXT_AUTOCAPITALIZATION_WORDS,
                                 AutoCapitalize::Sentences => UI_TEXT_AUTOCAPITALIZATION_SENTENCES,
                                 AutoCapitalize::AllCharacters => UI_TEXT_AUTOCAPITALIZATION_ALL,
                             };
 
-                            let autocorrect_type: i64 = match config.autocorrect {
+                            let autocorrect_type: i64 = match config.soft_keyboard.autocorrect {
                                 AutoCorrect::Default => -1, // use CJK detection logic
                                 AutoCorrect::Disabled => UI_TEXT_AUTOCORRECTION_NO,
                                 AutoCorrect::Enabled => UI_TEXT_AUTOCORRECTION_YES,
                             };
 
-                            let return_type: i64 = match config.return_key_type {
+                            let return_type: i64 = match config.soft_keyboard.return_key_type {
                                 ReturnKeyType::Default => UI_RETURN_KEY_DEFAULT,
                                 ReturnKeyType::Go => UI_RETURN_KEY_GO,
                                 ReturnKeyType::Search => UI_RETURN_KEY_SEARCH,

@@ -757,10 +757,12 @@ impl TextInput {
     /// these settings have no effect.
     pub fn get_ime_config(&self) -> TextInputConfig {
         TextInputConfig {
-            input_mode: self.input_mode,
-            autocapitalize: self.autocapitalize,
-            autocorrect: self.autocorrect,
-            return_key_type: self.return_key_type,
+            soft_keyboard: SoftKeyboardConfig {
+                input_mode: self.input_mode,
+                autocapitalize: self.autocapitalize,
+                autocorrect: self.autocorrect,
+                return_key_type: self.return_key_type,
+            },
             is_multiline: self.is_multiline,
             is_secure: self.is_password,
         }

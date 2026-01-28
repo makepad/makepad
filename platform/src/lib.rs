@@ -142,7 +142,7 @@ pub use {
     crate::{
         os::*,
         cx_api::{CxOsApi, OpenUrlInPlace, CxOsOp},
-        ime::{InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType, TextInputConfig},
+        ime::{InputMode, AutoCapitalize, AutoCorrect, ReturnKeyType, SoftKeyboardConfig, TextInputConfig},
         media_api::CxMediaApi,
         scope::*,
         draw_list::{
